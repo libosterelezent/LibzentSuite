@@ -1,0 +1,5 @@
+{
+  "_comment": "Bus-wide default rate rules for ALL bots, 'actions/seconds'. Per-bot overrides live in config/accounts/<name>.json. Keep conservative: selfbots risk suspension.",
+  "message": "8/12s",
+  "dm": "8/12s"
+}

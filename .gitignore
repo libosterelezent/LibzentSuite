@@ -1,0 +1,25 @@
+# --- secrets & credentials (NEVER commit) ---
+.env
+.env.*
+!.env.example
+accounts/
+*.token
+*_token.txt
+
+# --- local-only knowledgebase (kept on disk, read-only) ---
+knowledgebase/
+
+# --- local runtime state ---
+config/accounts/*.local.json
+*.log
+state/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/

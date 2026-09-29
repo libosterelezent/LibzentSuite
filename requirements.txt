@@ -1,0 +1,8 @@
+# Core framework + tests: Python standard library only (>= 3.10).
+# No installs needed to run the simulation suite:
+#   python3 -m unittest discover -s tests -t . -v
+
+# --- optional, live mode only ---
+# Live Discord access requires a user-account-capable client fork, e.g.:
+#   pip install discord.py-self
+# The framework imports it lazily inside core/discord_adapter.py and never in tests/sims.

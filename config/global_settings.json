@@ -1,0 +1,9 @@
+{
+  "_comment": "Global plugin setting overrides (layer 2 of 3; account files win).",
+  "soulcopy": {
+    "trigger": "slcopy",
+    "dm_read_timeout": 10.0,
+    "inter_chunk_delay": 10.0,
+    "max_chunk_length": 2000
+  }
+}
