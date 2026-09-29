@@ -10,7 +10,7 @@ from core.logging_setup import RingBufferHandler, attach_ring_buffer
 class TestRingBufferHandler(unittest.TestCase):
     def test_tail_returns_emitted_lines(self) -> None:
         ring = RingBufferHandler(capacity=10)
-        logger = logging.getLogger("mudae.test.ring1")
+        logger = logging.getLogger("slaughtermudae.test.ring1")
         logger.addHandler(ring)
         logger.setLevel(logging.INFO)
         logger.info("hello %s", "world")
@@ -24,7 +24,7 @@ class TestRingBufferHandler(unittest.TestCase):
 
     def test_capacity_trims_oldest(self) -> None:
         ring = RingBufferHandler(capacity=3)
-        logger = logging.getLogger("mudae.test.ring2")
+        logger = logging.getLogger("slaughtermudae.test.ring2")
         logger.addHandler(ring)
         logger.setLevel(logging.INFO)
         for i in range(6):

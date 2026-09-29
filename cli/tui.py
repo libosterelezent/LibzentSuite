@@ -124,7 +124,7 @@ class Tui:
 
 
 def _header() -> str:
-    return "MudaeScripts TUI — commands: help status plugins limits start/stop set-limit …  :q quits"
+    return "SlaughterMudae TUI — commands: help status plugins limits start/stop set-limit …  :q quits"
 
 
 def _status_rows(status: dict) -> list:

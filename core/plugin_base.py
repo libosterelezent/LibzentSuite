@@ -92,7 +92,7 @@ class PluginContext:
         self.credentials = credentials
         #: container helpers: collect_messages/wait_for/broadcast
         self.container = container
-        self.logger = logger or logging.getLogger(f"mudae.plugin.{account}.{plugin}")
+        self.logger = logger or logging.getLogger(f"slaughtermudae.plugin.{account}.{plugin}")
 
     def __repr__(self) -> str:
         return f"<PluginContext {self.account}:{self.plugin} settings={sorted(self.settings)}>"

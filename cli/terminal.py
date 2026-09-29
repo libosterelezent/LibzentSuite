@@ -12,7 +12,7 @@ from core.api import ControlAPI
 
 from .commands import QuitRequested, help_text, run_command
 
-BANNER = """MudaeScripts terminal — 'help' for commands."""
+BANNER = """SlaughterMudae terminal — 'help' for commands."""
 
 
 class Terminal:
@@ -29,7 +29,7 @@ class Terminal:
         self.running = True
         self._print(BANNER)
         while self.running:
-            self._print("mudae> ", end="")
+            self._print("slaughtermudae> ", end="")
             try:
                 line = self._in.readline()
             except (EOFError, KeyboardInterrupt):

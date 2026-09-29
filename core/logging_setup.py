@@ -1,4 +1,4 @@
-"""Logging setup: one namespaced logger tree ("mudae.*") + live tail buffer."""
+"""Logging setup: one namespaced logger tree ("slaughtermudae.*") + live tail buffer."""
 from __future__ import annotations
 
 import logging
@@ -6,7 +6,7 @@ import sys
 from collections import deque
 from typing import Callable, Deque, List, Optional
 
-ROOT_LOGGER = "mudae"
+ROOT_LOGGER = "slaughtermudae"
 _FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 TAIL_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 TAIL_DATEFMT = "%H:%M:%S"

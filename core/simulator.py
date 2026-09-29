@@ -25,7 +25,7 @@ from .plugin_loader import PluginLoader
 from .rate_limiter import RateLimiterService
 from .settings import SettingsStore
 
-LOG = logging.getLogger("mudae.sim")
+LOG = logging.getLogger("slaughtermudae.sim")
 
 # --- synthetic fixture ids (NOT real Discord ids; real ones live in .env) ---
 SYNTHETIC_OWNER_ID = 1001

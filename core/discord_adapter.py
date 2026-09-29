@@ -20,7 +20,7 @@ from typing import Any, Callable, Optional
 from .account import AccountConfig, DiscordMessage
 from .credentials import Credentials
 
-LOG = logging.getLogger("mudae.adapter")
+LOG = logging.getLogger("slaughtermudae.adapter")
 
 
 class AdapterNotAvailable(RuntimeError):

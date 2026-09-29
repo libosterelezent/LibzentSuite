@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict
 
-LOG = logging.getLogger("mudae.state")
+LOG = logging.getLogger("slaughtermudae.state")
 
 EMPTY_STATE: Dict[str, Any] = {"plugin_states": {}, "limit_overrides": {}}
 

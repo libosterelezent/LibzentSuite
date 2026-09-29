@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Type
 
-LOG = logging.getLogger("mudae.events")
+LOG = logging.getLogger("slaughtermudae.events")
 
 Handler = Callable[["Event"], Any]
 

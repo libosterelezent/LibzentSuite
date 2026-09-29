@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Type
 
 from .plugin_base import PluginBase
 
-LOG = logging.getLogger("mudae.loader")
+LOG = logging.getLogger("slaughtermudae.loader")
 
 _PARENT_SEQ = itertools.count()
 

@@ -27,7 +27,7 @@ centralized rate limiting, and dual management interfaces (GUI dashboard + termi
 - [x] Event dispatch: route Discord events to plugins (subclass-aware bus)
 - [x] Plugin lifecycle hooks (on_load, on_enable, on_disable, on_unload)
 - [x] Error isolation: one plugin crashing must not take down the framework (tested)
-- [x] Per-plugin and per-account logging (`mudae.<account>.<plugin>`)
+- [x] Per-plugin and per-account logging (`slaughtermudae.<account>.<plugin>`)
 - [x] Migrate `Soulcopy/autocopy.py` into the plugin system (ids moved to .env)
 
 ## Phase 2 — Multi-Account Container  ✅ DONE

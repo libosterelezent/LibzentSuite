@@ -98,7 +98,7 @@ class TestDashboardHTTP(unittest.IsolatedAsyncioTestCase):
     async def test_index_html_served_without_auth(self) -> None:
         status, body = await asyncio.to_thread(http_get, f"{self.base}/", None)
         self.assertEqual(status, 200)
-        self.assertIn("MudaeScripts", body)
+        self.assertIn("SlaughterMudae", body)
         self.assertIn("WebSocket", body)
 
     async def test_status_requires_token(self) -> None:

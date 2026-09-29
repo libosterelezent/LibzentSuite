@@ -1,4 +1,4 @@
-# MudaeScripts
+# SlaughterMudae
 
 Selfbot framework for Mudae automation: plugin modules with declared settings,
 a centralized multi-account container, a two-layer rate limiter, and two

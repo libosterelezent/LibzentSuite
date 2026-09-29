@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Mapping, Optional
 
-LOG = logging.getLogger("mudae.credentials")
+LOG = logging.getLogger("slaughtermudae.credentials")
 
 #: keys whose values must be masked in any human-facing output
 SENSITIVE_KEYS = ("token", "secret", "password")

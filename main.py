@@ -1,4 +1,4 @@
-"""MudaeScripts entrypoint.
+"""SlaughterMudae entrypoint.
 
 Usage:
   python main.py --sim                 run the local simulation demo (no network)
@@ -105,7 +105,7 @@ async def run_main(args: argparse.Namespace) -> int:
 
 def main() -> int:
     """Parse args and dispatch to sim or live mode."""
-    parser = argparse.ArgumentParser(prog="mudae", description="MudaeScripts framework")
+    parser = argparse.ArgumentParser(prog="slaughtermudae", description="SlaughterMudae framework")
     parser.add_argument("--sim", action="store_true", help="run the local simulation demo")
     parser.add_argument("--config", default="config", help="config directory (default: ./config)")
     parser.add_argument("--env", default=".env", help="credentials file (default: ./.env)")

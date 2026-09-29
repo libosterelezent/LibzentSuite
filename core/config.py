@@ -15,7 +15,7 @@ from typing import Dict, List
 
 from .account import AccountConfig
 
-LOG = logging.getLogger("mudae.config")
+LOG = logging.getLogger("slaughtermudae.config")
 
 #: conservative defaults if rate_limits.json is absent
 DEFAULT_RATE_LIMITS: Dict[str, str] = {

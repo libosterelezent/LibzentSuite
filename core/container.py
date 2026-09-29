@@ -21,7 +21,7 @@ from .plugin_loader import PluginLoader
 from .rate_limiter import RateLimiterService
 from .settings import SettingsStore
 
-LOG = logging.getLogger("mudae.container")
+LOG = logging.getLogger("slaughtermudae.container")
 
 
 class ContainerError(RuntimeError):
@@ -166,7 +166,7 @@ class AccountContainer:
         client = self._client_factory(runtime.config, self._credentials)
         session = AccountSession(
             runtime.config, client, self._bus, self._limiter,
-            logging.getLogger(f"mudae.account.{name}"),
+            logging.getLogger(f"slaughtermudae.account.{name}"),
         )
         await session.start()
         runtime.session = session
@@ -375,7 +375,7 @@ class AccountContainer:
             limiter=self._limiter,
             credentials=self._credentials,
             container=self,
-            logger=logging.getLogger(f"mudae.{runtime.config.name}.{prt.name}"),
+            logger=logging.getLogger(f"slaughtermudae.{runtime.config.name}.{prt.name}"),
         )
 
     async def _dispatch(self, event: Event) -> None:

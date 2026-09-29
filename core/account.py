@@ -151,7 +151,7 @@ class AccountSession:
         self._client = client
         self._bus = bus
         self._limiter = limiter
-        self._logger = logger or logging.getLogger(f"mudae.account.{config.name}")
+        self._logger = logger or logging.getLogger(f"slaughtermudae.account.{config.name}")
         self.status = AccountStatus.CREATED
         self.last_error: Optional[str] = None
         #: set when the connection drops UNEXPECTEDLY (watched by the supervisor)

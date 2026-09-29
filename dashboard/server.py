@@ -36,7 +36,7 @@ from core.api import ControlAPI
 
 from . import ws as wsproto
 
-LOG = logging.getLogger("mudae.dashboard")
+LOG = logging.getLogger("slaughtermudae.dashboard")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 BROADCAST_INTERVAL = 1.0
