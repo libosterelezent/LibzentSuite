@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MudaeScripts Dashboard</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --panel2: #1c2330; --line: #2b3245;
+    --text: #d7dde7; --dim: #8a93a6; --accent: #58a6ff; --ok: #3fb950;
+    --warn: #d29922; --err: #f85149; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+           background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0; }
+  #wsdot { width: 10px; height: 10px; border-radius: 50%; background: var(--err); }
+  #wsdot.on { background: var(--ok); }
+  #tokenbox { margin-left: auto; display: flex; gap: 6px; }
+  #tokenbox input { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+                    border-radius: 6px; padding: 4px 8px; width: 200px; }
+  main { display: grid; grid-template-columns: 1.4fr 1fr; gap: 12px; padding: 12px 16px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+            padding: 12px; min-width: 0; }
+  section h2 { margin: 0 0 10px; font-size: 13px; color: var(--dim);
+               text-transform: uppercase; letter-spacing: .06em; }
+  .card { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+          padding: 10px; margin-bottom: 10px; }
+  .card .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .name { font-weight: 600; }
+  .status { font-family: var(--mono); font-size: 12px; padding: 1px 8px; border-radius: 10px; }
+  .status.running { color: var(--ok); background: rgba(63,185,80,.12); }
+  .status.reconnecting { color: var(--warn); background: rgba(210,153,34,.15); }
+  .status.created, .status.stopped { color: var(--dim); background: rgba(138,147,166,.12); }
+  .status.connecting, .status.failed { color: var(--err); background: rgba(248,81,73,.12); }
+  button { background: var(--panel); color: var(--text); border: 1px solid var(--line);
+           border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.on { border-color: var(--ok); color: var(--ok); }
+  button.off { border-color: var(--err); color: var(--err); }
+  input, select { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+                  border-radius: 6px; padding: 4px 8px; font-family: var(--mono); font-size: 12px; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .chip { font-family: var(--mono); font-size: 11px; padding: 1px 8px; border-radius: 10px;
+          background: var(--panel); border: 1px solid var(--line); color: var(--dim); }
+  .chip.on { color: var(--ok); border-color: var(--ok); }
+  #logs { background: #0a0d12; border: 1px solid var(--line); border-radius: 8px;
+          font-family: var(--mono); font-size: 11.5px; padding: 8px; height: 260px;
+          overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  .rule-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  .mono { font-family: var(--mono); font-size: 12px; }
+  .dim { color: var(--dim); }
+  .plugin-setting { margin: 2px 0 8px 12px; font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+  #fullwrap { grid-column: 1 / -1; }
+  .errbox { color: var(--err); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<header>
+  <div id="wsdot"></div>
+  <h1>MudaeScripts</h1>
+  <span class="dim" id="connmsg">connecting…</span>
+  <div id="tokenbox">
+    <input id="token" type="password" placeholder="dashboard token">
+    <button id="savetoken">save</button>
+  </div>
+</header>
+<main>
+  <section id="accounts-sec">
+    <h2>Accounts</h2>
+    <div id="accounts"><span class="dim">waiting for data…</span></div>
+  </section>
+  <section>
+    <h2>Rate limits</h2>
+    <div id="limits"><span class="dim">waiting for data…</span></div>
+  </section>
+  <section>
+    <h2>Plugins</h2>
+    <div id="plugins"><span class="dim">waiting for data…</span></div>
+  </section>
+  <section>
+    <h2>Log tail</h2>
+    <div id="logs"></div>
+  </section>
+  <section id="fullwrap">
+    <h2>Errors</h2>
+    <div class="errbox" id="errors"></div>
+  </section>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const token = () => localStorage.getItem("dash_token") || "";
+let lastStats = null;
+
+function api(path, opts = {}) {
+  const headers = Object.assign({"Content-Type": "application/json"}, opts.headers || {});
+  if (token()) headers["X-Dashboard-Token"] = token();
+  return fetch(path, Object.assign({}, opts, {headers})).then(async (r) => {
+    if (r.status === 401) { $("errors").textContent = "401 — set the dashboard token (top right)"; throw new Error("unauthorized"); }
+    const body = await r.json();
+    if (!body.ok) throw new Error(body.error || "request failed");
+    return body.data;
+  });
+}
+
+function logline(text) {
+  const box = $("logs");
+  const at_bottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+  const div = document.createElement("div");
+  div.textContent = text;
+  box.appendChild(div);
+  while (box.childNodes.length > 300) box.removeChild(box.firstChild);
+  if (at_bottom) box.scrollTop = box.scrollHeight;
+}
+
+function renderAccounts(accounts) {
+  const root = $("accounts");
+  root.innerHTML = "";
+  if (!accounts.length) { root.innerHTML = '<span class="dim">no accounts configured</span>'; return; }
+  for (const a of accounts) {
+    const card = document.createElement("div"); card.className = "card";
+    const row = document.createElement("div"); row.className = "row";
+    row.innerHTML = `<span class="name">${esc(a.name)}</span>` +
+      `<span class="status ${a.status}">${a.status}</span>` +
+      `<span class="dim mono">${a.sync_group ? "grp:" + esc(a.sync_group) : "independent"}</span>` +
+      `<span class="dim mono">uid:${a.user_id ?? "-"}</span>`;
+    const start = btn("start", () => api("/api/start", {method: "POST", body: JSON.stringify({account: a.name})}).then(refresh).catch(showErr));
+    const stop = btn("stop", () => api("/api/stop", {method: "POST", body: JSON.stringify({account: a.name})}).then(refresh).catch(showErr));
+    row.append(start, stop);
+    card.appendChild(row);
+    const chips = document.createElement("div"); chips.className = "chips";
+    for (const [name, info] of Object.entries(a.plugins)) {
+      const chip = document.createElement("button");
+      chip.className = info.enabled ? "on" : "off";
+      chip.textContent = (info.enabled ? "◆ " : "◇ ") + name;
+      chip.onclick = () => api("/api/plugin", {method: "POST", body: JSON.stringify(
+        {account: a.name, plugin: name, enabled: !info.enabled})}).then(refresh).catch(showErr);
+      chips.appendChild(chip);
+    }
+    if (!chips.childNodes.length) chips.innerHTML = '<span class="dim mono">no plugins</span>';
+    card.appendChild(chips);
+    root.appendChild(card);
+  }
+}
+
+function renderLimits(limits) {
+  const root = $("limits");
+  root.innerHTML = "";
+  for (const [action, info] of Object.entries(limits.actions || {})) {
+    const wrap = document.createElement("div");
+    wrap.innerHTML = `<div class="card"><div class="row">
+        <span class="name mono">${esc(action)}</span>
+        <span class="dim mono">default ${esc(info.default_rule)}</span>
+        <span class="mono">global ${info.global_bucket.tokens}/${info.global_bucket.capacity}</span>
+      </div><div class="dim mono" style="margin-top:4px">overrides: ${
+        Object.entries(info.overrides || {}).map(([a, r]) => `${esc(a)}=${esc(r)}`).join(", ") || "—"}</div></div>`;
+    const editor = document.createElement("div"); editor.className = "rule-row";
+    const acct = document.createElement("select");
+    for (const a of (lastStats ? lastStats.accounts : [])) acct.append(new Option(a.name, a.name));
+    const rule = document.createElement("input"); rule.size = 8; rule.placeholder = "5/12s";
+    const setAll = btn("set global", () => api("/api/limit", {method: "POST", body: JSON.stringify(
+      {action, rule: rule.value})}).then(refresh).catch(showErr));
+    const setOne = btn("set for bot", () => api("/api/limit", {method: "POST", body: JSON.stringify(
+      {action, rule: rule.value, account: acct.value})}).then(refresh).catch(showErr));
+    const clearOne = btn("clear bot rule", () => api("/api/clear-limit", {method: "POST", body: JSON.stringify(
+      {account: acct.value, action})}).then(refresh).catch(showErr));
+    editor.append(acct, rule, setAll, setOne, clearOne);
+    wrap.firstChild.appendChild(editor);
+    root.appendChild(wrap);
+  }
+}
+
+async function renderPlugins() {
+  const root = $("plugins");
+  try {
+    const manifests = await api("/api/plugins");
+    root.innerHTML = "";
+    for (const m of manifests) {
+      const card = document.createElement("div"); card.className = "card";
+      card.innerHTML = `<div class="row"><span class="name">${esc(m.name)}</span>
+        <span class="dim mono">v${esc(m.version)}</span></div>
+        <div class="dim">${esc(m.description)}</div>`;
+      for (const s of m.settings) {
+        const line = document.createElement("div"); line.className = "plugin-setting";
+        line.textContent = `${s.key}: ${s.type} = ${JSON.stringify(s.default)}` + (s.min != null ? `  [${s.min}..${s.max ?? "∞"}]` : "");
+        card.appendChild(line);
+      }
+      root.appendChild(card);
+    }
+  } catch (e) { /* handled by api() */ }
+}
+
+function renderStats(stats) {
+  lastStats = stats;
+  renderAccounts(stats.accounts || []);
+  renderLimits(stats.limits || {});
+}
+
+let wsRetry = 1000;
+function connectWS() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const url = proto + "//" + location.host + "/ws" + (token() ? "?token=" + encodeURIComponent(token()) : "");
+  const ws = new WebSocket(url);
+  ws.onopen = () => { $("wsdot").classList.add("on"); $("connmsg").textContent = "live"; wsRetry = 1000; };
+  ws.onmessage = (ev) => {
+    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.type === "stats") renderStats(msg);
+    else if (msg.type === "log") logline(msg.line);
+    else if (msg.type === "error") showErr(msg.error);
+  };
+  ws.onclose = () => {
+    $("wsdot").classList.remove("on"); $("connmsg").textContent = "reconnecting…";
+    setTimeout(connectWS, wsRetry);
+    wsRetry = Math.min(wsRetry * 2, 10000);
+  };
+}
+
+function refresh() { return api("/api/status").then(renderStats).catch(showErr); }
+function showErr(e) { $("errors").textContent = String(e && e.message || e); }
+function esc(s) { const d = document.createElement("span"); d.textContent = String(s); return d.innerHTML; }
+function btn(label, onclick) { const b = document.createElement("button"); b.textContent = label; b.onclick = onclick; return b; }
+
+$("savetoken").onclick = () => { localStorage.setItem("dash_token", $("token").value.trim()); location.reload(); };
+$("token").value = token();
+renderPlugins().then(refresh).catch(() => {});
+connectWS();
+</script>
+</body>
+</html>

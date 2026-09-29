@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
-from .account import AccountConfig, AccountSession, AccountStatus
+from .account import AccountConfig, AccountSession, AccountStatus, ReconnectPolicy
 from .credentials import Credentials
 from .events import Event, EventBus, MessageEvent
 from .plugin_base import PluginBase, PluginContext
@@ -46,6 +46,9 @@ class AccountRuntime:
     config: AccountConfig
     plugins: Dict[str, PluginRuntime] = field(default_factory=dict)
     session: Optional[AccountSession] = None
+    #: set by stop_account; tells the supervisor to stand down
+    stop_requested: bool = False
+    supervisor: Optional[asyncio.Task] = None
 
     def status_dict(self) -> Dict[str, Any]:
         return {
@@ -73,6 +76,8 @@ class AccountContainer:
         bus: Optional[EventBus] = None,
         client_factory: Optional[Callable[[AccountConfig, Credentials], Any]] = None,
         logger: Optional[logging.Logger] = None,
+        reconnect_policy: Optional[ReconnectPolicy] = None,
+        state: Optional[Any] = None,
     ) -> None:
         self._credentials = credentials
         self._settings = settings
@@ -81,6 +86,9 @@ class AccountContainer:
         self._bus = bus or EventBus()
         self._client_factory = client_factory
         self._logger = logger or LOG
+        self._reconnect_policy = reconnect_policy or ReconnectPolicy()
+        #: core.persistence.StateStore — remembers plugin toggles across restarts
+        self._state = state
         self._accounts: Dict[str, AccountRuntime] = {}
         self._bus.subscribe(Event, self._dispatch)
 
@@ -121,8 +129,11 @@ class AccountContainer:
         for name in wanted:
             instance = self._loader.create(name)
             resolved = self._settings.resolve(name, type(instance).settings, account=config.name)
+            enabled = True
+            if self._state is not None:
+                enabled = self._state.plugin_enabled(config.name, name, default=True)
             runtime.plugins[name] = PluginRuntime(
-                name=name, instance=instance, enabled=True, settings=resolved
+                name=name, instance=instance, enabled=enabled, settings=resolved
             )
         self._accounts[config.name] = runtime
         self._logger.info("registered account %s (plugins=%s)", config.name, sorted(runtime.plugins))
@@ -131,6 +142,10 @@ class AccountContainer:
     def remove_account(self, name: str) -> None:
         """Unload plugins and drop a stopped account."""
         runtime = self._get(name)
+        runtime.stop_requested = True
+        if runtime.supervisor is not None:
+            runtime.supervisor.cancel()
+            runtime.supervisor = None
         if runtime.session and runtime.session.status == AccountStatus.RUNNING:
             raise ContainerError(f"stop account {name!r} before removing it")
         for prt in runtime.plugins.values():
@@ -143,6 +158,7 @@ class AccountContainer:
     async def start_account(self, name: str) -> AccountRuntime:
         """Connect one account and enable its plugins (on_load + on_enable)."""
         runtime = self._get(name)
+        runtime.stop_requested = False
         if runtime.session and runtime.session.status == AccountStatus.RUNNING:
             raise ContainerError(f"account {name!r} is already running")
         if self._client_factory is None:
@@ -157,11 +173,28 @@ class AccountContainer:
         for prt in runtime.plugins.values():
             if prt.enabled:
                 await self._activate(runtime, prt)
+        policy = (
+            ReconnectPolicy.from_dict(runtime.config.reconnect)
+            if runtime.config.reconnect is not None
+            else self._reconnect_policy
+        )
+        if policy.enabled:
+            runtime.supervisor = asyncio.create_task(
+                self._supervise(runtime, policy), name=f"supervise-{name}"
+            )
         return runtime
 
     async def stop_account(self, name: str) -> AccountRuntime:
         """Disable plugins (on_disable) and disconnect one account."""
         runtime = self._get(name)
+        runtime.stop_requested = True
+        supervisor = runtime.supervisor
+        if supervisor is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(supervisor), timeout=1.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                supervisor.cancel()
+            runtime.supervisor = None
         for prt in runtime.plugins.values():
             if prt.enabled and prt.loaded:
                 try:
@@ -197,10 +230,14 @@ class AccountContainer:
             raise ContainerError(f"account {account!r} has no plugin {plugin!r}")
         if enabled and not prt.enabled:
             prt.enabled = True
+            if self._state is not None:
+                self._state.set_plugin_enabled(account, plugin, True)
             if runtime.session and runtime.session.status == AccountStatus.RUNNING:
                 await self._activate(runtime, prt)
         elif not enabled and prt.enabled:
             prt.enabled = False
+            if self._state is not None:
+                self._state.set_plugin_enabled(account, plugin, False)
             if prt.loaded:
                 try:
                     await prt.instance.on_disable(self._context(runtime, prt))
@@ -276,6 +313,50 @@ class AccountContainer:
         }
 
     # -------------------------------------------------------------- internals
+    async def _supervise(self, runtime: AccountRuntime, policy: ReconnectPolicy) -> None:
+        """Watch one running account; reconnect it with backoff when dropped.
+
+        Only reacts to session.lost (unexpected drops). Deliberate stops set
+        stop_requested and the supervisor exits without reconnecting.
+        """
+        name = runtime.config.name
+        try:
+            while not runtime.stop_requested:
+                session = runtime.session
+                if session is None:
+                    return
+                if session.status == AccountStatus.RECONNECTING or (
+                    session.status == AccountStatus.RUNNING and session.lost.is_set()
+                ):
+                    await self._reconnect_loop(runtime, policy)
+                    continue
+                await asyncio.sleep(0.2)
+        except asyncio.CancelledError:
+            return
+
+    async def _reconnect_loop(self, runtime: AccountRuntime, policy: ReconnectPolicy) -> None:
+        """Retry connecting a dropped account with exponential backoff."""
+        name = runtime.config.name
+        session = runtime.session
+        if session is None:
+            return
+        attempt = 0
+        while not runtime.stop_requested:
+            delay = policy.delay_for(attempt)
+            self._logger.warning(
+                "account %s reconnect attempt %d in %.2fs", name, attempt + 1, delay
+            )
+            await asyncio.sleep(delay)
+            if runtime.stop_requested:
+                return
+            try:
+                client = self._client_factory(runtime.config, self._credentials)
+                await session.reattach(client)
+                return
+            except Exception as exc:
+                attempt += 1
+                self._logger.warning("reconnect failed for %s: %s", name, exc)
+
     def _get(self, name: str) -> AccountRuntime:
         try:
             return self._accounts[name]

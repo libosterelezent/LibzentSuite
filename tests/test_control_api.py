@@ -80,7 +80,7 @@ class TestDashboardRouting(unittest.IsolatedAsyncioTestCase):
         api = make_api(harness)
         server = DashboardServer(api, token="secret", port=0)
         server._loop = asyncio.get_running_loop()
-        status, payload = await server._route("GET", "/api/status", {})
+        status, payload = await server._route("GET", "/api/status", {}, {})
         self.assertEqual(status, 200)
         self.assertTrue(payload["ok"])
         self.assertEqual(len(payload["data"]["accounts"]), 1)
@@ -93,7 +93,7 @@ class TestDashboardRouting(unittest.IsolatedAsyncioTestCase):
         server = DashboardServer(api, token=None, port=0)
         server._loop = asyncio.get_running_loop()
         status, payload = await server._route(
-            "POST", "/api/limit", {"action": "message", "rule": "3/10s", "account": "alpha"}
+            "POST", "/api/limit", {"action": "message", "rule": "3/10s", "account": "alpha"}, {}
         )
         self.assertEqual(status, 200)
         self.assertTrue(payload["ok"])
@@ -105,7 +105,7 @@ class TestDashboardRouting(unittest.IsolatedAsyncioTestCase):
         harness = Harness("tests/fixtures/plugins", ["alpha"])
         server = DashboardServer(make_api(harness), token=None, port=0)
         server._loop = asyncio.get_running_loop()
-        status, payload = await server._route("GET", "/api/nope", {})
+        status, payload = await server._route("GET", "/api/nope", {}, {})
         self.assertEqual(status, 404)
         self.assertFalse(payload["ok"])
 

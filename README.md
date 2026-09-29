@@ -11,13 +11,15 @@ management surfaces (terminal + GUI dashboard API).
 ## Layout
 
 ```
-core/       framework: container, rate limiter, plugins, events, credentials, simulator
+core/       framework: container, rate limiter, plugins, events, credentials,
+            reconnect supervisor, persistence, simulator
 plugins/    plugin modules (soulcopy = migrated Soulcopy/autocopy.py)
-cli/        interactive terminal
-dashboard/  JSON API backend for the GUI dashboard
+cli/        terminal REPL + full-screen TUI + shared command engine
+dashboard/  JSON REST API + WebSocket push + browser SPA (static/)
 config/     global settings, rate limits, per-account JSON (no secrets!)
-tests/      82-test suite incl. full local simulations
+tests/      125-test suite incl. full local simulations
 knowledgebase/  local-only, read-only docs (gitignored)
+state/      persisted runtime state (gitignored)
 main.py     entrypoint
 ```
 
@@ -27,9 +29,17 @@ main.py     entrypoint
 cp .env.example .env        # fill tokens + OWNER_USER_IDS (chmod 600 .env)
 python3 main.py --sim       # watch the framework run locally (no network)
 python3 main.py             # terminal management
-python3 main.py --start-all --dashboard   # live accounts + dashboard API
+python3 main.py --tui       # full-screen TUI with live log tailing
+python3 main.py --start-all --dashboard   # live accounts + browser dashboard
 bash scripts/run_tests.sh   # run the simulation test suite
 ```
+
+The dashboard serves a browser UI on `http://127.0.0.1:8070` (accounts,
+plugin toggles, rate-limit editing, live logs over WebSocket). Set
+`DASHBOARD_TOKEN` in `.env` to require authentication.
+
+Runtime changes (plugin toggles, per-bot rate overrides) persist to
+`state/state.json` and are restored on the next boot.
 
 Dependencies: Python ≥ 3.10, standard library only for everything local.
 Live mode additionally needs a user-account client fork
@@ -64,5 +74,6 @@ knowledgebase/`; unlock with `chmod -R u+w` to edit).
 
 `python3 -m unittest discover -s tests -t . -v` — rate limiter math (manual
 clock), plugin loader, container routing/isolation, settings layers, soulcopy
-text pipeline, end-to-end simulated slcopy runs, control API + dashboard
-routing. See `knowledgebase/KB_09_SIMULATOR_TESTING.md`.
+text pipeline, end-to-end simulated slcopy runs, reconnect supervisor with
+backoff, persistence roundtrips, WebSocket codec + live dashboard over real
+HTTP. See `knowledgebase/KB_09_SIMULATOR_TESTING.md`.

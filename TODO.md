@@ -5,12 +5,16 @@ centralized rate limiting, and dual management interfaces (GUI dashboard + termi
 
 > Reference: `Soulcopy/autocopy.py` was migrated into `plugins/soulcopy/` (see
 > `knowledgebase/KB_10_SOULCOPY_MIGRATION.md`).
+>
+> STATUS: all planned phases complete. The framework runs fully locally via
+> simulations (`python3 main.py --sim`); live mode needs a user-account client
+> fork (see `core/discord_adapter.py`).
 
 ---
 
 ## Phase 0 — Project Scaffolding  ✅ DONE
 
-- [x] Initialize project structure (`core/ plugins/ cli/ dashboard/ config/ tests/ knowledgebase/`)
+- [x] Initialize project structure (`core/ plugins/ cli/ dashboard/ config/ tests/ knowledgebase/ state/`)
 - [x] Choose dependencies (stdlib-only core; live Discord fork lazily imported)
 - [x] Define config file format(s) (global + per-account + per-plugin settings schema, validated)
 
@@ -34,7 +38,8 @@ centralized rate limiting, and dual management interfaces (GUI dashboard + termi
 - [x] Sync groups (`broadcast`) + independent mode (account×plugin matrix per config)
 - [x] Shared context: plugins coordinate via container helpers (collect_messages/wait_for/broadcast)
 - [x] Health reporting: per-account status + last_error; graceful failure containment
-- [ ] Auto-reconnect with exponential backoff on dropped sessions (pending)
+- [x] Auto-reconnect with exponential backoff on dropped sessions (supervisor task,
+      per-account `reconnect` policy overrides; KB_11)
 
 ## Phase 3 — Centralized Rate Limiter  ✅ DONE
 
@@ -47,30 +52,30 @@ centralized rate limiting, and dual management interfaces (GUI dashboard + termi
 - [x] Live view: current usage, queue depth, per-account stats (`stats()` / `limits`)
 - [x] Integration point: ALL outbound sends pass through the limiter (enforced in AccountSession)
 
-## Phase 4 — Management Interfaces
+## Phase 4 — Management Interfaces  ✅ DONE
 
-### Terminal (CLI/TUI)  ✅ DONE
+### Terminal (CLI/TUI)
 - [x] Interactive terminal REPL over the shared ControlAPI (injectable stdio, testable)
 - [x] Commands: status, plugins, start/stop, enable/disable, limits, set-limit, env, quit
-- [ ] Live log tailing in a full-screen TUI (pending)
+- [x] Full-screen TUI with live log tailing (curses; shared command engine; KB_12)
 
-### GUI Dashboard  🔶 BACKEND DONE
+### GUI Dashboard
 - [x] Backend JSON API (REST) exposing the same control surface as the terminal
-- [x] Endpoints: status, plugins, limits, start/stop, plugin toggle, limit set/clear
-- [x] Local token auth (`DASHBOARD_TOKEN` + `X-Dashboard-Token`)
-- [ ] Browser frontend pages (Accounts, Plugins, Rate limits, live logs) — pending
-- [ ] Real-time WebSocket updates — pending
+- [x] Endpoints: status, plugins, account-plugins, limits, start/stop, plugin toggle, limit set/clear
+- [x] Local token auth (`DASHBOARD_TOKEN` + `X-Dashboard-Token` / `?token=`)
+- [x] Browser frontend: Accounts, Plugins, Rate limits, live logs (single-file SPA)
+- [x] Real-time WebSocket updates (minimal RFC 6455 server; 1s stats push + live logs)
 
 ### Shared
-- [x] Single ControlAPI layer used by both interfaces (parity by construction)
+- [x] Single ControlAPI/command layer used by all surfaces (parity by construction)
 
-## Phase 5 — Hardening & Docs
+## Phase 5 — Hardening & Docs  ✅ DONE
 
-- [x] Graceful shutdown: terminal quit + stop_all disable plugins and disconnect cleanly
-- [ ] State persistence across restarts (enabled accounts / plugin toggles)
+- [x] Graceful shutdown: terminal/TUI quit + stop_all disable plugins and disconnect cleanly
+- [x] State persistence across restarts (plugin toggles + per-bot limit overrides; KB_14)
 - [x] README: setup, adding an account, running sims/tests
 - [x] Knowledgebase: function-level docs (`knowledgebase/`, read-only, gitignored)
-- [x] Test suite: 82 tests incl. local simulations (`bash scripts/run_tests.sh`)
+- [x] Test suite: 125 tests incl. local simulations (`bash scripts/run_tests.sh`)
 
 ---
 
@@ -80,3 +85,6 @@ centralized rate limiting, and dual management interfaces (GUI dashboard + termi
   conservative and document the risk for every account added.
 - Tokens/ids only in `.env` (gitignored, chmod 600); tests use synthetic ids.
 - `knowledgebase/` is local-only and read-only on disk (`chmod -R a-w knowledgebase/`).
+- `state/state.json` (gitignored) holds runtime toggles/overrides across restarts.
+- Live mode (`--start-all`) requires a user-account client fork, imported lazily;
+  everything else — including the dashboard and TUI — runs on the standard library.

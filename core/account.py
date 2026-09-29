@@ -6,6 +6,7 @@ through the central rate limiter before touching the client.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -26,8 +27,45 @@ class AccountStatus(str, Enum):
     CREATED = "created"
     CONNECTING = "connecting"
     RUNNING = "running"
+    RECONNECTING = "reconnecting"
     STOPPED = "stopped"
     FAILED = "failed"
+
+
+@dataclass
+class ReconnectPolicy:
+    """Exponential-backoff reconnection rules for a dropped session.
+
+    Delays grow initial_delay * multiplier**attempt, capped at max_delay.
+    """
+
+    enabled: bool = True
+    initial_delay: float = 1.0
+    max_delay: float = 60.0
+    multiplier: float = 2.0
+
+    def delay_for(self, attempt: int) -> float:
+        """Backoff wait before Nth reconnect attempt (0-based)."""
+        return min(self.initial_delay * (self.multiplier ** attempt), self.max_delay)
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict]) -> "ReconnectPolicy":
+        """Parse {'enabled','initial','max','multiplier'} with sane defaults."""
+        data = data or {}
+        return cls(
+            enabled=bool(data.get("enabled", True)),
+            initial_delay=float(data.get("initial", 1.0)),
+            max_delay=float(data.get("max", 60.0)),
+            multiplier=float(data.get("multiplier", 2.0)),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "enabled": self.enabled,
+            "initial": self.initial_delay,
+            "max": self.max_delay,
+            "multiplier": self.multiplier,
+        }
 
 
 @dataclass
@@ -41,6 +79,7 @@ class AccountConfig:
     settings: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # plugin->key->value
     rate_rules: Dict[str, str] = field(default_factory=dict)           # action->'n/secs'
     sync_group: Optional[str] = None         # accounts in the same group act in sync
+    reconnect: Optional[Dict[str, Any]] = None  # ReconnectPolicy overrides
 
     def __post_init__(self) -> None:
         if not NAME_RE.match(self.name or ""):
@@ -51,7 +90,7 @@ class AccountConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AccountConfig":
         """Build from parsed JSON; unknown keys rejected to catch typos."""
-        allowed = {"name", "token_ref", "enabled", "plugins", "settings", "rate_rules", "sync_group"}
+        allowed = {"name", "token_ref", "enabled", "plugins", "settings", "rate_rules", "sync_group", "reconnect"}
         unknown = set(data) - allowed
         if unknown:
             raise AccountError(f"unknown account config keys: {sorted(unknown)}")
@@ -63,6 +102,7 @@ class AccountConfig:
             settings=data.get("settings") or {},
             rate_rules=data.get("rate_rules") or {},
             sync_group=data.get("sync_group"),
+            reconnect=data.get("reconnect"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -75,6 +115,7 @@ class AccountConfig:
             "settings": self.settings,
             "rate_rules": self.rate_rules,
             "sync_group": self.sync_group,
+            "reconnect": self.reconnect,
         }
 
     def effective_token_ref(self) -> str:
@@ -113,8 +154,11 @@ class AccountSession:
         self._logger = logger or logging.getLogger(f"mudae.account.{config.name}")
         self.status = AccountStatus.CREATED
         self.last_error: Optional[str] = None
+        #: set when the connection drops UNEXPECTEDLY (watched by the supervisor)
+        self.lost: "asyncio.Event[None]" = asyncio.Event()
+        self._stopping = False
         # route every client message onto the bus as a MessageEvent
-        client.on_message = self._on_client_message
+        self.attach(client)
 
     @property
     def name(self) -> str:
@@ -125,6 +169,12 @@ class AccountSession:
         """Discord user id of the logged-in account, once connected."""
         return getattr(self._client, "user_id", None)
 
+    def attach(self, client: Any) -> None:
+        """Bind a client to this session (wires message + disconnect callbacks)."""
+        self._client = client
+        client.on_message = self._on_client_message
+        client.on_disconnect = self._on_client_disconnect
+
     # ------------------------------------------------------------ lifecycle
     async def start(self) -> None:
         """Connect the client; publishes ReadyEvent on success.
@@ -133,6 +183,7 @@ class AccountSession:
         """
         if self.status == AccountStatus.RUNNING:
             raise AccountError(f"account {self.name} is already running")
+        self._stopping = False
         self.status = AccountStatus.CONNECTING
         try:
             await self._client.connect()
@@ -141,13 +192,25 @@ class AccountSession:
             self.last_error = str(exc)
             raise AccountError(f"account {self.name} failed to connect: {exc}") from exc
         self.status = AccountStatus.RUNNING
+        self.lost.clear()
         self._logger.info("account running (user_id=%s)", self.user_id)
         self._bus.publish_nowait(ReadyEvent(account=self.name))
 
+    async def reattach(self, client: Any) -> None:
+        """Swap in a FRESH client and reconnect (used by the supervisor)."""
+        self.status = AccountStatus.CONNECTING
+        self.attach(client)
+        await client.connect()
+        self.status = AccountStatus.RUNNING
+        self.lost.clear()
+        self._logger.info("account reconnected (user_id=%s)", self.user_id)
+        self._bus.publish_nowait(ReadyEvent(account=self.name))
+
     async def stop(self) -> None:
-        """Disconnect the client; safe to call multiple times."""
+        """Disconnect the client deliberately; safe to call multiple times."""
         if self.status == AccountStatus.STOPPED:
             return
+        self._stopping = True  # suppress the lost-connection signal
         await self._client.disconnect()
         self.status = AccountStatus.STOPPED
         self._logger.info("account stopped")
@@ -189,3 +252,17 @@ class AccountSession:
                 dm=message.dm,
             )
         )
+
+    def _on_client_disconnect(self, reason: str = "") -> None:
+        """Sync client callback on UNEXPECTED connection loss.
+
+        Deliberate stop() sets _stopping first and never lands here. Marks the
+        session RECONNECTING and sets `lost` for the container supervisor.
+        """
+        if self._stopping:
+            return
+        if self.status == AccountStatus.RUNNING:
+            self.status = AccountStatus.RECONNECTING
+            self.last_error = reason or "connection lost"
+            self.lost.set()
+            self._logger.warning("connection lost (%s)", self.last_error)

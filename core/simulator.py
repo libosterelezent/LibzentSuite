@@ -17,8 +17,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .account import AccountConfig, AccountSession, DiscordMessage
-from .config import ProjectConfig
+from .account import AccountConfig, DiscordMessage, ReconnectPolicy
 from .container import AccountContainer
 from .credentials import Credentials
 from .events import EventBus
@@ -137,6 +136,7 @@ class FakeClient:
         self._world = world
         self.user_id = user_id
         self.on_message: Optional[Callable[[DiscordMessage], None]] = None
+        self.on_disconnect: Optional[Callable[[str], None]] = None
         self.connected = False
 
     # ------------------------------------------------------------ lifecycle
@@ -148,6 +148,16 @@ class FakeClient:
         if self in self._world.subscribers:
             self._world.subscribers.remove(self)
         self.connected = False
+
+    def drop(self, reason: str = "simulated network drop") -> None:
+        """Simulate an UNEXPECTED connection loss (fires on_disconnect)."""
+        if not self.connected:
+            return
+        if self in self._world.subscribers:
+            self._world.subscribers.remove(self)
+        self.connected = False
+        if self.on_disconnect is not None:
+            self.on_disconnect(reason)
 
     # ------------------------------------------------------------- messaging
     async def send_message(self, channel_id: int, content: str) -> DiscordMessage:
@@ -238,6 +248,8 @@ class SimulatedCluster:
             loader=loader,
             bus=EventBus(),
             client_factory=self._client_factory,
+            # sims don't reconnect unless a test asks for it
+            reconnect_policy=ReconnectPolicy(enabled=False),
         )
         # alpha runs every discovered plugin; beta idles in the group — the
         # account x plugin matrix is per-account config (independent use)

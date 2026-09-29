@@ -24,12 +24,15 @@ class ControlAPI:
         loader: PluginLoader,
         credentials: Credentials,
         settings_store: Optional[SettingsStore] = None,
+        state: Optional[Any] = None,
     ) -> None:
         self._container = container
         self._limiter = limiter
         self._loader = loader
         self._credentials = credentials
         self._settings_store = settings_store
+        #: core.persistence.StateStore — records runtime limit changes
+        self._state = state
 
     # ---------------------------------------------------------------- status
     async def status(self) -> Dict[str, Any]:
@@ -55,6 +58,11 @@ class ControlAPI:
     def credentials_summary(self) -> Dict[str, str]:
         """Redacted credential view (tokens masked; ids shown)."""
         return self._credentials.redacted()
+
+    @property
+    def dashboard_token(self) -> Optional[str]:
+        """Optional auth token the dashboard should require (from .env)."""
+        return self._credentials.dashboard_token
 
     # -------------------------------------------------------------- lifecycle
     async def start(self, account: Optional[str] = None) -> Dict[str, Any]:
@@ -90,9 +98,13 @@ class ControlAPI:
             parsed = self._limiter.set_default_rule(action, rule)
             return {"action": action, "account": None, "rule": str(parsed)}
         parsed = self._limiter.set_account_rule(account, action, rule)
+        if self._state is not None:
+            self._state.set_limit_override(account, action, str(parsed))
         return {"action": action, "rule": str(parsed), "account": account}
 
     async def clear_limit(self, account: str, action: str) -> Dict[str, Any]:
         """Remove a per-bot override so it inherits the global rule again."""
         removed = self._limiter.clear_account_rule(account, action)
+        if removed and self._state is not None:
+            self._state.clear_limit_override(account, action)
         return {"account": account, "action": action, "cleared": removed}

@@ -37,6 +37,7 @@ class RealDiscordClient:
         self._ready = asyncio.Event()
         self._logger = logger or LOG
         self.on_message: Optional[Callable[[DiscordMessage], None]] = None
+        self.on_disconnect: Optional[Callable[[str], None]] = None
         self.user_id: Optional[int] = None
 
     # ------------------------------------------------------------ lifecycle
@@ -58,6 +59,11 @@ class RealDiscordClient:
         async def on_ready() -> None:
             self.user_id = self._client.user.id
             self._ready.set()
+
+        @self._client.event
+        async def on_disconnect() -> None:
+            if self.on_disconnect is not None:
+                self.on_disconnect("gateway closed")
 
         @self._client.event
         async def on_message(message: Any) -> None:

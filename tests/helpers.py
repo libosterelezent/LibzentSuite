@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.account import AccountConfig  # noqa: E402
+from core.account import AccountConfig, ReconnectPolicy
 from core.container import AccountContainer  # noqa: E402
 from core.credentials import Credentials  # noqa: E402
 from core.events import EventBus  # noqa: E402
@@ -21,6 +21,8 @@ from core.simulator import FakeClient, FakeWorld  # noqa: E402
 TEST_CHANNEL = 500
 FIXTURE_MUDAE_ID = 999_999
 FIXTURE_OWNER_ID = 1001
+#: supervisors off by default so tests that never stop accounts stay clean
+_NO_RECONNECT = ReconnectPolicy(enabled=False)
 
 
 class Harness:
@@ -34,6 +36,8 @@ class Harness:
         rate_rules: Optional[Dict[str, str]] = None,
         mudae_id: int = FIXTURE_MUDAE_ID,
         owner_id: int = FIXTURE_OWNER_ID,
+        reconnect_policy: Optional = None,
+        state: Optional = None,
     ) -> None:
         self.mudae_id = mudae_id
         self.owner_id = owner_id
@@ -64,6 +68,8 @@ class Harness:
             loader=loader,
             bus=EventBus(),
             client_factory=lambda cfg, _creds: FakeClient(self.world, self.user_ids[cfg.name]),
+            reconnect_policy=reconnect_policy if reconnect_policy is not None else _NO_RECONNECT,
+            state=state,
         )
         for name in accounts:
             self.container.add_account(AccountConfig(name=name, sync_group="grp"))
