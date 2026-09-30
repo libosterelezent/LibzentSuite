@@ -120,6 +120,8 @@ class EventBus:
                     # every remaining handler — treat it like any failure
                     LOG.exception("event handler %r cancelled internally for %s", handler, event.name)
                     results.append(asyncio.CancelledError("handler cancelled"))
+                except (KeyboardInterrupt, SystemExit):
+                    raise  # deliberate: process-level signals are not handler failures
                 except Exception as exc:  # isolation by design
                     LOG.exception("event handler %r failed for %s", handler, event.name)
                     results.append(exc)

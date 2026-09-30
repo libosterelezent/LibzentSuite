@@ -80,6 +80,11 @@ management interfaces (dashboard + terminal) with full settings parity.
 - [x] v2.1 — 15-agent deep audit (module-by-module + adversarial rate-limit
       stress): 16 confirmed bugs fixed, ~35 risks hardened, 30 regression
       tests + permanent 32-test stress suite. Full findings: KB_20.
+- [x] v2.2 — 8-agent error-handling audit (UI, HTTP/WS contract, CLI
+      messages, backend containment, plugins, fuzzing, live scenarios,
+      terminal UX): wrong-action bool coercions eliminated, transactional
+      add/remove, sane field-level messages everywhere, error visibility in
+      status/dashboard. Full findings: KB_21.
 
 ## Backlog (nice-to-have, not requested)
 

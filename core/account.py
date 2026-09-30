@@ -156,6 +156,10 @@ class DiscordMessage:
         self.content = content
         self.dm = dm
 
+    def __repr__(self) -> str:  # ERROR AUDIT: sane broadcast-result rendering
+        preview = (self.content or "").replace("\n", "\\n")[:40]
+        return f"<msg ch={self.channel_id} author={self.author_id}: {preview!r}>"
+
 
 class AccountSession:
     """Runtime wrapper binding one account to a client + bus + limiter."""

@@ -25,6 +25,18 @@ from .warnings import (
 LOG = logging.getLogger("slaughtermudae.api")
 
 
+def _as_bool(value: Any, field: str) -> bool:
+    """Strict boolean parsing shared by every mutation surface.
+
+    ERROR AUDIT FIX: bool("false") == True silently did the OPPOSITE of the
+    user's request. JSON surfaces must send real booleans — strings are
+    rejected so nothing is ever guessed.
+    """
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"field '{field}' must be a boolean (true/false), got {value!r}")
+
+
 class ControlAPI:
     """High-level operations over the container + limiter + database."""
 
@@ -94,16 +106,25 @@ class ControlAPI:
         """Register + persist a new account (token VALUE stays in .env).
 
         payload: {name (required), token_ref?, sync_group?, roles?, plugins?,
-                  settings?, rate_rules?, reconnect?} — extra fields are
-        validated by AccountConfig (fail fast on bad settings/names).
+                  settings?, rate_rules?, reconnect?}. ERROR AUDIT FIX:
+        unknown keys are rejected (typos were silently dropped) and roles
+        must be a list (a string was char-split into phantom roles); a DB
+        failure after registration rolls the runtime entry back.
         """
         if not isinstance(payload, dict) or not payload.get("name"):
             raise ContainerError("account payload needs at least {'name': ...}")
+        allowed = {"name", "token_ref", "sync_group", "roles", "plugins", "settings", "rate_rules", "reconnect"}
+        unknown = set(payload) - allowed
+        if unknown:
+            raise ContainerError(f"unknown account payload keys: {sorted(unknown)}")
+        roles = payload.get("roles") or []
+        if not isinstance(roles, list) or not all(isinstance(r, str) for r in roles):
+            raise ContainerError(f"'roles' must be a list of strings, got {roles!r}")
         config = AccountConfig(
             name=payload["name"],
             token_ref=payload.get("token_ref"),
             sync_group=payload.get("sync_group"),
-            roles=list(payload.get("roles") or []),
+            roles=list(roles),
             plugins=payload.get("plugins"),
             settings=payload.get("settings") or {},
             rate_rules=payload.get("rate_rules") or {},
@@ -111,20 +132,32 @@ class ControlAPI:
         )
         self._container.add_account(config)  # validates name/settings (fail fast)
         if self._state is not None:
-            self._state.upsert_account(config)
+            try:
+                self._state.upsert_account(config)
+            except Exception:
+                # ERROR AUDIT FIX: no orphan — runtime without DB row
+                self._container.remove_account(config.name)
+                raise
         return {"added": config.name, "roles": config.roles, "sync_group": config.sync_group}
 
     async def remove_account(self, name: str) -> Dict[str, Any]:
         """Remove an account (must be stopped) from runtime + database.
 
-        Unknown accounts raise ContainerError; running accounts are stopped
-        first, then removed with cascading state cleanup.
+        Unknown accounts raise ContainerError. ERROR AUDIT FIX: the DB row is
+        deleted FIRST (a later runtime failure can no longer resurrect the
+        account on the next boot), and running accounts are explicitly
+        reported as stopped in the result.
         """
-        await self._container.stop_account(name)  # no-op when not running; raises never for unknown? _get raises
-        self._container.remove_account(name)
+        runtime = self._container._get(name)  # unknown accounts raise here
+        was_running = (
+            runtime.session is not None and runtime.session.status.value == "running"
+        )
+        await self._container.stop_account(name)  # no-op when already stopped
         if self._state is not None:
             self._state.delete_account(name)
-        return {"removed": name}
+        self._container.remove_account(name)
+        message = "stopped and removed" if was_running else "removed"
+        return {"removed": name, "was_running": was_running, "message": message}
 
     async def account_details(self, name: str) -> Dict[str, Any]:
         """Deep view of one account: status, roles, cached Discord data.
@@ -144,12 +177,19 @@ class ControlAPI:
             "name": name,
             "status": session.status.value if session else AccountStatus.CREATED.value,
             "user_id": session.user_id if session else None,
+            "last_error": session.last_error if session else None,
             "sync_group": runtime.config.sync_group,
             "roles": list(runtime.config.roles),
             "reconnect": (runtime.config.reconnect or {}),
             "cached": snapshot,
             "plugins": [
-                {"name": pname, "enabled": prt.enabled, "settings": prt.settings}
+                {
+                    "name": pname,
+                    "enabled": prt.enabled,
+                    "settings": prt.settings,
+                    "last_error": prt.last_error,
+                    "error_count": prt.error_count,
+                }
                 for pname, prt in sorted(runtime.plugins.items())
             ],
         }
@@ -173,6 +213,7 @@ class ControlAPI:
 
     async def set_plugin_enabled(self, account: str, plugin: str, enabled: bool) -> Dict[str, Any]:
         """Enable/disable a plugin on an account at runtime."""
+        enabled = _as_bool(enabled, "enabled")
         await self._container.enable_plugin(account, plugin, enabled)
         return {"account": account, "plugin": plugin, "enabled": enabled}
 
@@ -256,8 +297,16 @@ class ControlAPI:
         return {"deleted": name, "existed": self._roles.delete_role(name)}
 
     async def assign_role(self, account: str, role: str, assigned: bool) -> Dict[str, Any]:
-        """Grant/revoke a role on an account (persisted; applies on next start)."""
+        """Grant/revoke a role on an account (persisted; applies on next start).
+
+        ERROR AUDIT FIX: unknown roles are rejected instead of silently
+        persisted as a grant that allows nothing.
+        """
         runtime = self._container._get(account)  # noqa: SLF001
+        if self._roles is not None and assigned and self._roles.get(role) is None:
+            known = sorted(self._roles.all())
+            raise ContainerError(f"unknown role {role!r} (defined: {known or 'none yet'})")
+        assigned = _as_bool(assigned, "assigned")
         roles = self._container.assign_role(account, role, assigned)
         if self._state is not None:
             self._state.upsert_account(runtime.config)

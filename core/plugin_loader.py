@@ -78,6 +78,7 @@ class PluginLoader:
                 candidates.append(("package", entry.name, entry / "__init__.py"))
             elif entry.is_file() and entry.suffix == ".py":
                 candidates.append(("file", entry.name, entry))
+        registered_here = 0
         for kind, name, path in candidates:
             if kind == "package":
                 try:
@@ -86,6 +87,7 @@ class PluginLoader:
                     raise PluginLoadError(f"error importing plugin {path}: {exc}") from exc
             else:
                 module = self._import_file(f"{parent_name}_{Path(name).stem}", path)
+            found_here = 0
             prefix = module.__name__ + "."
             for attr in vars(module).values():
                 if (
@@ -98,6 +100,13 @@ class PluginLoader:
                     )
                 ):
                     self._register(attr, path)
+                    found_here += 1
+            if found_here == 0:
+                # ERROR AUDIT FIX: a module exporting no plugin was silently skipped
+                LOG.warning(
+                    "%s exports no PluginBase subclass (did you forget to inherit?)", path
+                )
+            registered_here += found_here
         self._discovered = True
         LOG.info("discovered %d plugin(s) in %s: %s", len(self._records), self._dir, sorted(self._records))
         return dict(self._records)
@@ -122,6 +131,14 @@ class PluginLoader:
         # AUDIT FIX: strict ASCII validation — isalnum() accepted Unicode names
         if not re.fullmatch(r"[a-z0-9_-]+", name):
             raise PluginLoadError(f"plugin name {name!r} must be lowercase [a-z0-9_-]")
+        # ERROR AUDIT FIX: duplicate setting keys silently last-winned
+        seen_keys = set()
+        for setting in cls.settings or ():
+            if setting.key in seen_keys:
+                raise PluginLoadError(
+                    f"plugin {name!r} declares duplicate setting key {setting.key!r}"
+                )
+            seen_keys.add(setting.key)
         if name in self._records:
             raise PluginLoadError(f"duplicate plugin name {name!r} ({path} vs {self._records[name].source})")
         self._records[name] = PluginRecord(name=name, cls=cls, source=path)

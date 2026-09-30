@@ -45,7 +45,8 @@ class TestSettingsAuditFixes(unittest.TestCase):
         with self.assertRaises(SettingValidationError) as ctx:
             store.resolve("p", self.DEFS, account="a")
         self.assertIn("p.n", str(ctx.exception))
-        self.assertEqual(ctx.exception.path, "p.n")
+        self.assertIn("p.n", ctx.exception.path)
+        self.assertIn("layer", ctx.exception.path)  # ERROR AUDIT: layer named
 
 
 class TestEventBusAuditFixes(unittest.IsolatedAsyncioTestCase):

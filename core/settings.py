@@ -136,7 +136,10 @@ class SettingsStore:
         layers = [self._global.get(plugin_name, {})]
         if account is not None:
             layers.append(self._accounts.get(account, {}).get(plugin_name, {}))
-        for layer in layers:
+        for layer_name, layer in zip(
+            ("global layer", f"account '{account}' layer") if account is not None else ("global layer",),
+            layers,
+        ):
             for key, raw in layer.items():
                 if key not in defs:
                     raise SettingValidationError(
@@ -145,8 +148,9 @@ class SettingsStore:
                 try:
                     values[key] = defs[key].validate(raw)
                 except SettingValidationError as exc:
-                    # AUDIT FIX: bad values now carry the full <plugin>.<key> path
+                    # AUDIT FIX: bad values carry the full <plugin>.<key> path
+                    # ERROR AUDIT FIX: ...and now the LAYER that holds the bad value
                     raise SettingValidationError(
-                        f"{plugin_name}.{key}", exc.reason
+                        f"{plugin_name}.{key} ({layer_name})", exc.reason
                     ) from exc
         return values

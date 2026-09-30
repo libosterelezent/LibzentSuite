@@ -37,6 +37,9 @@ class PluginRuntime:
     enabled: bool = True
     loaded: bool = False
     settings: Dict[str, Any] = field(default_factory=dict)
+    # ERROR AUDIT FIX: runtime crashes are now visible in status/dashboard
+    last_error: Optional[str] = None
+    error_count: int = 0
 
 
 @dataclass
@@ -49,17 +52,32 @@ class AccountRuntime:
     #: set by stop_account; tells the supervisor to stand down
     stop_requested: bool = False
     supervisor: Optional[asyncio.Task] = None
+    #: ERROR AUDIT FIX: why the last START failed (factory errors happen
+    #: before a session exists, so session.last_error can't hold them)
+    last_error: Optional[str] = None
 
     def status_dict(self) -> Dict[str, Any]:
+        if self.session is not None:
+            status = self.session.status.value
+        else:
+            # ERROR AUDIT FIX: a failed START (before any session existed)
+            # reports 'failed', not a misleading 'created'
+            status = AccountStatus.FAILED.value if self.last_error else AccountStatus.CREATED.value
         return {
             "name": self.config.name,
-            "status": self.session.status.value if self.session else AccountStatus.CREATED.value,
+            "status": status,
             "user_id": self.session.user_id if self.session else None,
+            "last_error": (self.session.last_error if self.session else None) or self.last_error,
             "sync_group": self.config.sync_group,
             # AUDIT FIX: the dashboard role chips read this key
             "roles": list(self.config.roles),
             "plugins": {
-                name: {"enabled": rt.enabled, "loaded": rt.loaded}
+                name: {
+                    "enabled": rt.enabled,
+                    "loaded": rt.loaded,
+                    "last_error": rt.last_error,
+                    "error_count": rt.error_count,
+                }
                 for name, rt in sorted(self.plugins.items())
             },
         }
@@ -196,7 +214,12 @@ class AccountContainer:
             raise ContainerError(f"account {name!r} is already running")
         if self._client_factory is None:
             raise ContainerError("no client_factory configured (simulation or live required)")
-        client = self._client_factory(runtime.config, self._credentials)
+        try:
+            client = self._client_factory(runtime.config, self._credentials)
+        except Exception as exc:
+            runtime.last_error = f"start failed: {type(exc).__name__}: {exc}"
+            self._logger.exception("client factory failed for %s", name)
+            raise
         session = AccountSession(
             runtime.config, client, self._bus, self._limiter,
             logging.getLogger(f"slaughtermudae.account.{name}"),
@@ -272,15 +295,17 @@ class AccountContainer:
         if prt is None:
             raise ContainerError(f"account {account!r} has no plugin {plugin!r}")
         if enabled and not prt.enabled:
-            prt.enabled = True
             if self._state is not None:
+                # ERROR AUDIT FIX: persist BEFORE mutating — a DB failure no
+                # longer leaves memory and the database disagreeing
                 self._state.set_plugin_enabled(account, plugin, True)
+            prt.enabled = True
             if runtime.session and runtime.session.status == AccountStatus.RUNNING:
                 await self._activate(runtime, prt)
         elif not enabled and prt.enabled:
-            prt.enabled = False
             if self._state is not None:
                 self._state.set_plugin_enabled(account, plugin, False)
+            prt.enabled = False
             if prt.loaded:
                 try:
                     await prt.instance.on_disable(self._context(runtime, prt))
@@ -343,7 +368,11 @@ class AccountContainer:
         """Collect matching messages until `timeout` passes with no new match.
 
         Idle-timeout semantics mirror the original Soulcopy DM reader.
+        ERROR AUDIT FIX: timeout must be positive (0/negative silently
+        returned [] before).
         """
+        if timeout <= 0:
+            raise ValueError(f"collect_messages timeout must be > 0, got {timeout}")
         queue: asyncio.Queue[MessageEvent] = asyncio.Queue()
 
         def _handler(event: Event) -> None:
@@ -357,6 +386,13 @@ class AccountContainer:
                 collected.append(await asyncio.wait_for(queue.get(), timeout=timeout))
         except asyncio.TimeoutError:
             pass
+        except Exception as exc:
+            # ERROR AUDIT FIX: a raising check() previously vanished into the
+            # bus logger (hex function address) and looked like "no messages"
+            raise ContainerError(
+                f"collect_messages failed for account {account!r}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
         finally:
             unsubscribe()
         return collected
@@ -369,6 +405,8 @@ class AccountContainer:
         AUDIT FIX: returns as soon as the FIRST match arrives (previously it
         sat through the full collect_messages idle window).
         """
+        if timeout <= 0:
+            raise ValueError(f"wait_for timeout must be > 0, got {timeout}")
         loop = asyncio.get_running_loop()
         future: "asyncio.Future[MessageEvent]" = loop.create_future()
 
@@ -449,15 +487,26 @@ class AccountContainer:
                 client = self._client_factory(runtime.config, self._credentials)
                 await session.reattach(client)
                 return
-            except Exception as exc:
-                attempt += 1
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:  # ERROR AUDIT FIX: SystemExit/KI must not
+                attempt += 1          # kill the process silently mid-reattach
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    session.status = AccountStatus.FAILED
+                    session.last_error = f"reconnect interrupted: {exc}"
+                    self._logger.error("reconnect for %s interrupted: %r", name, exc)
+                    return
                 self._logger.warning("reconnect failed for %s: %s", name, exc)
 
     def _get(self, name: str) -> AccountRuntime:
         try:
             return self._accounts[name]
         except KeyError as exc:
-            raise ContainerError(f"unknown account {name!r}") from exc
+            raise ContainerError(
+                f"unknown account {name!r} (registered: {sorted(self._accounts)})"
+            ) from exc
+        except TypeError as exc:  # unhashable payloads via the dashboard
+            raise ContainerError(f"account name must be a string, got {name!r}") from exc
 
     def _context(self, runtime: AccountRuntime, prt: PluginRuntime) -> PluginContext:
         session = runtime.session
@@ -494,9 +543,18 @@ class AccountContainer:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                prt.error_count += 1  # ERROR AUDIT FIX: visible in status/dashboard
+                prt.last_error = f"{event.name}: {self._current_exception()}"
                 self._logger.exception(
                     "plugin %s crashed handling %s on %s", prt.name, event.name, event.account
                 )
+
+    @staticmethod
+    def _current_exception() -> str:
+        import sys
+
+        exc = sys.exc_info()[1]
+        return f"{type(exc).__name__}: {exc}" if exc else "unknown error"
 
 
 class _NullSession:

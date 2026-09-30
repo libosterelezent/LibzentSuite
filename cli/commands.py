@@ -57,9 +57,14 @@ HELP = {
 
 
 def help_text() -> str:
-    """Render the HELP table as aligned text."""
-    return "\n".join(
+    """Render the HELP table as aligned text (with an error-behaviour footer)."""
+    rows = "\n".join(
         f"  {name:<14}{sig:<36}{desc}" for name, (sig, desc) in sorted(HELP.items())
+    )
+    return (
+        rows
+        + "\n  errors print as 'error: …' and never exit the REPL;"
+          " 'quit' stops all accounts first"
     )
 
 
@@ -74,7 +79,11 @@ async def run_command(api: ControlAPI, line: str) -> Optional[str]:
     line = (line or "").strip()
     if not line:
         return None
-    parts = shlex.split(line)
+    try:
+        parts = shlex.split(line)
+    except ValueError as exc:
+        # ERROR AUDIT FIX: unclosed quotes got a raw Python-internal message
+        raise UsageError(f"cannot parse command (check your quotes): {exc}") from exc
     cmd, args = parts[0].lower(), parts[1:]
     if cmd in ("quit", "exit"):
         raise QuitRequested()
@@ -127,12 +136,24 @@ async def run_command(api: ControlAPI, line: str) -> Optional[str]:
         account, action = _need(args, 2, cmd)
         return str(await api.clear_limit(account, action))
     if cmd == "set-delay":
+        def _number(token: str, label: str) -> float:
+            try:
+                return float(token)
+            except ValueError as exc:
+                # ERROR AUDIT FIX: raw float() message had zero context
+                raise UsageError(
+                    f"set-delay: {label} {token!r} is not a number — "
+                    f"usage: set-delay {HELP['set-delay'][0]}"
+                ) from exc
+
         if len(args) == 3:
             action, minimum, maximum = args
-            return str(await api.set_delay(action, float(minimum), float(maximum)))
+            return str(await api.set_delay(action, _number(minimum, "min"), _number(maximum, "max")))
         if len(args) == 4:
             action, minimum, maximum, account = args
-            return str(await api.set_delay(action, float(minimum), float(maximum), account))
+            return str(await api.set_delay(
+                action, _number(minimum, "min"), _number(maximum, "max"), account
+            ))
         raise UsageError(f"usage: set-delay {HELP['set-delay'][0]}")
     if cmd == "clear-delay":
         if len(args) == 2:
@@ -157,9 +178,12 @@ async def run_command(api: ControlAPI, line: str) -> Optional[str]:
         return str(await api.assign_role(account, role, False))
     if cmd == "audit":
         # AUDIT FIX: positional parsing — audit [n] [account], repeats rejected
+        # ERROR AUDIT FIX: negative n is an error, not a phantom account filter
         limit, account = 20, None
         rest = args
-        if rest and rest[0].isdigit():
+        if rest and rest[0].lstrip("-").isdigit():
+            if int(rest[0]) < 0:
+                raise UsageError("audit: n must be a non-negative integer")
             limit = int(rest[0])
             rest = rest[1:]
         if len(rest) > 1:

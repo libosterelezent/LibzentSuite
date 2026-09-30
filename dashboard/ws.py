@@ -16,6 +16,18 @@ GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 OP_CONT, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
 
+#: sanity cap for one inbound frame (ERROR AUDIT: a bogus 2^62 length claim
+#: previously deafened the reader forever and grew the buffer unbounded)
+MAX_FRAME_BYTES = 1_000_000
+
+
+class IncompleteFrame(ValueError):
+    """Buffer holds a partial frame — wait for more bytes (not an error)."""
+
+
+class ProtocolViolation(ValueError):
+    """Client broke RFC 6455 — the connection must be closed."""
+
 
 def accept_key(client_key: str) -> str:
     """Sec-WebSocket-Accept = b64(sha1(key + GUID)) per RFC 6455 §1.3."""
@@ -64,34 +76,44 @@ def decode_frame(buffer: bytes) -> Tuple[int, bool, bytes, int]:
 
     Client frames MUST be masked (RFC §5.1); the payload is unmasked here.
     Returns: (opcode, fin, payload, consumed_bytes).
-    Raises: ValueError when the buffer holds an incomplete frame.
+    Raises: IncompleteFrame when the buffer holds a partial frame;
+    ProtocolViolation for RFC violations (RSV bits, unmasked frame, control
+    frame > 125 bytes, absurd length claims) — the caller must close.
     """
     if len(buffer) < 2:
-        raise ValueError("incomplete frame header")
+        raise IncompleteFrame("incomplete frame header")
     first, second = buffer[0], buffer[1]
     fin = bool(first & 0x80)
+    if first & 0x70:  # ERROR AUDIT: RSV bits must be 0 (no extensions negotiated)
+        raise ProtocolViolation("RSV bits set without negotiated extension")
     opcode = first & 0x0F
     masked = bool(second & 0x80)
+    if not masked:  # ERROR AUDIT: RFC 6455 §5.1 — client frames must be masked
+        raise ProtocolViolation("client frame is not masked")
     length = second & 0x7F
+    if opcode >= 0x8 and length > 125:  # control frames are tiny
+        raise ProtocolViolation("control frame payload exceeds 125 bytes")
     offset = 2
     if length == 126:
         if len(buffer) < offset + 2:
-            raise ValueError("incomplete extended length")
+            raise IncompleteFrame("incomplete extended length")
         (length,) = struct.unpack(">H", buffer[offset:offset + 2])
         offset += 2
     elif length == 127:
         if len(buffer) < offset + 8:
-            raise ValueError("incomplete extended length")
+            raise IncompleteFrame("incomplete extended length")
         (length,) = struct.unpack(">Q", buffer[offset:offset + 8])
         offset += 8
+    if length > MAX_FRAME_BYTES:
+        raise ProtocolViolation(f"frame length {length} exceeds {MAX_FRAME_BYTES} bytes")
     mask_key = b""
     if masked:
         if len(buffer) < offset + 4:
-            raise ValueError("incomplete mask")
+            raise IncompleteFrame("incomplete mask")
         mask_key = buffer[offset:offset + 4]
         offset += 4
     if len(buffer) < offset + length:
-        raise ValueError("incomplete payload")
+        raise IncompleteFrame("incomplete payload")
     payload = buffer[offset:offset + length]
     if masked:
         payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))

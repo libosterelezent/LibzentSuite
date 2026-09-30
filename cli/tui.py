@@ -72,7 +72,8 @@ class Tui:
                         line for line in _status_rows(status)
                     ]
                 except Exception as exc:
-                    output.append(f"status error: {exc}")
+                    # ERROR AUDIT FIX: stale 'waiting for first status…' forever
+                    last_status = [f"status fetch failed: {exc}"]
             screen.erase()
             height, width = screen.getmaxyx()
             y = 0
@@ -126,7 +127,15 @@ class Tui:
     def _call(self, coro_factory):
         """Hop from the TUI thread onto the asyncio loop (blocking, bounded)."""
         future = asyncio.run_coroutine_threadsafe(coro_factory(), self._loop)
-        return future.result(timeout=10)
+        try:
+            return future.result(timeout=10)
+        except TimeoutError as exc:
+            # ERROR AUDIT FIX: empty str(TimeoutError) rendered as bare 'error: '
+            raise RuntimeError("command timed out after 10s (may still complete)") from exc
+        except Exception as exc:
+            if not str(exc):
+                raise RuntimeError(f"{type(exc).__name__} (no message)") from exc
+            raise
 
 
 def _header() -> str:

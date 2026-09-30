@@ -180,9 +180,14 @@ function api(path, opts = {}) {
   const headers = Object.assign({"Content-Type": "application/json"}, opts.headers || {});
   if (token()) headers["X-Dashboard-Token"] = token();
   return fetch(path, Object.assign({}, opts, {headers})).then(async (r) => {
-    if (r.status === 401) { $("errors").textContent = "401 — set the dashboard token (top right)"; throw new Error("unauthorized"); }
-    const body = await r.json();
-    if (!body.ok) throw new Error(body.error || "request failed");
+    if (r.status === 401) {
+      // ERROR AUDIT FIX: throw the actionable hint so showErr keeps it
+      throw new Error("401 — set the dashboard token (top right)");
+    }
+    let body;
+    try { body = await r.json(); }
+    catch { throw new Error(`server returned ${r.status} with a non-JSON body`); }
+    if (!body.ok) throw new Error(body.error || `request failed (${r.status})`);
     return body.data;
   });
 }
@@ -250,8 +255,8 @@ function renderAccounts(accounts) {
     status.className = "status " + a.status; status.textContent = a.status;
     row.append(status);
     const detailsBtn = btn("details…", () => openDetails(a.name));
-    const start = btn("start", () => post("/api/start", {account: a.name}).then(renderStats).catch(showErr));
-    const stop = btn("stop", () => post("/api/stop", {account: a.name}).then(renderStats).catch(showErr));
+    const start = btn("start", () => post("/api/start", {account: a.name}).then(refresh).catch(showErr));
+    const stop = btn("stop", () => post("/api/stop", {account: a.name}).then(refresh).catch(showErr));
     const remove = btn("remove"); remove.className = "danger";
     remove.onclick = () => post("/api/account-remove", {name: a.name})
       .then(() => api("/api/status").then(renderStats)).catch(showErr);
@@ -268,7 +273,7 @@ function renderAccounts(accounts) {
       chip.className = info.enabled ? "on" : "off";
       chip.textContent = (info.enabled ? "◆ " : "◇ ") + name;
       chip.onclick = () => post("/api/plugin", {account: a.name, plugin: name, enabled: !info.enabled})
-        .then(renderStats).catch(showErr);
+        .then(refresh).catch(showErr);
       chips.appendChild(chip);
     }
     for (const role of a.roles || []) {
@@ -311,14 +316,18 @@ function renderLimits(limits) {
     const dmin = document.createElement("input"); dmin.size = 5; dmin.placeholder = "0.80";
     const dmax = document.createElement("input"); dmax.size = 5; dmax.placeholder = "2.40";
     const setRule = btn("set rule", () => post("/api/limit", {action, rule: rule.value, account: acct.value || null})
-      .then(renderStats).catch(showErr));
-    const setDelay = btn("set delay", () => post("/api/delay",
-      {action, min: parseFloat(dmin.value), max: parseFloat(dmax.value), account: acct.value || null})
-      .then(renderStats).catch(showErr));
+      .then(refresh).catch(showErr));
+    const setDelay = btn("set delay", () => {
+      // ERROR AUDIT FIX: NaN guards client-side instead of server TypeErrors
+      const lo = parseFloat(dmin.value), hi = parseFloat(dmax.value);
+      if (!Number.isFinite(lo) || !Number.isFinite(hi)) { showErr("delay min/max must be numbers"); return; }
+      post("/api/delay", {action, min: lo, max: hi, account: acct.value || null})
+        .then(refresh).catch(showErr);
+    });
     const clearBot = btn("clear bot rules", () => Promise.all([
       post("/api/clear-limit", {account: acct.value, action}),
       post("/api/clear-delay", {action, account: acct.value}),
-    ]).then(renderStats).catch(showErr));
+    ]).then(refresh).catch(showErr));
     editor.append(acct, rule, setRule, dmin, dmax, setDelay, clearBot);
     card.appendChild(editor);
     wrap.appendChild(card);
@@ -350,7 +359,7 @@ function renderRoles(roles) {
     const acct = document.createElement("select");
     for (const a of (lastStats ? lastStats.accounts : [])) acct.append(new Option(a.name, a.name));
     const grant = btn("assign to", () => post("/api/assign", {account: acct.value, role: role.name, assigned: true})
-      .then(renderStats).catch(showErr));
+      .then(refresh).catch(showErr));
     assignRow.append(acct, grant,
       Object.assign(document.createElement("span"), {className: "dim mono", textContent: "(applies on next start)"}));
     card.appendChild(assignRow);
@@ -362,8 +371,7 @@ async function renderPlugins() {
   const root = $("plugins");
   try {
     manifests = await api("/api/plugins");
-    root.innerHTML = "";
-    for (const m of manifests) {
+    root.innerHTML = "";    for (const m of manifests) {
       const card = document.createElement("div"); card.className = "card";
       card.innerHTML = `<div class="row"><span class="name">${esc(m.name)}</span>
         <span class="dim mono">v${esc(m.version)}</span></div>
@@ -375,12 +383,32 @@ async function renderPlugins() {
       }
       root.appendChild(card);
     }
-  } catch (e) { /* handled by api() */ }
+  } catch (e) {
+    // ERROR AUDIT FIX: non-401 failures (network/proxy) left the panel
+    // "waiting for data…" forever with nothing shown anywhere
+    root.innerHTML = "";
+    const line = document.createElement("div");
+    line.className = "dim";
+    line.textContent = "plugins unavailable: " + (e.message || e);
+    root.appendChild(line);
+    showErr(e);
+  }
 }
 
 async function openDetails(name) {
-  const data = await api("/api/account-details?account=" + encodeURIComponent(name)).catch(showErr);
-  if (!data) return;
+  let data;
+  try {
+    data = await api("/api/account-details?account=" + encodeURIComponent(name));
+  } catch (e) { showErr(e); return; }
+  // ERROR AUDIT FIX: render-phase failures surface instead of silently dying
+  try {
+    renderDetails(name, data);
+  } catch (e) {
+    showErr(new Error(`failed to render details for ${name}: ${e.message}`));
+  }
+}
+
+function renderDetails(name, data) {
   $("det-title").textContent = name + " — " + data.status;
   const body = $("det-body");
   body.innerHTML = "";
@@ -425,14 +453,22 @@ async function openDetails(name) {
     }
     box.appendChild(grid);
     const save = btn("save settings", () => {
+      // ERROR AUDIT FIX: NaN guard + allSettled so every key's outcome shows
       const calls = Object.entries(inputs).map(([key, input]) => {
         let value;
         if (def_type(key) === "bool") value = input.checked;
-        else if (["int", "float"].includes(def_type(key))) value = parseFloat(input.value);
+        else if (["int", "float"].includes(def_type(key))) {
+          value = parseFloat(input.value);
+          if (!Number.isFinite(value)) return Promise.reject(new Error(`${key}: not a number`));
+        }
         else value = input.value;
         return post("/api/setting", {account: name, plugin: plugin.name, key, value});
       });
-      Promise.all(calls).then(() => showSync("settings saved")).catch(showErr);
+      Promise.allSettled(calls).then((results) => {
+        const failed = results.filter((r) => r.status === "rejected");
+        if (failed.length) showErr(`${failed.length} setting(s) failed — first: ${failed[0].reason.message}`);
+        else showSync("settings saved");
+      });
     });
     const actions = document.createElement("div"); actions.className = "out-row";
     actions.appendChild(save);
@@ -450,36 +486,70 @@ function renderStats(stats) {
 }
 
 function loadRoles() {
-  return api("/api/roles").then(renderRoles).catch(() => {});
+  // ERROR AUDIT FIX: failures render in the panel instead of an eternal
+  // "waiting for data…" placeholder
+  return api("/api/roles").then(renderRoles).catch((e) => {
+    const root = $("roles");
+    root.innerHTML = "";
+    const line = document.createElement("div");
+    line.className = "dim";
+    line.textContent = "roles unavailable: " + (e.message || e);
+    root.appendChild(line);
+  });
 }
 
 let wsRetry = 1000;
+let wsAttempts = 0;
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const url = proto + "//" + location.host + "/ws" + (token() ? "?token=" + encodeURIComponent(token()) : "");
   const ws = new WebSocket(url);
-  ws.onopen = () => { $("wsdot").classList.add("on"); $("connmsg").textContent = "live"; wsRetry = 1000; };
+  ws.onopen = () => { $("wsdot").classList.add("on"); $("connmsg").textContent = "live"; wsRetry = 1000; wsAttempts = 0; };
   ws.onmessage = (ev) => {
-    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
-    if (msg.type === "stats") renderStats(msg);
-    else if (msg.type === "log") logline(msg.line);
-    else if (msg.type === "audit") auditline(msg);
-    else if (msg.type === "error") showErr(msg.error);
+    // ERROR AUDIT FIX: a render throw here silently froze the UI on stale data
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    try {
+      if (msg.type === "stats") renderStats(msg);
+      else if (msg.type === "log") logline(msg.line);
+      else if (msg.type === "audit") auditline(msg);
+      else if (msg.type === "error") showErr(msg.error);
+    } catch (e) {
+      showErr(new Error("failed to render live update: " + (e.message || e)));
+    }
   };
   ws.onclose = () => {
-    $("wsdot").classList.remove("on"); $("connmsg").textContent = "reconnecting…";
+    $("wsdot").classList.remove("on");
+    // ERROR AUDIT FIX: cap retries + name the likely cause instead of an
+    // endless misleading "reconnecting…"
+    wsAttempts += 1;
+    if (wsAttempts > 10) {
+      $("connmsg").textContent = "live updates stopped — check the token or server, then reload";
+      return;
+    }
+    $("connmsg").textContent = wsAttempts > 3 ? "reconnecting… (bad token?)" : "reconnecting…";
     setTimeout(connectWS, wsRetry);
     wsRetry = Math.min(wsRetry * 2, 10000);
   };
 }
 
-function refresh() { return api("/api/status").then(renderStats).catch(showErr); }
-function showErr(e) { $("errors").textContent = String(e && e.message || e); }
-function showSync(text) { $("errors").textContent = ""; $("auditsync").textContent = text || ""; }
+// ERROR AUDIT FIX: errors accrue with timestamps (last-one-wins hid earlier
+// ones) and are only cleared explicitly, never by unrelated successes
+function showErr(e) {
+  const box = $("errors");
+  const line = document.createElement("div");
+  const clock = new Date().toTimeString().slice(0, 8);
+  line.textContent = clock + "  " + String(e && e.message || e);
+  box.appendChild(line);
+  while (box.childNodes.length > 50) box.removeChild(box.firstChild);
+}
+function clearErrors() { $("errors").textContent = ""; }
+function showSync(text) { $("auditsync").textContent = text || ""; }
 function esc(s) { const d = document.createElement("span"); d.textContent = String(s); return d.innerHTML; }
 function btn(label, onclick) { const b = document.createElement("button"); b.textContent = label; b.onclick = onclick; return b; }
+function refresh() { return api("/api/status").then(renderStats).catch(showErr); }
 
-$("savetoken").onclick = () => { store.setItem("dash_token", $("token").value.trim()); location.reload(); };
+$("savetoken").onclick = () => { store.setItem("dash_token", $("token").value.trim()); clearErrors(); location.reload(); };
 $("token").addEventListener("keydown", (e) => { if (e.key === "Enter") $("savetoken").click(); });
 // demo/share links: http://host:port/?token=... seeds the store then cleans the URL
 const qtoken = new URLSearchParams(location.search).get("token");
@@ -490,7 +560,14 @@ if (qtoken) {
 }
 $("token").value = token();
 $("addacct").onclick = () => {
-  const payload = {name: $("newacct").value.trim()};
+  // ERROR AUDIT FIX: client-side validation mirrors add-role (empty/garbage
+  // names used to POST and produce developer-speak errors)
+  const name = $("newacct").value.trim();
+  if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(name)) {
+    showErr("account name must be lowercase [a-z0-9_-], up to 32 chars");
+    return;
+  }
+  const payload = {name};
   // AUDIT FIX: the sync group is sent when TYPED (condition was inverted)
   payload.sync_group = $("newacct-sync").value.trim() || null;
   const roles = $("newacct-roles").value.trim().split(/\s+/).filter(Boolean);

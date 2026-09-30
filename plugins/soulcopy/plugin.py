@@ -49,7 +49,10 @@ class SoulcopyPlugin(PluginBase):
         if event.content.strip() != ctx.settings["trigger"]:
             return
         if event.author_id not in ctx.credentials.owner_user_ids:
-            ctx.logger.warning("ignoring trigger from non-owner %s", event.author_id)
+            ctx.logger.warning(
+                "ignoring trigger from non-owner %s (if this is you, add the id to "
+                "OWNER_USER_IDS in .env)", event.author_id,
+            )
             return
         await self._run_copy(ctx, event.channel_id)
 

@@ -106,7 +106,7 @@ class AuditRecorder:
             try:
                 callback(entry)
             except Exception:
-                pass
+                LOG.debug("audit subscriber failed", exc_info=True)  # ERROR AUDIT: no more silent pass
         return entry
 
     def tail(self, n: int = 50, account: Optional[str] = None) -> List[AuditEntry]:

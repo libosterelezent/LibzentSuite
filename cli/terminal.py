@@ -2,6 +2,11 @@
 
 Thin shell over cli/commands.py (shared with the TUI) so every surface stays
 feature-equal. Type 'help' for the command list.
+
+ERROR AUDIT FIXES: api.stop() + the goodbye now run on EVERY exit path
+(quit, EOF, Ctrl-C, mid-command interrupts) and command failures never leak
+tracebacks — one 'error: <message>' line each, with the exception type
+included for non-domain errors.
 """
 from __future__ import annotations
 
@@ -14,6 +19,19 @@ from .commands import QuitRequested, help_text, run_command
 
 BANNER = """SlaughterMudae terminal — 'help' for commands."""
 
+#: exception families that already carry a human message
+_DOMAIN = ("UsageError", "ContainerError", "AccountError", "RateRuleError",
+           "UnsafeRateRuleError", "SettingValidationError", "RoleError",
+           "CredentialsError", "AdapterNotAvailable")
+
+
+def render_error(exc: BaseException) -> str:
+    """One-line error text; keeps the type name for non-domain exceptions."""
+    name = type(exc).__name__
+    if name in _DOMAIN or not str(exc):
+        return f"error: {exc}" if str(exc) else f"error: {name}"
+    return f"error: {name}: {exc}"
+
 
 class Terminal:
     """REPL over ControlAPI; injectable stdin/stdout for testing."""
@@ -25,21 +43,26 @@ class Terminal:
         self.running = False
 
     async def run(self) -> None:
-        """Main loop; returns when the user quits."""
+        """Main loop; api.stop() and 'bye.' run on every exit path."""
         self.running = True
         self._print(BANNER)
-        while self.running:
-            self._print("slaughtermudae> ", end="")
+        try:
+            while self.running:
+                self._print("slaughtermudae> ", end="")
+                try:
+                    line = self._in.readline()
+                except (EOFError, KeyboardInterrupt):
+                    break
+                if not line:
+                    break
+                if not await self.execute(line.strip()):
+                    break
+        finally:
             try:
-                line = self._in.readline()
-            except (EOFError, KeyboardInterrupt):
-                break
-            if not line:
-                break
-            if not await self.execute(line.strip()):
-                break
-        await self.api.stop()
-        self._print("bye.")
+                await self.api.stop()
+            except Exception:
+                pass  # never let a stop failure eat the goodbye
+            self._print("bye.")
 
     def _print(self, *args, **kwargs) -> None:
         print(*args, file=self._out, **kwargs)
@@ -52,9 +75,11 @@ class Terminal:
                 self._print(text)
         except QuitRequested:
             return False
+        except KeyboardInterrupt:
+            return False  # interrupted command ends the session cleanly
         except Exception as exc:
-            self._print(f"error: {exc}")
+            self._print(render_error(exc))
         return True
 
 
-__all__ = ["Terminal", "BANNER", "help_text"]
+__all__ = ["Terminal", "BANNER", "help_text", "render_error"]

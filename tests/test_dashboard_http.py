@@ -177,7 +177,8 @@ class TestDashboardHTTP(unittest.IsolatedAsyncioTestCase):
                     f"GET /ws?token=wrong HTTP/1.1\r\n"
                     f"Host: 127.0.0.1:{self.port}\r\n"
                     "Upgrade: websocket\r\nConnection: Upgrade\r\n"
-                    "Sec-WebSocket-Key: abcdefghijklmnopqw==\r\n\r\n"
+                    "Sec-WebSocket-Key: abcdefghijklmnopqw==\r\n"
+                    "Sec-WebSocket-Version: 13\r\n\r\n"
                 )
                 sock.sendall(request.encode())
                 headers, _rest = read_http_headers(sock)
