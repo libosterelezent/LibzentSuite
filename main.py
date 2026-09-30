@@ -44,9 +44,8 @@ def build_live_container(env_file: str, config_dir: str, db_path: str) -> tuple[
     )
     limiter = RateLimiterService(default_rules=config.rate_rules)
     # AUDIT FIX: restore global rules changed at runtime (persisted via kv)
-    with database._conn.execute("SELECT key, value FROM kv WHERE key LIKE 'global_rule:%'") as scan:
-        for row in scan.fetchall():
-            limiter.set_default_rule(row["key"][len("global_rule:"):], row["value"])
+    for key, value in database.kv_prefix("global_rule:").items():
+        limiter.set_default_rule(key[len("global_rule:"):], value)
     for account, rules in database.limit_overrides().items():
         for action, rule in rules.items():
             limiter.set_account_rule(account, action, rule)
@@ -132,6 +131,16 @@ async def run_main(args: argparse.Namespace) -> int:
 
         await Tui(api, ring).run()
         return 0
+    if args.headless:
+        # BACKGROUND MODE: run forever, no terminal attached (the REPL would
+        # hit EOF on stdin and shut down immediately when daemonized)
+        print("running headless — Ctrl-C to stop")
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pass
+        await api.stop()
+        return 0
     from cli.terminal import Terminal
 
     await Terminal(api).run()
@@ -147,6 +156,7 @@ def main() -> int:
     parser.add_argument("--start-all", action="store_true", help="start all configured accounts on boot")
     parser.add_argument("--dashboard", action="store_true", help="serve the GUI dashboard (browser + WS)")
     parser.add_argument("--tui", action="store_true", help="full-screen TUI with live log tailing")
+    parser.add_argument("--headless", action="store_true", help="run forever with no terminal (use with --dashboard)")
     parser.add_argument("--port", type=int, default=8070, help="dashboard port (default 8070)")
     parser.add_argument("--db", default="state/slaughter.db", help="sqlite persistence file")
     args = parser.parse_args()

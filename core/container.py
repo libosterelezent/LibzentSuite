@@ -379,9 +379,16 @@ class AccountContainer:
         return runtime
 
     async def start_all(self) -> None:
-        """Start every registered account; collects errors into logs."""
+        """Start every enabled account; collects errors into logs.
+
+        AUDIT FIX: accounts configured with enabled=false are skipped by
+        bulk-start (an explicitly named start_account call still works).
+        """
         self.start_scheduler()
         for name in self.account_names():
+            if not self._accounts[name].config.enabled:
+                self._logger.info("skipping disabled account %s", name)
+                continue
             try:
                 await self.start_account(name)
             except Exception:

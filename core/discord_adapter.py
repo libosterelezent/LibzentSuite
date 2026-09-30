@@ -52,9 +52,12 @@ class RealDiscordClient:
                 "(e.g. 'pip install discord.py-self')"
             ) from exc
         self._discord = discord
-        intents = discord.Intents.default()
-        intents.message_content = True
-        self._client = discord.Client(intents=intents)
+        # discord.py-self 2.x removed Intents (user accounts don't use them);
+        # construct plain and fall back cleanly across fork variants
+        try:
+            self._client = discord.Client()
+        except TypeError:
+            self._client = discord.Client(intents=None)
 
         @self._client.event
         async def on_ready() -> None:

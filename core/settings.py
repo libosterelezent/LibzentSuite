@@ -8,9 +8,12 @@ Unknown keys and type mismatches raise SettingValidationError at resolve time.
 """
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Sequence
+
+LOG = logging.getLogger("slaughtermudae.settings")
 
 SETTING_TYPES = ("str", "int", "float", "bool")
 
@@ -108,14 +111,24 @@ class SettingsStore:
         account_overrides: Optional[Mapping[str, Mapping[str, Mapping[str, Any]]]] = None,
     ) -> None:
         #: plugin name -> {key: raw value}
-        self._global: Dict[str, Dict[str, Any]] = {
-            k: dict(v) for k, v in (global_settings or {}).items()
-        }
+        # ERROR AUDIT: tolerate documentation keys / malformed layers with a
+        # warning instead of crashing the whole boot
+        self._global: Dict[str, Dict[str, Any]] = {}
+        for plugin, layer in (global_settings or {}).items():
+            if isinstance(layer, Mapping):
+                self._global[plugin] = dict(layer)
+            else:
+                LOG.warning("ignoring malformed global settings for %r (not an object)", plugin)
         #: account name -> plugin name -> {key: raw value}
-        self._accounts: Dict[str, Dict[str, Dict[str, Any]]] = {
-            a: {p: dict(v) for p, v in layers.items()}
-            for a, layers in (account_overrides or {}).items()
-        }
+        self._accounts: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for account, plugins in (account_overrides or {}).items():
+            clean: Dict[str, Dict[str, Any]] = {}
+            for plugin, layer in (plugins or {}).items():
+                if isinstance(layer, Mapping):
+                    clean[plugin] = dict(layer)
+                else:
+                    LOG.warning("ignoring malformed account override %s/%s", account, plugin)
+            self._accounts[account] = clean
 
     def resolve(
         self,

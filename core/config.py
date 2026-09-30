@@ -48,7 +48,12 @@ def _read_json(path: Path) -> dict:
 def load_config(config_dir: str | Path) -> ProjectConfig:
     """Load config dir into a ProjectConfig (accounts from config/accounts/*.json)."""
     base = Path(config_dir)
-    global_settings = _read_json(base / "global_settings.json")
+    # LIVE-BOOT FIX: documentation keys ("_comment") would crash SettingsStore
+    global_settings = {
+        key: value
+        for key, value in _read_json(base / "global_settings.json").items()
+        if not (isinstance(key, str) and key.startswith("_"))
+    }
     rate_rules = dict(DEFAULT_RATE_LIMITS)
     # LIVE-BOOT FIX: skip documentation keys ("_comment") — they would crash
     # RateRule.parse at startup; also drop every underscore-prefixed key

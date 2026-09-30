@@ -346,6 +346,14 @@ class Database:
             row = self._conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
         return default if row is None else row["value"]
 
+    def kv_prefix(self, prefix: str) -> Dict[str, str]:
+        """All kv entries whose key starts with prefix (key -> value)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key, value FROM kv WHERE key LIKE ?", (prefix + "%",)
+            ).fetchall()
+        return {row["key"]: row["value"] for row in rows}
+
     # -------------------------------------------------------------- migration
     def migrate_legacy_state(self, path: str | Path = "state/state.json") -> int:
         """One-time import from the old JSON StateStore; returns rows imported."""
