@@ -111,7 +111,7 @@ class AccountConfig:
         if raw_roles is not None and not isinstance(raw_roles, list):
             raise AccountError(f"'roles' must be a list, got {type(raw_roles).__name__}")
         allowed = {"name", "token_ref", "enabled", "plugins", "roles", "settings", "rate_rules", "sync_group", "reconnect", "send_engine"}
-        unknown = set(data) - allowed
+        unknown = {k for k in set(data) - allowed if not (isinstance(k, str) and k.startswith("_"))}
         if unknown:
             raise AccountError(f"unknown account config keys: {sorted(unknown)}")
         return cls(
