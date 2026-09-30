@@ -1,8 +1,22 @@
-# Core framework + tests: Python standard library only (>= 3.10).
-# No installs needed to run the simulation suite:
-#   python3 -m unittest discover -s tests -t . -v
+# SlaughterMudae — Python dependencies
+# ---------------------------------------------------------------------------
+# The framework has ZERO hard dependencies: core, plugins, CLI, TUI,
+# dashboard (HTTP + WebSocket), SQLite persistence, audit trail and the
+# entire test/simulation suite run on the Python standard library.
+#
+#   python3 -m unittest discover -s tests -t .     # verify: no installs needed
+#
+# Requires Python >= 3.10 (uses asyncio.Task cancellation semantics,
+# match-free stdlib APIs tested on 3.13).
+# ---------------------------------------------------------------------------
 
-# --- optional, live mode only ---
-# Live Discord access requires a user-account-capable client fork, e.g.:
-#   pip install discord.py-self
-# The framework imports it lazily inside core/discord_adapter.py and never in tests/sims.
+# --- OPTIONAL: live Discord mode only ---------------------------------------
+# Live selfbot access needs a user-account-capable client fork. It is imported
+# LAZILY inside core/discord_adapter.py (never during tests/simulations), so
+# uncomment and install ONLY if you run `python main.py --start-all`:
+#
+#     pip install discord.py-self
+#
+# (any fork exposing Client/start/close/on_ready/on_message/get_channel/
+#  fetch_channel.send/fetch_user.dm_channel works — see KB_07 in the
+#  knowledgebase for the exact client protocol the adapter expects)
