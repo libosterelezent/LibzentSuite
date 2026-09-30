@@ -78,6 +78,8 @@ class AccountContainer:
         logger: Optional[logging.Logger] = None,
         reconnect_policy: Optional[ReconnectPolicy] = None,
         state: Optional[Any] = None,
+        roles: Optional[Any] = None,
+        audit: Optional[Any] = None,
     ) -> None:
         self._credentials = credentials
         self._settings = settings
@@ -87,8 +89,12 @@ class AccountContainer:
         self._client_factory = client_factory
         self._logger = logger or LOG
         self._reconnect_policy = reconnect_policy or ReconnectPolicy()
-        #: core.persistence.StateStore — remembers plugin toggles across restarts
+        #: core.database.Database — persistent state source
         self._state = state
+        #: core.roles.RoleRegistry — capability grants (None = no restriction)
+        self._roles = roles
+        #: core.audit.AuditRecorder — interaction trail (None = disabled)
+        self._audit = audit
         self._accounts: Dict[str, AccountRuntime] = {}
         self._bus.subscribe(Event, self._dispatch)
 
@@ -126,6 +132,12 @@ class AccountContainer:
             raise ContainerError(f"account {config.name!r} already registered")
         runtime = AccountRuntime(config=config)
         wanted = config.plugins if config.plugins is not None else self._loader.names()
+        # roles gate the plugin set: an account WITH roles only keeps the
+        # plugins its roles allow (union); no roles => untouched (back-compat)
+        if self._roles is not None and config.roles:
+            allowed = self._roles.allowed_plugins(config.roles)
+            if allowed is not None:
+                wanted = [name for name in wanted if name in allowed]
         for name in wanted:
             instance = self._loader.create(name)
             resolved = self._settings.resolve(name, type(instance).settings, account=config.name)
@@ -136,7 +148,10 @@ class AccountContainer:
                 name=name, instance=instance, enabled=enabled, settings=resolved
             )
         self._accounts[config.name] = runtime
-        self._logger.info("registered account %s (plugins=%s)", config.name, sorted(runtime.plugins))
+        self._logger.info(
+            "registered account %s (plugins=%s roles=%s)",
+            config.name, sorted(runtime.plugins), config.roles or "-",
+        )
         return runtime
 
     def remove_account(self, name: str) -> None:
@@ -167,9 +182,10 @@ class AccountContainer:
         session = AccountSession(
             runtime.config, client, self._bus, self._limiter,
             logging.getLogger(f"slaughtermudae.account.{name}"),
+            audit=self._audit,
         )
+        runtime.session = session  # assigned FIRST so failures surface in status()
         await session.start()
-        runtime.session = session
         for prt in runtime.plugins.values():
             if prt.enabled:
                 await self._activate(runtime, prt)
@@ -258,6 +274,42 @@ class AccountContainer:
             )
 
     # ---------------------------------------------------------------- helpers
+    def set_plugin_setting(self, account: str, plugin: str, key: str, value: Any) -> Any:
+        """Validate + apply one plugin setting override for an account.
+
+        Raises ContainerError for unknown account/plugin/setting and
+        SettingValidationError for bad values (both surfaces share this path).
+        Effect is immediate for future reads (ctx.settings is the same dict).
+        """
+        runtime = self._get(account)
+        prt = runtime.plugins.get(plugin)
+        if prt is None:
+            raise ContainerError(f"account {account!r} has no plugin {plugin!r}")
+        defs = {d.key: d for d in type(prt.instance).settings}
+        if key not in defs:
+            raise ContainerError(
+                f"plugin {plugin!r} has no setting {key!r} (supports: {sorted(defs)})"
+            )
+        validated = defs[key].validate(value)
+        prt.settings[key] = validated
+        if self._state is not None:
+            self._state.set_setting_override(account, plugin, key, validated)
+        self._logger.info("setting %s:%s.%s = %r", account, plugin, key, validated)
+        return validated
+
+    def assign_role(self, account: str, role: str, assigned: bool) -> List[str]:
+        """Grant/revoke a role on an account at runtime (persisted by caller).
+
+        Role changes shape the plugin set on the NEXT start of the account —
+        deliberate and predictable, no mid-run plugin yanking.
+        """
+        runtime = self._get(account)
+        if assigned and role not in runtime.config.roles:
+            runtime.config.roles.append(role)
+        elif not assigned and role in runtime.config.roles:
+            runtime.config.roles.remove(role)
+        return list(runtime.config.roles)
+
     async def collect_messages(
         self, account: str, check: Callable[[MessageEvent], bool], timeout: float
     ) -> List[MessageEvent]:
@@ -383,6 +435,13 @@ class AccountContainer:
         runtime = self._accounts.get(event.account)
         if runtime is None:
             return
+        if self._audit is not None and isinstance(event, MessageEvent):
+            preview = event.content.replace("\n", "\\n")[:80]
+            self._audit.record(
+                account=event.account, direction="in", action="event:message",
+                channel_id=event.channel_id, content=preview,
+                note=f"author={event.author_id}{' dm' if event.dm else ''}",
+            )
         for prt in runtime.plugins.values():
             if not prt.enabled:
                 continue

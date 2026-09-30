@@ -119,14 +119,27 @@ class FakeWorld:
         return [m.content for m in self.history.get(channel_id, [])]
 
     async def wait_for_quiet(self, channel_id: int, quiet: float = 0.4, limit: float = 10.0) -> None:
-        """Return once no new messages appear in a channel for `quiet` seconds."""
-        seen, elapsed = len(self.history.get(channel_id, [])), 0.0
-        while elapsed < limit:
-            await asyncio.sleep(min(quiet, 0.05))
-            elapsed += min(quiet, 0.05)
+        """Return once no new messages appear in a channel for `quiet` seconds.
+
+        AUDIT FIX: previously this ran to the full `limit` regardless of
+        silence (the quiet window was never checked) — every caller waited
+        far longer than intended. Now it returns as soon as `quiet` seconds
+        of silence accumulate, with `limit` as the hard cap.
+        """
+        seen = len(self.history.get(channel_id, []))
+        quiet_elapsed, total = 0.0, 0.0
+        while total < limit:
+            step = min(0.05, max(quiet - quiet_elapsed, 0.001))
+            await asyncio.sleep(step)
+            total += step
             current = len(self.history.get(channel_id, []))
             if current != seen:
-                seen, elapsed = current, 0.0
+                seen = current
+                quiet_elapsed = 0.0
+            else:
+                quiet_elapsed += step
+                if quiet_elapsed >= quiet:
+                    return
 
 
 class FakeClient:
@@ -174,6 +187,25 @@ class FakeClient:
     async def open_dm(self, user_id: int) -> int:
         return self._world.dm_channel_for(self.user_id, user_id)
 
+    def cached_snapshot(self) -> dict:
+        """World-backed equivalent of the live client's in-memory cache."""
+        guild_channels = [
+            {"id": cid, "name": name}
+            for cid, name in self._world.channels.items()
+            if not self._world.dm_channels.get(cid, False)
+        ]
+        dm_channels = [
+            {"id": cid, "name": name}
+            for cid, name in self._world.channels.items()
+            if self._world.dm_channels.get(cid, False)
+        ]
+        return {
+            "available": self.connected,
+            "user": {"id": self.user_id, "name": self._world.users.get(self.user_id, "?")},
+            "guilds": [{"id": 0, "name": "sim-guild", "channels": guild_channels}],
+            "dm_channels": dm_channels,
+        }
+
     # -------------------------------------------------------------- internal
     def receive(self, message: _WorldMessage) -> None:
         """World push -> session callback (ignores our own messages)."""
@@ -212,10 +244,14 @@ class SimulatedCluster:
         plugin_dir: str = "plugins",
         settings_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
         rate_rules: Optional[Dict[str, str]] = None,
+        limiter: Optional[RateLimiterService] = None,
+        audit: Optional[Any] = None,
     ) -> None:
-        # demo pacing: seconds, not minutes (production values live in config/)
+        # demo pacing: seconds, not minutes (production values live in config/).
+        # dm_read_timeout is generous so runtime delay ranges set from the
+        # dashboard (which slow the export send) can't starve the collector.
         demo_settings: Dict[str, Dict[str, Any]] = {
-            "soulcopy": {"dm_read_timeout": 0.5, "inter_chunk_delay": 0.05, "max_chunk_length": 60}
+            "soulcopy": {"dm_read_timeout": 3.0, "inter_chunk_delay": 0.05, "max_chunk_length": 60}
         }
         for plugin, overrides in (settings_overrides or {}).items():
             demo_settings.setdefault(plugin, {}).update(overrides)
@@ -239,9 +275,10 @@ class SimulatedCluster:
         loader.discover()
         self.loader = loader
         self.settings = SettingsStore(global_settings=demo_settings)
-        self.limiter = RateLimiterService(
+        self.limiter = limiter if limiter is not None else RateLimiterService(
             default_rules=rate_rules or {"message": "2000/0.05s", "dm": "2000/0.05s"}
         )
+        self.audit = audit
         self.container = AccountContainer(
             credentials=self.credentials,
             settings=self.settings,
@@ -251,6 +288,7 @@ class SimulatedCluster:
             client_factory=self._client_factory,
             # sims don't reconnect unless a test asks for it
             reconnect_policy=ReconnectPolicy(enabled=False),
+            audit=audit,
         )
         # alpha runs every discovered plugin; beta idles in the group — the
         # account x plugin matrix is per-account config (independent use)

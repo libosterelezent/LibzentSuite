@@ -38,6 +38,8 @@ class Harness:
         owner_id: int = FIXTURE_OWNER_ID,
         reconnect_policy: Optional = None,
         state: Optional = None,
+        roles: Optional = None,
+        audit: Optional = None,
     ) -> None:
         self.mudae_id = mudae_id
         self.owner_id = owner_id
@@ -70,6 +72,8 @@ class Harness:
             client_factory=lambda cfg, _creds: FakeClient(self.world, self.user_ids[cfg.name]),
             reconnect_policy=reconnect_policy if reconnect_policy is not None else _NO_RECONNECT,
             state=state,
+            roles=roles,
+            audit=audit,
         )
         for name in accounts:
             self.container.add_account(AccountConfig(name=name, sync_group="grp"))

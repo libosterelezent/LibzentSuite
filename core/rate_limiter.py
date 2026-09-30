@@ -116,6 +116,40 @@ class Grant:
     account: Optional[str]
     at: float
     amount: float = 1.0
+    #: human-like delay (seconds) the limiter applied AFTER granting, if any
+    delay_applied: float = 0.0
+
+
+@dataclass(frozen=True)
+class DelaySpec:
+    """Human-like random pause range applied after a grant (x.xx–y.yy seconds).
+
+    maximum == 0 disables the delay entirely (legacy behavior).
+    """
+
+    minimum: float = 0.0
+    maximum: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.minimum < 0 or self.maximum < 0:
+            raise RateRuleError(f"delay bounds must be >= 0, got {self.minimum}..{self.maximum}")
+        if self.maximum < self.minimum:
+            raise RateRuleError(f"delay maximum {self.maximum} < minimum {self.minimum}")
+
+    @property
+    def enabled(self) -> bool:
+        return self.maximum > 0
+
+    def sample(self, rng: random.Random) -> float:
+        """Uniform draw inside [minimum, maximum]; 0.0 when disabled."""
+        if not self.enabled:
+            return 0.0
+        return rng.uniform(self.minimum, self.maximum)
+
+    def __str__(self) -> str:
+        if not self.enabled:
+            return "off"
+        return f"{self.minimum:.2f}s..{self.maximum:.2f}s"
 
 
 @dataclass
@@ -175,6 +209,7 @@ class RateLimiterService:
         default_rules: Optional[Dict[str, Any]] = None,
         account_rules: Optional[Dict[Tuple[str, str], Any]] = None,
         jitter_seed: Optional[int] = None,
+        delay_seed: Optional[int] = None,
     ) -> None:
         self._clock = clock if clock is not None else SystemClock()
         #: action -> RateRule (the bus-wide default == global bucket rule)
@@ -185,10 +220,14 @@ class RateLimiterService:
         self._account_rules: Dict[Tuple[str, str], RateRule] = {
             key: RateRule.parse(rule) for key, rule in (account_rules or {}).items()
         }
+        #: human-like post-grant pauses: global + per-account
+        self._delays: Dict[str, DelaySpec] = {}
+        self._account_delays: Dict[Tuple[str, str], DelaySpec] = {}
         self._buckets: Dict[Tuple[str, str], _Bucket] = {}
         self._pending: Dict[Tuple[str, str], List[_Entry]] = {}
         self._seq = itertools.count()
         self._jitter_rng = random.Random(jitter_seed)
+        self._delay_rng = random.Random(delay_seed)
         self._wake: Optional[asyncio.Event] = None
 
     # ------------------------------------------------------------ inspection
@@ -211,9 +250,12 @@ class RateLimiterService:
         return self._account_rules.get((account, action))
 
     def next_wait(self, action: str, account: Optional[str] = None, amount: float = 1.0) -> float:
-        """Seconds until a reservation could succeed (ignores pending queue)."""
+        """Seconds until a reservation could succeed (ignores pending queue).
+
+        Raises RateRuleError (not KeyError) when the action is unconfigured.
+        """
         now = self._clock.now()
-        wait = self._bucket_for((GLOBAL_KEY, action), self._rules[action]).wait_for(now, amount)
+        wait = self._bucket_for((GLOBAL_KEY, action), self.rule_for(action)).wait_for(now, amount)
         if account is not None:
             wait = max(wait, self._bucket_for((account, action), self.rule_for(action, account)).wait_for(now, amount))
         return wait
@@ -233,6 +275,14 @@ class RateLimiterService:
                     "overrides": {
                         account: str(self._account_rules[(account, action)])
                         for account in sorted({a for (a, act) in self._account_rules if act == action})
+                    },
+                    "delay": {
+                        "global": str(self._delays.get(action, DelaySpec())),
+                        "accounts": {
+                            owner: str(self._account_delays[(owner, action)])
+                            for (owner, act) in sorted(self._account_delays)
+                            if act == action and owner != GLOBAL_KEY
+                        },
                     },
                     "global_bucket": self._bucket_for((GLOBAL_KEY, action), rule).snapshot(),
                     "account_buckets": {
@@ -269,6 +319,35 @@ class RateLimiterService:
         self._buckets.pop((account, action), None)
         self._wake_waiters()
         return existed
+
+    # ------------------------------------------------------------- delays
+    def set_delay(
+        self, action: str, minimum: float, maximum: float, account: Optional[str] = None
+    ) -> DelaySpec:
+        """Configure the human-like pause range applied AFTER each grant.
+
+        account=None sets the global default; a per-account delay overrides it.
+        """
+        spec = DelaySpec(float(minimum), float(maximum))
+        if account is None:
+            self._delays[action] = spec
+        else:
+            self._account_delays[(account, action)] = spec
+        return spec
+
+    def clear_delay(self, action: str, account: Optional[str] = None) -> bool:
+        """Remove a delay range (per-account when account given, else global)."""
+        if account is None:
+            return self._delays.pop(action, None) is not None
+        return self._account_delays.pop((account, action), None) is not None
+
+    def delay_for(self, action: str, account: Optional[str] = None) -> DelaySpec:
+        """Effective delay spec: account override when set, else global default."""
+        if account is not None:
+            override = self._account_delays.get((account, action))
+            if override is not None:
+                return override
+        return self._delays.get(action, DelaySpec())
 
     # ------------------------------------------------------- sync fast-path
     def try_acquire(
@@ -324,7 +403,14 @@ class RateLimiterService:
                 except asyncio.TimeoutError:
                     pass
                 wake.clear()
-            return entry.future.result()
+            grant = entry.future.result()
+            # human-like pacing: an extra random pause AFTER the grant
+            delay = self.delay_for(action, account)
+            if delay.enabled:
+                grant.delay_applied = delay.sample(self._delay_rng)
+                if grant.delay_applied > 0:
+                    await asyncio.sleep(grant.delay_applied)
+            return grant
         finally:
             entry.cancelled = True
             self._prune(key)
@@ -333,14 +419,12 @@ class RateLimiterService:
         """Multiply a wait by (1 + U(0, jitter)) using the effective rule.
 
         Kept public for deterministic unit tests of the jitter bounds.
+        Raises RateRuleError for unknown actions (consistent with rule_for).
         """
         if wait <= 0:
+            self.rule_for(action, account)  # validation only
             return wait
-        jitter = 0.0
-        if account is not None:
-            jitter = max(jitter, self.rule_for(action, account).jitter)
-        else:
-            jitter = self._rules[action].jitter
+        jitter = self.rule_for(action, account).jitter
         if jitter <= 0:
             return wait
         return wait * (1.0 + self._jitter_rng.uniform(0.0, jitter))
@@ -355,7 +439,7 @@ class RateLimiterService:
 
     def _reserve(self, action: str, account: Optional[str], amount: float) -> None:
         now = self._clock.now()
-        self._bucket_for((GLOBAL_KEY, action), self._rules[action]).take(now, amount)
+        self._bucket_for((GLOBAL_KEY, action), self.rule_for(action)).take(now, amount)
         if account is not None:
             self._bucket_for((account, action), self.rule_for(action, account)).take(now, amount)
 

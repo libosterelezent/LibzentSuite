@@ -39,6 +39,8 @@ class SettingDef:
             raise SettingValidationError(self.key, "setting key must be a simple identifier")
         if self.type not in SETTING_TYPES:
             raise SettingValidationError(self.key, f"unknown type {self.type!r} (use {SETTING_TYPES})")
+        if (self.min_value is not None or self.max_value is not None) and self.type not in ("int", "float"):
+            raise SettingValidationError(self.key, "min/max bounds are only supported for numeric settings")
         try:
             self.validate(self.default)
         except SettingValidationError as exc:

@@ -26,8 +26,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.api import ControlAPI
+from core.audit import AuditRecorder
 from core.credentials import Credentials
 from core.logging_setup import attach_ring_buffer, setup_logging
+from core.roles import RoleRegistry
 from core.simulator import SYNTHETIC_GUILD_CHANNEL, SimulatedCluster
 from dashboard.server import DashboardServer
 
@@ -50,15 +52,23 @@ async def amain(args: argparse.Namespace) -> None:
             "`openssl rand -hex 16 >> /dev/null` style) or pass --token"
         )
 
-    cluster = SimulatedCluster(mudae_bot_id=mudae_id, plugin_dir=str(ROOT / "plugins"))
+    cluster = SimulatedCluster(
+        mudae_bot_id=mudae_id, plugin_dir=str(ROOT / "plugins"),
+        audit=AuditRecorder(),  # live interaction trail for the Audit page
+    )
+    roles = RoleRegistry()  # in-memory registry for the demo
+    roles.set_role("copier", ["soulcopy"], "demo role: soul copying duty")
     api = ControlAPI(
         cluster.container, cluster.limiter, cluster.loader,
-        cluster.credentials, settings_store=cluster.settings,
+        cluster.credentials, settings_store=cluster.settings, roles=roles,
+        audit=cluster.audit,
     )
     server = DashboardServer(api, token=token, port=args.port)
 
     await cluster.start()
     server.start().attach_logs(ring)
+    if cluster.audit is not None:
+        server.attach_audit(cluster.audit)
     demo_log.info("dashboard live at %s (token auth ON)", server.url)
     demo_log.info("demo loop: triggering slcopy every %.0fs", args.interval)
 

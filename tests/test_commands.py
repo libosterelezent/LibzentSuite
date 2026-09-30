@@ -7,7 +7,7 @@ from core.api import ControlAPI
 
 from .helpers import Harness
 
-from cli.commands import QuitRequested, format_limits, format_plugins, format_status_lines, run_command
+from cli.commands import QuitRequested, UsageError, format_limits, format_plugins, format_status_lines, run_command
 
 
 def make_api(harness: Harness) -> ControlAPI:
@@ -50,8 +50,8 @@ class TestRunCommand(unittest.IsolatedAsyncioTestCase):
         self.assertIn("alpha", text)
 
     async def test_bad_usage_reports_usage(self) -> None:
-        text = await run_command(self.api, "set-limit onlyonearg")
-        self.assertIn("usage:", text)
+        with self.assertRaises(UsageError):
+            await run_command(self.api, "set-limit onlyonearg")
 
 
 class TestFormatters(unittest.TestCase):

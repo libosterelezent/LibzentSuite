@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -76,6 +77,7 @@ class AccountConfig:
     token_ref: Optional[str] = None          # env key; default DISCORD_TOKEN_<NAME>
     enabled: bool = True
     plugins: Optional[List[str]] = None      # None => every discovered plugin
+    roles: List[str] = field(default_factory=list)  # capability grants (see core/roles.py)
     settings: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # plugin->key->value
     rate_rules: Dict[str, str] = field(default_factory=dict)           # action->'n/secs'
     sync_group: Optional[str] = None         # accounts in the same group act in sync
@@ -90,7 +92,7 @@ class AccountConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AccountConfig":
         """Build from parsed JSON; unknown keys rejected to catch typos."""
-        allowed = {"name", "token_ref", "enabled", "plugins", "settings", "rate_rules", "sync_group", "reconnect"}
+        allowed = {"name", "token_ref", "enabled", "plugins", "roles", "settings", "rate_rules", "sync_group", "reconnect"}
         unknown = set(data) - allowed
         if unknown:
             raise AccountError(f"unknown account config keys: {sorted(unknown)}")
@@ -99,6 +101,7 @@ class AccountConfig:
             token_ref=data.get("token_ref"),
             enabled=bool(data.get("enabled", True)),
             plugins=data.get("plugins"),
+            roles=list(data.get("roles") or []),
             settings=data.get("settings") or {},
             rate_rules=data.get("rate_rules") or {},
             sync_group=data.get("sync_group"),
@@ -116,6 +119,7 @@ class AccountConfig:
             "rate_rules": self.rate_rules,
             "sync_group": self.sync_group,
             "reconnect": self.reconnect,
+            "roles": self.roles,
         }
 
     def effective_token_ref(self) -> str:
@@ -146,11 +150,13 @@ class AccountSession:
         bus: EventBus,
         limiter: RateLimiterService,
         logger: Optional[logging.Logger] = None,
+        audit: Optional[Any] = None,
     ) -> None:
         self.config = config
         self._client = client
         self._bus = bus
         self._limiter = limiter
+        self._audit = audit
         self._logger = logger or logging.getLogger(f"slaughtermudae.account.{config.name}")
         self.status = AccountStatus.CREATED
         self.last_error: Optional[str] = None
@@ -219,17 +225,23 @@ class AccountSession:
     async def send_message(
         self, channel_id: int, content: str, priority: Priority | int = Priority.NORMAL
     ) -> DiscordMessage:
-        """Rate-limited message send (action='message')."""
-        await self._limiter.acquire("message", self.name, priority)
-        return await self._client.send_message(channel_id, content)
+        """Rate-limited message send (action='message'), audited when enabled."""
+        started = time.perf_counter()
+        grant = await self._limiter.acquire("message", self.name, priority)
+        sent = await self._client.send_message(channel_id, content)
+        self._audit_out("message", channel_id, content, grant, started)
+        return sent
 
     async def send_dm(
         self, user_id: int, content: str, priority: Priority | int = Priority.NORMAL
     ) -> DiscordMessage:
         """Rate-limited DM send (action='dm'); opens the DM channel if needed."""
-        await self._limiter.acquire("dm", self.name, priority)
+        started = time.perf_counter()
+        grant = await self._limiter.acquire("dm", self.name, priority)
         channel_id = await self._client.open_dm(user_id)
-        return await self._client.send_message(channel_id, content)
+        sent = await self._client.send_message(channel_id, content)
+        self._audit_out("dm", channel_id, content, grant, started, note=f"to user {user_id}")
+        return sent
 
     async def fetch_user(self, user_id: int) -> Any:
         """Look up a user (returns None if unknown to the client)."""
@@ -239,7 +251,34 @@ class AccountSession:
         """Return the DM channel id for a user, opening it if necessary."""
         return await self._client.open_dm(user_id)
 
+    def cached_snapshot(self) -> Dict[str, Any]:
+        """Client's in-memory view (user, guilds, channels, DMs) — never fetches.
+
+        Delegates to the client's own cache (discord.py-self keeps guilds,
+        channels and private channels in memory after READY). Used by the
+        account details page; NO extra API calls are made.
+        """
+        snapshot = getattr(self._client, "cached_snapshot", None)
+        return snapshot() if callable(snapshot) else {"available": False}
+
     # -------------------------------------------------------------- internal
+    def _audit_out(
+        self, action: str, channel_id: int, content: str, grant: Any, started: float, note: str = ""
+    ) -> None:
+        """Record an outbound interaction with its limiter wait + applied delay."""
+        if self._audit is None or grant is None:
+            return
+        delay_ms = getattr(grant, "delay_applied", 0.0) * 1000.0
+        wait_ms = max(0.0, (time.perf_counter() - started) * 1000.0 - delay_ms)
+        try:
+            self._audit.record(
+                account=self.name, direction="out", action=action,
+                channel_id=channel_id, content=content,
+                wait_ms=wait_ms, delay_ms=delay_ms, note=note,
+            )
+        except Exception:
+            self._logger.exception("audit recording failed")
+
     def _on_client_message(self, message: DiscordMessage) -> None:
         """Sync client callback -> fire-and-forget bus publish."""
         self._bus.publish_nowait(

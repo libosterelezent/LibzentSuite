@@ -1,12 +1,15 @@
 # SlaughterMudae
 
 Selfbot framework for Mudae automation: plugin modules with declared settings,
-a centralized multi-account container, a two-layer rate limiter, and two
-management surfaces (terminal + GUI dashboard API).
+a centralized multi-account container with role-based assignment, a two-layer
+rate limiter with human-like pacing and a hard safety floor, a SQLite
+persistence layer, an interaction audit trail, and two fully parity'd
+management surfaces (browser dashboard + terminal/TUI).
 
 > ⚠️ Selfbots violate Discord's Terms of Service and can get accounts
-> suspended. Keep rate rules conservative (defaults: `8/12s`) and never add
-> accounts you cannot afford to lose.
+> suspended. The 1.5s/action floor and human-like delay ranges mitigate —
+> they do not authorize. Keep rules conservative (defaults: `8/12s`) and
+> never add accounts you cannot afford to lose.
 
 ## Layout
 
@@ -31,7 +34,9 @@ python3 main.py --sim       # watch the framework run locally (no network)
 python3 main.py             # terminal management
 python3 main.py --tui       # full-screen TUI with live log tailing
 python3 main.py --start-all --dashboard   # live accounts + browser dashboard
-bash scripts/run_tests.sh   # run the simulation test suite
+bash scripts/run_tests.sh   # run the simulation test suite (169 tests)
+python3 scripts/sim_inspect.py --delay 0.4 0.9   # audited interaction report
+python3 scripts/sim_server.py                # live dashboard demo over the sim world
 ```
 
 The dashboard serves a browser UI on `http://127.0.0.1:8070` (accounts,
@@ -70,10 +75,16 @@ No user/bot ids are hardcoded in the codebase; tests use synthetic fixtures.
 for, what it expects/returns) — kept read-only on disk (`chmod -R a-w
 knowledgebase/`; unlock with `chmod -R u+w` to edit).
 
+Runtime state persists in SQLite (`state/slaughter.db`, chmod 0600): accounts,
+plugin toggles, settings overrides, per-bot limit/delay rules, roles, and the
+interaction audit trail. Token values never leave `.env`. Rules faster than
+1.5s/action are rejected everywhere; the dashboard shows a live warnings
+banner for risky configurations.
+
 ## Tests & simulations
 
-`python3 -m unittest discover -s tests -t . -v` — rate limiter math (manual
-clock), plugin loader, container routing/isolation, settings layers, soulcopy
-text pipeline, end-to-end simulated slcopy runs, reconnect supervisor with
-backoff, persistence roundtrips, WebSocket codec + live dashboard over real
-HTTP. See `knowledgebase/KB_09_SIMULATOR_TESTING.md`.
+`python3 -m unittest discover -s tests -t . -v` — 169 tests: rate limiter math
+(manual clock), delays + safety floor, plugin loader, container routing and
+role gating, settings layers and parity, soulcopy pipeline, reconnect with
+backoff, database CRUD + migration, audit wiring, end-to-end simulated slcopy
+runs, dashboard HTTP + WebSocket. See `knowledgebase/KB_09` and `KB_18`.

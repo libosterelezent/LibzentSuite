@@ -30,6 +30,8 @@
           padding: 10px; margin-bottom: 10px; }
   .card .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .name { font-weight: 600; }
+  .acct-name { font-size: 16px; font-weight: 700; }
+  .sub { color: var(--dim); font-family: var(--mono); font-size: 11.5px; margin-top: 2px; }
   .status { font-family: var(--mono); font-size: 12px; padding: 1px 8px; border-radius: 10px; }
   .status.running { color: var(--ok); background: rgba(63,185,80,.12); }
   .status.reconnecting { color: var(--warn); background: rgba(210,153,34,.15); }
@@ -40,21 +42,44 @@
   button:hover { border-color: var(--accent); color: var(--accent); }
   button.on { border-color: var(--ok); color: var(--ok); }
   button.off { border-color: var(--err); color: var(--err); }
+  button.danger:hover { border-color: var(--err); color: var(--err); }
   input, select { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
                   border-radius: 6px; padding: 4px 8px; font-family: var(--mono); font-size: 12px; }
   .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
   .chip { font-family: var(--mono); font-size: 11px; padding: 1px 8px; border-radius: 10px;
           background: var(--panel); border: 1px solid var(--line); color: var(--dim); }
   .chip.on { color: var(--ok); border-color: var(--ok); }
-  #logs { background: #0a0d12; border: 1px solid var(--line); border-radius: 8px;
-          font-family: var(--mono); font-size: 11.5px; padding: 8px; height: 260px;
+  .chip.role { color: var(--accent); border-color: var(--accent); }
+  #logs, #auditbox { background: #0a0d12; border: 1px solid var(--line); border-radius: 8px;
+          font-family: var(--mono); font-size: 11.5px; padding: 8px; height: 220px;
           overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
   .rule-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
   .mono { font-family: var(--mono); font-size: 12px; }
   .dim { color: var(--dim); }
   .plugin-setting { margin: 2px 0 8px 12px; font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+  #warnbar { grid-column: 1 / -1; }
+  #warnbar:empty { display: none; }
+  .warn-item { display: flex; gap: 8px; align-items: baseline; padding: 6px 10px; margin-bottom: 6px;
+               border-radius: 6px; font-size: 12.5px; }
+  .warn-item.danger { background: rgba(248,81,73,.12); border: 1px solid var(--err); }
+  .warn-item.warn { background: rgba(210,153,34,.10); border: 1px solid var(--warn); }
+  .warn-item.info { background: rgba(88,166,255,.08); border: 1px solid var(--line); }
+  .warn-item .lvl { font-family: var(--mono); font-weight: 700; }
   #fullwrap { grid-column: 1 / -1; }
+  #fullwrap2, #fullwrap3 { grid-column: 1 / -1; }
   .errbox { color: var(--err); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line);
+           border-radius: 10px; max-width: 720px; width: 92vw; padding: 16px; }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog h3 { margin: 0 0 8px; }
+  dialog .kv { font-family: var(--mono); font-size: 12px; margin: 2px 0; }
+  .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  .settings-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px;
+                         color: var(--dim); font-family: var(--mono); }
+  .out-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+  .audit-line.in { color: var(--dim); }
+  .audit-line.out { color: var(--text); }
+  .audit-meta { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -68,27 +93,66 @@
   </div>
 </header>
 <main>
+  <div id="warnbar"></div>
+
   <section id="accounts-sec">
     <h2>Accounts</h2>
+    <div class="rule-row">
+      <input id="newacct" placeholder="name" size="10">
+      <input id="newacct-sync" placeholder="sync group (opt)" size="14">
+      <input id="newacct-roles" placeholder="roles (opt, space-sep)" size="18">
+      <button id="addacct">add account</button>
+    </div>
     <div id="accounts"><span class="dim">waiting for data…</span></div>
   </section>
+
   <section>
-    <h2>Rate limits</h2>
+    <h2>Rate limits &amp; human-like delays</h2>
     <div id="limits"><span class="dim">waiting for data…</span></div>
   </section>
+
+  <section>
+    <h2>Roles</h2>
+    <div class="rule-row">
+      <input id="rolename" placeholder="role name" size="10">
+      <input id="roleplugins" placeholder="plugins (space-sep)" size="20">
+      <button id="addrole">create / update</button>
+    </div>
+    <div id="roles"><span class="dim">waiting for data…</span></div>
+  </section>
+
   <section>
     <h2>Plugins</h2>
     <div id="plugins"><span class="dim">waiting for data…</span></div>
   </section>
-  <section>
+
+  <section id="fullwrap">
+    <h2>Audit — live Discord interactions (waits &amp; delays)</h2>
+    <div class="rule-row">
+      <select id="auditacct"><option value="">all accounts</option></select>
+      <button id="auditload">load history</button>
+      <span class="dim mono" id="auditsync"></span>
+    </div>
+    <div id="auditbox"></div>
+  </section>
+
+  <section id="fullwrap2">
     <h2>Log tail</h2>
     <div id="logs"></div>
   </section>
-  <section id="fullwrap">
+
+  <section id="fullwrap3">
     <h2>Errors</h2>
     <div class="errbox" id="errors"></div>
   </section>
 </main>
+
+<dialog id="details">
+  <h3 id="det-title">account</h3>
+  <div id="det-body"></div>
+  <div class="out-row"><button id="det-close">close</button></div>
+</dialog>
+
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -110,6 +174,7 @@ const store = (() => {
 })();
 const token = () => store.getItem("dash_token") || "";
 let lastStats = null;
+let manifests = [];
 
 function api(path, opts = {}) {
   const headers = Object.assign({"Content-Type": "application/json"}, opts.headers || {});
@@ -121,6 +186,7 @@ function api(path, opts = {}) {
     return body.data;
   });
 }
+const post = (path, body) => api(path, {method: "POST", body: JSON.stringify(body)});
 
 function logline(text) {
   const box = $("logs");
@@ -132,28 +198,88 @@ function logline(text) {
   if (at_bottom) box.scrollTop = box.scrollHeight;
 }
 
+function auditline(entry) {
+  const box = $("auditbox");
+  const filter = $("auditacct").value;
+  if (filter && entry.account !== filter) return;
+  const at_bottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+  const div = document.createElement("div");
+  div.className = "audit-line " + entry.direction;
+  const clock = new Date((entry.ts || 0) * 1000).toTimeString().slice(0, 8);
+  const arrow = entry.direction === "out" ? "->" : "<-";
+  const meta = [];
+  if (entry.wait_ms) meta.push("wait " + Math.round(entry.wait_ms) + "ms");
+  if (entry.delay_ms) meta.push("delay " + Math.round(entry.delay_ms) + "ms");
+  div.innerHTML = esc(clock) + " " + arrow + " " + esc(entry.account) + " " +
+    esc(entry.action) + " ch=" + esc(entry.channel_id ?? "-") + " " +
+    '<span class="audit-meta">' + esc(meta.join(", ")) + "</span> " +
+    esc((entry.content || "").slice(0, 80)) + (entry.note ? "  (" + esc(entry.note) + ")" : "");
+  box.appendChild(div);
+  while (box.childNodes.length > 300) box.removeChild(box.firstChild);
+  if (at_bottom) box.scrollTop = box.scrollHeight;
+}
+
+function renderWarnings(warnings) {
+  const bar = $("warnbar");
+  bar.innerHTML = "";
+  for (const w of warnings || []) {
+    const div = document.createElement("div");
+    div.className = "warn-item " + w.level;
+    const lvl = w.level === "danger" ? "⚠ DANGER" : w.level === "warn" ? "⚠ warning" : "i";
+    div.innerHTML = '<span class="lvl">' + esc(lvl) + "</span><span>" + esc(w.message) + "</span>";
+    bar.appendChild(div);
+  }
+}
+
 function renderAccounts(accounts) {
   const root = $("accounts");
   root.innerHTML = "";
-  if (!accounts.length) { root.innerHTML = '<span class="dim">no accounts configured</span>'; return; }
+  const acctSel = $("auditacct");
+  const previous = acctSel.value;
+  acctSel.innerHTML = '<option value="">all accounts</option>';
+  for (const a of accounts) acctSel.append(new Option(a.name, a.name));
+  acctSel.value = previous;
+  if (!accounts.length) { root.innerHTML = '<span class="dim">no accounts — add one above</span>'; return; }
   for (const a of accounts) {
     const card = document.createElement("div"); card.className = "card";
     const row = document.createElement("div"); row.className = "row";
-    row.innerHTML = `<span class="name">${esc(a.name)}</span>` +
-      `<span class="status ${a.status}">${a.status}</span>` +
-      `<span class="dim mono">${a.sync_group ? "grp:" + esc(a.sync_group) : "independent"}</span>` +
-      `<span class="dim mono">uid:${a.user_id ?? "-"}</span>`;
-    const start = btn("start", () => api("/api/start", {method: "POST", body: JSON.stringify({account: a.name})}).then(refresh).catch(showErr));
-    const stop = btn("stop", () => api("/api/stop", {method: "POST", body: JSON.stringify({account: a.name})}).then(refresh).catch(showErr));
-    row.append(start, stop);
+    const title = document.createElement("span"); title.className = "acct-name";
+    title.textContent = a.name;
+    row.append(title);
+    const status = document.createElement("span");
+    status.className = "status " + a.status; status.textContent = a.status;
+    row.append(status);
+    const detailsBtn = btn("details…", () => openDetails(a.name));
+    const start = btn("start", () => post("/api/start", {account: a.name}).then(renderStats).catch(showErr));
+    const stop = btn("stop", () => post("/api/stop", {account: a.name}).then(renderStats).catch(showErr));
+    const remove = btn("remove"); remove.className = "danger";
+    remove.onclick = () => post("/api/account-remove", {name: a.name})
+      .then(() => api("/api/status").then(renderStats)).catch(showErr);
+    row.append(detailsBtn, start, stop, remove);
     card.appendChild(row);
+    const sub = document.createElement("div"); sub.className = "sub";
+    sub.textContent = "id: " + (a.user_id ?? "(not running)") +
+      "   group: " + (a.sync_group || "independent") +
+      "   plugins: " + (Object.keys(a.plugins).length || "none");
+    card.appendChild(sub);
     const chips = document.createElement("div"); chips.className = "chips";
     for (const [name, info] of Object.entries(a.plugins)) {
       const chip = document.createElement("button");
       chip.className = info.enabled ? "on" : "off";
       chip.textContent = (info.enabled ? "◆ " : "◇ ") + name;
-      chip.onclick = () => api("/api/plugin", {method: "POST", body: JSON.stringify(
-        {account: a.name, plugin: name, enabled: !info.enabled})}).then(refresh).catch(showErr);
+      chip.onclick = () => post("/api/plugin", {account: a.name, plugin: name, enabled: !info.enabled})
+        .then(renderStats).catch(showErr);
+      chips.appendChild(chip);
+    }
+    for (const role of a.roles || []) {
+      const chip = document.createElement("span");
+      chip.className = "chip role";
+      chip.textContent = "role: " + role;
+      const x = document.createElement("button"); x.textContent = "✕";
+      x.onclick = () => post("/api/assign", {account: a.name, role, assigned: false})
+        .then(renderStats).catch(showErr);
+      chip.appendChild(document.createTextNode(" "));
+      chip.appendChild(x);
       chips.appendChild(chip);
     }
     if (!chips.childNodes.length) chips.innerHTML = '<span class="dim mono">no plugins</span>';
@@ -165,34 +291,77 @@ function renderAccounts(accounts) {
 function renderLimits(limits) {
   const root = $("limits");
   root.innerHTML = "";
+  const accountNames = (lastStats ? lastStats.accounts : []).map((a) => a.name);
   for (const [action, info] of Object.entries(limits.actions || {})) {
     const wrap = document.createElement("div");
-    wrap.innerHTML = `<div class="card"><div class="row">
+    const card = document.createElement("div"); card.className = "card";
+    const delayGlobal = (info.delay && info.delay.global) || "off";
+    card.innerHTML = `<div class="row">
         <span class="name mono">${esc(action)}</span>
         <span class="dim mono">default ${esc(info.default_rule)}</span>
-        <span class="mono">global ${info.global_bucket.tokens}/${info.global_bucket.capacity}</span>
-      </div><div class="dim mono" style="margin-top:4px">overrides: ${
-        Object.entries(info.overrides || {}).map(([a, r]) => `${esc(a)}=${esc(r)}`).join(", ") || "—"}</div></div>`;
+        <span class="mono">global bucket ${info.global_bucket.tokens}/${info.global_bucket.capacity}</span>
+        <span class="dim mono">delay ${esc(delayGlobal)}</span>
+      </div><div class="sub">overrides: ${
+        Object.entries(info.overrides || {}).map(([a, r]) => esc(a) + "=" + esc(r)).join(", ") || "—"}</div>`;
     const editor = document.createElement("div"); editor.className = "rule-row";
     const acct = document.createElement("select");
-    for (const a of (lastStats ? lastStats.accounts : [])) acct.append(new Option(a.name, a.name));
+    acct.append(new Option("— global —", ""));
+    for (const name of accountNames) acct.append(new Option(name, name));
     const rule = document.createElement("input"); rule.size = 8; rule.placeholder = "5/12s";
-    const setAll = btn("set global", () => api("/api/limit", {method: "POST", body: JSON.stringify(
-      {action, rule: rule.value})}).then(refresh).catch(showErr));
-    const setOne = btn("set for bot", () => api("/api/limit", {method: "POST", body: JSON.stringify(
-      {action, rule: rule.value, account: acct.value})}).then(refresh).catch(showErr));
-    const clearOne = btn("clear bot rule", () => api("/api/clear-limit", {method: "POST", body: JSON.stringify(
-      {account: acct.value, action})}).then(refresh).catch(showErr));
-    editor.append(acct, rule, setAll, setOne, clearOne);
-    wrap.firstChild.appendChild(editor);
+    const dmin = document.createElement("input"); dmin.size = 5; dmin.placeholder = "0.80";
+    const dmax = document.createElement("input"); dmax.size = 5; dmax.placeholder = "2.40";
+    const setRule = btn("set rule", () => post("/api/limit", {action, rule: rule.value, account: acct.value || null})
+      .then(renderStats).catch(showErr));
+    const setDelay = btn("set delay", () => post("/api/delay",
+      {action, min: parseFloat(dmin.value), max: parseFloat(dmax.value), account: acct.value || null})
+      .then(renderStats).catch(showErr));
+    const clearBot = btn("clear bot rules", () => Promise.all([
+      post("/api/clear-limit", {account: acct.value, action}),
+      post("/api/clear-delay", {action, account: acct.value}),
+    ]).then(renderStats).catch(showErr));
+    editor.append(acct, rule, setRule, dmin, dmax, setDelay, clearBot);
+    card.appendChild(editor);
+    wrap.appendChild(card);
     root.appendChild(wrap);
+  }
+  const hint = document.createElement("div");
+  hint.className = "dim mono";
+  hint.textContent = "safety floor: rules below 1.5s/action are rejected — pick a bot above to override just that one";
+  root.appendChild(hint);
+}
+
+function renderRoles(roles) {
+  const root = $("roles");
+  root.innerHTML = "";
+  const manifestsNames = manifests.map((m) => m.name);
+  if (!roles.length) {
+    root.innerHTML = '<span class="dim">no roles — create one above (e.g. name "roll", plugins "roll")</span>';
+  }
+  for (const role of roles) {
+    const card = document.createElement("div"); card.className = "card";
+    const row = document.createElement("div"); row.className = "row";
+    row.innerHTML = `<span class="name">${esc(role.name)}</span>
+      <span class="dim mono">permits: ${role.plugins.map(esc).join(", ")}</span>`;
+    const del = btn("delete"); del.className = "danger";
+    del.onclick = () => post("/api/role-delete", {name: role.name}).then(loadRoles).catch(showErr);
+    row.appendChild(del);
+    card.appendChild(row);
+    const assignRow = document.createElement("div"); assignRow.className = "rule-row";
+    const acct = document.createElement("select");
+    for (const a of (lastStats ? lastStats.accounts : [])) acct.append(new Option(a.name, a.name));
+    const grant = btn("assign to", () => post("/api/assign", {account: acct.value, role: role.name, assigned: true})
+      .then(renderStats).catch(showErr));
+    assignRow.append(acct, grant,
+      Object.assign(document.createElement("span"), {className: "dim mono", textContent: "(applies on next start)"}));
+    card.appendChild(assignRow);
+    root.appendChild(card);
   }
 }
 
 async function renderPlugins() {
   const root = $("plugins");
   try {
-    const manifests = await api("/api/plugins");
+    manifests = await api("/api/plugins");
     root.innerHTML = "";
     for (const m of manifests) {
       const card = document.createElement("div"); card.className = "card";
@@ -209,10 +378,74 @@ async function renderPlugins() {
   } catch (e) { /* handled by api() */ }
 }
 
+async function openDetails(name) {
+  const data = await api("/api/account-details?account=" + encodeURIComponent(name)).catch(showErr);
+  if (!data) return;
+  $("det-title").textContent = name + " — " + data.status;
+  const body = $("det-body");
+  body.innerHTML = "";
+  const kv = (k, v) => `<div class="kv">${esc(k)}: ${esc(v)}</div>`;
+  let html = kv("user id", data.user_id ?? "(not running)") +
+    kv("sync group", data.sync_group || "-") +
+    kv("roles", (data.roles || []).join(", ") || "-");
+  const cached = data.cached || {};
+  if (cached.available) {
+    html += kv("cached user", `${cached.user.name} (${cached.user.id}) [in-memory only]`);
+    for (const guild of cached.guilds || []) {
+      html += kv("guild " + guild.name, (guild.channels || []).length + " channels");
+    }
+    html += kv("open DMs", (cached.dm_channels || []).length);
+  } else {
+    html += kv("cached data", "unavailable until the account runs");
+  }
+  const head = document.createElement("div"); head.innerHTML = html; body.appendChild(head);
+  // plugin settings editors (shared surface with CLI 'set')
+  for (const plugin of data.plugins || []) {
+    const box = document.createElement("div"); box.className = "card";
+    box.innerHTML = `<div class="row"><span class="name">${esc(plugin.name)}</span>
+      <span class="dim mono">${plugin.enabled ? "enabled" : "disabled"}</span></div>`;
+    const grid = document.createElement("div"); grid.className = "settings-grid";
+    const defs = ((manifests.find((m) => m.name === plugin.name) || {}).settings) || [];
+    const inputs = {};
+    for (const def of defs) {
+      const label = document.createElement("label");
+      label.textContent = `${def.key} (${def.type})`;
+      const input = document.createElement("input");
+      input.value = plugin.settings[def.key] ?? "";
+      inputs[def.key] = input;
+      label.appendChild(input);
+      grid.appendChild(label);
+    }
+    box.appendChild(grid);
+    const save = btn("save settings", () => {
+      const calls = Object.entries(inputs).map(([key, input]) => {
+        let value = input.value;
+        if (def_types(key) === "bool") value = input.checked;
+        else if (["int", "float"].includes(def_types(key))) value = parseFloat(input.value);
+        return post("/api/setting", {account: name, plugin: plugin.name, key, value});
+      });
+      Promise.all(calls).then(() => showSync("settings saved")).catch(showErr);
+      function def_types(key) {
+        return ((defs.find((d) => d.key === key) || {}).type) || "str";
+      }
+    });
+    const actions = document.createElement("div"); actions.className = "out-row";
+    actions.appendChild(save);
+    box.appendChild(actions);
+    body.appendChild(box);
+  }
+  $("details").showModal();
+}
+
 function renderStats(stats) {
   lastStats = stats;
   renderAccounts(stats.accounts || []);
   renderLimits(stats.limits || {});
+  renderWarnings(stats.warnings || []);
+}
+
+function loadRoles() {
+  return api("/api/roles").then(renderRoles).catch(() => {});
 }
 
 let wsRetry = 1000;
@@ -225,6 +458,7 @@ function connectWS() {
     let msg; try { msg = JSON.parse(ev.data); } catch { return; }
     if (msg.type === "stats") renderStats(msg);
     else if (msg.type === "log") logline(msg.line);
+    else if (msg.type === "audit") auditline(msg);
     else if (msg.type === "error") showErr(msg.error);
   };
   ws.onclose = () => {
@@ -236,6 +470,7 @@ function connectWS() {
 
 function refresh() { return api("/api/status").then(renderStats).catch(showErr); }
 function showErr(e) { $("errors").textContent = String(e && e.message || e); }
+function showSync(text) { $("errors").textContent = ""; $("auditsync").textContent = text || ""; }
 function esc(s) { const d = document.createElement("span"); d.textContent = String(s); return d.innerHTML; }
 function btn(label, onclick) { const b = document.createElement("button"); b.textContent = label; b.onclick = onclick; return b; }
 
@@ -249,7 +484,29 @@ if (qtoken) {
   history.replaceState(null, "", location.pathname);
 }
 $("token").value = token();
-renderPlugins().then(refresh).catch(() => {});
+$("addacct").onclick = () => {
+  const payload = {name: $("newacct").value.trim()};
+  if (!$("newacct-sync").value.trim()) payload.sync_group = $("newacct-sync").value.trim() || null;
+  const roles = $("newacct-roles").value.trim().split(/\s+/).filter(Boolean);
+  if (roles.length) payload.roles = roles;
+  post("/api/account", payload).then(() => { $("newacct").value = ""; renderStats; return refresh(); }).catch(showErr);
+};
+$("addrole").onclick = () => {
+  const name = $("rolename").value.trim();
+  const plugins = $("roleplugins").value.trim().split(/\s+/).filter(Boolean);
+  if (!name || !plugins.length) { showErr("role needs a name and at least one plugin"); return; }
+  post("/api/role", {name, plugins}).then(() => { $("rolename").value = ""; $("roleplugins").value = ""; return loadRoles(); }).catch(showErr);
+};
+$("auditload").onclick = () => {
+  const q = "/api/audit?limit=200" + ($("auditacct").value ? "&account=" + encodeURIComponent($("auditacct").value) : "");
+  api(q).then((entries) => {
+    $("auditbox").innerHTML = "";
+    for (const entry of entries) auditline(entry);
+    showSync(entries.length + " history entries");
+  }).catch(showErr);
+};
+$("det-close").onclick = () => $("details").close();
+renderPlugins().then(refresh).then(loadRoles).catch(() => {});
 connectWS();
 </script>
 </body>

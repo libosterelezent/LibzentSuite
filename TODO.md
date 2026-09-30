@@ -1,90 +1,83 @@
-# TODO — Discord Selfbot Framework
+# TODO — SlaughterMudae
 
-Project: Modular selfbot framework for Mudae automation with multi-account support,
-centralized rate limiting, and dual management interfaces (GUI dashboard + terminal).
+Project: Modular selfbot framework for Mudae automation with multi-account
+support, centralized rate limiting, role-based bot assignment, and dual
+management interfaces (dashboard + terminal) with full settings parity.
 
-> Reference: `Soulcopy/autocopy.py` was migrated into `plugins/soulcopy/` (see
-> `knowledgebase/KB_10_SOULCOPY_MIGRATION.md`).
->
-> STATUS: all planned phases complete. The framework runs fully locally via
-> simulations (`python3 main.py --sim`); live mode needs a user-account client
-> fork (see `core/discord_adapter.py`).
+> v1 pillars (plugin system, multi-account container, two-layer rate limiter,
+> terminal + dashboard) are COMPLETE — see git history and KB_01…KB_14.
+> This list tracks the v2 expansion (settings parity, accounts mgmt, roles,
+> database, safety floor, audit/simulation suite) — all delivered below.
 
 ---
 
-## Phase 0 — Project Scaffolding  ✅ DONE
+## v2 — Every feature with settings accessible via BOTH APIs (CLI + Dashboard)  ✅ DONE
 
-- [x] Initialize project structure (`core/ plugins/ cli/ dashboard/ config/ tests/ knowledgebase/ state/`)
-- [x] Choose dependencies (stdlib-only core; live Discord fork lazily imported)
-- [x] Define config file format(s) (global + per-account + per-plugin settings schema, validated)
+- [x] Single shared command layer: every mutation goes through `ControlAPI`;
+      CLI (`cli/commands.py`) and dashboard routes are 1:1 wrappers (KB_19
+      parity table)
+- [x] **Plugin settings page**: dashboard details modal with per-plugin setting
+      editors (`POST /api/setting`); CLI `settings <acct>` + `set <acct>
+      <plugin> <key> <value>` — validated via SettingDef, persisted as the
+      account layer, immediate runtime effect
+- [x] **Account add/remove handling**: CLI `add-account`/`remove-account`,
+      dashboard forms; persisted in SQLite; cascade cleanup of states
+- [x] **Account list with names AND ids under them** (CLI `accounts`,
+      dashboard cards — id shown beneath each name once running)
+- [x] **Details button beside each account** → modal (CLI `details <acct>`)
+      showing in-cached-memory data ONLY (discord.py-self client caches:
+      user, guilds, channels, DM channels) — no extra fetching beyond what
+      the library already holds (KB_19)
+- [x] **Database for persistency and secrecy** (KB_15): SQLite `state/slaughter.db`,
+      chmod 0600, accounts/plugin states/settings/limits/delays/roles/audit;
+      token VALUES stay in `.env` only; one-time migration from the old JSON store
+- [x] **Roles system** (KB_16): `Role` = named bundle of permitted plugins;
+      assign/unassign per selfbot (CLI + dashboard + DB); union gating at
+      account start; future `Roll`/`Snipe` plugins just get referenced by roles
+- [x] **Rate limit settings page per selfbot or global + Advanced settings**
+      (KB_17): human-like random delay ranges (`x.xx..y.yy` seconds) applied
+      after every grant — global default or per-bot override, settable from
+      either surface, chosen from the account list
+- [x] **Live simulation test suite with detailed logging view** (KB_18):
+      audit trail of every Discord interaction (waits + delays per send,
+      inbound events) streamed to the dashboard Audit page and stored in the
+      DB; `scripts/sim_inspect.py` runs audited scenarios locally with a
+      summary + safety review (`--json` for diffs)
+- [x] **Dangerous-settings warnings** (KB_17): banner (dashboard) + `warnings`
+      (CLI) for aggressive rules / missing or narrow delays / no jitter;
+      HARD FLOOR — no rule below 1.5s/action can be set from any surface
+      (`UnsafeRateRuleError` with explanation)
 
-## Phase 1 — Plugin Architecture (Selfbot Framework)  ✅ DONE
+## v1 — carried over, all complete
 
-- [x] Define plugin/module API (`PluginBase`: name, version, description)
-- [x] Plugin manifest: declare supported settings (`SettingDef`, typed + bounded)
-- [x] Settings system: 3-layer resolve (defaults < global < account) with fail-fast validation
-- [x] Plugin loader: discover/import package or single-file plugins
-- [x] Event dispatch: route Discord events to plugins (subclass-aware bus)
-- [x] Plugin lifecycle hooks (on_load, on_enable, on_disable, on_unload)
-- [x] Error isolation: one plugin crashing must not take down the framework (tested)
-- [x] Per-plugin and per-account logging (`slaughtermudae.<account>.<plugin>`)
-- [x] Migrate `Soulcopy/autocopy.py` into the plugin system (ids moved to .env)
-
-## Phase 2 — Multi-Account Container  ✅ DONE
-
-- [x] Account model: credentials, status, per-account settings overrides
-- [x] Central container: spawn/stop/restart individual account sessions
-- [x] Credential storage in `.env` (gitignored, chmod 600; no plaintext in repo)
-- [x] Sync groups (`broadcast`) + independent mode (account×plugin matrix per config)
-- [x] Shared context: plugins coordinate via container helpers (collect_messages/wait_for/broadcast)
-- [x] Health reporting: per-account status + last_error; graceful failure containment
-- [x] Auto-reconnect with exponential backoff on dropped sessions (supervisor task,
-      per-account `reconnect` policy overrides; KB_11)
-
-## Phase 3 — Centralized Rate Limiter  ✅ DONE
-
-- [x] Global limiter service shared by all accounts (two-layer: global + per-account buckets)
-- [x] Per-bot limits: global default overridable per account (`set-limit [account]`)
-- [x] Precedence rules: explicit per-bot setting > global default (tested)
-- [x] Limit dimensions: `message` and `dm` actions (extensible per action key)
-- [x] Priority queues: HIGH/NORMAL/LOW (tested HIGH beats LOW)
-- [x] Jitter/randomization to avoid rigid timing patterns (bounded, seeded in tests)
-- [x] Live view: current usage, queue depth, per-account stats (`stats()` / `limits`)
-- [x] Integration point: ALL outbound sends pass through the limiter (enforced in AccountSession)
-
-## Phase 4 — Management Interfaces  ✅ DONE
-
-### Terminal (CLI/TUI)
-- [x] Interactive terminal REPL over the shared ControlAPI (injectable stdio, testable)
-- [x] Commands: status, plugins, start/stop, enable/disable, limits, set-limit, env, quit
-- [x] Full-screen TUI with live log tailing (curses; shared command engine; KB_12)
-
-### GUI Dashboard
-- [x] Backend JSON API (REST) exposing the same control surface as the terminal
-- [x] Endpoints: status, plugins, account-plugins, limits, start/stop, plugin toggle, limit set/clear
-- [x] Local token auth (`DASHBOARD_TOKEN` + `X-Dashboard-Token` / `?token=`)
-- [x] Browser frontend: Accounts, Plugins, Rate limits, live logs (single-file SPA)
-- [x] Real-time WebSocket updates (minimal RFC 6455 server; 1s stats push + live logs)
-
-### Shared
-- [x] Single ControlAPI/command layer used by all surfaces (parity by construction)
-
-## Phase 5 — Hardening & Docs  ✅ DONE
-
-- [x] Graceful shutdown: terminal/TUI quit + stop_all disable plugins and disconnect cleanly
-- [x] State persistence across restarts (plugin toggles + per-bot limit overrides; KB_14)
-- [x] README: setup, adding an account, running sims/tests
-- [x] Knowledgebase: function-level docs (`knowledgebase/`, read-only, gitignored)
-- [x] Test suite: 125 tests incl. local simulations (`bash scripts/run_tests.sh`)
+- [x] Phase 0: scaffolding, stdlib-only core, validated config formats
+- [x] Phase 1: plugin architecture (manifests, 3-layer settings, loader,
+      lifecycle, error isolation, soulcopy migration)
+- [x] Phase 2: multi-account container (sync groups, account×plugin matrix,
+      health containment, auto-reconnect with exponential backoff)
+- [x] Phase 3: centralized rate limiter (global + per-bot layers, precedence,
+      priorities, jitter, live stats, all sends enforced)
+- [x] Phase 4: terminal REPL + full-screen TUI; dashboard SPA + WebSocket
+      live push; shared ControlAPI
+- [x] Phase 5: graceful shutdown, state persistence, README, knowledgebase,
+      test suite (169 tests incl. local simulations)
 
 ---
 
 ## Notes / Risks
 
-- ⚠️ Selfbots violate Discord ToS — risk of account suspension. Keep the rate limiter
-  conservative and document the risk for every account added.
-- Tokens/ids only in `.env` (gitignored, chmod 600); tests use synthetic ids.
-- `knowledgebase/` is local-only and read-only on disk (`chmod -R a-w knowledgebase/`).
-- `state/state.json` (gitignored) holds runtime toggles/overrides across restarts.
-- Live mode (`--start-all`) requires a user-account client fork, imported lazily;
-  everything else — including the dashboard and TUI — runs on the standard library.
+- ⚠️ Selfbots violate Discord ToS — suspension risk. The 1.5s/action floor +
+      human delay ranges exist to mitigate, not authorize; keep rules conservative.
+- Tokens/ids only in `.env` (gitignored, chmod 600); the DB stores refs, never
+  token values; tests use synthetic ids.
+- `knowledgebase/` is local-only, read-only on disk (`chmod -R a-w`).
+- Role changes apply on the account's NEXT start (by design — predictable).
+- Future plugins (`roll`, `snipe`) only need to exist under `plugins/` and be
+  listed in a role to slot into the role-based control flow.
+
+## Backlog (nice-to-have, not requested)
+
+- [ ] Browser frontend: keyboard shortcuts, mobile layout polish
+- [ ] Audit page: CSV export button
+- [ ] Reconnect policy editable from the dashboard (currently config/CLI only)
+- [ ] Per-guild/per-channel scoped rate buckets (dimension beyond message/dm)

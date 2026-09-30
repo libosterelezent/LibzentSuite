@@ -137,6 +137,7 @@ class DashboardServer:
         self._clients: List[WebSocketClient] = []
         self._broadcaster: Optional[asyncio.Task] = None
         self._log_unsub: Optional[Any] = None
+        self._audit_unsub: Optional[Any] = None
 
     @property
     def url(self) -> str:
@@ -162,13 +163,16 @@ class DashboardServer:
         if self._log_unsub is not None:
             self._log_unsub()
             self._log_unsub = None
+        if self._audit_unsub is not None:
+            self._audit_unsub()
+            self._audit_unsub = None
         if self._httpd is not None:
             self._httpd.shutdown()
             self._httpd = None
 
     def attach_logs(self, ring) -> "DashboardServer":
         """Stream every new log line from a RingBufferHandler to WS clients."""
-        loop = self._loop or asyncio.get_event_loop()
+        loop = self._loop if self._loop is not None else asyncio.get_running_loop()
 
         def _on_line(line: str) -> None:
             def _push() -> None:
@@ -177,6 +181,19 @@ class DashboardServer:
             loop.call_soon_threadsafe(_push)
 
         self._log_unsub = ring.subscribe(_on_line)
+        return self
+
+    def attach_audit(self, recorder) -> "DashboardServer":
+        """Stream every audited interaction to WS clients (Audit page live view)."""
+        loop = self._loop if self._loop is not None else asyncio.get_running_loop()
+
+        def _on_entry(entry) -> None:
+            def _push() -> None:
+                for client in list(self._clients):
+                    client.push_json({"type": "audit", **entry.as_dict()})
+            loop.call_soon_threadsafe(_push)
+
+        self._audit_unsub = recorder.subscribe(_on_entry)
         return self
 
     # ---------------------------------------------------------- registration
@@ -259,6 +276,55 @@ class DashboardServer:
                 return 200, {"ok": True, "data": await api.account_plugins(account)}
             if (method, path) == ("GET", "/api/limits"):
                 return 200, {"ok": True, "data": await api.limits()}
+            if (method, path) == ("GET", "/api/warnings"):
+                return 200, {"ok": True, "data": await api.warnings()}
+            if (method, path) == ("GET", "/api/audit"):
+                limit = int((query.get("limit") or ["100"])[0])
+                account = (query.get("account") or [None])[0]
+                return 200, {"ok": True, "data": api.audit(limit=limit, account=account)}
+            if (method, path) == ("POST", "/api/account"):
+                return 200, {"ok": True, "data": await api.add_account(body)}
+            if (method, path) == ("POST", "/api/account-remove"):
+                return 200, {"ok": True, "data": await api.remove_account(body["name"])}
+            if (method, path) == ("GET", "/api/account-details"):
+                account = (query.get("account") or [""])[0]
+                if not account:
+                    return 400, {"ok": False, "error": "missing ?account="}
+                return 200, {"ok": True, "data": await api.account_details(account)}
+            if (method, path) == ("POST", "/api/setting"):
+                return 200, {
+                    "ok": True,
+                    "data": api.set_plugin_setting(
+                        body["account"], body["plugin"], body["key"], body["value"]
+                    ),
+                }
+            if (method, path) == ("POST", "/api/delay"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.set_delay(
+                        body["action"], float(body["min"]), float(body["max"]),
+                        body.get("account"),
+                    ),
+                }
+            if (method, path) == ("POST", "/api/clear-delay"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.clear_delay(body["action"], body.get("account")),
+                }
+            if (method, path) == ("GET", "/api/roles"):
+                return 200, {"ok": True, "data": await api.roles()}
+            if (method, path) == ("POST", "/api/role"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.set_role(body["name"], body.get("plugins") or [], body.get("description", "")),
+                }
+            if (method, path) == ("POST", "/api/role-delete"):
+                return 200, {"ok": True, "data": await api.delete_role(body["name"])}
+            if (method, path) == ("POST", "/api/assign"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.assign_role(body["account"], body["role"], bool(body["assigned"])),
+                }
             if (method, path) == ("POST", "/api/start"):
                 return 200, {"ok": True, "data": await api.start(body.get("account"))}
             if (method, path) == ("POST", "/api/stop"):

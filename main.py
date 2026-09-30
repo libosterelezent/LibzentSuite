@@ -14,30 +14,44 @@ import asyncio
 import sys
 
 from core.api import ControlAPI
+from core.audit import AuditRecorder
 from core.config import load_config
 from core.container import AccountContainer
 from core.credentials import Credentials
+from core.database import Database
 from core.discord_adapter import AdapterNotAvailable, RealClientFactory
 from core.events import EventBus
 from core.logging_setup import attach_ring_buffer, setup_logging
-from core.persistence import StateStore
 from core.plugin_loader import PluginLoader
 from core.rate_limiter import RateLimiterService
+from core.roles import RoleRegistry
 from core.settings import SettingsStore
 
 
-def build_live_container(env_file: str, config_dir: str, state_path: str) -> tuple[ControlAPI, AccountContainer]:
-    """Assemble the live stack: credentials + config + state + container + limiter."""
+def build_live_container(env_file: str, config_dir: str, db_path: str) -> tuple[ControlAPI, AccountContainer, AuditRecorder, Database]:
+    """Assemble the live stack: credentials + config + database + container."""
     credentials = Credentials.from_file(env_file)
     config = load_config(config_dir)
-    state = StateStore(state_path)
+    database = Database(db_path)
+    database.migrate_legacy_state()  # one-time import from state/state.json
     loader = PluginLoader(f"{config_dir}/../plugins")
     loader.discover()
-    settings = SettingsStore(global_settings=config.global_settings)
+    settings = SettingsStore(
+        global_settings=config.global_settings,
+        account_overrides=database.setting_overrides(),
+    )
     limiter = RateLimiterService(default_rules=config.rate_rules)
-    for account, rules in state.limit_overrides().items():
+    for account, rules in database.limit_overrides().items():
         for action, rule in rules.items():
             limiter.set_account_rule(account, action, rule)
+    delays = database.delays()
+    for action, pair in delays["global"].items():
+        limiter.set_delay(action, pair[0], pair[1])
+    for account, actions in delays["accounts"].items():
+        for action, pair in actions.items():
+            limiter.set_delay(action, pair[0], pair[1], account)
+    roles = RoleRegistry(database)
+    audit = AuditRecorder(database)
     container = AccountContainer(
         credentials=credentials,
         settings=settings,
@@ -45,12 +59,20 @@ def build_live_container(env_file: str, config_dir: str, state_path: str) -> tup
         loader=loader,
         bus=EventBus(),
         client_factory=RealClientFactory(),
-        state=state,
+        state=database,
+        roles=roles,
+        audit=audit,
     )
     for account in config.accounts:
         container.add_account(account)
-    api = ControlAPI(container, limiter, loader, credentials, settings, state=state)
-    return api, container
+    for account in database.load_accounts():  # DB is the runtime source of truth
+        if account.name not in container.account_names():
+            container.add_account(account)
+    api = ControlAPI(
+        container, limiter, loader, credentials, settings,
+        state=database, roles=roles, audit=audit,
+    )
+    return api, container, audit, database
 
 
 async def run_sim() -> int:
@@ -79,7 +101,7 @@ async def run_main(args: argparse.Namespace) -> int:
     """Wire the requested surfaces (terminal/TUI/dashboard) and run."""
     setup_logging()
     ring = attach_ring_buffer()
-    api, _container = build_live_container(args.env, args.config, args.state)
+    api, _container, audit, _database = build_live_container(args.env, args.config, args.db)
     if args.start_all:
         try:
             await api.start()
@@ -89,8 +111,10 @@ async def run_main(args: argparse.Namespace) -> int:
     if args.dashboard:
         from dashboard import DashboardServer
 
-        server = DashboardServer(api, token=api._credentials.dashboard_token, port=args.port)
-        server.attach_logs(ring).start()
+        server = DashboardServer(api, token=api.dashboard_token, port=args.port)
+        server.start().attach_logs(ring)
+        if audit is not None:
+            server.attach_audit(audit)
         print(f"dashboard: {server.url}")
     if args.tui:
         from cli.tui import Tui
@@ -113,7 +137,7 @@ def main() -> int:
     parser.add_argument("--dashboard", action="store_true", help="serve the GUI dashboard (browser + WS)")
     parser.add_argument("--tui", action="store_true", help="full-screen TUI with live log tailing")
     parser.add_argument("--port", type=int, default=8070, help="dashboard port (default 8070)")
-    parser.add_argument("--state", default="state/state.json", help="persisted runtime state file")
+    parser.add_argument("--db", default="state/slaughter.db", help="sqlite persistence file")
     args = parser.parse_args()
     if args.sim:
         return asyncio.run(run_sim())

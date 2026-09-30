@@ -89,6 +89,41 @@ class RealDiscordClient:
             self._logger.error("live client terminated: %s", exc)
             self._ready.set()
 
+    def cached_snapshot(self) -> dict:
+        """In-memory view only — NO network fetches (details page data source).
+
+        Uses exactly what the live client already holds in cache after READY:
+        our user, guilds + their channels, and open DM channels.
+        """
+        client = self._client
+        if client is None or self.user_id is None:
+            return {"available": False}
+        user = client.user
+        guilds = [
+            {
+                "id": guild.id,
+                "name": guild.name,
+                "channels": [
+                    {"id": channel.id, "name": getattr(channel, "name", None) or ""}
+                    for channel in getattr(guild, "channels", [])
+                ],
+            }
+            for guild in getattr(client, "guilds", [])
+        ]
+        dms = [
+            {
+                "id": channel.id,
+                "recipient": getattr(getattr(channel, "recipient", None), "id", None),
+            }
+            for channel in getattr(client, "private_channels", [])
+        ]
+        return {
+            "available": True,
+            "user": {"id": user.id, "name": str(user)},
+            "guilds": guilds,
+            "dm_channels": dms,
+        }
+
     async def disconnect(self) -> None:
         """Close the underlying client; safe if never started."""
         if self._client is not None:
