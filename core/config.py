@@ -37,9 +37,13 @@ def _read_json(path: Path) -> dict:
     if not path.is_file():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        parsed = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON in {path}: {exc}") from exc
+    if not isinstance(parsed, dict):
+        # AUDIT FIX: non-dict JSON gets a clear error naming the file
+        raise ValueError(f"{path} must contain a JSON object, got {type(parsed).__name__}")
+    return parsed
 
 
 def load_config(config_dir: str | Path) -> ProjectConfig:

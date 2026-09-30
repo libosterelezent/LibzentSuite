@@ -129,13 +129,17 @@ class Credentials:
 
     # ---------------------------------------------------------------- display
     def redacted(self) -> Dict[str, str]:
-        """Human-safe copy: token-like values masked to first 4 chars + length."""
+        """Human-safe copy: token-like values masked, never fully shown.
+
+        AUDIT FIX: values of 4 chars or fewer are fully hidden — previously
+        they were disclosed verbatim after the 4-char prefix.
+        """
         safe: Dict[str, str] = {}
         for key, value in self._values.items():
             if not value:
                 safe[key] = ""
             elif "token" in key.lower() or any(s in key.lower() for s in SENSITIVE_KEYS):
-                safe[key] = f"{value[:4]}…({len(value)} chars)"
+                safe[key] = f"{value[:4]}…({len(value)} chars)" if len(value) > 4 else "***"
             else:
                 safe[key] = value
         return safe

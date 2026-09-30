@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import itertools
+import math
 import random
 import re
 import time
@@ -27,6 +28,9 @@ from enum import IntEnum
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 GLOBAL_KEY = "__global__"
+
+#: sanity cap for one human-like delay (STRESS AUDIT FIX)
+MAX_DELAY_SECONDS = 3600.0
 
 _RULE_RE = re.compile(r"^\s*(\d+)\s*/\s*([0-9]*\.?[0-9]+)\s*s?\s*$", re.IGNORECASE)
 
@@ -81,8 +85,10 @@ class RateRule:
     def __post_init__(self) -> None:
         if self.actions < 1:
             raise RateRuleError(f"actions must be >= 1, got {self.actions}")
-        if self.window <= 0:
-            raise RateRuleError(f"window must be > 0, got {self.window}")
+        if self.actions > 10**9:  # AUDIT FIX: absurd actions overflow capacity later
+            raise RateRuleError(f"actions unrealistically large: {self.actions}")
+        if not math.isfinite(self.window) or self.window <= 0:
+            raise RateRuleError(f"window must be a finite number > 0, got {self.window}")
         if not 0.0 <= self.jitter <= 4.0:
             raise RateRuleError(f"jitter fraction must be 0..4, got {self.jitter}")
 
@@ -124,17 +130,27 @@ class Grant:
 class DelaySpec:
     """Human-like random pause range applied after a grant (x.xx–y.yy seconds).
 
-    maximum == 0 disables the delay entirely (legacy behavior).
+    maximum == 0 (with minimum == 0) disables the delay entirely.
+    AUDIT FIX: bounds must be finite and the maximum is capped — a stray
+    1e9-second delay would silently wedge every send in the fleet.
     """
 
     minimum: float = 0.0
     maximum: float = 0.0
 
     def __post_init__(self) -> None:
+        if not (math.isfinite(self.minimum) and math.isfinite(self.maximum)):
+            raise RateRuleError(
+                f"delay bounds must be finite, got {self.minimum}..{self.maximum}"
+            )
         if self.minimum < 0 or self.maximum < 0:
             raise RateRuleError(f"delay bounds must be >= 0, got {self.minimum}..{self.maximum}")
         if self.maximum < self.minimum:
             raise RateRuleError(f"delay maximum {self.maximum} < minimum {self.minimum}")
+        if self.maximum > MAX_DELAY_SECONDS:
+            raise RateRuleError(
+                f"delay maximum {self.maximum}s exceeds the {MAX_DELAY_SECONDS}s cap"
+            )
 
     @property
     def enabled(self) -> bool:
@@ -194,6 +210,7 @@ class _Entry:
     action: str
     account: Optional[str]
     future: "asyncio.Future[Grant]"
+    amount: float = 1.0
     cancelled: bool = False
 
     def __lt__(self, other: "_Entry") -> bool:
@@ -261,14 +278,25 @@ class RateLimiterService:
         return wait
 
     def stats(self) -> Dict[str, Any]:
-        """JSON-safe snapshot: rules, per-bucket tokens, pending queue depths."""
+        """JSON-safe snapshot: rules, per-bucket tokens, pending queue depths.
+
+        AUDIT FIX: buckets are refilled to `now` before snapshotting so token
+        counts are current, not stale from the last grant.
+        """
+        now = self._clock.now()
+
+        def _snap(key: Tuple[str, str], fallback_rule: RateRule) -> Dict[str, Any]:
+            bucket = self._bucket_for(key, fallback_rule)
+            bucket.refill(now)
+            return bucket.snapshot()
+
         pending: Dict[str, int] = {}
         for (owner, action), heap in self._pending.items():
             live = [e for e in heap if not e.cancelled and not e.future.done()]
             if live:
                 pending[f"{owner}:{action}"] = len(live)
         return {
-            "now": round(self._clock.now(), 3),
+            "now": round(now, 3),
             "actions": {
                 action: {
                     "default_rule": str(rule),
@@ -284,10 +312,10 @@ class RateLimiterService:
                             if act == action and owner != GLOBAL_KEY
                         },
                     },
-                    "global_bucket": self._bucket_for((GLOBAL_KEY, action), rule).snapshot(),
+                    "global_bucket": _snap((GLOBAL_KEY, action), rule),
                     "account_buckets": {
-                        owner: bucket.snapshot()
-                        for (owner, act), bucket in self._buckets.items()
+                        owner: _snap((owner, act), self.rule_for(act, owner))
+                        for (owner, act) in list(self._buckets)
                         if act == action and owner != GLOBAL_KEY
                     },
                 }
@@ -349,6 +377,23 @@ class RateLimiterService:
                 return override
         return self._delays.get(action, DelaySpec())
 
+    def _validate_amount(self, action: str, account: Optional[str], amount: float) -> None:
+        """AUDIT FIX: amount must be positive, finite, and fit the smallest bucket.
+
+        NaN previously slipped through every comparison and poisoned the
+        bucket (tokens=NaN => unlimited grants).
+        """
+        if not math.isfinite(amount) or amount <= 0:
+            raise RateRuleError(f"amount must be a finite number > 0, got {amount}")
+        capacity = min(
+            self.rule_for(action).capacity,
+            self.rule_for(action, account).capacity if account else float("inf"),
+        )
+        if amount > capacity:
+            raise RateRuleError(
+                f"amount {amount} exceeds bucket capacity {capacity} for {action!r}"
+            )
+
     # ------------------------------------------------------- sync fast-path
     def try_acquire(
         self, action: str, account: Optional[str] = None, amount: float = 1.0
@@ -358,6 +403,7 @@ class RateLimiterService:
         Fails (None) if: pending async waiters exist for this group (fairness),
         or either bucket lacks tokens right now.
         """
+        self._validate_amount(action, account, amount)
         key = (account or GLOBAL_KEY, action)
         heap = self._pending.get(key)
         if heap and any(not e.cancelled and not e.future.done() for e in heap):
@@ -381,12 +427,14 @@ class RateLimiterService:
         Returns: Grant once tokens exist in BOTH the global and account buckets.
         """
         loop = asyncio.get_running_loop()
+        self._validate_amount(action, account, amount)
         entry = _Entry(
             priority=int(priority),
             seq=next(self._seq),
             action=action,
             account=account,
             future=loop.create_future(),
+            amount=amount,
         )
         key = (account or GLOBAL_KEY, action)
         heapq.heappush(self._pending.setdefault(key, []), entry)
@@ -452,7 +500,7 @@ class RateLimiterService:
         heap = self._pending.get(key, [])
         self._prune(key)
         if heap and heap[0] is entry:
-            return self._combined_wait(entry.action, entry.account)
+            return self._combined_wait(entry.action, entry.account, entry.amount)
         return 0.02  # not the head yet: brief poll until ahead of us resolves
 
     def _grant_ready(self) -> None:
@@ -462,14 +510,17 @@ class RateLimiterService:
             self._prune(key)
             while heap:
                 head = heap[0]
-                if self._combined_wait(head.action, head.account) > 0:
+                if self._combined_wait(head.action, head.account, head.amount) > 0:
                     break
-                self._reserve(head.action, head.account, 1.0)
+                # AUDIT FIX: check liveness BEFORE reserving tokens
+                if head.cancelled or head.future.done():
+                    heapq.heappop(heap)
+                    continue
+                self._reserve(head.action, head.account, head.amount)
                 heapq.heappop(heap)
-                if not head.cancelled and not head.future.done():
-                    head.future.set_result(
-                        Grant(head.action, head.account, self._clock.now(), 1.0)
-                    )
+                head.future.set_result(
+                    Grant(head.action, head.account, self._clock.now(), head.amount)
+                )
 
     def _prune(self, key: Tuple[str, str]) -> None:
         heap = self._pending.get(key)

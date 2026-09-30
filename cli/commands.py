@@ -52,7 +52,7 @@ HELP = {
     "unassign": ("<account> <role>", "revoke a role"),
     "audit": ("[n] [account]", "last n audited interactions"),
     "env": ("", "redacted credentials view"),
-    "quit": ("", "stop everything and exit"),
+    "quit": ("", "stop everything and exit (alias: exit)"),
 }
 
 
@@ -95,9 +95,9 @@ async def run_command(api: ControlAPI, line: str) -> Optional[str]:
     if cmd == "add-account":
         return str(await api.add_account(_parse_account_payload(args)))
     if cmd == "remove-account":
-        return str(await api.remove_account(_need(args, 1)))
+        return str(await api.remove_account(_need(args, 1, cmd)))
     if cmd == "details":
-        return "\n".join(format_details(await api.account_details(_need(args, 1))))
+        return "\n".join(format_details(await api.account_details(_need(args, 1, cmd))))
     if cmd == "start":
         await api.start(None if args == ["all"] else _need(args, 1))
         return "started."
@@ -105,13 +105,13 @@ async def run_command(api: ControlAPI, line: str) -> Optional[str]:
         await api.stop(None if args == ["all"] else _need(args, 1))
         return "stopped."
     if cmd in ("enable", "disable"):
-        account, plugin = _need(args, 2)
+        account, plugin = _need(args, 2, cmd)
         await api.set_plugin_enabled(account, plugin, cmd == "enable")
         return f"{cmd}d {plugin} on {account}."
     if cmd == "settings":
-        return "\n".join(format_account_settings(await api.account_plugins(_need(args, 1))))
+        return "\n".join(format_account_settings(await api.account_plugins(_need(args, 1, cmd))))
     if cmd == "set":
-        account, plugin, key, value = _need(args, 4)
+        account, plugin, key, value = _need(args, 4, cmd)
         return str(api.set_plugin_setting(account, plugin, key, value))
     if cmd == "limits":
         return "\n".join(format_limits(await api.limits()))
@@ -124,7 +124,7 @@ async def run_command(api: ControlAPI, line: str) -> Optional[str]:
             return str(await api.set_limit(action, rule, account))
         raise UsageError(f"usage: set-limit {HELP['set-limit'][0]}")
     if cmd == "clear-limit":
-        account, action = _need(args, 2)
+        account, action = _need(args, 2, cmd)
         return str(await api.clear_limit(account, action))
     if cmd == "set-delay":
         if len(args) == 3:
@@ -156,13 +156,16 @@ async def run_command(api: ControlAPI, line: str) -> Optional[str]:
         account, role = _need(args, 2)
         return str(await api.assign_role(account, role, False))
     if cmd == "audit":
-        limit = 20
-        account = None
-        for arg in args:
-            if arg.isdigit():
-                limit = int(arg)
-            else:
-                account = arg
+        # AUDIT FIX: positional parsing — audit [n] [account], repeats rejected
+        limit, account = 20, None
+        rest = args
+        if rest and rest[0].isdigit():
+            limit = int(rest[0])
+            rest = rest[1:]
+        if len(rest) > 1:
+            raise UsageError(f"usage: audit {HELP['audit'][0]}")
+        if rest:
+            account = rest[0]
         from core.audit import format_audit
 
         entries = [type("E", (), e)() for e in api.audit(limit=limit, account=account)]
@@ -265,10 +268,12 @@ def format_limits(stats: dict) -> list:
     lines = []
     for action, info in stats["actions"].items():
         delay = info.get("delay", {})
+        # AUDIT FIX: overrides render as k=v pairs, not a raw dict repr
+        overrides = ", ".join(f"{k}={v}" for k, v in (info["overrides"] or {}).items()) or "-"
         lines.append(
             f"  {action:<8}default={info['default_rule']:<12}"
             f"delay={delay.get('global', 'off'):<18}"
-            f"overrides={str(info['overrides'] or '-'):<24}pending={stats['pending'] or '-'}"
+            f"overrides={overrides:<24}pending={stats['pending'] or '-'}"
         )
         for account, account_delay in (delay.get("accounts") or {}).items():
             lines.append(f"           {account:<8}delay={account_delay}")
@@ -303,8 +308,12 @@ def _parse_account_payload(args: list) -> dict:
         raise UsageError(f"usage: add-account {HELP['add-account'][0]}")
     payload: dict = {"name": args[0]}
     roles: List[str] = []
+    seen_sync = False
     for arg in args[1:]:
         if arg.startswith("sync="):
+            if seen_sync:  # AUDIT FIX: a repeated sync= is a typo, not last-wins
+                raise UsageError("add-account accepts at most one sync=<group>")
+            seen_sync = True
             payload["sync_group"] = arg[len("sync="):] or None
         else:
             roles.append(arg)
@@ -313,8 +322,10 @@ def _parse_account_payload(args: list) -> dict:
     return payload
 
 
-def _need(args: list, count: int) -> tuple | str:
-    """Validate argument count or raise a usage error."""
-    if len(args) < count:
-        raise UsageError("wrong number of arguments")
+def _need(args: list, count: int, cmd: str = "") -> tuple | str:
+    """Validate the EXACT argument count or raise a contextual usage error."""
+    if len(args) != count:
+        raise UsageError(
+            f"{cmd or 'command'} expects {count} argument(s), got {len(args)}"
+        )
     return args if count > 1 else args[0]

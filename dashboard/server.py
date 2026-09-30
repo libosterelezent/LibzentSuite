@@ -168,6 +168,7 @@ class DashboardServer:
             self._audit_unsub = None
         if self._httpd is not None:
             self._httpd.shutdown()
+            self._httpd.server_close()  # AUDIT FIX: release the listening socket
             self._httpd = None
 
     def attach_logs(self, ring) -> "DashboardServer":
@@ -233,13 +234,22 @@ class DashboardServer:
             asyncio.run_coroutine_threadsafe(_fetch_and_push(), self._loop)
 
     async def _broadcast_loop(self) -> None:
-        """Push status+limits to every connected client once per second."""
+        """Push status+limits to every connected client once per second.
+
+        AUDIT FIX: one API failure no longer permanently kills the loop.
+        """
         try:
             while True:
                 await asyncio.sleep(BROADCAST_INTERVAL)
                 if not self._clients:
                     continue
-                status = await self._api.status()
+                try:
+                    status = await self._api.status()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    LOG.warning("broadcast snapshot failed: %s", exc)
+                    continue
                 payload = json.dumps({"type": "stats", **status})
                 for client in list(self._clients):
                     client.push_text(payload)

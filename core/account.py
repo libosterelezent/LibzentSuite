@@ -51,12 +51,20 @@ class ReconnectPolicy:
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "ReconnectPolicy":
-        """Parse {'enabled','initial','max','multiplier'} with sane defaults."""
+        """Parse {'enabled','initial','max','multiplier'} with sane defaults.
+
+        AUDIT FIX: unknown keys are rejected (typo trap) — matching
+        AccountConfig.from_dict's strictness.
+        """
         data = data or {}
+        allowed = {"enabled", "initial", "max", "multiplier", "initial_delay", "max_delay"}
+        unknown = set(data) - allowed
+        if unknown:
+            raise AccountError(f"unknown reconnect policy keys: {sorted(unknown)}")
         return cls(
             enabled=bool(data.get("enabled", True)),
-            initial_delay=float(data.get("initial", 1.0)),
-            max_delay=float(data.get("max", 60.0)),
+            initial_delay=float(data.get("initial", data.get("initial_delay", 1.0))),
+            max_delay=float(data.get("max", data.get("max_delay", 60.0))),
             multiplier=float(data.get("multiplier", 2.0)),
         )
 
@@ -84,14 +92,23 @@ class AccountConfig:
     reconnect: Optional[Dict[str, Any]] = None  # ReconnectPolicy overrides
 
     def __post_init__(self) -> None:
-        if not NAME_RE.match(self.name or ""):
+        if not isinstance(self.name, str) or not NAME_RE.match(self.name or ""):
             raise AccountError(
-                f"account name {self.name!r} must match {NAME_RE.pattern} (lowercase)"
+                f"account name {self.name!r} must be a string matching {NAME_RE.pattern} (lowercase)"
             )
+        if not isinstance(self.roles, list) or not all(isinstance(r, str) for r in self.roles):
+            raise AccountError(f"account {self.name!r} roles must be a list of strings")
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AccountConfig":
         """Build from parsed JSON; unknown keys rejected to catch typos."""
+        if not isinstance(data, dict):
+            raise AccountError(f"account config must be an object, got {type(data).__name__}")
+        if "name" not in data:
+            raise AccountError("account config needs a 'name' key")
+        raw_roles = data.get("roles")
+        if raw_roles is not None and not isinstance(raw_roles, list):
+            raise AccountError(f"'roles' must be a list, got {type(raw_roles).__name__}")
         allowed = {"name", "token_ref", "enabled", "plugins", "roles", "settings", "rate_rules", "sync_group", "reconnect"}
         unknown = set(data) - allowed
         if unknown:
@@ -185,10 +202,12 @@ class AccountSession:
     async def start(self) -> None:
         """Connect the client; publishes ReadyEvent on success.
 
-        Raises AccountError if already running; records failures as status=FAILED.
+        Raises AccountError if already running/connecting; records failures as
+        status=FAILED. AUDIT FIX: a stop() issued DURING connect is honored —
+        the session ends STOPPED instead of flipping back to RUNNING.
         """
-        if self.status == AccountStatus.RUNNING:
-            raise AccountError(f"account {self.name} is already running")
+        if self.status in (AccountStatus.RUNNING, AccountStatus.CONNECTING, AccountStatus.RECONNECTING):
+            raise AccountError(f"account {self.name} is already {self.status.value}")
         self._stopping = False
         self.status = AccountStatus.CONNECTING
         try:
@@ -197,6 +216,10 @@ class AccountSession:
             self.status = AccountStatus.FAILED
             self.last_error = str(exc)
             raise AccountError(f"account {self.name} failed to connect: {exc}") from exc
+        if self._stopping:  # stop() raced us mid-connect — honor it
+            self.status = AccountStatus.STOPPED
+            self._logger.info("account start aborted by concurrent stop")
+            return
         self.status = AccountStatus.RUNNING
         self.lost.clear()
         self._logger.info("account running (user_id=%s)", self.user_id)
@@ -207,6 +230,9 @@ class AccountSession:
         self.status = AccountStatus.CONNECTING
         self.attach(client)
         await client.connect()
+        connected = getattr(client, "connected", None)
+        if self._stopping or connected is False:
+            raise AccountError(f"account {self.name} reattach failed: client not connected")
         self.status = AccountStatus.RUNNING
         self.lost.clear()
         self._logger.info("account reconnected (user_id=%s)", self.user_id)
@@ -219,6 +245,7 @@ class AccountSession:
         self._stopping = True  # suppress the lost-connection signal
         await self._client.disconnect()
         self.status = AccountStatus.STOPPED
+        self.lost.clear()  # AUDIT FIX: defense-in-depth for direct-stop callers
         self._logger.info("account stopped")
 
     # ------------------------------------------------------------- messaging
@@ -297,10 +324,12 @@ class AccountSession:
 
         Deliberate stop() sets _stopping first and never lands here. Marks the
         session RECONNECTING and sets `lost` for the container supervisor.
+        AUDIT FIX: drops during CONNECTING (reattach handshake dying) also set
+        `lost` so the supervisor can retry instead of hanging forever.
         """
         if self._stopping:
             return
-        if self.status == AccountStatus.RUNNING:
+        if self.status in (AccountStatus.RUNNING, AccountStatus.CONNECTING):
             self.status = AccountStatus.RECONNECTING
             self.last_error = reason or "connection lost"
             self.lost.set()

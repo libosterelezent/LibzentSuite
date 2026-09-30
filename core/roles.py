@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 LOG = logging.getLogger("slaughtermudae.roles")
 
@@ -74,7 +74,7 @@ class RoleRegistry:
 
     def set_role(self, name: str, plugins: Iterable[str], description: str = "") -> Role:
         """Create/update a role (persisted)."""
-        plugin_list = sorted({p for p in plugins if p and p.strip()})
+        plugin_list = sorted({p.strip() for p in plugins if p and p.strip()})
         if not plugin_list:
             raise RoleError(f"role {name!r} must allow at least one plugin")
         role = Role(name=name, plugins=plugin_list, description=description)

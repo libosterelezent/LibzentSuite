@@ -407,11 +407,18 @@ async function openDetails(name) {
     const grid = document.createElement("div"); grid.className = "settings-grid";
     const defs = ((manifests.find((m) => m.name === plugin.name) || {}).settings) || [];
     const inputs = {};
+    const def_type = (key) => ((defs.find((d) => d.key === key) || {}).type) || "str";
     for (const def of defs) {
       const label = document.createElement("label");
       label.textContent = `${def.key} (${def.type})`;
       const input = document.createElement("input");
-      input.value = plugin.settings[def.key] ?? "";
+      // AUDIT FIX: bool settings are checkboxes — text inputs always saved false
+      if (def.type === "bool") {
+        input.type = "checkbox";
+        input.checked = String(plugin.settings[def.key]) === "true" || plugin.settings[def.key] === true;
+      } else {
+        input.value = plugin.settings[def.key] ?? "";
+      }
       inputs[def.key] = input;
       label.appendChild(input);
       grid.appendChild(label);
@@ -419,15 +426,13 @@ async function openDetails(name) {
     box.appendChild(grid);
     const save = btn("save settings", () => {
       const calls = Object.entries(inputs).map(([key, input]) => {
-        let value = input.value;
-        if (def_types(key) === "bool") value = input.checked;
-        else if (["int", "float"].includes(def_types(key))) value = parseFloat(input.value);
+        let value;
+        if (def_type(key) === "bool") value = input.checked;
+        else if (["int", "float"].includes(def_type(key))) value = parseFloat(input.value);
+        else value = input.value;
         return post("/api/setting", {account: name, plugin: plugin.name, key, value});
       });
       Promise.all(calls).then(() => showSync("settings saved")).catch(showErr);
-      function def_types(key) {
-        return ((defs.find((d) => d.key === key) || {}).type) || "str";
-      }
     });
     const actions = document.createElement("div"); actions.className = "out-row";
     actions.appendChild(save);
@@ -486,10 +491,11 @@ if (qtoken) {
 $("token").value = token();
 $("addacct").onclick = () => {
   const payload = {name: $("newacct").value.trim()};
-  if (!$("newacct-sync").value.trim()) payload.sync_group = $("newacct-sync").value.trim() || null;
+  // AUDIT FIX: the sync group is sent when TYPED (condition was inverted)
+  payload.sync_group = $("newacct-sync").value.trim() || null;
   const roles = $("newacct-roles").value.trim().split(/\s+/).filter(Boolean);
   if (roles.length) payload.roles = roles;
-  post("/api/account", payload).then(() => { $("newacct").value = ""; renderStats; return refresh(); }).catch(showErr);
+  post("/api/account", payload).then(() => { $("newacct").value = ""; return refresh(); }).catch(showErr);
 };
 $("addrole").onclick = () => {
   const name = $("rolename").value.trim();

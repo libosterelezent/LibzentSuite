@@ -93,7 +93,9 @@ class ControlAPI:
     async def add_account(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Register + persist a new account (token VALUE stays in .env).
 
-        payload: {name (required), token_ref?, sync_group?, roles?, plugins?}
+        payload: {name (required), token_ref?, sync_group?, roles?, plugins?,
+                  settings?, rate_rules?, reconnect?} — extra fields are
+        validated by AccountConfig (fail fast on bad settings/names).
         """
         if not isinstance(payload, dict) or not payload.get("name"):
             raise ContainerError("account payload needs at least {'name': ...}")
@@ -103,6 +105,9 @@ class ControlAPI:
             sync_group=payload.get("sync_group"),
             roles=list(payload.get("roles") or []),
             plugins=payload.get("plugins"),
+            settings=payload.get("settings") or {},
+            rate_rules=payload.get("rate_rules") or {},
+            reconnect=payload.get("reconnect"),
         )
         self._container.add_account(config)  # validates name/settings (fail fast)
         if self._state is not None:
@@ -110,7 +115,11 @@ class ControlAPI:
         return {"added": config.name, "roles": config.roles, "sync_group": config.sync_group}
 
     async def remove_account(self, name: str) -> Dict[str, Any]:
-        """Remove an account (must be stopped) from runtime + database."""
+        """Remove an account (must be stopped) from runtime + database.
+
+        Unknown accounts raise ContainerError; running accounts are stopped
+        first, then removed with cascading state cleanup.
+        """
         await self._container.stop_account(name)  # no-op when not running; raises never for unknown? _get raises
         self._container.remove_account(name)
         if self._state is not None:
@@ -189,8 +198,10 @@ class ControlAPI:
         enforce_floor(action, parsed, account)
         if account is None:
             applied = self._limiter.set_default_rule(action, parsed)
+            # AUDIT FIX: global rules persist too (kv row) — previously a
+            # dashboard/CLI global change silently reverted on restart
             if self._state is not None:
-                pass  # global defaults stay in config/rate_limits.json
+                self._state.kv_set(f"global_rule:{action}", str(applied))
             return {"action": action, "account": None, "rule": str(applied)}
         applied = self._limiter.set_account_rule(account, action, parsed)
         if self._state is not None:

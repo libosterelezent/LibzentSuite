@@ -35,6 +35,7 @@ class RealDiscordClient:
         self._discord: Any = None
         self._client: Any = None
         self._ready = asyncio.Event()
+        self._startup_error: Optional[Exception] = None
         self._logger = logger or LOG
         self.on_message: Optional[Callable[[DiscordMessage], None]] = None
         self.on_disconnect: Optional[Callable[[str], None]] = None
@@ -80,13 +81,21 @@ class RealDiscordClient:
 
         asyncio.get_running_loop().create_task(self._run())
         await self._ready.wait()
+        # AUDIT FIX: login/startup failures now FAIL the connect instead of
+        # silently yielding a RUNNING session with user_id=None
+        if getattr(self, "_startup_error", None) is not None:
+            raise AdapterNotAvailable(f"live client failed to start: {self._startup_error}")
+        if self.user_id is None:
+            raise AdapterNotAvailable("live client connected without a user (bad token?)")
         self._logger.info("live client connected as user %s", self.user_id)
 
     async def _run(self) -> None:
         try:
             await self._client.start(self._token)
-        except Exception as exc:  # startup failures surface via _ready never set
+        except Exception as exc:  # startup failures must surface via connect()
             self._logger.error("live client terminated: %s", exc)
+            self._startup_error = exc
+        finally:
             self._ready.set()
 
     def cached_snapshot(self) -> dict:

@@ -41,7 +41,8 @@ def split_into_chunks(stream: str, max_chunk_length: int, prefix: str) -> List[s
 
     Raises ValueError when the budget is too small for prefix + one character.
     """
-    if max_chunk_length < len(prefix) + 2:
+    if max_chunk_length < len(prefix) + 1:
+        # AUDIT FIX: raise only when prefix + ONE character cannot fit
         raise ValueError(
             f"max_chunk_length {max_chunk_length} too small for prefix {prefix!r}"
         )

@@ -38,10 +38,16 @@ class Tui:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     async def run(self) -> None:
-        """Run the TUI until the user quits; then stop all accounts."""
+        """Run the TUI until the user quits; then stop all accounts.
+
+        AUDIT FIX: api.stop() runs even when curses init fails (bad TERM /
+        non-tty) — accounts never survive a broken TUI launch.
+        """
         self._loop = asyncio.get_running_loop()
-        await self._loop.run_in_executor(None, self._curses_entry)
-        await self.api.stop()
+        try:
+            await self._loop.run_in_executor(None, self._curses_entry)
+        finally:
+            await self.api.stop()
 
     # ---------------------------------------------------------------- curses
     def _curses_entry(self) -> None:

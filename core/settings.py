@@ -8,6 +8,7 @@ Unknown keys and type mismatches raise SettingValidationError at resolve time.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -42,7 +43,7 @@ class SettingDef:
         if (self.min_value is not None or self.max_value is not None) and self.type not in ("int", "float"):
             raise SettingValidationError(self.key, "min/max bounds are only supported for numeric settings")
         try:
-            self.validate(self.default)
+            object.__setattr__(self, "default", self.validate(self.default))  # frozen dataclass
         except SettingValidationError as exc:
             raise SettingValidationError(self.key, f"invalid default: {exc.reason}") from exc
 
@@ -67,15 +68,19 @@ class SettingDef:
                     raise ValueError(value)
                 return bool(value)
             if self.type == "int":
-                coerced = int(value) if not isinstance(value, bool) else int(value)
+                coerced = int(value)
                 if isinstance(value, float) and not value.is_integer():
                     raise ValueError(value)
             elif self.type == "float":
-                coerced = float(value) if not isinstance(value, bool) else float(value)
+                coerced = float(value)
+                if math.isnan(coerced):
+                    raise ValueError(value)
             else:
                 coerced = str(value)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise SettingValidationError(path, f"expected {self.type}, got {value!r}") from exc
+        if self.type in ("int", "float") and math.isinf(coerced):
+            raise SettingValidationError(path, f"{value!r} is not a finite number")
         if self.min_value is not None and coerced < self.min_value:
             raise SettingValidationError(path, f"{coerced} < min {self.min_value}")
         if self.max_value is not None and coerced > self.max_value:
@@ -125,7 +130,9 @@ class SettingsStore:
         Raises: SettingValidationError for unknown keys or bad values.
         """
         defs = {d.key: d for d in setting_defs}
-        values: Dict[str, Any] = {d.key: d.default for d in setting_defs}
+        # AUDIT FIX: coerce defaults too — previously raw (unvalidated) defaults
+        # leaked through when no layer overrode them (e.g. int default "5" stayed a str)
+        values: Dict[str, Any] = {d.key: d.validate(d.default) for d in setting_defs}
         layers = [self._global.get(plugin_name, {})]
         if account is not None:
             layers.append(self._accounts.get(account, {}).get(plugin_name, {}))
@@ -135,5 +142,11 @@ class SettingsStore:
                     raise SettingValidationError(
                         f"{plugin_name}.{key}", "unknown setting for this plugin"
                     )
-                values[key] = defs[key].validate(raw)
+                try:
+                    values[key] = defs[key].validate(raw)
+                except SettingValidationError as exc:
+                    # AUDIT FIX: bad values now carry the full <plugin>.<key> path
+                    raise SettingValidationError(
+                        f"{plugin_name}.{key}", exc.reason
+                    ) from exc
         return values

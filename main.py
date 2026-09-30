@@ -41,6 +41,10 @@ def build_live_container(env_file: str, config_dir: str, db_path: str) -> tuple[
         account_overrides=database.setting_overrides(),
     )
     limiter = RateLimiterService(default_rules=config.rate_rules)
+    # AUDIT FIX: restore global rules changed at runtime (persisted via kv)
+    with database._conn.execute("SELECT key, value FROM kv WHERE key LIKE 'global_rule:%'") as scan:
+        for row in scan.fetchall():
+            limiter.set_default_rule(row["key"][len("global_rule:"):], row["value"])
     for account, rules in database.limit_overrides().items():
         for action, rule in rules.items():
             limiter.set_account_rule(account, action, rule)

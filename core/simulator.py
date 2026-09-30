@@ -57,6 +57,8 @@ class FakeWorld:
         self.dm_channels: Dict[int, bool] = {}
         self.history: Dict[int, List[_WorldMessage]] = {}
         self._dm_pairs: Dict[Tuple[int, int], int] = {}
+        self._reverse_dm: Dict[int, Tuple[int, int]] = {}
+        self._dm_seq = 0
         self._next_id = 1
         self.subscribers: List["FakeClient"] = []
         self.auto_mudae_id: Optional[int] = mudae_user_id
@@ -73,13 +75,27 @@ class FakeWorld:
         self.history.setdefault(channel_id, [])
 
     def dm_channel_for(self, user_a: int, user_b: int) -> int:
-        """Deterministic, symmetric DM channel id for a user pair."""
+        """Deterministic, symmetric DM channel id for a user pair.
+
+        AUDIT FIX: collision-checked — if the hash-style id already belongs to
+        a different pair, fall back to a sequential id instead of merging two
+        conversations.
+        """
         pair = (min(user_a, user_b), max(user_a, user_b))
         if pair not in self._dm_pairs:
             channel_id = 1_000_000 + pair[0] * 7919 + pair[1]
+            while channel_id in self._reverse_dm or channel_id in self.channels:
+                self._dm_seq += 1
+                channel_id = 2_000_000_000 + self._dm_seq
             self._dm_pairs[pair] = channel_id
+            self._reverse_dm[channel_id] = pair
             self.add_channel(channel_id, f"dm-{pair[0]}-{pair[1]}", dm=True)
         return self._dm_pairs[pair]
+
+    def dm_pairs_of(self, channel_id: int) -> list:
+        """The (one) user pair behind a DM channel id (per-account filtering)."""
+        pair = self._reverse_dm.get(channel_id)
+        return [pair] if pair else []
 
     # -------------------------------------------------------------- traffic
     def deliver(
@@ -154,6 +170,8 @@ class FakeClient:
 
     # ------------------------------------------------------------ lifecycle
     async def connect(self) -> None:
+        if self.connected:  # AUDIT FIX: idempotent — no duplicate subscriptions
+            return
         self._world.subscribers.append(self)
         self.connected = True
 
@@ -188,7 +206,11 @@ class FakeClient:
         return self._world.dm_channel_for(self.user_id, user_id)
 
     def cached_snapshot(self) -> dict:
-        """World-backed equivalent of the live client's in-memory cache."""
+        """World-backed equivalent of the live client's in-memory cache.
+
+        AUDIT FIX: DM channels are filtered to pairs involving THIS account —
+        previously the world-level view leaked other accounts' DMs.
+        """
         guild_channels = [
             {"id": cid, "name": name}
             for cid, name in self._world.channels.items()
@@ -198,6 +220,7 @@ class FakeClient:
             {"id": cid, "name": name}
             for cid, name in self._world.channels.items()
             if self._world.dm_channels.get(cid, False)
+            and any(self.user_id in pair for pair in self._world.dm_pairs_of(cid))
         ]
         return {
             "available": self.connected,
@@ -246,6 +269,7 @@ class SimulatedCluster:
         rate_rules: Optional[Dict[str, str]] = None,
         limiter: Optional[RateLimiterService] = None,
         audit: Optional[Any] = None,
+        roles: Optional[Any] = None,
     ) -> None:
         # demo pacing: seconds, not minutes (production values live in config/).
         # dm_read_timeout is generous so runtime delay ranges set from the
@@ -288,6 +312,7 @@ class SimulatedCluster:
             client_factory=self._client_factory,
             # sims don't reconnect unless a test asks for it
             reconnect_policy=ReconnectPolicy(enabled=False),
+            roles=roles,
             audit=audit,
         )
         # alpha runs every discovered plugin; beta idles in the group — the
@@ -313,7 +338,15 @@ class SimulatedCluster:
         self.world.deliver(SYNTHETIC_GUILD_CHANNEL, author_id or SYNTHETIC_OWNER_ID, content)
 
     async def run_soulcopy_transcript(self) -> List[str]:
-        """Trigger slcopy and wait until the output settles; return transcript."""
+        """Trigger slcopy and wait until the output settles; return transcript.
+
+        AUDIT FIX: the quiet window now derives from the effective
+        dm_read_timeout so the default 3.0s demo pacing can't make this
+        return before the chunks land.
+        """
         await self.owner_says("slcopy")
-        await self.world.wait_for_quiet(SYNTHETIC_GUILD_CHANNEL, quiet=0.8, limit=15.0)
+        read_timeout = self.settings._global.get("soulcopy", {}).get("dm_read_timeout", 3.0)
+        await self.world.wait_for_quiet(
+            SYNTHETIC_GUILD_CHANNEL, quiet=float(read_timeout) + 1.2, limit=30.0
+        )
         return self.world.messages_of(SYNTHETIC_GUILD_CHANNEL)

@@ -71,9 +71,15 @@ management interfaces (dashboard + terminal) with full settings parity.
 - Tokens/ids only in `.env` (gitignored, chmod 600); the DB stores refs, never
   token values; tests use synthetic ids.
 - `knowledgebase/` is local-only, read-only on disk (`chmod -R a-w`).
-- Role changes apply on the account's NEXT start (by design — predictable).
+- Role changes apply when the account is re-added or on the next process start.
 - Future plugins (`roll`, `snipe`) only need to exist under `plugins/` and be
   listed in a role to slot into the role-based control flow.
+
+## Audit rounds
+
+- [x] v2.1 — 15-agent deep audit (module-by-module + adversarial rate-limit
+      stress): 16 confirmed bugs fixed, ~35 risks hardened, 30 regression
+      tests + permanent 32-test stress suite. Full findings: KB_20.
 
 ## Backlog (nice-to-have, not requested)
 

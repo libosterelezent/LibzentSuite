@@ -61,6 +61,9 @@ class EventBus:
 
     def __init__(self) -> None:
         self._subs: Dict[Type[Event], List[Handler]] = {}
+        # AUDIT FIX: strong refs for fire-and-forget tasks so they can't be
+        # garbage-collected mid-dispatch (documented create_task hazard)
+        self._background: set = set()
 
     def subscribe(self, event_type: Type[Event], handler: Handler) -> Callable[[], None]:
         """Register handler for event_type (and subclasses).
@@ -78,14 +81,24 @@ class EventBus:
         return _unsubscribe
 
     def publish_nowait(self, event: Event) -> asyncio.Task:
-        """Fire-and-forget publish; safe to call from sync callbacks inside a loop."""
-        return asyncio.get_running_loop().create_task(self.publish(event))
+        """Fire-and-forget publish; safe to call from sync callbacks inside a loop.
+
+        The task is kept alive via a strong reference until it completes.
+        """
+        task = asyncio.get_running_loop().create_task(self.publish(event))
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+        return task
 
     async def publish(self, event: Event) -> List[Any]:
-        """Invoke all matching handlers (sync or async) in subscription order.
+        """Invoke all matching handlers (sync or async).
 
-        Exceptions in a handler are logged and recorded in the results list
-        (instance of the exception) instead of propagating.
+        Handlers are grouped by subscribed event type (dict insertion order);
+        within each type they run in subscription order. Exceptions in a
+        handler are logged and recorded in the results list (instance of the
+        exception) instead of propagating — including CancelledError raised
+        INSIDE a handler, which is treated as a handler failure unless the
+        enclosing task is itself being cancelled (then it propagates).
         Returns: handler results / exception objects, in invocation order.
         """
         results: List[Any] = []
@@ -98,6 +111,15 @@ class EventBus:
                     if asyncio.iscoroutine(outcome):
                         outcome = await outcome
                     results.append(outcome)
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    outer_cancel = bool(task) and task.cancelling() > task.uncancel()
+                    if outer_cancel:
+                        raise  # the publish task itself is being cancelled
+                    # AUDIT FIX: an in-handler cancel used to escape and kill
+                    # every remaining handler — treat it like any failure
+                    LOG.exception("event handler %r cancelled internally for %s", handler, event.name)
+                    results.append(asyncio.CancelledError("handler cancelled"))
                 except Exception as exc:  # isolation by design
                     LOG.exception("event handler %r failed for %s", handler, event.name)
                     results.append(exc)

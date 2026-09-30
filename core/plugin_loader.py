@@ -12,6 +12,7 @@ import importlib
 import importlib.util
 import itertools
 import logging
+import re
 import sys
 import types
 from dataclasses import dataclass
@@ -68,6 +69,11 @@ class PluginLoader:
         for entry in sorted(self._dir.iterdir()):
             if entry.name.startswith(("_", ".")):
                 continue
+            # AUDIT FIX: dotted directory names can't be imported as packages —
+            # reject them clearly instead of failing with a confusing ImportError
+            if entry.is_dir() and "." in entry.name:
+                LOG.warning("skipping plugin dir with dotted name: %s", entry)
+                continue
             if entry.is_dir() and (entry / "__init__.py").is_file():
                 candidates.append(("package", entry.name, entry / "__init__.py"))
             elif entry.is_file() and entry.suffix == ".py":
@@ -79,7 +85,7 @@ class PluginLoader:
                 except Exception as exc:
                     raise PluginLoadError(f"error importing plugin {path}: {exc}") from exc
             else:
-                module = self._import_file(f"{parent_name}_{name}", path)
+                module = self._import_file(f"{parent_name}_{Path(name).stem}", path)
             prefix = module.__name__ + "."
             for attr in vars(module).values():
                 if (
@@ -113,7 +119,8 @@ class PluginLoader:
         name = getattr(cls, "name", None)
         if not name or not isinstance(name, str):
             raise PluginLoadError(f"plugin class {cls.__name__} in {path} has no valid 'name'")
-        if name != name.lower() or not name.replace("_", "").replace("-", "").isalnum():
+        # AUDIT FIX: strict ASCII validation — isalnum() accepted Unicode names
+        if not re.fullmatch(r"[a-z0-9_-]+", name):
             raise PluginLoadError(f"plugin name {name!r} must be lowercase [a-z0-9_-]")
         if name in self._records:
             raise PluginLoadError(f"duplicate plugin name {name!r} ({path} vs {self._records[name].source})")

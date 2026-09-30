@@ -56,6 +56,8 @@ class AccountRuntime:
             "status": self.session.status.value if self.session else AccountStatus.CREATED.value,
             "user_id": self.session.user_id if self.session else None,
             "sync_group": self.config.sync_group,
+            # AUDIT FIX: the dashboard role chips read this key
+            "roles": list(self.config.roles),
             "plugins": {
                 name: {"enabled": rt.enabled, "loaded": rt.loaded}
                 for name, rt in sorted(self.plugins.items())
@@ -96,6 +98,7 @@ class AccountContainer:
         #: core.audit.AuditRecorder — interaction trail (None = disabled)
         self._audit = audit
         self._accounts: Dict[str, AccountRuntime] = {}
+        self._background: set = set()  # strong refs for fire-and-forget tasks
         self._bus.subscribe(Event, self._dispatch)
 
     # ------------------------------------------------------------ properties
@@ -132,6 +135,7 @@ class AccountContainer:
             raise ContainerError(f"account {config.name!r} already registered")
         runtime = AccountRuntime(config=config)
         wanted = config.plugins if config.plugins is not None else self._loader.names()
+        wanted = list(dict.fromkeys(wanted))  # AUDIT FIX: dedupe, keep order
         # roles gate the plugin set: an account WITH roles only keeps the
         # plugins its roles allow (union); no roles => untouched (back-compat)
         if self._roles is not None and config.roles:
@@ -155,20 +159,34 @@ class AccountContainer:
         return runtime
 
     def remove_account(self, name: str) -> None:
-        """Unload plugins and drop a stopped account."""
+        """Unload plugins and drop a stopped account.
+
+        AUDIT FIX: the RUNNING refusal now happens BEFORE any state mutation,
+        so a failed removal no longer leaves the account unsupervised.
+        """
         runtime = self._get(name)
+        if runtime.session and runtime.session.status in (AccountStatus.RUNNING, AccountStatus.RECONNECTING):
+            raise ContainerError(f"stop account {name!r} before removing it")
         runtime.stop_requested = True
         if runtime.supervisor is not None:
             runtime.supervisor.cancel()
             runtime.supervisor = None
-        if runtime.session and runtime.session.status == AccountStatus.RUNNING:
-            raise ContainerError(f"stop account {name!r} before removing it")
         for prt in runtime.plugins.values():
             if prt.loaded:
-                asyncio.get_running_loop().create_task(
-                    prt.instance.on_unload(self._context(runtime, prt))
-                )
+                self._spawn_background(self._safe_unload(runtime, prt))
         del self._accounts[name]
+
+    async def _safe_unload(self, runtime: AccountRuntime, prt: PluginRuntime) -> None:
+        try:
+            await prt.instance.on_unload(self._context(runtime, prt))
+        except Exception:
+            self._logger.exception("on_unload failed for %s:%s", runtime.config.name, prt.name)
+
+    def _spawn_background(self, coro) -> None:
+        """AUDIT FIX: keep strong refs to fire-and-forget tasks."""
+        task = asyncio.get_running_loop().create_task(coro)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     async def start_account(self, name: str) -> AccountRuntime:
         """Connect one account and enable its plugins (on_load + on_enable)."""
@@ -201,22 +219,31 @@ class AccountContainer:
         return runtime
 
     async def stop_account(self, name: str) -> AccountRuntime:
-        """Disable plugins (on_disable) and disconnect one account."""
+        """Disable plugins (on_disable) and disconnect one account.
+
+        AUDIT FIX: idempotent — hooks fire once (skipped when the session is
+        already STOPPED), and a caller's CancelledError now propagates instead
+        of being swallowed with the supervisor grace timeout.
+        """
         runtime = self._get(name)
         runtime.stop_requested = True
         supervisor = runtime.supervisor
         if supervisor is not None:
             try:
                 await asyncio.wait_for(asyncio.shield(supervisor), timeout=1.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError:
                 supervisor.cancel()
+            except asyncio.CancelledError:
+                raise
             runtime.supervisor = None
-        for prt in runtime.plugins.values():
-            if prt.enabled and prt.loaded:
-                try:
-                    await prt.instance.on_disable(self._context(runtime, prt))
-                except Exception:
-                    self._logger.exception("on_disable failed for %s:%s", name, prt.name)
+        already_stopped = runtime.session is not None and runtime.session.status == AccountStatus.STOPPED
+        if not already_stopped:
+            for prt in runtime.plugins.values():
+                if prt.enabled and prt.loaded:
+                    try:
+                        await prt.instance.on_disable(self._context(runtime, prt))
+                    except Exception:
+                        self._logger.exception("on_disable failed for %s:%s", name, prt.name)
         if runtime.session is not None:
             await runtime.session.stop()
         return runtime
@@ -337,9 +364,26 @@ class AccountContainer:
     async def wait_for(
         self, account: str, check: Callable[[MessageEvent], bool], timeout: float
     ) -> Optional[MessageEvent]:
-        """Wait for ONE matching message; None on timeout."""
-        found = await self.collect_messages(account, check, timeout)
-        return found[0] if found else None
+        """Wait for ONE matching message; None on timeout.
+
+        AUDIT FIX: returns as soon as the FIRST match arrives (previously it
+        sat through the full collect_messages idle window).
+        """
+        loop = asyncio.get_running_loop()
+        future: "asyncio.Future[MessageEvent]" = loop.create_future()
+
+        def _handler(event: Event) -> None:
+            if isinstance(event, MessageEvent) and event.account == account and check(event):
+                if not future.done():
+                    future.set_result(event)
+
+        unsubscribe = self._bus.subscribe(MessageEvent, _handler)
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            unsubscribe()
 
     async def broadcast(
         self, group: str, operation: Callable[[AccountSession], Coroutine[Any, Any, Any]]
@@ -377,9 +421,9 @@ class AccountContainer:
                 session = runtime.session
                 if session is None:
                     return
-                if session.status == AccountStatus.RECONNECTING or (
-                    session.status == AccountStatus.RUNNING and session.lost.is_set()
-                ):
+                # AUDIT FIX: react to `lost` regardless of exact status so
+                # drops during CONNECTING/reattach also trigger recovery
+                if session.status == AccountStatus.RECONNECTING or session.lost.is_set():
                     await self._reconnect_loop(runtime, policy)
                     continue
                 await asyncio.sleep(0.2)

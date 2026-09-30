@@ -79,13 +79,24 @@ def enforce_floor(action: str, rule: RateRule, account: Optional[str] = None) ->
 
 
 def evaluate_limiter(limiter: RateLimiterService) -> List[SafetyWarning]:
-    """Review every configured action + override + delay for risk."""
+    """Review every configured action + override + delay for risk.
+
+    AUDIT FIXES: per-account overrides with no global default are now
+    reviewed (union of actions); per-account DELAY overrides and per-account
+    zero-jitter are checked inside the override loop.
+    """
     warnings: List[SafetyWarning] = []
-    for action in sorted(limiter._rules):
-        default_rule = limiter.rule_for(action)
-        verdict = check_rule_safety(default_rule, f"{action} (global default)")
-        if verdict:
-            warnings.append(verdict)
+    override_actions = {act for (_acct, act) in limiter._account_rules}
+    override_actions |= {act for (_acct, act) in limiter._account_delays}
+    for action in sorted(set(limiter._rules) | override_actions):
+        default_rule = None
+        try:
+            default_rule = limiter.rule_for(action)
+            verdict = check_rule_safety(default_rule, f"{action} (global default)")
+            if verdict:
+                warnings.append(verdict)
+        except Exception:
+            pass  # action only exists as an override — reviewed below
         delay = limiter.delay_for(action)
         if not delay.enabled:
             warnings.append(SafetyWarning(
@@ -93,13 +104,13 @@ def evaluate_limiter(limiter: RateLimiterService) -> List[SafetyWarning]:
                 f"action {action!r} has no human-like delay range — add one "
                 "(e.g. 0.80s..2.40s) to avoid metronome timing",
             ))
-        elif delay.maximum - delay.minimum < NARROW_DELAY_SPREAD:
+        elif round(delay.maximum - delay.minimum, 9) < NARROW_DELAY_SPREAD:
             warnings.append(SafetyWarning(
                 "info", "narrow_delay",
                 f"action {action!r} delay range {delay} is narrow — widen it "
                 "for less robotic spacing",
             ))
-        if default_rule.jitter <= 0:
+        if default_rule is not None and default_rule.jitter <= 0:
             warnings.append(SafetyWarning(
                 "info", "no_jitter",
                 f"action {action!r} has no jitter on bucket waits — enable some",
@@ -110,6 +121,25 @@ def evaluate_limiter(limiter: RateLimiterService) -> List[SafetyWarning]:
             verdict = check_rule_safety(override, f"{account}:{action}")
             if verdict:
                 warnings.append(verdict)
+            if override.jitter <= 0:
+                warnings.append(SafetyWarning(
+                    "info", "no_jitter",
+                    f"account {account!r} rule {override} for {action!r} has no jitter",
+                ))
+        for (account, act), spec in sorted(limiter._account_delays.items()):
+            if act != action:
+                continue
+            if not spec.enabled:
+                warnings.append(SafetyWarning(
+                    "warn", "no_human_delay",
+                    f"account {account!r} DISABLED the human-like delay for {action!r} "
+                    "(overrides the global range)",
+                ))
+            elif round(spec.maximum - spec.minimum, 9) < NARROW_DELAY_SPREAD:
+                warnings.append(SafetyWarning(
+                    "info", "narrow_delay",
+                    f"account {account!r} delay range {spec} for {action!r} is narrow",
+                ))
     return warnings
 
 

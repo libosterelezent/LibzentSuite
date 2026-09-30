@@ -115,7 +115,8 @@ class AuditRecorder:
             items = list(self._ring)
         if account:
             items = [e for e in items if e.account == account]
-        return items[-max(0, n):]
+        # AUDIT FIX: n <= 0 returns nothing (previously returned the whole ring)
+        return items[-n:] if n > 0 else []
 
     def subscribe(self, callback: Callable[[AuditEntry], None]) -> Callable[[], None]:
         """Live-tail subscription (dashboard WS); returns unsubscribe."""
@@ -130,10 +131,18 @@ class AuditRecorder:
         return _unsubscribe
 
     def history(self, limit: int = 200, account: Optional[str] = None) -> List[Dict[str, Any]]:
-        """DB-backed history (falls back to the ring when no DB is attached)."""
+        """DB-backed history (falls back to the ring when no DB is attached).
+
+        AUDIT FIX: normalized shape — DB rows drop the internal `id` and round
+        `ts` so both sources look identical to consumers.
+        """
         if self._db is not None:
             try:
-                return self._db.audit_log(limit=limit, account=account)
+                rows = self._db.audit_log(limit=limit, account=account)
+                for row in rows:
+                    row.pop("id", None)
+                    row["ts"] = round(float(row.get("ts") or 0.0), 3)
+                return rows
             except Exception:
                 LOG.exception("audit history read failed")
         return [e.as_dict() for e in self.tail(limit, account)]
