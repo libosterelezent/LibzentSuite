@@ -15,7 +15,7 @@
 # LAZILY inside core/discord_adapter.py (never during tests/simulations), so
 # uncomment and install ONLY if you run `python main.py --start-all`:
 #
-#     pip install discord.py-self
+     pip install discord.py-self
 #
 # (any fork exposing Client/start/close/on_ready/on_message/get_channel/
 #  fetch_channel.send/fetch_user.dm_channel works — see KB_07 in the

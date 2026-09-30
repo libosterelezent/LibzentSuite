@@ -1,13 +1,13 @@
 # TODO — SlaughterMudae
 
-Project: Modular selfbot framework for Mudae automation with multi-account
-support, centralized rate limiting, role-based bot assignment, and dual
-management interfaces (dashboard + terminal) with full settings parity.
+Modular selfbot framework for Mudae automation: plugins with declared
+settings, multi-account container with roles, layered rate limiting
+(buckets + Discord's own headers + serialized lanes), SQLite persistence,
+full CLI/dashboard parity, audit trail, simulations, and a live test suite.
 
-> v1 pillars (plugin system, multi-account container, two-layer rate limiter,
-> terminal + dashboard) are COMPLETE — see git history and KB_01…KB_14.
-> This list tracks the v2 expansion (settings parity, accounts mgmt, roles,
-> database, safety floor, audit/simulation suite) — all delivered below.
+> Architecture: see ARCHITECTURE.md (component map + live/testing adapters:
+> Framework → Discord Adapter → user-account client for live; Framework →
+> Simulation Adapter for offline runs/tests).
 
 ---
 
@@ -85,6 +85,31 @@ management interfaces (dashboard + terminal) with full settings parity.
       terminal UX): wrong-action bool coercions eliminated, transactional
       add/remove, sane field-level messages everywhere, error visibility in
       status/dashboard. Full findings: KB_21.
+
+## v3 — Real-time Discord, component architecture, live testing  ✅ DONE
+
+- [x] **Discord's own rate-limit headers** (KB_23): RestBucketManager
+      consumes X-RateLimit-* per route/bucket (per-guild via Discord's bucket
+      ids); 429 Retry-After + Global cooldowns honored fleet-wide; sparse
+      user-token headers handled honestly (researched vs docs + discord.py-self)
+- [x] **Real-time cache-first operation** (KB_23): per-account DiscordCache
+      ingested from READY (zero fetches); sends validate against cache;
+      open_dm cache-first; fetches single-flight (one call, others wait)
+- [x] **Flow aborts with reasons** (KB_23): TargetGone/AccessDenied stop
+      THAT account's flow with a human reason; other accounts unaffected;
+      soulcopy is the reference implementation (v1.2.0)
+- [x] **Component architecture** (ARCHITECTURE.md): named managers
+      (Account/Plugin/Profile/Task Scheduler/Rate Limit/Event Bus/Settings/
+      Database/Logging) with stable facade imports + live/testing adapter
+      diagram
+- [x] **Task Scheduler** (KB_24): interval jobs (+jitter) persisted in DB,
+      fired through the FULL safety stack, per-job containment, CLI +
+      dashboard parity
+- [x] **Profile Manager** (KB_24): conservative/balanced presets + custom
+      profiles; apply sets rules/delays/lane per account (floor still guarded)
+- [x] **Live testing suite** (tests_live/live_suite.py): opt-in real-Discord
+      checks (gateway, cache-from-READY, REST intake, one-message round-trip)
+      with disposable-account env gating and hard safety minimums
 - [x] v2.3 — SendEngine: FarmLite's serialized per-account send lane
       (prefixrate spacing, pause-at-0, named coalescing, priority) — a
       single account can never have two requests in flight simultaneously;

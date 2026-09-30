@@ -57,6 +57,8 @@
   .mono { font-family: var(--mono); font-size: 12px; }
   .dim { color: var(--dim); }
   .plugin-setting { margin: 2px 0 8px 12px; font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+  .plugin-err { color: var(--err); font-family: var(--mono); font-size: 11.5px; margin-top: 4px;
+                white-space: pre-wrap; word-break: break-all; }
   #warnbar { grid-column: 1 / -1; }
   #warnbar:empty { display: none; }
   .warn-item { display: flex; gap: 8px; align-items: baseline; padding: 6px 10px; margin-bottom: 6px;
@@ -124,6 +126,30 @@
   <section>
     <h2>Plugins</h2>
     <div id="plugins"><span class="dim">waiting for data…</span></div>
+  </section>
+
+  <section>
+    <h2>Scheduler — interval jobs</h2>
+    <div class="rule-row">
+      <input id="job-name" placeholder="job name" size="9">
+      <select id="job-acct"></select>
+      <input id="job-channel" placeholder="channel id" size="11">
+      <input id="job-interval" placeholder="interval s (>=5)" size="11">
+      <input id="job-jitter" placeholder="jitter s (opt)" size="9">
+      <input id="job-command" placeholder="command" size="9">
+      <button id="addjob">add job</button>
+    </div>
+    <div id="jobs"><span class="dim">waiting for data…</span></div>
+  </section>
+
+  <section>
+    <h2>Profiles</h2>
+    <div id="profiles"><span class="dim">waiting for data…</span></div>
+    <div class="rule-row">
+      <select id="profile-sel"></select>
+      <select id="profile-acct"></select>
+      <button id="applyprofile">apply profile</button>
+    </div>
   </section>
 
   <section id="fullwrap">
@@ -244,6 +270,9 @@ function renderAccounts(accounts) {
   acctSel.innerHTML = '<option value="">all accounts</option>';
   for (const a of accounts) acctSel.append(new Option(a.name, a.name));
   acctSel.value = previous;
+  // scheduler/profile pickers follow the same rebuild-preserving-selection pattern
+  fillAccountSelect($("job-acct"));
+  fillAccountSelect($("profile-acct"));
   if (!accounts.length) { root.innerHTML = '<span class="dim">no accounts — add one above</span>'; return; }
   for (const a of accounts) {
     const card = document.createElement("div"); card.className = "card";
@@ -289,6 +318,18 @@ function renderAccounts(accounts) {
     }
     if (!chips.childNodes.length) chips.innerHTML = '<span class="dim mono">no plugins</span>';
     card.appendChild(chips);
+    // ERROR AUDIT FIX: plugin failures were invisible until a details open —
+    // surface error_count/last_error on the card itself (red, only when > 0)
+    const pluginErrs = Object.entries(a.plugins || {})
+      .filter(([, info]) => (info.error_count || 0) > 0)
+      .map(([pname, info]) => pname + ": " + info.error_count + " error(s)" +
+        (info.last_error ? " — " + info.last_error : ""));
+    if (pluginErrs.length) {
+      const errLine = document.createElement("div");
+      errLine.className = "plugin-err";
+      errLine.textContent = pluginErrs.join("\n");
+      card.appendChild(errLine);
+    }
     root.appendChild(card);
   }
 }
@@ -531,6 +572,104 @@ function loadRoles() {
   });
 }
 
+function fillAccountSelect(sel) {
+  const accounts = (lastStats ? lastStats.accounts : []);
+  const previous = sel.value;
+  sel.innerHTML = "";
+  for (const a of accounts) sel.append(new Option(a.name, a.name));
+  sel.value = previous;
+}
+
+function renderJobs(jobs) {
+  const root = $("jobs");
+  root.innerHTML = "";
+  if (!jobs.length) {
+    root.innerHTML = '<span class="dim">no scheduled jobs — add one above (interval floor is 5s)</span>';
+    return;
+  }
+  for (const j of jobs) {
+    const card = document.createElement("div"); card.className = "card";
+    const row = document.createElement("div"); row.className = "row";
+    row.innerHTML = `<span class="name mono">${esc(j.name)}</span>
+      <span class="dim mono">acct ${esc(j.account)} · ch ${esc(j.channel_id)} · every ${esc(j.interval)}s+${esc(j.jitter)}s · runs ${esc(j.run_count)}</span>`;
+    const toggle = btn(j.enabled ? "on" : "off", () =>
+      post("/api/job-toggle", {name: j.name, enabled: !j.enabled})
+        .then(refreshScheduler).catch(showErr));
+    toggle.className = j.enabled ? "on" : "off";
+    const del = btn("delete"); del.className = "danger";
+    del.onclick = () => post("/api/job-delete", {name: j.name})
+      .then(refreshScheduler).catch(showErr);
+    row.append(toggle, del);
+    card.appendChild(row);
+    if (j.last_error) {
+      const errLine = document.createElement("div");
+      errLine.className = "plugin-err";
+      errLine.textContent = "last error: " + j.last_error;
+      card.appendChild(errLine);
+    }
+    root.appendChild(card);
+  }
+}
+
+function loadScheduler() {
+  // ERROR AUDIT FIX: failures render in the panel instead of an eternal
+  // "waiting for data…" placeholder
+  return api("/api/scheduler").then(renderJobs).catch((e) => {
+    const root = $("jobs");
+    root.innerHTML = "";
+    const line = document.createElement("div");
+    line.className = "dim";
+    line.textContent = "scheduler unavailable: " + (e.message || e);
+    root.appendChild(line);
+    showErr(e);
+  });
+}
+
+// refresh-after-ack: re-fetch BOTH surfaces a job mutation touches
+function refreshScheduler() {
+  return Promise.all([refresh(), loadScheduler()]);
+}
+
+function renderProfiles(profiles) {
+  const root = $("profiles");
+  root.innerHTML = "";
+  const sel = $("profile-sel");
+  const previous = sel.value;
+  sel.innerHTML = "";
+  for (const p of profiles) sel.append(new Option(p.name, p.name));
+  sel.value = previous;
+  if (!profiles.length) {
+    root.innerHTML = '<span class="dim">no profiles defined (built-ins ship with the bot)</span>';
+    return;
+  }
+  for (const p of profiles) {
+    const card = document.createElement("div"); card.className = "card";
+    const rules = Object.entries(p.rules || {}).map(([a, r]) => a + "=" + r).join(", ") || "—";
+    const delays = Object.entries(p.delays || {})
+      .map(([a, d]) => a + " " + d[0] + ".." + d[1] + "s").join(", ") || "—";
+    card.innerHTML = `<div class="row"><span class="name mono">${esc(p.name)}</span>
+        <span class="chip${p.builtin ? "" : " role"}">${p.builtin ? "builtin" : "custom"}</span></div>
+      <div class="dim">${esc(p.description)}</div>
+      <div class="sub">rules: ${esc(rules)}</div>
+      <div class="sub">delays: ${esc(delays)} · lane spacing ${esc(p.prefixrate)}s</div>`;
+    root.appendChild(card);
+  }
+}
+
+function loadProfiles() {
+  // ERROR AUDIT FIX: failures render in the panel instead of an eternal
+  // "waiting for data…" placeholder
+  return api("/api/profiles").then(renderProfiles).catch((e) => {
+    const root = $("profiles");
+    root.innerHTML = "";
+    const line = document.createElement("div");
+    line.className = "dim";
+    line.textContent = "profiles unavailable: " + (e.message || e);
+    root.appendChild(line);
+    showErr(e);
+  });
+}
+
 let wsRetry = 1000;
 let wsAttempts = 0;
 function connectWS() {
@@ -613,6 +752,39 @@ $("addrole").onclick = () => {
   if (!name || !plugins.length) { showErr("role needs a name and at least one plugin"); return; }
   post("/api/role", {name, plugins}).then(() => { $("rolename").value = ""; $("roleplugins").value = ""; return loadRoles(); }).catch(showErr);
 };
+$("addjob").onclick = () => {
+  // ERROR AUDIT FIX: NaN/floor guards client-side (server floor is 5s);
+  // channel_id is sent as digits — the API int()s it
+  const name = $("job-name").value.trim();
+  const account = $("job-acct").value;
+  const channel = $("job-channel").value.trim();
+  const command = $("job-command").value.trim();
+  const interval = parseFloat($("job-interval").value);
+  const jitterRaw = $("job-jitter").value.trim();
+  const jitter = parseFloat(jitterRaw);
+  if (!name) { showErr("job needs a name"); return; }
+  if (!account) { showErr("job needs an account (add one in Accounts)"); return; }
+  if (!/^\d+$/.test(channel)) { showErr("job channel id must be all digits"); return; }
+  if (!Number.isFinite(interval) || interval < 5) { showErr("job interval must be a number >= 5 seconds"); return; }
+  if (jitterRaw && (!Number.isFinite(jitter) || jitter < 0)) { showErr("job jitter must be a number >= 0"); return; }
+  const payload = {name, account, channel_id: channel, command, interval};
+  if (jitterRaw) payload.jitter = jitter;
+  post("/api/job-add", payload).then(() => {
+    for (const id of ["job-name", "job-channel", "job-interval", "job-jitter", "job-command"]) {
+      $(id).value = "";
+    }
+    return refreshScheduler();
+  }).catch(showErr);
+};
+$("applyprofile").onclick = () => {
+  // ERROR AUDIT FIX: empty selections used to POST and 400 in developer-speak
+  const profile = $("profile-sel").value;
+  const account = $("profile-acct").value;
+  if (!profile) { showErr("no profile to apply (profiles unavailable?)"); return; }
+  if (!account) { showErr("apply profile: pick an account first (add one in Accounts)"); return; }
+  // applying rewrites rules/delays/lane spacing — re-fetch status after ack
+  post("/api/profile-apply", {profile, account}).then(refresh).catch(showErr);
+};
 $("auditload").onclick = () => {
   const q = "/api/audit?limit=200" + ($("auditacct").value ? "&account=" + encodeURIComponent($("auditacct").value) : "");
   api(q).then((entries) => {
@@ -622,7 +794,7 @@ $("auditload").onclick = () => {
   }).catch(showErr);
 };
 $("det-close").onclick = () => $("details").close();
-renderPlugins().then(refresh).then(loadRoles).catch(() => {});
+renderPlugins().then(refresh).then(loadRoles).then(loadProfiles).then(loadScheduler).catch(() => {});
 connectWS();
 </script>
 </body>

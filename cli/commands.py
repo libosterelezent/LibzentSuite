@@ -46,6 +46,15 @@ HELP = {
     "clear-delay": ("<action> [account]", "remove a delay range"),
     "engine": ("<on|off> [account]", "toggle the serialized send lane (no concurrent sends)"),
     "set-prefixrate": ("<seconds> [account]", "lane spacing; 0 PAUSES the lane (FarmLite)"),
+    "profiles": ("", "safety profiles (rules + delays + lane)"),
+    "apply-profile": ("<profile> <account>", "apply a safety profile to an account"),
+    "jobs": ("", "scheduled interval jobs"),
+    "job-add": ("<name> <account> <channel> <interval> <command...>", "add a scheduled send"),
+    "job-del": ("<name>", "delete a scheduled job"),
+    "job-on": ("<name>", "enable a scheduled job"),
+    "job-off": ("<name>", "disable a scheduled job"),
+    "rest": ("[account]", "Discord's own REST rate-limit state (headers/buckets)"),
+    "cache": ("<account>", "account's real-time guild/channel cache"),
     "warnings": ("", "safety review of current configuration"),
     "roles": ("", "defined roles and the plugins they permit"),
     "role-add": ("<name> <plugin...>", "create/update a role"),
@@ -200,6 +209,39 @@ async def run_command(api: ControlAPI, line: str) -> Optional[str]:
                 )
             lines.append(str(await api.set_engine(name, True, prefixrate=rate)))
         return "\n".join(lines)
+    if cmd == "profiles":
+        return "\n".join(format_profiles(await api.profiles()))
+    if cmd == "apply-profile":
+        name, account = _need(args, 2, cmd)
+        return str(await api.apply_profile(name, account))
+    if cmd == "jobs":
+        return "\n".join(format_jobs(await api.jobs()))
+    if cmd == "job-add":
+        if len(args) < 5:
+            raise UsageError(f"usage: job-add {HELP['job-add'][0]}")
+        name, account, channel, interval, *command = args
+        return str(await api.add_job({
+            "name": name, "account": account, "channel_id": channel,
+            "interval": interval, "command": " ".join(command),
+        }))
+    if cmd == "job-del":
+        return str(await api.delete_job(_need(args, 1, cmd)))
+    if cmd == "job-on":
+        return str(await api.set_job_enabled(_need(args, 1, cmd), True))
+    if cmd == "job-off":
+        return str(await api.set_job_enabled(_need(args, 1, cmd), False))
+    if cmd == "rest":
+        import json as _json
+
+        account = args[0] if args else None
+        if account:
+            return _json.dumps(await api.rest_status(account), indent=2, default=str)
+        stats = (await api.status())["limits"]
+        return _json.dumps(stats.get("rest", {}), indent=2, default=str)
+    if cmd == "cache":
+        import json as _json
+
+        return _json.dumps(await api.cache_status(_need(args, 1, cmd)), indent=2, default=str)
     if cmd == "warnings":
         return "\n".join(api.format_warnings_text())
     if cmd == "roles":
@@ -354,6 +396,38 @@ def format_roles(roles: list) -> List[str]:
         + (f" — {role['description']}" if role["description"] else "")
         for role in roles
     ]
+
+
+def format_profiles(profiles: list) -> List[str]:
+    """Safety profiles -> display lines (rules/delays/lane)."""
+    if not profiles:
+        return ["  (no profiles defined)"]
+    lines = []
+    for profile in profiles:
+        lines.append(
+            f"  {profile['name']:<14}lane={profile['prefixrate']}s — {profile['description']}"
+        )
+        for action, rule in profile["rules"].items():
+            lines.append(f"      {action}: {rule}")
+        for action, pair in profile["delays"].items():
+            lines.append(f"      {action} delay: {pair[0]}..{pair[1]}s")
+    return lines
+
+
+def format_jobs(jobs: list) -> List[str]:
+    """Scheduled jobs -> display lines with run stats."""
+    if not jobs:
+        return ["  (no scheduled jobs — 'job-add <name> <account> <channel> <interval> <command...>')"]
+    lines = []
+    for job in jobs:
+        state = "on" if job["enabled"] else "off"
+        error = f" LAST ERROR: {job['last_error']}" if job.get("last_error") else ""
+        lines.append(
+            f"  {job['name']:<14}[{state}] {job['account']} -> ch={job['channel_id']} "
+            f"every {job['interval']}s (+{job['jitter']}s jitter) runs={job['run_count']}{error}"
+        )
+        lines.append(f"      sends: {job['command']}")
+    return lines
 
 
 def format_warnings(warnings: list) -> List[str]:

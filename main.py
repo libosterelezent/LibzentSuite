@@ -23,6 +23,7 @@ from core.discord_adapter import AdapterNotAvailable, RealClientFactory
 from core.events import EventBus
 from core.logging_setup import attach_ring_buffer, setup_logging
 from core.plugin_loader import PluginLoader
+from core.profiles import ProfileManager
 from core.rate_limiter import RateLimiterService
 from core.roles import RoleRegistry
 from core.send_engine import SendPolicy
@@ -57,6 +58,7 @@ def build_live_container(env_file: str, config_dir: str, db_path: str) -> tuple[
             limiter.set_delay(action, pair[0], pair[1], account)
     roles = RoleRegistry(database)
     audit = AuditRecorder(database)
+    profiles = ProfileManager(database)
     container = AccountContainer(
         credentials=credentials,
         settings=settings,
@@ -78,7 +80,7 @@ def build_live_container(env_file: str, config_dir: str, db_path: str) -> tuple[
             container.add_account(account)
     api = ControlAPI(
         container, limiter, loader, credentials, settings,
-        state=database, roles=roles, audit=audit,
+        state=database, roles=roles, audit=audit, profiles=profiles,
     )
     return api, container, audit, database
 
@@ -116,6 +118,7 @@ async def run_main(args: argparse.Namespace) -> int:
         except AdapterNotAvailable as exc:
             print(f"live mode unavailable: {exc}", file=sys.stderr)
             return 2
+    _container.start_scheduler()  # interval jobs fire through the safety stack
     if args.dashboard:
         from dashboard import DashboardServer
 

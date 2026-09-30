@@ -9,11 +9,26 @@ Flow (ported from Soulcopy/autocopy.py onto the framework):
 
 Every tunable is a declared setting; the Mudae id and the allowed owner ids
 come from credentials (.env) — nothing is hardcoded.
+
+Flow safety:
+  The session/cache raise FlowBlocked subclasses when this flow's target is
+  unusable; the plugin catches FlowBlocked around its WHOLE flow:
+    * TargetGone   — the triggering channel is not in the account's cache
+      (deleted, evicted, or never visible to this account); validated before
+      anything is sent, so an abort can never produce partial chunks.
+    * AccessDenied — Discord refused a send (permissions revoked / vanished
+      target); the session also invalidates the cached channel for it.
+  On either, exactly ONE warning line is logged
+  (``flow aborted for <account>: <reason>``) and the flow returns without
+  sending anything further — no re-raise, no partial output. Other accounts
+  keep running either way: per-account isolation is the container's job,
+  failing clean and quiet is the plugin's.
 """
 from __future__ import annotations
 
 import asyncio
 
+from core.errors import FlowBlocked
 from core.events import Event, MessageEvent
 from core.plugin_base import PluginBase, PluginContext
 from core.rate_limiter import Priority
@@ -22,11 +37,22 @@ from core.settings import SettingDef
 from .textutils import DEFAULT_PREFIX, build_soulcopy_chunks
 
 
+def flow_block_reason(exc: BaseException) -> str:
+    """Human-readable reason for a flow abort (pure -> unit-testable).
+
+    FlowBlocked (and subclasses) carry a curated ``reason``; anything else is
+    rendered generically as ``"<TypeName>: <message>"``.
+    """
+    if isinstance(exc, FlowBlocked):
+        return exc.reason
+    return f"{type(exc).__name__}: {exc}"
+
+
 class SoulcopyPlugin(PluginBase):
     """Mirror Mudae's soulmate list into chunks ready for '$soulcopy' import."""
 
     name = "soulcopy"
-    version = "1.1.0"
+    version = "1.2.0"
     description = "Export your Mudae soulmate list and re-import it elsewhere."
 
     settings = (
@@ -50,15 +76,30 @@ class SoulcopyPlugin(PluginBase):
             return
         if event.author_id not in ctx.credentials.owner_user_ids:
             ctx.logger.warning(
-                "ignoring trigger from non-owner %s (if this is you, add the id to "
-                "OWNER_USER_IDS in .env)", event.author_id,
+                "ignoring trigger from non-owner %s on account %s (if this is you, add the "
+                "id to OWNER_USER_IDS in .env)", event.author_id, ctx.account,
             )
             return
-        await self._run_copy(ctx, event.channel_id)
+        try:
+            await self._run_copy(ctx, event.channel_id)
+        except FlowBlocked as exc:
+            # Flow safety contract: one clean line for THIS account, then stop
+            # — no partial chunks, no re-raise (the container would only see a
+            # crash; the flow itself is simply over). See docstring.
+            ctx.logger.warning("flow aborted for %s: %s", ctx.account, flow_block_reason(exc))
 
     # ------------------------------------------------------------------- core
     async def _run_copy(self, ctx: PluginContext, trigger_channel: int) -> None:
-        """Drive the full copy flow for one trigger."""
+        """Drive the full copy flow for one trigger.
+
+        Raises FlowBlocked (TargetGone/AccessDenied) when the target channel
+        is unusable — handle_event renders the abort log line from it.
+        """
+        cache = getattr(ctx.session, "cache", None) or getattr(ctx.session, "_cache", None)
+        if cache is not None:
+            # cache-aware: validate BEFORE acting so a gone channel aborts
+            # the flow before a single message leaves the account
+            cache.validate_channel(trigger_channel)
         mudae_id = ctx.credentials.mudae_bot_id
         user = await ctx.session.fetch_user(mudae_id)
         if user is None:
@@ -86,7 +127,8 @@ class SoulcopyPlugin(PluginBase):
             if ctx.settings["inter_chunk_delay"] > 0:
                 await asyncio.sleep(ctx.settings["inter_chunk_delay"])
             await ctx.session.send_message(trigger_channel, chunk, priority=Priority.LOW)
-        ctx.logger.info("sent %d chunk(s) back to channel %s", len(chunks), trigger_channel)
+        target = cache.describe(trigger_channel) if cache is not None else str(trigger_channel)
+        ctx.logger.info("sent %d chunk(s) back to %s", len(chunks), target)
 
     async def _collect_pages(self, ctx: PluginContext, mudae_id: int, dm_channel: int):
         """Collect Mudae DM pages until the idle timeout expires."""

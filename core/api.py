@@ -7,6 +7,7 @@ and the dashboard can never drift apart in capability (settings parity).
 from __future__ import annotations
 
 import logging
+import json as _json
 from typing import Any, Dict, List, Optional
 
 from .account import AccountConfig, AccountStatus
@@ -37,9 +38,16 @@ def _as_bool(value: Any, field: str) -> bool:
     raise ValueError(f"field '{field}' must be a boolean (true/false), got {value!r}")
 
 
+def _require_str(payload: Dict[str, Any], key: str) -> str:
+    """Payload string-field guard with an actionable message."""
+    value = payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"field '{key}' must be a non-empty string")
+    return value
+
+
 class ControlAPI:
     """High-level operations over the container + limiter + database."""
-
     def __init__(
         self,
         container: AccountContainer,
@@ -50,6 +58,7 @@ class ControlAPI:
         state: Optional[Any] = None,
         roles: Optional[Any] = None,
         audit: Optional[Any] = None,
+        profiles: Optional[Any] = None,
     ) -> None:
         self._container = container
         self._limiter = limiter
@@ -62,6 +71,75 @@ class ControlAPI:
         self._roles = roles
         #: core.audit.AuditRecorder
         self._audit = audit
+        #: core.profiles.ProfileManager
+        self._profiles = profiles
+
+    # ----------------------------------------------------- profiles/scheduler
+    async def profiles(self) -> List[Dict[str, Any]]:
+        """Defined safety profiles (built-ins + custom)."""
+        if self._profiles is None:
+            return []
+        return self._profiles.manifests()
+
+    async def apply_profile(self, name: str, account: str) -> Dict[str, Any]:
+        """Apply a safety profile to one account (rules+delays+lane spacing)."""
+        if self._profiles is None:
+            raise ContainerError("no profile manager configured")
+        profile = self._profiles.resolve(name)
+        runtime = self._container._get(account)  # noqa: SLF001 - facade
+        applied: List[str] = []
+        for action, rule in profile.rules.items():
+            await self.set_limit(action, rule, account)
+            applied.append(f"{action}={rule}")
+        for action, pair in profile.delays.items():
+            await self.set_delay(action, pair[0], pair[1], account)
+            applied.append(f"{action}-delay={pair[0]}..{pair[1]}")
+        if runtime.engine is not None:
+            runtime.engine.set_prefixrate(profile.prefixrate)
+            applied.append(f"lane={profile.prefixrate}s")
+            if self._state is not None:
+                self._state.kv_set(
+                    f"engine:{account}",
+                    json.dumps({"enabled": True, "prefixrate": profile.prefixrate}),
+                )
+        if self._state is not None:
+            self._state.kv_set(f"profile:{account}", name)
+        return {"profile": name, "account": account, "applied": applied}
+    async def jobs(self) -> List[Dict[str, Any]]:
+        """Scheduled jobs (interval sends through the full safety stack)."""
+        return self._container.scheduler.jobs()
+
+    async def add_job(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Register an interval job: {name, account, channel_id, command, interval, jitter?}."""
+        scheduler = self._container.scheduler
+        job = scheduler.add_job(
+            name=_require_str(payload, "name"),
+            account=_require_str(payload, "account"),
+            channel_id=int(_require_str(payload, "channel_id")),
+            command=str(payload["command"]),
+            interval=float(payload["interval"]),
+            jitter=float(payload.get("jitter", 0.0)),
+        )
+        return job.as_dict()
+
+    async def delete_job(self, name: str) -> Dict[str, Any]:
+        return {"deleted": name, "existed": self._container.scheduler.delete_job(name)}
+
+    async def set_job_enabled(self, name: str, enabled: bool) -> Dict[str, Any]:
+        self._container.scheduler.set_enabled(name, enabled)
+        return {"job": name, "enabled": enabled}
+
+    async def rest_status(self, account: str) -> Dict[str, Any]:
+        """Discord's own REST rate-limit state for one account."""
+        runtime = self._container._get(account)
+        return self._container._rest_manager_for(runtime).snapshot()
+
+    async def cache_status(self, account: str) -> Dict[str, Any]:
+        """The account's real-time Discord cache (guilds/channels/invalidated)."""
+        runtime = self._container._get(account)  # noqa: SLF001 - facade
+        cache = self._container.cache_manager.cache_for(account)
+        _ = runtime
+        return cache.snapshot()
 
     # ---------------------------------------------------------------- status
     async def status(self) -> Dict[str, Any]:

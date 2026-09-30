@@ -176,6 +176,9 @@ class AccountSession:
         logger: Optional[logging.Logger] = None,
         audit: Optional[Any] = None,
         engine: Optional[Any] = None,
+        cache: Optional[Any] = None,
+        rest_gate: Optional[Any] = None,
+        rest_manager: Optional[Any] = None,
     ) -> None:
         self.config = config
         self._client = client
@@ -183,6 +186,9 @@ class AccountSession:
         self._limiter = limiter
         self._audit = audit
         self._engine = engine
+        self._cache = cache
+        self._rest_gate = rest_gate
+        self._rest_manager = rest_manager
         self._logger = logger or logging.getLogger(f"slaughtermudae.account.{config.name}")
         self.status = AccountStatus.CREATED
         self.last_error: Optional[str] = None
@@ -317,7 +323,22 @@ class AccountSession:
         started = time.perf_counter()
         grant = await self._limiter.acquire("dm", self.name, priority)
         channel_id = await self._client.open_dm(user_id)
-        sent = await self._client.send_message(channel_id, content)
+        try:
+            if self._rest_gate is not None:
+                async with self._rest_gate.call(
+                    "dm", lambda: self._client.send_message(channel_id, content)
+                ) as action:
+                    sent = await action()
+                if self._rest_manager is not None:
+                    self._rest_feedback("dm", channel_id)
+            else:
+                sent = await self._client.send_message(channel_id, content)
+        except PermissionError as exc:
+            self._block_target(channel_id, f"access denied: {exc}")
+            raise
+        except KeyError as exc:
+            self._block_target(channel_id, f"target vanished: {exc}")
+            raise
         self._audit_out(
             "dm", channel_id, content, grant, started,
             note=f"to user {user_id}", timing=timing,
@@ -325,11 +346,25 @@ class AccountSession:
         return sent
 
     async def fetch_user(self, user_id: int) -> Any:
-        """Look up a user (returns None if unknown to the client)."""
+        """Look up a user through the SINGLE-FLIGHT REST gate (others wait)."""
+        if self._rest_gate is not None:
+            async with self._rest_gate.call("fetch", lambda: self._client.fetch_user(user_id)) as action:
+                return await action()
         return await self._client.fetch_user(user_id)
 
     async def open_dm(self, user_id: int) -> int:
-        """Return the DM channel id for a user, opening it if necessary."""
+        """Open (or reuse) the cached DM channel for a user — cache-first.
+
+        REAL-TIME RULE: DM channels are cached at READY; the fetch API is only
+        touched through the single-flight gate when the cache misses.
+        """
+        if self._cache is not None:
+            for info in self._cache.channels.values():
+                if info.dm and info.recipient == user_id and not info.deleted:
+                    return info.channel_id
+        if self._rest_gate is not None:
+            async with self._rest_gate.call("fetch", lambda: self._client.open_dm(user_id)) as action:
+                return await action()
         return await self._client.open_dm(user_id)
 
     def cached_snapshot(self) -> Dict[str, Any]:

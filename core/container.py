@@ -19,6 +19,7 @@ from .events import Event, EventBus, MessageEvent
 from .plugin_base import PluginBase, PluginContext
 from .plugin_loader import PluginLoader
 from .rate_limiter import RateLimiterService
+from .scheduler import TaskScheduler
 from .send_engine import SendEngine, SendPolicy
 from .settings import SettingsStore
 
@@ -123,6 +124,17 @@ class AccountContainer:
         self._audit = audit
         #: core.send_engine.SendPolicy — serialized per-account lanes (FarmLite)
         self._send_policy = send_policy or SendPolicy()
+        # REAL-TIME: per-account caches + REST header managers
+        from .discord_cache import CacheManager
+
+        self.cache_manager = CacheManager()  # public: ControlAPI reads snapshots
+        self._rest_managers: Dict[str, Any] = {}
+        # Task Scheduler: fires jobs through the full safety stack (lane +
+        # limiter + cache validation), failures contained per job
+        self.scheduler = TaskScheduler(
+            database=state, send=self._scheduled_send,
+            logger=logging.getLogger("slaughtermudae.scheduler"),
+        )
         self._accounts: Dict[str, AccountRuntime] = {}
         self._background: set = set()  # strong refs for fire-and-forget tasks
         self._bus.subscribe(Event, self._dispatch)
@@ -268,9 +280,14 @@ class AccountContainer:
             logging.getLogger(f"slaughtermudae.account.{name}"),
             audit=self._audit,
             engine=self._spawn_engine(runtime),
+            cache=self.cache_manager.cache_for(name),
+            rest_manager=self._rest_manager_for(runtime),
+            rest_gate=self._rest_gate_for(runtime),
         )
         runtime.session = session  # assigned FIRST so failures surface in status()
         await session.start()
+        # REAL-TIME: ingest the client's cache (guilds/channels/DMs) — zero fetches
+        self.cache_manager.cache_for(name).ingest_snapshot(session.cached_snapshot())
         for prt in runtime.plugins.values():
             if prt.enabled:
                 await self._activate(runtime, prt)
@@ -284,6 +301,51 @@ class AccountContainer:
                 self._supervise(runtime, policy), name=f"supervise-{name}"
             )
         return runtime
+
+    def start_scheduler(self) -> None:
+        """Start the interval job loop (safe to call repeatedly)."""
+        self.scheduler.start()
+
+    async def stop_scheduler(self) -> None:
+        await self.scheduler.stop()
+
+    async def _scheduled_send(self, account: str, channel_id: int, command: str) -> Any:
+        """Scheduler hook: run a job's send through the FULL safety stack."""
+        runtime = self._accounts.get(account)
+        if runtime is None or runtime.session is None:
+            raise ContainerError(
+                f"job targets account {account!r} which is not running (skipping)"
+            )
+        return await runtime.session.send_message(int(channel_id), command)
+
+    def _rest_manager_for(self, runtime: AccountRuntime):
+        """Per-account REST header manager (Discord's own rate-limit state)."""
+        from .rest_buckets import RestBucketManager
+
+        manager = self._rest_managers.get(runtime.config.name)
+        if manager is None:
+            manager = RestBucketManager(
+                runtime.config.name,
+                on_global_cooldown=self._on_rest_global_cooldown,
+            )
+            self._rest_managers[runtime.config.name] = manager
+        return manager
+
+    def _rest_gate_for(self, runtime: AccountRuntime):
+        """Single-flight REST gate: one HTTP call at a time, others wait."""
+        from .rest_buckets import RestGate
+
+        return RestGate(self._rest_manager_for(runtime))
+
+    def _on_rest_global_cooldown(self, seconds: float) -> None:
+        """A GLOBAL 429 raises EVERY account's lane spacing for the cooldown."""
+        for runtime in self._accounts.values():
+            if runtime.engine is not None and runtime.engine.prefixrate < seconds:
+                runtime.engine.set_prefixrate(seconds)
+                self._logger.warning(
+                    "global REST cooldown: %s lane spacing raised to %.1fs",
+                    runtime.config.name, seconds,
+                )
 
     async def stop_account(self, name: str) -> AccountRuntime:
         """Disable plugins (on_disable) and disconnect one account.
@@ -318,6 +380,7 @@ class AccountContainer:
 
     async def start_all(self) -> None:
         """Start every registered account; collects errors into logs."""
+        self.start_scheduler()
         for name in self.account_names():
             try:
                 await self.start_account(name)
@@ -326,6 +389,7 @@ class AccountContainer:
 
     async def stop_all(self) -> None:
         """Graceful shutdown: stop all accounts (used on CTRL-C / 'quit')."""
+        await self.stop_scheduler()
         for name in self.account_names():
             try:
                 await self.stop_account(name)

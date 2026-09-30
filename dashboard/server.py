@@ -11,6 +11,14 @@ Routes:
   POST /api/plugin     {account, plugin, enabled} -> {ok, data}
   POST /api/limit      {action, rule, account?}   -> {ok, data}
   POST /api/clear-limit {account, action}         -> {ok, data}
+  GET  /api/scheduler         -> {ok, data}
+  POST /api/job-add       {name, account, channel_id, command, interval, jitter?} -> {ok, data}
+  POST /api/job-delete    {name}            -> {ok, data}
+  POST /api/job-toggle    {name, enabled}   -> {ok, data}
+  GET  /api/profiles            -> {ok, data}
+  POST /api/profile-apply  {profile, account} -> {ok, data}
+  GET  /api/rest?account=X      -> {ok, data}   (API-only: Discord REST bucket state)
+  GET  /api/cache?account=X     -> {ok, data}   (API-only: account Discord cache snapshot)
   GET  /ws[?token=...]        -> WebSocket; server pushes:
           {"type":"stats", "accounts":..., "limits":...}   every second
           {"type":"log", "line":"..."}                     live log tail
@@ -24,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import queue as thread_queue
 import socket
 import threading
@@ -356,6 +365,58 @@ class DashboardServer:
                 limit = int((query.get("limit") or ["100"])[0])
                 account = (query.get("account") or [None])[0]
                 return 200, {"ok": True, "data": api.audit(limit=limit, account=account)}
+            if (method, path) == ("GET", "/api/scheduler"):
+                return 200, {"ok": True, "data": await api.jobs()}
+            if (method, path) == ("POST", "/api/job-add"):
+                # channel_id arrives as a string and ControlAPI int()s it
+                name = require_str(body, "name", path)
+                account = require_str(body, "account", path)
+                channel_id = require_str(body, "channel_id", path)
+                command = require_str(body, "command", path)
+                interval = require_number(body, "interval", path)
+                if not math.isfinite(interval) or interval <= 0:
+                    # NaN slips past the scheduler's < MIN_INTERVAL check
+                    raise ValueError(f"field 'interval' in POST {path} must be a positive number")
+                payload = {
+                    "name": name, "account": account, "channel_id": channel_id,
+                    "command": command, "interval": interval,
+                }
+                if "jitter" in body:
+                    jitter = require_number(body, "jitter", path)
+                    if not math.isfinite(jitter) or jitter < 0:
+                        raise ValueError(f"field 'jitter' in POST {path} must be a number >= 0")
+                    payload["jitter"] = jitter
+                return 200, {"ok": True, "data": await api.add_job(payload)}
+            if (method, path) == ("POST", "/api/job-delete"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.delete_job(require_str(body, "name", path)),
+                }
+            if (method, path) == ("POST", "/api/job-toggle"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.set_job_enabled(
+                        require_str(body, "name", path),
+                        parse_json_bool(require_field(body, "enabled", path), "enabled"),
+                    ),
+                }
+            if (method, path) == ("GET", "/api/profiles"):
+                return 200, {"ok": True, "data": await api.profiles()}
+            if (method, path) == ("POST", "/api/profile-apply"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.apply_profile(
+                        require_str(body, "profile", path),
+                        require_str(body, "account", path),
+                    ),
+                }
+            if (method, path) in (("GET", "/api/rest"), ("GET", "/api/cache")):
+                account = (query.get("account") or [""])[0]
+                if not account:
+                    return 400, {"ok": False, "error": "missing ?account="}
+                data = await (api.rest_status(account) if path == "/api/rest"
+                              else api.cache_status(account))
+                return 200, {"ok": True, "data": data}
             if (method, path) == ("POST", "/api/account"):
                 return 200, {"ok": True, "data": await api.add_account(body)}
             if (method, path) == ("POST", "/api/account-remove"):
@@ -534,6 +595,14 @@ def _make_handler(server: "DashboardServer") -> type:
                     self._respond(400, {"ok": False, "error": "invalid Content-Length header"})
                     return
                 if length > MAX_BODY_BYTES:
+                    # drain a bounded amount so the client's send completes,
+                    # then reject (a bare early-close breaks the client's write)
+                    remaining = length
+                    while remaining > 0 and remaining <= 16 * MAX_BODY_BYTES:
+                        chunk = self.rfile.read(min(remaining, 65536))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
                     self._respond(413, {"ok": False, "error": f"request body too large (> {MAX_BODY_BYTES} bytes)"})
                     return
                 if length:

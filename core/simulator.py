@@ -167,6 +167,38 @@ class FakeClient:
         self.on_message: Optional[Callable[[DiscordMessage], None]] = None
         self.on_disconnect: Optional[Callable[[str], None]] = None
         self.connected = False
+        self._rate_counters: Dict[int, int] = {}
+
+    def rate_feedback_for(self, channel_id: Optional[int]) -> Any:
+        """Simulated Discord headers for the channel just used (REST intake).
+
+        A 5-cap bucket per channel that drains then refills — enough to
+        exercise RestBucketManager's header intake offline.
+        """
+        from core.rest_buckets import RestFeedback
+
+        counter = self._rate_counters.get(channel_id, 0) + 1
+        self._rate_counters[channel_id] = counter
+        remaining = max(0, 4 - (counter % 5))
+        return RestFeedback(
+            status=200,
+            headers={
+                "X-RateLimit-Limit": "5",
+                "X-RateLimit-Remaining": str(remaining),
+                "X-RateLimit-Reset-After": "1.0",
+                "X-RateLimit-Bucket": f"sim-{channel_id}",
+                "X-RateLimit-Scope": "user",
+            },
+        )
+
+    def delete_channel(self, channel_id: int) -> bool:
+        """Simulate a channel deletion: world forgets it, sends now raise."""
+        if channel_id not in self._world.channels:
+            return False
+        self._world.channels.pop(channel_id, None)
+        self._world.dm_channels.pop(channel_id, None)
+        self._world.history.pop(channel_id, None)
+        return True
 
     # ------------------------------------------------------------ lifecycle
     async def connect(self) -> None:
