@@ -237,6 +237,7 @@ class SimulatedCluster:
 
         loader = PluginLoader(plugin_dir)
         loader.discover()
+        self.loader = loader
         self.settings = SettingsStore(global_settings=demo_settings)
         self.limiter = RateLimiterService(
             default_rules=rate_rules or {"message": "2000/0.05s", "dm": "2000/0.05s"}

@@ -224,6 +224,13 @@ function esc(s) { const d = document.createElement("span"); d.textContent = Stri
 function btn(label, onclick) { const b = document.createElement("button"); b.textContent = label; b.onclick = onclick; return b; }
 
 $("savetoken").onclick = () => { localStorage.setItem("dash_token", $("token").value.trim()); location.reload(); };
+// demo/share links: http://host:port/?token=... seeds localStorage then cleans the URL
+const qtoken = new URLSearchParams(location.search).get("token");
+if (qtoken) {
+  localStorage.setItem("dash_token", qtoken);
+  $("token").value = qtoken;
+  history.replaceState(null, "", location.pathname);
+}
 $("token").value = token();
 renderPlugins().then(refresh).catch(() => {});
 connectWS();
