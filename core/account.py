@@ -90,6 +90,7 @@ class AccountConfig:
     rate_rules: Dict[str, str] = field(default_factory=dict)           # action->'n/secs'
     sync_group: Optional[str] = None         # accounts in the same group act in sync
     reconnect: Optional[Dict[str, Any]] = None  # ReconnectPolicy overrides
+    send_engine: Optional[Dict[str, Any]] = None  # SendPolicy overrides (FarmLite lane)
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not NAME_RE.match(self.name or ""):
@@ -109,7 +110,7 @@ class AccountConfig:
         raw_roles = data.get("roles")
         if raw_roles is not None and not isinstance(raw_roles, list):
             raise AccountError(f"'roles' must be a list, got {type(raw_roles).__name__}")
-        allowed = {"name", "token_ref", "enabled", "plugins", "roles", "settings", "rate_rules", "sync_group", "reconnect"}
+        allowed = {"name", "token_ref", "enabled", "plugins", "roles", "settings", "rate_rules", "sync_group", "reconnect", "send_engine"}
         unknown = set(data) - allowed
         if unknown:
             raise AccountError(f"unknown account config keys: {sorted(unknown)}")
@@ -123,6 +124,7 @@ class AccountConfig:
             rate_rules=data.get("rate_rules") or {},
             sync_group=data.get("sync_group"),
             reconnect=data.get("reconnect"),
+            send_engine=data.get("send_engine"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -137,6 +139,7 @@ class AccountConfig:
             "sync_group": self.sync_group,
             "reconnect": self.reconnect,
             "roles": self.roles,
+            "send_engine": self.send_engine,
         }
 
     def effective_token_ref(self) -> str:
@@ -172,12 +175,14 @@ class AccountSession:
         limiter: RateLimiterService,
         logger: Optional[logging.Logger] = None,
         audit: Optional[Any] = None,
+        engine: Optional[Any] = None,
     ) -> None:
         self.config = config
         self._client = client
         self._bus = bus
         self._limiter = limiter
         self._audit = audit
+        self._engine = engine
         self._logger = logger or logging.getLogger(f"slaughtermudae.account.{config.name}")
         self.status = AccountStatus.CREATED
         self.last_error: Optional[str] = None
@@ -256,22 +261,67 @@ class AccountSession:
     async def send_message(
         self, channel_id: int, content: str, priority: Priority | int = Priority.NORMAL
     ) -> DiscordMessage:
-        """Rate-limited message send (action='message'), audited when enabled."""
+        """Rate-limited message send (action='message'), audited when enabled.
+
+        SEND ENGINE: when the account has an engine attached, the actual
+        send runs inside the serialized lane — two requests from this
+        account can never be in flight simultaneously (FarmLite concept).
+        """
+        if self._engine is not None:
+            timing: Dict[str, float] = {}
+            submitted = time.perf_counter()
+
+            def _factory():
+                # lane just picked us up -> this IS the queue wait
+                timing["engine_wait"] = time.perf_counter() - submitted
+                return self._do_send_message(channel_id, content, priority, timing=timing)
+
+            return await self._engine.run(None, _factory, priority=priority)
+        return await self._do_send_message(channel_id, content, priority)
+
+    async def _do_send_message(
+        self,
+        channel_id: int,
+        content: str,
+        priority: Priority | int = Priority.NORMAL,
+        timing: Optional[Dict[str, float]] = None,
+    ) -> DiscordMessage:
         started = time.perf_counter()
         grant = await self._limiter.acquire("message", self.name, priority)
         sent = await self._client.send_message(channel_id, content)
-        self._audit_out("message", channel_id, content, grant, started)
+        self._audit_out("message", channel_id, content, grant, started, timing=timing)
         return sent
 
     async def send_dm(
         self, user_id: int, content: str, priority: Priority | int = Priority.NORMAL
     ) -> DiscordMessage:
-        """Rate-limited DM send (action='dm'); opens the DM channel if needed."""
+        """Rate-limited DM send (action='dm'); serialized like messages."""
+        if self._engine is not None:
+            timing: Dict[str, float] = {}
+            submitted = time.perf_counter()
+
+            def _factory():
+                timing["engine_wait"] = time.perf_counter() - submitted
+                return self._do_send_dm(user_id, content, priority, timing=timing)
+
+            return await self._engine.run(None, _factory, priority=priority)
+        return await self._do_send_dm(user_id, content, priority)
+
+    async def _do_send_dm(
+        self,
+        user_id: int,
+        content: str,
+        priority: Priority | int = Priority.NORMAL,
+        timing: Optional[Dict[str, float]] = None,
+    ) -> DiscordMessage:
         started = time.perf_counter()
         grant = await self._limiter.acquire("dm", self.name, priority)
         channel_id = await self._client.open_dm(user_id)
         sent = await self._client.send_message(channel_id, content)
-        self._audit_out("dm", channel_id, content, grant, started, note=f"to user {user_id}")
+        self._audit_out(
+            "dm", channel_id, content, grant, started,
+            note=f"to user {user_id}", timing=timing,
+        )
         return sent
 
     async def fetch_user(self, user_id: int) -> Any:
@@ -294,13 +344,26 @@ class AccountSession:
 
     # -------------------------------------------------------------- internal
     def _audit_out(
-        self, action: str, channel_id: int, content: str, grant: Any, started: float, note: str = ""
+        self,
+        action: str,
+        channel_id: int,
+        content: str,
+        grant: Any,
+        started: float,
+        note: str = "",
+        timing: Optional[Dict[str, float]] = None,
     ) -> None:
-        """Record an outbound interaction with its limiter wait + applied delay."""
+        """Record an outbound interaction with its limiter wait + applied delay.
+
+        The send-engine queue wait (when a lane is attached) is captured at
+        record time — appending after the send raced with inbound entries.
+        """
         if self._audit is None or grant is None:
             return
         delay_ms = getattr(grant, "delay_applied", 0.0) * 1000.0
         wait_ms = max(0.0, (time.perf_counter() - started) * 1000.0 - delay_ms)
+        if timing is not None and "engine_wait" in timing:
+            note = f"{note} engine_wait={round(timing['engine_wait'] * 1000.0)}ms".strip()
         try:
             self._audit.record(
                 account=self.name, direction="out", action=action,

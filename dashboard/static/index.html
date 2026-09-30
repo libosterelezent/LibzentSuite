@@ -337,6 +337,39 @@ function renderLimits(limits) {
   hint.className = "dim mono";
   hint.textContent = "safety floor: rules below 1.5s/action are rejected — pick a bot above to override just that one";
   root.appendChild(hint);
+  // serialized send lane (FarmLite prefixrate): one request in flight per bot
+  const lane = document.createElement("div"); lane.className = "card";
+  lane.innerHTML = '<div class="row"><span class="name">send lane</span>' +
+    '<span class="dim mono">one request in flight per account — spacing (prefixrate) is extra safety on top of the rules</span></div>';
+  const laneRow = document.createElement("div"); laneRow.className = "rule-row";
+  const laneAcct = document.createElement("select");
+  for (const a of accountNames) laneAcct.append(new Option(a, a));
+  const laneRate = document.createElement("input"); laneRate.size = 6; laneRate.placeholder = "1.5 (0 = pause)";
+  const laneGet = (name) => {
+    const acct = (lastStats ? lastStats.accounts : []).find((a) => a.name === name) || {};
+    return acct.engine || {};
+  };
+  const laneInfo = document.createElement("span"); laneInfo.className = "dim mono";
+  const refreshLane = () => {
+    const info = laneGet(laneAcct.value);
+    laneInfo.textContent = info.enabled
+      ? `running · prefixrate ${Number(info.prefixrate).toFixed(2)}s${info.paused ? " · PAUSED" : ""} · queued ${info.queued} · executed ${info.executed}`
+      : "off (sends bypass the lane)";
+  };
+  laneAcct.onchange = refreshLane; refreshLane();
+  const laneOn = btn("enable", () => post("/api/engine", {account: laneAcct.value, enabled: true})
+    .then(refresh).catch(showErr));
+  const laneOff = btn("disable", () => post("/api/engine", {account: laneAcct.value, enabled: false})
+    .then(refresh).catch(showErr));
+  const laneSet = btn("set spacing", () => {
+    const rate = parseFloat(laneRate.value);
+    if (!Number.isFinite(rate) || rate < 0) { showErr("prefixrate must be a number >= 0 (0 pauses the lane)"); return; }
+    post("/api/engine", {account: laneAcct.value, enabled: true, prefixrate: rate})
+      .then(refresh).catch(showErr);
+  });
+  laneRow.append(laneAcct, laneRate, laneOn, laneOff, laneSet, laneInfo);
+  lane.appendChild(laneRow);
+  root.appendChild(lane);
 }
 
 function renderRoles(roles) {

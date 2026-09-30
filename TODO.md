@@ -85,6 +85,10 @@ management interfaces (dashboard + terminal) with full settings parity.
       terminal UX): wrong-action bool coercions eliminated, transactional
       add/remove, sane field-level messages everywhere, error visibility in
       status/dashboard. Full findings: KB_21.
+- [x] v2.3 — SendEngine: FarmLite's serialized per-account send lane
+      (prefixrate spacing, pause-at-0, named coalescing, priority) — a
+      single account can never have two requests in flight simultaneously;
+      CLI/dashboard parity + persistence; 15 tests. Docs: KB_22.
 
 ## Backlog (nice-to-have, not requested)
 

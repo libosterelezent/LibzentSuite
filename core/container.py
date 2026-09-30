@@ -19,6 +19,7 @@ from .events import Event, EventBus, MessageEvent
 from .plugin_base import PluginBase, PluginContext
 from .plugin_loader import PluginLoader
 from .rate_limiter import RateLimiterService
+from .send_engine import SendEngine, SendPolicy
 from .settings import SettingsStore
 
 LOG = logging.getLogger("slaughtermudae.container")
@@ -52,6 +53,8 @@ class AccountRuntime:
     #: set by stop_account; tells the supervisor to stand down
     stop_requested: bool = False
     supervisor: Optional[asyncio.Task] = None
+    #: serialized send lane (FarmLite prefixrate engine); None = bypass
+    engine: Optional[SendEngine] = None
     #: ERROR AUDIT FIX: why the last START failed (factory errors happen
     #: before a session exists, so session.last_error can't hold them)
     last_error: Optional[str] = None
@@ -68,6 +71,8 @@ class AccountRuntime:
             "status": status,
             "user_id": self.session.user_id if self.session else None,
             "last_error": (self.session.last_error if self.session else None) or self.last_error,
+            # serialized send lane state (FarmLite prefixrate engine)
+            "engine": self.engine.stats() if self.engine else {"enabled": False},
             "sync_group": self.config.sync_group,
             # AUDIT FIX: the dashboard role chips read this key
             "roles": list(self.config.roles),
@@ -100,6 +105,7 @@ class AccountContainer:
         state: Optional[Any] = None,
         roles: Optional[Any] = None,
         audit: Optional[Any] = None,
+        send_policy: Optional[SendPolicy] = None,
     ) -> None:
         self._credentials = credentials
         self._settings = settings
@@ -115,6 +121,8 @@ class AccountContainer:
         self._roles = roles
         #: core.audit.AuditRecorder — interaction trail (None = disabled)
         self._audit = audit
+        #: core.send_engine.SendPolicy — serialized per-account lanes (FarmLite)
+        self._send_policy = send_policy or SendPolicy()
         self._accounts: Dict[str, AccountRuntime] = {}
         self._background: set = set()  # strong refs for fire-and-forget tasks
         self._bus.subscribe(Event, self._dispatch)
@@ -142,6 +150,41 @@ class AccountContainer:
     def status(self) -> List[Dict[str, Any]]:
         """JSON-safe status of every account."""
         return [self._accounts[name].status_dict() for name in sorted(self._accounts)]
+
+    def _spawn_engine(self, runtime: AccountRuntime) -> Optional[SendEngine]:
+        """Create + start the account's serialized send lane when enabled.
+
+        Policy precedence: runtime-tuned DB value (kv 'engine:<account>') >
+        account config 'send_engine' block > container default SendPolicy.
+        """
+        import json as _json
+
+        policy = (
+            SendPolicy.from_dict(runtime.config.send_engine)
+            if runtime.config.send_engine is not None
+            else self._send_policy
+        )
+        if self._state is not None:
+            stored = self._state.kv_get(f"engine:{runtime.config.name}")
+            if stored:
+                try:
+                    policy = SendPolicy.from_dict(_json.loads(stored))
+                except (ValueError, _json.JSONDecodeError):
+                    self._logger.warning("ignoring corrupt engine policy for %s", runtime.config.name)
+        runtime.engine = None
+        if not policy.enabled:
+            return None
+        engine = SendEngine(runtime.config.name, prefixrate=policy.prefixrate).start()
+        runtime.engine = engine
+        self._logger.info(
+            "send engine for %s: prefixrate=%.2fs", runtime.config.name, policy.prefixrate
+        )
+        return engine
+
+    async def _shutdown_engine(self, runtime: AccountRuntime) -> None:
+        if runtime.engine is not None:
+            await runtime.engine.stop()
+            runtime.engine = None
 
     # -------------------------------------------------------------- accounts
     def add_account(self, config: AccountConfig) -> AccountRuntime:
@@ -224,6 +267,7 @@ class AccountContainer:
             runtime.config, client, self._bus, self._limiter,
             logging.getLogger(f"slaughtermudae.account.{name}"),
             audit=self._audit,
+            engine=self._spawn_engine(runtime),
         )
         runtime.session = session  # assigned FIRST so failures surface in status()
         await session.start()
@@ -269,6 +313,7 @@ class AccountContainer:
                         self._logger.exception("on_disable failed for %s:%s", name, prt.name)
         if runtime.session is not None:
             await runtime.session.stop()
+        await self._shutdown_engine(runtime)
         return runtime
 
     async def start_all(self) -> None:

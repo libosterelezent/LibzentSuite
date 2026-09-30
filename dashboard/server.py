@@ -419,6 +419,24 @@ class DashboardServer:
                         parse_json_bool(require_field(body, "assigned", path), "assigned"),
                     ),
                 }
+            if (method, path) == ("POST", "/api/engine"):
+                account = require_str(body, "account", path)
+                prefixrate = body.get("prefixrate")
+                if prefixrate is not None:
+                    try:
+                        prefixrate = float(prefixrate)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"field 'prefixrate' in POST {path} must be a number"
+                        ) from exc
+                return 200, {
+                    "ok": True,
+                    "data": await api.set_engine(
+                        account,
+                        parse_json_bool(require_field(body, "enabled", path), "enabled"),
+                        prefixrate,
+                    ),
+                }
             if (method, path) == ("POST", "/api/start") or (method, path) == ("POST", "/api/stop"):
                 account = body.get("account")
                 if account is not None and not isinstance(account, str):

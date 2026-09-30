@@ -270,6 +270,7 @@ class SimulatedCluster:
         limiter: Optional[RateLimiterService] = None,
         audit: Optional[Any] = None,
         roles: Optional[Any] = None,
+        send_policy: Optional[Any] = None,
     ) -> None:
         # demo pacing: seconds, not minutes (production values live in config/).
         # dm_read_timeout is generous so runtime delay ranges set from the
@@ -314,6 +315,7 @@ class SimulatedCluster:
             reconnect_policy=ReconnectPolicy(enabled=False),
             roles=roles,
             audit=audit,
+            send_policy=send_policy,
         )
         # alpha runs every discovered plugin; beta idles in the group — the
         # account x plugin matrix is per-account config (independent use)

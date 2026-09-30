@@ -30,6 +30,7 @@ from core.audit import AuditRecorder
 from core.credentials import Credentials
 from core.logging_setup import attach_ring_buffer, setup_logging
 from core.roles import RoleRegistry
+from core.send_engine import SendPolicy
 from core.simulator import SYNTHETIC_GUILD_CHANNEL, SimulatedCluster
 from dashboard.server import DashboardServer
 
@@ -55,6 +56,8 @@ async def amain(args: argparse.Namespace) -> None:
     cluster = SimulatedCluster(
         mudae_bot_id=mudae_id, plugin_dir=str(ROOT / "plugins"),
         audit=AuditRecorder(),  # live interaction trail for the Audit page
+        # demo: serialized lane with a watchable 0.6s spacing (0 = paused)
+        send_policy=SendPolicy(enabled=True, prefixrate=0.6),
     )
     roles = RoleRegistry()  # in-memory registry for the demo
     roles.set_role("copier", ["soulcopy"], "demo role: soul copying duty")

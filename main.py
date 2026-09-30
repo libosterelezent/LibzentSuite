@@ -25,6 +25,7 @@ from core.logging_setup import attach_ring_buffer, setup_logging
 from core.plugin_loader import PluginLoader
 from core.rate_limiter import RateLimiterService
 from core.roles import RoleRegistry
+from core.send_engine import SendPolicy
 from core.settings import SettingsStore
 
 
@@ -66,6 +67,9 @@ def build_live_container(env_file: str, config_dir: str, db_path: str) -> tuple[
         state=database,
         roles=roles,
         audit=audit,
+        # FarmLite send lane: serialize per-account sends (never concurrent),
+        # spaced by the prefixrate; tunable at runtime via CLI/dashboard
+        send_policy=SendPolicy(enabled=True, prefixrate=1.5),
     )
     for account in config.accounts:
         container.add_account(account)

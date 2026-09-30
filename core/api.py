@@ -312,6 +312,49 @@ class ControlAPI:
             self._state.upsert_account(runtime.config)
         return {"account": account, "roles": roles}
 
+    # ------------------------------------------------------------- send engine
+    async def set_engine(
+        self, account: str, enabled: bool, prefixrate: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """Toggle/tune the account's serialized send lane (FarmLite prefixrate).
+
+        enabled=True attaches (or retunes) the engine — prefixrate 0 PAUSES
+        the lane (tasks wait) per FarmLite semantics. Persisted in the DB so
+        the policy survives restarts. Shared by CLI + dashboard.
+        """
+        import json as _json
+
+        from .send_engine import SendEngine
+
+        runtime = self._container._get(account)
+        effective = prefixrate
+        if effective is None:
+            effective = (
+                runtime.engine.prefixrate if runtime.engine is not None
+                else self._container._send_policy.prefixrate
+            )
+        effective = float(effective)
+        if effective < 0:
+            raise ValueError(f"prefixrate must be >= 0, got {effective}")
+        if enabled:
+            if runtime.engine is None:
+                runtime.engine = SendEngine(account, prefixrate=effective).start()
+                if runtime.session is not None:
+                    runtime.session._engine = runtime.engine
+            elif prefixrate is not None:
+                runtime.engine.set_prefixrate(effective)
+        else:
+            await self._container._shutdown_engine(runtime)
+            if runtime.session is not None:
+                runtime.session._engine = None
+        if self._state is not None:
+            self._state.kv_set(
+                f"engine:{account}", _json.dumps({"enabled": enabled, "prefixrate": effective})
+            )
+        return runtime.engine.stats() if runtime.engine else {
+            "account": account, "enabled": False, "running": False,
+        }
+
     # ----------------------------------------------------------------- audit
     def audit(self, limit: int = 100, account: Optional[str] = None) -> List[Dict[str, Any]]:
         """Interaction history — DB-backed when available, else the ring."""

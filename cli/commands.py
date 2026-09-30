@@ -44,6 +44,8 @@ HELP = {
     "clear-limit": ("<account> <action>", "remove a per-bot override"),
     "set-delay": ("<action> <min> <max> [account]", "human-like delay range, e.g. set-delay message 0.80 2.40 [alpha]"),
     "clear-delay": ("<action> [account]", "remove a delay range"),
+    "engine": ("<on|off> [account]", "toggle the serialized send lane (no concurrent sends)"),
+    "set-prefixrate": ("<seconds> [account]", "lane spacing; 0 PAUSES the lane (FarmLite)"),
     "warnings": ("", "safety review of current configuration"),
     "roles": ("", "defined roles and the plugins they permit"),
     "role-add": ("<name> <plugin...>", "create/update a role"),
@@ -159,6 +161,45 @@ async def run_command(api: ControlAPI, line: str) -> Optional[str]:
         if len(args) == 2:
             return str(await api.clear_delay(args[0], args[1]))
         return str(await api.clear_delay(_need(args, 1)))
+    if cmd == "engine":
+        if not args:
+            raise UsageError(f"usage: engine {HELP['engine'][0]}")
+        flag = args[0].lower()
+        if flag not in ("on", "off"):
+            raise UsageError(f"engine expects 'on' or 'off', got {flag!r}")
+        account = args[1] if len(args) > 1 else None
+        if account is None:
+            targets = [a["name"] for a in (await api.status())["accounts"]]
+        else:
+            targets = [account]
+        lines = []
+        for name in targets:
+            lines.append(str(await api.set_engine(name, flag == "on")))
+        return "\n".join(lines)
+    if cmd == "set-prefixrate":
+        if not args:
+            raise UsageError(f"usage: set-prefixrate {HELP['set-prefixrate'][0]}")
+        seconds = args[0]
+        try:
+            rate = float(seconds)
+        except ValueError as exc:
+            raise UsageError(f"set-prefixrate: {seconds!r} is not a number") from exc
+        account = args[1] if len(args) > 1 else None
+        if account is None:
+            targets = [a["name"] for a in (await api.status())["accounts"]]
+        else:
+            targets = [account]
+        lines = []
+        for name in targets:
+            engine_info = next(
+                a.get("engine") or {} for a in (await api.status())["accounts"] if a["name"] == name
+            )
+            if not engine_info.get("running"):
+                raise UsageError(
+                    f"account {name!r} has no running send engine — run 'engine on {name}' first"
+                )
+            lines.append(str(await api.set_engine(name, True, prefixrate=rate)))
+        return "\n".join(lines)
     if cmd == "warnings":
         return "\n".join(api.format_warnings_text())
     if cmd == "roles":

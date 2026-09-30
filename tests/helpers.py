@@ -40,6 +40,7 @@ class Harness:
         state: Optional = None,
         roles: Optional = None,
         audit: Optional = None,
+        send_policy: Optional = None,
     ) -> None:
         self.mudae_id = mudae_id
         self.owner_id = owner_id
@@ -74,6 +75,7 @@ class Harness:
             state=state,
             roles=roles,
             audit=audit,
+            send_policy=send_policy,
         )
         for name in accounts:
             self.container.add_account(AccountConfig(name=name, sync_group="grp"))
