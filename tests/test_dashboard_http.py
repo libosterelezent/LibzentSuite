@@ -114,6 +114,13 @@ class TestDashboardHTTP(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(len(payload["data"]["accounts"]), 2)
 
+    async def test_status_accepts_query_param_token(self) -> None:
+        status, body = await asyncio.to_thread(
+            http_get, f"{self.base}/api/status?token={TOKEN}", None
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["ok"])
+
     async def test_account_plugins_route(self) -> None:
         status, body = await asyncio.to_thread(
             http_get, f"{self.base}/api/account-plugins?account=alpha"

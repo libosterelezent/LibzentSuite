@@ -291,10 +291,11 @@ def _make_handler(server: "DashboardServer") -> type:
     """Build the request-handler class closing over the server instance."""
 
     class Handler(BaseHTTPRequestHandler):
-        def _authorized(self, token: Optional[str]) -> bool:
+        def _authorized(self, provided: Optional[str]) -> bool:
+            """Accept the token via X-Dashboard-Token header OR ?token= query."""
             if server._token is None:
                 return True
-            return token is not None and token == server._token
+            return provided is not None and provided.strip() == server._token
 
         def _respond(self, status: int, payload: Dict[str, Any], content_type: str = "application/json") -> None:
             if content_type == "application/json":
@@ -320,8 +321,13 @@ def _make_handler(server: "DashboardServer") -> type:
                 else:
                     self._respond(404, {"ok": False, "error": "index.html missing"}, )
                 return
-            if not self._authorized(self.headers.get("X-Dashboard-Token")):
-                self._respond(401, {"ok": False, "error": "bad or missing X-Dashboard-Token"})
+            if not self._authorized(
+                self.headers.get("X-Dashboard-Token") or (query.get("token") or [None])[0]
+            ):
+                self._respond(
+                    401,
+                    {"ok": False, "error": "bad or missing token (X-Dashboard-Token header or ?token=)"},
+                )
                 return
             body: Dict[str, Any] = {}
             if method == "POST":

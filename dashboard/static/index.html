@@ -92,7 +92,23 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const token = () => localStorage.getItem("dash_token") || "";
+// safe storage: sandboxed/embedded browsers may block localStorage entirely —
+// fall back to an in-memory store so the page never crashes over it
+const store = (() => {
+  try {
+    const t = window.localStorage;
+    t.setItem("__probe", "1"); t.removeItem("__probe");
+    return t;
+  } catch {
+    const mem = {};
+    return {
+      getItem: (k) => (k in mem ? mem[k] : null),
+      setItem: (k, v) => { mem[k] = String(v); },
+      removeItem: (k) => { delete mem[k]; },
+    };
+  }
+})();
+const token = () => store.getItem("dash_token") || "";
 let lastStats = null;
 
 function api(path, opts = {}) {
@@ -223,12 +239,13 @@ function showErr(e) { $("errors").textContent = String(e && e.message || e); }
 function esc(s) { const d = document.createElement("span"); d.textContent = String(s); return d.innerHTML; }
 function btn(label, onclick) { const b = document.createElement("button"); b.textContent = label; b.onclick = onclick; return b; }
 
-$("savetoken").onclick = () => { localStorage.setItem("dash_token", $("token").value.trim()); location.reload(); };
-// demo/share links: http://host:port/?token=... seeds localStorage then cleans the URL
+$("savetoken").onclick = () => { store.setItem("dash_token", $("token").value.trim()); location.reload(); };
+$("token").addEventListener("keydown", (e) => { if (e.key === "Enter") $("savetoken").click(); });
+// demo/share links: http://host:port/?token=... seeds the store then cleans the URL
 const qtoken = new URLSearchParams(location.search).get("token");
 if (qtoken) {
-  localStorage.setItem("dash_token", qtoken);
-  $("token").value = qtoken;
+  store.setItem("dash_token", qtoken.trim());
+  $("token").value = qtoken.trim();
   history.replaceState(null, "", location.pathname);
 }
 $("token").value = token();
