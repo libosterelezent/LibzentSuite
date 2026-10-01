@@ -103,10 +103,16 @@ class TaskCompleted(Event):
 
 @dataclass
 class TaskFailed(Event):
-    """A task failed permanently (retries exhausted or non-retryable)."""
+    """A task failed permanently (retries exhausted or non-retryable).
+
+    ``error_kind`` is the exception CLASS NAME (e.g. "TargetGone") so the
+    services layer can faithfully re-raise FlowBlocked subclasses to the
+    waiting plugin — the flow-abort contract must survive the task-ack seam.
+    """
 
     task_id: int = 0
     error: str = ""
+    error_kind: str = ""
 
 
 @dataclass

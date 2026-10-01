@@ -74,6 +74,28 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(pending, 1.0)
         self.assertIn("channel gone", str(ctx.exception))
 
+    async def test_flow_blocked_survives_the_ack_seam(self) -> None:
+        """REGRESSION (channel_gone debug round): a task failing with
+        TargetGone must re-raise TargetGone at the waiting plugin — NOT an
+        opaque SchedulerError — so the flow-abort contract (soulcopy's
+        catch-all) actually fires."""
+        from core.errors import TargetGone
+
+        bus, scheduler = EventBus(), FakeScheduler()
+        services = make_services(bus=bus, scheduler=scheduler)
+        pending = asyncio.create_task(services.send_message(100, "hi"))
+        await asyncio.sleep(0.02)
+        task_id = scheduler.submitted[0].id
+        await bus.publish(TaskFailed(
+            account="alpha", task_id=task_id,
+            error="TargetGone: [] flow blocked: channel 500 vanished",
+            error_kind="TargetGone",
+        ))
+        with self.assertRaises(TargetGone) as ctx:
+            await asyncio.wait_for(pending, 1.0)
+        self.assertEqual(ctx.exception.account, "alpha")
+        self.assertIn("channel 500 vanished", ctx.exception.reason)
+
     async def test_send_message_raises_on_task_cancelled(self) -> None:
         bus, scheduler = EventBus(), FakeScheduler()
         services = make_services(bus=bus, scheduler=scheduler)

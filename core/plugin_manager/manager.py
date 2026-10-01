@@ -323,7 +323,7 @@ class PluginManager:
                 runtime.last_error = f"{type(event).__name__}: {type(exc).__name__}: {exc}"
                 self._logger.exception(
                     "plugin %s crashed handling %s on %s",
-                    runtime.name, type(event).name, event.account,
+                    runtime.name, type(event).__name__, event.account,
                 )
 
     # ------------------------------------------------------------ internals

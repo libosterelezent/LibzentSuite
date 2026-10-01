@@ -31,11 +31,20 @@ DESIGN — how sends await task completion (the lead asked for this):
 from __future__ import annotations
 
 import asyncio
+import re
 import logging
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 
-from ..errors import AccountError, SchedulerError
+from ..errors import (
+    AccessDenied,
+    AccountError,
+    CacheInvalid,
+    FetchRequired,
+    FlowBlocked,
+    SchedulerError,
+    TargetGone,
+)
 from ..event_bus import (
     Event,
     EventBus,
@@ -67,12 +76,40 @@ class TaskAckRegistry:
         if future is not None and not future.done():
             future.set_result(event.summary)
 
+    #: FlowBlocked family, reconstructed across the task-ack seam so the
+    #: plugin-side catch (soulcopy's flow-abort contract) actually fires
+    _FLOW_CLASSES = {
+        "FlowBlocked": FlowBlocked,
+        "CacheInvalid": CacheInvalid,
+        "TargetGone": TargetGone,
+        "AccessDenied": AccessDenied,
+        "FetchRequired": FetchRequired,
+    }
+
     def _on_failed(self, event: TaskFailed) -> None:
         future = self._futures.pop(event.task_id, None)
-        if future is not None and not future.done():
+        if future is None or future.done():
+            return
+        blocked = self._FLOW_CLASSES.get(getattr(event, "error_kind", "") or "")
+        if blocked is not None:
+            future.set_exception(
+                blocked(event.account, self._flow_reason(event.error))
+            )
+        else:
             future.set_exception(
                 SchedulerError(f"task {event.task_id} failed: {event.error}")
             )
+
+    @staticmethod
+    def _flow_reason(error: str) -> str:
+        """'"TargetGone: [alpha] flow blocked: channel 500 vanished"' -> reason."""
+        text = error or ""
+        # drop the leading "ClassName: " (the scheduler's error format)
+        if ": " in text:
+            text = text.split(": ", 1)[1]
+        # drop the "[account] flow blocked: " wrapper FlowBlocked adds
+        match = re.match(r"^\[[^\]]*\] flow blocked: (.*)$", text, flags=re.DOTALL)
+        return match.group(1) if match else text
 
     def _on_cancelled(self, event: TaskCancelled) -> None:
         future = self._futures.pop(event.task_id, None)

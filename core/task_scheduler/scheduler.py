@@ -50,6 +50,7 @@ through the ``_sleep`` seam (deterministic tests) and are capped at
 from __future__ import annotations
 
 import asyncio
+import re
 import heapq
 import inspect
 import itertools
@@ -717,6 +718,19 @@ class TaskScheduler:
             self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
             raise
 
+    @staticmethod
+    def _error_kind(error: str) -> str:
+        """Exception CLASS NAME from an error string, when it has the
+        ``"ClassName: message"`` shape every failure site produces.
+
+        Used by the services layer to faithfully re-raise FlowBlocked
+        subclasses across the task-ack seam (the flow-abort contract must
+        survive: a plugin waiting on send_message receives TargetGone, not
+        an opaque SchedulerError). "" when the shape doesn't match.
+        """
+        match = re.match(r"^([A-Z][A-Za-z0-9_]+): ", error)
+        return match.group(1) if match else ""
+
     def _finish(
         self,
         task: Task,
@@ -782,7 +796,11 @@ class TaskScheduler:
                 )
             )
         elif status in (STATUS_FAILED, STATUS_TIMED_OUT):
-            self._emit(TaskFailed(account=task.account, task_id=task.id, error=error or status))
+            self._emit(TaskFailed(
+                account=task.account, task_id=task.id,
+                error=error or status,
+                error_kind=self._error_kind(error or ""),
+            ))
         elif status == STATUS_CANCELLED:
             self._emit(TaskCancelled(account=task.account, task_id=task.id))
 
