@@ -69,12 +69,20 @@ def load_config(config_dir: str | Path) -> ProjectConfig:
 
     policies = _deep_copy(DEFAULT_POLICIES)
     raw_policies = _skip_doc_keys(_read_json(base / "rate_limits.json"))
+    lane = raw_policies.pop("lane", None) or {}
     if "global" in raw_policies or "accounts" in raw_policies:
         policies["global"].update(raw_policies.get("global") or {})
         for account, actions in (raw_policies.get("accounts") or {}).items():
             policies["accounts"].setdefault(account, {}).update(actions or {})
     else:  # tolerate a flat {action: {...}} file -> global level
         policies["global"].update(raw_policies)
+    if isinstance(lane, dict) and lane:
+        # server-wide sequential send lane config (kv runtime state wins on
+        # later boots; this is the first-boot baseline)
+        policies["lane"] = {
+            "enabled": bool(lane.get("enabled", False)),
+            "prefixrate": float(lane.get("prefixrate", 1.5)),
+        }
 
     accounts: List[Dict[str, Any]] = []
     accounts_dir = base / "accounts"

@@ -566,7 +566,8 @@ class DashboardServer:
                 return 200, {"ok": True, "data": await api.emergency_stop_all()}
             if (method, path) == ("POST", "/api/shutdown"):
                 return 200, {"ok": True, "data": await api.shutdown()}
-
+            if (method, path) == ("POST", "/api/resume"):
+                return 200, {"ok": True, "data": await api.system_resume()}
             # -------------------------------------------------------------- accounts
             if (method, path) == ("GET", "/api/accounts"):
                 return 200, {"ok": True, "data": await api.accounts_list()}
@@ -728,6 +729,27 @@ class DashboardServer:
                     require_number(body, "seconds", path), "seconds", path
                 )
                 return 200, {"ok": True, "data": await api.ratelimit_set_floor(seconds)}
+            if (method, path) == ("GET", "/api/ratelimit/lane"):
+                return 200, {"ok": True, "data": await api.ratelimit_lane()}
+            if (method, path) == ("POST", "/api/ratelimit/lane"):
+                enabled = body.get("enabled")
+                if enabled is not None and not isinstance(enabled, bool):
+                    return 400, {"ok": False, "error": "field 'enabled' must be a boolean"}
+                prefixrate = body.get("prefixrate")
+                if prefixrate is not None:
+                    try:
+                        prefixrate = float(prefixrate)
+                    except (TypeError, ValueError):
+                        return 400, {"ok": False, "error": "field 'prefixrate' must be a number"}
+                    prefixrate = require_finite(prefixrate, "prefixrate", path)
+                    if prefixrate < 0:
+                        return 400, {"ok": False, "error": "prefixrate must be >= 0 (0 pauses the lane)"}
+                if enabled is None and prefixrate is None:
+                    return 400, {"ok": False, "error": "provide 'enabled' and/or 'prefixrate'"}
+                return 200, {
+                    "ok": True,
+                    "data": await api.ratelimit_set_lane(enabled, prefixrate),
+                }
 
             # ------------------------------------------------------------------ tasks
             if (method, path) == ("GET", "/api/tasks"):

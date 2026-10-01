@@ -155,7 +155,7 @@ class AccountsRepository(BaseRepository):
             existed = cur.rowcount > 0
             if existed:
                 for table in ("account_settings", "plugin_settings", "plugin_states",
-                              "account_profiles"):
+                              "account_profiles", "api_cache"):
                     conn.execute(f"DELETE FROM {table} WHERE account = ?", (name,))
         return existed
 

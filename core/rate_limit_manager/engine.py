@@ -61,6 +61,7 @@ from ..errors import RatePolicyError, UnsafePolicyError
 from ..event_bus import EventBus, RateLimitTriggered
 from ..priority import Priority
 from database.models import POLICY_LEVELS
+from .lane import GlobalSendLane
 from .policies import MIN_ACTION_INTERVAL, RatePolicy, parse_scope, policy_from_row
 from .warnings import evaluate_policies
 
@@ -154,10 +155,14 @@ class RateLimitManager:
         floor: float = MIN_ACTION_INTERVAL,
         clock: Optional[Clock] = None,
         jitter_seed: Optional[int] = None,
+        lane_enabled: bool = False,
+        lane_prefixrate: float = 1.5,
+        kv_repo: Any = None,
     ) -> None:
         self._bus = bus
         self._logger = logger
         self._repo = policy_repo
+        self._kv = kv_repo
         self._floor = self._validated_floor(floor)
         self._clock = clock if clock is not None else SystemClock()
         self._jitter_rng = random.Random(jitter_seed)
@@ -167,8 +172,16 @@ class RateLimitManager:
         self._global_until: float = 0.0
         #: (account, action) -> monotonic "until" timestamp
         self._account_cooldowns: Dict[Tuple[str, str], float] = {}
-        #: pacing key (owner, action) -> monotonic time of the last grant
+        #: pacing key (owner, action) -> monotonic time of the last grant.
+        #: TWO SCOPES share this table (spec: per-account/group + per-task):
+        #:   ("alpha", "message")        per-TASK scope — consecutive API
+        #:                               calls (tasks) of ONE account
+        #:   ("group:grinders", "message") per-ACCOUNT/GROUP scope — the
+        #:                               shared clock serializing every member
+        #:                               account of the group
         self._last_fire: Dict[Tuple[str, str], float] = {}
+        #: account -> group name (framework-fed metadata, no API involved)
+        self._groups: Dict[str, str] = {}
         #: pacing key -> heap of pending _Entry waiters
         self._pending: Dict[Tuple[str, str], List[_Entry]] = {}
         self._seq = itertools.count()
@@ -177,7 +190,17 @@ class RateLimitManager:
         self._grants = 0
         self._waits = 0
         self._total_wait = 0.0
+        # server-wide sequential send lane (FarmLite concept, robust port):
+        # every acquire() from every account passes one gate, spaced by
+        # prefixrate; waiter-driven so it cannot die; see lane.py
+        self._lane = GlobalSendLane(
+            clock=self._clock,
+            wait_either=self._wait_either,
+            on_change=self._wake_waiters,
+            log=self._log,
+        )
         self._load_stored_policies()
+        self._load_lane_config(lane_enabled, lane_prefixrate)
 
     # ------------------------------------------------------------ validation
     @staticmethod
@@ -300,7 +323,7 @@ class RateLimitManager:
                     f"{scope}: {exc} (policy is still active in memory)",
                 )
         self._log(
-            "info", f"rate policy set: {policy} at {scope}"
+            "info", f"rate policy set: {policy.action}={policy} at {scope}"
         )
         self._wake_waiters()
         return policy
@@ -424,6 +447,113 @@ class RateLimitManager:
         self._log("info", f"rate-limit safety floor raised to {candidate:g}s")
         return self._floor
 
+    # ------------------------------------------------------------- send lane
+    # ------------------------------------------------------------ group scope
+    def set_account_group(self, account: str, group: Optional[str]) -> None:
+        """Register which GROUP an account operates in (per-account/group
+        rate scope, spec: accounts in the same group serialize their API
+        activity against one shared clock).
+
+        Framework-fed metadata only — no Discord API is involved. ``None``
+        removes the account from any group (back to per-task pacing alone).
+        """
+        account = (account or "").strip()
+        if not account:
+            raise RatePolicyError("group registration needs an account name")
+        if group is None or not str(group).strip():
+            self._groups.pop(account, None)
+        else:
+            self._groups[account] = str(group).strip()
+        self._wake_waiters()
+
+    def account_groups(self) -> Dict[str, str]:
+        """account -> group mapping (stats/UI)."""
+        return dict(self._groups)
+
+    def _pacing_keys(self, account: Optional[str], action: str) -> List[Tuple[str, str]]:
+        """Every pacing clock this acquisition must respect.
+
+        Per-TASK scope is always present: ``(account, action)`` — the
+        account's own consecutive API calls. A grouped account ALSO paces on
+        ``(group:<name>, action)``: any member's grant stamps the shared
+        group clock, so the NEXT member's call waits the full interval —
+        exactly the A -> [limit] -> B -> [limit] -> A serialization.
+        """
+        keys = [(account or GLOBAL_KEY, action)]
+        if account is not None:
+            group = self._groups.get(account)
+            if group:
+                keys.append((f"group:{group}", action))
+        return keys
+
+    def _load_lane_config(self, default_enabled: bool, default_prefixrate: float) -> None:
+        """Restore the lane config from kv when present (best-effort).
+
+        Precedence: persisted kv value > constructor defaults. A corrupt row
+        is logged and skipped — persistence must never crash the limiter.
+        """
+        enabled, prefixrate = bool(default_enabled), float(default_prefixrate)
+        if self._kv is not None:
+            try:
+                raw = self._kv.get("ratelimit:lane")
+                if raw:
+                    import json as _json
+
+                    data = _json.loads(raw)
+                    enabled = bool(data.get("enabled", enabled))
+                    prefixrate = float(data.get("prefixrate", prefixrate))
+            except Exception as exc:
+                self._log("warning", f"could not load lane config: {exc}")
+        try:
+            self._lane.set_prefixrate(prefixrate)
+            self._lane.set_enabled(enabled)
+        except RatePolicyError as exc:
+            self._log("warning", f"stored lane config invalid ({exc}); using defaults")
+            self._lane.set_prefixrate(1.5)
+            self._lane.set_enabled(False)
+        else:
+            # first-boot baseline: persist the effective config when the kv
+            # has no lane row yet, so CLI/dashboard edits have a base state
+            if self._kv is not None:
+                try:
+                    if self._kv.get("ratelimit:lane") is None:
+                        self._persist_lane()
+                except Exception:
+                    pass
+
+    def _persist_lane(self) -> None:
+        """Best-effort kv write of the lane config (never raises)."""
+        if self._kv is None:
+            return
+        try:
+            import json as _json
+
+            self._kv.set(
+                "ratelimit:lane",
+                _json.dumps({
+                    "enabled": self._lane.enabled,
+                    "prefixrate": self._lane.prefixrate,
+                }),
+            )
+        except Exception as exc:
+            self._log("warning", f"could not persist lane config: {exc}")
+
+    def set_lane_enabled(self, enabled: bool) -> dict:
+        """Enable/disable the server-wide sequential send lane (persisted)."""
+        self._lane.set_enabled(bool(enabled))
+        self._persist_lane()
+        return self.lane_status()
+
+    def set_lane_prefixrate(self, seconds: float) -> dict:
+        """Set the lane spacing; 0 PAUSES the lane (persisted)."""
+        self._lane.set_prefixrate(seconds)  # RatePolicyError on bad input
+        self._persist_lane()
+        return self.lane_status()
+
+    def lane_status(self) -> dict:
+        """Lane state for stats/CLI/dashboard."""
+        return self._lane.status()
+
     # ------------------------------------------------------------- acquiring
     async def acquire(
         self,
@@ -460,9 +590,17 @@ class RateLimitManager:
             plugin=plugin,
             future=loop.create_future(),
         )
-        heapq.heappush(self._pending.setdefault(key, []), entry)
         started_at = self._clock.now()
         reason = "pacing"
+        # stage 0: server-wide sequential send lane (no-op when disabled) —
+        # one grant at a time across EVERY account, spaced by prefixrate;
+        # cooldown/pacing/jitter below only ever ADD delay after admission
+        lane_wait_s = 0.0
+        if self._lane.enabled:
+            lane_wait_s = await self._lane.enter(int(priority))
+            if lane_wait_s > 0:
+                reason = "lane"
+        heapq.heappush(self._pending.setdefault(key, []), entry)
         try:
             while not entry.future.done():
                 self._grant_ready()
@@ -567,10 +705,14 @@ class RateLimitManager:
                 server_waits.append(until - now)
         server_wait = max(server_waits)
         interval = self.effective(entry.action, entry.account, entry.plugin)["interval"]
-        last = self._last_fire.get((entry.account or GLOBAL_KEY, entry.action))
-        pacing_wait = (
-            max(0.0, last + interval - now) if last is not None else 0.0
-        )
+        # BOTH scopes compose (max): per-task (the account's own clock) and,
+        # when grouped, the shared group clock stamped by every member
+        pacing_wait = 0.0
+        for key in self._pacing_keys(entry.account, entry.action):
+            last = self._last_fire.get(key)
+            if last is not None:
+                pacing_wait = max(pacing_wait, last + interval - now)
+        pacing_wait = max(0.0, pacing_wait)
         return max(server_wait, pacing_wait), server_wait
 
     def _grant_ready(self) -> None:
@@ -593,7 +735,12 @@ class RateLimitManager:
                     continue
                 if self._entry_block(head)[0] > 0:
                     break  # head not ready: everyone behind it waits too
-                self._last_fire[key] = self._clock.now()
+                # stamp EVERY pacing clock this grant satisfies: the account
+                # key (per-task scope) and, for grouped accounts, the shared
+                # group key (per-account/group scope) — both from this grant
+                # instant, so the next member waits the full interval
+                for stamp_key in self._pacing_keys(head.account, head.action):
+                    self._last_fire[stamp_key] = self._clock.now()
                 heapq.heappop(heap)
                 head.future.set_result(None)
                 granted_any = True
@@ -716,6 +863,8 @@ class RateLimitManager:
         avg = round(self._total_wait / self._waits, 3) if self._waits else 0.0
         return {
             "floor": self._floor,
+            "lane": self._lane.status(),
+            "groups": self.account_groups(),
             "policies": self.policies(),
             "cooldowns": {
                 "global": round(max(0.0, self._global_until - now), 3),
@@ -728,7 +877,8 @@ class RateLimitManager:
         }
 
     def warnings(self) -> List[dict]:
-        """Advisory safety review of every stored policy + the floor entry.
+        """Advisory safety review: every stored policy, the floor entry, and
+        the sequential lane state (a paused lane holds ALL outbound traffic).
 
         Entries are ``{"level", "code", "message"}`` sorted danger > warn >
         info; see core/rate_limit_manager/warnings.py for the taxonomy.
@@ -737,7 +887,17 @@ class RateLimitManager:
             (policy, level, owner)
             for (level, owner, _action), policy in self._policies.items()
         )
-        return evaluate_policies(stored, self._floor)
+        items = evaluate_policies(stored, self._floor)
+        if self._lane.paused():
+            items.append({
+                "level": "warn",
+                "code": "lane_paused",
+                "message": (
+                    "the sequential send lane is PAUSED (prefixrate 0) — every "
+                    "outbound action is holding until a non-zero spacing is set"
+                ),
+            })
+        return items
 
     # --------------------------------------------------------------- helpers
     async def _publish(self, event: Any) -> None:

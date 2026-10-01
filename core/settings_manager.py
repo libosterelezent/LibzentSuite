@@ -118,6 +118,10 @@ ACCOUNT_SETTINGS: tuple = (
             "Reconnect wait cap (seconds).", min_value=0.5, max_value=600.0),
     Setting("reconnect_multiplier", "float", 2.0,
             "Backoff growth factor.", min_value=1.0, max_value=10.0),
+    Setting("typing_probability", "float", 0.0,
+            "Chance a guild send first fires a typing indicator (anti-flag: "
+            "humans type; 0 disables — zero extra API calls). ~0.85 looks human.",
+            min_value=0.0, max_value=1.0),
 )
 
 

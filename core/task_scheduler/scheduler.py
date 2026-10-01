@@ -50,6 +50,7 @@ through the ``_sleep`` seam (deterministic tests) and are capped at
 from __future__ import annotations
 
 import asyncio
+import re
 import heapq
 import inspect
 import itertools
@@ -253,14 +254,18 @@ class TaskScheduler:
             pass
 
     def start(self) -> None:
-        """Mark the scheduler ready (idempotent).
+        """Mark the scheduler ready (idempotent; RE-ARMS after stop()).
 
         Lanes are spawned lazily per account on first submit, so there is no
-        central loop to launch here. Raises SchedulerError after stop() — a
-        stopped scheduler cannot be restarted.
+        central loop to launch here. Re-arming after stop() is the resume
+        path for the global emergency stop: stop() already drove every task
+        to a terminal state and reaped every lane, so a fresh arm starts
+        from clean state (finished-task history is preserved). Attempts,
+        counters and audit state are per-task — nothing stale carries over.
         """
-        if self._stopped:
-            raise SchedulerError("scheduler cannot be restarted after stop()")
+        if self._stopping:
+            raise SchedulerError("scheduler is stopping; wait for stop() to finish")
+        self._stopped = False
         self._started = True
 
     async def stop(self, *, drain: bool = True, timeout: float = 10.0) -> None:
@@ -626,6 +631,7 @@ class TaskScheduler:
                 timed_out = False
                 retryable: Optional[BaseException] = None
                 try:
+                    task.sender_ran = True  # the API call is going out NOW
                     result = await asyncio.wait_for(self._sender(task), task.timeout_s)
                 except asyncio.CancelledError:
                     if self._outer_cancelled():
@@ -717,6 +723,19 @@ class TaskScheduler:
             self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
             raise
 
+    @staticmethod
+    def _error_kind(error: str) -> str:
+        """Exception CLASS NAME from an error string, when it has the
+        ``"ClassName: message"`` shape every failure site produces.
+
+        Used by the services layer to faithfully re-raise FlowBlocked
+        subclasses across the task-ack seam (the flow-abort contract must
+        survive: a plugin waiting on send_message receives TargetGone, not
+        an opaque SchedulerError). "" when the shape doesn't match.
+        """
+        match = re.match(r"^([A-Z][A-Za-z0-9_]+): ", error)
+        return match.group(1) if match else ""
+
     def _finish(
         self,
         task: Task,
@@ -754,7 +773,14 @@ class TaskScheduler:
             except Exception:
                 self._log("warning", "scheduler", f"task {task.id} history write failed (continuing)")
 
-        if self._audit is not None and task.action in _AUDITED_ACTIONS:
+        # AUDIT INTEGRITY: only record an outbound row when the task could
+        # actually have touched the API. COMPLETED/FAILED/TIMED_OUT attempts
+        # all invoked the sender; a CANCELLED task only did when it was
+        # cancelled mid-send (checkpoint 2) — a cancel while still queued or
+        # parked on the grant NEVER sent and must not appear in the trail
+        # (the pacing checks read audit timestamps as real send times).
+        auditable = status != STATUS_CANCELLED or task.sender_ran
+        if self._audit is not None and auditable and task.action in _AUDITED_ACTIONS:
             note = f"plugin={task.plugin} task={task.id}"
             if task.attempts > 0:
                 note += f" attempts={task.attempts + 1}"
@@ -782,7 +808,11 @@ class TaskScheduler:
                 )
             )
         elif status in (STATUS_FAILED, STATUS_TIMED_OUT):
-            self._emit(TaskFailed(account=task.account, task_id=task.id, error=error or status))
+            self._emit(TaskFailed(
+                account=task.account, task_id=task.id,
+                error=error or status,
+                error_kind=self._error_kind(error or ""),
+            ))
         elif status == STATUS_CANCELLED:
             self._emit(TaskCancelled(account=task.account, task_id=task.id))
 

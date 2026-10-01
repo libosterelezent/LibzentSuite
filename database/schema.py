@@ -116,6 +116,25 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         );
         """,
     ),
+    (
+        2,
+        "persistent api cache",
+        """
+        -- Per-account cache of Discord entities resolved through the REST
+        -- API (DM channels, users) so restarts never re-fetch them: one
+        -- open_dm per (account, user) EVER, not per boot (anti-flag: the
+        -- framework outside plugins makes the minimum possible API calls;
+        -- rows are scoped to ONE account/profile only).
+        CREATE TABLE IF NOT EXISTS api_cache (
+            account    TEXT NOT NULL,
+            kind       TEXT NOT NULL,   -- 'dm' | 'user' | 'channel'
+            key        TEXT NOT NULL,   -- str(entity id)
+            value_json TEXT NOT NULL,
+            cached_at  REAL NOT NULL,
+            PRIMARY KEY (account, kind, key)
+        );
+        """,
+    ),
 ]
 
 

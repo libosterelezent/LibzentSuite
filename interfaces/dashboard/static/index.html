@@ -318,6 +318,21 @@
             <span class="dim mono" style="font-size:11px">can only rise, never below 1.5s</span>
           </div>
         </section>
+        <section class="card">
+          <h4>Sequential send lane</h4>
+          <div class="sub dim" style="margin-bottom:6px">
+            server-wide: one outbound action at a time across ALL accounts,
+            spaced by the prefixrate — 0 pauses the lane (everything holds)
+          </div>
+          <div class="rule-row">
+            <span>state: <span class="mono" id="lane-state">?</span></span>
+            <input id="lane-rate" placeholder="spacing s (0=pause)" size="12">
+            <button id="lane-on">enable</button>
+            <button id="lane-off">disable</button>
+            <button id="lane-set">set spacing</button>
+          </div>
+          <div class="sub mono" id="lane-info" style="margin-top:4px"></div>
+        </section>
       </section>
 
       <!-- ======================================================= Tasks -->
@@ -1055,6 +1070,7 @@ function renderRlStats(stats) {
   const root = $("rl-stats");
   root.innerHTML = "";
   $("rl-floor").textContent = stats.floor + "s";
+  renderLane(stats.lane || {enabled: false});
 
   const cd = stats.cooldowns || {};
   const cool = document.createElement("div"); cool.className = "card2";
@@ -1156,6 +1172,40 @@ $("rl-floor-set").onclick = () => {
   if (!Number.isFinite(seconds)) { showErr("floor must be a number (seconds)"); return; }
   post("/api/ratelimit/floor", { seconds })
     .then(() => { $("rl-floor-new").value = ""; return loadRateLimits(); })
+    .catch(showErr);
+};
+
+// ------------------------------------------------- sequential send lane
+function renderLane(lane) {
+  if (!lane || !lane.enabled) {
+    $("lane-state").textContent = "off";
+    $("lane-info").textContent = "sends are paced per-account only";
+    return;
+  }
+  $("lane-state").textContent = lane.paused
+    ? "PAUSED (all outbound actions hold)" : "active";
+  const last = lane.last_grant_age_s == null ? "never" : lane.last_grant_age_s + "s ago";
+  $("lane-info").textContent =
+    "spacing " + Number(lane.prefixrate).toFixed(2) + "s between consecutive sends · " +
+    "waiting " + lane.waiting + " · grants " + lane.grants + " · last grant " + last;
+}
+$("lane-on").onclick = () => {
+  const raw = $("lane-rate").value.trim();
+  const payload = {enabled: true};
+  if (raw) {
+    const rate = parseFloat(raw);
+    if (!Number.isFinite(rate) || rate < 0) { showErr("spacing must be a number >= 0 (0 pauses)"); return; }
+    payload.prefixrate = rate;
+  }
+  post("/api/ratelimit/lane", payload).then(loadRateLimits).catch(showErr);
+};
+$("lane-off").onclick = () =>
+  post("/api/ratelimit/lane", {enabled: false}).then(loadRateLimits).catch(showErr);
+$("lane-set").onclick = () => {
+  const rate = parseFloat($("lane-rate").value);
+  if (!Number.isFinite(rate) || rate < 0) { showErr("spacing must be a number >= 0 (0 pauses the lane)"); return; }
+  post("/api/ratelimit/lane", {enabled: true, prefixrate: rate})
+    .then(() => { $("lane-rate").value = ""; return loadRateLimits(); })
     .catch(showErr);
 };
 

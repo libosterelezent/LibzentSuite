@@ -74,6 +74,28 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(pending, 1.0)
         self.assertIn("channel gone", str(ctx.exception))
 
+    async def test_flow_blocked_survives_the_ack_seam(self) -> None:
+        """REGRESSION (channel_gone debug round): a task failing with
+        TargetGone must re-raise TargetGone at the waiting plugin — NOT an
+        opaque SchedulerError — so the flow-abort contract (soulcopy's
+        catch-all) actually fires."""
+        from core.errors import TargetGone
+
+        bus, scheduler = EventBus(), FakeScheduler()
+        services = make_services(bus=bus, scheduler=scheduler)
+        pending = asyncio.create_task(services.send_message(100, "hi"))
+        await asyncio.sleep(0.02)
+        task_id = scheduler.submitted[0].id
+        await bus.publish(TaskFailed(
+            account="alpha", task_id=task_id,
+            error="TargetGone: [] flow blocked: channel 500 vanished",
+            error_kind="TargetGone",
+        ))
+        with self.assertRaises(TargetGone) as ctx:
+            await asyncio.wait_for(pending, 1.0)
+        self.assertEqual(ctx.exception.account, "alpha")
+        self.assertIn("channel 500 vanished", ctx.exception.reason)
+
     async def test_send_message_raises_on_task_cancelled(self) -> None:
         bus, scheduler = EventBus(), FakeScheduler()
         services = make_services(bus=bus, scheduler=scheduler)
@@ -135,6 +157,27 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
         await h.bus.publish(TaskCompleted(
             account="alpha", task_id=h.scheduler.submitted[0].id, summary="ok"))
         self.assertIsNone(await asyncio.wait_for(pending, 1.0))
+
+
+class LiveSettingsTests(unittest.IsolatedAsyncioTestCase):
+    """REGRESSION (isolation finding): services.settings must be the SAME
+    live dict the plugin contexts read — a runtime set_setting change has
+    to be visible through BOTH views, not a frozen-at-activation copy."""
+
+    async def test_settings_live_view_shared_with_context(self) -> None:
+        from tests.unit.test_plugin_manager import make_manager as make_pm
+
+        manager, bus, _ = make_pm()
+        manager.attach_account("alpha")
+        await manager.activate_account("alpha", lambda _name: None)
+        live = manager.live_settings("alpha", "spy")
+        self.assertIsInstance(live, dict)
+        # a runtime change through the manager mutates the LIVE dict...
+        manager.set_setting("alpha", "spy", "greeting", "changed")
+        self.assertEqual(live["greeting"], "changed")
+        # ...and states() still renders the new value (display copy)
+        states = {s["name"]: s for s in manager.states("alpha")}
+        self.assertEqual(states["spy"]["settings"]["greeting"], "changed")
 
 
 class WaitForMessageTests(unittest.IsolatedAsyncioTestCase):

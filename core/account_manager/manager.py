@@ -1,5 +1,34 @@
 """Account manager (A6): Account, AccountRuntime, AccountManager, DiscordCache wiring.
 
+════════════════════════════════════════════════════════════════════════
+API BOUNDARY CONTRACT (architecture spec) — audited & enforced
+════════════════════════════════════════════════════════════════════════
+This module is the framework: event routing, account control, task
+orchestration, lifecycle. It NEVER initiates a Discord API call for its own
+purposes. The COMPLETE inventory of client touches (each demand-driven):
+
+  1. ``connect()/disconnect()``          — gateway lifecycle (account control)
+  2. ``client.cached_snapshot()``        — memory-only read of what the client
+                                           already holds; ZERO API calls
+  3. ``send_hook`` → ``client.send_message`` — EXECUTES a task a PLUGIN
+                                           submitted (orchestration; paced by
+                                           the RateLimiter before it runs)
+  4. ``resolve_dm_channel`` → ``client.open_dm`` — ONLY on a DM-send cache
+                                           miss, for a plugin-demanded send
+  5. ``services.fetch_user`` → ``client.fetch_user`` — PLUGIN-facing,
+                                           on-demand, DB-cached per account
+  6. ``_maybe_typing`` → ``client.send_typing`` — the ONE deliberate,
+                                           opt-in exception: a send-decoration
+                                           policy (typing_probability, default
+                                           0.0 = never) — no plugin demands it,
+                                           so it ships disabled
+
+There is NO prefetching, NO "just in case" fetching, and NO API-derived
+state beyond what a live send/flow actually consumed. ``details()`` reads
+exclusively from the ingested READY snapshot + repos. Rate-scope metadata
+(``_sync_group_scope``) is pure plumbing — no API involved.
+════════════════════════════════════════════════════════════════════════
+
 One :class:`Account` per Discord user account, split into PERSISTENT state
 (``record`` — database/models.AccountRecord) and RUNTIME state
 (``runtime`` — client, status, cache, supervisor; never persisted).
@@ -53,7 +82,7 @@ from ..event_bus import (
 from ..settings_manager import SettingsManager
 from adapters.base import DiscordMessage
 from database.models import AccountRecord
-from .cache import DiscordCache, resolve_dm_channel
+from .cache import DiscordCache, invalidate_dm_channel, resolve_dm_channel
 from .services import AccountPluginServices, TaskAckRegistry
 
 #: account names share the profile namespace style (may start with a digit)
@@ -157,9 +186,12 @@ class AccountManager:
         *,
         limiter: Any = None,
         supervisor_tick: float = 0.2,
+        api_cache_repo: Any = None,
     ) -> None:
         """``limiter`` (optional) enriches details() with effective rate data;
-        ``supervisor_tick`` is the supervisor's poll granularity in seconds.
+        ``supervisor_tick`` is the supervisor's poll granularity in seconds;
+        ``api_cache_repo`` (optional) persists resolved Discord entities
+        (DM channels, users) per account so restarts never re-fetch them.
         """
         self._bus = bus
         self._logger = logger or logging.getLogger("slaughtermudae.accounts")
@@ -173,6 +205,11 @@ class AccountManager:
         self._credentials = credentials
         self._limiter = limiter
         self._supervisor_tick = float(supervisor_tick)
+        self._api_cache = api_cache_repo
+        # typing-indicator RNG (anti-flag: humans trigger typing; disabled
+        # by default via the typing_probability account setting = 0.0)
+        import random as _random
+        self._typing_rng = _random.Random()
 
         self._accounts: Dict[str, Account] = {}
         #: ONE task-ack registry per manager (single bus subscription set)
@@ -187,6 +224,19 @@ class AccountManager:
 
         # restore accounts persisted in the database (boot path)
         self._load_from_repo()
+
+    # ------------------------------------------------------- rate-scope sync
+    def _sync_group_scope(self, name: str, group: Optional[str]) -> None:
+        """Feed the account's group membership to the limiter (per-account/
+        group rate scope). Pure metadata plumbing — NO Discord API is
+        involved; tolerant of limiters without group support (tests)."""
+        register = getattr(self._limiter, "set_account_group", None)
+        if register is None:
+            return
+        try:
+            register(name, group)
+        except Exception:
+            self._logger.exception("group scope registration failed for %s", name)
 
     # ------------------------------------------------------------------ boot
     def _load_from_repo(self) -> None:
@@ -204,6 +254,7 @@ class AccountManager:
                 account = Account(record=record)
                 self._accounts[record.name] = account
                 self._attach_plugins(record.name)
+                self._sync_group_scope(record.name, record.sync_group)
             except Exception:
                 self._logger.exception("could not restore account %r", record.name)
 
@@ -256,6 +307,7 @@ class AccountManager:
         if fresh is not None:
             account.record = fresh
         self._attach_plugins(name)
+        self._sync_group_scope(name, sync_group)
         self._logger.info(
             "account %s added (enabled=%s sync_group=%s profiles=%s)",
             name, enabled, sync_group, account.record.profiles or "-",
@@ -288,6 +340,7 @@ class AccountManager:
         except Exception:
             self._logger.exception("plugin detach failed for %s", name)
         self._drop_services(name)
+        self._sync_group_scope(name, None)
         existed = bool(self._accounts_repo.delete(name))
         del self._accounts[name]
         self._logger.info("account %s removed (existed=%s)", name, existed)
@@ -636,6 +689,29 @@ class AccountManager:
         self._bus.publish_nowait(AccountFailed(account=name, error=rt.last_error))
 
     # --------------------------------------------------------------- sending
+    async def _maybe_typing(self, name: str, rt: "AccountRuntime", channel_id: int) -> None:
+        """Probabilistic typing indicator before a guild send (anti-flag).
+
+        Real clients fire typing while composing; an account that NEVER does
+        is a detectable outlier. Off by default (typing_probability=0.0 —
+        zero extra API calls unless opted in; ~0.85 looks human). A typing
+        failure must NEVER fail the send.
+        """
+        try:
+            probability = float(
+                self._settings.account_settings(name).get("typing_probability", 0.0)
+            )
+        except Exception:
+            return
+        if probability <= 0 or not hasattr(rt.client, "send_typing"):
+            return
+        if self._typing_rng.random() >= probability:
+            return
+        try:
+            await rt.client.send_typing(channel_id)
+        except Exception:
+            pass  # cosmetic best-effort only
+
     async def send_hook(self, task: Any) -> DiscordMessage:
         """Scheduler sender: one task -> one validated, audited Discord send.
 
@@ -659,13 +735,25 @@ class AccountManager:
         action = getattr(task, "action", None)
         client = rt.client
         if action == "dm":
+            # resolution order: memory cache -> persistent api_cache -> ONE
+            # client.open_dm (recorded in both, never fetched again)
             channel_id = await resolve_dm_channel(
-                rt.cache, client, int(task.user_id), name
+                rt.cache, client, int(task.user_id), name, self._api_cache
             )
-            message = await client.send_dm(int(task.user_id), task.content)
+            # send through the RESOLVED channel: client.send_dm(user_id)
+            # would re-fetch the user + re-open the DM (2 redundant REST
+            # calls per send — a classic selfbot flag vector)
+            try:
+                message = await client.send_message(channel_id, task.content)
+            except Exception as exc:
+                if type(exc).__name__ == "TargetGone":
+                    invalidate_dm_channel(rt.cache, self._api_cache,
+                                          int(task.user_id), name)
+                raise
         elif action == "message":
             rt.cache.validate_channel(int(task.channel_id))  # TargetGone propagates
             channel_id = int(task.channel_id)
+            await self._maybe_typing(name, rt, channel_id)
             message = await client.send_message(channel_id, task.content)
         else:
             raise SchedulerError(
@@ -802,10 +890,17 @@ class AccountManager:
         )
         settings_dict: Dict[str, Any] = {}
         try:
-            for state in self._plugin_manager.states(account_name) or []:
-                if isinstance(state, dict) and state.get("name") == plugin_name:
-                    settings_dict = state.get("settings") or {}
-                    break
+            # LIVE view first (set_setting mutates this dict in place, so
+            # services.settings and ctx.settings can never diverge); the
+            # states() copy is only a fallback for duck-typed collaborators
+            live = getattr(self._plugin_manager, "live_settings", None)
+            settings_dict = live(account_name, plugin_name) if callable(live) else None
+            if not isinstance(settings_dict, dict):
+                settings_dict = {}
+                for state in self._plugin_manager.states(account_name) or []:
+                    if isinstance(state, dict) and state.get("name") == plugin_name:
+                        settings_dict = state.get("settings") or {}
+                        break
         except Exception:
             pass
         services = AccountPluginServices(
@@ -818,6 +913,7 @@ class AccountManager:
             settings_dict=settings_dict,
             ack_registry=self._ack_registry,
             client_getter=lambda: self._client_of(account_name),
+            api_cache_repo=self._api_cache,
         )
         self._services[key] = services
         return services

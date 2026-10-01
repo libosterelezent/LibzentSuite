@@ -20,6 +20,7 @@ Behaviour highlights (audit-proven unless noted):
 from __future__ import annotations
 
 import random
+import time
 from types import SimpleNamespace
 from typing import Callable, List, Optional, Tuple
 
@@ -60,6 +61,10 @@ class SimClient:
         self.connected = False
         self.fail_connect = fail_connect
         self._rng = random.Random(seed)
+        #: typing indicators fired (observable for anti-flag tests)
+        self.typing_calls: list = []
+        #: REST-touching DM opens (observable for API-trim tests)
+        self.open_dm_calls: list = []
 
     # -------------------------------------------------------------- lifecycle
     async def connect(self) -> None:
@@ -136,8 +141,13 @@ class SimClient:
         sent = self._world.deliver(channel_id, self.user_id, content, dm=True)
         return self._as_discord_message(sent, dm=True)
 
+    async def send_typing(self, channel_id: int) -> None:
+        """Record a typing indicator (no world effect; observable in tests)."""
+        self.typing_calls.append((channel_id, time.monotonic()))
+
     async def open_dm(self, user_id: int) -> int:
         """The (deterministic, symmetric) DM channel id for a user pair."""
+        self.open_dm_calls.append(int(user_id))  # observable for API-trim tests
         return self._world.dm_channel_for(self.user_id, user_id)
 
     async def fetch_user(self, user_id: int) -> Optional[SimpleNamespace]:

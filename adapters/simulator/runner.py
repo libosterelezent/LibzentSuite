@@ -45,6 +45,7 @@ rules; the lead reconciles at integration):
 """
 from __future__ import annotations
 
+import logging
 import sys
 import time
 from types import SimpleNamespace
@@ -255,6 +256,22 @@ class SimulationRunner:
         )
         box["send"] = accounts.send_hook  # fill the seam BEFORE start()
 
+        # a real ControlAPI + the mention-prefix bridge, so scenarios can
+        # exercise Discord-side management exactly like production
+        from core.api import ControlAPI
+
+        api = ControlAPI(
+            accounts=accounts, plugins=plugins_mgr, profiles=profiles,
+            settings=settings, limiter=limiter, scheduler=scheduler,
+            logs=logger, audit=audit, credentials=credentials,
+        )
+        from core.remote_control import RemoteControl
+
+        remote = RemoteControl(
+            bus, scheduler, accounts, lambda: api, credentials,
+            ServiceLogger(logger, "remote-control"),
+        ).start()
+
         # --- observability subscriptions BEFORE any traffic can flow
         log_lines: List[str] = []
 
@@ -284,6 +301,26 @@ class SimulationRunner:
         failures: List[str] = []
         account_started = False
         scheduler_started = False
+        # stdlib ingestion for THIS stack: standalone runs previously DROPPED
+        # plugin/loader INFO lines (tree effective level WARNING with no
+        # bridge). Attach one bound to the run's service when the tree has
+        # none; when the live stack's bridge is present (dashboard-sim) keep
+        # it — swapping a process-global handler mid-run would misroute the
+        # MAIN stack's lines — and document the cross-leak instead.
+        from core.logging_service import StdlibBridge, attach_stdlib_bridge, detach_stdlib_bridge
+
+        tree_root = logging.getLogger("slaughtermudae")
+        bridge_attached_here = not any(
+            isinstance(h, StdlibBridge) for h in tree_root.handlers
+        )
+        if bridge_attached_here:
+            attach_stdlib_bridge(logger)
+        else:
+            logger.record(
+                "INFO", "sim",
+                "shared stdlib bridge detected: raw stdlib lines from this run "
+                "land in the main log service (documented cross-leak)",
+            )
         try:
             # --- stack phase: bring the ephemeral stack up
             try:
@@ -323,6 +360,7 @@ class SimulationRunner:
                     ),
                     audit_entries=lambda: list(interactions),
                     settings_overrides=DEMO_PLUGIN_SETTINGS,
+                    remote=remote,
                 )
                 try:
                     await scenario.script(facade)
@@ -335,6 +373,9 @@ class SimulationRunner:
                     failures.append(f"scenario crashed: {type(exc).__name__}: {exc}")
 
             try:
+                if bridge_attached_here:
+                    detach_stdlib_bridge()  # never leak a bridge to a dead service
+                remote.stop()
                 await bus.publish(
                     ScenarioFinished(
                         account="", name=name,
@@ -404,6 +445,7 @@ class SimulationRunner:
             return mods.AccountManager(
                 bus, logger, db.accounts, plugins_mgr, profiles, scheduler,
                 settings, audit, client_factory, credentials, limiter=limiter,
+                api_cache_repo=db.cache,
             )
         except TypeError:
             return mods.AccountManager(

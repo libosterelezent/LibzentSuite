@@ -31,10 +31,20 @@ DESIGN — how sends await task completion (the lead asked for this):
 from __future__ import annotations
 
 import asyncio
+import re
 import logging
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 
-from ..errors import AccountError, SchedulerError
+from ..errors import (
+    AccessDenied,
+    AccountError,
+    CacheInvalid,
+    FetchRequired,
+    FlowBlocked,
+    SchedulerError,
+    TargetGone,
+)
 from ..event_bus import (
     Event,
     EventBus,
@@ -66,12 +76,40 @@ class TaskAckRegistry:
         if future is not None and not future.done():
             future.set_result(event.summary)
 
+    #: FlowBlocked family, reconstructed across the task-ack seam so the
+    #: plugin-side catch (soulcopy's flow-abort contract) actually fires
+    _FLOW_CLASSES = {
+        "FlowBlocked": FlowBlocked,
+        "CacheInvalid": CacheInvalid,
+        "TargetGone": TargetGone,
+        "AccessDenied": AccessDenied,
+        "FetchRequired": FetchRequired,
+    }
+
     def _on_failed(self, event: TaskFailed) -> None:
         future = self._futures.pop(event.task_id, None)
-        if future is not None and not future.done():
+        if future is None or future.done():
+            return
+        blocked = self._FLOW_CLASSES.get(getattr(event, "error_kind", "") or "")
+        if blocked is not None:
+            future.set_exception(
+                blocked(event.account, self._flow_reason(event.error))
+            )
+        else:
             future.set_exception(
                 SchedulerError(f"task {event.task_id} failed: {event.error}")
             )
+
+    @staticmethod
+    def _flow_reason(error: str) -> str:
+        """'"TargetGone: [alpha] flow blocked: channel 500 vanished"' -> reason."""
+        text = error or ""
+        # drop the leading "ClassName: " (the scheduler's error format)
+        if ": " in text:
+            text = text.split(": ", 1)[1]
+        # drop the "[account] flow blocked: " wrapper FlowBlocked adds
+        match = re.match(r"^\[[^\]]*\] flow blocked: (.*)$", text, flags=re.DOTALL)
+        return match.group(1) if match else text
 
     def _on_cancelled(self, event: TaskCancelled) -> None:
         future = self._futures.pop(event.task_id, None)
@@ -133,6 +171,7 @@ class AccountPluginServices:
         settings_dict: Optional[Dict[str, Any]] = None,
         ack_registry: Optional[TaskAckRegistry] = None,
         client_getter: Optional[Callable[[], Any]] = None,
+        api_cache_repo: Any = None,
     ) -> None:
         self._account = account
         self._plugin = plugin
@@ -146,6 +185,8 @@ class AccountPluginServices:
         )
         self._ack_registry = ack_registry
         self._client_getter = client_getter
+        #: per-account persistent entity cache (database.cache repository)
+        self._api_cache = api_cache_repo
         #: bounded wait for a task completion ack (seconds; configurable)
         self.task_ack_timeout: float = 30.0
 
@@ -192,11 +233,44 @@ class AccountPluginServices:
     async def open_dm(self, user_id: int) -> int:
         """Resolve (opening if needed) the DM channel id for a user.
 
-        Cache-first: an already-known DM channel never touches the client.
+        Cache-first across THREE layers: live memory -> the account's
+        persistent api_cache row -> ONE client.open_dm (then recorded in
+        both, so a DM is resolved once per account lifetime, not per boot).
         """
         return await resolve_dm_channel(
-            self._cache, self._client(), int(user_id), self._account
+            self._cache, self._client(), int(user_id), self._account,
+            self._api_cache,
         )
+
+    async def fetch_user(self, user_id: int):
+        """Resolve a user, cached per account in the database.
+
+        Resolution order: the account's persistent api_cache 'user' row ->
+        the client's fetch (then cached forever for this account). Returns a
+        small namespace with ``id``/``name`` (or the raw client object when
+        no repo is wired), None when the client cannot resolve the user.
+        """
+        user_id = int(user_id)
+        if self._api_cache is not None:
+            try:
+                stored = self._api_cache.get(self._account, "user", str(user_id))
+            except Exception:
+                stored = None
+            if isinstance(stored, dict) and stored.get("id") == user_id:
+                return SimpleNamespace(id=stored["id"], name=stored.get("name", ""))
+        client = self._client()
+        if client is None:
+            return None
+        user = await client.fetch_user(user_id)
+        if user is not None and self._api_cache is not None:
+            try:
+                self._api_cache.set(self._account, "user", str(user_id), {
+                    "id": user_id,
+                    "name": getattr(user, "name", "") or "",
+                })
+            except Exception:
+                pass
+        return user
 
     # -------------------------------------------------------------- inbound
     async def wait_for_message(

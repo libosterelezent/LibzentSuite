@@ -24,6 +24,32 @@ Spec source: `TODO + Ideas.md` (architecture, phases, safety rules).
   (`UnsafePolicyError`). Constant `MIN_ACTION_INTERVAL = 1.5` in
   `core/rate_limit_manager`.
 
+## API BOUNDARY (binding architecture contract)
+
+```
+Events ──► SlaughterMudae (routing/orchestration/lifecycle) ──► Plugins
+                                                                    │ on demand
+                                                                    ▼
+                                                       RateLimiter (scopes)
+                                                                    ▼
+                                                               API functions
+```
+
+- The FRAMEWORK never initiates a Discord API call for its own purposes. No
+  prefetching, no "just in case" fetches, no API-derived state beyond what a
+  live send/flow consumed. Its full client-touch inventory is audited in the
+  `core/account_manager` module docstring.
+- PLUGINS decide when an API call is needed and request it through
+  `PluginServices` (`send_message` / `send_dm` / `open_dm` / `fetch_user`) —
+  all on-demand; `fetch_user`/DM channels persist in the account-scoped
+  `api_cache` table so a resolved entity costs ONE call per account lifetime.
+- The RATE LIMITER owns execution timing, in three composing scopes:
+  per-task (`(account, action)` — one account's consecutive calls),
+  per-account/group (`(group:<name>, action)` shared clock registered via
+  `RateLimitManager.set_account_group(account, group)`; the account manager
+  feeds it from `sync_group` on add/remove/restore), and the server-wide
+  lane (`set_lane_*`). `stats()` exposes `groups` + all pacing clocks.
+
 ## Target structure
 
 ```
@@ -41,6 +67,7 @@ core/                    framework (managers + shared contracts)
   plugin_base.py         (A3)     PluginBase, PluginContext, PluginServices protocol
   plugin_manager/        (A3)     discovery, per-account instances, dispatch
   rate_limit_manager/    (A4)     policies (4 levels), pacing engine, server limits, warnings
+                          + lane.py GlobalSendLane (server-wide sequential sends)
   task_scheduler/        (A5)     queue/priority/cancel/retry/timeout/history
   audit.py               (A5)     AuditRecorder (interaction trail)
 database/                (A2 + spine models/schema)
@@ -108,12 +135,14 @@ global_layer=None)`; `.resolve(plugin_name, schema, account=None) -> dict`;
 Framework account schema: `ACCOUNT_SETTINGS` (reconnect_enabled,
 reconnect_initial_delay, reconnect_max_delay, reconnect_multiplier).
 
-### core/rate_limit_manager (A4)
+### core/rate_limit_manager (A4 + GlobalSendLane)
 ```python
 RatePolicy(action, interval, jitter_min=0.0, jitter_max=0.0)   # frozen; __str__ "2.00s +0.10..0.50s"
 MIN_ACTION_INTERVAL = 1.5
 class RateLimitManager:
-    def __init__(self, bus, logger, policy_repo=None, *, floor=MIN_ACTION_INTERVAL): ...
+    def __init__(self, bus, logger, policy_repo=None, *, floor=MIN_ACTION_INTERVAL,
+                 clock=None, jitter_seed=None, lane_enabled=False,
+                 lane_prefixrate=1.5, kv_repo=None): ...
     def set_policy(self, policy: RatePolicy, level="global", owner=None) -> RatePolicy
     def set_policy_values(self, action, interval, jitter_min=0.0, jitter_max=0.0,
                           level="global", owner=None) -> RatePolicy   # convenience used by ControlAPI
@@ -137,6 +166,11 @@ class RateLimitManager:
     def stats(self) -> dict     # policies + cooldowns + last-fire ages + counters (UI page)
     def warnings(self) -> list[dict]   # [{"level","code","message"}] aggressive(<3s), no_jitter, narrow_jitter
     def set_floor(self, seconds)       # may only raise, never below 1.5
+    # --- sequential send lane (FarmLite concept, robust port — lane.py) ---
+    def set_lane_enabled(self, enabled: bool) -> dict      # persisted (kv 'ratelimit:lane')
+    def set_lane_prefixrate(self, seconds: float) -> dict  # 0 PAUSES; persisted
+    def lane_status(self) -> dict  # {"enabled","prefixrate","paused","waiting",
+                                   #  "grants","last_grant_age_s","held_off_seconds"}
 ```
 Port pacing/priority-waiter ideas from `git show HEAD:core/rate_limiter.py`
 and server-limit ideas from `git show HEAD:core/rest_buckets.py` +

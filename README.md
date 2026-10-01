@@ -60,6 +60,45 @@ Dependencies: Python ≥ 3.10, standard library only. Live mode additionally
 needs a user-account client fork (`pip install discord.py-self`), imported
 lazily — simulations/tests never require it.
 
+## Architecture: who calls what
+
+```
+                    ┌─────────────────────┐
+                    │   SlaughterMudae    │
+                    │  (core framework)   │
+Events ────────────►│ Event routing       │
+                    │ Account control     │
+                    │ Task orchestration  │
+                    │ Lifecycle           │
+                    └──────────┬──────────┘
+                               │  (events/context only — NEVER API calls
+                               │   for its own purposes)
+                               ▼
+                    ┌─────────────────────┐
+                    │       Plugins       │
+                    │ Decide WHEN an API  │
+                    │ call is actually    │
+                    │ required            │
+                    └──────────┬──────────┘
+                               │  on-demand (services.send_message /
+                               │  open_dm / fetch_user)
+                               ▼
+                    ┌─────────────────────┐
+                    │     RateLimiter     │
+                    │ · per-task          │  one account's consecutive calls
+                    │ · per-account/group │  shared clock per sync_group
+                    │ · server-wide lane  │  fleet serialization
+                    └──────────┬──────────┘
+                               ▼
+                         API functions
+
+The core principle: **SlaughterMudae controls the flow; plugins control API
+usage; the RateLimiter controls when those calls may execute.** The
+framework's complete client-touch inventory is audited in the
+`core/account_manager` module docstring — every entry is demand-driven by a
+plugin task (the single deliberate exception, the opt-in typing indicator,
+ships disabled). Nothing prefetches; nothing fetches "just in case".
+
 ## The send pipeline
 
 ```
@@ -72,10 +111,49 @@ Plugin -> PluginServices.send_message()
         -> audit + history + events                  [exactly-once per task]
 ```
 
+On top of the per-account pacing sits the **sequential send lane**
+(`core/rate_limit_manager/lane.py`, FarmLite concept made robust): when
+enabled, every outbound action from EVERY account is admitted strictly one
+at a time, spaced by `prefixrate` (0 = pause the lane, everything holds).
+Server-wide serialization + per-account pacing + the 1.5s floor compose —
+`ratelimit lane` (CLI) or the Rate Limits page (dashboard) control it, and
+the config ships it on by default (`"lane": {"enabled": true,
+"prefixrate": 1.5}` in `config/rate_limits.json`).
+
+### Rate scopes (three composing layers)
+
+| Scope | Key | Governs |
+|---|---|---|
+| **per-task** | `(account, action)` | consecutive API calls (scheduler tasks) of ONE account — a task can never fire back-to-back |
+| **per-account/group** | `(group:<sync_group>, action)` | accounts sharing a `sync_group` serialize on ONE shared clock: `A → [limit] → B → [limit] → A` |
+| **server-wide lane** | fleet | every outbound action from every account, one at a time, spaced by `prefixrate` |
+
+All three compose (the strictest wait wins), then jitter is applied after
+the grant. Groups are registered automatically from each account's
+`sync_group` (pure metadata — no API involved).
+
 Retries cover transient failures and server 429s (`ServerRateLimit` always
 earns at least one retry, paced by the limiter cooldown — the framework
 always respects server-provided rate limits). `FlowBlocked` aborts only THAT
 account's flow with a human reason.
+
+**API-call hygiene (anti-flag).** The framework outside plugins makes the
+minimum possible Discord REST calls: connections are gateway-only, sends are
+plugin-initiated, and every resolved entity is cached per account in SQLite
+(`api_cache` — migration 002) so a DM channel or user costs **one call for
+the account's lifetime, not one per boot**. DM sends go through the resolved
+channel id (never re-fetching the user mid-send), stale cache rows are
+dropped when Discord reports a target gone, and an optional typing indicator
+(account setting `typing_probability`, default 0 = zero extra calls) mimics
+human composing when enabled.
+
+## Managing from Discord (mention prefix)
+
+Owners mention a running account as the command prefix — `@account status`,
+`@account plugins alpha soulcopy off`, `@account estop` — in any channel the
+account can see. Replies go through the SAME paced pipeline (lane → pacing →
+jitter → audit), non-owners are ignored completely, commands are
+allowlisted, and `REMOTE_CONTROL=0` in `.env` disables the bridge entirely.
 
 ## Rate policies (spec §5)
 
@@ -121,3 +199,19 @@ settings, tasks, rate policies, logs and simulation system — parity by
 construction, not by discipline.
 
 Inter-module contracts are documented in `INTEGRATION.md`.
+
+## Anti-flag hardening (audit round)
+
+- **One REST call per entity, ever**: DM channels + users resolve through
+  memory cache → the per-account `api_cache` table (SQLite, migration 002) →
+  a single client call, recorded in both. Restarts never re-fetch.
+- **No double-resolution**: DM sends reuse the resolved channel id instead
+  of re-running fetch_user/create_dm inside `send_dm`.
+- **Stale-cache healing**: a TargetGone on a DM send invalidates the memory
+  + DB rows so the next resolution re-opens cleanly.
+- **Optional typing indicator**: `typing_probability` account setting
+  (default 0 — zero extra API calls); fires `trigger_typing` before guild
+  sends when enabled, best-effort only.
+- **Mention-prefix management** (`core/remote_control.py`): owner-only,
+  allowlisted, self-throttled, replies paced by the full pipeline.
+
