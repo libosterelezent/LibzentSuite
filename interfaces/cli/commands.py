@@ -84,7 +84,7 @@ HELP: Dict[str, Tuple[str, str]] = {
     "simulation": ("list|run [name]", "offline scenario runs"),
     "logs": ("[n] [account]", "structured log tail (default: last 20)"),
     "audit": ("[n] [account]", "interaction audit trail (default: last 20)"),
-    "estop": ("", "GLOBAL emergency stop: cancel all tasks + stop accounts"),
+    "estop": ("[resume]", "GLOBAL emergency stop; 'estop resume' re-arms after one"),
     "quit": ("", "graceful shutdown, then exit (alias: exit)"),
 }
 
@@ -155,6 +155,10 @@ async def run_command(api: Any, line: str) -> Optional[str]:
         limit, account = _tail_args(cmd, args)
         return format_audit(await api.audit_tail(limit, account=account))
     if cmd == "estop":
+        if args and args[0].lower() in ("resume", "unhalt"):
+            return _result(await api.system_resume(), verb="resume")
+        if args:
+            raise UsageError("usage: estop [resume]")
         return _result(await api.emergency_stop_all(), verb="EMERGENCY STOP")
     return f"unknown command {cmd!r} — try 'help'"
 

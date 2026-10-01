@@ -166,6 +166,26 @@ SIM_REPORT = {
 
 
 
+class TestResumeRoute(unittest.IsolatedAsyncioTestCase):
+    """POST /api/resume: the dashboard's post-emergency-stop recovery."""
+
+    async def asyncSetUp(self) -> None:
+        self.fake = FakeControlAPI()
+        self.server = DashboardServer(self.fake, token=TOKEN, port=0)
+        self.server.start()
+        self.base = f"http://127.0.0.1:{self.server.bound_port}"
+
+    async def asyncTearDown(self) -> None:
+        self.server.stop()
+
+    async def test_resume_route(self) -> None:
+        status, body = await asyncio.to_thread(
+            http_post, f"{self.base}/api/resume", {})
+        self.assertEqual(status, 200)
+        self.assertTrue(get_json(body)["data"]["resumed"])
+        self.assertEqual(self.fake.calls[-1], ("system_resume", (), {}))
+
+
 class TestLaneRoutes(unittest.IsolatedAsyncioTestCase):
     """Sequential send lane: GET state + POST configuration."""
 
@@ -374,6 +394,10 @@ class FakeControlAPI:
     async def ratelimit_warnings(self):
         self._record("ratelimit_warnings")
         return WARNINGS
+
+    async def system_resume(self):
+        self.calls.append(("system_resume", (), {}))
+        return {"resumed": True}
 
     async def ratelimit_lane(self):
         return {"enabled": False, "prefixrate": 1.5, "paused": False,

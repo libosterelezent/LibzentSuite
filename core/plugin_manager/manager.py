@@ -294,6 +294,19 @@ class PluginManager:
         """Names currently attached to the account (for error messages)."""
         return sorted(self._accounts.get(account, {}))
 
+    def live_settings(self, account: str, plugin: str) -> Optional[Dict[str, Any]]:
+        """The LIVE resolved-settings dict for one (account, plugin) pair.
+
+        Unlike ``states()`` (which returns copies for display), this hands
+        out the dict the runtime contexts share — ``set_setting`` mutates it
+        in place, so readers see changes immediately. The account manager
+        passes it to PluginServices so ``services.settings`` and
+        ``ctx.settings`` can never diverge (isolation finding). None when
+        the pair is unknown.
+        """
+        runtime = self._accounts.get(account, {}).get(plugin)
+        return runtime.settings if runtime is not None else None
+
     # -------------------------------------------------------------- routing
     def _on_message(self, event: Event) -> None:
         """Bus handler (sync): fan a MessageReceived out as a fire-and-forget

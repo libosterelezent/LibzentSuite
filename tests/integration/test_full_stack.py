@@ -341,6 +341,40 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
             await stack.stop()
 
 
+class TestEmergencyStopResume(unittest.IsolatedAsyncioTestCase):
+    """REGRESSION: the global estop message says 'restart manually' — the
+    resume path must actually exist. estop halts everything; system_resume
+    re-arms the scheduler so plugin sends work again."""
+
+    async def test_estop_then_resume_restores_sending(self) -> None:
+        stack = Stack()
+        api = stack.framework.api
+        await api.accounts_add({"name": "alpha"})
+        await api.accounts_start()
+        try:
+            out = await api.emergency_stop_all()
+            self.assertTrue(out["halted"])
+            # halted: every submit is rejected
+            from core.errors import SchedulerError
+            with self.assertRaises(SchedulerError):
+                stack.framework.scheduler.submit("alpha", "roll", "message",
+                                                 channel_id=GUILD_CHANNEL, content="x")
+            # resume: scheduler re-armed, sends flow again
+            resumed = await api.system_resume()
+            self.assertTrue(resumed["resumed"])
+            await api.accounts_start()  # accounts restart is explicit
+            scheduler = stack.framework.scheduler
+            scheduler.submit("alpha", "roll", "message",
+                             channel_id=GUILD_CHANNEL, content="back")
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                if "back" in stack.world.messages_of(GUILD_CHANNEL):
+                    break
+            self.assertIn("back", stack.world.messages_of(GUILD_CHANNEL))
+        finally:
+            await stack.stop()
+
+
 class TestGroupRateScope(unittest.IsolatedAsyncioTestCase):
     """Per-account/group scope over the production bootstrap: accounts in
     one sync_group serialize their API activity on a shared clock."""

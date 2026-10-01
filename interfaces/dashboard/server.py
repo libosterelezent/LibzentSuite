@@ -566,7 +566,8 @@ class DashboardServer:
                 return 200, {"ok": True, "data": await api.emergency_stop_all()}
             if (method, path) == ("POST", "/api/shutdown"):
                 return 200, {"ok": True, "data": await api.shutdown()}
-
+            if (method, path) == ("POST", "/api/resume"):
+                return 200, {"ok": True, "data": await api.system_resume()}
             # -------------------------------------------------------------- accounts
             if (method, path) == ("GET", "/api/accounts"):
                 return 200, {"ok": True, "data": await api.accounts_list()}

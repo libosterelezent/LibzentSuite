@@ -890,10 +890,17 @@ class AccountManager:
         )
         settings_dict: Dict[str, Any] = {}
         try:
-            for state in self._plugin_manager.states(account_name) or []:
-                if isinstance(state, dict) and state.get("name") == plugin_name:
-                    settings_dict = state.get("settings") or {}
-                    break
+            # LIVE view first (set_setting mutates this dict in place, so
+            # services.settings and ctx.settings can never diverge); the
+            # states() copy is only a fallback for duck-typed collaborators
+            live = getattr(self._plugin_manager, "live_settings", None)
+            settings_dict = live(account_name, plugin_name) if callable(live) else None
+            if not isinstance(settings_dict, dict):
+                settings_dict = {}
+                for state in self._plugin_manager.states(account_name) or []:
+                    if isinstance(state, dict) and state.get("name") == plugin_name:
+                        settings_dict = state.get("settings") or {}
+                        break
         except Exception:
             pass
         services = AccountPluginServices(

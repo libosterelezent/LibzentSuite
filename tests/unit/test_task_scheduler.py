@@ -367,7 +367,21 @@ class TestCancel(SchedulerTestBase):
         self.assertEqual(len(self.recorder.of(TaskCancelled)), 1)
         self.assertEqual(len(self.repo.add_calls), 1)
         self.assertEqual(self.repo.add_calls[0]["status"], "cancelled")
-        self.assertEqual(len(self.audit.calls), 1)  # terminal audit, exactly once
+        # AUDIT INTEGRITY (regression): a cancel that NEVER invoked the
+        # sender must not write an outbound audit row — audit timestamps
+        # are read as real send times by the pacing checks
+        self.assertEqual(self.audit.calls, [])
+
+    async def test_cancel_mid_send_is_audited(self) -> None:
+        """Cancelled AFTER the sender ran (checkpoint 2): the API call went
+        out, so the outbound audit row must exist."""
+        task = self.scheduler.submit("alpha", "p", "message", channel_id=1)
+        self.sender.outcomes.append(("sleep", 0.08))
+        await self.settle(0.02)  # running inside the sender
+        self.assertTrue(self.scheduler.cancel(task.id))
+        await self.settle(0.3)
+        self.assertEqual(len(self.audit.calls), 1)
+        self.assertEqual(self.audit.calls[0]["direction"], "out")
 
     async def test_cancel_running_discards_result_after_sender_returns(self) -> None:
         task = self.scheduler.submit("alpha", "p", "message", channel_id=1)
@@ -648,10 +662,17 @@ class TestValidation(SchedulerTestBase):
         self.assertEqual(task.name, "custom")
         self.assertEqual(task.priority, int(Priority.NORMAL))
 
-    async def test_start_after_stop_raises(self) -> None:
+    async def test_start_rearms_after_stop(self) -> None:
+        """REGRESSION (resume path): the global emergency stop leaves the
+        scheduler stopped; start() must RE-ARM it (fresh submits accepted)
+        — stop() already drove every task terminal, so nothing is stale."""
         await self.scheduler.stop(drain=False)
         with self.assertRaises(SchedulerError):
-            self.scheduler.start()
+            self.scheduler.submit("alpha", "p", "message", channel_id=1)
+        self.scheduler.start()
+        task = self.scheduler.submit("alpha", "p", "message", channel_id=1)
+        await self.settle(0.1)
+        self.assertEqual(task.status, "completed")
 
     def test_constructor_rejects_bad_config(self) -> None:
         bus, logger, limiter, sender = self.bus, FakeLogger(), FakeLimiter(), FakeSender()

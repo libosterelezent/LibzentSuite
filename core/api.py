@@ -345,6 +345,20 @@ class ControlAPI:
         self._logs.error("system", f"GLOBAL EMERGENCY STOP executed ({cancelled} task(s) cancelled)")
         return {"cancelled_tasks": cancelled, "accounts": stopped, "halted": True}
 
+    async def system_resume(self) -> Dict[str, Any]:
+        """Resume after a GLOBAL emergency stop.
+
+        Re-arms the scheduler (stop() left it terminal — every task had
+        already reached a final state, so nothing stale carries over) and
+        returns fresh status. Accounts stay stopped on purpose: restart the
+        ones you want with accounts_start. The resume path exists because
+        emergency_stop_all's contract says 'restart manually' — without it
+        the halt was irreversible until process restart.
+        """
+        self._scheduler.start()
+        self._logs.info("system", "resume after emergency stop: scheduler re-armed")
+        return {"resumed": True, "status": await self.status()}
+
     async def shutdown(self) -> Dict[str, Any]:
         """Graceful shutdown of everything (used by quit/dashboard shutdown)."""
         await self._scheduler.stop(drain=True)

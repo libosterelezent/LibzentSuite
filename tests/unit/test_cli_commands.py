@@ -235,6 +235,10 @@ class FakeApi:
         self._record("emergency_stop_all")
         return {"cancelled_tasks": 5, "halted": True}
 
+    async def system_resume(self):
+        self._record("system_resume")
+        return {"resumed": True}
+
     async def shutdown(self):
         self._record("shutdown")
 
@@ -515,6 +519,13 @@ class TestSimulationLogsAudit(unittest.IsolatedAsyncioTestCase):
         api = FakeApi()
         await run_command(api, "estop")
         self.assertTrue(called(api, "emergency_stop_all"))
+
+    async def test_estop_resume(self) -> None:
+        api = FakeApi()
+        await run_command(api, "estop resume")
+        self.assertTrue(called(api, "system_resume"))
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "estop sideways")
 
 
 class TestFormatters(unittest.TestCase):

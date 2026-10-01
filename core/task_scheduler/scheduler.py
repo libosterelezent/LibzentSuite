@@ -254,14 +254,18 @@ class TaskScheduler:
             pass
 
     def start(self) -> None:
-        """Mark the scheduler ready (idempotent).
+        """Mark the scheduler ready (idempotent; RE-ARMS after stop()).
 
         Lanes are spawned lazily per account on first submit, so there is no
-        central loop to launch here. Raises SchedulerError after stop() — a
-        stopped scheduler cannot be restarted.
+        central loop to launch here. Re-arming after stop() is the resume
+        path for the global emergency stop: stop() already drove every task
+        to a terminal state and reaped every lane, so a fresh arm starts
+        from clean state (finished-task history is preserved). Attempts,
+        counters and audit state are per-task — nothing stale carries over.
         """
-        if self._stopped:
-            raise SchedulerError("scheduler cannot be restarted after stop()")
+        if self._stopping:
+            raise SchedulerError("scheduler is stopping; wait for stop() to finish")
+        self._stopped = False
         self._started = True
 
     async def stop(self, *, drain: bool = True, timeout: float = 10.0) -> None:
@@ -627,6 +631,7 @@ class TaskScheduler:
                 timed_out = False
                 retryable: Optional[BaseException] = None
                 try:
+                    task.sender_ran = True  # the API call is going out NOW
                     result = await asyncio.wait_for(self._sender(task), task.timeout_s)
                 except asyncio.CancelledError:
                     if self._outer_cancelled():
@@ -768,7 +773,14 @@ class TaskScheduler:
             except Exception:
                 self._log("warning", "scheduler", f"task {task.id} history write failed (continuing)")
 
-        if self._audit is not None and task.action in _AUDITED_ACTIONS:
+        # AUDIT INTEGRITY: only record an outbound row when the task could
+        # actually have touched the API. COMPLETED/FAILED/TIMED_OUT attempts
+        # all invoked the sender; a CANCELLED task only did when it was
+        # cancelled mid-send (checkpoint 2) — a cancel while still queued or
+        # parked on the grant NEVER sent and must not appear in the trail
+        # (the pacing checks read audit timestamps as real send times).
+        auditable = status != STATUS_CANCELLED or task.sender_ran
+        if self._audit is not None and auditable and task.action in _AUDITED_ACTIONS:
             note = f"plugin={task.plugin} task={task.id}"
             if task.attempts > 0:
                 note += f" attempts={task.attempts + 1}"

@@ -159,6 +159,27 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await asyncio.wait_for(pending, 1.0))
 
 
+class LiveSettingsTests(unittest.IsolatedAsyncioTestCase):
+    """REGRESSION (isolation finding): services.settings must be the SAME
+    live dict the plugin contexts read — a runtime set_setting change has
+    to be visible through BOTH views, not a frozen-at-activation copy."""
+
+    async def test_settings_live_view_shared_with_context(self) -> None:
+        from tests.unit.test_plugin_manager import make_manager as make_pm
+
+        manager, bus, _ = make_pm()
+        manager.attach_account("alpha")
+        await manager.activate_account("alpha", lambda _name: None)
+        live = manager.live_settings("alpha", "spy")
+        self.assertIsInstance(live, dict)
+        # a runtime change through the manager mutates the LIVE dict...
+        manager.set_setting("alpha", "spy", "greeting", "changed")
+        self.assertEqual(live["greeting"], "changed")
+        # ...and states() still renders the new value (display copy)
+        states = {s["name"]: s for s in manager.states("alpha")}
+        self.assertEqual(states["spy"]["settings"]["greeting"], "changed")
+
+
 class WaitForMessageTests(unittest.IsolatedAsyncioTestCase):
     async def test_first_match_wins_and_filters_account(self) -> None:
         bus = EventBus()
