@@ -172,8 +172,16 @@ class RateLimitManager:
         self._global_until: float = 0.0
         #: (account, action) -> monotonic "until" timestamp
         self._account_cooldowns: Dict[Tuple[str, str], float] = {}
-        #: pacing key (owner, action) -> monotonic time of the last grant
+        #: pacing key (owner, action) -> monotonic time of the last grant.
+        #: TWO SCOPES share this table (spec: per-account/group + per-task):
+        #:   ("alpha", "message")        per-TASK scope — consecutive API
+        #:                               calls (tasks) of ONE account
+        #:   ("group:grinders", "message") per-ACCOUNT/GROUP scope — the
+        #:                               shared clock serializing every member
+        #:                               account of the group
         self._last_fire: Dict[Tuple[str, str], float] = {}
+        #: account -> group name (framework-fed metadata, no API involved)
+        self._groups: Dict[str, str] = {}
         #: pacing key -> heap of pending _Entry waiters
         self._pending: Dict[Tuple[str, str], List[_Entry]] = {}
         self._seq = itertools.count()
@@ -440,6 +448,44 @@ class RateLimitManager:
         return self._floor
 
     # ------------------------------------------------------------- send lane
+    # ------------------------------------------------------------ group scope
+    def set_account_group(self, account: str, group: Optional[str]) -> None:
+        """Register which GROUP an account operates in (per-account/group
+        rate scope, spec: accounts in the same group serialize their API
+        activity against one shared clock).
+
+        Framework-fed metadata only — no Discord API is involved. ``None``
+        removes the account from any group (back to per-task pacing alone).
+        """
+        account = (account or "").strip()
+        if not account:
+            raise RatePolicyError("group registration needs an account name")
+        if group is None or not str(group).strip():
+            self._groups.pop(account, None)
+        else:
+            self._groups[account] = str(group).strip()
+        self._wake_waiters()
+
+    def account_groups(self) -> Dict[str, str]:
+        """account -> group mapping (stats/UI)."""
+        return dict(self._groups)
+
+    def _pacing_keys(self, account: Optional[str], action: str) -> List[Tuple[str, str]]:
+        """Every pacing clock this acquisition must respect.
+
+        Per-TASK scope is always present: ``(account, action)`` — the
+        account's own consecutive API calls. A grouped account ALSO paces on
+        ``(group:<name>, action)``: any member's grant stamps the shared
+        group clock, so the NEXT member's call waits the full interval —
+        exactly the A -> [limit] -> B -> [limit] -> A serialization.
+        """
+        keys = [(account or GLOBAL_KEY, action)]
+        if account is not None:
+            group = self._groups.get(account)
+            if group:
+                keys.append((f"group:{group}", action))
+        return keys
+
     def _load_lane_config(self, default_enabled: bool, default_prefixrate: float) -> None:
         """Restore the lane config from kv when present (best-effort).
 
@@ -659,10 +705,14 @@ class RateLimitManager:
                 server_waits.append(until - now)
         server_wait = max(server_waits)
         interval = self.effective(entry.action, entry.account, entry.plugin)["interval"]
-        last = self._last_fire.get((entry.account or GLOBAL_KEY, entry.action))
-        pacing_wait = (
-            max(0.0, last + interval - now) if last is not None else 0.0
-        )
+        # BOTH scopes compose (max): per-task (the account's own clock) and,
+        # when grouped, the shared group clock stamped by every member
+        pacing_wait = 0.0
+        for key in self._pacing_keys(entry.account, entry.action):
+            last = self._last_fire.get(key)
+            if last is not None:
+                pacing_wait = max(pacing_wait, last + interval - now)
+        pacing_wait = max(0.0, pacing_wait)
         return max(server_wait, pacing_wait), server_wait
 
     def _grant_ready(self) -> None:
@@ -685,7 +735,12 @@ class RateLimitManager:
                     continue
                 if self._entry_block(head)[0] > 0:
                     break  # head not ready: everyone behind it waits too
-                self._last_fire[key] = self._clock.now()
+                # stamp EVERY pacing clock this grant satisfies: the account
+                # key (per-task scope) and, for grouped accounts, the shared
+                # group key (per-account/group scope) — both from this grant
+                # instant, so the next member waits the full interval
+                for stamp_key in self._pacing_keys(head.account, head.action):
+                    self._last_fire[stamp_key] = self._clock.now()
                 heapq.heappop(heap)
                 head.future.set_result(None)
                 granted_any = True
@@ -809,6 +864,7 @@ class RateLimitManager:
         return {
             "floor": self._floor,
             "lane": self._lane.status(),
+            "groups": self.account_groups(),
             "policies": self.policies(),
             "cooldowns": {
                 "global": round(max(0.0, self._global_until - now), 3),

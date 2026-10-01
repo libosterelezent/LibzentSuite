@@ -341,5 +341,45 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
             await stack.stop()
 
 
+class TestGroupRateScope(unittest.IsolatedAsyncioTestCase):
+    """Per-account/group scope over the production bootstrap: accounts in
+    one sync_group serialize their API activity on a shared clock."""
+
+    async def test_group_members_serialize(self) -> None:
+        stack = Stack()
+        api = stack.framework.api
+        await api.accounts_add({"name": "alpha", "sync_group": "grinders"})
+        await api.accounts_add({"name": "beta", "sync_group": "grinders"})
+        self.assertEqual(
+            (await api.ratelimit_stats())["groups"],
+            {"alpha": "grinders", "beta": "grinders"},
+        )
+        await api.accounts_start()
+        try:
+            scheduler = stack.framework.scheduler
+            for account in ("alpha", "beta", "alpha", "beta"):
+                scheduler.submit(
+                    account, "roll", "message",
+                    channel_id=GUILD_CHANNEL, content=f"hi-{account}",
+                )
+            for _ in range(200):  # 4 sends on a 2.0s group clock land ~t=6s
+                await asyncio.sleep(0.05)
+                if len(stack.world.messages_of(GUILD_CHANNEL)) >= 4:
+                    break
+            await asyncio.sleep(0.3)
+            history = [m for m in stack.world.messages_of(GUILD_CHANNEL)
+                       if m.startswith("hi-")]
+            self.assertEqual(len(history), 4)
+            audit = await api.audit_tail(n=20)
+            outs = sorted(e["ts"] for e in audit if e["direction"] == "out"
+                          and e["content"].startswith("hi-"))
+            gaps = [b - a for a, b in zip(outs, outs[1:])]
+            # every gap between GROUP members (and each account's own calls)
+            # respects the 1.5s config interval across the shared clock
+            self.assertTrue(all(g >= 1.45 for g in gaps), gaps)
+        finally:
+            await stack.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

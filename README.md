@@ -60,6 +60,45 @@ Dependencies: Python ≥ 3.10, standard library only. Live mode additionally
 needs a user-account client fork (`pip install discord.py-self`), imported
 lazily — simulations/tests never require it.
 
+## Architecture: who calls what
+
+```
+                    ┌─────────────────────┐
+                    │   SlaughterMudae    │
+                    │  (core framework)   │
+Events ────────────►│ Event routing       │
+                    │ Account control     │
+                    │ Task orchestration  │
+                    │ Lifecycle           │
+                    └──────────┬──────────┘
+                               │  (events/context only — NEVER API calls
+                               │   for its own purposes)
+                               ▼
+                    ┌─────────────────────┐
+                    │       Plugins       │
+                    │ Decide WHEN an API  │
+                    │ call is actually    │
+                    │ required            │
+                    └──────────┬──────────┘
+                               │  on-demand (services.send_message /
+                               │  open_dm / fetch_user)
+                               ▼
+                    ┌─────────────────────┐
+                    │     RateLimiter     │
+                    │ · per-task          │  one account's consecutive calls
+                    │ · per-account/group │  shared clock per sync_group
+                    │ · server-wide lane  │  fleet serialization
+                    └──────────┬──────────┘
+                               ▼
+                         API functions
+
+The core principle: **SlaughterMudae controls the flow; plugins control API
+usage; the RateLimiter controls when those calls may execute.** The
+framework's complete client-touch inventory is audited in the
+`core/account_manager` module docstring — every entry is demand-driven by a
+plugin task (the single deliberate exception, the opt-in typing indicator,
+ships disabled). Nothing prefetches; nothing fetches "just in case".
+
 ## The send pipeline
 
 ```
@@ -80,6 +119,18 @@ Server-wide serialization + per-account pacing + the 1.5s floor compose —
 `ratelimit lane` (CLI) or the Rate Limits page (dashboard) control it, and
 the config ships it on by default (`"lane": {"enabled": true,
 "prefixrate": 1.5}` in `config/rate_limits.json`).
+
+### Rate scopes (three composing layers)
+
+| Scope | Key | Governs |
+|---|---|---|
+| **per-task** | `(account, action)` | consecutive API calls (scheduler tasks) of ONE account — a task can never fire back-to-back |
+| **per-account/group** | `(group:<sync_group>, action)` | accounts sharing a `sync_group` serialize on ONE shared clock: `A → [limit] → B → [limit] → A` |
+| **server-wide lane** | fleet | every outbound action from every account, one at a time, spaced by `prefixrate` |
+
+All three compose (the strictest wait wins), then jitter is applied after
+the grant. Groups are registered automatically from each account's
+`sync_group` (pure metadata — no API involved).
 
 Retries cover transient failures and server 429s (`ServerRateLimit` always
 earns at least one retry, paced by the limiter cooldown — the framework

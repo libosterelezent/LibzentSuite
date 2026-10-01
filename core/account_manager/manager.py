@@ -1,5 +1,34 @@
 """Account manager (A6): Account, AccountRuntime, AccountManager, DiscordCache wiring.
 
+════════════════════════════════════════════════════════════════════════
+API BOUNDARY CONTRACT (architecture spec) — audited & enforced
+════════════════════════════════════════════════════════════════════════
+This module is the framework: event routing, account control, task
+orchestration, lifecycle. It NEVER initiates a Discord API call for its own
+purposes. The COMPLETE inventory of client touches (each demand-driven):
+
+  1. ``connect()/disconnect()``          — gateway lifecycle (account control)
+  2. ``client.cached_snapshot()``        — memory-only read of what the client
+                                           already holds; ZERO API calls
+  3. ``send_hook`` → ``client.send_message`` — EXECUTES a task a PLUGIN
+                                           submitted (orchestration; paced by
+                                           the RateLimiter before it runs)
+  4. ``resolve_dm_channel`` → ``client.open_dm`` — ONLY on a DM-send cache
+                                           miss, for a plugin-demanded send
+  5. ``services.fetch_user`` → ``client.fetch_user`` — PLUGIN-facing,
+                                           on-demand, DB-cached per account
+  6. ``_maybe_typing`` → ``client.send_typing`` — the ONE deliberate,
+                                           opt-in exception: a send-decoration
+                                           policy (typing_probability, default
+                                           0.0 = never) — no plugin demands it,
+                                           so it ships disabled
+
+There is NO prefetching, NO "just in case" fetching, and NO API-derived
+state beyond what a live send/flow actually consumed. ``details()`` reads
+exclusively from the ingested READY snapshot + repos. Rate-scope metadata
+(``_sync_group_scope``) is pure plumbing — no API involved.
+════════════════════════════════════════════════════════════════════════
+
 One :class:`Account` per Discord user account, split into PERSISTENT state
 (``record`` — database/models.AccountRecord) and RUNTIME state
 (``runtime`` — client, status, cache, supervisor; never persisted).
@@ -196,6 +225,19 @@ class AccountManager:
         # restore accounts persisted in the database (boot path)
         self._load_from_repo()
 
+    # ------------------------------------------------------- rate-scope sync
+    def _sync_group_scope(self, name: str, group: Optional[str]) -> None:
+        """Feed the account's group membership to the limiter (per-account/
+        group rate scope). Pure metadata plumbing — NO Discord API is
+        involved; tolerant of limiters without group support (tests)."""
+        register = getattr(self._limiter, "set_account_group", None)
+        if register is None:
+            return
+        try:
+            register(name, group)
+        except Exception:
+            self._logger.exception("group scope registration failed for %s", name)
+
     # ------------------------------------------------------------------ boot
     def _load_from_repo(self) -> None:
         """Rebuild Account objects (and attach their plugins) from the repo.
@@ -212,6 +254,7 @@ class AccountManager:
                 account = Account(record=record)
                 self._accounts[record.name] = account
                 self._attach_plugins(record.name)
+                self._sync_group_scope(record.name, record.sync_group)
             except Exception:
                 self._logger.exception("could not restore account %r", record.name)
 
@@ -264,6 +307,7 @@ class AccountManager:
         if fresh is not None:
             account.record = fresh
         self._attach_plugins(name)
+        self._sync_group_scope(name, sync_group)
         self._logger.info(
             "account %s added (enabled=%s sync_group=%s profiles=%s)",
             name, enabled, sync_group, account.record.profiles or "-",
@@ -296,6 +340,7 @@ class AccountManager:
         except Exception:
             self._logger.exception("plugin detach failed for %s", name)
         self._drop_services(name)
+        self._sync_group_scope(name, None)
         existed = bool(self._accounts_repo.delete(name))
         del self._accounts[name]
         self._logger.info("account %s removed (existed=%s)", name, existed)

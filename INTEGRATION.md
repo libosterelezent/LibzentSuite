@@ -24,6 +24,32 @@ Spec source: `TODO + Ideas.md` (architecture, phases, safety rules).
   (`UnsafePolicyError`). Constant `MIN_ACTION_INTERVAL = 1.5` in
   `core/rate_limit_manager`.
 
+## API BOUNDARY (binding architecture contract)
+
+```
+Events ──► SlaughterMudae (routing/orchestration/lifecycle) ──► Plugins
+                                                                    │ on demand
+                                                                    ▼
+                                                       RateLimiter (scopes)
+                                                                    ▼
+                                                               API functions
+```
+
+- The FRAMEWORK never initiates a Discord API call for its own purposes. No
+  prefetching, no "just in case" fetches, no API-derived state beyond what a
+  live send/flow consumed. Its full client-touch inventory is audited in the
+  `core/account_manager` module docstring.
+- PLUGINS decide when an API call is needed and request it through
+  `PluginServices` (`send_message` / `send_dm` / `open_dm` / `fetch_user`) —
+  all on-demand; `fetch_user`/DM channels persist in the account-scoped
+  `api_cache` table so a resolved entity costs ONE call per account lifetime.
+- The RATE LIMITER owns execution timing, in three composing scopes:
+  per-task (`(account, action)` — one account's consecutive calls),
+  per-account/group (`(group:<name>, action)` shared clock registered via
+  `RateLimitManager.set_account_group(account, group)`; the account manager
+  feeds it from `sync_group` on add/remove/restore), and the server-wide
+  lane (`set_lane_*`). `stats()` exposes `groups` + all pacing clocks.
+
 ## Target structure
 
 ```
