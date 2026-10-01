@@ -29,7 +29,10 @@ from core.errors import PluginError
 from core.event_bus import (
     EventBus,
     Event,
+    MessageDeleted,
+    MessageEdited,
     MessageReceived,
+    ReactionAdded,
     PluginEnabledChanged,
     PluginLoaded,
     PluginUnloaded,
@@ -75,7 +78,12 @@ class PluginManager:
         self._services: Dict[str, Callable[[str], Any]] = {}
         #: strong refs for fire-and-forget dispatch tasks (no GC mid-flight)
         self._pending: Set[asyncio.Task] = set()
+        # every account-scoped Discord event type routes to plugins; new
+        # types are ADDITIVE — plugins filter by isinstance in handle_event
         self._unsubscribe = bus.subscribe(MessageReceived, self._on_message)
+        self._unsub_edited = bus.subscribe(MessageEdited, self._on_message)
+        self._unsub_deleted = bus.subscribe(MessageDeleted, self._on_message)
+        self._unsub_reaction = bus.subscribe(ReactionAdded, self._on_message)
         self._discovered = False
 
     # ------------------------------------------------------------- discovery
@@ -311,7 +319,8 @@ class PluginManager:
     def _on_message(self, event: Event) -> None:
         """Bus handler (sync): fan a MessageReceived out as a fire-and-forget
         dispatch task so the publisher is never blocked by a slow plugin."""
-        if not isinstance(event, MessageReceived):
+        if not isinstance(event, (MessageReceived, MessageEdited,
+                                  MessageDeleted, ReactionAdded)):
             return
         runtimes = self._accounts.get(event.account)
         if not runtimes:

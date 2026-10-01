@@ -28,20 +28,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional, Protocol, runtime_checkable
 
+# RICH MODEL (adapters/model.py) — the full stable projection (embeds,
+# components, attachments, reactions, reference, author/channel/guild,
+# created_at, runtime-only raw escape hatch). Re-exported here so every
+# existing ``from adapters.base import DiscordMessage`` keeps working.
+from .model import (  # noqa: F401 — compatibility re-exports
+    DiscordAttachment,
+    DiscordChannel,
+    DiscordComponent,
+    DiscordEmbed,
+    DiscordEmbedField,
+    DiscordMessage,
+    DiscordMessageReference,
+    DiscordReaction,
+    DiscordUser,
+    convert_message,
+)
 
-@dataclass
-class DiscordMessage:
-    """Client-agnostic message shape exchanged between client and framework."""
 
-    id: int
-    channel_id: int
-    author_id: int
-    content: str
-    dm: bool = False
-
-    def __repr__(self) -> str:  # sane rendering in broadcast/results
-        preview = (self.content or "").replace("\n", "\\n")[:40]
-        return f"<msg ch={self.channel_id} author={self.author_id}: {preview!r}>"
 
 
 @runtime_checkable
@@ -55,6 +59,14 @@ class DiscordClient(Protocol):
     #: callbacks assigned by the account manager BEFORE connect()
     on_message: Optional[Callable[[DiscordMessage], None]]
     on_disconnect: Optional[Callable[[str], None]]
+    #: OPTIONAL rich-event callbacks (None on clients that lack the event):
+    #: on_reaction(kind: "add"|"remove", message_id, channel_id, guild_id,
+    #:              user_id, emoji: str, raw)
+    #: on_message_edit(message: DiscordMessage)   (post-edit, raw=library msg)
+    #: on_message_delete(message_id, channel_id, guild_id, raw)
+    on_reaction: Optional[Callable[..., None]]
+    on_message_edit: Optional[Callable[[DiscordMessage], None]]
+    on_message_delete: Optional[Callable[..., None]]
 
     async def connect(self) -> None: ...
 
@@ -67,6 +79,16 @@ class DiscordClient(Protocol):
     async def open_dm(self, user_id: int) -> int: ...
 
     async def fetch_user(self, user_id: int) -> Any: ...
+
+    # ----- OPTIONAL capability actions (plugin-demanded, pipeline-paced) ------
+    async def add_reaction(self, channel_id: int, message_id: int, emoji: str) -> Any:
+        """React to a message (kakerareact capability). Raises the shared
+        domain errors (ServerRateLimit/AccessDenied/TargetGone)."""
+
+    async def click_button(self, channel_id: int, message_id: int, custom_id: str) -> Any:
+        """Click a component by custom_id (kakeraloot capability). Resolves
+        the message on demand (plugin-requested fetch) and clicks the
+        matching button; raises the shared domain errors."""
 
     def cached_snapshot(self) -> dict:
         """In-memory view: {"available": bool, "user": {"id","name"},

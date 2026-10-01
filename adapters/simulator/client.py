@@ -58,6 +58,9 @@ class SimClient:
         self.user_id = user_id
         self.on_message: Optional[Callable[[DiscordMessage], None]] = None
         self.on_disconnect: Optional[Callable[[str], None]] = None
+        self.on_reaction: Optional[Callable[..., None]] = None
+        self.on_message_edit: Optional[Callable[[DiscordMessage], None]] = None
+        self.on_message_delete: Optional[Callable[..., None]] = None
         self.connected = False
         self.fail_connect = fail_connect
         self._rng = random.Random(seed)
@@ -65,6 +68,8 @@ class SimClient:
         self.typing_calls: list = []
         #: REST-touching DM opens (observable for API-trim tests)
         self.open_dm_calls: list = []
+        #: button clicks performed (observable for capability tests)
+        self.button_clicks: list = []
 
     # -------------------------------------------------------------- lifecycle
     async def connect(self) -> None:
@@ -215,8 +220,19 @@ class SimClient:
         )
 
     def receive(self, message: WorldMessage) -> None:
-        """World push -> framework callback (ignores our own messages)."""
+        """World push -> framework callback (ignores our own messages).
+
+        Rich boundary: whatever the world row carries (embeds, components,
+        attachments, reactions, author/guild, reference) crosses into the
+        DTO untouched — same contract as the live adapter.
+        """
         if self.on_message is not None and message.author_id != self.user_id:
+            from adapters.model import (
+                DiscordChannel,
+                DiscordMessageReference,
+                DiscordUser,
+            )
+
             self.on_message(
                 DiscordMessage(
                     id=message.id,
@@ -224,8 +240,57 @@ class SimClient:
                     author_id=message.author_id,
                     content=message.content,
                     dm=message.dm,
+                    guild_id=message.guild_id,
+                    author=DiscordUser(
+                        id=message.author_id, name=message.author_name),
+                    channel=DiscordChannel(
+                        id=message.channel_id,
+                        name=self._world.channels.get(message.channel_id, ""),
+                        type="private" if message.dm else "text",
+                        guild_id=message.guild_id,
+                    ),
+                    embeds=tuple(message.embeds),
+                    components=tuple(message.components),
+                    attachments=tuple(message.attachments),
+                    reactions=tuple(message.reactions),
+                    reference=(
+                        DiscordMessageReference(
+                            message_id=message.reference_message_id,
+                            channel_id=message.channel_id,
+                            guild_id=message.guild_id)
+                        if message.reference_message_id else None
+                    ),
                 )
             )
+
+    # ------------------------------------------------- capability actions
+    async def add_reaction(self, channel_id: int, message_id: int, emoji: str) -> Any:
+        """React via the world (echoes a ReactionAdded to other subscribers)."""
+        if not self.connected:
+            raise ConnectionError("client not connected")
+        self._world.react(self.user_id, message_id, emoji, kind="add")
+        return None
+
+    async def click_button(self, channel_id: int, message_id: int, custom_id: str) -> Any:
+        """Click a button the world still holds (TargetGone when vanished)."""
+        from adapters.model import DiscordComponent
+        from core.errors import TargetGone
+
+        if not self.connected:
+            raise ConnectionError("client not connected")
+        for messages in self._world.history.values():
+            for message in messages:
+                if message.id == message_id:
+                    for top in message.components:
+                        for component in (top.walk() if isinstance(
+                                top, DiscordComponent) else ()):
+                            if component.custom_id == custom_id:
+                                self.button_clicks.append(
+                                    (message_id, custom_id))
+                                return None
+                    raise TargetGone(
+                        "", f"custom_id {custom_id!r} not on message {message_id}")
+        raise TargetGone("", f"message {message_id} vanished")
 
 
 __all__ = ["SimClient", "LATENCY_MIN_MS", "LATENCY_MAX_MS"]

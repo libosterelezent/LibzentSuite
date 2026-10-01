@@ -436,6 +436,28 @@ latency_ms/user_id/on_message/on_disconnect), `ClientFactory` protocol
   accrual, token box, ws retry cap) from
   `git show HEAD:dashboard/static/index.html`.
 
+## Rich message/event boundary (adapters/model.py)
+
+```
+discord.py-self / SimWorld event
+        ↓ one non-blocking conversion (no fetches)
+adapters.model.DiscordMessage  (frozen; 5 compat fields + rich additions:
+        guild_id/author/channel/embeds/components/attachments/reactions/
+        reference/created_at + runtime-only raw via .unwrap())
+        ↓
+EventBus: MessageReceived(.message = rich DTO)
+          MessageEdited / MessageDeleted / ReactionAdded (typed, additive)
+        ↓
+plugins (isolation: frozen DTOs; actions NEVER on the model)
+        ↓
+PluginServices: send_message/send_dm/add_reaction/click_button
+        ↓ scheduler action kinds message|dm|reaction|button → limiter → adapter
+```
+
+Rules: raw is runtime-only, repr=False, never persisted; missing optionals
+stay None (never fetched to populate §12); reaction/button payloads ride in
+Task.content with Task.message_id as target; audit notes carry counts only.
+
 ## Database (A2 implements; models+schema in spine)
 
 `database/db.py`: `Database(path="state/slaughter.db", *, audit_keep=10000,

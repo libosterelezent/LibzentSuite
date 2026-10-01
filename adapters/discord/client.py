@@ -28,7 +28,7 @@ import logging
 import math
 from typing import Any, Callable, Optional
 
-from adapters.base import DiscordMessage
+from adapters.base import DiscordMessage, convert_message
 from core.credentials import Credentials
 from core.errors import (
     AccessDenied,
@@ -120,15 +120,54 @@ class RealDiscordClient:
         async def on_message(message: Any) -> None:
             if self.on_message is None or message.author.id == self.user_id:
                 return
+            # RICH BOUNDARY: capture everything the event already holds
+            # (embeds/components/attachments/reactions/reference/author/
+            # channel/guild/created_at + the runtime-only raw handle) in ONE
+            # non-blocking conversion — plugins never re-fetch it (§15)
             self.on_message(
-                DiscordMessage(
-                    id=message.id,
-                    channel_id=message.channel.id,
-                    author_id=message.author.id,
-                    content=message.content or "",
+                convert_message(
+                    message,
                     dm=isinstance(message.channel, self._discord.DMChannel),
+                    viewer_id=self.user_id,
                 )
             )
+
+        @self._client.event
+        async def on_message_edit(before: Any, after: Any) -> None:
+            if self.on_message_edit is not None and after.author.id != self.user_id:
+                self.on_message_edit(convert_message(
+                    after, dm=isinstance(after.channel, self._discord.DMChannel)))
+
+        @self._client.event
+        async def on_message_delete(message: Any) -> None:
+            if self.on_message_delete is not None and message.author.id != self.user_id:
+                guild = getattr(message, "guild", None)
+                self.on_message_delete(
+                    message.id, message.channel.id,
+                    getattr(guild, "id", None) if guild else None, message,
+                )
+
+        @self._client.event
+        async def on_reaction_add(reaction: Any, user: Any) -> None:
+            if self.on_reaction is not None and user.id != self.user_id:
+                message = reaction.message
+                guild = getattr(message, "guild", None)                     or getattr(getattr(message, "channel", None), "guild", None)
+                self.on_reaction(
+                    "add", message.id, message.channel.id,
+                    getattr(guild, "id", None) if guild else None,
+                    user.id, reaction.emoji, (reaction, user),
+                )
+
+        @self._client.event
+        async def on_reaction_remove(reaction: Any, user: Any) -> None:
+            if self.on_reaction is not None and user.id != self.user_id:
+                message = reaction.message
+                guild = getattr(message, "guild", None)                     or getattr(getattr(message, "channel", None), "guild", None)
+                self.on_reaction(
+                    "remove", message.id, message.channel.id,
+                    getattr(guild, "id", None) if guild else None,
+                    user.id, reaction.emoji, (reaction, user),
+                )
 
         asyncio.get_running_loop().create_task(self._run())
         await self._ready.wait()
@@ -280,6 +319,58 @@ class RealDiscordClient:
         if channel is None:
             return  # unknown channel: skip rather than fetch (API-call trim)
         await channel.trigger_typing()
+
+    async def _resolve_message(self, channel_id: int, message_id: int) -> Any:
+        """Message object by ids — cache first, fetch on miss (the ONE
+        plugin-demanded fetch for button/reaction actions; §15)."""
+        client = self._require_client()
+        channel = client.get_channel(channel_id)
+        if channel is None:
+            channel = await client.fetch_channel(channel_id)
+        message = channel.get_message(message_id) if hasattr(
+            channel, "get_message") else None
+        if message is None:
+            message = await channel.fetch_message(message_id)
+        return message
+
+    async def add_reaction(self, channel_id: int, message_id: int, emoji: str) -> Any:
+        """React to a message (kakerareact capability; pipeline-paced)."""
+        try:
+            message = await self._resolve_message(channel_id, message_id)
+            await message.add_reaction(emoji)
+        except Exception as exc:
+            mapped = self._map_send_error(exc, channel_id)
+            if mapped is not None:
+                raise mapped from exc
+            raise
+
+    async def click_button(self, channel_id: int, message_id: int, custom_id: str) -> Any:
+        """Click a component by custom_id (kakeraloot capability).
+
+        Uses the library's Button.click() (supported on user tokens). The
+        component must still exist on the live message; a vanished custom_id
+        raises TargetGone with the id in the reason.
+        """
+        try:
+            message = await self._resolve_message(channel_id, message_id)
+        except Exception as exc:
+            mapped = self._map_send_error(exc, channel_id)
+            if mapped is not None:
+                raise mapped from exc
+            raise
+        for top in getattr(message, "components", None) or ():
+            for component in getattr(top, "children", None) or ():
+                if getattr(component, "custom_id", None) == custom_id:
+                    try:
+                        return await component.click()
+                    except Exception as exc:
+                        mapped = self._map_send_error(exc, channel_id)
+                        if mapped is not None:
+                            raise mapped from exc
+                        raise
+        from core.errors import TargetGone
+
+        raise TargetGone("", f"custom_id {custom_id!r} not on message {message_id}")
 
     async def fetch_user(self, user_id: int) -> Any:
         """Fetch a user object from the library."""

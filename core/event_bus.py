@@ -146,13 +146,61 @@ class SettingChanged(Event):
 # ---------------------------------------------------------------- messages
 @dataclass
 class MessageReceived(Event):
-    """A Discord message seen by an account (never the account's own sends)."""
+    """A Discord message seen by an account (never the account's own sends).
+
+    COMPATIBILITY: the five flat fields are the original surface every
+    existing consumer uses (soulcopy, roll, remote control, collect/wait).
+    ``message`` carries the RICH adapters.model.DiscordMessage (embeds,
+    components, attachments, reactions, reference, author/channel/guild,
+    created_at, and the runtime-only ``raw`` escape hatch) — typed ``Any``
+    so core never imports the adapter layer. None for legacy/synthetic
+    events that predate the rich boundary.
+    """
 
     message_id: int = 0
     channel_id: int = 0
     author_id: int = 0
     content: str = ""
     dm: bool = False
+    #: rich DTO (adapters.model.DiscordMessage) — additive, optional
+    message: Any = None
+
+
+@dataclass
+class MessageEdited(Event):
+    """A message was edited (stable ids + the RICH post-edit message)."""
+
+    message_id: int = 0
+    channel_id: int = 0
+    guild_id: Optional[int] = None
+    message: Any = None  # rich post-edit DiscordMessage (raw = library msg)
+
+
+@dataclass
+class MessageDeleted(Event):
+    """A message was deleted (ids only — the library gives no payload body)."""
+
+    message_id: int = 0
+    channel_id: int = 0
+    guild_id: Optional[int] = None
+
+
+@dataclass
+class ReactionAdded(Event):
+    """A reaction was added to a message — WITHOUT any message fetch (§9).
+
+    Everything a kakerareact-style plugin needs arrives on the event:
+    message/channel/guild ids, the reacting user, the printable emoji, dm
+    flag, and the optional runtime-only ``raw`` library objects.
+    """
+
+    message_id: int = 0
+    channel_id: int = 0
+    guild_id: Optional[int] = None
+    user_id: int = 0
+    emoji: str = ""
+    dm: bool = False
+    raw: Any = field(default=None, repr=False)
 
 
 # -------------------------------------------------------------- simulation
@@ -248,5 +296,6 @@ __all__ = [
     "PluginLoaded", "PluginUnloaded", "PluginEnabledChanged", "TaskQueued",
     "TaskStarted", "TaskCompleted", "TaskFailed", "TaskCancelled",
     "RateLimitTriggered", "SettingChanged", "MessageReceived",
+    "MessageEdited", "MessageDeleted", "ReactionAdded",
     "ScenarioStarted", "ScenarioFinished",
 ]

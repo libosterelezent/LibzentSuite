@@ -242,6 +242,32 @@ class AccountPluginServices:
             self._api_cache,
         )
 
+    async def add_reaction(self, channel_id: int, message_id: int, emoji: str,
+                           *, priority: Priority = Priority.NORMAL) -> None:
+        """React to a message through the paced pipeline (kakerareact).
+
+        The emoji is the task payload; pacing/floor/lane/audit apply exactly
+        like a send (safety first — reaction claim races are precisely where
+        robotic timing gets flagged).
+        """
+        task = self._scheduler.submit(
+            self._account, self._plugin, "reaction",
+            channel_id=int(channel_id), message_id=int(message_id),
+            content=str(emoji), priority=priority,
+        )
+        await self._acks.wait_for_task(task.id, self.task_ack_timeout)
+
+    async def click_button(self, channel_id: int, message_id: int, custom_id: str,
+                           *, priority: Priority = Priority.NORMAL) -> None:
+        """Click a message component by custom_id (kakeraloot) — paced,
+        audited, with the adapter resolving the live message on demand."""
+        task = self._scheduler.submit(
+            self._account, self._plugin, "button",
+            channel_id=int(channel_id), message_id=int(message_id),
+            content=str(custom_id), priority=priority,
+        )
+        await self._acks.wait_for_task(task.id, self.task_ack_timeout)
+
     async def fetch_user(self, user_id: int):
         """Resolve a user, cached per account in the database.
 
