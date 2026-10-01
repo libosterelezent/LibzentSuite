@@ -63,14 +63,24 @@ def encode_frame(opcode: int, payload: bytes) -> bytes:
 
 
 def encode_text_frame(text: str) -> bytes:
+    """
+    Encode one server->client TEXT frame (FIN=1, unmasked).
+    """
     return encode_frame(OP_TEXT, text.encode("utf-8"))
 
 
 def encode_pong(payload: bytes) -> bytes:
+    """
+    Encode a PONG control frame echoing the ping payload (RFC 6455 §5.5.2).
+    """
     return encode_frame(OP_PONG, payload)
 
 
 def encode_close_frame() -> bytes:
+    """
+    Encode an empty CLOSE frame (RFC 6455 §5.5.1) — sent before the
+    socket is dropped after a protocol violation or a peer close.
+    """
     return encode_frame(OP_CLOSE, b"")
 
 

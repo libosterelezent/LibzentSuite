@@ -6,8 +6,6 @@ accounts/
 *.token
 *_token.txt
 
-# --- local-only knowledgebase (kept on disk, read-only) ---
-knowledgebase/
 
 # --- local runtime state ---
 config/accounts/*.local.json
@@ -23,3 +21,4 @@ venv/
 .mypy_cache/
 .coverage
 htmlcov/
+docs/_build/

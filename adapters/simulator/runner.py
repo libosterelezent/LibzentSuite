@@ -1,6 +1,6 @@
 """SimulationRunner — a COMPLETE ephemeral stack per scenario run (spec §16).
 
-Wiring follows the pinned constructors in INTEGRATION.md exactly:
+Wiring follows the pinned constructors in INTEGRATION.md exactly::
 
     Database(":memory:") + migrate()
     EventBus()
@@ -28,9 +28,10 @@ Manager modules from A3/A5/A6 are imported INSIDE run(): when one is still
 pending integration, run() raises SimulationError with a human-readable
 message instead of an ImportError traceback.
 
-Documented contract decisions (ambiguous seams — see INTEGRATION.md ground
-rules; the lead reconciles at integration):
-  * LOGGER SHAPE: the spine SettingsManager and the A3/A6 managers call the
+Documented contract decisions (ambiguous seams — see INTEGRATION.md
+ground rules; the lead reconciles at integration):
+
+- LOGGER SHAPE: the spine SettingsManager and the A3/A6 managers call the
     injected logger in STDLIB style (``logger.info("fmt %s", arg)``,
     ``logger.exception(...)``), while A4's rate-limit engine calls it in
     LogService style (``logger.info(source, message)``) and A5's scheduler
@@ -39,9 +40,10 @@ rules; the lead reconciles at integration):
     manager. Both call styles produce a readable structured entry (so
     ``log_lines`` and the dashboard Logs page keep working), and a logging
     failure can never break a manager.
-  * ACCOUNT MANAGER ``limiter`` KEYWORD: passed when accepted (A7 assignment
-    wording); the INTEGRATION.md pinned signature omits it, so a TypeError
-    falls back to the keyword-less construction — either variant works.
+
+- ACCOUNT MANAGER ``limiter`` KEYWORD: passed when accepted (A7 assignment
+  wording); the INTEGRATION.md pinned signature omits it, so a TypeError
+  falls back to the keyword-less construction — either variant works.
 """
 from __future__ import annotations
 

@@ -99,6 +99,11 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
 
 
 def main() -> int:
+    """
+    Entrypoint: parse argv and dispatch to the simulation runner
+    (``--sim``/``--sim-list``) or the live app (REPL / one-shot CLI /
+    dashboard / headless). Returns a process exit code (130 on Ctrl-C).
+    """
     parser = argparse.ArgumentParser(
         prog="slaughtermudae", description="SlaughterMudae automation framework"
     )

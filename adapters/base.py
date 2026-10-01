@@ -1,25 +1,24 @@
 """Discord client abstraction (spec §9): ONE interface, two implementations.
 
-    DiscordClient (protocol)
-        /                \
-  Real Client          Simulator
-  (adapters/discord)  (adapters/simulator)
+.. code-block:: text
+
+      DiscordClient (protocol)
+          /                \
+    Real Client          Simulator
+    (adapters/discord)  (adapters/simulator)
 
 The framework (account manager, scheduler sender hook, plugins) only ever
 talks to this protocol — never to a concrete library — which is what makes
 full offline simulation possible.
 
-Implementations must provide:
-  * lifecycle : connect(), disconnect(), connected state
-  * messaging : send_message(channel_id, content), send_dm(user_id, content),
-                open_dm(user_id) -> channel_id, fetch_user(user_id)
-  * observability: user_id (once connected), latency_ms (gateway heartbeat),
-                cached_snapshot() — in-memory view only, NEVER a network fetch
-  * callbacks : on_message(DiscordMessage), on_disconnect(reason) — assigned
-                by the account manager before connect()
+Implementations must provide lifecycle (``connect``/``disconnect``),
+messaging (``send_message``, ``send_dm``, ``open_dm``, ``fetch_user``),
+observability (``user_id``, ``latency_ms``, ``cached_snapshot`` — in-memory
+view only, NEVER a network fetch), and callbacks (``on_message``,
+``on_disconnect`` — assigned by the account manager before connect).
 
 Server-provided rate limits: when Discord answers 429 the client raises
-core.errors.ServerRateLimit(retry_after, global_). The scheduler reports it
+:class:`core.errors.ServerRateLimit` (``retry_after``, ``global_``). The scheduler reports it
 to the rate limit manager and retries after backoff — the framework always
 respects server-provided rate-limit information.
 """
@@ -59,11 +58,10 @@ class DiscordClient(Protocol):
     #: callbacks assigned by the account manager BEFORE connect()
     on_message: Optional[Callable[[DiscordMessage], None]]
     on_disconnect: Optional[Callable[[str], None]]
-    #: OPTIONAL rich-event callbacks (None on clients that lack the event):
-    #: on_reaction(kind: "add"|"remove", message_id, channel_id, guild_id,
-    #:              user_id, emoji: str, raw)
-    #: on_message_edit(message: DiscordMessage)   (post-edit, raw=library msg)
-    #: on_message_delete(message_id, channel_id, guild_id, raw)
+    #: OPTIONAL rich-event callbacks (None on clients that lack the
+    #: event): ``on_reaction(kind, message_id, channel_id, guild_id,
+    #: user_id, emoji, raw)``, ``on_message_edit(message)``,
+    #: ``on_message_delete(message_id, channel_id, guild_id, raw)``.
     on_reaction: Optional[Callable[..., None]]
     on_message_edit: Optional[Callable[[DiscordMessage], None]]
     on_message_delete: Optional[Callable[..., None]]

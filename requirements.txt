@@ -18,5 +18,5 @@
      pip install discord.py-self
 #
 # (any fork exposing Client/start/close/on_ready/on_message/get_channel/
-#  fetch_channel.send/fetch_user.dm_channel works — see KB_07 in the
-#  knowledgebase for the exact client protocol the adapter expects)
+#  fetch_channel.send/fetch_user.dm_channel works — see adapters/base.py
+#  for the exact client protocol the adapter expects)

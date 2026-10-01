@@ -44,8 +44,9 @@ class WorldMessage:
 
     Rich payloads (embeds/components/attachments/reactions as
     adapters.model DTO tuples, author_name, guild_id, reference ids) are
-    optional — deliver(**rich) forwards them — so scenarios can exercise
-    the full rich boundary exactly like live traffic.
+    optional keyword arguments forwarded by :meth:`deliver` — so
+    scenarios can exercise the full rich boundary exactly like live
+    traffic.
     """
 
     id: int

@@ -36,15 +36,16 @@ priority order re-evaluates immediately. A bounded poll (0.25s) backstops
 non-head waiters against lost wakes — correctness never depends on the wake.
 
 Other documented decisions (INTEGRATION.md: pick the safest option):
-* effective() interval is max(all applicable policies, floor) — a stored
-  policy can never pace faster than the floor even after set_floor() raised
-  it past existing policy intervals.
-* waiters of one pacing key do NOT block other keys (per-account pacing),
+
+- effective() interval is max(all applicable policies, floor) — a stored
+  policy can never pace faster than the floor even after set_floor()
+  raised it past existing policy intervals.
+- waiters of one pacing key do NOT block other keys (per-account pacing),
   exactly as the pinned contract states.
-* persistence is best-effort: a failing repo.set/delete is logged but the
+- persistence is best-effort: a failing repo.set/delete is logged but the
   in-memory (runtime-enforced) policy still changes; pacing safety never
   depends on the database.
-* single-event-loop assumption, like the audited limiter (no locks).
+- single-event-loop assumption, like the audited limiter (no locks).
 """
 from __future__ import annotations
 

@@ -1,0 +1,30 @@
+Runtime lifecycle
+=================
+
+Boot
+----
+``main.py`` → :func:`core.bootstrap.build` (order pinned by tests):
+credentials → config → Database+migrations → LogService(+bridge) → bus →
+limiter → settings → audit → scheduler → plugins.discover → profiles →
+accounts (DB restore) → sender bind → ``scheduler.start()`` → remote
+control → ControlAPI → surface.
+
+Account
+-------
+``add_account`` persists FIRST (repo failure leaves memory untouched);
+``start`` resolves the token (``.env`` by convention key), wires every
+client callback (message + rich events) before connect, connects, ingests
+the READY snapshot (zero API calls), activates profile-filtered plugins,
+spawns the reconnect supervisor (exponential backoff from account
+settings).
+
+Shutdown
+--------
+``Framework.shutdown``: remote control unsubscribes → scheduler drains →
+accounts stop (plugins deactivate first) → **logging sinks detach before
+``database.close()``** (the bridge must never feed a closed sink) → DB
+closes. The global emergency stop halts everything; ``system_resume``
+(``estop`` resume / ``POST /api/resume``) re-arms the scheduler — accounts
+restart explicitly.
+
+Exact walk-through: ``knowledgebase/RUNTIME_LIFECYCLE.md``.
