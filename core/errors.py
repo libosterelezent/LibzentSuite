@@ -1,19 +1,22 @@
-"""Domain errors for flow control and cache invalidation.
+"""Domain errors for the whole framework.
 
-`FlowBlocked` is the contract plugins rely on: when a selfbot's flow hits a
-dead end (channel deleted, access revoked, cache invalid), raising a
-FlowBlocked subclass stops THAT account's flow with a human-readable reason
-while every other account keeps running (per-account isolation is the
-container's job).
+Grouping rules:
+  * FlowBlocked family — a plugin flow for ONE account hit a dead end; the
+    account's flow aborts with a human reason while everything else runs on.
+  * ServerRateLimit    — Discord itself said WAIT (429 / Retry-After); raised
+    by adapters, consumed by the scheduler which reports it to the limiter.
+  * Config/validation  — ValueError subclasses with precise, human messages;
+    both interfaces render them as plain 'error: ...' lines / 400 responses.
 """
 from __future__ import annotations
 
 
+# ------------------------------------------------------------------ flow
 class FlowBlocked(RuntimeError):
     """A selfbot flow cannot continue, with a reason.
 
     Raising this aborts the current plugin flow for ONE account. Other
-    accounts/plugins are unaffected (the container's dispatcher contains it).
+    accounts/plugins are unaffected (isolation is the dispatcher's job).
     """
 
     def __init__(self, account: str, reason: str) -> None:
@@ -27,7 +30,7 @@ class CacheInvalid(FlowBlocked):
 
 
 class TargetGone(CacheInvalid):
-    """The cached channel/target no longer exists (deleted, cache evicted)."""
+    """The cached channel/target no longer exists (deleted, evicted)."""
 
 
 class AccessDenied(FlowBlocked):
@@ -38,12 +41,71 @@ class FetchRequired(FlowBlocked):
     """The target is not in cache and fetching is disabled/unavailable."""
 
 
-class RestCooldown(RuntimeError):
-    """Discord's own rate limit said WAIT (429 Retry-After / exhausted bucket)."""
+# ------------------------------------------------------------------ server
+class ServerRateLimit(RuntimeError):
+    """Discord's own rate limit said WAIT (429 Retry-After / global).
 
-    def __init__(self, route_key: str, retry_after: float, global_: bool = False) -> None:
-        scope = "GLOBAL" if global_ else route_key
-        super().__init__(f"REST cooldown {scope} for {retry_after:.2f}s")
-        self.route_key = route_key
-        self.retry_after = retry_after
-        self.global_ = global_
+    Attributes:
+        retry_after: seconds Discord asked us to wait (>= 0).
+        global_: True when the limit is account-wide (X-RateLimit-Global).
+    """
+
+    def __init__(self, retry_after: float, global_: bool = False) -> None:
+        scope = "GLOBAL" if global_ else "route"
+        super().__init__(f"server rate limit ({scope}) for {retry_after:.2f}s")
+        self.retry_after = max(0.0, float(retry_after))
+        self.global_ = bool(global_)
+
+
+# ------------------------------------------------------------- accounts etc.
+class AccountError(RuntimeError):
+    """Invalid account configuration or invalid account state."""
+
+
+class PluginError(RuntimeError):
+    """Plugin loading/lifecycle problem (bad module, duplicate name...)."""
+
+
+class ProfileError(ValueError):
+    """Invalid profile definition or assignment."""
+
+
+class SettingsValidationError(ValueError):
+    """A setting value failed schema validation (path included)."""
+
+    def __init__(self, path: str, reason: str) -> None:
+        super().__init__(f"{path}: {reason}")
+        self.path = path
+        self.reason = reason
+
+
+class RatePolicyError(ValueError):
+    """Malformed rate policy (bad interval/jitter/level/owner)."""
+
+
+class UnsafePolicyError(RatePolicyError):
+    """A policy would break the minimum-pacing safety floor (1.5s/action)."""
+
+
+class SchedulerError(RuntimeError):
+    """Invalid task/scheduler operation (unknown task, scheduler stopped...)."""
+
+
+class DatabaseError(RuntimeError):
+    """Persistence-layer failure or invalid database operation."""
+
+
+class CredentialsError(RuntimeError):
+    """A required credential is missing or malformed."""
+
+
+class SimulationError(RuntimeError):
+    """Scenario/runner problem (unknown scenario, broken script)."""
+
+
+__all__ = [
+    "FlowBlocked", "CacheInvalid", "TargetGone", "AccessDenied", "FetchRequired",
+    "ServerRateLimit", "AccountError", "PluginError", "ProfileError",
+    "SettingsValidationError", "RatePolicyError", "UnsafePolicyError",
+    "SchedulerError", "DatabaseError", "CredentialsError", "SimulationError",
+]

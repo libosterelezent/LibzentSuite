@@ -1,9 +1,11 @@
 """Credential handling: every token and user/bot ID lives in .env, never in code.
 
 Design rules enforced by this module:
-  * Values are read from a .env file (or injected dict for tests/simulations).
-  * Nothing that could identify a real account is hardcoded anywhere else.
-  * repr/redacted output never leaks token values (dashboard/CLI safe display).
+  * values are read from a .env file (or an injected dict for tests/simulations),
+  * nothing that could identify a real account is hardcoded anywhere else,
+  * repr/redacted output never leaks token values (dashboard/CLI safe display),
+  * per spec §7: secrets are NOT considered safe merely because a DB exists —
+    token values never enter the database at all; only .env key references do.
 """
 from __future__ import annotations
 
@@ -33,12 +35,7 @@ class Credentials:
     # ------------------------------------------------------------------ load
     @staticmethod
     def parse_env(text: str) -> Dict[str, str]:
-        """Parse .env text into a dict.
-
-        Supports: comments (#), blank lines, optional 'export ', single or double
-        quoted values, KEY=VALUE pairs. Values keep internal newlines only when
-        quoted.
-        """
+        """Parse .env text: comments, blank lines, optional 'export ', quotes."""
         out: Dict[str, str] = {}
         for raw in text.splitlines():
             line = raw.strip()
@@ -59,7 +56,7 @@ class Credentials:
 
     @classmethod
     def from_file(cls, path: str | Path = ".env") -> "Credentials":
-        """Load credentials from a .env file; missing file yields empty set."""
+        """Load credentials from a .env file; a missing file yields an empty set."""
         p = Path(path)
         if not p.is_file():
             LOG.warning("credentials file %s not found; using empty credentials", p)
@@ -68,16 +65,16 @@ class Credentials:
 
     @classmethod
     def from_values(cls, values: Mapping[str, str]) -> "Credentials":
-        """Build credentials directly (used by tests/simulations with synthetic ids)."""
+        """Build credentials directly (tests/simulations with synthetic ids)."""
         return cls(values)
 
     # ----------------------------------------------------------------- access
     def get(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        """Return raw string value or default."""
+        """Raw string value or default."""
         return self._values.get(key, default)
 
     def require(self, key: str) -> str:
-        """Return value or raise CredentialsError (for hard requirements)."""
+        """Value or raise CredentialsError (for hard requirements)."""
         value = self._values.get(key)
         if not value:
             raise CredentialsError(
@@ -85,22 +82,14 @@ class Credentials:
             )
         return value
 
-    # ------------------------------------------------------------- aggregates
-    def account_tokens(self) -> Dict[str, str]:
-        """Map account name (lowercased suffix) -> token for DISCORD_TOKEN_* keys."""
-        return {
-            key[len(TOKEN_PREFIX):].lower(): value
-            for key, value in self._values.items()
-            if key.startswith(TOKEN_PREFIX) and value
-        }
-
     def token_for(self, account_name: str) -> Optional[str]:
-        """Token lookup for an account using the DISCORD_TOKEN_<NAME> convention."""
+        """Token lookup using the DISCORD_TOKEN_<NAME> convention."""
         return self._values.get(f"{TOKEN_PREFIX}{account_name.upper()}")
 
+    # ------------------------------------------------------------- aggregates
     @property
     def mudae_bot_id(self) -> int:
-        """Mudae bot user id (required int)."""
+        """Mudae bot user id (required int; plugins read it, never hardcode it)."""
         raw = self.require("MUDAE_BOT_ID")
         try:
             return int(raw)
@@ -119,21 +108,19 @@ class Credentials:
             try:
                 ids.add(int(part))
             except ValueError as exc:
-                raise CredentialsError(f"OWNER_USER_IDS contains a non-integer: {part!r}") from exc
+                raise CredentialsError(
+                    f"OWNER_USER_IDS contains a non-integer: {part!r}"
+                ) from exc
         return frozenset(ids)
 
     @property
     def dashboard_token(self) -> Optional[str]:
-        """Optional local auth token for the GUI dashboard."""
+        """Optional local auth token for the dashboard."""
         return self._values.get("DASHBOARD_TOKEN") or None
 
     # ---------------------------------------------------------------- display
     def redacted(self) -> Dict[str, str]:
-        """Human-safe copy: token-like values masked, never fully shown.
-
-        AUDIT FIX: values of 4 chars or fewer are fully hidden — previously
-        they were disclosed verbatim after the 4-char prefix.
-        """
+        """Human-safe copy: token-like values masked, never fully shown."""
         safe: Dict[str, str] = {}
         for key, value in self._values.items():
             if not value:
@@ -150,3 +137,6 @@ class Credentials:
     def source_path(self) -> Optional[Path]:
         """File the values came from, if any."""
         return self._path
+
+
+__all__ = ["Credentials", "CredentialsError"]

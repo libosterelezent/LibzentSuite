@@ -1,5 +1,8 @@
 {
-  "_comment": "Bus-wide default rate rules for ALL bots, 'actions/seconds'. Per-bot overrides live in config/accounts/<name>.json. Keep conservative: selfbots risk suspension.",
-  "message": "8/12s",
-  "dm": "8/12s"
+  "_comment": "Rate-limit policies (spec §5). global applies to every account; accounts.<name> overrides per account. interval = minimum seconds between actions; jitter = [min, max] random extra pause. Floor: 1.5s/action enforced everywhere.",
+  "global": {
+    "message": {"interval": 2.0, "jitter": [0.1, 0.5]},
+    "dm": {"interval": 2.0, "jitter": [0.1, 0.5]}
+  },
+  "accounts": {}
 }

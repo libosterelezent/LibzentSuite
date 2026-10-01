@@ -1,4 +1,4 @@
-"""Plugin package: soulcopy (migrated from Soulcopy/autocopy.py)."""
-from .plugin import SoulcopyPlugin
+"""Plugin package: soulcopy (Mudae soulmate list export/import)."""
+from .plugin import SoulcopyPlugin, flow_block_reason
 
-__all__ = ["SoulcopyPlugin"]
+__all__ = ["SoulcopyPlugin", "flow_block_reason"]
