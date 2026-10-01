@@ -86,7 +86,7 @@ from .tasks import (
 _FINISHED_KEEP = 500
 
 #: actions whose terminal transition is mirrored into the audit trail
-_AUDITED_ACTIONS = ("message", "dm")
+_AUDITED_ACTIONS = ("message", "dm", "reaction", "button")
 
 
 class _GrantGate:
@@ -313,6 +313,7 @@ class TaskScheduler:
         channel_id: Optional[int] = None,
         user_id: Optional[int] = None,
         content: Optional[str] = None,
+        message_id: Optional[int] = None,
         priority: Priority = Priority.NORMAL,
         name: Optional[str] = None,
         timeout: Optional[float] = None,
@@ -330,7 +331,8 @@ class TaskScheduler:
                 raise SchedulerError(f"task {label} must be a non-empty string, got {value!r}")
         if content is not None and not isinstance(content, str):
             raise SchedulerError(f"content must be a string or None, got {type(content).__name__}")
-        for label, value in (("channel_id", channel_id), ("user_id", user_id)):
+        for label, value in (("channel_id", channel_id), ("user_id", user_id),
+                             ("message_id", message_id)):
             if value is None:
                 continue
             if isinstance(value, bool) or not isinstance(value, int):
@@ -363,6 +365,7 @@ class TaskScheduler:
             channel_id=channel_id,
             user_id=user_id,
             content=content,
+            message_id=message_id,
             priority=int(prio),
             timeout_s=timeout_s,
             max_retries=retries,

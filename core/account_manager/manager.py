@@ -656,7 +656,11 @@ class AccountManager:
         """Wire client callbacks BEFORE connect (pinned ordering)."""
 
         def _on_message(message: DiscordMessage) -> None:
-            """Client callback -> fire-and-forget MessageReceived on the bus."""
+            """Client callback -> fire-and-forget MessageReceived on the bus.
+
+            The rich DTO rides along (``.message``): flat fields stay the
+            compatibility surface; embeds/components/... are additive.
+            """
             self._bus.publish_nowait(MessageReceived(
                 account=name,
                 message_id=message.id,
@@ -664,6 +668,45 @@ class AccountManager:
                 author_id=message.author_id,
                 content=message.content,
                 dm=message.dm,
+                message=message,
+            ))
+
+        def _on_reaction(kind: str, message_id: int, channel_id: int,
+                         guild_id, user_id: int, emoji, raw) -> None:
+            """Client callback -> ReactionAdded/Removed-shaped bus events.
+
+            The stable ids + printable emoji cross WITHOUT any message fetch
+            (§9); ``raw`` is the runtime-only library handle.
+            """
+            from ..event_bus import ReactionAdded
+
+            if kind != "add":  # removal events: reserved for future plugins
+                return
+            text = emoji if isinstance(emoji, str) else getattr(emoji, "name", str(emoji))
+            self._bus.publish_nowait(ReactionAdded(
+                account=name, message_id=int(message_id),
+                channel_id=int(channel_id), guild_id=guild_id,
+                user_id=int(user_id), emoji=text,
+                dm=rt.cache.channels.get(channel_id).dm
+                if rt.cache.channels.get(channel_id) is not None else False,
+                raw=raw,
+            ))
+
+        def _on_message_edit(message: DiscordMessage) -> None:
+            from ..event_bus import MessageEdited
+
+            self._bus.publish_nowait(MessageEdited(
+                account=name, message_id=message.id,
+                channel_id=message.channel_id, guild_id=message.guild_id,
+                message=message,
+            ))
+
+        def _on_message_delete(message_id: int, channel_id: int, guild_id, raw) -> None:
+            from ..event_bus import MessageDeleted
+
+            self._bus.publish_nowait(MessageDeleted(
+                account=name, message_id=int(message_id),
+                channel_id=int(channel_id), guild_id=guild_id,
             ))
 
         def _on_disconnect(reason: str = "") -> None:
@@ -680,6 +723,11 @@ class AccountManager:
 
         client.on_message = _on_message
         client.on_disconnect = _on_disconnect
+        # rich-event callbacks: wired on every client; adapters that never
+        # fire them simply leave these as inert assignments (duck-typed)
+        client.on_reaction = _on_reaction
+        client.on_message_edit = _on_message_edit
+        client.on_message_delete = _on_message_delete
 
     def _start_failed(self, name: str, rt: AccountRuntime, exc: BaseException) -> None:
         """Record a start failure: status failed + last_error + AccountFailed."""
@@ -755,10 +803,25 @@ class AccountManager:
             channel_id = int(task.channel_id)
             await self._maybe_typing(name, rt, channel_id)
             message = await client.send_message(channel_id, task.content)
+        elif action == "reaction":
+            # kakerareact capability: emoji rides in task.content; target
+            # channel validated like a send, message id is opaque to us
+            rt.cache.validate_channel(int(task.channel_id))
+            channel_id = int(task.channel_id)
+            await client.add_reaction(channel_id, int(task.message_id), task.content)
+            return None  # no DiscordMessage shape for reactions
+        elif action == "button":
+            # kakeraloot capability: custom_id rides in task.content; the
+            # adapter resolves the live message ON DEMAND (plugin-requested
+            # fetch — the only fetch this action performs)
+            rt.cache.validate_channel(int(task.channel_id))
+            channel_id = int(task.channel_id)
+            await client.click_button(channel_id, int(task.message_id), task.content)
+            return None
         else:
             raise SchedulerError(
                 f"unsupported action {action!r} "
-                "(supported: 'message', 'dm')"
+                "(supported: 'message', 'dm', 'reaction', 'button')"
             )
         # NOTE: outbound AUDIT is written by the scheduler at task-terminal
         # (exactly-once, with attempts context) — recording here too would
@@ -989,6 +1052,22 @@ class AccountManager:
             account.plugins = plugins
 
     # ----------------------------------------------------------------- audit
+    @staticmethod
+    def _rich_note(event: MessageReceived) -> str:
+        """Embed/component counts for the inbound audit note (§21: metadata,
+        never payloads)."""
+        message = getattr(event, "message", None)
+        if message is None:
+            return ""
+        parts = []
+        if message.embeds:
+            parts.append(f"embeds={len(message.embeds)}")
+        if message.components:
+            parts.append(f"components={len(message.components)}")
+        if message.attachments:
+            parts.append(f"attachments={len(message.attachments)}")
+        return (" " + " ".join(parts)) if parts else ""
+
     def _audit_inbound(self, event: MessageReceived) -> None:
         """MessageReceived -> inbound audit row (never raises; guarded)."""
         if self._audit is None:
@@ -1001,7 +1080,8 @@ class AccountManager:
                 action="message",
                 channel_id=event.channel_id,
                 content=preview,
-                note=f"author={event.author_id}{' dm' if event.dm else ''}",
+                note=f"author={event.author_id}{' dm' if event.dm else ''}"
+                     + self._rich_note(event),
             )
         except Exception:
             self._logger.exception("inbound audit recording failed")

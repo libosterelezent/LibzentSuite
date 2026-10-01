@@ -147,6 +147,21 @@ dropped when Discord reports a target gone, and an optional typing indicator
 (account setting `typing_probability`, default 0 = zero extra calls) mimics
 human composing when enabled.
 
+## Rich event model
+
+`adapters/model.py` converts every inbound Discord event ONCE into a frozen
+project-owned DTO — content, embeds (fields/author/footer/media),
+components (buttons/selects with `custom_id`, nested in action rows),
+attachments, reactions, reference ids, author/channel/guild, timestamps —
+plus a documented runtime-only `raw` escape hatch (`message.unwrap()`) for
+advanced plugins. Typed bus events (`MessageReceived`, `MessageEdited`,
+`MessageDeleted`, `ReactionAdded`) are additive: existing plugins keep the
+flat field surface, future plugins (snipe/kakerareact/kakeraloot/soulmate
+farm) read rich data without re-fetching or core rewrites. Actions are
+capabilities on `PluginServices` (`send_message`, `send_dm`,
+`add_reaction`, `click_button`) flowing through the paced pipeline — event
+models carry data only, never rate limiting.
+
 ## Managing from Discord (mention prefix)
 
 Owners mention a running account as the command prefix — `@account status`,

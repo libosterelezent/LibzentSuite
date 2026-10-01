@@ -40,7 +40,13 @@ SYNTHETIC_MUDAE_ID = 999_999
 
 @dataclass
 class WorldMessage:
-    """One message that exists in the world (delivered + timestamped)."""
+    """One message that exists in the world (delivered + timestamped).
+
+    Rich payloads (embeds/components/attachments/reactions as
+    adapters.model DTO tuples, author_name, guild_id, reference ids) are
+    optional — deliver(**rich) forwards them — so scenarios can exercise
+    the full rich boundary exactly like live traffic.
+    """
 
     id: int
     channel_id: int
@@ -48,6 +54,13 @@ class WorldMessage:
     content: str
     dm: bool
     ts: float = field(default_factory=time.time)
+    author_name: str = ""
+    guild_id: "int | None" = None
+    embeds: tuple = ()
+    components: tuple = ()
+    attachments: tuple = ()
+    reactions: tuple = ()
+    reference_message_id: "int | None" = None
 
 
 @dataclass
@@ -219,18 +232,27 @@ class SimWorld:
 
     # ---------------------------------------------------------------- traffic
     def deliver(
-        self, channel_id: int, author_id: int, content: str, dm: Optional[bool] = None
+        self, channel_id: int, author_id: int, content: str, dm: Optional[bool] = None,
+        *, author_name: str = "", guild_id: "int | None" = None,
+        embeds: tuple = (), components: tuple = (), attachments: tuple = (),
+        reactions: tuple = (), reference_message_id: "int | None" = None,
     ) -> WorldMessage:
         """Append a message to the channel and push it to every subscriber.
 
-        Raises KeyError for an unknown (or deleted) channel — the client
-        layer translates that into TargetGone.
+        Rich payloads are adapters.model DTO tuples passed through to the
+        boundary conversion untouched. Raises KeyError for an unknown (or
+        deleted) channel — the client layer translates that into TargetGone.
         """
         if channel_id not in self.channels:
             raise KeyError(f"unknown channel {channel_id}")
         if dm is None:
             dm = self.dm_channels.get(channel_id, False)
-        message = WorldMessage(self._next_id, channel_id, author_id, content, dm)
+        message = WorldMessage(
+            self._next_id, channel_id, author_id, content, dm,
+            author_name=author_name, guild_id=guild_id, embeds=embeds,
+            components=components, attachments=attachments,
+            reactions=reactions, reference_message_id=reference_message_id,
+        )
         self._next_id += 1
         self.history[channel_id].append(message)
         self.journal.append(message)
@@ -238,6 +260,57 @@ class SimWorld:
             client.receive(message)
         self._maybe_auto_respond(message)
         return message
+
+    def react(self, user_id: int, message_id: int, emoji: str,
+              kind: str = "add") -> None:
+        """Push a reaction event for a known message to every subscriber
+        except the reactor (mirrors the gateway: no fetch involved)."""
+        for channel_id, messages in self.history.items():
+            for message in messages:
+                if message.id == message_id:
+                    if kind == "add":
+                        from adapters.model import DiscordReaction
+
+                        for existing in message.reactions:
+                            if existing.emoji == emoji:
+                                object.__setattr__(existing, "count", existing.count + 1)
+                                break
+                        else:
+                            message.reactions = message.reactions + (
+                                DiscordReaction(emoji=emoji, name=emoji, count=1),)
+                    for client in list(self.subscribers):
+                        if client.user_id != user_id and client.on_reaction is not None:
+                            client.on_reaction(
+                                kind, message_id, channel_id, message.guild_id,
+                                user_id, emoji, None,
+                            )
+                    return
+        raise KeyError(f"unknown message {message_id}")
+
+    def edit_message(self, message_id: int, content: str) -> WorldMessage:
+        """Rewrite a message's content and push an edit event to subscribers."""
+        for messages in self.history.values():
+            for message in messages:
+                if message.id == message_id:
+                    message.content = content
+                    for client in list(self.subscribers):
+                        if client.on_message_edit is not None:
+                            client.on_message_edit(message)
+                    return message
+        raise KeyError(f"unknown message {message_id}")
+
+    def delete_message(self, message_id: int) -> WorldMessage:
+        """Remove a message and push a delete event (ids only, like live)."""
+        for channel_id, messages in list(self.history.items()):
+            for index, message in enumerate(messages):
+                if message.id == message_id:
+                    messages.pop(index)
+                    for client in list(self.subscribers):
+                        if client.on_message_delete is not None:
+                            client.on_message_delete(
+                                message_id, channel_id, message.guild_id, message)
+                    return message
+        raise KeyError(f"unknown message {message_id}")
 
     def _maybe_auto_respond(self, message: WorldMessage) -> None:
         """Scripted responder: an exact registered command triggers DM pages.

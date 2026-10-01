@@ -87,6 +87,9 @@ class Task:
     channel_id: Optional[int] = None
     user_id: Optional[int] = None
     content: Optional[str] = None
+    #: target message for reaction/button actions (emoji / custom_id rides
+    #: in ``content``; the scheduler treats both opaquely)
+    message_id: Optional[int] = None
     priority: int = Priority.NORMAL
     submitted_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
@@ -122,6 +125,7 @@ class Task:
             "channel_id": self.channel_id,
             "user_id": self.user_id,
             "content": self.content,
+            "message_id": self.message_id,
             "priority": int(self.priority),
             "submitted_at": round(self.submitted_at, 3),
             "started_at": round(self.started_at, 3) if self.started_at is not None else None,
