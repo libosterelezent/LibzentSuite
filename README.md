@@ -1,90 +1,123 @@
 # SlaughterMudae
 
-Selfbot framework for Mudae automation: plugin modules with declared settings,
-a centralized multi-account container with role-based assignment, a two-layer
-rate limiter with human-like pacing and a hard safety floor, a SQLite
-persistence layer, an interaction audit trail, and two fully parity'd
-management surfaces (browser dashboard + terminal/TUI).
+Multi-account Discord automation framework built to the architecture in
+`TODO + Ideas.md`: modular plugins that request services from a central core,
+first-class accounts with a persistent/runtime split, capability profiles,
+a four-level rate-policy system, a centralized task pipeline, SQLite
+persistence with repositories + migrations, and two fully parity'd management
+surfaces (CLI + browser dashboard) over ONE Core API.
 
-> ⚠️ Selfbots violate Discord's Terms of Service and can get accounts
-> suspended. The 1.5s/action floor and human-like delay ranges mitigate —
-> they do not authorize. Keep rules conservative (defaults: `8/12s`) and
-> never add accounts you cannot afford to lose.
+> ⚠️ Selfbot usage violates Discord's Terms of Service and can get accounts
+> suspended. The 1.5s/action hard floor, human-like jitter ranges and the
+> always-on server-limit handling MITIGATE risk — they do not authorize it.
+> Keep policies conservative (defaults: 2.0s + 0.0–0.5s jitter) and never add
+> accounts you cannot afford to lose.
 
-## Layout
+## Layout (spec §14)
 
 ```
-core/       framework: container, rate limiter, plugins, events, credentials,
-            reconnect supervisor, persistence, simulator
-plugins/    plugin modules (soulcopy = migrated Soulcopy/autocopy.py)
-cli/        terminal REPL + full-screen TUI + shared command engine
-dashboard/  JSON REST API + WebSocket push + browser SPA (static/)
-config/     global settings, rate limits, per-account JSON (no secrets!)
-tests/      125-test suite incl. full local simulations
-knowledgebase/  local-only, read-only docs (gitignored)
-state/      persisted runtime state (gitignored)
-main.py     entrypoint
+core/                  framework managers + shared contracts
+  api.py               ControlAPI — the ONE facade both interfaces call
+  bootstrap.py         composition root (the boot flow of main.py)
+  account_manager/     Account (first-class), lifecycle, send hook, cache
+  plugin_manager/      discovery, per-account instances, event dispatch
+  plugin_base.py       the plugin contract (PluginBase/Context/Services)
+  profile_manager/     capability profiles (plugin bundles per account)
+  settings_manager.py  ONE settings schema consumed by CLI + GUI alike
+  rate_limit_manager/  policies (global/account/plugin/pair), pacing, 429s
+  task_scheduler/      queue + priority + cancel + retries + timeouts
+  event_bus.py         typed pub/sub with handler isolation
+  logging_service.py   structured logging (one service for everything)
+  audit.py             interaction audit trail (waits/jitter per send)
+  credentials.py       tokens/ids ONLY in .env
+  config.py            config dir loading
+database/              SQLite: models, ordered migrations, repositories
+adapters/              Discord boundary: discord/ (live) + simulator/ (offline)
+interfaces/            cli/ (REPL + one-shot) + dashboard/ (SPA + REST + WS)
+plugins/               soulcopy (migrated) + roll (reference plugin)
+tests/unit|integration|simulation/   450-test offline suite
+config/                global settings, rate policies, account files
+main.py                entrypoint
 ```
 
 ## Quickstart
 
 ```bash
 cp .env.example .env        # fill tokens + OWNER_USER_IDS (chmod 600 .env)
-python3 main.py --sim       # watch the framework run locally (no network)
-python3 main.py             # terminal management
-python3 main.py --tui       # full-screen TUI with live log tailing
-python3 main.py --start-all --dashboard   # live accounts + browser dashboard
-bash scripts/run_tests.sh   # run the simulation test suite (169 tests)
-python3 scripts/sim_inspect.py --delay 0.4 0.9   # audited interaction report
-python3 scripts/sim_server.py                # live dashboard demo over the sim world
+python3 main.py --sim-list             # available offline scenarios
+python3 main.py --sim soulcopy_basic   # full pipeline over the simulator
+python3 main.py                         # interactive REPL (live accounts)
+python3 main.py accounts list           # one-shot command mode
+python3 main.py --start-all --dashboard # live accounts + dashboard :8070
+bash scripts/run_tests.sh               # the whole 450-test suite
 ```
 
-The dashboard serves a browser UI on `http://127.0.0.1:8070` (accounts,
-plugin toggles, rate-limit editing, live logs over WebSocket). Set
-`DASHBOARD_TOKEN` in `.env` to require authentication.
+The dashboard serves a sidebar SPA (Overview, Accounts, Plugins, Profiles,
+Rate Limits, Tasks, Logs, Simulation, Advanced) on `http://127.0.0.1:8070`
+with live WebSocket push; set `DASHBOARD_TOKEN` in `.env` to require auth.
 
-Runtime changes (plugin toggles, per-bot rate overrides) persist to
-`state/state.json` and are restored on the next boot.
+Dependencies: Python ≥ 3.10, standard library only. Live mode additionally
+needs a user-account client fork (`pip install discord.py-self`), imported
+lazily — simulations/tests never require it.
 
-Dependencies: Python ≥ 3.10, standard library only for everything local.
-Live mode additionally needs a user-account client fork
-(`pip install discord.py-self`), imported lazily.
+## The send pipeline
+
+```
+Plugin -> PluginServices.send_message()
+        -> TaskScheduler.submit()                    [queued, prioritized]
+        -> per-account lane (concurrency = 1)
+        -> RateLimitManager.acquire()                [pacing + jitter + 429 cooldowns]
+        -> AccountManager.send_hook()                [cache validation]
+        -> DiscordClient (real or simulated)
+        -> audit + history + events                  [exactly-once per task]
+```
+
+Retries cover transient failures and server 429s (`ServerRateLimit` always
+earns at least one retry, paced by the limiter cooldown — the framework
+always respects server-provided rate limits). `FlowBlocked` aborts only THAT
+account's flow with a human reason.
+
+## Rate policies (spec §5)
+
+Four levels — `global`, `account`, `plugin`, `account_plugin` — each
+`{interval: seconds, jitter: [min, max]}`. The effective pacing for an
+(account, plugin, action) is the MAX across every applicable level, so no
+level can ever make traffic FASTER than a stricter level demands. Policies
+below **1.5s/action** are rejected everywhere (`UnsafePolicyError`), the
+floor can only be raised, and `ratelimit warnings` reviews the configuration
+for aggressive intervals / missing or narrow jitter.
 
 ## Credentials & IDs
 
-Everything identifiable lives in `.env` (gitignored, chmod 600):
+Everything identifiable lives in `.env` (gitignored, chmod 600): one
+`DISCORD_TOKEN_<NAME>` per account, `MUDAE_BOT_ID`, `OWNER_USER_IDS`,
+optional `DASHBOARD_TOKEN`. The database stores only the .env key
+*references* — token values never leave `.env`.
 
-| Key | Meaning |
-|---|---|
-| `MUDAE_BOT_ID` | Mudae bot id (used by soulcopy) |
-| `OWNER_USER_IDS` | comma-separated user ids allowed to trigger commands |
-| `DISCORD_TOKEN_<NAME>` | one token per account in `config/accounts/<name>.json` |
-| `DASHBOARD_TOKEN` | local auth token for the dashboard API |
+## Simulation system (spec §9)
 
-No user/bot ids are hardcoded in the codebase; tests use synthetic fixtures.
+`adapters/simulator/` is a complete in-memory Discord world (users, channels,
+DM pairs, history, a scripted responder, one-shot 429s, channel deletion).
+`SimulationRunner` boots a FULL ephemeral framework per run and produces a
+timed execution log, the audit trail and pass/fail checks:
+
+```
+0000.089s INFO    scheduler scheduler: queued task 1 (soulcopy:message)
+0003.201s INFO    scheduler scheduler: queued task 2 (soulcopy:message)
+```
+
+Scenarios: `soulcopy_basic`, `soulcopy_multichunk`, `pacing_respected`,
+`server_429_respected`, `channel_gone_aborts`.
 
 ## Management surfaces
 
-- Terminal: `help status plugins start/stop limits set-limit enable/disable env quit`
-- Dashboard API: `GET /api/status|plugins|limits`, `POST /api/start|stop|plugin|limit|clear-limit`
-  (auth header `X-Dashboard-Token`), default `http://127.0.0.1:8070`
+- CLI: `accounts|plugins|profiles|ratelimit|tasks|simulation|logs|audit|estop|status|help|quit`
+  subcommands, interactive or one-shot; identical results everywhere.
+- Dashboard API: JSON REST routes mapping 1:1 to ControlAPI methods plus a
+  WebSocket pushing stats/log/audit/task events live.
 
-## Documentation
+Both interfaces manipulate the exact same accounts, plugins, profiles,
+settings, tasks, rate policies, logs and simulation system — parity by
+construction, not by discipline.
 
-`knowledgebase/` holds function-level docs (what each function does, what it's
-for, what it expects/returns) — kept read-only on disk (`chmod -R a-w
-knowledgebase/`; unlock with `chmod -R u+w` to edit).
-
-Runtime state persists in SQLite (`state/slaughter.db`, chmod 0600): accounts,
-plugin toggles, settings overrides, per-bot limit/delay rules, roles, and the
-interaction audit trail. Token values never leave `.env`. Rules faster than
-1.5s/action are rejected everywhere; the dashboard shows a live warnings
-banner for risky configurations.
-
-## Tests & simulations
-
-`python3 -m unittest discover -s tests -t . -v` — 169 tests: rate limiter math
-(manual clock), delays + safety floor, plugin loader, container routing and
-role gating, settings layers and parity, soulcopy pipeline, reconnect with
-backoff, database CRUD + migration, audit wiring, end-to-end simulated slcopy
-runs, dashboard HTTP + WebSocket. See `knowledgebase/KB_09` and `KB_18`.
+Inter-module contracts are documented in `INTEGRATION.md`.

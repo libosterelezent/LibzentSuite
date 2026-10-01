@@ -6,13 +6,20 @@ anti-abuse — plus a persistent record in the database.
 
 Recorded per interaction:
   direction 'out' — every rate-limited send (message/DM): content preview,
-                    how long the limiter made us WAIT, and the human-like
-                    DELAY applied after the grant
-  direction 'in'  — every message event dispatched to plugins: author,
-                    channel, dm flag
+                    how long the limiter made us WAIT (wait_ms), and the
+                    human-like jitter applied after the grant (jitter_ms)
+  direction 'in'  — every message event dispatched to plugins
 
-Consumers: the dashboard Audit page (live via WS + history via REST),
-the CLI 'audit' command, and scripts/sim_inspect.py (local simulation suite).
+Ported from the audited ``git show HEAD:core/audit.py`` with the rewrite's
+renames: ``db_repo`` instead of ``database`` (duck-typed repository with
+``add(entry)`` / ``recent(limit, account)``), ``jitter_ms`` instead of the
+old ``delay_ms``, and a dict boundary — ``record()``/``tail()``/``history()``
+all speak JSON-safe dicts so the CLI, dashboard and simulations share one
+shape. Kept from the original: the best-effort DB write, per-subscriber
+error isolation, the ring capacity bound, and the n<=0 tail guard.
+
+Consumers: the dashboard Audit page (live via WS + history via REST), the
+CLI 'audit' command, scripts, and the simulation reports.
 """
 from __future__ import annotations
 
@@ -20,15 +27,18 @@ import logging
 import threading
 import time
 from collections import deque
-from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Deque, Dict, List, Optional
+from dataclasses import asdict, dataclass
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
 
 LOG = logging.getLogger("slaughtermudae.audit")
+
+#: content previews are truncated to this length in format_audit lines
+_PREVIEW_LIMIT = 60
 
 
 @dataclass
 class AuditEntry:
-    """One observed interaction."""
+    """One observed interaction (internal unit of the audit trail)."""
 
     ts: float
     account: str
@@ -37,43 +47,75 @@ class AuditEntry:
     channel_id: Optional[int] = None
     content: str = ""
     wait_ms: float = 0.0      # time spent waiting for the rate limiter
-    delay_ms: float = 0.0     # human-like delay applied after the grant
+    jitter_ms: float = 0.0    # human-like jitter applied after the grant
     note: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
+        """JSON-safe dict form (floats rounded to milliseconds precision)."""
         out = asdict(self)
         out["ts"] = round(out["ts"], 3)
+        out["wait_ms"] = round(out["wait_ms"], 3)
+        out["jitter_ms"] = round(out["jitter_ms"], 3)
         return out
 
 
-def format_audit(entries: List[AuditEntry]) -> List[str]:
-    """Entries -> compact human-readable lines (CLI/TUI/inspector)."""
-    lines = []
-    for e in entries:
-        clock = time.strftime("%H:%M:%S", time.localtime(e.ts))
-        arrow = "->" if e.direction == "out" else "<-"
+def _field(entry: Any, key: str, default: Any = None) -> Any:
+    """Read one field from a dict OR an AuditEntry-like object."""
+    if isinstance(entry, dict):
+        return entry.get(key, default)
+    return getattr(entry, key, default)
+
+
+def format_audit(entries: Iterable[Any]) -> List[str]:
+    """Render entries (dicts or AuditEntry) as compact human-readable lines.
+
+    Line shape:
+        HH:MM:SS -> account action ch=... preview (wait Xms, jitter Yms) note
+    ('<-' for inbound; missing channel renders as 'ch=-'; newlines in the
+    preview are escaped and long content truncated). An empty iterable
+    renders as the '(no interactions recorded)' placeholder.
+    """
+    lines: List[str] = []
+    for entry in entries:
+        ts = float(_field(entry, "ts", 0.0) or 0.0)
+        clock = time.strftime("%H:%M:%S", time.localtime(ts))
+        arrow = "->" if _field(entry, "direction", "") == "out" else "<-"
+        account = str(_field(entry, "account", "") or "")
+        action = str(_field(entry, "action", "") or "")
+        channel = _field(entry, "channel_id", None)
+        channel_text = f"ch={channel}" if channel is not None else "ch=-"
+        preview = str(_field(entry, "content", "") or "").replace("\n", "\\n")
+        if len(preview) > _PREVIEW_LIMIT:
+            preview = preview[: _PREVIEW_LIMIT - 3] + "..."
         waits = []
-        if e.wait_ms:
-            waits.append(f"wait {e.wait_ms:.0f}ms")
-        if e.delay_ms:
-            waits.append(f"delay {e.delay_ms:.0f}ms")
+        wait_ms = float(_field(entry, "wait_ms", 0.0) or 0.0)
+        jitter_ms = float(_field(entry, "jitter_ms", 0.0) or 0.0)
+        if wait_ms:
+            waits.append(f"wait {wait_ms:.0f}ms")
+        if jitter_ms:
+            waits.append(f"jitter {jitter_ms:.0f}ms")
         extra = f" ({', '.join(waits)})" if waits else ""
-        note = f" {e.note}" if e.note else ""
-        preview = (e.content or "").replace("\n", "\\n")
-        if len(preview) > 60:
-            preview = preview[:57] + "..."
+        note = str(_field(entry, "note", "") or "")
+        note_text = f" {note}" if note else ""
         lines.append(
-            f"  {clock} {arrow} {e.account:<8}{e.action:<16}"
-            f"ch={e.channel_id if e.channel_id is not None else '-':<22}{preview}{extra}{note}"
+            f"{clock} {arrow} {account:<12}{action:<14}{channel_text:<24}{preview}{extra}{note_text}"
         )
-    return lines or ["  (no interactions recorded)"]
+    return lines or ["(no interactions recorded)"]
 
 
 class AuditRecorder:
-    """Ring buffer + optional DB sink + live subscribers for audit entries."""
+    """Ring buffer + optional DB sink + live subscribers for audit entries.
 
-    def __init__(self, database: Optional[Any] = None, capacity: int = 2000) -> None:
-        self._db = database
+    Parameters:
+        db_repo: duck-typed AuditRepository (``add(entry)`` /
+            ``recent(limit, account)``); None keeps everything in memory.
+        capacity: ring size (older entries are dropped first).
+    """
+
+    def __init__(self, db_repo: Any = None, capacity: int = 2000) -> None:
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
+            raise ValueError(f"audit capacity must be a positive int, got {capacity!r}")
+        self._db = db_repo
         self._ring: Deque[AuditEntry] = deque(maxlen=capacity)
         self._subscribers: List[Callable[[AuditEntry], None]] = []
         self._lock = threading.Lock()
@@ -86,63 +128,84 @@ class AuditRecorder:
         channel_id: Optional[int] = None,
         content: str = "",
         wait_ms: float = 0.0,
-        delay_ms: float = 0.0,
+        jitter_ms: float = 0.0,
         note: str = "",
-    ) -> AuditEntry:
-        """Store one interaction (ring + DB) and notify live subscribers."""
+    ) -> Dict[str, Any]:
+        """Store one interaction (ring + best-effort DB) and notify subscribers.
+
+        Returns the JSON-safe dict form of the stored entry. Never raises:
+        the DB write and every subscriber callback are individually isolated
+        — auditing must never break the send path.
+        """
         entry = AuditEntry(
-            ts=time.time(), account=account, direction=direction, action=action,
-            channel_id=channel_id, content=content, wait_ms=wait_ms,
-            delay_ms=delay_ms, note=note,
+            ts=time.time(),
+            account=str(account),
+            direction=str(direction),
+            action=str(action),
+            channel_id=channel_id,
+            content=str(content or ""),
+            wait_ms=float(wait_ms or 0.0),
+            jitter_ms=float(jitter_ms or 0.0),
+            note=str(note or ""),
         )
         with self._lock:
             self._ring.append(entry)
         if self._db is not None:
             try:
-                self._db.add_audit(entry.as_dict())
+                self._db.add(entry.as_dict())
             except Exception:  # auditing must never break the send path
                 LOG.exception("audit DB write failed")
         for callback in list(self._subscribers):
             try:
                 callback(entry)
             except Exception:
-                LOG.debug("audit subscriber failed", exc_info=True)  # ERROR AUDIT: no more silent pass
-        return entry
+                LOG.debug("audit subscriber failed", exc_info=True)
+        return entry.as_dict()
 
-    def tail(self, n: int = 50, account: Optional[str] = None) -> List[AuditEntry]:
-        """Most recent entries (oldest first), optionally filtered per account."""
+    def tail(self, n: int = 50, account: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Most recent entries as dicts (oldest first), optionally per account.
+
+        n <= 0 returns [] — never the whole ring.
+        """
         with self._lock:
             items = list(self._ring)
         if account:
             items = [e for e in items if e.account == account]
-        # AUDIT FIX: n <= 0 returns nothing (previously returned the whole ring)
-        return items[-n:] if n > 0 else []
+        return [e.as_dict() for e in (items[-n:] if n > 0 else [])]
 
     def subscribe(self, callback: Callable[[AuditEntry], None]) -> Callable[[], None]:
-        """Live-tail subscription (dashboard WS); returns unsubscribe."""
-        self._subscribers.append(callback)
+        """Live-tail subscription (dashboard WS); returns an unsubscribe callable."""
+        with self._lock:
+            self._subscribers.append(callback)
 
         def _unsubscribe() -> None:
-            try:
-                self._subscribers.remove(callback)
-            except ValueError:
-                pass
+            with self._lock:
+                try:
+                    self._subscribers.remove(callback)
+                except ValueError:
+                    pass  # already unsubscribed (idempotent)
 
         return _unsubscribe
 
     def history(self, limit: int = 200, account: Optional[str] = None) -> List[Dict[str, Any]]:
-        """DB-backed history (falls back to the ring when no DB is attached).
+        """DB-backed history (falls back to the ring when no DB / DB failure).
 
-        AUDIT FIX: normalized shape — DB rows drop the internal `id` and round
-        `ts` so both sources look identical to consumers.
+        Rows coming from the DB drop their internal 'id' and get 'ts' rounded
+        so both sources look identical to consumers.
         """
         if self._db is not None:
             try:
-                rows = self._db.audit_log(limit=limit, account=account)
+                rows = self._db.recent(limit=limit, account=account)
+                normalized: List[Dict[str, Any]] = []
                 for row in rows:
+                    row = dict(row)
                     row.pop("id", None)
                     row["ts"] = round(float(row.get("ts") or 0.0), 3)
-                return rows
+                    normalized.append(row)
+                return normalized
             except Exception:
-                LOG.exception("audit history read failed")
-        return [e.as_dict() for e in self.tail(limit, account)]
+                LOG.exception("audit history read failed; falling back to ring")
+        return self.tail(limit, account)
+
+
+__all__ = ["AuditRecorder", "AuditEntry", "format_audit"]

@@ -1,0 +1,1516 @@
+<!DOCTYPE html>
+<!--
+  ============================================================================
+  SlaughterMudae dashboard SPA — single file, no build step (agent A8).
+
+  STRUCTURE
+    <style>   Dark theme ported from the audited original dashboard (CSS
+              variables, cards, chips, status pills, warn banner, dialog).
+    <body>    Two-column shell:
+                aside#sidebar   navigation — 9 sections exactly per spec §12,
+                                one panel visible at a time (data-section)
+                main#main       header (ws dot + conn message + token box),
+                                div#errbox  (error accrual: timestamped,
+                                never cleared by successes),
+                                section.panel × 9 + <dialog id="details">
+    <script>  "use strict" ES module-free JS:
+                store/token     safe-storage fallback + ?token= seeding
+                api()/post()    fetch wrapper (401 hint, {ok,data} unwrap)
+                esc()/btn()     escape-everything helper + button factory
+                showErr()       accrual box (timestamps; success never clears)
+                connectWS()     live push: stats/log/audit/task, retry cap 10
+                render*()       one renderer family per section
+                load*()         per-section REST loaders (lazy on first open)
+
+  HARDENING PORTED FROM THE ORIGINAL (3 audit rounds):
+    * esc() on EVERY interpolated server value before innerHTML
+    * errors accrue with timestamps and are never cleared by successes
+    * NaN guards on numeric inputs BEFORE any POST
+    * ws reconnect capped (10 attempts) with an honest final message
+    * localStorage may be sandboxed away -> in-memory store fallback
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SlaughterMudae Dashboard</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --panel2: #1c2330; --line: #2b3245;
+    --text: #d7dde7; --dim: #8a93a6; --accent: #58a6ff; --ok: #3fb950;
+    --warn: #d29922; --err: #f85149; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+  #shell { display: grid; grid-template-columns: 208px 1fr; min-height: 100vh; }
+
+  /* ---------------------------------------------------------- sidebar */
+  #sidebar { background: var(--panel); border-right: 1px solid var(--line);
+             padding: 12px 8px; position: sticky; top: 0; height: 100vh;
+             display: flex; flex-direction: column; gap: 2px; }
+  #sidebar h1 { font-size: 14px; margin: 4px 8px 14px; letter-spacing: .03em; }
+  .navbtn { display: block; width: 100%; text-align: left; background: none;
+            color: var(--dim); border: none; border-left: 3px solid transparent;
+            border-radius: 0; padding: 7px 12px; cursor: pointer; font-size: 13px; }
+  .navbtn:hover { color: var(--text); background: var(--panel2); }
+  .navbtn.active { color: var(--accent); border-left-color: var(--accent);
+                   background: var(--panel2); font-weight: 600; }
+  #sidebar .foot { margin-top: auto; padding: 8px; font-size: 11px;
+                   color: var(--dim); font-family: var(--mono); }
+
+  /* ------------------------------------------------------------ main */
+  #main { min-width: 0; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+           background: var(--panel); border-bottom: 1px solid var(--line);
+           position: sticky; top: 0; z-index: 5; }
+  header h2 { font-size: 15px; margin: 0; }
+  #wsdot { width: 10px; height: 10px; border-radius: 50%; background: var(--err); }
+  #wsdot.on { background: var(--ok); }
+  #connmsg { color: var(--dim); font-size: 12px; }
+  #tokenbox { margin-left: auto; display: flex; gap: 6px; }
+  #tokenbox input { width: 190px; }
+  #errbox { color: var(--err); font-family: var(--mono); font-size: 12px;
+            white-space: pre-wrap; padding: 6px 16px; max-height: 120px;
+            overflow-y: auto; background: rgba(248,81,73,.05);
+            border-bottom: 1px solid var(--line); }
+  #errbox:empty { display: none; }
+  #content { padding: 14px 16px 40px; }
+
+  .panel { display: none; }
+  .panel.active { display: block; }
+  .panel > h3 { margin: 2px 0 12px; font-size: 13px; color: var(--dim);
+                text-transform: uppercase; letter-spacing: .06em; }
+  section.card { background: var(--panel); border: 1px solid var(--line);
+                 border-radius: 8px; padding: 12px; margin-bottom: 12px; min-width: 0; }
+  section.card > h4 { margin: 0 0 10px; font-size: 12px; color: var(--dim);
+                      text-transform: uppercase; letter-spacing: .06em; }
+  .card2 { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+           padding: 10px; margin-bottom: 10px; }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .name { font-weight: 600; }
+  .acct-name { font-size: 15px; font-weight: 700; }
+  .sub { color: var(--dim); font-family: var(--mono); font-size: 11.5px; margin-top: 2px; }
+  .dim { color: var(--dim); }
+  .mono { font-family: var(--mono); font-size: 12px; }
+
+  .status { font-family: var(--mono); font-size: 12px; padding: 1px 8px; border-radius: 10px; }
+  .status.running { color: var(--ok); background: rgba(63,185,80,.12); }
+  .status.reconnecting, .status.connecting { color: var(--warn); background: rgba(210,153,34,.15); }
+  .status.created, .status.stopped { color: var(--dim); background: rgba(138,147,166,.12); }
+  .status.failed { color: var(--err); background: rgba(248,81,73,.12); }
+
+  button { background: var(--panel); color: var(--text); border: 1px solid var(--line);
+           border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.on { border-color: var(--ok); color: var(--ok); }
+  button.off { border-color: var(--err); color: var(--err); }
+  button.danger:hover { border-color: var(--err); color: var(--err); }
+  button:disabled { opacity: .45; cursor: wait; }
+  input, select { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+                  border-radius: 6px; padding: 4px 8px; font-family: var(--mono); font-size: 12px; }
+  input[type="checkbox"] { width: auto; }
+
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; align-items: center; }
+  .chip { font-family: var(--mono); font-size: 11px; padding: 1px 8px; border-radius: 10px;
+          background: var(--panel); border: 1px solid var(--line); color: var(--dim); }
+  .chip.role { color: var(--accent); border-color: var(--accent); }
+
+  .warn-item { display: flex; gap: 8px; align-items: baseline; padding: 6px 10px;
+               margin-bottom: 6px; border-radius: 6px; font-size: 12.5px; }
+  .warn-item.danger { background: rgba(248,81,73,.12); border: 1px solid var(--err); }
+  .warn-item.warn { background: rgba(210,153,34,.10); border: 1px solid var(--warn); }
+  .warn-item.info { background: rgba(88,166,255,.08); border: 1px solid var(--line); }
+  .warn-item .lvl { font-family: var(--mono); font-weight: 700; }
+
+  table.tbl { width: 100%; border-collapse: collapse; font-family: var(--mono);
+              font-size: 12px; }
+  table.tbl th { text-align: left; color: var(--dim); font-weight: 400;
+                 border-bottom: 1px solid var(--line); padding: 4px 8px; }
+  table.tbl td { border-bottom: 1px solid rgba(43,50,69,.45); padding: 4px 8px;
+                 vertical-align: top; word-break: break-all; }
+  .st-completed { color: var(--ok); } .st-failed, .st-timed_out { color: var(--err); }
+  .st-cancelled { color: var(--dim); } .st-running { color: var(--accent); }
+  .st-queued { color: var(--warn); }
+
+  #logbox, #auditbox, #simlogs, #taskevents { background: #0a0d12;
+          border: 1px solid var(--line); border-radius: 8px;
+          font-family: var(--mono); font-size: 11.5px; padding: 8px; height: 240px;
+          overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  #simlogs { height: 200px; }
+  #taskevents { height: 110px; }
+  .lg-DEBUG { color: var(--dim); } .lg-INFO { color: var(--text); }
+  .lg-WARNING { color: var(--warn); } .lg-ERROR { color: var(--err); }
+  .audit-line.in { color: var(--dim); } .audit-line.out { color: var(--text); }
+  .audit-meta { color: var(--accent); }
+
+  .settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+                   gap: 8px; margin-top: 8px; }
+  .settings-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px;
+                         color: var(--dim); font-family: var(--mono); }
+  .plugin-err { color: var(--err); font-family: var(--mono); font-size: 11.5px; margin-top: 4px;
+                white-space: pre-wrap; word-break: break-all; }
+  .rule-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  .out-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+  .banner { padding: 10px 14px; border-radius: 8px; font-weight: 600; margin-bottom: 12px; }
+  .banner.pass { background: rgba(63,185,80,.12); border: 1px solid var(--ok); color: var(--ok); }
+  .banner.fail { background: rgba(248,81,73,.12); border: 1px solid var(--err); color: var(--err); }
+  .kv { font-family: var(--mono); font-size: 12px; margin: 2px 0; }
+
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line);
+           border-radius: 10px; max-width: 780px; width: 92vw; padding: 16px; }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog h3 { margin: 0 0 8px; }
+  dialog .kv { margin: 2px 0; }
+  #det-body { max-height: 74vh; overflow-y: auto; }
+  .spin { display: inline-block; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="shell">
+  <aside id="sidebar">
+    <h1>Slaughter<span style="color:var(--accent)">Mudae</span></h1>
+    <button class="navbtn active" data-section="overview">Overview</button>
+    <button class="navbtn" data-section="accounts">Accounts</button>
+    <button class="navbtn" data-section="plugins">Plugins</button>
+    <button class="navbtn" data-section="profiles">Profiles</button>
+    <button class="navbtn" data-section="ratelimit">Rate Limits</button>
+    <button class="navbtn" data-section="tasks">Tasks</button>
+    <button class="navbtn" data-section="logs">Logs</button>
+    <button class="navbtn" data-section="simulation">Simulation</button>
+    <button class="navbtn" data-section="advanced">Advanced</button>
+    <div class="foot">stdlib server<br>WS + JSON REST</div>
+  </aside>
+
+  <div id="main">
+    <header>
+      <div id="wsdot"></div>
+      <h2 id="section-title">Overview</h2>
+      <span id="connmsg">connecting…</span>
+      <button id="pushrefresh" title="ask the server for a fresh snapshot now">push refresh</button>
+      <div id="tokenbox">
+        <input id="token" type="password" placeholder="dashboard token">
+        <button id="savetoken">save</button>
+      </div>
+    </header>
+    <div class="errbox" id="errbox"></div>
+    <div id="content">
+
+      <!-- ==================================================== Overview -->
+      <section class="panel active" id="panel-overview">
+        <h3>Overview</h3>
+        <div id="ov-warnbar"></div>
+        <section class="card">
+          <h4>Task counters</h4>
+          <div class="row" id="ov-tasks"><span class="dim">waiting for data…</span></div>
+        </section>
+        <section class="card">
+          <h4>Accounts</h4>
+          <div id="ov-accounts"><span class="dim">waiting for data…</span></div>
+        </section>
+      </section>
+
+      <!-- ==================================================== Accounts -->
+      <section class="panel" id="panel-accounts">
+        <h3>Accounts</h3>
+        <section class="card">
+          <h4>Add account</h4>
+          <div class="rule-row">
+            <input id="newacct" placeholder="name" size="10">
+            <input id="newacct-sync" placeholder="sync group (opt)" size="14">
+            <input id="newacct-profiles" placeholder="profiles (opt, space-sep)" size="20">
+            <button id="addacct">add account</button>
+          </div>
+          <div class="dim mono" style="font-size:11px">token values live in .env — pass a
+            <span class="mono">token_ref</span> via the CLI if needed</div>
+        </section>
+        <section class="card">
+          <h4>Registered accounts</h4>
+          <div id="acct-list"><span class="dim">waiting for data…</span></div>
+        </section>
+      </section>
+
+      <!-- ==================================================== Plugins -->
+      <section class="panel" id="panel-plugins">
+        <h3>Plugins</h3>
+        <section class="card">
+          <h4>Installed plugins</h4>
+          <div id="plugin-list"><span class="dim">loading…</span></div>
+        </section>
+        <div class="dim">per-account enable toggles + settings editors live in
+          Accounts → details…</div>
+      </section>
+
+      <!-- ==================================================== Profiles -->
+      <section class="panel" id="panel-profiles">
+        <h3>Profiles</h3>
+        <section class="card">
+          <h4>Create profile</h4>
+          <div class="rule-row">
+            <input id="prof-name" placeholder="name" size="10">
+            <input id="prof-desc" placeholder="description (opt)" size="22">
+          </div>
+          <div class="chips" id="prof-plugins"><span class="dim">loading plugins…</span></div>
+          <div class="rule-row" style="margin-top:8px">
+            <button id="prof-create">create profile</button>
+          </div>
+        </section>
+        <section class="card">
+          <h4>Defined profiles</h4>
+          <div id="prof-list"><span class="dim">loading…</span></div>
+        </section>
+      </section>
+
+      <!-- ================================================== Rate Limits -->
+      <section class="panel" id="panel-ratelimit">
+        <h3>Rate Limits</h3>
+        <section class="card">
+          <h4>Warnings</h4>
+          <div id="rl-warnings"><span class="dim">loading…</span></div>
+        </section>
+        <section class="card">
+          <h4>Set policy</h4>
+          <div class="rule-row">
+            <input id="rl-action" placeholder="action (message/dm)" size="12">
+            <input id="rl-interval" placeholder="interval s (>=1.5)" size="12">
+            <input id="rl-jmin" placeholder="jitter min s (opt)" size="11">
+            <input id="rl-jmax" placeholder="jitter max s (opt)" size="11">
+            <select id="rl-level">
+              <option value="global">global</option>
+              <option value="account">account</option>
+              <option value="plugin">plugin</option>
+              <option value="account_plugin">account/plugin</option>
+            </select>
+            <input id="rl-owner" placeholder="owner (see hint)" size="14">
+            <button id="rl-set">set policy</button>
+          </div>
+          <div class="dim mono" id="rl-owner-hint" style="font-size:11px">
+            owner: global → empty · account → account name · plugin → plugin name ·
+            account_plugin → "account/plugin"</div>
+          <div class="dim mono" style="font-size:11px">safety floor: nothing faster than
+            1.5s/action can ever be set</div>
+        </section>
+        <section class="card">
+          <h4>Stored policies</h4>
+          <div id="rl-policies"><span class="dim">loading…</span></div>
+        </section>
+        <section class="card">
+          <h4>Effective policy calculator</h4>
+          <div class="rule-row">
+            <input id="eff-action" placeholder="action" size="12">
+            <select id="eff-account"></select>
+            <input id="eff-plugin" placeholder="plugin (opt)" size="12">
+            <button id="eff-go">calculate</button>
+          </div>
+          <div id="eff-result"></div>
+        </section>
+        <section class="card">
+          <h4>Pacing stats</h4>
+          <div id="rl-stats"><span class="dim">loading…</span></div>
+        </section>
+        <section class="card">
+          <h4>Floor</h4>
+          <div class="rule-row">
+            <span>current floor: <span class="mono" id="rl-floor">?</span></span>
+            <input id="rl-floor-new" placeholder="raise floor to (s)" size="12">
+            <button id="rl-floor-set">raise floor</button>
+            <span class="dim mono" style="font-size:11px">can only rise, never below 1.5s</span>
+          </div>
+        </section>
+      </section>
+
+      <!-- ======================================================= Tasks -->
+      <section class="panel" id="panel-tasks">
+        <h3>Tasks</h3>
+        <section class="card">
+          <h4>Live task events</h4>
+          <div id="taskevents"></div>
+        </section>
+        <section class="card">
+          <h4>Running + queued <button id="tasks-refresh" style="float:right">refresh</button></h4>
+          <div id="tasks-live"><span class="dim">loading…</span></div>
+        </section>
+        <section class="card">
+          <h4>History</h4>
+          <div id="tasks-history"><span class="dim">loading…</span></div>
+        </section>
+      </section>
+
+      <!-- ======================================================== Logs -->
+      <section class="panel" id="panel-logs">
+        <h3>Logs</h3>
+        <section class="card">
+          <h4>Structured log tail (live via WS)</h4>
+          <div class="rule-row">
+            <select id="log-acct"><option value="">all accounts</option></select>
+            <select id="log-sev">
+              <option value="">all severities</option>
+              <option>DEBUG</option><option>INFO</option>
+              <option>WARNING</option><option>ERROR</option>
+            </select>
+            <button id="log-backfill">load history</button>
+            <span class="dim mono" id="logsync"></span>
+          </div>
+          <div id="logbox"></div>
+        </section>
+        <section class="card">
+          <h4>Audit trail — Discord interactions (live via WS)</h4>
+          <div class="rule-row">
+            <select id="audit-acct"><option value="">all accounts</option></select>
+            <button id="audit-backfill">load history</button>
+          </div>
+          <div id="auditbox"></div>
+        </section>
+      </section>
+
+      <!-- ================================================== Simulation -->
+      <section class="panel" id="panel-simulation">
+        <h3>Simulation</h3>
+        <section class="card">
+          <h4>Scenarios</h4>
+          <div id="sim-list"><span class="dim">loading…</span></div>
+        </section>
+        <section class="card">
+          <h4>Result</h4>
+          <div id="sim-result"><span class="dim">run a scenario to see its report</span></div>
+        </section>
+      </section>
+
+      <!-- ==================================================== Advanced -->
+      <section class="panel" id="panel-advanced">
+        <h3>Advanced</h3>
+        <section class="card">
+          <h4>Global emergency stop</h4>
+          <div class="dim">cancels every task and stops every account NOW — the
+            framework halts. Use when anything looks wrong.</div>
+          <div class="out-row" style="justify-content:flex-start">
+            <button id="estop" class="danger">⚠ GLOBAL EMERGENCY STOP</button>
+          </div>
+        </section>
+        <section class="card">
+          <h4>Graceful shutdown</h4>
+          <div class="dim">drains the scheduler, stops all accounts, closes the
+            database. The dashboard stops responding afterwards.</div>
+          <div class="out-row" style="justify-content:flex-start">
+            <button id="shutdown" class="danger">graceful shutdown</button>
+          </div>
+        </section>
+        <section class="card">
+          <h4>Dashboard token</h4>
+          <div class="dim">stored locally (safe-storage fallback when
+            localStorage is blocked). A token in the URL (?token=…) seeds it
+            and is cleaned from the address bar.</div>
+          <div class="rule-row">
+            <input id="adv-token" type="password" placeholder="dashboard token" size="24">
+            <button id="adv-save">save + reload</button>
+            <button id="adv-forget">forget</button>
+          </div>
+        </section>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<dialog id="details">
+  <h3 id="det-title">account</h3>
+  <div id="det-body"></div>
+  <div class="out-row"><button id="det-close">close</button></div>
+</dialog>
+
+<dialog id="confirmbox">
+  <h3 id="confirm-title">confirm</h3>
+  <p id="confirm-text" class="mono"></p>
+  <div class="out-row">
+    <button id="confirm-no">cancel</button>
+    <button id="confirm-yes" class="danger">yes, do it</button>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+// safe storage: sandboxed/embedded browsers may block localStorage entirely —
+// fall back to an in-memory store so the page never crashes over it
+const store = (() => {
+  try {
+    const t = window.localStorage;
+    t.setItem("__probe", "1"); t.removeItem("__probe");
+    return t;
+  } catch {
+    const mem = {};
+    return {
+      getItem: (k) => (k in mem ? mem[k] : null),
+      setItem: (k, v) => { mem[k] = String(v); },
+      removeItem: (k) => { delete mem[k]; },
+    };
+  }
+})();
+const token = () => store.getItem("dash_token") || "";
+
+// shared client state
+let lastStats = null;
+let manifests = [];        // plugin manifests (settings schema source)
+let ws = null;
+
+// ---------------------------------------------------------------- helpers
+function esc(s) { const d = document.createElement("span"); d.textContent = String(s ?? ""); return d.innerHTML; }
+function btn(label, onclick, cls) {
+  const b = document.createElement("button");
+  b.textContent = label; b.onclick = onclick;
+  if (cls) b.className = cls;
+  return b;
+}
+function fmtDur(s) {
+  s = Math.max(0, Math.round(Number(s) || 0));
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m " + (s % 60) + "s";
+  return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+}
+function fmtAge(ts) { return ts ? fmtDur((Date.now() - ts * 1000) / 1000) : "-"; }
+function accountNames() { return (lastStats && lastStats.accounts ? lastStats.accounts : []).map((a) => a.name); }
+
+function api(path, opts = {}) {
+  const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+  if (token()) headers["X-Dashboard-Token"] = token();
+  return fetch(path, Object.assign({}, opts, { headers })).then(async (r) => {
+    if (r.status === 401) {
+      // ERROR AUDIT FIX: throw the actionable hint so showErr keeps it
+      throw new Error("401 — set the dashboard token (top right)");
+    }
+    let body;
+    try { body = await r.json(); }
+    catch { throw new Error(`server returned ${r.status} with a non-JSON body`); }
+    if (!body.ok) throw new Error(body.error || `request failed (${r.status})`);
+    return body.data;
+  });
+}
+const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body) });
+
+// ERROR AUDIT FIX: errors accrue with timestamps (last-one-wins hid earlier
+// ones) and are only cleared explicitly, never by unrelated successes
+function showErr(e) {
+  const box = $("errbox");
+  const line = document.createElement("div");
+  const clock = new Date().toTimeString().slice(0, 8);
+  line.textContent = clock + "  " + String(e && e.message || e);
+  box.appendChild(line);
+  while (box.childNodes.length > 50) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+}
+function showNote(text) {
+  const box = $("errbox");
+  const line = document.createElement("div");
+  const clock = new Date().toTimeString().slice(0, 8);
+  line.style.color = "var(--dim)";
+  line.textContent = clock + "  " + text;
+  box.appendChild(line);
+  while (box.childNodes.length > 50) box.removeChild(box.firstChild);
+}
+function clearErrors() { $("errbox").textContent = ""; }
+
+function fillSelect(sel, names, placeholder) {
+  const previous = sel.value;
+  sel.innerHTML = "";
+  if (placeholder !== undefined) sel.append(new Option(placeholder, ""));
+  for (const n of names) sel.append(new Option(n, n));
+  sel.value = previous;
+  if (sel.selectedIndex === -1 && sel.options.length) sel.selectedIndex = 0;
+}
+
+// confirm dialog (native confirm() can be blocked in sandboxed frames)
+let confirmAction = null;
+function askConfirm(title, text, action) {
+  $("confirm-title").textContent = title;
+  $("confirm-text").textContent = text;
+  confirmAction = action;
+  $("confirmbox").showModal();
+}
+$("confirm-yes").onclick = () => {
+  $("confirmbox").close();
+  if (confirmAction) { const a = confirmAction; confirmAction = null; a(); }
+};
+$("confirm-no").onclick = () => { $("confirmbox").close(); confirmAction = null; };
+
+// ---------------------------------------------------------------- navigation
+const LOADERS = {};  // section -> first-open loader
+const TITLES = {};
+function activate(section) {
+  for (const b of document.querySelectorAll(".navbtn"))
+    b.classList.toggle("active", b.dataset.section === section);
+  for (const p of document.querySelectorAll(".panel"))
+    p.classList.toggle("active", p.id === "panel-" + section);
+  $("section-title").textContent = TITLES[section] || section;
+  if (LOADERS[section]) { const load = LOADERS[section]; LOADERS[section] = null; load(); }
+}
+for (const b of document.querySelectorAll(".navbtn"))
+  b.onclick = () => activate(b.dataset.section);
+
+// ---------------------------------------------------------------- Overview
+function renderWarnings(container, warnings) {
+  container.innerHTML = "";
+  for (const w of warnings || []) {
+    const div = document.createElement("div");
+    div.className = "warn-item " + (w.level || "info");
+    const lvl = w.level === "danger" ? "⚠ DANGER" : w.level === "warn" ? "⚠ warning" : "i";
+    div.innerHTML = '<span class="lvl">' + esc(lvl) + "</span><span>" +
+      esc(w.message) + (w.code ? ' <span class="dim mono">[' + esc(w.code) + "]</span>" : "") +
+      "</span>";
+    container.appendChild(div);
+  }
+}
+
+function renderOverview() {
+  if (!lastStats) return;
+  renderWarnings($("ov-warnbar"), lastStats.warnings);
+  const t = lastStats.tasks || {};
+  $("ov-tasks").innerHTML = "";
+  for (const [label, key, cls] of
+       [["queued", "queued", "st-queued"], ["running", "running", "st-running"],
+        ["completed", "completed", "st-completed"], ["failed", "failed", "st-failed"],
+        ["cancelled", "cancelled", "st-cancelled"]]) {
+    const chip = document.createElement("span");
+    chip.className = "chip " + cls;
+    chip.textContent = label + ": " + (t[key] ?? 0);
+    $("ov-tasks").appendChild(chip);
+  }
+  const info = document.createElement("span");
+  info.className = "dim mono";
+  info.textContent = "workers " + (t.workers ?? 0) +
+    " · avg " + Number(t.avg_duration_s ?? 0).toFixed(2) + "s" +
+    " · framework uptime " + fmtDur(lastStats.uptime_s);
+  $("ov-tasks").appendChild(info);
+
+  const root = $("ov-accounts");
+  root.innerHTML = "";
+  const accounts = lastStats.accounts || [];
+  if (!accounts.length) {
+    root.innerHTML = '<span class="dim">no accounts yet — add one in Accounts</span>';
+    return;
+  }
+  for (const a of accounts) {
+    const card = document.createElement("div"); card.className = "card2";
+    const row = document.createElement("div"); row.className = "row";
+    const title = document.createElement("span"); title.className = "acct-name";
+    title.textContent = a.name;
+    const status = document.createElement("span");
+    status.className = "status " + (a.status || "");
+    status.textContent = a.status || "?";
+    const det = btn("details…", () => { activate("accounts"); openDetails(a.name); });
+    row.append(title, status, det);
+    card.appendChild(row);
+    const sub = document.createElement("div"); sub.className = "sub";
+    sub.textContent =
+      "discord id: " + (a.discord_id ?? a.user_id ?? "(not running)") +
+      "   latency: " + (a.latency_ms != null ? Math.round(a.latency_ms) + "ms" : "-") +
+      "   uptime: " + fmtDur(a.uptime_s) +
+      "   group: " + (a.sync_group || "independent");
+    card.appendChild(sub);
+    const chips = document.createElement("div"); chips.className = "chips";
+    for (const p of a.profiles || []) {
+      const chip = document.createElement("span");
+      chip.className = "chip role"; chip.textContent = p;
+      chips.appendChild(chip);
+    }
+    if (!chips.childNodes.length) chips.innerHTML = '<span class="dim mono">no profiles</span>';
+    card.appendChild(chips);
+    root.appendChild(card);
+  }
+}
+
+// ---------------------------------------------------------------- Accounts
+function renderAccountCards() {
+  const root = $("acct-list");
+  root.innerHTML = "";
+  const accounts = (lastStats && lastStats.accounts) || [];
+  fillSelect($("log-acct"), accountNames(), "all accounts");
+  fillSelect($("audit-acct"), accountNames(), "all accounts");
+  fillSelect($("eff-account"), accountNames(), "— any account —");
+  if (!accounts.length) {
+    root.innerHTML = '<span class="dim">no accounts — add one above</span>';
+    return;
+  }
+  for (const a of accounts) {
+    const card = document.createElement("div"); card.className = "card2";
+    const row = document.createElement("div"); row.className = "row";
+    const title = document.createElement("span"); title.className = "acct-name";
+    title.textContent = a.name;
+    const status = document.createElement("span");
+    status.className = "status " + (a.status || "");
+    status.textContent = a.status || "?";
+    const start = btn("start", () => post("/api/accounts/start", { account: a.name })
+      .then(loadAccountsQuiet).catch(showErr));
+    const stop = btn("stop", () => post("/api/accounts/stop", { account: a.name })
+      .then(loadAccountsQuiet).catch(showErr));
+    const details = btn("details…", () => openDetails(a.name));
+    const estop = btn("estop", () => askConfirm("Emergency stop",
+      "Cancel every " + a.name + " task and disconnect NOW?",
+      () => post("/api/accounts/emergency-stop", { name: a.name })
+        .then(loadAccountsQuiet).catch(showErr)), "danger");
+    const remove = btn("remove", () => askConfirm("Remove account",
+      "Remove " + a.name + " (must be stopped)? Settings and assignments are deleted too.",
+      () => post("/api/accounts/remove", { name: a.name })
+        .then(loadAccountsQuiet).catch(showErr)), "danger");
+    row.append(title, status, start, stop, details, estop, remove);
+    card.appendChild(row);
+    const sub = document.createElement("div"); sub.className = "sub";
+    sub.textContent =
+      "discord id: " + (a.discord_id ?? a.user_id ?? "(not running)") +
+      "   latency: " + (a.latency_ms != null ? Math.round(a.latency_ms) + "ms" : "-") +
+      "   uptime: " + fmtDur(a.uptime_s) +
+      "   group: " + (a.sync_group || "independent");
+    card.appendChild(sub);
+    const chips = document.createElement("div"); chips.className = "chips";
+    for (const p of a.profiles || []) {
+      const chip = document.createElement("span");
+      chip.className = "chip role"; chip.textContent = p;
+      chips.appendChild(chip);
+    }
+    if (!chips.childNodes.length) chips.innerHTML = '<span class="dim mono">no profiles</span>';
+    card.appendChild(chips);
+    root.appendChild(card);
+  }
+}
+
+function loadAccountsQuiet() {
+  return api("/api/accounts").then((accounts) => {
+    if (lastStats) lastStats.accounts = accounts;
+    renderAccountCards(); renderOverview();
+  }).catch(showErr);
+}
+LOADERS.accounts = loadAccountsQuiet;
+
+$("addacct").onclick = () => {
+  // ERROR AUDIT FIX: client-side validation — empty/garbage names used to
+  // POST and produce developer-speak errors
+  const name = $("newacct").value.trim();
+  if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(name)) {
+    showErr("account name must be lowercase [a-z0-9_-], up to 32 chars");
+    return;
+  }
+  const payload = { name };
+  payload.sync_group = $("newacct-sync").value.trim() || null;
+  const profiles = $("newacct-profiles").value.trim().split(/\s+/).filter(Boolean);
+  if (profiles.length) payload.profiles = profiles;
+  post("/api/accounts/add", payload).then(() => {
+    $("newacct").value = ""; $("newacct-sync").value = ""; $("newacct-profiles").value("");
+    return loadAccountsQuiet();
+  }).catch(showErr);
+};
+
+// ------------------------------------------------------- details modal (§8)
+async function openDetails(name) {
+  let info, states, profiles;
+  try {
+    [info, states, profiles] = await Promise.all([
+      api("/api/accounts/info?account=" + encodeURIComponent(name)),
+      api("/api/plugins/state?account=" + encodeURIComponent(name)).catch(() => []),
+      api("/api/profiles").catch(() => []),
+    ]);
+  } catch (e) { showErr(e); return; }
+  try {
+    renderDetails(info, states, profiles);
+  } catch (e) {
+    showErr(new Error("failed to render details for " + name + ": " + (e.message || e)));
+  }
+}
+
+function renderDetails(info, states, profiles) {
+  $("det-title").textContent = info.name;
+  const body = $("det-body");
+  body.innerHTML = "";
+  const section = (title) => {
+    const card = document.createElement("section"); card.className = "card";
+    const h = document.createElement("h4"); h.textContent = title;
+    card.appendChild(h); body.appendChild(card);
+    return card;
+  };
+  const kv = (k, v) => '<div class="kv">' + esc(k) + ": " + esc(v) + "</div>";
+
+  // §8 Status + Identity
+  const st = info.status || {};
+  const head = section("Status · Identity");
+  head.innerHTML += kv("state", st.state) +
+    kv("connected", st.connected) +
+    kv("latency", st.latency_ms != null ? Math.round(st.latency_ms) + "ms" : "-") +
+    kv("uptime", fmtDur(st.uptime_s)) +
+    kv("discord id", (info.identity || {}).discord_id ?? "(not running)") +
+    kv("name", (info.identity || {}).name ?? "-");
+
+  // §8 Runtime — clearly marked client cache from READY
+  const rt = info.runtime || {};
+  const run = section("Runtime");
+  run.innerHTML += kv("cached guilds", rt.cached_guilds ?? "-") +
+    kv("cached channels", rt.cached_channels ?? "-") +
+    kv("cached DMs", rt.cached_dms ?? "-") +
+    '<div class="kv dim">source: ' + esc(rt.cache_source || "client cache (READY)") +
+    " — live client cache only, not persisted</div>";
+
+  // §8 Plugins — enable toggles + auto-generated settings editors
+  const plug = section("Plugins");
+  plug.innerHTML = "";
+  if (!states.length) plug.innerHTML = '<span class="dim">no plugins attached</span>';
+  for (const p of states) {
+    const box = document.createElement("div"); box.className = "card2";
+    const row = document.createElement("div"); row.className = "row";
+    row.innerHTML = '<span class="name">' + esc(p.name) + "</span>";
+    const toggle = btn(p.enabled ? "◆ enabled" : "◇ disabled", () =>
+      post("/api/plugins/set-enabled",
+           { account: info.name, plugin: p.name, enabled: !p.enabled })
+        .then(() => openDetails(info.name)).catch(showErr),
+    p.enabled ? "on" : "off");
+    row.appendChild(toggle);
+    if ((p.error_count || 0) > 0) {
+      const err = document.createElement("span");
+      err.className = "plugin-err";
+      err.textContent = p.error_count + " error(s)" +
+        (p.last_error ? " — " + p.last_error : "");
+      row.appendChild(err);
+    }
+    box.appendChild(row);
+    box.appendChild(buildSettingsEditor(info.name, p, box));
+    plug.appendChild(box);
+  }
+
+  // §8 Profile — chips + assign/unassign
+  const prof = section("Profiles");
+  const chips = document.createElement("div"); chips.className = "chips";
+  for (const p of info.profiles || []) {
+    const chip = document.createElement("span");
+    chip.className = "chip role"; chip.textContent = p;
+    const x = btn("✕", () => post("/api/profiles/unassign",
+        { account: info.name, profile: p })
+      .then(() => openDetails(info.name)).catch(showErr));
+    chip.appendChild(document.createTextNode(" "), x);
+    chips.appendChild(chip);
+  }
+  if (!chips.childNodes.length) chips.innerHTML = '<span class="dim mono">none assigned (unrestricted)</span>';
+  prof.appendChild(chips);
+  const assignRow = document.createElement("div"); assignRow.className = "rule-row";
+  const sel = document.createElement("select");
+  for (const p of profiles) sel.append(new Option(p.name, p.name));
+  const assign = btn("assign profile", () => {
+    if (!sel.value) { showErr("pick a profile first"); return; }
+    post("/api/profiles/assign", { account: info.name, profile: sel.value })
+      .then(() => openDetails(info.name)).catch(showErr);
+  });
+  const note = document.createElement("span");
+  note.className = "dim mono"; note.style.fontSize = "11px";
+  note.textContent = "(applies on the account's next start)";
+  assignRow.append(sel, assign, note);
+  prof.appendChild(assignRow);
+
+  // §8 Rate limit — effective table per action
+  const rl = section("Rate limit (effective)");
+  const table = document.createElement("table"); table.className = "tbl";
+  table.innerHTML = "<tr><th>action</th><th>interval</th><th>jitter</th><th>source</th></tr>";
+  for (const [action, r] of Object.entries(info.rate_limit || {})) {
+    const tr = document.createElement("tr");
+    const jitter = Array.isArray(r.jitter) ? r.jitter[0] + ".." + r.jitter[1] + "s" : "-";
+    tr.innerHTML = "<td>" + esc(action) + "</td><td>" + esc(r.interval) + "s</td><td>" +
+      esc(jitter) + '</td><td class="dim">' + esc(r.source || "inherited from global") + "</td>";
+    table.appendChild(tr);
+  }
+  if (!Object.keys(info.rate_limit || {}).length)
+    rl.innerHTML += '<span class="dim mono">no actions paced yet</span>';
+  else rl.appendChild(table);
+
+  $("details").showModal();
+}
+
+// AUTO-GENERATED settings editor from the plugin schema in /api/plugins:
+// bool -> checkbox, int/float -> number input, str -> text input
+function buildSettingsEditor(account, pluginState, container) {
+  const schema = ((manifests.find((m) => m.name === pluginState.name) || {}).settings) || [];
+  const grid = document.createElement("div"); grid.className = "settings-grid";
+  const inputs = {};
+  for (const def of schema) {
+    const label = document.createElement("label");
+    label.textContent = def.name + " (" + def.type + ")" +
+      (def.description ? " — " + def.description : "");
+    let input;
+    if (def.type === "bool") {
+      input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = pluginState.settings[def.name] === true ||
+        String(pluginState.settings[def.name]) === "true";
+    } else if (def.type === "int" || def.type === "float") {
+      input = document.createElement("input");
+      input.type = "number";
+      if (def.min != null) input.min = def.min;
+      if (def.max != null) input.max = def.max;
+      if (def.type === "int") input.step = "1";
+      input.value = pluginState.settings[def.name] ?? def.default ?? "";
+    } else {
+      input = document.createElement("input");
+      input.type = "text";
+      input.value = pluginState.settings[def.name] ?? def.default ?? "";
+    }
+    inputs[def.name] = input;
+    label.appendChild(input);
+    grid.appendChild(label);
+  }
+  if (!schema.length) {
+    grid.innerHTML = '<span class="dim mono">no settings</span>';
+  }
+  const actions = document.createElement("div"); actions.className = "out-row";
+  actions.appendChild(btn("save settings", () => {
+    // ERROR AUDIT FIX: NaN guards + allSettled so every key's outcome shows
+    const calls = schema.map((def) => {
+      const input = inputs[def.name];
+      let value;
+      if (def.type === "bool") value = input.checked;
+      else if (def.type === "int") {
+        value = parseInt(input.value, 10);
+        if (!Number.isFinite(value)) return Promise.reject(new Error(def.name + ": not an integer"));
+      } else if (def.type === "float") {
+        value = parseFloat(input.value);
+        if (!Number.isFinite(value)) return Promise.reject(new Error(def.name + ": not a number"));
+      } else value = input.value;
+      return post("/api/plugins/set-setting",
+        { account, plugin: pluginState.name, key: def.name, value });
+    });
+    Promise.allSettled(calls).then((results) => {
+      const failed = results.filter((r) => r.status === "rejected");
+      if (failed.length) {
+        showErr(failed.length + " setting(s) failed for " + pluginState.name + " — first: " +
+          failed[0].reason.message);
+      } else {
+        showNote("settings saved for " + pluginState.name);
+        openDetails(account); // re-render with server-resolved values
+      }
+    });
+  }));
+  const wrap = document.createElement("div");
+  wrap.append(grid, actions);
+  return wrap;
+}
+
+$("det-close").onclick = () => $("details").close();
+
+// ---------------------------------------------------------------- Plugins
+function renderPlugins() {
+  const root = $("plugin-list");
+  root.innerHTML = "";
+  if (!manifests.length) {
+    root.innerHTML = '<span class="dim">no plugins discovered</span>';
+    return;
+  }
+  for (const m of manifests) {
+    const card = document.createElement("div"); card.className = "card2";
+    const row = document.createElement("div"); row.className = "row";
+    row.innerHTML = '<span class="name">' + esc(m.name) + "</span>" +
+      '<span class="dim mono">v' + esc(m.version) + "</span>";
+    card.appendChild(row);
+    const desc = document.createElement("div"); desc.className = "dim";
+    desc.textContent = m.description || "";
+    card.appendChild(desc);
+    for (const s of m.settings || []) {
+      const line = document.createElement("div"); line.className = "sub";
+      line.textContent = s.name + ": " + s.type + " = " + JSON.stringify(s.default) +
+        (s.description ? "  — " + s.description : "") +
+        (s.min != null ? "  [" + s.min + ".." + (s.max ?? "∞") + "]" : "");
+      card.appendChild(line);
+    }
+    root.appendChild(card);
+  }
+}
+function loadManifests() {
+  return api("/api/plugins").then((m) => {
+    manifests = m;
+    renderPlugins();
+    renderProfilePluginChecks();
+  }).catch((e) => {
+    $("plugin-list").innerHTML = "";
+    const line = document.createElement("div");
+    line.className = "dim";
+    line.textContent = "plugins unavailable: " + (e.message || e);
+    $("plugin-list").appendChild(line);
+    showErr(e);
+  });
+}
+LOADERS.plugins = loadManifests;
+
+// ---------------------------------------------------------------- Profiles
+function renderProfilePluginChecks() {
+  const root = $("prof-plugins");
+  root.innerHTML = "";
+  if (!manifests.length) {
+    root.innerHTML = '<span class="dim">no plugins discovered — create nothing yet</span>';
+    return;
+  }
+  for (const m of manifests) {
+    const label = document.createElement("label");
+    label.className = "chip";
+    label.style.cursor = "pointer";
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.value = m.name;
+    label.append(cb, document.createTextNode(" " + m.name));
+    root.appendChild(label);
+  }
+}
+
+function renderProfiles(profiles) {
+  const root = $("prof-list");
+  root.innerHTML = "";
+  if (!profiles.length) {
+    root.innerHTML = '<span class="dim">no profiles defined</span>';
+    return;
+  }
+  for (const p of profiles) {
+    const card = document.createElement("div"); card.className = "card2";
+    const row = document.createElement("div"); row.className = "row";
+    row.innerHTML = '<span class="name">' + esc(p.name) + "</span>" +
+      '<span class="dim">' + esc(p.description || "") + "</span>";
+    const del = btn("delete", () => askConfirm("Delete profile",
+      "Delete profile " + p.name + "?",
+      () => post("/api/profiles/delete", { name: p.name })
+        .then(loadProfiles).catch(showErr)), "danger");
+    row.appendChild(del);
+    card.appendChild(row);
+    const chips = document.createElement("div"); chips.className = "chips";
+    for (const pl of p.plugins || []) {
+      const chip = document.createElement("span");
+      chip.className = "chip"; chip.textContent = pl;
+      chips.appendChild(chip);
+    }
+    card.appendChild(chips);
+    const assignRow = document.createElement("div"); assignRow.className = "rule-row";
+    const sel = document.createElement("select");
+    for (const a of accountNames()) sel.append(new Option(a, a));
+    const assign = btn("assign to", () => {
+      if (!sel.value) { showErr("pick an account first (add one in Accounts)"); return; }
+      post("/api/profiles/assign", { account: sel.value, profile: p.name })
+        .then(loadAccountsQuiet).catch(showErr);
+    });
+    const note = document.createElement("span");
+    note.className = "dim mono"; note.style.fontSize = "11px";
+    note.textContent = "(applies on the account's next start)";
+    assignRow.append(sel, assign, note);
+    card.appendChild(assignRow);
+    root.appendChild(card);
+  }
+}
+function loadProfiles() {
+  return api("/api/profiles").then(renderProfiles).catch((e) => {
+    $("prof-list").innerHTML = "";
+    const line = document.createElement("div");
+    line.className = "dim";
+    line.textContent = "profiles unavailable: " + (e.message || e);
+    $("prof-list").appendChild(line);
+    showErr(e);
+  });
+}
+LOADERS.profiles = async () => { await loadManifests(); await loadProfiles(); };
+
+$("prof-create").onclick = () => {
+  const name = $("prof-name").value.trim();
+  const plugins = [...document.querySelectorAll("#prof-plugins input:checked")]
+    .map((cb) => cb.value);
+  if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(name)) {
+    showErr("profile name must be lowercase [a-z0-9_-], up to 32 chars");
+    return;
+  }
+  if (!plugins.length) { showErr("profile needs at least one plugin"); return; }
+  post("/api/profiles/create",
+       { name, plugins, description: $("prof-desc").value.trim() })
+    .then(() => { $("prof-name").value = ""; $("prof-desc").value = ""; return loadProfiles(); })
+    .catch(showErr);
+};
+
+// ---------------------------------------------------------------- Rate Limits
+function renderRlWarnings(warnings) {
+  renderWarnings($("rl-warnings"), warnings);
+  if (!(warnings || []).length)
+    $("rl-warnings").innerHTML = '<span class="dim">no warnings — configuration looks sane</span>';
+}
+
+function renderPolicies(policies) {
+  const root = $("rl-policies");
+  root.innerHTML = "";
+  if (!policies.length) {
+    root.innerHTML = '<span class="dim">no stored policies — everything paces at the floor</span>';
+    return;
+  }
+  const table = document.createElement("table"); table.className = "tbl";
+  table.innerHTML = "<tr><th>action</th><th>level</th><th>owner</th><th>interval</th><th>jitter</th><th></th></tr>";
+  for (const p of policies) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = "<td>" + esc(p.action) + "</td><td>" + esc(p.level) + "</td><td>" +
+      esc(p.owner || "-") + "</td><td>" + esc(p.interval) + "s</td><td>" +
+      esc((p.jitter || [0, 0])[0]) + ".." + esc((p.jitter || [0, 0])[1]) + "s</td>";
+    const td = document.createElement("td");
+    td.appendChild(btn("clear", () => post("/api/ratelimit/clear",
+        { level: p.level, owner: p.owner, action: p.action })
+      .then(loadRateLimits).catch(showErr), "danger"));
+    tr.appendChild(td);
+    table.appendChild(tr);
+  }
+  root.appendChild(table);
+}
+
+function renderRlStats(stats) {
+  const root = $("rl-stats");
+  root.innerHTML = "";
+  $("rl-floor").textContent = stats.floor + "s";
+
+  const cd = stats.cooldowns || {};
+  const cool = document.createElement("div"); cool.className = "card2";
+  cool.innerHTML = "<div class='sub'>server cooldowns — global: " +
+    esc(cd.global || 0) + "s remaining</div>";
+  const acctLines = Object.entries(cd.accounts || {})
+    .map(([acct, actions]) =>
+      acct + ": " + Object.entries(actions).map(([a, s]) => a + " " + s + "s").join(", "))
+    .join(" · ");
+  cool.innerHTML += "<div class='sub dim'>" + esc(acctLines || "no account cooldowns") + "</div>";
+  root.appendChild(cool);
+
+  const fire = document.createElement("div"); fire.className = "card2";
+  const fireTable = document.createElement("table"); fireTable.className = "tbl";
+  fireTable.innerHTML = "<tr><th>pacing key</th><th>last fire age</th></tr>";
+  for (const [key, age] of Object.entries(stats.last_fire_ages || {})) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = "<td>" + esc(key) + "</td><td>" + esc(age) + "s</td>";
+    fireTable.appendChild(tr);
+  }
+  if (!Object.keys(stats.last_fire_ages || {}).length)
+    fire.innerHTML += '<span class="dim mono">nothing has fired yet</span>';
+  else fire.appendChild(fireTable);
+  root.appendChild(fire);
+
+  const counters = document.createElement("div"); counters.className = "sub";
+  counters.textContent = "grants " + (stats.grants ?? 0) +
+    " · waits " + (stats.waits ?? 0) +
+    " · avg wait " + Number(stats.avg_wait_s ?? 0).toFixed(2) + "s";
+  root.appendChild(counters);
+}
+
+function loadRateLimits() {
+  fillSelect($("eff-account"), accountNames(), "— any account —");
+  return Promise.all([
+    api("/api/ratelimit/warnings").then(renderRlWarnings).catch(showErr),
+    api("/api/ratelimit/policies").then(renderPolicies).catch(showErr),
+    api("/api/ratelimit/stats").then(renderRlStats).catch(showErr),
+  ]);
+}
+LOADERS.ratelimit = loadRateLimits;
+
+$("rl-set").onclick = () => {
+  // ERROR AUDIT FIX: NaN/floor guards client-side (server floor is 1.5s)
+  const action = $("rl-action").value.trim();
+  const interval = parseFloat($("rl-interval").value);
+  if (!action) { showErr("policy needs an action (e.g. message)"); return; }
+  if (!Number.isFinite(interval)) { showErr("interval must be a number"); return; }
+  const payload = { action, interval, level: $("rl-level").value };
+  const jminRaw = $("rl-jmin").value.trim();
+  const jmaxRaw = $("rl-jmax").value.trim();
+  if (jminRaw || jmaxRaw) {
+    const jmin = parseFloat(jminRaw), jmax = parseFloat(jmaxRaw);
+    if (!Number.isFinite(jmin) || !Number.isFinite(jmax)) {
+      showErr("jitter min/max must be numbers when given");
+      return;
+    }
+    payload.jitter_min = jmin; payload.jitter_max = jmax;
+  }
+  const owner = $("rl-owner").value.trim();
+  if (owner) payload.owner = owner;
+  post("/api/ratelimit/set", payload).then(() => {
+    $("rl-interval").value = ""; $("rl-jmin").value = ""; $("rl-jmax").value = "";
+    return loadRateLimits();
+  }).catch(showErr);
+};
+
+$("eff-go").onclick = () => {
+  const action = $("eff-action").value.trim();
+  if (!action) { showErr("effective calculator needs an action"); return; }
+  const q = new URLSearchParams({ action });
+  if ($("eff-account").value) q.set("account", $("eff-account").value);
+  if ($("eff-plugin").value.trim()) q.set("plugin", $("eff-plugin").value.trim());
+  api("/api/ratelimit/effective?" + q).then((eff) => {
+    const root = $("eff-result");
+    root.innerHTML = "";
+    const card = document.createElement("div"); card.className = "card2";
+    card.innerHTML = '<div class="row"><span class="name mono">' + esc(eff.action) + "</span>" +
+      '<span class="mono">every ' + esc(eff.interval) + "s</span>" +
+      '<span class="mono dim">jitter ' + esc((eff.jitter || [0, 0])[0]) + ".." +
+      esc((eff.jitter || [0, 0])[1]) + "s</span></div>";
+    const table = document.createElement("table"); table.className = "tbl";
+    table.innerHTML = "<tr><th>source level</th><th>owner</th><th>interval</th></tr>";
+    for (const s of eff.sources || []) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + esc(s.level) + "</td><td>" + esc(s.owner || "-") +
+        "</td><td>" + esc(s.interval) + "s</td>";
+      table.appendChild(tr);
+    }
+    if (!(eff.sources || []).length)
+      card.innerHTML += '<div class="sub dim">no stored policy — pacing at the floor</div>';
+    else card.appendChild(table);
+    root.appendChild(card);
+  }).catch(showErr);
+};
+
+$("rl-floor-set").onclick = () => {
+  const seconds = parseFloat($("rl-floor-new").value);
+  if (!Number.isFinite(seconds)) { showErr("floor must be a number (seconds)"); return; }
+  post("/api/ratelimit/floor", { seconds })
+    .then(() => { $("rl-floor-new").value = ""; return loadRateLimits(); })
+    .catch(showErr);
+};
+
+// ---------------------------------------------------------------- Tasks
+function taskRow(t, live) {
+  const tr = document.createElement("tr");
+  tr.innerHTML = "<td>" + esc(t.id) + "</td><td>" + esc(t.account || "-") + "</td><td>" +
+    esc(t.plugin || "-") + "</td><td>" + esc(t.action) + "</td><td>" +
+    esc(t.priority ?? "-") + "</td><td>" +
+    (live ? esc(fmtAge(t.submitted_at)) : esc(t.status)) + "</td>";
+  if (live) {
+    const td = document.createElement("td");
+    td.appendChild(btn("cancel", () => post("/api/tasks/cancel", { task_id: t.id })
+      .then(loadTasks).catch(showErr), "danger"));
+    tr.appendChild(td);
+  } else {
+    const dur = t.finished_at && t.submitted_at
+      ? ((t.finished_at - t.submitted_at)).toFixed(1) + "s" : "-";
+    const td = document.createElement("td");
+    td.textContent = dur + (t.error ? " — " + t.error : "");
+    tr.appendChild(td);
+  }
+  return tr;
+}
+
+function renderTasks(tasks, history) {
+  const root = $("tasks-live");
+  root.innerHTML = "";
+  const live = (tasks || []).filter((t) => t.status === "running" || t.status === "queued");
+  const byStatus = { running: [], queued: [] };
+  for (const t of live) (byStatus[t.status] = byStatus[t.status] || []).push(t);
+  for (const [status, label] of [["running", "Running"], ["queued", "Queued"]]) {
+    const card = document.createElement("div"); card.className = "card2";
+    card.innerHTML = "<div class='sub'>" + label + " (" + byStatus[status].length + ")</div>";
+    const table = document.createElement("table"); table.className = "tbl";
+    table.innerHTML = "<tr><th>id</th><th>account</th><th>plugin</th><th>action</th><th>prio</th><th>age</th><th></th></tr>";
+    for (const t of byStatus[status]) table.appendChild(taskRow(t, true));
+    if (!byStatus[status].length) {
+      card.innerHTML += '<span class="dim mono">none</span>';
+    } else card.appendChild(table);
+    root.appendChild(card);
+  }
+
+  const hroot = $("tasks-history");
+  hroot.innerHTML = "";
+  const htable = document.createElement("table"); htable.className = "tbl";
+  htable.innerHTML = "<tr><th>id</th><th>account</th><th>plugin</th><th>action</th><th>prio</th><th>status</th><th>duration</th></tr>";
+  for (const t of history || []) {
+    const tr = taskRow(t, false);
+    tr.children[5].innerHTML = '<span class="st-' + esc(t.status) + '">' + esc(t.status) + "</span>";
+    htable.appendChild(tr);
+  }
+  hroot.appendChild(htable);
+  if (!(history || []).length)
+    hroot.innerHTML = '<span class="dim mono">no history yet</span>';
+}
+
+function loadTasks() {
+  return Promise.all([
+    api("/api/tasks"),
+    api("/api/tasks/history?limit=50"),
+  ]).then(([tasks, history]) => renderTasks(tasks, history)).catch((e) => {
+    $("tasks-live").innerHTML = "";
+    const line = document.createElement("div");
+    line.className = "dim";
+    line.textContent = "tasks unavailable: " + (e.message || e);
+    $("tasks-live").appendChild(line);
+    showErr(e);
+  });
+}
+LOADERS.tasks = loadTasks;
+$("tasks-refresh").onclick = () => loadTasks().then(() => showNote("tasks refreshed"));
+
+function appendTaskEvent(msg) {
+  const box = $("taskevents");
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+  const div = document.createElement("div");
+  const clock = new Date().toTimeString().slice(0, 8);
+  const bits = [msg.account || "-"];
+  if (msg.task_id != null) bits.push("#" + msg.task_id);
+  if (msg.action) bits.push(msg.action);
+  if (msg.duration_s != null) bits.push(msg.duration_s.toFixed(2) + "s");
+  if (msg.error) bits.push(msg.error);
+  if (msg.summary) bits.push(msg.summary);
+  div.textContent = clock + " " + msg.event + "  " + bits.join("  ");
+  box.appendChild(div);
+  while (box.childNodes.length > 120) box.removeChild(box.firstChild);
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+// ---------------------------------------------------------------- Logs
+function logLine(entry) {
+  const box = $("logbox");
+  const acctFilter = $("log-acct").value;
+  const sevFilter = $("log-sev").value;
+  if (acctFilter && entry.account !== acctFilter) return;
+  if (sevFilter && entry.severity !== sevFilter) return;
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+  const div = document.createElement("div");
+  div.className = "lg-" + (entry.severity || "INFO");
+  const clock = new Date((entry.ts || 0) * 1000).toTimeString().slice(0, 8);
+  div.textContent = clock + " " + (entry.severity || "?") + " " + (entry.source || "?") +
+    (entry.account ? " (" + entry.account + ")" : "") + ": " + (entry.message || "");
+  box.appendChild(div);
+  while (box.childNodes.length > 400) box.removeChild(box.firstChild);
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+function auditLine(entry) {
+  const box = $("auditbox");
+  const filter = $("audit-acct").value;
+  if (filter && entry.account !== filter) return;
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+  const div = document.createElement("div");
+  div.className = "audit-line " + (entry.direction === "out" ? "out" : "in");
+  const clock = new Date((entry.ts || 0) * 1000).toTimeString().slice(0, 8);
+  const arrow = entry.direction === "out" ? "->" : "<-";
+  const meta = [];
+  if (entry.wait_ms) meta.push("wait " + Math.round(entry.wait_ms) + "ms");
+  if (entry.jitter_ms) meta.push("jitter " + Math.round(entry.jitter_ms) + "ms");
+  div.innerHTML = esc(clock) + " " + arrow + " " + esc(entry.account) + " " +
+    esc(entry.action) + " ch=" + esc(entry.channel_id ?? "-") + " " +
+    '<span class="audit-meta">' + esc(meta.join(", ")) + "</span> " +
+    esc((entry.content || "").slice(0, 80)) +
+    (entry.note ? "  (" + esc(entry.note) + ")" : "");
+  box.appendChild(div);
+  while (box.childNodes.length > 300) box.removeChild(box.firstChild);
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+function backfillLogs() {
+  const q = new URLSearchParams({ n: "200" });
+  if ($("log-acct").value) q.set("account", $("log-acct").value);
+  if ($("log-sev").value) q.set("severity", $("log-sev").value);
+  api("/api/logs?" + q).then((entries) => {
+    $("logbox").innerHTML = "";
+    for (const entry of entries) logLine(entry);
+    $("logsync").textContent = entries.length + " entries";
+  }).catch(showErr);
+}
+$("log-backfill").onclick = backfillLogs;
+$("log-acct").onchange = backfillLogs;
+$("log-sev").onchange = backfillLogs;
+
+function backfillAudit() {
+  const q = new URLSearchParams({ n: "100" });
+  if ($("audit-acct").value) q.set("account", $("audit-acct").value);
+  api("/api/audit?" + q).then((entries) => {
+    $("auditbox").innerHTML = "";
+    for (const entry of entries) auditLine(entry);
+  }).catch(showErr);
+}
+$("audit-backfill").onclick = backfillAudit;
+$("audit-acct").onchange = backfillAudit;
+LOADERS.logs = () => { backfillLogs(); backfillAudit(); };
+
+// ---------------------------------------------------------------- Simulation
+function renderScenarios(scenarios) {
+  const root = $("sim-list");
+  root.innerHTML = "";
+  if (!scenarios.length) {
+    root.innerHTML = '<span class="dim">no simulation scenarios configured</span>';
+    return;
+  }
+  for (const s of scenarios) {
+    const card = document.createElement("div"); card.className = "card2";
+    const row = document.createElement("div"); row.className = "row";
+    row.innerHTML = '<span class="name mono">' + esc(s.name) + "</span>";
+    const run = btn("run", () => runSimulation(s.name, run));
+    row.appendChild(run);
+    card.appendChild(row);
+    const desc = document.createElement("div"); desc.className = "dim";
+    desc.textContent = s.description || "";
+    card.appendChild(desc);
+    root.appendChild(card);
+  }
+}
+
+function runSimulation(name, button) {
+  button.disabled = true;
+  const old = button.textContent;
+  button.innerHTML = '<span class="spin">◌</span> running…';
+  post("/api/simulation/run", { name }).then((report) => {
+    button.disabled = false; button.textContent = old;
+    renderSimReport(report);
+  }).catch((e) => {
+    button.disabled = false; button.textContent = old;
+    showErr(e);
+  });
+}
+
+function renderSimReport(report) {
+  const root = $("sim-result");
+  root.innerHTML = "";
+  const banner = document.createElement("div");
+  banner.className = "banner " + (report.passed ? "pass" : "fail");
+  banner.textContent = (report.passed ? "✔ PASSED" : "✘ FAILED") + " — " + report.name +
+    " in " + Number(report.duration_s ?? 0).toFixed(2) + "s";
+  root.appendChild(banner);
+  if (!report.passed) {
+    const fails = document.createElement("div"); fails.className = "card2";
+    fails.innerHTML = "<div class='sub'>failures</div>";
+    for (const f of report.failures || []) {
+      const line = document.createElement("div");
+      line.className = "plugin-err"; line.textContent = "• " + f;
+      fails.appendChild(line);
+    }
+    if (!(report.failures || []).length)
+      fails.innerHTML += '<span class="dim mono">no failure details</span>';
+    root.appendChild(fails);
+  }
+  if (report.summary) {
+    const sum = document.createElement("div"); sum.className = "sub";
+    sum.textContent = report.summary;
+    root.appendChild(sum);
+  }
+  const logs = document.createElement("div"); logs.className = "card2";
+  logs.innerHTML = "<div class='sub'>timed log lines</div>";
+  const box = document.createElement("div"); box.id = "simlogs";
+  for (const line of report.log_lines || []) {
+    const div = document.createElement("div");
+    div.textContent = line;
+    box.appendChild(div);
+  }
+  logs.appendChild(box);
+  root.appendChild(logs);
+  const inter = document.createElement("div"); inter.className = "card2";
+  inter.innerHTML = "<div class='sub'>interactions (" +
+    (report.interactions || []).length + ")</div>";
+  const itable = document.createElement("table"); itable.className = "tbl";
+  itable.innerHTML = "<tr><th>ts</th><th>dir</th><th>account</th><th>action</th><th>channel</th><th>content</th></tr>";
+  for (const i of report.interactions || []) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = "<td>" + esc(new Date((i.ts || 0) * 1000).toTimeString().slice(0, 8)) +
+      "</td><td>" + esc(i.direction) + "</td><td>" + esc(i.account) + "</td><td>" +
+      esc(i.action) + "</td><td>" + esc(i.channel_id ?? "-") + "</td><td>" +
+      esc((i.content || "").slice(0, 60)) + "</td>";
+    itable.appendChild(tr);
+  }
+  if (!(report.interactions || []).length)
+    inter.innerHTML += '<span class="dim mono">no interactions recorded</span>';
+  else inter.appendChild(itable);
+  root.appendChild(inter);
+}
+function loadScenarios() {
+  return api("/api/simulation/list").then(renderScenarios).catch((e) => {
+    $("sim-list").innerHTML = "";
+    const line = document.createElement("div");
+    line.className = "dim";
+    line.textContent = "simulation unavailable: " + (e.message || e);
+    $("sim-list").appendChild(line);
+    showErr(e);
+  });
+}
+LOADERS.simulation = loadScenarios;
+
+// ---------------------------------------------------------------- Advanced
+$("estop").onclick = () => askConfirm("GLOBAL EMERGENCY STOP",
+  "Cancel EVERY task and stop EVERY account immediately?",
+  () => post("/api/estop", {}).then((r) => {
+    showNote("emergency stop executed — " + (r.cancelled_tasks ?? "?") + " tasks cancelled");
+    loadAccountsQuiet();
+  }).catch(showErr));
+
+$("shutdown").onclick = () => askConfirm("Graceful shutdown",
+  "Shut the whole framework down (drain tasks, stop accounts, close DB)?",
+  () => post("/api/shutdown", {}).then(() => {
+    showNote("shutdown requested — the server will stop responding");
+  }).catch(showErr));
+
+$("savetoken").onclick = () => {
+  store.setItem("dash_token", $("token").value.trim());
+  clearErrors(); location.reload();
+};
+$("token").addEventListener("keydown", (e) => { if (e.key === "Enter") $("savetoken").click(); });
+$("adv-save").onclick = () => {
+  store.setItem("dash_token", $("adv-token").value.trim());
+  clearErrors(); location.reload();
+};
+$("adv-forget").onclick = () => {
+  store.removeItem("dash_token");
+  $("adv-token").value = "";
+  showNote("token forgotten from local storage");
+};
+
+// ---------------------------------------------------------------- WebSocket
+let wsRetry = 1000;
+let wsAttempts = 0;
+function connectWS() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const url = proto + "//" + location.host + "/ws" +
+    (token() ? "?token=" + encodeURIComponent(token()) : "");
+  ws = new WebSocket(url);
+  ws.onopen = () => {
+    $("wsdot").classList.add("on");
+    $("connmsg").textContent = "live";
+    wsRetry = 1000; wsAttempts = 0;
+  };
+  ws.onmessage = (ev) => {
+    // ERROR AUDIT FIX: a render throw here silently froze the UI on stale data
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    try {
+      if (msg.type === "stats") { lastStats = msg; renderOverview(); renderAccountCards(); }
+      else if (msg.type === "log") logLine(msg);
+      else if (msg.type === "audit") auditLine(msg);
+      else if (msg.type === "task") { appendTaskEvent(msg); scheduleTaskRefresh(); }
+      else if (msg.type === "error") showErr(msg.error);
+    } catch (e) {
+      showErr(new Error("failed to render live update: " + (e.message || e)));
+    }
+  };
+  ws.onclose = () => {
+    $("wsdot").classList.remove("on");
+    // ERROR AUDIT FIX: cap retries + name the likely cause instead of an
+    // endless misleading "reconnecting…"
+    wsAttempts += 1;
+    if (wsAttempts > 10) {
+      $("connmsg").textContent = "live updates stopped — check the token or server, then reload";
+      return;
+    }
+    $("connmsg").textContent = wsAttempts > 3 ? "reconnecting… (bad token?)" : "reconnecting…";
+    setTimeout(connectWS, wsRetry);
+    wsRetry = Math.min(wsRetry * 2, 10000);
+  };
+}
+
+// task events arrive in bursts — refresh the tables at most once a second
+let taskRefreshTimer = null;
+function scheduleTaskRefresh() {
+  if (taskRefreshTimer || !$("panel-tasks").classList.contains("active")) return;
+  taskRefreshTimer = setTimeout(() => {
+    taskRefreshTimer = null;
+    if ($("panel-tasks").classList.contains("active")) loadTasks();
+  }, 1000);
+}
+
+$("pushrefresh").onclick = () => {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send("refresh");
+  else showErr("websocket not connected — cannot push refresh");
+};
+
+// ---------------------------------------------------------------- init
+// demo/share links: http://host:port/?token=... seeds the store then cleans the URL
+const qtoken = new URLSearchParams(location.search).get("token");
+if (qtoken) {
+  store.setItem("dash_token", qtoken.trim());
+  $("token").value = qtoken.trim();
+  history.replaceState(null, "", location.pathname);
+}
+$("token").value = token();
+$("adv-token").value = token();
+connectWS();
+// REST backfill so the overview renders even before the first WS push
+api("/api/status").then((stats) => { lastStats = stats; renderOverview(); renderAccountCards(); }).catch(showErr);
+</script>
+</body>
+</html>

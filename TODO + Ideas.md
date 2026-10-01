@@ -1,0 +1,624 @@
+Discord Automation Framework — Project Ideas & TODO
+
+ARCHITECTURE
+
+The project can be structured as a multi-account automation framework with:
+- Modular plugins
+- Centralized account management
+- Centralized settings
+- Centralized rate limiting
+- Profiles/capabilities
+- Database persistence
+- CLI and GUI dashboard
+- Centralized logging
+- Simulation/testing system
+
+Suggested architecture:
+
+                    CLI / GUI
+                       |
+                       v
+                 Core Manager
+                       |
+        +--------------+--------------+
+        |              |              |
+ Account Manager  Plugin Manager  Settings Manager
+        |              |              |
+        +--------------+--------------+
+                       |
+                Task Scheduler
+                       |
+                Rate Limit Manager
+                       |
+                 Discord Adapter
+                       |
+                    Database
+
+
+IMPORTANT DESIGN PRINCIPLE
+
+Plugins should not directly manage:
+- Accounts
+- Database
+- GUI state
+- CLI state
+- Global rate limiting
+
+Plugins should request services from the core framework instead.
+
+This keeps plugins independent and makes future plugins much easier to create.
+
+
+1. ACCOUNT MANAGER
+
+Make Account a first-class object instead of using scattered dictionaries.
+
+Account:
+- id
+- name
+- client
+- status
+- enabled
+- settings
+- assigned profile/capabilities
+- loaded plugins
+- runtime state
+- rate-limit policy
+
+Separate persistent data from runtime data.
+
+Persistent:
+- Account ID
+- Account name
+- Enabled state
+- Settings
+- Assigned profiles
+- Plugin settings
+- Rate-limit policy
+
+Runtime:
+- Client instance
+- Connection state
+- Cached guild/user/channel information
+- Latency
+- Ready state
+- Runtime statistics
+
+Account details should display only information already available from the running client's cached/runtime state when appropriate.
+
+
+2. PLUGIN ARCHITECTURE
+
+Plugins should be self-describing.
+
+Plugin:
+- Metadata
+- Version
+- Description
+- Settings schema
+- Lifecycle hooks
+- Commands/actions
+- Runtime state
+
+Example settings:
+
+    enabled
+    cooldown
+    option_a
+    option_b
+
+The framework should be able to automatically generate settings interfaces from the plugin's settings schema instead of hardcoding every plugin's GUI.
+
+
+3. SHARED SETTINGS SYSTEM
+
+Every feature with settings should be accessible through both:
+- CLI
+- Dashboard
+
+Do NOT create separate settings implementations for CLI and GUI.
+
+Instead:
+
+             Settings Schema
+              /                        /                        CLI             GUI
+
+Example:
+
+    Setting(
+        name="cooldown",
+        type=float,
+        default=2.0,
+        minimum=1.5
+    )
+
+The CLI and GUI both consume the same schema.
+
+
+4. PROFILES / CAPABILITIES
+
+The original "Role" concept should preferably be represented as an internal framework profile/capability rather than a Discord server role.
+
+Example:
+
+    Profile: Roller
+        Plugins:
+            Roll
+
+    Profile: Sniper
+        Plugins:
+            Snipe
+
+    Profile: Collector
+        Plugins:
+            Roll
+            Snipe
+            Collector
+
+Then:
+
+    Account A -> Roller
+    Account B -> Sniper
+    Account C -> Sniper
+
+This makes the system easier to expand.
+
+
+5. RATE LIMIT MANAGER
+
+Use a centralized scheduler/rate-limit manager.
+
+Possible policy levels:
+- Global
+- Account
+- Plugin
+- Account + Plugin
+
+Example:
+
+    Global:
+        minimum interval = 2.0 sec
+
+    Account A:
+        inherits global
+
+    Account B:
+        minimum interval = 3.0 sec
+
+    Account C:
+        minimum interval = 2.5 sec
+
+Useful rate-control concepts:
+- Minimum interval
+- Random jitter
+- Priority
+- Concurrency
+- Backoff
+- Server-provided rate-limit handling
+
+The randomized delay should be treated as request pacing/load management, not as a method for disguising automation or bypassing service enforcement.
+
+Suggested UI:
+
+    Base interval: 2.0 sec
+    Random jitter: 0.0 - 0.5 sec
+
+The framework should always respect server-provided rate-limit information.
+
+
+6. TASK SCHEDULER
+
+Add a centralized task scheduler.
+
+Responsibilities:
+- Queueing
+- Priorities
+- Cancellation
+- Concurrency
+- Rate limiting
+- Retries
+- Timeouts
+- Graceful shutdown
+
+Concept:
+
+    Plugin
+       |
+       v
+    Task Scheduler
+       |
+       +-- Priority
+       +-- Rate Limit
+       +-- Concurrency
+       +-- Cancellation
+       |
+       v
+    Discord Adapter
+
+
+7. DATABASE
+
+Use a proper database instead of storing everything in one large JSON file.
+
+Possible SQLite tables:
+
+    accounts
+    account_settings
+    plugins
+    plugin_settings
+    profiles
+    profile_plugins
+    account_profiles
+    rate_limit_policies
+    audit_logs
+
+Secrets should not be treated as automatically secure simply because they are stored in SQLite. Use an OS credential/keyring mechanism where appropriate.
+
+
+8. ACCOUNT DETAILS PAGE
+
+Example:
+
+    Account: Example
+
+    Status
+    ----------------
+    Connected
+    Latency: 83 ms
+    Uptime: 2h 14m
+
+    Identity
+    ----------------
+    Name
+    ID
+
+    Runtime
+    ----------------
+    Cached guilds
+    Cached users
+    Cached channels
+
+    Plugins
+    ----------------
+    Roll       Enabled
+    Snipe      Disabled
+
+    Profile
+    ----------------
+    Collector
+
+    Rate Limit
+    ----------------
+    Inherited from global
+
+The page should clearly indicate when information comes from the current client's runtime/cache.
+
+
+9. SIMULATION SYSTEM
+
+Create a Discord client abstraction so the framework can use either a real adapter or a simulation adapter.
+
+Concept:
+
+    DiscordClient Interface
+          /                   /                Real Client     Simulator
+
+The simulator can generate events such as:
+
+    MESSAGE_RECEIVED
+    COMMAND
+    REACTION
+    CHANNEL_UPDATE
+    RATE_LIMIT
+    ERROR
+    DISCONNECT
+
+Example simulation log:
+
+    00:00.000  Plugin loaded
+    00:00.012  Task created
+    00:02.017  Action scheduled
+    00:02.021  Action executed
+    00:02.025  Response simulated
+    00:04.500  Cooldown completed
+
+This allows plugin behavior and scheduler logic to be tested without repeatedly interacting with the real service.
+
+
+10. CENTRALIZED LOGGING
+
+Create one logging service for:
+
+    Core
+    Account
+    Plugin
+    Scheduler
+    RateLimiter
+    Discord Adapter
+
+Each event should contain:
+
+    timestamp
+    account_id
+    plugin
+    task_id
+    event
+    severity
+    message
+
+Example:
+
+    21:04:12.221
+    Account=AccountA
+    Plugin=Roll
+    Task=1842
+    INFO
+    Action scheduled
+
+The dashboard can then display live logs without parsing text files.
+
+
+11. EVENT BUS
+
+Add a centralized Event Bus.
+
+Possible events:
+
+    Account connected
+    Account disconnected
+    Plugin loaded
+    Plugin unloaded
+    Task queued
+    Task started
+    Task completed
+    Rate limit triggered
+    Setting changed
+
+Concept:
+
+    Account Manager
+          |
+          v
+       Event Bus
+       /   |         /    |     Dashboard Logger CLI
+
+
+12. DASHBOARD STRUCTURE
+
+Suggested navigation:
+
+    Dashboard
+    |
+    +-- Overview
+    |
+    +-- Accounts
+    |    +-- Account list
+    |    +-- Account details
+    |
+    +-- Plugins
+    |    +-- Installed plugins
+    |    +-- Plugin settings
+    |
+    +-- Profiles
+    |    +-- Profiles
+    |    +-- Profile assignments
+    |
+    +-- Rate Limits
+    |    +-- Global
+    |    +-- Per-account
+    |
+    +-- Tasks
+    |    +-- Running
+    |    +-- Queued
+    |    +-- History
+    |
+    +-- Logs
+    |    +-- Live logs
+    |
+    +-- Simulation
+    |    +-- Scenarios
+    |    +-- Run
+    |    +-- Results
+    |
+    +-- Advanced
+         +-- Database
+         +-- Logging
+         +-- Runtime
+
+
+13. CLI STRUCTURE
+
+Suggested commands:
+
+    app accounts list
+    app accounts add
+    app accounts remove
+    app accounts info <account>
+
+    app plugins list
+    app plugins enable <plugin>
+    app plugins disable <plugin>
+    app plugins settings <plugin>
+
+    app profiles list
+    app profiles assign <account> <profile>
+
+    app ratelimit global
+    app ratelimit account <account>
+
+    app tasks list
+    app tasks cancel <task>
+
+    app simulation run
+    app logs live
+
+CLI and GUI should call the same Application/Core API.
+
+
+RECOMMENDED PROJECT STRUCTURE
+
+    project/
+    |
+    +-- core/
+    |    +-- account_manager
+    |    +-- plugin_manager
+    |    +-- profile_manager
+    |    +-- settings_manager
+    |    +-- rate_limit_manager
+    |    +-- task_scheduler
+    |    +-- event_bus
+    |    +-- logging
+    |
+    +-- database/
+    |    +-- models
+    |    +-- repositories
+    |    +-- migrations
+    |
+    +-- plugins/
+    |    +-- plugin_a
+    |    +-- plugin_b
+    |    +-- ...
+    |
+    +-- adapters/
+    |    +-- discord
+    |    +-- simulator
+    |
+    +-- interfaces/
+    |    +-- cli
+    |    +-- dashboard
+    |
+    +-- tests/
+    |    +-- unit
+    |    +-- integration
+    |    +-- simulation
+    |
+    +-- config/
+    |
+    +-- main.py
+
+
+TODO LIST
+
+PHASE 1 — CORE  ✅ DONE
+
+[x] Account manager
+[x] Plugin manager
+[x] Settings system
+[x] Event bus
+[x] Task scheduler
+[x] Centralized logging
+[x] Database layer
+
+
+PHASE 2 — ACCOUNT MANAGEMENT  ✅ DONE
+
+[x] Add account
+[x] Remove account
+[x] Account list
+[x] Account runtime state
+[x] Account details
+[x] Enable/disable account
+
+
+PHASE 3 — PLUGIN SYSTEM  ✅ DONE
+
+[x] Plugin discovery
+[x] Plugin metadata
+[x] Plugin settings schema
+[x] Plugin lifecycle
+[x] Enable/disable plugins
+[x] Plugin settings API
+
+
+PHASE 4 — PROFILES / CAPABILITIES  ✅ DONE
+
+[x] Create profile
+[x] Assign plugins to profile
+[x] Assign profile to account
+[x] Profile settings
+[x] Multiple accounts sharing profile
+
+
+PHASE 5 — RATE MANAGEMENT  ✅ DONE
+
+[x] Global policy
+[x] Account policy
+[x] Plugin policy
+[x] Randomized pacing/jitter
+[x] Server-provided rate-limit handling
+[x] Configuration validation
+[x] Dangerous-setting warnings
+[x] Rate-limit visualization
+
+
+PHASE 6 — INTERFACES  ✅ DONE
+
+[x] CLI API
+[x] Dashboard API
+[x] Account pages
+[x] Plugin pages
+[x] Profile pages
+[x] Rate-limit pages
+[x] Live logs
+
+
+PHASE 7 — SIMULATION  ✅ DONE
+
+[x] Mock Discord adapter
+[x] Event generator
+[x] Scenario system
+[x] Simulation runner
+[x] Detailed execution logs
+[x] Regression tests
+
+
+PHASE 8 — SAFETY / VALIDATION  ✅ DONE
+
+[x] Dangerous-setting warnings
+[x] Configuration validation
+[x] Minimum pacing constraints
+[x] Global emergency stop
+[x] Account emergency stop
+[x] Plugin emergency stop
+[x] Graceful shutdown
+
+
+ORIGINAL TODO ITEMS TO PRESERVE
+
+- Add Plugin settings page.
+- Add Account add/remove handling.
+- Add account list showing account names and IDs.
+- Add account details button.
+- Show runtime information from cached client memory where available.
+- Add database for persistence and protection of sensitive configuration.
+- Add internal role/profile-style assignment system.
+- Add global and per-account rate-limit settings.
+- Allow selecting an account from the account list when configuring account-specific rate limits.
+- Add advanced delay configuration using float ranges.
+- Add live simulation testing.
+- Add detailed logging for simulation and runtime interactions.
+- Warn users when configured pacing/settings may be unsafe.
+- Require a configurable minimum pacing value, with the current proposed minimum being 1.5 seconds plus optional jitter.
+
+
+CORE DESIGN GOAL
+
+The most important architectural goal is:
+
+    One Core API
+          |
+      +---+---+
+      |       |
+     CLI     GUI
+
+Both interfaces should manipulate the exact same underlying:
+- Accounts
+- Plugins
+- Profiles
+- Settings
+- Tasks
+- Rate-limit policies
+- Logs
+- Simulation system
+
+Plugins should remain independent from the interface layer.

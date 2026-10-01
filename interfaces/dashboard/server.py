@@ -1,0 +1,936 @@
+"""Dashboard backend: JSON REST + WebSocket live push over ControlAPI.
+
+Serves a single-page app (``static/index.html``, no build step) plus a JSON
+REST surface that maps 1:1 onto :class:`core.api.ControlAPI` and a WebSocket
+(`/ws`) that pushes live stats/log/audit/task updates.
+
+Threading model (ported from the audited original, 3 audit rounds clean):
+  * ``ThreadingHTTPServer`` runs on ONE daemon thread; every request —
+    including an accepted WebSocket — gets its own handler thread.
+  * Route handlers run on the MAIN asyncio loop via
+    ``asyncio.run_coroutine_threadsafe`` (see :meth:`DashboardServer.call`);
+    a stuck route surfaces as 504, never a hung handler thread.
+  * Each ``WebSocketClient`` owns an outbound queue drained by its reader
+    thread; pushes from any thread are queue puts (thread-safe by design).
+
+Auth: when ``token`` is set, REST requires the ``X-Dashboard-Token`` header
+or ``?token=`` and the WebSocket requires the same. The static index is
+served WITHOUT auth (the SPA prompts for the token itself). Serves on
+127.0.0.1 by default — do not expose publicly without the token.
+
+Error semantics (ported):
+  * missing/invalid fields      -> 400 with an actionable message naming the
+                                    field and the route (helpers below)
+  * strict bools                -> ``parse_json_bool``: ``{"enabled": "yes"}``
+                                    is a 400, never a silent truthy cast
+  * ValueError/RuntimeError from the api (the whole domain-error family in
+    core/errors.py) -> honest 400 carrying the message
+  * anything unexpected         -> 500 with the traceback logged
+  * main-loop hop timeout       -> 504 with a real message
+  * body > 1MB                  -> 413 after a bounded drain
+
+Live push (WS ``text`` frames, JSON):
+  * ``{"type":"stats", **await api.status()}`` every second (broadcaster
+    loop survives api errors) and immediately on connect / on "refresh"
+  * ``{"type":"log", **entry}``   for every log-service entry (attach_logs)
+  * ``{"type":"audit", **entry}`` for every audit entry (auto-subscribed via
+    ``api.audit_recorder()`` when the recorder exists)
+  * ``{"type":"task", "event": <name>, ...}`` for TaskStarted/TaskCompleted/
+    TaskFailed/TaskCancelled bus events
+
+NOTABLE GAP (core/api.py lacked this): ControlAPI exposes no event-bus
+accessor, so task events can not be subscribed through the facade. The
+server therefore accepts an optional ``bus=`` argument (any object with the
+``EventBus.subscribe`` shape) and, failing that, probes a few common
+attribute names on the api object (``bus``/``event_bus``). Bootstrap should
+pass the real bus explicitly.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import math
+import queue as thread_queue
+import socket
+import threading
+from dataclasses import asdict, is_dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, urlparse
+
+from core.api import ControlAPI
+from core.event_bus import (
+    Event,
+    EventBus,
+    TaskCancelled,
+    TaskCompleted,
+    TaskFailed,
+    TaskStarted,
+)
+
+from . import ws as wsproto
+
+LOG = logging.getLogger("slaughtermudae.dashboard")
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+BROADCAST_INTERVAL = 1.0
+#: request/WS-frame sanity caps (ERROR AUDIT: half-open posts pinned threads)
+MAX_BODY_BYTES = 1_000_000
+MAX_WS_FRAME_BYTES = 1_000_000
+#: how long a route coroutine may take on the main loop before we 504
+ROUTE_TIMEOUT_S = 10.0
+
+#: task event types forwarded to WS clients (JSON-safe payloads)
+TASK_EVENT_TYPES = (TaskStarted, TaskCompleted, TaskFailed, TaskCancelled)
+
+
+def parse_json_bool(value: Any, field: str) -> bool:
+    """Strict boolean parsing for API payloads.
+
+    ERROR AUDIT FIX: bool("false") == True silently did the OPPOSITE of what
+    the user asked. JSON surfaces carry real booleans — anything else is a
+    client bug and gets a 400.
+    """
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"field '{field}' must be a boolean (true/false), got {value!r}")
+
+
+def require_field(body: Dict[str, Any], key: str, route: str) -> Any:
+    """Fetch a required body field with an actionable 400 message.
+
+    ERROR AUDIT FIX: missing keys previously leaked bare KeyError text
+    like {"error": "'plugin'"}.
+    """
+    if not isinstance(body, dict) or key not in body:
+        raise ValueError(f"missing required field '{key}' in POST {route}")
+    return body[key]
+
+
+def require_str(body: Dict[str, Any], key: str, route: str) -> str:
+    """Required non-empty string field (actionable 400 on missing/empty/wrong type)."""
+    value = require_field(body, key, route)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"field '{key}' in POST {route} must be a non-empty string")
+    return value
+
+
+def require_number(body: Dict[str, Any], key: str, route: str) -> float:
+    """Required numeric field; finite-ness is checked separately by callers."""
+    value = require_field(body, key, route)
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"field '{key}' in POST {route} must be a number") from exc
+
+
+def require_finite(value: float, key: str, route: str) -> float:
+    """Reject NaN/inf numbers (NaN slips past plain comparisons)."""
+    if not math.isfinite(value):
+        raise ValueError(f"field '{key}' in POST {route} must be a finite number")
+    return value
+
+
+def require_int(body: Dict[str, Any], key: str, route: str) -> int:
+    """Required integer field (bools excluded; integral floats tolerated)."""
+    value = require_field(body, key, route)
+    if isinstance(value, bool):
+        raise ValueError(f"field '{key}' in POST {route} must be an integer, got {value!r}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    raise ValueError(f"field '{key}' in POST {route} must be an integer, got {value!r}")
+
+
+def q_str(query: Dict[str, List[str]], key: str, route: str) -> str:
+    """Required non-empty query-string parameter (actionable 400 when absent)."""
+    value = (query.get(key) or [""])[0].strip()
+    if not value:
+        raise ValueError(f"missing ?{key}= parameter in GET {route}")
+    return value
+
+
+def q_opt(query: Dict[str, List[str]], key: str) -> Optional[str]:
+    """Optional query-string parameter; empty/absent becomes None."""
+    value = (query.get(key) or [""])[0].strip()
+    return value or None
+
+
+def q_int(query: Dict[str, List[str]], key: str, default: int, route: str) -> int:
+    """Integer query-string parameter with a default; 400 on garbage."""
+    raw = (query.get(key) or [""])[0].strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"?{key}= in GET {route} must be an integer, got {raw!r}") from exc
+
+
+def body_opt_str(body: Dict[str, Any], key: str, route: str) -> Optional[str]:
+    """Optional string body field; null/empty -> None; non-string -> 400."""
+    value = body.get(key)
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"field '{key}' in POST {route} must be a string")
+    return value
+
+
+def body_opt_number(body: Dict[str, Any], key: str, default: float, route: str) -> float:
+    """Optional numeric body field (finite-checked); absent -> default."""
+    if key not in body or body[key] is None:
+        return default
+    return require_finite(require_number(body, key, route), key, route)
+
+
+def body_opt_owner(body: Dict[str, Any], route: str) -> Optional[str]:
+    """Policy owner: null/"" means global scope; must be a string otherwise."""
+    return body_opt_str(body, "owner", route)
+
+
+def entry_as_dict(entry: Any) -> Dict[str, Any]:
+    """Normalize a log/audit entry (dict or dataclass-like) to a JSON dict."""
+    if isinstance(entry, dict):
+        return dict(entry)
+    if hasattr(entry, "as_dict"):
+        try:
+            return dict(entry.as_dict())
+        except Exception:  # pragma: no cover - defensive
+            pass
+    return {"message": str(entry)}
+
+
+def event_as_dict(event: Event) -> Dict[str, Any]:
+    """JSON-safe dict of a bus event (dataclass fields; falls back to vars)."""
+    if is_dataclass(event):
+        return dict(asdict(event))
+    return {k: v for k, v in vars(getattr(event, "__dict__", {})).items()
+            if isinstance(v, (str, int, float, bool, type(None)))}
+
+
+class WebSocketClient:
+    """One browser connection: outbound queue drained by its reader thread."""
+
+    def __init__(self, sock: socket.socket, server: "DashboardServer") -> None:
+        self._sock = sock
+        self._server = server
+        self._sendq: "thread_queue.SimpleQueue[Tuple[str, bytes]]" = thread_queue.SimpleQueue()
+        self.alive = True
+
+    def push_text(self, text: str) -> None:
+        """Queue a text frame (thread-safe; sent by the owning reader loop)."""
+        if self.alive:
+            self._sendq.put(("text", wsproto.encode_text_frame(text)))
+
+    def push_json(self, payload: Dict[str, Any]) -> None:
+        self.push_text(json.dumps(payload))
+
+    def serve(self) -> None:
+        """Reader loop (runs in the handler thread that did the upgrade)."""
+        self._sock.settimeout(0.25)
+        buffer = b""
+        try:
+            while self.alive:
+                self._drain()
+                try:
+                    chunk = self._sock.recv(4096)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                buffer += chunk
+                while buffer:
+                    try:
+                        opcode, _fin, payload, consumed = wsproto.decode_frame(buffer)
+                    except wsproto.IncompleteFrame:
+                        break  # wait for more bytes
+                    except wsproto.ProtocolViolation as exc:
+                        # ERROR AUDIT: fail the connection instead of staying
+                        # deaf-but-alive swallowing every later frame
+                        LOG.warning("websocket protocol violation: %s", exc)
+                        self._sendq.put(("raw", wsproto.encode_close_frame()))
+                        self._drain()
+                        return
+                    buffer = buffer[consumed:]
+                    if opcode == wsproto.OP_CLOSE:
+                        self._sendq.put(("raw", wsproto.encode_close_frame()))
+                        self._drain()
+                        return
+                    if opcode == wsproto.OP_PING:
+                        self._sendq.put(("raw", wsproto.encode_pong(payload)))
+                    elif opcode == wsproto.OP_TEXT:
+                        self._handle_text(payload.decode("utf-8", "replace"))
+        finally:
+            self.alive = False
+            self._server.unregister_threadsafe(self)
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+
+    def _handle_text(self, text: str) -> None:
+        """Minimal app-level protocol: 'refresh' forces an immediate push."""
+        if text.strip() == "refresh":
+            self._server.push_stats_to(self)
+
+    def _drain(self) -> None:
+        while True:
+            try:
+                _kind, frame = self._sendq.get_nowait()
+            except thread_queue.Empty:
+                return
+            try:
+                self._sock.sendall(frame)
+            except OSError:
+                self.alive = False
+                return
+
+
+class DashboardServer:
+    """HTTP JSON + WebSocket facade over ControlAPI, on a daemon thread.
+
+    ``port=0`` binds an ephemeral port; the REAL port is exposed via
+    :attr:`bound_port` (and reflected in :attr:`url`) after :meth:`start`.
+    """
+
+    def __init__(
+        self,
+        api: ControlAPI,
+        token: Optional[str] = None,
+        host: str = "127.0.0.1",
+        port: int = 8070,
+        bus: Optional[EventBus] = None,
+    ) -> None:
+        self._api = api
+        self._token = token
+        self._host, self._port = host, port
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._httpd: Optional[ThreadingHTTPServer] = None
+        self._thread: Optional[threading.Thread] = None
+        self._clients: List[WebSocketClient] = []
+        self._broadcaster: Optional[asyncio.Task] = None
+        self._log_unsub: Optional[Any] = None
+        self._audit_unsub: Optional[Any] = None
+        self._task_unsubs: List[Any] = []
+        # ControlAPI has no bus accessor (documented gap) — accept one
+        # explicitly or probe the usual attribute names, duck-typed.
+        self._bus: Optional[Any] = bus
+        if self._bus is None:
+            for attr in ("bus", "event_bus", "_bus"):
+                candidate = getattr(api, attr, None)
+                if candidate is not None and hasattr(candidate, "subscribe"):
+                    self._bus = candidate
+                    break
+
+    @property
+    def bound_port(self) -> int:
+        """The REAL bound port (useful when constructed with port=0)."""
+        if self._httpd is not None:
+            return int(self._httpd.server_address[1])
+        return self._port
+
+    @property
+    def url(self) -> str:
+        return f"http://{self._host}:{self.bound_port}"
+
+    # ------------------------------------------------------------- lifecycle
+    def start(self) -> "DashboardServer":
+        """Start serving (call from inside the running asyncio loop)."""
+        self._loop = asyncio.get_running_loop()
+        handler = _make_handler(self)
+        self._httpd = ThreadingHTTPServer((self._host, self._port), handler)
+        self._port = int(self._httpd.server_address[1])  # real port when port=0
+        self._thread = threading.Thread(
+            target=self._httpd.serve_forever, name="dashboard", daemon=True
+        )
+        self._thread.start()
+        self._broadcaster = self._loop.create_task(self._broadcast_loop())
+        self._attach_audit_recorder()
+        self._attach_task_events()
+        LOG.info(
+            "dashboard listening on %s (auth=%s)",
+            self.url,
+            "on" if self._token else "OFF",
+        )
+        return self
+
+    def stop(self) -> None:
+        """Shut the HTTP server + broadcaster + subscriptions down."""
+        if self._broadcaster is not None:
+            try:
+                self._broadcaster.cancel()
+            except RuntimeError:  # ERROR AUDIT: loop already closed
+                pass
+            self._broadcaster = None
+        if self._log_unsub is not None:
+            self._log_unsub()
+            self._log_unsub = None
+        if self._audit_unsub is not None:
+            self._audit_unsub()
+            self._audit_unsub = None
+        for unsub in self._task_unsubs:
+            try:
+                unsub()
+            except Exception:
+                pass
+        self._task_unsubs = []
+        if self._httpd is not None:
+            self._httpd.shutdown()
+            self._httpd.server_close()  # AUDIT FIX: release the listening socket
+            self._httpd = None
+
+    def attach_logs(self, log_service: Any) -> "DashboardServer":
+        """Stream every new log entry from a LogService to WS clients.
+
+        Entries arrive as dicts or LogEntry-like objects; either way the
+        frame payload is ``{"type":"log", **entry}``. The push hops to the
+        main loop via ``call_soon_threadsafe`` before touching clients.
+        """
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
+
+        def _on_entry(entry: Any) -> None:
+            self._broadcast_payload({"type": "log", **entry_as_dict(entry)})
+
+        self._log_unsub = log_service.subscribe(_on_entry)
+        return self
+
+    def attach_audit(self, recorder: Any) -> "DashboardServer":
+        """Stream every audited interaction to WS clients (manual form)."""
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
+
+        def _on_entry(entry: Any) -> None:
+            self._broadcast_payload({"type": "audit", **entry_as_dict(entry)})
+
+        self._audit_unsub = recorder.subscribe(_on_entry)
+        return self
+
+    def _attach_audit_recorder(self) -> None:
+        """Auto-subscribe the api's audit recorder when one exists."""
+        try:
+            recorder = self._api.audit_recorder()
+        except Exception:
+            return
+        if recorder is not None and hasattr(recorder, "subscribe"):
+            self.attach_audit(recorder)
+
+    def _attach_task_events(self) -> None:
+        """Subscribe Task* bus events (when a bus is available — see module
+        docstring for the ControlAPI gap this works around)."""
+        bus = self._bus
+        if bus is None:
+            return
+
+        def _on_task_event(event: Event) -> None:
+            self._broadcast_payload(
+                {"type": "task", "event": event.name, **event_as_dict(event)}
+            )
+
+        for event_type in TASK_EVENT_TYPES:
+            self._task_unsubs.append(bus.subscribe(event_type, _on_task_event))
+
+    def _broadcast_payload(self, payload: Dict[str, Any]) -> None:
+        """Hop to the main loop, then queue one JSON payload on every client.
+
+        Safe from any thread AND from the loop itself (call_soon_threadsafe
+        is only a scheduled callback when already on the loop thread).
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+
+        def _push() -> None:
+            text = json.dumps(payload)
+            for client in list(self._clients):
+                client.push_text(text)
+
+        try:
+            loop.call_soon_threadsafe(_push)
+        except RuntimeError:  # loop closed between check and call
+            pass
+
+    # ---------------------------------------------------------- registration
+    def register_threadsafe(self, client: WebSocketClient) -> None:
+        if self._loop is None or self._loop.is_closed():
+            return
+        asyncio.run_coroutine_threadsafe(self._register(client), self._loop).result(timeout=2)
+
+    async def _register(self, client: WebSocketClient) -> None:
+        self._clients.append(client)
+        LOG.info("websocket client connected (%d online)", len(self._clients))
+        self.push_stats_to(client)
+
+    def unregister_threadsafe(self, client: WebSocketClient) -> None:
+        if self._loop is None or self._loop.is_closed():
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._unregister(client), self._loop).result(timeout=2)
+        except Exception:
+            pass
+
+    async def _unregister(self, client: WebSocketClient) -> None:
+        if client in self._clients:
+            self._clients.remove(client)
+        LOG.info("websocket client gone (%d online)", len(self._clients))
+
+    # ------------------------------------------------------------ broadcast
+    def push_stats_to(self, client: WebSocketClient) -> None:
+        """Queue a fresh stats snapshot for one client (async fetch, thread-safe)."""
+        if self._loop is None or self._loop.is_closed():
+            return
+
+        async def _fetch_and_push() -> None:
+            try:
+                status = await self._api.status()
+                client.push_json({"type": "stats", **status})
+            except Exception as exc:  # never kill anything downstream
+                client.push_json({"type": "error", "error": str(exc)})
+
+        asyncio.run_coroutine_threadsafe(_fetch_and_push(), self._loop)
+
+    async def _broadcast_loop(self) -> None:
+        """Push a stats snapshot to every connected client once per second.
+
+        AUDIT FIX: one API failure no longer permanently kills the loop.
+        """
+        try:
+            while True:
+                await asyncio.sleep(BROADCAST_INTERVAL)
+                if not self._clients:
+                    continue
+                try:
+                    status = await self._api.status()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    LOG.warning("broadcast snapshot failed: %s", exc)
+                    continue
+                payload = json.dumps({"type": "stats", **status})
+                for client in list(self._clients):
+                    client.push_text(payload)
+        except asyncio.CancelledError:
+            return
+
+    # ---------------------------------------------------------------- routing
+    def call(
+        self,
+        method: str,
+        path: str,
+        body: Dict[str, Any],
+        query: Optional[Dict[str, List[str]]] = None,
+    ) -> Tuple[int, Dict[str, Any]]:
+        """Execute an API call on the main loop; returns (http_status, payload).
+
+        ERROR AUDIT FIX: timeouts now return 504 with a real message (was an
+        empty 500 error string); unexpected failures are logged with the
+        traceback and reported as 500 instead of masquerading as 400s.
+        """
+        if self._loop is None or self._loop.is_closed():
+            return 503, {"ok": False, "error": "main loop unavailable"}
+        future = asyncio.run_coroutine_threadsafe(
+            self._route(method, path, body, query or {}), self._loop
+        )
+        try:
+            return future.result(timeout=ROUTE_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            return 504, {
+                "ok": False,
+                "error": f"{method} {path} timed out after {ROUTE_TIMEOUT_S:.0f}s (may still complete)",
+            }
+        except Exception as exc:
+            LOG.exception("dashboard API call failed: %s %s", method, path)
+            return 500, {"ok": False, "error": f"internal error: {exc}"}
+
+    async def _route(
+        self, method: str, path: str, body: Dict[str, Any], query: Dict[str, List[str]]
+    ) -> Tuple[int, Dict[str, Any]]:
+        """Map a request to one ControlAPI call. Runs ON the main loop.
+
+        Every route returns ``{ok: true, data}``; domain errors
+        (ValueError/RuntimeError family) become honest 400s and anything
+        unexpected becomes a logged 500.
+        """
+        api = self._api
+        try:
+            # ---------------------------------------------------------------- system
+            if (method, path) == ("GET", "/api/status"):
+                return 200, {"ok": True, "data": await api.status()}
+            if (method, path) == ("POST", "/api/estop"):
+                return 200, {"ok": True, "data": await api.emergency_stop_all()}
+            if (method, path) == ("POST", "/api/shutdown"):
+                return 200, {"ok": True, "data": await api.shutdown()}
+
+            # -------------------------------------------------------------- accounts
+            if (method, path) == ("GET", "/api/accounts"):
+                return 200, {"ok": True, "data": await api.accounts_list()}
+            if (method, path) == ("POST", "/api/accounts/add"):
+                require_str(body, "name", path)  # api re-validates the full payload
+                if "enabled" in body:
+                    body["enabled"] = parse_json_bool(body["enabled"], "enabled")
+                return 200, {"ok": True, "data": await api.accounts_add(body)}
+            if (method, path) == ("POST", "/api/accounts/remove"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_remove(require_str(body, "name", path)),
+                }
+            if (method, path) == ("GET", "/api/accounts/info"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_info(q_str(query, "account", path)),
+                }
+            if (method, path) == ("POST", "/api/accounts/enable"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_enable(
+                        require_str(body, "name", path),
+                        parse_json_bool(require_field(body, "enabled", path), "enabled"),
+                    ),
+                }
+            if (method, path) == ("POST", "/api/accounts/start"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_start(body_opt_str(body, "account", path)),
+                }
+            if (method, path) == ("POST", "/api/accounts/stop"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_stop(body_opt_str(body, "account", path)),
+                }
+            if (method, path) == ("POST", "/api/accounts/emergency-stop"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_emergency_stop(require_str(body, "name", path)),
+                }
+
+            # --------------------------------------------------------------- plugins
+            if (method, path) == ("GET", "/api/plugins"):
+                return 200, {"ok": True, "data": await api.plugins_manifests()}
+            if (method, path) == ("GET", "/api/plugins/state"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.plugins_state(q_str(query, "account", path)),
+                }
+            if (method, path) == ("POST", "/api/plugins/set-enabled"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.plugins_set_enabled(
+                        require_str(body, "account", path),
+                        require_str(body, "plugin", path),
+                        parse_json_bool(require_field(body, "enabled", path), "enabled"),
+                    ),
+                }
+            if (method, path) == ("GET", "/api/plugins/settings"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.plugins_settings(q_str(query, "account", path)),
+                }
+            if (method, path) == ("POST", "/api/plugins/set-setting"):
+                # 'value' may be ANY JSON type (incl. null = reset to default);
+                # schema validation happens in the api and 400s with the path
+                return 200, {
+                    "ok": True,
+                    "data": await api.plugins_set_setting(
+                        require_str(body, "account", path),
+                        require_str(body, "plugin", path),
+                        require_str(body, "key", path),
+                        require_field(body, "value", path),
+                    ),
+                }
+
+            # -------------------------------------------------------------- profiles
+            if (method, path) == ("GET", "/api/profiles"):
+                return 200, {"ok": True, "data": await api.profiles_list()}
+            if (method, path) == ("POST", "/api/profiles/create"):
+                plugins = require_field(body, "plugins", path)
+                if not isinstance(plugins, list) or not all(isinstance(p, str) for p in plugins):
+                    raise ValueError(
+                        f"field 'plugins' in POST {path} must be a list of plugin names"
+                    )
+                return 200, {
+                    "ok": True,
+                    "data": await api.profiles_create(
+                        require_str(body, "name", path),
+                        plugins,
+                        body.get("description", ""),
+                    ),
+                }
+            if (method, path) == ("POST", "/api/profiles/delete"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.profiles_delete(require_str(body, "name", path)),
+                }
+            if (method, path) == ("POST", "/api/profiles/assign"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.profiles_assign(
+                        require_str(body, "account", path),
+                        require_str(body, "profile", path),
+                    ),
+                }
+            if (method, path) == ("POST", "/api/profiles/unassign"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.profiles_unassign(
+                        require_str(body, "account", path),
+                        require_str(body, "profile", path),
+                    ),
+                }
+
+            # ------------------------------------------------------------ rate limits
+            if (method, path) == ("GET", "/api/ratelimit/policies"):
+                return 200, {"ok": True, "data": await api.ratelimit_policies()}
+            if (method, path) == ("POST", "/api/ratelimit/set"):
+                action = require_str(body, "action", path)
+                interval = require_finite(require_number(body, "interval", path), "interval", path)
+                jitter_min = body_opt_number(body, "jitter_min", 0.0, path)
+                jitter_max = body_opt_number(body, "jitter_max", 0.0, path)
+                level = body.get("level", "global")
+                if not isinstance(level, str) or not level:
+                    raise ValueError(f"field 'level' in POST {path} must be a non-empty string")
+                return 200, {
+                    "ok": True,
+                    "data": await api.ratelimit_set(
+                        action, interval, jitter_min, jitter_max, level,
+                        body_opt_owner(body, path),
+                    ),
+                }
+            if (method, path) == ("POST", "/api/ratelimit/clear"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.ratelimit_clear(
+                        require_str(body, "level", path),
+                        body_opt_owner(body, path),
+                        require_str(body, "action", path),
+                    ),
+                }
+            if (method, path) == ("GET", "/api/ratelimit/effective"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.ratelimit_effective(
+                        q_str(query, "action", path),
+                        q_opt(query, "account"),
+                        q_opt(query, "plugin"),
+                    ),
+                }
+            if (method, path) == ("GET", "/api/ratelimit/stats"):
+                return 200, {"ok": True, "data": await api.ratelimit_stats()}
+            if (method, path) == ("GET", "/api/ratelimit/warnings"):
+                return 200, {"ok": True, "data": await api.ratelimit_warnings()}
+            if (method, path) == ("POST", "/api/ratelimit/floor"):
+                seconds = require_finite(
+                    require_number(body, "seconds", path), "seconds", path
+                )
+                return 200, {"ok": True, "data": await api.ratelimit_set_floor(seconds)}
+
+            # ------------------------------------------------------------------ tasks
+            if (method, path) == ("GET", "/api/tasks"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.tasks_list(
+                        status=q_opt(query, "status"), account=q_opt(query, "account")
+                    ),
+                }
+            if (method, path) == ("POST", "/api/tasks/cancel"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.tasks_cancel(require_int(body, "task_id", path)),
+                }
+            if (method, path) == ("POST", "/api/tasks/cancel-matching"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.tasks_cancel_matching(
+                        account=body_opt_str(body, "account", path),
+                        plugin=body_opt_str(body, "plugin", path),
+                    ),
+                }
+            if (method, path) == ("GET", "/api/tasks/history"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.tasks_history(
+                        limit=q_int(query, "limit", 50, path),
+                        account=q_opt(query, "account"),
+                    ),
+                }
+
+            # ------------------------------------------------------------- simulation
+            if (method, path) == ("GET", "/api/simulation/list"):
+                return 200, {"ok": True, "data": await api.simulation_list()}
+            if (method, path) == ("POST", "/api/simulation/run"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.simulation_run(require_str(body, "name", path)),
+                }
+
+            # ------------------------------------------------------- logs + audit
+            if (method, path) == ("GET", "/api/logs"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.logs_tail(
+                        n=q_int(query, "n", 100, path),
+                        account=q_opt(query, "account"),
+                        severity=q_opt(query, "severity"),
+                    ),
+                }
+            if (method, path) == ("GET", "/api/audit"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.audit_tail(
+                        n=q_int(query, "n", 100, path),
+                        account=q_opt(query, "account"),
+                    ),
+                }
+
+            return 404, {"ok": False, "error": f"no route {method} {path}"}
+        except (ValueError, RuntimeError) as exc:
+            # domain errors -> honest 400 (AccountError/SchedulerError are
+            # RuntimeError; RatePolicy/Setting/Profile validation ValueError)
+            return 400, {"ok": False, "error": str(exc)}
+        except Exception as exc:  # unexpected -> honest 500 + traceback
+            LOG.exception("dashboard route failed: %s %s", method, path)
+            return 500, {"ok": False, "error": f"internal error: {exc}"}
+
+
+def _make_handler(server: "DashboardServer") -> type:
+    """Build the request-handler class closing over the server instance."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def _authorized(self, provided: Optional[str]) -> bool:
+            """Accept the token via X-Dashboard-Token header OR ?token= query."""
+            if server._token is None:
+                return True
+            return provided is not None and provided.strip() == server._token
+
+        def _respond(
+            self, status: int, payload: Dict[str, Any], content_type: str = "application/json"
+        ) -> None:
+            if content_type == "application/json":
+                data = json.dumps(payload).encode("utf-8")
+            else:
+                data = payload if isinstance(payload, bytes) else str(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            try:
+                self.wfile.write(data)
+            except OSError:
+                pass  # ERROR AUDIT: client aborted mid-response — not an error worth a traceback
+
+        def _handle(self, method: str) -> None:
+            parsed = urlparse(self.path)
+            path, query = parsed.path, parse_qs(parsed.query)
+            if path == "/ws":
+                self._handle_websocket(query)
+                return
+            if method == "GET" and path in ("/", "/index.html"):
+                # the SPA is served WITHOUT auth: it prompts for the token
+                # itself and the demo-link flow needs it loadable first
+                index = STATIC_DIR / "index.html"
+                if index.is_file():
+                    self._respond(200, index.read_bytes(), "text/html; charset=utf-8")
+                else:
+                    self._respond(404, {"ok": False, "error": "index.html missing"})
+                return
+            if not self._authorized(
+                self.headers.get("X-Dashboard-Token") or (query.get("token") or [None])[0]
+            ):
+                self._respond(
+                    401,
+                    {"ok": False, "error": "bad or missing token (X-Dashboard-Token header or ?token=)"},
+                )
+                return
+            body: Dict[str, Any] = {}
+            if method == "POST":
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    self._respond(400, {"ok": False, "error": "invalid Content-Length header"})
+                    return
+                if length > MAX_BODY_BYTES:
+                    # drain a bounded amount so the client's send completes,
+                    # then reject (a bare early-close breaks the client's write)
+                    remaining = length
+                    while remaining > 0 and remaining <= 16 * MAX_BODY_BYTES:
+                        chunk = self.rfile.read(min(remaining, 65536))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                    self._respond(
+                        413,
+                        {"ok": False, "error": f"request body too large (> {MAX_BODY_BYTES} bytes)"},
+                    )
+                    return
+                if length:
+                    try:
+                        body = json.loads(self.rfile.read(length).decode("utf-8"))
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        self._respond(400, {"ok": False, "error": "invalid JSON body"})
+                        return
+                    if not isinstance(body, dict):
+                        self._respond(400, {"ok": False, "error": "request body must be a JSON object"})
+                        return
+            status, payload = server.call(method, path, body, query)
+            self._respond(status, payload)
+
+        def _handle_websocket(self, query: Dict[str, List[str]]) -> None:
+            # ERROR AUDIT: validate the upgrade before hijacking the socket
+            if (
+                self.command != "GET"
+                or self.headers.get("Upgrade", "").lower() != "websocket"
+                or "upgrade" not in self.headers.get("Connection", "").lower()
+            ):
+                self._respond(
+                    400,
+                    {"ok": False, "error": "not a websocket upgrade request (need GET + Upgrade: websocket)"},
+                )
+                return
+            if self.headers.get("Sec-WebSocket-Version") != "13":
+                self._respond(
+                    400,
+                    {"ok": False, "error": "unsupported Sec-WebSocket-Version (need 13)"},
+                )
+                return
+            key = self.headers.get("Sec-WebSocket-Key")
+            if not key:
+                self._respond(400, {"ok": False, "error": "missing Sec-WebSocket-Key"})
+                return
+            if not self._authorized(
+                (query.get("token") or [None])[0] or self.headers.get("X-Dashboard-Token")
+            ):
+                self._respond(
+                    401,
+                    {"ok": False, "error": "bad or missing ws token (use ?token= or the X-Dashboard-Token header)"},
+                )
+                return
+            self.connection.sendall(wsproto.handshake_response(key))
+            fd = self.connection.detach()  # we own the socket now
+            sock = socket.socket(fileno=fd)
+            client = WebSocketClient(sock, server)
+            try:
+                server.register_threadsafe(client)
+            except Exception:
+                LOG.exception("websocket registration failed; closing socket")
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                return
+            client.serve()  # blocks this handler thread until the socket closes
+
+        def do_GET(self) -> None:  # noqa: N802 — stdlib naming
+            self._handle("GET")
+
+        def do_POST(self) -> None:  # noqa: N802 — stdlib naming
+            self._handle("POST")
+
+        def log_message(self, fmt: str, *args: Any) -> None:  # route to our logger
+            LOG.debug("%s - %s", self.address_string(), fmt % args)
+
+    return Handler

@@ -1,41 +1,46 @@
-"""Fixture plugin: records lifecycle + events into class-level buffers."""
+"""Spy fixture plugin: records every event/hook call ON THE INSTANCE.
+
+State is per-instance (each (account, plugin) pair gets a fresh object), so
+tests can assert routing/isolation precisely: alpha's spy and beta's spy are
+different instances with different `seen`/`calls` lists.
+"""
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import Any, List
 
-from core.events import Event, MessageEvent
-from core.plugin_base import PluginBase
-from core.settings import SettingDef
-
-CALLS: List[str] = []
-EVENTS: List[Tuple[str, int, str]] = []
-
-
-def reset() -> None:
-    CALLS.clear()
-    EVENTS.clear()
+from core.event_bus import Event
+from core.plugin_base import PluginBase, PluginContext
+from core.settings_manager import Setting
 
 
 class SpyPlugin(PluginBase):
     name = "spy"
-    version = "0.1.0"
-    description = "test fixture plugin"
+    version = "1.0.0"
+    description = "records lifecycle + events"
 
     settings = (
-        SettingDef("greeting", "str", "hi", "word logged on enable"),
-        SettingDef("volume", "int", 5, "bounded int", 1, 10),
-        SettingDef("loud", "bool", False, "boolean toggle"),
+        Setting("greeting", "str", "hi", "a string"),
+        Setting("count", "int", 3, "a number", min_value=0, max_value=10),
+        Setting("enabled_flag", "bool", True, "a bool"),
     )
 
-    async def on_load(self, ctx) -> None:
-        CALLS.append(f"load:{ctx.account}")
+    def __init__(self) -> None:
+        self.calls: List[str] = []
+        self.seen: List[Any] = []
 
-    async def on_enable(self, ctx) -> None:
-        CALLS.append(f"enable:{ctx.account}:{ctx.settings['greeting']}")
+    async def on_load(self, ctx: PluginContext) -> None:
+        self.calls.append("on_load")
 
-    async def on_disable(self, ctx) -> None:
-        CALLS.append(f"disable:{ctx.account}")
+    async def on_enable(self, ctx: PluginContext) -> None:
+        self.calls.append("on_enable")
 
-    async def handle_event(self, ctx, event: Event) -> None:
-        if isinstance(event, MessageEvent):
-            EVENTS.append((ctx.account, event.author_id, event.content))
+    async def on_disable(self, ctx: PluginContext) -> None:
+        self.calls.append("on_disable")
+
+    async def on_unload(self, ctx: PluginContext) -> None:
+        self.calls.append("on_unload")
+
+    async def handle_event(self, ctx: PluginContext, event: Event) -> None:
+        self.seen.append(event)
+        if getattr(event, "content", "") == "boom-spy":
+            raise RuntimeError("spy exploded on purpose")

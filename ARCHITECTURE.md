@@ -1,82 +1,94 @@
 # SlaughterMudae — Architecture
 
-The component structure (user spec §1) and how the two run modes (user spec
-§2/§3) plug in. Module-level detail lives in `knowledgebase/` (KB_00 index).
+Implemented exactly per the architecture in `TODO + Ideas.md` (§"Suggested
+architecture", §14 project structure). Inter-module contracts: INTEGRATION.md.
 
 ```
-Automation Framework
-├── Account Manager      core/container.py (AccountContainer) + core/account.py
-├── Plugin Manager       core/plugin_loader.py + core/plugin_base.py + plugins/*
-├── Profile Manager      core/profiles.py (ProfileManager — safety presets)
-├── Task Scheduler       core/scheduler.py (TaskScheduler — interval jobs)
-├── Rate Limit Manager   core/rate_limit_manager.py facade over:
-│                          core/rate_limiter.py (token buckets + delays)
-│                          core/rest_buckets.py (Discord's own headers, 429s)
-│                          core/send_engine.py (serialized lane, prefixrate)
-├── Event Bus            core/events.py
-├── Settings Manager     core/settings.py + core/config.py
-├── Database             core/database.py (SQLite, 0600)
-└── Logging              core/logging_setup.py (+ RingBufferHandler tail)
-
-Supporting components:
-├── Credentials          core/credentials.py (tokens+ids ONLY in .env)
-├── Discord Cache        core/discord_cache.py (real-time, invalidation)
-├── REST Buckets         core/rest_buckets.py (header-aware per-route/guild)
-├── Errors               core/errors.py (FlowBlocked contract)
-├── Control API          core/api.py (the ONE shared CLI/dashboard surface)
-├── Dashboard            dashboard/ (SPA + REST + WebSocket)
-├── Terminal/TUI         cli/
-└── Simulator            core/simulator.py (in-memory Discord world)
+                    CLI / GUI
+        (interfaces/cli)   (interfaces/dashboard)
+                        |
+                        v
+                  Core API  (core.api.ControlAPI — ONE facade)
+                        |
+         +--------------+--------------+
+         |              |              |
+  Account Manager  Plugin Manager  Settings Manager
+  (core.account_   (core.plugin_   (core.settings_
+   manager)          manager)        manager)
+         |              |              |
+         +--------------+--------------+
+                        |
+                 Task Scheduler (core.task_scheduler)
+                        |
+             Rate Limit Manager (core.rate_limit_manager)
+                        |
+                  Discord Adapter (adapters/discord | adapters/simulator)
+                        |
+                     Database (database/ — models, migrations, repositories)
 ```
 
-Named component facades (`core/account_manager.py`,
-`core/plugin_manager.py`, `core/profile_manager.py`,
-`core/task_scheduler.py`, `core/rate_limit_manager.py`,
-`core/event_bus.py`, `core/settings_manager.py`,
-`core/database_manager.py`, `core/logging_manager.py`) give each block a
-stable import path for future features.
+Cross-cutting (every manager consumes them):
+`core.event_bus` (typed pub/sub), `core.logging_service` (structured logs +
+stdlib bridge), `core.audit` (interaction trail), `core.credentials` (.env
+only), `core.bootstrap` (composition root).
 
-## Live mode (§2)
+## Design principle (spec: "IMPORTANT DESIGN DESIGN PRINCIPLE")
+
+Plugins never manage accounts, the database, GUI/CLI state, or global rate
+limiting. They request services: `ctx.services.send_message(...)` submits a
+task, `collect_messages(...)` reads the bus, `validate_channel(...)` checks
+the cache. Everything else (pacing, serialization, retries, persistence,
+auditing) is the framework's job.
+
+## First-class Account (spec §1)
+
+`Account` splits persistent state (`database.models.AccountRecord`: id, name,
+token ref, enabled, sync group, settings, profiles) from runtime state
+(`AccountRuntime`: client, connection status, DiscordCache, latency, uptime,
+supervisor). The details page (spec §8) draws runtime data EXCLUSIVELY from
+the live client's cached snapshot — zero extra fetches.
+
+## Profiles / capabilities (spec §4)
+
+A profile names a bundle of permitted plugins; accounts get profiles; the
+union gates the plugin set at account start (no roles = unrestricted). All
+CRUD + assignments persist in SQLite and are reachable from both surfaces.
+
+## Rate limiting (spec §5)
+
+Policies live at four levels (global < account < plugin < account+plugin).
+`effective()` = the strictest (MAX interval) across applicable levels.
+Pacing engine: per-(account, action) minimum interval + uniform jitter,
+priority-ordered waiters, injectable clock; server 429s set account or
+fleet-wide cooldowns that every acquire respects. Hard floor 1.5s/action,
+raise-only; `warnings()` reviews aggressive/jitter-less configurations.
+
+## Task pipeline (spec §6)
+
+One worker lane per account (concurrency = 1 — never two in-flight requests
+for one account), cross-account priority fairness, cooperative cancellation,
+timeouts, retry/backoff (transient + ServerRateLimit; FlowBlocked fails fast
+with the reason), exactly-once terminal bookkeeping: history row, audit row
+(wait_ms/jitter_ms/attempts), bus event.
+
+## Testing (spec §9)
+
+`adapters/simulator` swaps the Discord boundary for an in-memory world; the
+simulation runner composes a complete ephemeral framework per scenario.
+`tests/unit` (per-module), `tests/integration` (production bootstrap over the
+simulator), `tests/simulation` (scenario suite). 450 tests, no network, no
+tokens.
+
+## Boot flow
 
 ```
-Automation Framework
-        │
-        ▼
-Discord Adapter        core/discord_adapter.py (lazy import, header intake,
-        │              single-flight fetches, cache ingestion via cached_snapshot)
-        ▼
-User-account Client    e.g. discord.py-self (lazily imported fork)
+.env -> Credentials -> config/ -> Database(+migrations) -> LogService
+  -> EventBus -> RateLimitManager(config policies) -> SettingsManager
+  -> AuditRecorder -> TaskScheduler(late-bound sender) -> PluginManager
+  -> ProfileManager -> AccountManager(restores persisted accounts)
+  -> sender bound -> scheduler.start() -> SimulationRunner -> ControlAPI
+  -> {REPL | one-shot CLI | Dashboard | headless}
 ```
 
-Real-time rules: the cache is populated from what the client already holds
-at READY (zero fetches); sends validate against the cache first; the only
-fetches go through the account's single-flight REST gate; Discord's own
-rate-limit headers are fed back into the RestBucketManager.
-
-## Testing (§3)
-
-```
-Automation Framework
-        │
-        ▼
-Simulation Adapter     core/simulator.py (FakeWorld/FakeClient + scripted
-                       Mudae responder) — same production code path, zero
-                       network, synthetic ids only
-```
-
-- `tests/` — 310+ offline tests (unit + e2e + fuzz-derived regressions)
-- `scripts/sim_inspect.py` — audited interaction report
-- `tests_live/live_suite.py` — OPT-IN real-Discord suite (env-gated; read-only
-  by default, one message max with --send, 1.5s minimum lane spacing)
-
-## Boot flow (live)
-
-```
-.env ──► Credentials ──► load_config ──► Database (restore: rules/delays/
-         engine/profiles/jobs) ──► SettingsStore ──► RateLimiterService ──►
-         RoleRegistry ──► AuditRecorder ──► AccountContainer(+SendPolicy) ──►
-         add accounts (config + DB) ──► ControlAPI ──► {Terminal | TUI | Dashboard}
-```
-
-Every mutation (settings, rules, delays, roles, jobs, engine) goes through
-`ControlAPI`, so the terminal and the dashboard can never diverge.
+Every mutation from either surface goes through ControlAPI, so the CLI and
+the dashboard can never diverge.

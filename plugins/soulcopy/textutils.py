@@ -1,6 +1,6 @@
 """Pure text transforms for the soulcopy plugin (no I/O -> fully unit-testable).
 
-Semantics ported from the original Soulcopy/autocopy.py:
+Semantics ported verbatim from the audited original (Soulcopy/autocopy.py):
   * each Mudae DM page: if the first line contains 'Soulmates', drop the first
     two lines (header + separator),
   * all remaining lines are collapsed with '$' as separator (Mudae's list mode),
@@ -42,7 +42,7 @@ def split_into_chunks(stream: str, max_chunk_length: int, prefix: str) -> List[s
     Raises ValueError when the budget is too small for prefix + one character.
     """
     if max_chunk_length < len(prefix) + 1:
-        # AUDIT FIX: raise only when prefix + ONE character cannot fit
+        # raise only when prefix + ONE character cannot fit
         raise ValueError(
             f"max_chunk_length {max_chunk_length} too small for prefix {prefix!r}"
         )
@@ -83,3 +83,9 @@ def build_soulcopy_chunks(
     if not stream:
         return []
     return [prefix + chunk for chunk in split_into_chunks(stream, max_chunk_length, prefix)]
+
+
+__all__ = [
+    "DEFAULT_PREFIX", "HEADER_MARKER", "strip_page_header", "collapse_pages",
+    "split_into_chunks", "build_soulcopy_chunks",
+]
