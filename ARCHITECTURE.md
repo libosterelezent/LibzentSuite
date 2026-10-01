@@ -76,7 +76,7 @@ with the reason), exactly-once terminal bookkeeping: history row, audit row
 `adapters/simulator` swaps the Discord boundary for an in-memory world; the
 simulation runner composes a complete ephemeral framework per scenario.
 `tests/unit` (per-module), `tests/integration` (production bootstrap over the
-simulator), `tests/simulation` (scenario suite). 450 tests, no network, no
+simulator), `tests/simulation` (scenario suite). 550 tests, no network, no
 tokens.
 
 ## Boot flow

@@ -1,15 +1,15 @@
 """Project configuration loading (config/ directory, all optional).
 
-Files:
-  * global_settings.json : {plugin_name: {setting_name: value}} — layer 2 of
-                           the settings merge (account layer wins)
-  * rate_limits.json     : NEW policy format (spec §5):
-                           {"global":    {action: {"interval": 2.0,
-                                                   "jitter": [0.1, 0.5]}},
-                            "accounts": {name: {action: {...}}}}
-  * accounts/<name>.json : one account bootstrap per file (no tokens — only
-                           the .env key reference): {name, token_ref?, enabled?,
-                           sync_group?, profiles?}
+Files: ``global_settings.json`` (plugin setting overrides — layer 2 of
+the settings merge, account layer wins), ``rate_limits.json`` (the policy
+format below), and ``accounts/<name>.json`` (one account bootstrap per
+file; never tokens — only the ``.env`` key reference).
+
+Policy file shape::
+
+    {"global":    {action: {"interval": 2.0, "jitter": [0.1, 0.5]}},
+     "accounts": {name: {action: {...}}},
+     "lane":      {"enabled": true, "prefixrate": 1.5}}
 """
 from __future__ import annotations
 

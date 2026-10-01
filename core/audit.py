@@ -4,11 +4,11 @@ Purpose (user spec): a detailed, in-depth view of how the selfbots interact
 so behavior can be reviewed and fixed BEFORE it triggers Discord's
 anti-abuse — plus a persistent record in the database.
 
-Recorded per interaction:
-  direction 'out' — every rate-limited send (message/DM): content preview,
-                    how long the limiter made us WAIT (wait_ms), and the
-                    human-like jitter applied after the grant (jitter_ms)
-  direction 'in'  — every message event dispatched to plugins
+Recorded per interaction: ``direction='out'`` rows carry every
+rate-limited send (message/DM/reaction/button) with a content preview,
+how long the limiter made us WAIT (``wait_ms``) and the human-like jitter
+applied after the grant (``jitter_ms``); ``direction='in'`` rows carry
+every message event dispatched to plugins.
 
 Ported from the audited ``git show HEAD:core/audit.py`` with the rewrite's
 renames: ``db_repo`` instead of ``database`` (duck-typed repository with
@@ -69,10 +69,13 @@ def _field(entry: Any, key: str, default: Any = None) -> Any:
 def format_audit(entries: Iterable[Any]) -> List[str]:
     """Render entries (dicts or AuditEntry) as compact human-readable lines.
 
-    Line shape:
+    Line shape (inbound rows use ``<-``; a missing channel renders as
+    ``ch=-``; newlines in the preview are escaped and long content
+    truncated)::
+
         HH:MM:SS -> account action ch=... preview (wait Xms, jitter Yms) note
-    ('<-' for inbound; missing channel renders as 'ch=-'; newlines in the
-    preview are escaped and long content truncated). An empty iterable
+
+    An empty iterable
     renders as the '(no interactions recorded)' placeholder.
     """
     lines: List[str] = []

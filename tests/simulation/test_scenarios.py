@@ -2,7 +2,8 @@
 
 The full-stack runs (runner + all managers + real plugins) are written as
 runnable code but SKIPPED until agents A3/A5/A6 land their modules — the
-lead unskips them at integration. Everything that does not need the other
+All scenario runs execute the full production stack (managers, scheduler,
+limiter, rich event model) over the in-memory world. Everything that does not need the other
 managers (registry shape, world setups, pure checks) runs now.
 """
 from __future__ import annotations

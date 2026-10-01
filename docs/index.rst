@@ -1,0 +1,41 @@
+SlaughterMudae — Documentation
+==============================
+
+Multi-account Discord automation framework: plugins that request services
+from a central core, first-class accounts, capability profiles, a
+four-scope rate-limiting stack, a centralized task pipeline, SQLite
+persistence, and two parity'd management surfaces (CLI + dashboard) over
+ONE Core API.
+
+.. warning::
+   Selfbot usage violates Discord's Terms of Service. The safety stack
+   (1.5s/action hard floor, human-like jitter, server-wide sequential
+   lane, server-limit compliance) mitigates risk — it does not authorize
+   it.
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Site
+
+   architecture/index
+   plugins/index
+   operations/index
+   api/index
+   reference/index
+
+Indices
+-------
+
+* :ref:`genindex`
+* :ref:`modindex`
+
+Where the knowledge lives
+-------------------------
+
+* ``knowledgebase/*.md`` — handwritten deep-dive guides (the WHY).
+* ``knowledgebase/read_only/`` — generated READ-ONLY symbol snapshot
+  (regenerate with ``python3 scripts/gen_knowledgebase.py``).
+* ``knowledgebase/generated/`` — machine-readable indexes
+  (``symbol_index.json``, coverage, drift baseline).
+* This Sphinx site — navigable API reference (autodoc from the real
+  docstrings) + condensed architecture/operations pages.

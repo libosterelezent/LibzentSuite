@@ -35,7 +35,7 @@ database/              SQLite: models, ordered migrations, repositories
 adapters/              Discord boundary: discord/ (live) + simulator/ (offline)
 interfaces/            cli/ (REPL + one-shot) + dashboard/ (SPA + REST + WS)
 plugins/               soulcopy (migrated) + roll (reference plugin)
-tests/unit|integration|simulation/   450-test offline suite
+tests/unit|integration|simulation/   550-test offline suite
 config/                global settings, rate policies, account files
 main.py                entrypoint
 ```
@@ -49,7 +49,7 @@ python3 main.py --sim soulcopy_basic   # full pipeline over the simulator
 python3 main.py                         # interactive REPL (live accounts)
 python3 main.py accounts list           # one-shot command mode
 python3 main.py --start-all --dashboard # live accounts + dashboard :8070
-bash scripts/run_tests.sh               # the whole 450-test suite
+bash scripts/run_tests.sh               # the whole 550-test suite
 ```
 
 The dashboard serves a sidebar SPA (Overview, Accounts, Plugins, Profiles,
@@ -200,7 +200,7 @@ timed execution log, the audit trail and pass/fail checks:
 ```
 
 Scenarios: `soulcopy_basic`, `soulcopy_multichunk`, `pacing_respected`,
-`server_429_respected`, `channel_gone_aborts`.
+`server_429_respected`, `channel_gone_aborts`, `control_mention`.
 
 ## Management surfaces
 
@@ -212,6 +212,21 @@ Scenarios: `soulcopy_basic`, `soulcopy_multichunk`, `pacing_respected`,
 Both interfaces manipulate the exact same accounts, plugins, profiles,
 settings, tasks, rate policies, logs and simulation system — parity by
 construction, not by discipline.
+
+## Documentation
+
+- `knowledgebase/` — the deep knowledge base: handwritten guides
+  (architecture, data flow, runtime lifecycle, per-subsystem references,
+  the formal plugin API with examples and anti-patterns, configuration,
+  CLI, dashboard, testing, security, glossary, changelog) +
+  `read_only/` generated symbol snapshot and `generated/` machine-readable
+  indexes (`symbol_index.json`, coverage, drift baseline). See
+  `knowledgebase/AGENT_GUIDE.md` and `knowledgebase/DISCREPANCIES.md`.
+- `docs/` — the Sphinx site (API reference from the real docstrings +
+  architecture/operations digests): `pip install --user sphinx
+  myst-parser` then `python3 -m sphinx -W -b html docs docs/_build/html`.
+- Regenerate the snapshot / detect drift:
+  `python3 scripts/gen_knowledgebase.py [--check]`.
 
 Inter-module contracts are documented in `INTEGRATION.md`.
 

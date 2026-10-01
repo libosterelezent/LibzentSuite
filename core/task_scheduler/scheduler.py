@@ -37,12 +37,11 @@ swallow every sender exception into a task failure — the scheduler NEVER
 crashes. History-repo and audit failures are likewise isolated (try/except
 + log).
 
-Retry classification (INTEGRATION contract):
-  * ServerRateLimit      -> report to limiter, then retry
-  * ConnectionError /
-    TimeoutError /
-    asyncio.TimeoutError -> retry (timeout marks final status "timed_out")
-  * FlowBlocked + everything else -> fail immediately with the reason
+Retry classification (INTEGRATION contract): ``ServerRateLimit`` is
+reported to the limiter then retried; ``ConnectionError`` /
+``TimeoutError`` / ``asyncio.TimeoutError`` retry (timeout marks the final
+status "timed_out"); ``FlowBlocked`` and everything else fail immediately
+with the reason.
 Retries sleep ``min(retry_backoff * 2 ** (attempts - 1), max_backoff)``
 through the ``_sleep`` seam (deterministic tests) and are capped at
 ``1 + max_retries`` total attempts.
@@ -409,11 +408,13 @@ class TaskScheduler:
     def cancel(self, task_id: int) -> bool:
         """Cancel one task by id.
 
-        queued  -> cancelled immediately (no sender call) + TaskCancelled.
-        running -> sets the cooperative flag; the worker aborts at its next
-                   checkpoint (after the grant wait or after the sender
-                   returns) and finishes the task as cancelled.
-        Returns False for unknown / already-terminal tasks.
+        ``queued`` tasks cancel immediately (no sender call) and emit
+        TaskCancelled; ``running`` tasks set the cooperative flag and the
+        worker aborts at its next checkpoint (after the grant wait or
+        after the sender returns), finishing the task as cancelled.
+
+        Returns:
+            False for unknown or already-terminal tasks.
         """
         task = self._tasks.get(task_id)
         if task is None:

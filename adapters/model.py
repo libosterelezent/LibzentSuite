@@ -54,6 +54,10 @@ class DiscordChannel:
 
 @dataclass(frozen=True)
 class DiscordEmbedField:
+    """
+    One embed field (name/value/inline) — the unit kakerareact-style
+    parsing reads via :meth:`DiscordEmbed.field_map`.
+    """
     name: str = ""
     value: str = ""
     inline: bool = False
@@ -131,6 +135,9 @@ class DiscordComponent:
 
 @dataclass(frozen=True)
 class DiscordAttachment:
+    """
+    One message attachment (file): id, filename, url, size, content type.
+    """
     id: int = 0
     filename: str = ""
     url: str = ""
@@ -345,6 +352,9 @@ def _emoji_repr(emoji: Any) -> str:
 
 
 def convert_user(user: Any) -> DiscordUser:
+    """
+    Library user object -> stable DiscordUser projection (no fetch).
+    """
     return DiscordUser(
         id=_optional_int(getattr(user, "id", None)) or 0,
         name=_text(getattr(user, "name", "")),
@@ -354,6 +364,17 @@ def convert_user(user: Any) -> DiscordUser:
 
 
 def convert_channel(channel: Any, *, dm: bool) -> DiscordChannel:
+    """
+    Library channel object -> stable DiscordChannel projection.
+
+    Args:
+        channel: the library channel (guild text/voice or DM).
+        dm: caller-computed DM flag (the adapter knows its library types).
+
+    Returns:
+        The stable channel projection; DM channels without a name get a
+        ``dm:<recipient id>`` label so downstream rendering stays useful.
+    """
     guild = getattr(channel, "guild", None)
     ctype = getattr(channel, "type", None)
     recipient = getattr(channel, "recipient", None)
