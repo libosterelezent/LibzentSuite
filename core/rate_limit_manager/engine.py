@@ -323,7 +323,7 @@ class RateLimitManager:
                     f"{scope}: {exc} (policy is still active in memory)",
                 )
         self._log(
-            "info", f"rate policy set: {policy} at {scope}"
+            "info", f"rate policy set: {policy.action}={policy} at {scope}"
         )
         self._wake_waiters()
         return policy

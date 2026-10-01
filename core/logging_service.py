@@ -19,7 +19,8 @@ import threading
 import time
 from collections import deque
 from dataclasses import asdict, dataclass
-from typing import Any, Callable, Deque, Dict, List, Optional
+from contextlib import contextmanager
+from typing import Any, Callable, Deque, Dict, Iterator, List, Optional
 
 SEVERITIES = ("DEBUG", "INFO", "WARNING", "ERROR")
 _LEVEL_BY_SEVERITY = {
@@ -27,6 +28,14 @@ _LEVEL_BY_SEVERITY = {
     "WARNING": logging.WARNING, "ERROR": logging.ERROR,
 }
 _STDERR_CONFIGURED = False
+
+#: stdlib level name -> canonical severity (CRITICAL/FATAL collapse to
+#: ERROR — the structured store has no crash level, and INFO would hide it)
+_SEVERITY_BY_LEVELNAME = {
+    "DEBUG": "DEBUG", "INFO": "INFO", "WARNING": "WARNING",
+    "ERROR": "ERROR", "CRITICAL": "ERROR", "FATAL": "ERROR",
+    "WARN": "WARNING",
+}
 
 
 @dataclass
@@ -73,6 +82,28 @@ class LogService:
         self._lock = threading.Lock()
         self._db = None  # LogRepository (duck-typed, attached later)
         self._counts: Dict[str, int] = {sev: 0 for sev in SEVERITIES}
+        # OBSERVABILITY (dead sinks must not be silent): drop/failure counters
+        self._db_failures = 0
+        self._subscriber_failures = 0
+        # INBOUND/OUTBOUND SEPARATION: while a StdlibBridge is ingesting a
+        # raw stdlib record ON THIS THREAD, the mirror is suppressed — the
+        # record came FROM stdlib (stderr already printed it once), so
+        # mirroring it back would double-print and re-enter the tree
+        self._ingest = threading.local()
+
+    @contextmanager
+    def ingest_context(self):
+        """Mark this thread as inside a bridge ingestion (mirror suppressed).
+
+        Used by StdlibBridge around its ``record()`` call: the record is
+        INBOUND (stdlib -> service); its outbound mirror is redundant by
+        construction. Thread-local: other threads keep their mirrors.
+        """
+        self._ingest.active = True
+        try:
+            yield
+        finally:
+            self._ingest.active = False
 
     # ---------------------------------------------------------------- sink
     def attach_db(self, repository: Any) -> None:
@@ -105,19 +136,29 @@ class LogService:
         with self._lock:
             self._ring.append(entry)
             self._counts[severity] = self._counts.get(severity, 0) + 1
-        logging.getLogger(f"slaughtermudae.{source}").log(
-            _LEVEL_BY_SEVERITY[severity], "%s", entry.message
-        )
+        # OUTBOUND mirror — only for records NOT ingested from stdlib on
+        # this thread (a bridge-ingested record already printed to stderr
+        # via the original stdlib call; mirroring it back double-prints).
+        # The _sm_from_service marker below is defense-in-depth: even if the
+        # mirror somehow reaches a bridge, it is skipped (the original loop
+        # echoed every line ~recursion-limit times into ring AND DB).
+        if not getattr(self._ingest, "active", False):
+            logging.getLogger(f"slaughtermudae.{source}").log(
+                _LEVEL_BY_SEVERITY[severity], "%s", entry.message,
+                extra={"_sm_from_service": True},
+            )
         if self._db is not None:
             try:
                 self._db.add(entry.as_dict())
-            except Exception:  # pragma: no cover - DB must never break logging
-                pass
+            except Exception:
+                # OBSERVABLE, never recursive: no logging here (a log call
+                # inside the write path is what fed the original loop)
+                self._db_failures += 1
         for callback in list(self._subscribers):
             try:
                 callback(entry)
-            except Exception:  # pragma: no cover - subscriber isolation
-                pass
+            except Exception:
+                self._subscriber_failures += 1  # observable, never recursive
         return entry.as_dict()
 
     def info(self, source: str, message: str, **ctx: Any) -> Dict[str, Any]:
@@ -166,10 +207,17 @@ class LogService:
         return _unsubscribe
 
     def stats(self) -> Dict[str, Any]:
-        """Counters by severity for the dashboard overview."""
+        """Counters by severity + drop/failure counters for the dashboard."""
         with self._lock:
             counts = dict(self._counts)
-        return {"entries": sum(counts.values()), "by_severity": counts}
+            db_failures = self._db_failures
+            subscriber_failures = self._subscriber_failures
+        return {
+            "entries": sum(counts.values()),
+            "by_severity": counts,
+            "db_failures": db_failures,
+            "subscriber_failures": subscriber_failures,
+        }
 
 
 __all__ = ["LogService", "LogEntry", "ServiceLogger", "StdlibBridge", "attach_stdlib_bridge", "SEVERITIES", "configure_stderr"]
@@ -241,7 +289,8 @@ class ServiceLogger:
         self._record("error", msg, args)
 
     def log(self, level: int, msg: Any, *args: Any) -> None:
-        severity = {10: "DEBUG", 20: "INFO", 30: "WARNING", 40: "ERROR"}.get(level, "INFO")
+        severity = {10: "DEBUG", 20: "INFO", 30: "WARNING", 40: "ERROR",
+                    50: "ERROR"}.get(level, "INFO")
         self._record(severity.lower(), msg, args)
 
     # ---------------------------------------------- LogService-style surface
@@ -266,16 +315,28 @@ class StdlibBridge(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
+            if getattr(record, "_sm_from_service", False):
+                # this record IS LogService's own stdlib mirror — the entry
+                # already exists; re-ingesting it would re-mirror it and
+                # recurse (found live: every boot log line echoed ~143x,
+                # bounded only by the recursion limit)
+                return
             name = record.name or "stdlib"
             if name.startswith("slaughtermudae"):
                 source = name[len("slaughtermudae"):].lstrip(".") or "core"
                 source = source.replace(".", ":")
             else:
                 source = f"ext:{name}"
-            severity = record.levelname
-            if severity not in SEVERITIES:
-                severity = "INFO"
-            self._service.record(severity, source, record.getMessage())
+            severity = _SEVERITY_BY_LEVELNAME.get(
+                record.levelname,
+                "ERROR" if record.levelno >= logging.ERROR
+                else "INFO" if record.levelno >= logging.INFO else "DEBUG",
+            )
+            # INBOUND path: suppress the outbound mirror for this record on
+            # this thread (its stderr print already happened at the original
+            # stdlib call; re-mirroring double-prints and re-enters the tree)
+            with self._service.ingest_context():
+                self._service.record(severity, source, record.getMessage())
         except Exception:  # a logging bridge must never raise
             pass
 
@@ -283,11 +344,37 @@ class StdlibBridge(logging.Handler):
 def attach_stdlib_bridge(
     service: "LogService", logger_name: str = "slaughtermudae"
 ) -> StdlibBridge:
-    """Attach (idempotently) the stdlib->structured bridge; returns the handler."""
+    """Attach (idempotently) the stdlib->structured bridge; returns the handler.
+
+    Also ensures the tree accepts INFO records even when configure_stderr()
+    was never called (headless/sim boots) — otherwise raw plugin-context
+    INFO logs are filtered at the logger level before reaching the bridge.
+    """
     root = logging.getLogger(logger_name)
+    if root.level == logging.NOTSET or root.level > logging.INFO:
+        root.setLevel(logging.INFO)
+    # quiet-mode hole: configure_stderr() sets propagate=False, but builds
+    # with quiet=True never call it — without this, mirrors and raw WARNING+
+    # records leak to the global root (lastResort prints them raw)
+    root.propagate = False
     for handler in root.handlers:
         if isinstance(handler, StdlibBridge):
             return handler
     bridge = StdlibBridge(service)
     root.addHandler(bridge)
     return bridge
+
+
+def detach_stdlib_bridge(logger_name: str = "slaughtermudae") -> int:
+    """Remove every StdlibBridge from the tree (shutdown/teardown).
+
+    Returns how many were removed. After this, raw stdlib records under the
+    tree print only (no structured ingestion) — exactly the pre-attach
+    behavior. Idempotent; safe to call from Framework.shutdown BEFORE
+    database.close() so the bridge stops feeding a dying sink.
+    """
+    root = logging.getLogger(logger_name)
+    bridges = [h for h in root.handlers if isinstance(h, StdlibBridge)]
+    for bridge in bridges:
+        root.removeHandler(bridge)
+    return len(bridges)

@@ -26,7 +26,7 @@ from .audit import AuditRecorder
 from .config import ProjectConfig, load_config
 from .credentials import Credentials
 from .event_bus import EventBus
-from .logging_service import LogService, ServiceLogger, attach_stdlib_bridge, configure_stderr
+from .logging_service import LogService, ServiceLogger, attach_stdlib_bridge, configure_stderr, detach_stdlib_bridge
 from .plugin_manager import PluginManager
 from .profile_manager import ProfileManager
 from .rate_limit_manager import RateLimitManager
@@ -117,11 +117,20 @@ class Framework:
         self.remote_control = remote_control
 
     async def shutdown(self) -> None:
-        """Graceful: drain the scheduler, stop accounts, close the database."""
+        """Graceful: drain the scheduler, stop accounts, detach logging
+        sinks, close the database.
+
+        ORDER MATTERS (logging shutdown): the db sink detaches and the
+        stdlib bridge is removed BEFORE database.close() — otherwise the
+        bridge keeps ingesting stdlib lines into a service whose sink is a
+        closed database (every write silently failing forever).
+        """
         if self.remote_control is not None:
             self.remote_control.stop()
         await self.scheduler.stop(drain=True)
         await self.accounts.stop_all()
+        self.logs.attach_db(None)          # stop persisting first
+        detach_stdlib_bridge()             # then stop ingesting stdlib
         self.database.close()
 
 
