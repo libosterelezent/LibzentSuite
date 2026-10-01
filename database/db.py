@@ -28,6 +28,7 @@ from core.errors import DatabaseError
 from database.schema import MIGRATIONS
 
 from .repositories.accounts import AccountsRepository
+from .repositories.cache import CacheRepository
 from .repositories.kv import KvRepository
 from .repositories.logs import AuditRepository, LogRepository
 from .repositories.plugins import PluginRepository
@@ -201,6 +202,11 @@ class Database:
     def tasks(self) -> TaskHistoryRepository:
         """Finished-task history for the Tasks page."""
         return self._repo("tasks", lambda: TaskHistoryRepository(self._conn, self._lock))
+
+    @property
+    def cache(self) -> CacheRepository:
+        """Per-account persistent cache of resolved Discord entities."""
+        return self._repo("cache", lambda: CacheRepository(self._conn, self._lock))
 
     @property
     def kv(self) -> KvRepository:

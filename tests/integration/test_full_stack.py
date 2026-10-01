@@ -8,6 +8,7 @@ audit, logging) is the real production code.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 import json
 import tempfile
 import unittest
@@ -260,6 +261,82 @@ class TestLaneIntegration(unittest.IsolatedAsyncioTestCase):
             history = stack.world.messages_of(GUILD_CHANNEL)
             self.assertIn("$slud-s", history)
             # a paused lane also surfaced a warning while it was paused
+        finally:
+            await stack.stop()
+
+
+class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
+    """Anti-flag guarantees: resolved entities cost ONE REST call per account
+    lifetime (persistent across restarts), and typing is opt-in."""
+
+    async def test_dm_resolved_once_across_restarts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sm-dm-") as tmp:
+            db_path = str(Path(tmp) / "slaughter.db")
+            stack = Stack(db_path=db_path)
+            api = stack.framework.api
+            await api.accounts_add({"name": "alpha"})
+            await api.accounts_start()
+            try:
+                # resolve the Mudae DM twice in this boot: ONE client call
+                services = stack.framework.accounts.services_for("alpha", "soulcopy")
+                cid1 = await services.open_dm(MUDAE_ID)
+                cid2 = await services.open_dm(MUDAE_ID)
+                self.assertEqual(cid1, cid2)
+                client = stack.framework.accounts.get("alpha").runtime.client
+                self.assertEqual(client.open_dm_calls, [MUDAE_ID])
+            finally:
+                await stack.stop()
+
+            # second boot on the same DB: still exactly ONE call ever
+            stack2 = Stack(db_path=db_path)
+            api2 = stack2.framework.api
+            # alpha was restored from the database by the AccountManager
+            names = [a["name"] for a in await api2.accounts_list()]
+            self.assertIn("alpha", names)
+            await api2.accounts_start()
+            try:
+                services2 = stack2.framework.accounts.services_for("alpha", "soulcopy")
+                cid3 = await services2.open_dm(MUDAE_ID)
+                self.assertEqual(cid3, cid1)
+                client2 = stack2.framework.accounts.get("alpha").runtime.client
+                self.assertEqual(client2.open_dm_calls, [])  # DB-served
+            finally:
+                await stack2.stop()
+
+    async def test_typing_indicator_opt_in(self) -> None:
+        stack = Stack()
+        api = stack.framework.api
+        await api.accounts_add({"name": "alpha"})
+        await stack.framework.accounts.start("alpha")
+        try:
+            client = stack.framework.accounts.get("alpha").runtime.client
+            settings = stack.framework.settings
+            # default: typing_probability 0.0 -> zero typing calls, zero extra API
+            await stack.framework.accounts.send_hook(
+                SimpleNamespace(account="alpha", action="message",
+                                channel_id=GUILD_CHANNEL, content="x"))
+            self.assertEqual(client.typing_calls, [])
+            # opted in at 1.0 -> every guild send fires typing first
+            settings.set_account_setting("alpha", "typing_probability", 1.0)
+            await stack.framework.accounts.send_hook(
+                SimpleNamespace(account="alpha", action="message",
+                                channel_id=GUILD_CHANNEL, content="y"))
+            self.assertEqual(len(client.typing_calls), 1)
+        finally:
+            await stack.stop()
+
+    async def test_remote_control_end_to_end(self) -> None:
+        stack = Stack()
+        api = stack.framework.api
+        await api.accounts_add({"name": "alpha"})
+        await stack.framework.accounts.start("alpha")
+        try:
+            alpha_uid = stack.framework.accounts.get("alpha").runtime.user_id
+            stack.world.deliver(GUILD_CHANNEL, OWNER_ID, f"<@{alpha_uid}> lane")
+            await stack.world.wait_for_quiet(GUILD_CHANNEL, quiet=1.2, limit=20.0)
+            replies = [m for m in stack.world.messages_of(GUILD_CHANNEL)
+                       if "send lane" in m]
+            self.assertTrue(replies, "expected a mention-prefix reply in-channel")
         finally:
             await stack.stop()
 

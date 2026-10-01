@@ -121,6 +121,8 @@ class ScenarioAPI:
     audit_entries: Callable[[], List[dict]]
     #: plugin settings overrides the runner applied (global layer)
     settings_overrides: Dict[str, Dict[str, Any]]
+    #: the mention-prefix RemoteControl bridge (control_mention scenario)
+    remote: Any = None
 
 
 # ------------------------------------------------------------------ fixtures
@@ -330,6 +332,39 @@ async def _script_channel_gone(api: ScenarioAPI) -> None:
 
 
 # ------------------------------------------------------------------ registry
+async def _script_control_mention(api: "ScenarioAPI") -> None:
+    """Owner drives @account commands; a stranger tries and gets nothing."""
+    mention = f"<@{api.account_user_id}>"
+    api.owner_says(api.channel_id, f"{mention} status", api.owner_id)
+    await api.world.wait_for_quiet(api.channel_id, quiet=0.6, limit=15.0)
+    # non-owner mentions the same account: must be ignored completely
+    stranger = 4242
+    if stranger not in (api.owner_id,):
+        api.world.add_user(stranger, "stranger")
+        api.owner_says(api.channel_id, f"{mention} estop", stranger)
+        await api.world.wait_for_quiet(api.channel_id, quiet=0.6, limit=15.0)
+
+
+def _checks_control_mention(audit: List[dict], world: SimWorld) -> List[str]:
+    failures: List[str] = []
+    out = [
+        e for e in audit
+        if e.get("direction") == "out" and e.get("note", "").find("plugin=control") >= 0
+    ]
+    if not out:
+        failures.append("owner mention produced no reply (expected a 'status' answer)")
+    history = world.messages_of(SYNTHETIC_GUILD_CHANNEL)
+    replies = [m for m in history if "uptime" in m or "tasks" in m]
+    if not replies:
+        failures.append("no status reply text landed in the guild channel")
+    # the stranger's estop must NOT have produced a reply or halted anything
+    estop_replies = [m for m in history if "EMERGENCY STOP" in m]
+    if estop_replies:
+        failures.append("non-owner mention was answered — owner gating broken")
+    return failures
+
+
+
 SCENARIOS: Dict[str, Scenario] = {
     "soulcopy_basic": Scenario(
         name="soulcopy_basic",
@@ -385,6 +420,18 @@ SCENARIOS: Dict[str, Scenario] = {
         world_setup=_base_world(SHORT_PAGES),
         script=_script_channel_gone,
         checks=_checks_channel_gone,
+    ),
+    "control_mention": Scenario(
+        name="control_mention",
+        description=(
+            "The owner manages the fleet from Discord by MENTIONING the "
+            "account as the command prefix (@account status, estop); replies "
+            "arrive through the paced pipeline and non-owners are ignored."
+        ),
+        policies={"message": {"interval": 1.5, "jitter": [0.0, 0.05]}},
+        world_setup=_base_world(SHORT_PAGES),
+        script=_script_control_mention,
+        checks=_checks_control_mention,
     ),
 }
 

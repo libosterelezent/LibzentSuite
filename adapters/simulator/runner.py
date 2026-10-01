@@ -255,6 +255,22 @@ class SimulationRunner:
         )
         box["send"] = accounts.send_hook  # fill the seam BEFORE start()
 
+        # a real ControlAPI + the mention-prefix bridge, so scenarios can
+        # exercise Discord-side management exactly like production
+        from core.api import ControlAPI
+
+        api = ControlAPI(
+            accounts=accounts, plugins=plugins_mgr, profiles=profiles,
+            settings=settings, limiter=limiter, scheduler=scheduler,
+            logs=logger, audit=audit, credentials=credentials,
+        )
+        from core.remote_control import RemoteControl
+
+        remote = RemoteControl(
+            bus, scheduler, accounts, lambda: api, credentials,
+            ServiceLogger(logger, "remote-control"),
+        ).start()
+
         # --- observability subscriptions BEFORE any traffic can flow
         log_lines: List[str] = []
 
@@ -323,6 +339,7 @@ class SimulationRunner:
                     ),
                     audit_entries=lambda: list(interactions),
                     settings_overrides=DEMO_PLUGIN_SETTINGS,
+                    remote=remote,
                 )
                 try:
                     await scenario.script(facade)
@@ -335,6 +352,7 @@ class SimulationRunner:
                     failures.append(f"scenario crashed: {type(exc).__name__}: {exc}")
 
             try:
+                remote.stop()
                 await bus.publish(
                     ScenarioFinished(
                         account="", name=name,
@@ -404,6 +422,7 @@ class SimulationRunner:
             return mods.AccountManager(
                 bus, logger, db.accounts, plugins_mgr, profiles, scheduler,
                 settings, audit, client_factory, credentials, limiter=limiter,
+                api_cache_repo=db.cache,
             )
         except TypeError:
             return mods.AccountManager(

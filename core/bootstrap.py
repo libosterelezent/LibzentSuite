@@ -99,7 +99,8 @@ class Framework:
                  accounts: AccountManager, plugins: PluginManager,
                  profiles: ProfileManager, settings: SettingsManager,
                  audit: AuditRecorder, database: Any,
-                 credentials: Credentials, config: ProjectConfig) -> None:
+                 credentials: Credentials, config: ProjectConfig,
+                 remote_control: Any = None) -> None:
         self.api = api
         self.bus = bus
         self.logs = logs
@@ -113,9 +114,12 @@ class Framework:
         self.database = database
         self.credentials = credentials
         self.config = config
+        self.remote_control = remote_control
 
     async def shutdown(self) -> None:
         """Graceful: drain the scheduler, stop accounts, close the database."""
+        if self.remote_control is not None:
+            self.remote_control.stop()
         await self.scheduler.stop(drain=True)
         await self.accounts.stop_all()
         self.database.close()
@@ -197,6 +201,7 @@ def build(
         bus, ServiceLogger(logs, "accounts"), database.accounts,
         plugins, profiles, scheduler, settings, audit,
         client_factory, credentials, limiter=limiter,
+        api_cache_repo=database.cache,
     )
     sender_box["send"] = accounts.send_hook
 
@@ -230,8 +235,21 @@ def build(
         simulation=simulation_runner, credentials=credentials, database=database,
         started_at=_time.time(),
     )
+
+    # Discord-side management: owners mention an account (@account status)
+    # to run the SAME CoreAPI commands from chat — replies flow through the
+    # paced pipeline; REMOTE_CONTROL=0 in .env disables the wiring entirely
+    remote_control = None
+    if credentials.remote_control_enabled:
+        from .remote_control import RemoteControl
+
+        remote_control = RemoteControl(
+            bus, scheduler, accounts, lambda: api, credentials,
+            ServiceLogger(logs, "remote-control"),
+        ).start()
     return Framework(
         api=api, bus=bus, logs=logs, limiter=limiter, scheduler=scheduler,
         accounts=accounts, plugins=plugins, profiles=profiles, settings=settings,
         audit=audit, database=database, credentials=credentials, config=config,
+        remote_control=remote_control,
     )

@@ -53,7 +53,7 @@ from ..event_bus import (
 from ..settings_manager import SettingsManager
 from adapters.base import DiscordMessage
 from database.models import AccountRecord
-from .cache import DiscordCache, resolve_dm_channel
+from .cache import DiscordCache, invalidate_dm_channel, resolve_dm_channel
 from .services import AccountPluginServices, TaskAckRegistry
 
 #: account names share the profile namespace style (may start with a digit)
@@ -157,9 +157,12 @@ class AccountManager:
         *,
         limiter: Any = None,
         supervisor_tick: float = 0.2,
+        api_cache_repo: Any = None,
     ) -> None:
         """``limiter`` (optional) enriches details() with effective rate data;
-        ``supervisor_tick`` is the supervisor's poll granularity in seconds.
+        ``supervisor_tick`` is the supervisor's poll granularity in seconds;
+        ``api_cache_repo`` (optional) persists resolved Discord entities
+        (DM channels, users) per account so restarts never re-fetch them.
         """
         self._bus = bus
         self._logger = logger or logging.getLogger("slaughtermudae.accounts")
@@ -173,6 +176,11 @@ class AccountManager:
         self._credentials = credentials
         self._limiter = limiter
         self._supervisor_tick = float(supervisor_tick)
+        self._api_cache = api_cache_repo
+        # typing-indicator RNG (anti-flag: humans trigger typing; disabled
+        # by default via the typing_probability account setting = 0.0)
+        import random as _random
+        self._typing_rng = _random.Random()
 
         self._accounts: Dict[str, Account] = {}
         #: ONE task-ack registry per manager (single bus subscription set)
@@ -636,6 +644,29 @@ class AccountManager:
         self._bus.publish_nowait(AccountFailed(account=name, error=rt.last_error))
 
     # --------------------------------------------------------------- sending
+    async def _maybe_typing(self, name: str, rt: "AccountRuntime", channel_id: int) -> None:
+        """Probabilistic typing indicator before a guild send (anti-flag).
+
+        Real clients fire typing while composing; an account that NEVER does
+        is a detectable outlier. Off by default (typing_probability=0.0 —
+        zero extra API calls unless opted in; ~0.85 looks human). A typing
+        failure must NEVER fail the send.
+        """
+        try:
+            probability = float(
+                self._settings.account_settings(name).get("typing_probability", 0.0)
+            )
+        except Exception:
+            return
+        if probability <= 0 or not hasattr(rt.client, "send_typing"):
+            return
+        if self._typing_rng.random() >= probability:
+            return
+        try:
+            await rt.client.send_typing(channel_id)
+        except Exception:
+            pass  # cosmetic best-effort only
+
     async def send_hook(self, task: Any) -> DiscordMessage:
         """Scheduler sender: one task -> one validated, audited Discord send.
 
@@ -659,13 +690,25 @@ class AccountManager:
         action = getattr(task, "action", None)
         client = rt.client
         if action == "dm":
+            # resolution order: memory cache -> persistent api_cache -> ONE
+            # client.open_dm (recorded in both, never fetched again)
             channel_id = await resolve_dm_channel(
-                rt.cache, client, int(task.user_id), name
+                rt.cache, client, int(task.user_id), name, self._api_cache
             )
-            message = await client.send_dm(int(task.user_id), task.content)
+            # send through the RESOLVED channel: client.send_dm(user_id)
+            # would re-fetch the user + re-open the DM (2 redundant REST
+            # calls per send — a classic selfbot flag vector)
+            try:
+                message = await client.send_message(channel_id, task.content)
+            except Exception as exc:
+                if type(exc).__name__ == "TargetGone":
+                    invalidate_dm_channel(rt.cache, self._api_cache,
+                                          int(task.user_id), name)
+                raise
         elif action == "message":
             rt.cache.validate_channel(int(task.channel_id))  # TargetGone propagates
             channel_id = int(task.channel_id)
+            await self._maybe_typing(name, rt, channel_id)
             message = await client.send_message(channel_id, task.content)
         else:
             raise SchedulerError(
@@ -818,6 +861,7 @@ class AccountManager:
             settings_dict=settings_dict,
             ack_registry=self._ack_registry,
             client_getter=lambda: self._client_of(account_name),
+            api_cache_repo=self._api_cache,
         )
         self._services[key] = services
         return services

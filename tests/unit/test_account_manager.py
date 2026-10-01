@@ -407,7 +407,9 @@ class SendHookTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(message.dm)
         self.assertEqual(client.open_dm_calls, [])  # snapshot DM 9001 was cached
-        self.assertEqual(client.sent[-1][0], "dm")
+        # unified path: DMs send through send_message with the resolved
+        # channel id (never re-fetching the user / re-creating the DM)
+        self.assertEqual(client.sent[-1], ("message", 9001, "psst"))
         await h.manager.stop("alpha")
 
     async def test_dm_action_opens_and_records_missing_dm(self) -> None:

@@ -8,6 +8,7 @@ Import surface used by ``database.db.Database`` (and tests):
 """
 from .accounts import AccountsRepository
 from .base import BaseRepository, loads_tolerant
+from .cache import CacheRepository
 from .kv import KvRepository
 from .logs import AuditRepository, LogRepository
 from .plugins import PluginRepository
@@ -19,6 +20,6 @@ from .tasks import TaskHistoryRepository
 __all__ = [
     "AccountsRepository", "AccountSettingsRepository", "ProfilesRepository",
     "PluginRepository", "RatePolicyRepository", "AuditRepository",
-    "LogRepository", "TaskHistoryRepository", "KvRepository",
+    "LogRepository", "TaskHistoryRepository", "KvRepository", "CacheRepository",
     "BaseRepository", "loads_tolerant",
 ]

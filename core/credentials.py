@@ -118,6 +118,12 @@ class Credentials:
         """Optional local auth token for the dashboard."""
         return self._values.get("DASHBOARD_TOKEN") or None
 
+    @property
+    def remote_control_enabled(self) -> bool:
+        """Mention-prefix management from Discord (REMOTE_CONTROL=0 opts out)."""
+        raw = (self._values.get("REMOTE_CONTROL") or "1").strip().lower()
+        return raw not in ("0", "false", "no", "off")
+
     # ---------------------------------------------------------------- display
     def redacted(self) -> Dict[str, str]:
         """Human-safe copy: token-like values masked, never fully shown."""

@@ -215,8 +215,18 @@ class RealDiscordClient:
             channel_id=channel_id,
             author_id=self.user_id or 0,
             content=content,
-            dm=dm,
+            # derive from the channel TYPE when possible: DM sends now arrive
+            # through send_message with an already-resolved DM channel id
+            dm=dm or self._is_dm_channel(channel),
         )
+
+    def _is_dm_channel(self, channel: Any) -> bool:
+        """True when the channel object is a DM channel (type-based)."""
+        discord = self._discord
+        if discord is None or channel is None:
+            return False
+        dm_type = getattr(discord, "DMChannel", None)
+        return dm_type is not None and isinstance(channel, dm_type)
 
     async def send_message(self, channel_id: int, content: str) -> DiscordMessage:
         """Send to a channel id (cache first, fetch fallback); returns the
@@ -258,6 +268,18 @@ class RealDiscordClient:
         """Open (or reuse) the DM channel with a user; returns its id."""
         channel = await self._dm_channel(user_id)
         return channel.id
+
+    async def send_typing(self, channel_id: int) -> None:
+        """Fire a typing indicator in a channel (anti-flag human behavior).
+
+        Best-effort by contract: callers swallow failures — typing must
+        never block or fail a send.
+        """
+        client = self._require_client()
+        channel = client.get_channel(channel_id)
+        if channel is None:
+            return  # unknown channel: skip rather than fetch (API-call trim)
+        await channel.trigger_typing()
 
     async def fetch_user(self, user_id: int) -> Any:
         """Fetch a user object from the library."""

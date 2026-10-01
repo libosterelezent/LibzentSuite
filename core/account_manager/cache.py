@@ -204,32 +204,73 @@ class DiscordCache:
 
 
 async def resolve_dm_channel(
-    cache: Optional[DiscordCache],
+    cache: Optional["DiscordCache"],
     client: Any,
     user_id: int,
     account: str = "",
+    cache_repo: Any = None,
 ) -> int:
     """Cache-first DM channel resolution (shared by send hook + services).
 
-    1. look for a live cached DM channel with this recipient,
-    2. on a miss, ``await client.open_dm(user_id)`` and record the result in
-       the cache so subsequent sends never re-open it.
+    Resolution order (anti-flag: the REST API is the LAST resort):
+    1. the account's live in-memory cache (from READY / prior sends),
+    2. the account-scoped persistent cache (api_cache 'dm' row — survives
+       restarts, so a DM costs ONE open for the account's lifetime),
+    3. ``await client.open_dm(user_id)`` — then the result is recorded in
+       BOTH caches so it is never fetched again.
 
     Raises:
-        AccountError: cache miss and no live client available.
+        AccountError: full miss and no live client available.
     """
+    user_id = int(user_id)
     if cache is not None:
-        cached = cache.dm_channel_for(int(user_id))
+        cached = cache.dm_channel_for(user_id)
         if cached is not None:
             return cached
+    if cache_repo is not None:
+        try:
+            stored = cache_repo.get(account, "dm", str(user_id))
+        except Exception:
+            stored = None
+        if isinstance(stored, int):
+            if cache is not None:  # promote the persistent row to memory
+                cache.record_dm(stored, user_id)
+            return stored
     if client is None:
         raise AccountError(
             f"account {account!r} has no active client to open a DM with {user_id}"
         )
-    channel_id = int(await client.open_dm(int(user_id)))
+    channel_id = int(await client.open_dm(user_id))
     if cache is not None:
-        cache.record_dm(channel_id, int(user_id))
+        cache.record_dm(channel_id, user_id)
+    if cache_repo is not None:
+        try:
+            cache_repo.set(account, "dm", str(user_id), channel_id)
+        except Exception:
+            pass  # persistence must never break the send path
     return channel_id
 
 
-__all__ = ["ChannelInfo", "DiscordCache", "resolve_dm_channel"]
+def invalidate_dm_channel(
+    cache: Optional["DiscordCache"], cache_repo: Any, user_id: int, account: str = ""
+) -> None:
+    """Drop every cached DM mapping for a user (memory + database).
+
+    Called when Discord reports the target gone — the next resolution
+    re-opens the DM instead of hammering a dead channel id.
+    """
+    user_id = int(user_id)
+    if cache is not None:
+        info = cache.channels.get(
+            cache.dm_channel_for(user_id) or -1
+        ) if cache.dm_channel_for(user_id) is not None else None
+        if info is not None:
+            info.deleted = True
+    if cache_repo is not None:
+        try:
+            cache_repo.delete(account, "dm", str(user_id))
+        except Exception:
+            pass
+
+
+__all__ = ["ChannelInfo", "DiscordCache", "resolve_dm_channel", "invalidate_dm_channel"]

@@ -295,7 +295,10 @@ class FakeClient:
 
     async def send_message(self, channel_id: int, content: str) -> DiscordMessage:
         self.sent.append(("message", int(channel_id), content))
-        return self._message(int(channel_id), content, dm=False)
+        # DM sends arrive through send_message with an already-resolved DM
+        # channel id (unified path): mark dm when the id is a known DM channel
+        dm = int(channel_id) in set(self.dm_channels.values()) or int(channel_id) >= 9000
+        return self._message(int(channel_id), content, dm=dm)
 
     async def send_dm(self, user_id: int, content: str) -> DiscordMessage:
         channel_id = self.dm_channels.get(int(user_id), 9000 + int(user_id))

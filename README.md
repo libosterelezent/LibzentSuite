@@ -86,6 +86,24 @@ earns at least one retry, paced by the limiter cooldown — the framework
 always respects server-provided rate limits). `FlowBlocked` aborts only THAT
 account's flow with a human reason.
 
+**API-call hygiene (anti-flag).** The framework outside plugins makes the
+minimum possible Discord REST calls: connections are gateway-only, sends are
+plugin-initiated, and every resolved entity is cached per account in SQLite
+(`api_cache` — migration 002) so a DM channel or user costs **one call for
+the account's lifetime, not one per boot**. DM sends go through the resolved
+channel id (never re-fetching the user mid-send), stale cache rows are
+dropped when Discord reports a target gone, and an optional typing indicator
+(account setting `typing_probability`, default 0 = zero extra calls) mimics
+human composing when enabled.
+
+## Managing from Discord (mention prefix)
+
+Owners mention a running account as the command prefix — `@account status`,
+`@account plugins alpha soulcopy off`, `@account estop` — in any channel the
+account can see. Replies go through the SAME paced pipeline (lane → pacing →
+jitter → audit), non-owners are ignored completely, commands are
+allowlisted, and `REMOTE_CONTROL=0` in `.env` disables the bridge entirely.
+
 ## Rate policies (spec §5)
 
 Four levels — `global`, `account`, `plugin`, `account_plugin` — each
@@ -130,3 +148,19 @@ settings, tasks, rate policies, logs and simulation system — parity by
 construction, not by discipline.
 
 Inter-module contracts are documented in `INTEGRATION.md`.
+
+## Anti-flag hardening (audit round)
+
+- **One REST call per entity, ever**: DM channels + users resolve through
+  memory cache → the per-account `api_cache` table (SQLite, migration 002) →
+  a single client call, recorded in both. Restarts never re-fetch.
+- **No double-resolution**: DM sends reuse the resolved channel id instead
+  of re-running fetch_user/create_dm inside `send_dm`.
+- **Stale-cache healing**: a TargetGone on a DM send invalidates the memory
+  + DB rows so the next resolution re-opens cleanly.
+- **Optional typing indicator**: `typing_probability` account setting
+  (default 0 — zero extra API calls); fires `trigger_typing` before guild
+  sends when enabled, best-effort only.
+- **Mention-prefix management** (`core/remote_control.py`): owner-only,
+  allowlisted, self-throttled, replies paced by the full pipeline.
+
