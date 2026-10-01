@@ -72,6 +72,15 @@ Plugin -> PluginServices.send_message()
         -> audit + history + events                  [exactly-once per task]
 ```
 
+On top of the per-account pacing sits the **sequential send lane**
+(`core/rate_limit_manager/lane.py`, FarmLite concept made robust): when
+enabled, every outbound action from EVERY account is admitted strictly one
+at a time, spaced by `prefixrate` (0 = pause the lane, everything holds).
+Server-wide serialization + per-account pacing + the 1.5s floor compose —
+`ratelimit lane` (CLI) or the Rate Limits page (dashboard) control it, and
+the config ships it on by default (`"lane": {"enabled": true,
+"prefixrate": 1.5}` in `config/rate_limits.json`).
+
 Retries cover transient failures and server 429s (`ServerRateLimit` always
 earns at least one retry, paced by the limiter cooldown — the framework
 always respects server-provided rate limits). `FlowBlocked` aborts only THAT

@@ -165,6 +165,48 @@ SIM_REPORT = {
 }
 
 
+
+class TestLaneRoutes(unittest.IsolatedAsyncioTestCase):
+    """Sequential send lane: GET state + POST configuration."""
+
+    async def asyncSetUp(self) -> None:
+        self.fake = FakeControlAPI()
+        self.server = DashboardServer(self.fake, token=TOKEN, port=0)
+        self.server.start()
+        self.base = f"http://127.0.0.1:{self.server.bound_port}"
+
+    async def asyncTearDown(self) -> None:
+        self.server.stop()
+
+    async def test_get_lane(self) -> None:
+        status, body = await asyncio.to_thread(
+            http_get, f"{self.base}/api/ratelimit/lane")
+        self.assertEqual(status, 200)
+        data = get_json(body)["data"]
+        self.assertIn("prefixrate", data)
+        self.assertIn("paused", data)
+
+    async def test_post_lane_happy(self) -> None:
+        status, body = await asyncio.to_thread(
+            http_post, f"{self.base}/api/ratelimit/lane",
+            {"enabled": True, "prefixrate": 2.0})
+        self.assertEqual(status, 200)
+        self.assertTrue(get_json(body)["ok"])
+        self.assertEqual(self.fake.calls[-1], ("ratelimit_set_lane", (True, 2.0)))
+
+    async def test_post_lane_validation(self) -> None:
+        for payload in (
+            {"enabled": "yes"},       # strict bool
+            {"prefixrate": -1},       # negative spacing
+            {"prefixrate": "fast"},   # not a number
+            {},                       # nothing provided
+        ):
+            status, body = await asyncio.to_thread(
+                http_post, f"{self.base}/api/ratelimit/lane", payload)
+            self.assertEqual(status, 400, payload)
+            self.assertFalse(get_json(body)["ok"])
+
+
 class FakeSubscribable:
     """LogService/AuditRecorder-shaped subscribe() double."""
 
@@ -332,6 +374,18 @@ class FakeControlAPI:
     async def ratelimit_warnings(self):
         self._record("ratelimit_warnings")
         return WARNINGS
+
+    async def ratelimit_lane(self):
+        return {"enabled": False, "prefixrate": 1.5, "paused": False,
+                "waiting": 0, "grants": 0, "last_grant_age_s": None,
+                "held_off_seconds": 0.0}
+
+    async def ratelimit_set_lane(self, enabled=None, prefixrate=None):
+        self.calls.append(("ratelimit_set_lane", (enabled, prefixrate)))
+        return {"enabled": bool(enabled) if enabled is not None else False,
+                "prefixrate": prefixrate if prefixrate is not None else 1.5,
+                "paused": False, "waiting": 0, "grants": 0,
+                "last_grant_age_s": None, "held_off_seconds": 0.0}
 
     async def ratelimit_set_floor(self, seconds):
         self._record("ratelimit_set_floor", seconds)

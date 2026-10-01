@@ -73,8 +73,8 @@ HELP: Dict[str, Tuple[str, str]] = {
     "ratelimit": (
         "show|set <action> <interval> [jitter_min jitter_max] [level owner]"
         "|clear <level> <owner> <action>|effective <action> [account] [plugin]"
-        "|warnings|floor <seconds>",
-        "rate policies (safety floor: 1.5s/action)",
+        "|warnings|floor <seconds>|lane [on [rate]|off|rate <s>]",
+        "rate policies (safety floor: 1.5s/action; lane: server-wide sequential sends)",
     ),
     "tasks": (
         "list [status]|cancel <id>|history [n]"
@@ -192,6 +192,7 @@ _RATELIMIT_USAGE = {
     "effective": "ratelimit effective <action> [account] [plugin]",
     "warnings": "ratelimit warnings",
     "floor": "ratelimit floor <seconds>",
+    "lane": "ratelimit lane [on [rate]|off|rate <s>]",
 }
 _TASKS_USAGE = {
     "list": "tasks list [status]",
@@ -441,7 +442,33 @@ async def _ratelimit_group(api: Any, args: List[str]) -> str:
     if sub == "floor":
         seconds = _number(_exact(rest, 1, ctx), ctx, "seconds")
         return _result(await api.ratelimit_set_floor(seconds), verb="floor set")
+    if sub == "lane":
+        return await _lane_subcommand(api, rest, ctx)
     raise UsageError(f"ratelimit: unknown subcommand {sub!r}")  # pragma: no cover
+
+
+async def _lane_subcommand(api: Any, rest: List[str], ctx: str) -> str:
+    """``ratelimit lane`` — show/configure the sequential send lane.
+
+    ``lane``                show state · ``lane on [rate]`` enable (+spacing)
+    ``lane off``            disable ·  ``lane rate <s>`` set spacing (0=pause)
+    """
+    if not rest:
+        return format_lane(await api.ratelimit_lane())
+    verb = rest[0].lower()
+    if verb in ("on", "enable"):
+        prefixrate = _number(rest[1], ctx, "rate") if len(rest) > 1 else None
+        return format_lane(
+            await api.ratelimit_set_lane(enabled=True, prefixrate=prefixrate)
+        )
+    if verb in ("off", "disable"):
+        if len(rest) > 1:
+            raise UsageError(f"usage: {_RATELIMIT_USAGE['lane']}")
+        return format_lane(await api.ratelimit_set_lane(enabled=False))
+    if verb == "rate":
+        rate = _number(_exact(rest[1:], 1, ctx), ctx, "rate")
+        return format_lane(await api.ratelimit_set_lane(prefixrate=rate))
+    raise UsageError(f"ratelimit lane: unknown verb {verb!r} — usage: {_RATELIMIT_USAGE['lane']}")
 
 
 async def _tasks_group(api: Any, args: List[str]) -> str:
@@ -672,6 +699,22 @@ def format_profiles(profiles: List[dict]) -> str:
             + (f" — {desc}" if desc else "")
         )
     return "\n".join(lines)
+
+
+def format_lane(lane: dict) -> str:
+    """Lane state -> display lines (sequential sends: spacing + pause flag)."""
+    if not lane.get("enabled"):
+        return "  send lane: off (sends are paced per-account only)"
+    state = "PAUSED — all outbound actions hold" if lane.get("paused") else "active"
+    last = lane.get("last_grant_age_s")
+    last_text = f"{last:g}s ago" if last is not None else "never"
+    return (
+        f"  send lane: on — server-wide sequential sends ({state})\n"
+        f"      spacing   : {lane.get('prefixrate', 0):g}s between consecutive sends"
+        "  (0 pauses)\n"
+        f"      waiting   : {lane.get('waiting', 0)}   grants: {lane.get('grants', 0)}"
+        f"   last grant: {last_text}"
+    )
 
 
 def format_policies(policies: List[dict]) -> str:

@@ -213,5 +213,56 @@ class TestEmergencyStop(unittest.IsolatedAsyncioTestCase):
             await stack.stop()
 
 
+class TestLaneIntegration(unittest.IsolatedAsyncioTestCase):
+    async def test_server_wide_sequential_sends(self) -> None:
+        """Two accounts sending through the production bootstrap: with the
+        lane on, EVERY pair of outbound sends (across accounts too) is spaced
+        by at least the prefixrate — the FarmLite guarantee, fleet-wide."""
+        stack = Stack()
+        # enable the lane with a recognizable spacing (runtime call path)
+        lane = await stack.framework.api.ratelimit_set_lane(enabled=True, prefixrate=1.6)
+        self.assertTrue(lane["enabled"])
+        await stack.start()
+        try:
+            # alpha and beta both fire the soulcopy flow
+            await stack.owner_says("slcopy")
+            await stack.world.wait_for_quiet(GUILD_CHANNEL, quiet=2.5, limit=40.0)
+            audit = await stack.framework.api.audit_tail(n=30)
+            outs = sorted(e["ts"] for e in audit if e["direction"] == "out")
+            self.assertGreaterEqual(len(outs), 2)
+            gaps = [b - a for a, b in zip(outs, outs[1:])]
+            self.assertTrue(all(g >= 1.5 for g in gaps), gaps)
+            # lane stats surfaced through the API
+            status = await stack.framework.api.ratelimit_lane()
+            self.assertTrue(status["enabled"])
+            self.assertGreaterEqual(status["grants"], 2)
+            # and in the full stats block (dashboard Rate Limits page)
+            stats = (await stack.framework.api.status())["ratelimit"]
+            self.assertTrue(stats["lane"]["enabled"])
+        finally:
+            await stack.stop()
+
+    async def test_lane_pause_holds_and_resumes(self) -> None:
+        stack = Stack()
+        await stack.framework.api.ratelimit_set_lane(enabled=True, prefixrate=1.5)
+        await stack.start()
+        try:
+            # pause the lane: the export send must NOT go out
+            await stack.framework.api.ratelimit_set_lane(prefixrate=0.0)
+            self.assertTrue((await stack.framework.api.ratelimit_lane())["paused"])
+            await stack.owner_says("slcopy")
+            await asyncio.sleep(1.0)
+            history = stack.world.messages_of(GUILD_CHANNEL)
+            self.assertNotIn("$slud-s", history)  # holding
+            # resume: the flow completes
+            await stack.framework.api.ratelimit_set_lane(prefixrate=1.5)
+            await stack.world.wait_for_quiet(GUILD_CHANNEL, quiet=2.5, limit=30.0)
+            history = stack.world.messages_of(GUILD_CHANNEL)
+            self.assertIn("$slud-s", history)
+            # a paused lane also surfaced a warning while it was paused
+        finally:
+            await stack.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

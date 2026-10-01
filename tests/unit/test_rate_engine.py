@@ -449,10 +449,11 @@ class StatsShape(unittest.IsolatedAsyncioTestCase):
         stats = manager.stats()
         self.assertEqual(
             set(stats),
-            {"floor", "policies", "cooldowns", "last_fire_ages", "grants",
+            {"floor", "lane", "policies", "cooldowns", "last_fire_ages", "grants",
              "waits", "avg_wait_s"},
         )
         self.assertEqual(stats["floor"], 1.5)
+        self.assertEqual(stats["lane"]["enabled"], False)
         self.assertEqual(len(stats["policies"]), 2)
         self.assertEqual(stats["cooldowns"]["global"], 0.0)
         self.assertEqual(stats["cooldowns"]["accounts"]["beta"]["poke"], 1.5)

@@ -150,7 +150,12 @@ def build(
     bus = EventBus()
     _wire_event_logging(bus, logs)
 
-    limiter = RateLimitManager(bus, ServiceLogger(logs, "ratelimit"), database.policies)
+    limiter = RateLimitManager(
+        bus, ServiceLogger(logs, "ratelimit"), database.policies,
+        kv_repo=database.kv,
+        lane_enabled=bool((config.policies.get("lane") or {}).get("enabled", False)),
+        lane_prefixrate=float((config.policies.get("lane") or {}).get("prefixrate", 1.5)),
+    )
     _apply_policies(limiter, config)
 
     settings = SettingsManager(

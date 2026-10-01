@@ -240,6 +240,41 @@ class ControlAPI:
         """Raise the pacing floor (can never drop below 1.5s)."""
         return {"floor": self._limiter.set_floor(seconds)}
 
+    async def ratelimit_lane(self) -> Dict[str, Any]:
+        """Sequential send lane state (server-wide serialization)."""
+        return self._limiter.lane_status()
+
+    async def ratelimit_set_lane(
+        self, enabled: bool = None, prefixrate: float = None
+    ) -> Dict[str, Any]:
+        """Configure the sequential send lane (persisted).
+
+        ``prefixrate`` is the minimum spacing between consecutive outbound
+        actions across EVERY account; 0 PAUSES the lane (submissions hold
+        until a non-zero rate is set — FarmLite semantics).
+        """
+        if enabled is None and prefixrate is None:
+            raise ValueError("provide 'enabled' and/or 'prefixrate'")
+        if enabled is not None:
+            self._limiter.set_lane_enabled(self._parse_lane_bool(enabled))
+        if prefixrate is not None:
+            self._limiter.set_lane_prefixrate(self._parse_lane_number(prefixrate))
+        return self._limiter.lane_status()
+
+    @staticmethod
+    def _parse_lane_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        raise ValueError(f"field 'enabled' must be a boolean, got {value!r}")
+
+    @staticmethod
+    def _parse_lane_number(value: Any) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"field 'prefixrate' must be a number, got {value!r}") from exc
+        return number
+
     # ------------------------------------------------------------------ tasks
     async def tasks_list(
         self, status: Optional[str] = None, account: Optional[str] = None

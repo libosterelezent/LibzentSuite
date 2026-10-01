@@ -174,6 +174,19 @@ class FakeApi:
         self._record("ratelimit_set_floor", seconds)
         return {"floor": seconds}
 
+    async def ratelimit_lane(self):
+        self._record("ratelimit_lane")
+        return {"enabled": True, "prefixrate": 1.5, "paused": False,
+                "waiting": 2, "grants": 9, "last_grant_age_s": 0.4,
+                "held_off_seconds": 0.0}
+
+    async def ratelimit_set_lane(self, enabled=None, prefixrate=None):
+        self._record("ratelimit_set_lane", enabled, prefixrate)
+        return {"enabled": bool(enabled) if enabled is not None else True,
+                "prefixrate": prefixrate if prefixrate is not None else 1.5,
+                "paused": False, "waiting": 0, "grants": 9,
+                "last_grant_age_s": None, "held_off_seconds": 0.0}
+
     # ---- tasks
     async def tasks_list(self, status=None, account=None):
         self._record("tasks_list", status=status, account=account)
@@ -416,6 +429,38 @@ class TestRateLimitGroup(unittest.IsolatedAsyncioTestCase):
         api = FakeApi()
         await run_command(api, "ratelimit floor 2.0")
         self.assertEqual(called(api, "ratelimit_set_floor")[0], (2.0,))
+
+    async def test_lane_show(self) -> None:
+        api = FakeApi()
+        text = await run_command(api, "ratelimit lane")
+        self.assertTrue(called(api, "ratelimit_lane"))
+        self.assertIn("sequential sends", text)
+        self.assertIn("active", text)
+
+    async def test_lane_on_with_rate(self) -> None:
+        api = FakeApi()
+        await run_command(api, "ratelimit lane on 2.5")
+        self.assertEqual(called(api, "ratelimit_set_lane")[0], (True, 2.5))
+
+    async def test_lane_on_bare_and_off(self) -> None:
+        api = FakeApi()
+        await run_command(api, "ratelimit lane on")
+        self.assertEqual(called(api, "ratelimit_set_lane")[0], (True, None))
+        await run_command(api, "ratelimit lane off")
+        self.assertEqual(called(api, "ratelimit_set_lane")[0], (False, None))
+
+    async def test_lane_rate_zero_pauses(self) -> None:
+        api = FakeApi()
+        await run_command(api, "ratelimit lane rate 0")
+        self.assertEqual(called(api, "ratelimit_set_lane")[0], (None, 0.0))
+
+    async def test_lane_bad_inputs(self) -> None:
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "ratelimit lane sideways")
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "ratelimit lane on x")
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "ratelimit lane rate")
 
 
 class TestTasksGroup(unittest.IsolatedAsyncioTestCase):
