@@ -22,7 +22,7 @@ from __future__ import annotations
 import random
 import time
 from types import SimpleNamespace
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from adapters.base import DiscordMessage
 from adapters.simulator.world import SimWorld, WorldMessage
@@ -265,18 +265,10 @@ class SimClient:
 
     # ------------------------------------------------- capability actions
     async def add_reaction(self, channel_id: int, message_id: int, emoji: str) -> Any:
-        """React via the world (echoes a ReactionAdded to other subscribers).
-
-        TargetGone for a vanished message — matching click_button and the
-        live adapter's contract (a generic error cannot be reconstructed
-        into FlowBlocked by the services layer).
-        """
+        """React via the world (echoes a ReactionAdded to other subscribers)."""
         if not self.connected:
             raise ConnectionError("client not connected")
-        try:
-            self._world.react(self.user_id, message_id, emoji, kind="add")
-        except KeyError:
-            raise TargetGone("", f"message {message_id} vanished") from None
+        self._world.react(self.user_id, message_id, emoji, kind="add")
         return None
 
     async def click_button(self, channel_id: int, message_id: int, custom_id: str) -> Any:

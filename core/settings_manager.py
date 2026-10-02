@@ -125,23 +125,6 @@ ACCOUNT_SETTINGS: tuple = (
 )
 
 
-_ACCOUNT_DEFS_CACHE: Optional[tuple] = None
-
-
-def _account_defs() -> tuple:
-    """(name -> Setting, name -> validated default) for ACCOUNT_SETTINGS.
-
-    Built once: ``account_settings()`` runs on every reconnect/typing
-    decision and used to re-validate every default on each call.
-    """
-    global _ACCOUNT_DEFS_CACHE
-    if _ACCOUNT_DEFS_CACHE is None:
-        defs = {s.name: s for s in ACCOUNT_SETTINGS}
-        _ACCOUNT_DEFS_CACHE = (
-            defs, {name: s.validate(s.default) for name, s in defs.items()})
-    return _ACCOUNT_DEFS_CACHE
-
-
 class SettingsManager:
     """Layered, validated, persisted settings for plugins AND accounts."""
 
@@ -195,15 +178,8 @@ class SettingsManager:
                 self._account_plugin = {}
         if self._account_repo is not None:
             listing = getattr(self._account_repo, "list_accounts", None)
-            if callable(listing):
-                try:  # best-effort like the layers above: a locked read
-                    names = await listing() or []  # must not fail the boot
-                except Exception:
-                    self._logger.exception("could not load account settings layer")
-                    names = []
-            else:
-                names = []
-            for name in names:
+            names = await listing() if callable(listing) else []
+            for name in names or []:
                 try:
                     self._account_framework[name] = dict(
                         await self._account_repo.get(name) or {}
@@ -282,9 +258,9 @@ class SettingsManager:
         Pure memory after :meth:`load` (sync by design — called from sync
         reconnect/typing paths in the account manager).
         """
-        defs, defaults = _account_defs()  # cached: hot sync path
+        defs = {s.name: s for s in ACCOUNT_SETTINGS}
         stored = self._account_framework.get(account, {})
-        values = dict(defaults)
+        values = {s.name: s.validate(s.default) for s in ACCOUNT_SETTINGS}
         for key, raw in stored.items():
             if key in defs:
                 try:

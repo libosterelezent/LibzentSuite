@@ -33,15 +33,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import queue
 import sys
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from contextlib import contextmanager
-from typing import Any, Callable, Deque, Dict, List, Optional
-
-from ._persist_queue import MAX_INFLIGHT as _MAX_INFLIGHT, PersistQueue
+from typing import Any, Callable, Deque, Dict, Iterator, List, Optional
 
 SEVERITIES = ("DEBUG", "INFO", "WARNING", "ERROR")
 _LEVEL_BY_SEVERITY = {
@@ -58,6 +57,12 @@ _SEVERITY_BY_LEVELNAME = {
     "WARN": "WARNING",
 }
 
+#: in-flight persistence cap: items enqueued but not yet drained. Above it,
+#: new records are dropped FROM PERSISTENCE ONLY (ring/counters keep them)
+#: and counted in stats()['dropped'] — a wedged DB must never balloon
+#: memory or leak back into the record path.
+_MAX_INFLIGHT = 10_000
+
 
 @dataclass
 class LogEntry:
@@ -73,14 +78,9 @@ class LogEntry:
     event: Optional[str] = None   # event name when this records a bus event
 
     def as_dict(self) -> Dict[str, Any]:
-        # explicit dict: dataclasses.asdict() deep-copies recursively and is
-        # ~3x slower on this hot path (every record + every queued row)
-        return {
-            "ts": round(self.ts, 3), "severity": self.severity,
-            "source": self.source, "message": self.message,
-            "account": self.account, "plugin": self.plugin,
-            "task_id": self.task_id, "event": self.event,
-        }
+        out = asdict(self)
+        out["ts"] = round(out["ts"], 3)
+        return out
 
 
 def configure_stderr(level: int = logging.INFO) -> None:
@@ -118,10 +118,18 @@ class LogService:
         self._db = None  # LogRepository (duck-typed) — CONFIG ONLY until start_persistence
         self._counts: Dict[str, int] = {sev: 0 for sev in SEVERITIES}
         # OBSERVABILITY (dead sinks must not be silent): drop/failure counters
+        self._db_failures = 0
         self._subscriber_failures = 0
+        self._dropped = 0  # records dropped from persistence (queue overflow)
         # QUEUED PERSISTENCE: producers (any thread) put; ONE async drain
-        # worker (event loop) consumes — shared engine, see _persist_queue
-        self._persist = PersistQueue("log")
+        # worker (event loop) consumes. SimpleQueue: put/get never block.
+        self._pqueue: "queue.SimpleQueue" = queue.SimpleQueue()
+        self._worker: Optional["asyncio.Task"] = None
+        self._worker_stopping = False
+        self._persist_repo: Any = None
+        self._persist_batch = 50
+        self._persist_interval = 0.25
+        self._db_failure_notified = False  # one stderr line per failure burst
         # INBOUND/OUTBOUND SEPARATION: while a StdlibBridge is ingesting a
         # raw stdlib record ON THIS THREAD, the mirror is suppressed — the
         # record came FROM stdlib (stderr already printed it once), so
@@ -158,9 +166,9 @@ class LogService:
     ) -> Optional["asyncio.Task"]:
         """Spawn the async drain worker (call BEFORE heavy logging).
 
-        The worker drains the queue in batches (``repo.add_many`` when the
-        repository has it — one transaction per batch — else ``repo.add``
-        per item) and sleeps ``interval`` seconds when idle. Failures are
+        The worker polls the queue, awaits ``repo.add(entry_dict)`` per
+        dequeued item (batch-commit friendliness is the repository's
+        business) and sleeps ``interval`` seconds when idle. Failures are
         counted in ``stats()['db_failures']`` — never raised, never logged
         through LogService (one raw stderr one-liner per failure burst).
 
@@ -168,19 +176,124 @@ class LogService:
         (stop_persistence() first to restart with a different repo/batch).
         """
         if repo is None:
-            return self._persist._worker
+            return self._worker
+        if self._worker is not None and not self._worker.done():
+            return self._worker
         self._db = repo
-        return await self._persist.start(repo, batch=batch, interval=interval)
+        self._persist_repo = repo
+        self._persist_batch = max(1, int(batch))
+        self._persist_interval = max(0.0, float(interval))
+        self._worker_stopping = False
+        self._worker = asyncio.get_running_loop().create_task(
+            self._persistence_worker(repo), name="logservice-persistence"
+        )
+        return self._worker
 
     async def stop_persistence(self, timeout: float = 5.0) -> None:
         """Stop the drain worker (idempotent); call BEFORE ``db.close()``.
 
-        Records stop being enqueued, the in-flight batch finishes (bounded
-        join), a stuck worker is cancelled after the grace window and the
-        remaining queue is drained inline in order (bounded by ``timeout``
-        — a hung repo cannot wedge shutdown).
+        Order: records stop being enqueued, the worker is asked to finish
+        its current batch and exit (bounded join — a HEALTHY worker is
+        never cancelled mid-``repo.add``, so no item is lost or doubled),
+        a stuck worker is cancelled after the grace window, and whatever
+        still remains in the queue is drained inline (bounded by
+        ``timeout`` — a hung repo cannot wedge shutdown).
         """
-        await self._persist.stop(timeout)
+        worker = self._worker
+        if worker is None:
+            return
+        self._worker = None  # record() stops enqueueing from now on
+        self._worker_stopping = True
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, float(timeout))
+        # graceful join: the worker checks the flag between adds and exits
+        # on its own; 0.5s grace covers one in-flight add + batch tail
+        await asyncio.wait({worker}, timeout=min(0.5, max(0.0, float(timeout))))
+        worker.cancel()  # no-op when the graceful exit already finished it
+        await asyncio.gather(worker, return_exceptions=True)
+        repo = self._persist_repo
+        if repo is not None:
+            while loop.time() < deadline:
+                got = 0
+                while got < self._persist_batch:
+                    try:
+                        item = self._pqueue.get_nowait()
+                    except queue.Empty:
+                        return
+                    try:
+                        await repo.add(item)
+                        self._db_failure_notified = False
+                    except Exception as exc:  # best-effort to the very end
+                        with self._lock:
+                            self._db_failures += 1
+                        self._notify_db_failure(exc)
+                    got += 1
+                await asyncio.sleep(0)  # yield between batches (big drains)
+
+    def _enqueue(self, entry: LogEntry) -> None:
+        """Hand one entry to the drain worker (never blocks, never raises).
+
+        The qsize() check is advisory: concurrent producer threads may
+        overshoot the cap by a hair before the single consumer catches up —
+        the bound exists to keep memory finite, not to be exact.
+        """
+        q = self._pqueue
+        if q.qsize() >= _MAX_INFLIGHT:
+            with self._lock:
+                self._dropped += 1
+            return
+        q.put(entry.as_dict())
+
+    async def _persistence_worker(self, repo: Any) -> None:
+        """Drain loop: batch of awaits, then yield (or idle-sleep).
+
+        Checks ``_worker_stopping`` between items so stop_persistence() can
+        join this task WITHOUT cancelling it mid-``repo.add`` (a cancelled
+        in-flight insert is the one place an item could be lost or
+        doubled); the idle sleep is the other cancellation point and is
+        always clean.
+        """
+        try:
+            while not self._worker_stopping:
+                drained = 0
+                while drained < self._persist_batch and not self._worker_stopping:
+                    try:
+                        item = self._pqueue.get_nowait()
+                    except queue.Empty:
+                        break
+                    try:
+                        await repo.add(item)
+                        self._db_failure_notified = False
+                    except Exception as exc:
+                        # OBSERVABLE, never recursive: no logging here (a
+                        # log call inside the write path is what fed the
+                        # original feedback loop)
+                        with self._lock:
+                            self._db_failures += 1
+                        self._notify_db_failure(exc)
+                    drained += 1
+                await asyncio.sleep(
+                    self._persist_interval if drained == 0 else 0
+                )
+        except asyncio.CancelledError:
+            raise  # stop_persistence()
+
+    def _notify_db_failure(self, exc: BaseException) -> None:
+        """One raw stderr one-liner per failure BURST (reset on success).
+
+        Deliberately not LogService/stdlib logging: a log call inside the
+        persistence path re-enters the very machinery that is failing.
+        """
+        if self._db_failure_notified:
+            return
+        self._db_failure_notified = True
+        try:
+            sys.stderr.write(
+                f"[slaughtermudae] log persistence failing: "
+                f"{type(exc).__name__}: {exc} (further errors counted silently)\n"
+            )
+        except Exception:
+            pass  # even stderr must never break the drain
 
     def record(
         self,
@@ -222,8 +335,9 @@ class LogService:
                 _LEVEL_BY_SEVERITY[severity], "%s", entry.message,
                 extra={"_sm_from_service": True},
             )
-        if self._persist.active:
-            self._persist.put(entry.as_dict())
+        worker = self._worker
+        if worker is not None and not worker.done():
+            self._enqueue(entry)
         for callback in list(self._subscribers):
             try:
                 callback(entry)
@@ -251,26 +365,18 @@ class LogService:
         source: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Most recent entries (oldest first) after applying the filters."""
-        if n <= 0:
-            return []
-        severity = severity.upper() if severity else None
         with self._lock:
-            ring = list(self._ring)  # cheap snapshot; filtering runs unlocked
-        out: List[LogEntry] = []
-        for entry in reversed(ring):  # newest first: stop once n are found
-            if severity and entry.severity != severity:
-                continue
-            if account and entry.account != account:
-                continue
-            if plugin and entry.plugin != plugin:
-                continue
-            if source and entry.source != source:
-                continue
-            out.append(entry)
-            if len(out) >= n:
-                break
-        out.reverse()
-        return [e.as_dict() for e in out]
+            items = list(self._ring)
+        if severity:
+            severity = severity.upper()
+            items = [e for e in items if e.severity == severity]
+        if account:
+            items = [e for e in items if e.account == account]
+        if plugin:
+            items = [e for e in items if e.plugin == plugin]
+        if source:
+            items = [e for e in items if e.source == source]
+        return [e.as_dict() for e in items[-max(0, n):]] if n > 0 else []
 
     def subscribe(self, callback: Callable[[LogEntry], None]) -> Callable[[], None]:
         """Live-tail subscription (dashboard WS); returns unsubscribe."""
@@ -288,14 +394,15 @@ class LogService:
         """Counters by severity + drop/failure counters for the dashboard."""
         with self._lock:
             counts = dict(self._counts)
+            db_failures = self._db_failures
             subscriber_failures = self._subscriber_failures
-        pstats = self._persist.stats()
+            dropped = self._dropped
         return {
             "entries": sum(counts.values()),
             "by_severity": counts,
-            "db_failures": pstats["db_failures"],
+            "db_failures": db_failures,
             "subscriber_failures": subscriber_failures,
-            "dropped": pstats["dropped"],
+            "dropped": dropped,
         }
 
 
@@ -318,13 +425,12 @@ class ServiceLogger:
         self._source = source
         self.name = f"slaughtermudae.{source}"
 
-    def _record(self, severity: str, msg: Any, args: tuple,
-                with_location: bool = False) -> None:
+    def _record(self, severity: str, msg: Any, args: tuple) -> None:
         try:
             message = self._format(msg, args)
             if severity == "error" and sys.exc_info()[0] is not None:
                 # stdlib .exception() contract: append the active exception
-                message = f"{message} [{self._exc_one_liner(with_location)}]"
+                message = f"{message} [{self._exc_one_liner()}]"
             self._service.record(severity.upper(), self._source, message)
         except Exception:
             pass  # logging must never break the caller
@@ -343,20 +449,11 @@ class ServiceLogger:
             return f"{text} {' '.join(str(a) for a in args)}"
 
     @staticmethod
-    def _exc_one_liner(with_location: bool = False) -> str:
-        """``Type: message`` (+ ``@ file.py:LINE in func`` of the innermost
-        frame for .exception(): the one-liner alone hides WHERE it broke)."""
-        exc_type, exc_value, tb = sys.exc_info()
+    def _exc_one_liner() -> str:
+        exc_type, exc_value, _ = sys.exc_info()
         if exc_type is None:
             return ""
-        text = f"{exc_type.__name__}: {exc_value}"
-        if with_location and tb is not None:
-            while tb.tb_next is not None:
-                tb = tb.tb_next
-            code = tb.tb_frame.f_code
-            text += (f" @ {code.co_filename.rsplit('/', 1)[-1]}"
-                     f":{tb.tb_lineno} in {code.co_name}")
-        return text
+        return f"{exc_type.__name__}: {exc_value}"
 
     # ------------------------------------------------- stdlib logger surface
     def debug(self, msg: Any, *args: Any) -> None:
@@ -375,7 +472,7 @@ class ServiceLogger:
         self._record("error", msg, args)
 
     def exception(self, msg: Any, *args: Any) -> None:
-        self._record("error", msg, args, with_location=True)
+        self._record("error", msg, args)
 
     def log(self, level: int, msg: Any, *args: Any) -> None:
         severity = {10: "DEBUG", 20: "INFO", 30: "WARNING", 40: "ERROR",

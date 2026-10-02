@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import signal
 import sys
 
 from core.bootstrap import build
@@ -57,74 +56,46 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
         plugin_dir=args.plugins,
     )
     api = framework.api
+
+    if args.start_all:
+        try:
+            await api.accounts_start()
+        except Exception as exc:
+            print(f"live mode unavailable: {exc}", file=sys.stderr)
+            return 2
+
     dashboard = None
+    if args.dashboard:
+        from interfaces.dashboard import DashboardServer
+
+        dashboard = DashboardServer(api, token=api.dashboard_token, port=args.port,
+                                     bus=framework.bus)
+        dashboard.start().attach_logs(api.logs_service())
+        if api.audit_recorder() is not None:
+            dashboard.attach_audit(api.audit_recorder())
+        print(f"dashboard: {dashboard.url}")
+
     exit_code = 0
     try:
-        if args.start_all:
-            try:
-                await api.accounts_start()
-            except Exception as exc:
-                print(f"live mode unavailable: {exc}", file=sys.stderr)
-                return 2  # the finally below still shuts the stack down
-
-        if args.dashboard:
-            from interfaces.dashboard import DashboardServer
-
-            dashboard = DashboardServer(api, token=api.dashboard_token, port=args.port,
-                                         bus=framework.bus, exit_signal=True)
-            dashboard.start().attach_logs(api.logs_service())
-            if api.audit_recorder() is not None:
-                dashboard.attach_audit(api.audit_recorder())
-            print(f"dashboard: {dashboard.url}")
-
         if argv:  # one-shot command mode
             from interfaces.cli import run_once
 
             exit_code = await run_once(api, argv)
         elif args.headless:
-            print("running headless — Ctrl-C / SIGTERM to stop")
-            await _wait_for_stop_signal()
+            print("running headless — Ctrl-C to stop")
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                pass
         else:
             from interfaces.cli import Repl
 
             await Repl(api).run()
     finally:
-        # ALWAYS runs (start-all failure, dashboard bind error, Ctrl-C...):
-        # a leaked database connection/worker thread can hang process exit
         if dashboard is not None:
-            try:
-                dashboard.stop()
-            except Exception as exc:
-                print(f"warning: dashboard stop failed: {exc}", file=sys.stderr)
+            dashboard.stop()
         await framework.shutdown()
     return exit_code
-
-
-async def _wait_for_stop_signal() -> None:
-    """Block until SIGINT/SIGTERM (a service manager's `stop` is SIGTERM,
-    which previously killed the process WITHOUT the graceful shutdown)."""
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    installed = []
-    for name in ("SIGTERM", "SIGINT"):
-        sig = getattr(signal, name, None)
-        if sig is None:
-            continue
-        try:
-            loop.add_signal_handler(sig, stop.set)
-            installed.append(sig)
-        except (NotImplementedError, RuntimeError, ValueError):
-            pass  # Windows / non-main thread: fall back to KeyboardInterrupt
-    try:
-        await stop.wait()
-    except asyncio.CancelledError:
-        pass
-    finally:
-        for sig in installed:
-            try:
-                loop.remove_signal_handler(sig)
-            except Exception:
-                pass
 
 
 def main() -> int:

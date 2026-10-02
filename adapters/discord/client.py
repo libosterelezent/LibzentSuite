@@ -63,7 +63,6 @@ class RealDiscordClient:
         self._client: Any = None           # the live Client instance
         self._ready = asyncio.Event()
         self._startup_error: Optional[Exception] = None
-        self._run_task: Optional["asyncio.Task"] = None  # strong ref (see connect)
         self._logger = logger or LOG
         #: best-effort account label for domain error messages (set by factory)
         self._account = ""
@@ -152,8 +151,7 @@ class RealDiscordClient:
         async def on_reaction_add(reaction: Any, user: Any) -> None:
             if self.on_reaction is not None and user.id != self.user_id:
                 message = reaction.message
-                guild = (getattr(message, "guild", None)
-                         or getattr(getattr(message, "channel", None), "guild", None))
+                guild = getattr(message, "guild", None)                     or getattr(getattr(message, "channel", None), "guild", None)
                 self.on_reaction(
                     "add", message.id, message.channel.id,
                     getattr(guild, "id", None) if guild else None,
@@ -164,31 +162,21 @@ class RealDiscordClient:
         async def on_reaction_remove(reaction: Any, user: Any) -> None:
             if self.on_reaction is not None and user.id != self.user_id:
                 message = reaction.message
-                guild = (getattr(message, "guild", None)
-                         or getattr(getattr(message, "channel", None), "guild", None))
+                guild = getattr(message, "guild", None)                     or getattr(getattr(message, "channel", None), "guild", None)
                 self.on_reaction(
                     "remove", message.id, message.channel.id,
                     getattr(guild, "id", None) if guild else None,
                     user.id, reaction.emoji, (reaction, user),
                 )
 
-        # keep a STRONG reference: the loop only weak-references tasks, so
-        # an unreferenced client task can be garbage-collected mid-run, and
-        # disconnect() needs the handle to cancel it
-        self._run_task = asyncio.get_running_loop().create_task(self._run())
-        try:
-            await self._ready.wait()
-            # AUDIT FIX (ported): startup failures must FAIL the connect
-            # instead of silently yielding a session with user_id=None
-            if self._startup_error is not None:
-                raise AccountError(
-                    f"live client failed to start: {self._startup_error}")
-            if self.user_id is None:
-                raise AccountError(
-                    "live client connected without a user (bad token?)")
-        except BaseException:
-            await self._cancel_run_task()  # no orphaned client task
-            raise
+        asyncio.get_running_loop().create_task(self._run())
+        await self._ready.wait()
+        # AUDIT FIX (ported): startup failures must FAIL the connect instead
+        # of silently yielding a running session with user_id=None
+        if self._startup_error is not None:
+            raise AccountError(f"live client failed to start: {self._startup_error}")
+        if self.user_id is None:
+            raise AccountError("live client connected without a user (bad token?)")
         self._logger.info("live client connected as user %s", self.user_id)
 
     async def _run(self) -> None:
@@ -203,17 +191,6 @@ class RealDiscordClient:
         finally:
             self._ready.set()
 
-    async def _cancel_run_task(self) -> None:
-        """Cancel + reap the background client task (idempotent)."""
-        task, self._run_task = self._run_task, None
-        if task is None or task.done():
-            return
-        task.cancel()
-        try:
-            await asyncio.wait_for(asyncio.shield(task), 2.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
-            pass
-
     async def disconnect(self) -> None:
         """Close the underlying client; safe when never started."""
         if self._client is not None:
@@ -221,7 +198,6 @@ class RealDiscordClient:
                 await self._client.close()
             except Exception as exc:  # closing a half-open client can throw
                 self._logger.warning("live client close raised %s", exc)
-        await self._cancel_run_task()
 
     # ------------------------------------------------------------- messaging
     def _require_client(self) -> Any:

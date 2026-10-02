@@ -74,54 +74,27 @@ class CredentialService:
                     "(generate one: python -c 'from cryptography.fernet import "
                     "Fernet; print(Fernet.generate_key().decode())')"
                 ) from exc
-        key = self._read_key_file()
-        if key:
-            return key
+        if self._key_path.is_file():
+            key = self._key_path.read_text(encoding="utf-8").strip()
+            if key:
+                return key.encode()
         key = Fernet.generate_key()
         self._key_path.parent.mkdir(parents=True, exist_ok=True)
+        self._key_path.write_text(key.decode(), encoding="utf-8")
         try:
-            # created 0600 ATOMICALLY (write_text + chmod left a window in
-            # which the key was world-readable) and O_EXCL so two processes
-            # booting together can never overwrite each other's key
-            fd = os.open(str(self._key_path),
-                         os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            existing = self._read_key_file()
-            if existing:
-                return existing
-            raise CredentialsError(
-                f"credential key file {self._key_path} exists but is empty")
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(key)
+            os.chmod(self._key_path, 0o600)  # key never world-readable
+        except OSError:
+            pass
         LOG.info("generated new credential master key at %s "
                  "(lose it and stored credentials must be re-entered)",
                  self._key_path)
         return key
 
-    def _read_key_file(self) -> Optional[bytes]:
-        """The stored key (stripped) or None when absent/blank."""
-        if not self._key_path.is_file():
-            return None
-        try:
-            text = self._key_path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError) as exc:
-            raise CredentialsError(
-                f"credential key file {self._key_path} is unreadable: {exc}"
-            ) from exc
-        return text.encode() if text else None
-
     @property
     def fernet(self) -> Fernet:
         """Lazily-initialized cipher (created on first use, not at boot)."""
         if self._fernet is None:
-            key = self._load_or_create_key()
-            try:
-                self._fernet = Fernet(key)
-            except Exception as exc:  # corrupt/truncated key file
-                raise CredentialsError(
-                    f"credential master key in {self._key_path} is not a "
-                    "valid Fernet key (corrupt file? restore it, or delete "
-                    "it and re-enter the stored credentials)") from exc
+            self._fernet = Fernet(self._load_or_create_key())
         return self._fernet
 
     # ------------------------------------------------------------ storage
@@ -172,16 +145,12 @@ class CredentialService:
         return None
 
     async def delete(self, account: str) -> bool:
-        """Remove the stored credential + cached plaintext.
-
-        Memory caches are cleared FIRST: a DB failure mid-delete must not
-        leave the plaintext token cached for the rest of the process.
-        """
+        """Remove the stored credential + cached plaintext."""
+        existed = await self._repo.delete(account) \
+            if self._repo is not None else False
         self._memory.pop(account, None)
         self._runtime_sources.pop(account, None)
         self._db_accounts.discard(account)
-        existed = await self._repo.delete(account) \
-            if self._repo is not None else False
         return existed
 
     # ------------------------------------------------------------- status

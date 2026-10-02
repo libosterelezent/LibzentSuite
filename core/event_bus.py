@@ -14,8 +14,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Type
 
-from ._asyncutil import outer_cancel_pending
-
 LOG = logging.getLogger("slaughtermudae.events")
 
 Handler = Callable[["Event"], Any]
@@ -131,7 +129,7 @@ class RateLimitTriggered(Event):
 
     action: str = ""
     wait_s: float = 0.0
-    reason: str = ""  # "pacing" | "server" | "lane"
+    reason: str = ""  # "pacing" | "server"
 
 
 # ---------------------------------------------------------------- settings
@@ -271,10 +269,9 @@ class EventBus:
                         outcome = await outcome
                     results.append(outcome)
                 except asyncio.CancelledError:
-                    # read-only check (the old cancelling()>uncancel() idiom
-                    # consumed the very cancellation it was inspecting);
-                    # on 3.10 (no Task.cancelling) re-raising is the safe side
-                    if outer_cancel_pending(unknown=True):
+                    task = asyncio.current_task()
+                    outer_cancel = bool(task) and task.cancelling() > task.uncancel()
+                    if outer_cancel:
                         raise
                     LOG.exception(
                         "event handler %r cancelled internally for %s", handler, event.name

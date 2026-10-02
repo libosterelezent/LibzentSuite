@@ -72,13 +72,6 @@ class TaskHistoryRepository(BaseRepository):
                 ) from exc
             return int(row["id"]) if "id" in row else int(cur.lastrowid)
 
-    async def max_id(self) -> int:
-        """Highest stored task id (0 when the archive is empty)."""
-        row = await self._fetch_one(
-            "SELECT COALESCE(MAX(id), 0) AS m FROM task_history",
-            what="read task history high-water mark")
-        return int(row["m"]) if row is not None else 0
-
     async def update(self, task_id: int, **fields: Any) -> None:
         """Update ONLY the provided columns of one history row.
 

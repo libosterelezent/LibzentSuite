@@ -22,46 +22,6 @@ from .base import BaseRepository
 __all__ = ["AuditRepository", "LogRepository"]
 
 
-_AUDIT_SQL = """INSERT INTO audit_logs
-       (ts, account, direction, action, channel_id, content,
-        wait_ms, jitter_ms, note)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
-
-_LOG_SQL = """INSERT INTO logs (ts, severity, source, account, plugin, task_id, event, message)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
-
-
-def _audit_row(entry: Dict[str, Any]) -> tuple:
-    if not isinstance(entry, dict):
-        raise DatabaseError(f"audit entry must be a dict, got {type(entry).__name__}")
-    return (
-        entry.get("ts", time.time()),
-        entry.get("account", "?"),
-        entry.get("direction", "out"),
-        entry.get("action", "?"),
-        entry.get("channel_id"),
-        (entry.get("content") or "")[:500],
-        entry.get("wait_ms", 0.0),
-        entry.get("jitter_ms", 0.0),
-        entry.get("note"),
-    )
-
-
-def _log_row(entry: Dict[str, Any]) -> tuple:
-    if not isinstance(entry, dict):
-        raise DatabaseError(f"log entry must be a dict, got {type(entry).__name__}")
-    return (
-        entry.get("ts", time.time()),
-        str(entry.get("severity") or "INFO").upper(),
-        str(entry.get("source") or "?"),
-        entry.get("account"),
-        entry.get("plugin"),
-        entry.get("task_id"),
-        entry.get("event"),
-        str(entry.get("message") or ""),
-    )
-
-
 class AuditRepository(BaseRepository):
     """Interaction audit trail (bounded, newest-kept pruning)."""
 
@@ -79,21 +39,27 @@ class AuditRepository(BaseRepository):
 
         Raises DatabaseError when entry is not a dict or the write fails.
         """
-        row = _audit_row(entry)
+        if not isinstance(entry, dict):
+            raise DatabaseError(f"audit entry must be a dict, got {type(entry).__name__}")
         async with self._tx("append audit entry") as conn:
-            await conn.execute(_AUDIT_SQL, row)
+            await conn.execute(
+                """INSERT INTO audit_logs
+                       (ts, account, direction, action, channel_id, content,
+                        wait_ms, jitter_ms, note)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    entry.get("ts", time.time()),
+                    entry.get("account", "?"),
+                    entry.get("direction", "out"),
+                    entry.get("action", "?"),
+                    entry.get("channel_id"),
+                    (entry.get("content") or "")[:500],
+                    entry.get("wait_ms", 0.0),
+                    entry.get("jitter_ms", 0.0),
+                    entry.get("note"),
+                ),
+            )
             await self._prune_newest(conn, "audit_logs", self._keep)
-
-    async def add_many(self, entries: List[Dict[str, Any]]) -> int:
-        """Append a batch in ONE transaction with ONE prune (the queued
-        drain worker's fast path); all-or-nothing. Returns rows written."""
-        rows = [_audit_row(e) for e in entries]
-        if not rows:
-            return 0
-        async with self._tx("append audit batch") as conn:
-            await conn.executemany(_AUDIT_SQL, rows)
-            await self._prune_newest(conn, "audit_logs", self._keep)
-        return len(rows)
 
     async def recent(self, limit: int = 100, account: Optional[str] = None) -> List[Dict[str, Any]]:
         """The newest ``limit`` audit rows, returned oldest-first.
@@ -133,20 +99,24 @@ class LogRepository(BaseRepository):
         Severity is upper-cased so dashboard filters match regardless of who
         wrote the row. Raises DatabaseError for a non-dict entry.
         """
-        row = _log_row(entry)
+        if not isinstance(entry, dict):
+            raise DatabaseError(f"log entry must be a dict, got {type(entry).__name__}")
         async with self._tx("append log entry") as conn:
-            await conn.execute(_LOG_SQL, row)
+            await conn.execute(
+                """INSERT INTO logs (ts, severity, source, account, plugin, task_id, event, message)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    entry.get("ts", time.time()),
+                    str(entry.get("severity") or "INFO").upper(),
+                    str(entry.get("source") or "?"),
+                    entry.get("account"),
+                    entry.get("plugin"),
+                    entry.get("task_id"),
+                    entry.get("event"),
+                    str(entry.get("message") or ""),
+                ),
+            )
             await self._prune_newest(conn, "logs", self._keep)
-
-    async def add_many(self, entries: List[Dict[str, Any]]) -> int:
-        """Append a batch in ONE transaction with ONE prune (all-or-nothing)."""
-        rows = [_log_row(e) for e in entries]
-        if not rows:
-            return 0
-        async with self._tx("append log batch") as conn:
-            await conn.executemany(_LOG_SQL, rows)
-            await self._prune_newest(conn, "logs", self._keep)
-        return len(rows)
 
     async def recent(
         self,

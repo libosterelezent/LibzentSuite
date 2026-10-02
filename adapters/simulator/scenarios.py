@@ -251,6 +251,15 @@ def _checks_pacing(audit: List[dict], world: SimWorld) -> List[str]:
     return failures
 
 
+def _retry_evidence(audit: List[dict]) -> bool:
+    """True when some audit note hints at an attempt/retry (secondary signal)."""
+    for entry in audit:
+        note = str(entry.get("note", "") or "")
+        if "retry" in note.lower() or "attempt" in note.lower():
+            return True
+    return False
+
+
 def _checks_server_429(audit: List[dict], world: SimWorld) -> List[str]:
     """server_429_respected: blocked send retried AFTER the server wait."""
     failures: List[str] = []
@@ -270,10 +279,11 @@ def _checks_server_429(audit: List[dict], world: SimWorld) -> List[str]:
         )
     if not _delivered_chunks(world):
         failures.append("flow did not complete after the 429 (no chunk delivered)")
-    # retry is proven by world evidence alone (blocked attempt + later
-    # delivery); audit attempt notes stay a bonus signal, never a
-    # requirement — the old `and not blocked` guard was unreachable
-    # (blocked is non-empty by the early return above).
+    # retry proven by world evidence (blocked attempt + later delivery);
+    # audit attempt notes are a bonus signal, not a requirement (see module
+    # docstring for the documented decision)
+    if not _retry_evidence(audit) and not blocked:
+        failures.append("no retry evidence anywhere")
     return failures
 
 
