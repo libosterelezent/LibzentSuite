@@ -169,7 +169,15 @@ class PluginManager:
         account manager). Settings resolve later, at activate time. Async:
         the persisted enabled-state of each (account, plugin) pair is read
         from the repository here.
+
+        FIX (S4): deactivates PREVIOUS runtimes for this account before
+        replacing them, so a failed-start → restart cycle doesn't leave
+        orphaned plugin instances running.
         """
+        # deactivate old runtimes (fire on_disable/on_unload on any that
+        # were active — a restart after a failed start may have left them)
+        if account in self._accounts:
+            await self.deactivate_account(account)
         self._ensure_discovered()
         wanted = [n for n in self._loader.names() if allowed is None or n in allowed]
         runtimes: Dict[str, PluginRuntime] = {}

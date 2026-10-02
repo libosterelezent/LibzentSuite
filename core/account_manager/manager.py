@@ -151,6 +151,13 @@ class AccountRuntime:
     stop_requested: bool = False
     lost: asyncio.Event = field(default_factory=asyncio.Event)
     stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # M2 (flap breaker): monotonic timestamp of the last successful READY
+    # and the recent SHORT-LIVED sessions (< 90s). When Discord culls an
+    # account's sessions (young-account anti-abuse treatment), each
+    # reconnect SUCCEEDS — so the attempt counter resets to 1 every cycle
+    # and the loop would hammer IDENTIFYs forever at minimum backoff.
+    session_started: float = 0.0
+    flaps: List[float] = field(default_factory=list)
 
 
 @dataclass
@@ -404,6 +411,11 @@ class AccountManager:
             try:  # drop queued/parked tasks so nothing fires against a
                 # re-created same-named account later
                 self._scheduler.cancel_matching(account=name)
+                cleanup = getattr(self._scheduler, "cleanup_account", None)
+                if callable(cleanup):
+                    resolved = cleanup(name)  # K1: real method now exists;
+                    if asyncio.iscoroutine(resolved):  # tolerant of sync fakes
+                        await resolved
             except Exception:
                 self._logger.exception("task cancel failed for %s", name)
         stale_client = rt.client
@@ -413,6 +425,17 @@ class AccountManager:
                 await stale_client.disconnect()
             except Exception:
                 self._logger.warning("stale client close failed for %s", name)
+        try:
+            # K6 (S1-C7/S5-C3/S10-C3): a FAILED account was never stop()ed,
+            # so its plugins may still be ACTIVE (roll's recovery loop,
+            # on_load resources). detach fires no lifecycle hooks —
+            # deactivate first or they outlive the account's removal.
+            outcome = self._plugin_manager.deactivate_account(name)
+            if asyncio.iscoroutine(outcome):  # tolerant: sync pinned, async OK
+                await outcome
+        except Exception:
+            self._logger.exception(
+                "plugin deactivation on remove failed for %s", name)
         try:
             outcome = self._plugin_manager.detach_account(name)
             if asyncio.iscoroutine(outcome):  # tolerant: sync pinned, async OK
@@ -436,6 +459,30 @@ class AccountManager:
                 await self._plugin_state.cascade_account(name)
             except Exception:
                 self._logger.exception("plugin-state cascade failed for %s", name)
+        # K14/K15: in-memory mirrors and engine residue must not outlive the
+        # account either, or a re-created same-named account silently
+        # inherits its settings, profile grants, pacing stamps and 429
+        # cooldowns. Tolerant lookups keep partial test doubles working.
+        settings_mgr = getattr(self, "_settings", None)
+        if hasattr(settings_mgr, "forget_account"):
+            try:
+                settings_mgr.forget_account(name)
+            except Exception:
+                self._logger.exception("settings mirror cascade failed for %s", name)
+        profile_mgr = getattr(self, "_profile_manager", None)
+        if hasattr(profile_mgr, "forget_account"):
+            try:
+                profile_mgr.forget_account(name)
+            except Exception:
+                self._logger.exception("profile cache cascade failed for %s", name)
+        limiter = getattr(self, "_limiter", None)
+        if hasattr(limiter, "prune_account"):
+            try:
+                resolved = limiter.prune_account(name)
+                if asyncio.iscoroutine(resolved):
+                    await resolved
+            except Exception:
+                self._logger.exception("rate-engine residue cascade failed for %s", name)
         existed = bool(await self._accounts_repo.delete(name))
         self._logger.info("account %s removed (existed=%s)", name, existed)
         return {"removed": name, "existed": existed}
@@ -502,11 +549,25 @@ class AccountManager:
                 f"account {name!r} failed to connect: {exc}"
             ) from exc
         if rt.stop_requested:  # a stop() raced us mid-connect — honour it
+            # K2 (S1-C1/S10-C1): the racing stop() may have completed BEFORE
+            # rt.client was assigned (e.g. while we awaited token resolution),
+            # so its disconnect never saw this client. Disconnect HERE or the
+            # gateway stays live forever on a "stopped" account whose STOPPED
+            # guard then blocks every future cleanup (zombie self-bot).
+            client = rt.client
+            rt.client = None  # callbacks go stale immediately
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    self._logger.exception(
+                        "abort-disconnect failed for %s", name)
             rt.status = AccountStatus.STOPPED
             self._logger.info("account %s start aborted by concurrent stop", name)
             return account.status_dict()
         rt.status = AccountStatus.RUNNING
         rt.started_at = time.monotonic()
+        rt.session_started = rt.started_at  # M2: flap window starts at READY
         self._refresh_credential_source(account)
         self._logger.info("account %s running (user_id=%s)", name, rt.user_id)
         # plugins: re-attach with the CURRENT profile grants (assignments
@@ -524,6 +585,13 @@ class AccountManager:
             )
         self._bus.publish_nowait(AccountConnected(account=name))
         if self._reconnect_settings(name)["enabled"]:
+            # K5 (S1-C4): a stand-down (FAILED) or interrupted reconnect
+            # leaves the OLD supervisor alive and polling `lost`; spawning
+            # over it would orphan that task → dual supervisors → client
+            # ping-pong on the next drop. Cancel any live one first.
+            old = rt.supervisor
+            if old is not None and not old.done():
+                old.cancel()
             rt.supervisor = asyncio.create_task(
                 self._supervise(name, rt), name=f"supervise-{name}"
             )
@@ -584,17 +652,30 @@ class AccountManager:
             self._logger.info("account %s stopped", name)
             return account.status_dict()
 
-    async def start_all(self) -> Dict[str, Any]:
-        """Start every ENABLED account; logs and continues per account."""
+    async def start_all(self, *, stagger: float = 5.0) -> Dict[str, Any]:
+        """Start every ENABLED account; logs and continues per account.
+
+        Staggers each start by `stagger` seconds so multiple IDENTIFYs
+        from the same IP don't hit Discord's gateway connection rate
+        limit (which manifests as `Connection reset by peer` when all
+        accounts connect simultaneously). Set stagger=0 to disable.
+        """
         started: List[str] = []
         failed: Dict[str, str] = {}
         skipped: List[str] = []
+        first = True
         for name in sorted(self._accounts):
             account = self._accounts[name]
             if not account.record.enabled:
                 skipped.append(name)
                 self._logger.info("skipping disabled account %s", name)
                 continue
+            if not first and stagger > 0:
+                self._logger.info(
+                    "staggering %s start by %.0fs (gateway rate-limit safety)",
+                    name, stagger)
+                await asyncio.sleep(stagger)
+            first = False
             try:
                 await self.start(name)
                 started.append(name)
@@ -710,9 +791,31 @@ class AccountManager:
                     name, rt.status.value,
                 )
                 return
+            # M2 (flap breaker): if this account's sessions keep dying
+            # young, every reconnect SUCCEEDS and resets `attempt` to 0 —
+            # the loop would hammer IDENTIFYs forever at minimum backoff
+            # (and eventually trip the login endpoint's throttle, which
+            # surfaces as a false "bad token"). Escalate the attempt floor
+            # by the recent short-lived-session count instead. Recovery is
+            # never blocked — a session that survives 90s clears the
+            # history and the backoff decays with it.
+            now = time.monotonic()
+            rt.flaps = [t for t in rt.flaps if now - t < 300.0]
+            if len(rt.flaps) >= 4 and attempt < len(rt.flaps):
+                attempt = len(rt.flaps)
+                self._logger.warning(
+                    "account %s: %d short-lived sessions in the last 5 min —"
+                    " Discord is closing this account's sessions shortly"
+                    " after connect (young/flagged account?); escalating"
+                    " reconnect backoff", name, len(rt.flaps))
             delay = min(
                 cfg["initial"] * (cfg["multiplier"] ** attempt), cfg["max"]
             )
+            # K9 (S7-A5): jitter the backoff per account — pure exponential
+            # delays re-cluster synchronized reconnect storms under a shared
+            # drop event, re-tripping Discord's per-IP IDENTIFY limit even
+            # with the identify gate in place.
+            delay *= self._typing_rng.uniform(1.0, 1.5)
             self._logger.warning(
                 "account %s reconnect attempt %d in %.2fs", name, attempt + 1, delay
             )
@@ -730,14 +833,31 @@ class AccountManager:
                 return
             except Exception as exc:
                 attempt += 1
-                rt.status = AccountStatus.RECONNECTING
+                if not rt.stop_requested:
+                    # FIX (S1 #3): never regress STOPPED back to RECONNECTING
+                    rt.status = AccountStatus.RECONNECTING
                 rt.last_error = f"{type(exc).__name__}: {exc}"
                 self._logger.warning(
                     "reconnect attempt failed for %s: %s", name, rt.last_error
                 )
                 continue
+            if rt.stop_requested:
+                # K3 (S1-C2): a stop() completed WHILE we were inside
+                # connect() — its disconnect may have raced past this fresh
+                # client. Do not resurrect the account: tear the client down
+                # and leave it stopped (send_hook's RUNNING gate stays shut).
+                client = rt.client
+                rt.client = None
+                if client is not None:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        self._logger.exception(
+                            "reconnect-abort disconnect failed for %s", name)
+                return
             rt.status = AccountStatus.RUNNING
             rt.started_at = time.monotonic()  # uptime = current connection
+            rt.session_started = rt.started_at  # M2: flap window starts at READY
             rt.last_error = None
             rt.lost.clear()
             self._logger.info("account %s reconnected (user_id=%s)", name, rt.user_id)
@@ -854,6 +974,15 @@ class AccountManager:
             if rt.stop_requested or rt.client is not client:
                 return
             if rt.status in (AccountStatus.RUNNING, AccountStatus.CONNECTING):
+                # M2: record session flaps (short-lived sessions). A session
+                # that survived >= 90s means the account is healthy again —
+                # clear the history so one bad network hour doesn't stick.
+                now = time.monotonic()
+                rt.flaps = [t for t in rt.flaps if now - t < 300.0]
+                if rt.session_started and now - rt.session_started >= 90.0:
+                    rt.flaps.clear()
+                elif rt.session_started:
+                    rt.flaps.append(now)
                 if rt.supervisor is None:
                     # nobody will act on RECONNECTING (no supervisor was
                     # spawned): FAILED keeps start() usable for automation,
@@ -888,6 +1017,12 @@ class AccountManager:
             LoginFailure, so text matching is the portable seam,
           * anything else               -> FAILED (network/library/unknown).
         """
+        if rt.stop_requested:
+            # K4 (S10-C4): the connect was aborted by an intentional
+            # concurrent stop() — the resulting "connected without a user
+            # (bad token?)" style error is NOT a credential failure, and
+            # STOPPED must never regress to FAILED/INVALID_CREDENTIAL.
+            return
         if isinstance(exc, CredentialsError):
             rt.status = AccountStatus.MISSING_CREDENTIAL
         elif _looks_like_auth_error(exc):

@@ -293,7 +293,13 @@ class RateLimitManager:
                 if raw:
                     import json as _json
 
-                    data = _json.loads(raw)
+                    # K10 (S6-C1/S8-C4): KvRepository.get already JSON-DECODES
+                    # and returns a dict — only re-decode legacy/hand-written
+                    # rows that hold a pre-encoded string. The previous
+                    # unconditional json.loads(dict) raised TypeError, got
+                    # swallowed below, and silently reverted dashboard lane
+                    # edits to the config-file defaults on every reboot.
+                    data = raw if isinstance(raw, dict) else _json.loads(raw)
                     enabled = bool(data.get("enabled", enabled))
                     prefixrate = float(data.get("prefixrate", prefixrate))
             except Exception as exc:
@@ -488,7 +494,34 @@ class RateLimitManager:
         self._log("info", f"rate-limit safety floor raised to {candidate:g}s")
         return self._floor
 
-    # ------------------------------------------------------------- send lane
+    async def prune_account(self, account: str) -> None:
+        """Drop a removed account's engine residue + policy rows (cascade).
+
+        K15 (S6-C3/S8-C5/S10-C7): ``_last_fire`` pacing stamps,
+        ``_account_cooldowns`` 429 entries and account-scoped policy rows
+        would otherwise survive account removal and be silently inherited
+        by a re-created same-named account (a stale pacing delay, a
+        leftover 429 cooldown, predecessor pacing overrides). Group scope
+        is already deregistered separately via ``set_account_group(None)``.
+        """
+        for key in [k for k in self._last_fire if k[0] == account]:
+            del self._last_fire[key]
+        for key in [k for k in self._account_cooldowns if k[0] == account]:
+            del self._account_cooldowns[key]
+        prefix = f"{account}/"
+        for key in [k for k in self._policies
+                    if k[0] in ("account", "account_plugin")
+                    and (k[1] == account
+                         or (k[0] == "account_plugin"
+                             and str(k[1]).startswith(prefix)))]:
+            del self._policies[key]
+        if self._repo is not None:
+            try:
+                await self._repo.delete_account(account)
+            except Exception as exc:  # guarded: removal must never fail on it
+                self._log("warning",
+                          f"policy row cascade failed for {account!r}: {exc}")
+
     # ------------------------------------------------------------ group scope
     def set_account_group(self, account: str, group: Optional[str]) -> None:
         """Register which GROUP an account operates in (per-account/group

@@ -213,6 +213,17 @@ class SettingsManager:
         self._loaded = True
 
     # ------------------------------------------------------------ plugins
+    def forget_account(self, account: str) -> None:
+        """Drop an account's in-memory mirror layers (removal cascade).
+
+        K14 (S6-C2): without this, removing and re-adding a same-named
+        account in one process inherits the predecessor's plugin/framework
+        setting overrides from memory while the database is empty — memory
+        and DB then diverge until the next restart.
+        """
+        self._account_plugin.pop(account, None)
+        self._account_framework.pop(account, None)
+
     def resolve(
         self,
         plugin_name: str,

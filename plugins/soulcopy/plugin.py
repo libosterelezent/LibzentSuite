@@ -57,6 +57,11 @@ class SoulcopyPlugin(PluginBase):
     version = "2.0.0"
     description = "Export your Mudae soulmate list and re-import it elsewhere."
 
+    def __init__(self) -> None:
+        # K16 (S4-TC1): one copy flow per (account, plugin) instance at a
+        # time — concurrent triggers would interleave flows and double-send.
+        self._in_flight = False
+
     settings = (
         Setting("trigger", "str", "slcopy", "Command word that starts the copy (owners only)."),
         Setting("dm_read_timeout", "float", 10.0, "Idle seconds before DM reading stops.",
@@ -85,6 +90,16 @@ class SoulcopyPlugin(PluginBase):
                 "add the id to OWNER_USER_IDS in .env)", event.author_id, ctx.account,
             )
             return
+        if self._in_flight:
+            # K16 (S4-TC1): dispatch is per-event, so a second trigger while
+            # a copy flow runs would interleave two flows over the same DM
+            # pages (both collect_messages subscribers match) and double-send
+            # chunks. Skip — the running flow owns the account until done.
+            ctx.logger.warning(
+                "copy flow already running for %s — trigger skipped",
+                ctx.account)
+            return
+        self._in_flight = True
         try:
             await self._run_copy(ctx, event.channel_id)
         except FlowBlocked as exc:
@@ -92,6 +107,8 @@ class SoulcopyPlugin(PluginBase):
             # — no partial chunks, no re-raise (the dispatcher would only see
             # a crash; the flow itself is simply over). See module docstring.
             ctx.logger.warning("flow aborted for %s: %s", ctx.account, flow_block_reason(exc))
+        finally:
+            self._in_flight = False  # release the K16 single-flow latch
 
     # ------------------------------------------------------------------- core
     async def _run_copy(self, ctx: PluginContext, trigger_channel: int) -> None:

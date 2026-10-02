@@ -54,6 +54,15 @@ class ProfileManager:
         #: account -> sorted profile names (cache; refresh via load()/assign)
         self._assignment_cache: Dict[str, List[str]] = {}
 
+    def forget_account(self, account: str) -> None:
+        """Drop an account's assignment-cache entry (removal cascade).
+
+        K14 (S6-C2): a cached assignment for a removed account would be
+        silently re-inherited (profile grants!) by a re-created
+        same-named account in the same process.
+        """
+        self._assignment_cache.pop(account, None)
+
     # ---------------------------------------------------------------- boot
     async def load(self) -> None:
         """Populate the caches from the repositories (boot path).

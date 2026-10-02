@@ -354,6 +354,33 @@ class TaskScheduler:
             if not latch.done():
                 latch.set_result(None)
 
+    async def cleanup_account(self, account: str) -> None:
+        """Tear down ONE account's lane bookkeeping (called on removal).
+
+        Cancels + reaps the serialized worker lane and drops the account's
+        queue/event/lane entries so a removed account leaves nothing behind
+        (isolation audit K1: this method previously did not exist and the
+        account manager's tolerant ``getattr`` call silently no-oped,
+        leaking a parked lane task plus dict entries per removed account
+        for the rest of the process lifetime).
+
+        Idempotent; safe when the account never submitted a task. Other
+        accounts' lanes and the global scheduler are untouched — the global
+        ``stop()`` remains the process-wide teardown. Callers should
+        ``cancel_matching(account=...)`` first so no live task is dropped
+        mid-flight.
+        """
+        lane = self._lanes.pop(account, None)
+        self._lane_events.pop(account, None)
+        self._queues.pop(account, None)
+        if lane is None or lane.done():
+            return
+        lane.cancel()
+        try:
+            await asyncio.wait({lane}, timeout=2.0)
+        except Exception:  # pragma: no cover - reap is best-effort
+            pass
+
     # ------------------------------------------------------------- submit
     def submit(
         self,

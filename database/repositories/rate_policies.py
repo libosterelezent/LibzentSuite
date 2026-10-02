@@ -144,6 +144,29 @@ class RatePolicyRepository(BaseRepository):
             )
             return cur.rowcount > 0
 
+    async def delete_account(self, account: str) -> int:
+        """Delete every account-scoped policy row for one account name.
+
+        Account-removal cascade (isolation audit K15): covers
+        level='account' (owner = name) and level='account_plugin'
+        (owner = 'name/plugin'). Orphaned owner rows would otherwise be
+        silently re-inherited by a re-created same-named account. Returns
+        the number of rows removed.
+        """
+        removed = 0
+        async with self._tx(f"delete policies for account {account!r}") as conn:
+            cur = await conn.execute(
+                "DELETE FROM rate_limit_policies WHERE level = ? AND owner = ?",
+                ("account", account),
+            )
+            removed += cur.rowcount
+            cur = await conn.execute(
+                "DELETE FROM rate_limit_policies WHERE level = ? AND owner LIKE ?",
+                ("account_plugin", account + "/%"),
+            )
+            removed += cur.rowcount
+        return removed
+
     # ---------------------------------------------------------------- read
     async def get(self, level: str, owner: Optional[str], action: str) -> Optional[RatePolicyRecord]:
         """One policy by exact scope (None when nothing stored there).

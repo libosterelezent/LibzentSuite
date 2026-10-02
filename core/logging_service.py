@@ -319,13 +319,13 @@ class ServiceLogger:
         self.name = f"slaughtermudae.{source}"
 
     def _record(self, severity: str, msg: Any, args: tuple,
-                with_location: bool = False) -> None:
+                with_location: bool = False, **ctx: Any) -> None:
         try:
             message = self._format(msg, args)
             if severity == "error" and sys.exc_info()[0] is not None:
                 # stdlib .exception() contract: append the active exception
                 message = f"{message} [{self._exc_one_liner(with_location)}]"
-            self._service.record(severity.upper(), self._source, message)
+            self._service.record(severity.upper(), self._source, message, **ctx)
         except Exception:
             pass  # logging must never break the caller
 
@@ -358,29 +358,33 @@ class ServiceLogger:
                      f":{tb.tb_lineno} in {code.co_name}")
         return text
 
-    # ------------------------------------------------- stdlib logger surface
-    def debug(self, msg: Any, *args: Any) -> None:
-        self._record("debug", msg, args)
+    # ---------------------------------------------- stdlib logger surface
+    # K12 (S6-C5/S9-C3): **ctx is accepted on the stdlib-shaped surface and
+    # forwarded — RateLimitManager._log passes account= context this way, and
+    # a TypeError here was silently swallowed, dropping the safety-critical
+    # per-account 429 cooldown warnings from ring/dashboard/DB entirely.
+    def debug(self, msg: Any, *args: Any, **ctx: Any) -> None:
+        self._record("debug", msg, args, **ctx)
 
-    def info(self, msg: Any, *args: Any) -> None:
-        self._record("info", msg, args)
+    def info(self, msg: Any, *args: Any, **ctx: Any) -> None:
+        self._record("info", msg, args, **ctx)
 
-    def warning(self, msg: Any, *args: Any) -> None:
-        self._record("warning", msg, args)
+    def warning(self, msg: Any, *args: Any, **ctx: Any) -> None:
+        self._record("warning", msg, args, **ctx)
 
-    def warn(self, msg: Any, *args: Any) -> None:  # legacy alias
-        self._record("warning", msg, args)
+    def warn(self, msg: Any, *args: Any, **ctx: Any) -> None:  # legacy alias
+        self._record("warning", msg, args, **ctx)
 
-    def error(self, msg: Any, *args: Any) -> None:
-        self._record("error", msg, args)
+    def error(self, msg: Any, *args: Any, **ctx: Any) -> None:
+        self._record("error", msg, args, **ctx)
 
-    def exception(self, msg: Any, *args: Any) -> None:
-        self._record("error", msg, args, with_location=True)
+    def exception(self, msg: Any, *args: Any, **ctx: Any) -> None:
+        self._record("error", msg, args, **ctx, with_location=True)
 
-    def log(self, level: int, msg: Any, *args: Any) -> None:
+    def log(self, level: int, msg: Any, *args: Any, **ctx: Any) -> None:
         severity = {10: "DEBUG", 20: "INFO", 30: "WARNING", 40: "ERROR",
                     50: "ERROR"}.get(level, "INFO")
-        self._record(severity.lower(), msg, args)
+        self._record(severity.lower(), msg, args, **ctx)
 
     # ---------------------------------------------- LogService-style surface
     def record(self, severity: str, source: str, message: str, **ctx: Any) -> dict:

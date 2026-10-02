@@ -41,6 +41,61 @@ from core.errors import (
 LOG = logging.getLogger("slaughtermudae.adapter")
 
 
+# ------------------------------------------------- per-process headers cache
+#: M3 (isolation audit S3-3.3/S7-A2): discord.py-self fetches its client
+#: properties from a third-party API (cordapi.dolfi.es) on EVERY
+#: HTTPClient.startup() — once per account start AND once per reconnect
+#: (we build a fresh client per attempt). Under a reconnect cycle that
+#: hammers cordapi (which then throttles us onto the STATIC fallback
+#: fingerprint — more detectable) and adds up to 3s of latency per attempt.
+#: We cache the fetched property DATA process-wide with a TTL; the Headers
+#: INSTANCE stays per-client so the per-client identity UUIDs
+#: (client_launch_id / client_heartbeat_session_id) are NEVER shared.
+_HEADERS_CACHE_TTL = 600.0
+_headers_cache: dict = {}          # (proxy, proxy_auth) -> (monotonic, result)
+_headers_cache_lock: Optional[asyncio.Lock] = None
+_headers_patch_installed = False
+
+
+def _install_headers_fetch_cache(discord: Any, ttl: float = _HEADERS_CACHE_TTL) -> None:
+    """Wrap ``Headers.get_api_properties`` with a process-wide TTL cache.
+
+    Idempotent; silently skipped when the library layout changes (a missing
+    seam must never break connect()).
+    """
+    global _headers_patch_installed, _headers_cache_lock
+    if _headers_patch_installed:
+        return
+    try:
+        headers_cls = discord.utils.Headers
+        original = headers_cls.get_api_properties  # bound classmethod
+    except AttributeError:
+        return
+    _headers_patch_installed = True
+    _headers_cache_lock = asyncio.Lock()
+
+    async def cached_get_api_properties(cls, session, type_, *, proxy=None,
+                                         proxy_auth=None):
+        key = (proxy, proxy_auth)
+        loop = asyncio.get_running_loop()
+        if _headers_cache_lock is not None:
+            async with _headers_cache_lock:
+                hit = _headers_cache.get(key)
+                if hit is not None and loop.time() - hit[0] < ttl:
+                    return hit[1]
+        result = await original(session, type_, proxy=proxy,
+                                proxy_auth=proxy_auth)
+        if _headers_cache_lock is not None:
+            async with _headers_cache_lock:
+                _headers_cache[key] = (loop.time(), result)
+        return result
+
+    try:
+        headers_cls.get_api_properties = classmethod(cached_get_api_properties)
+    except (AttributeError, TypeError):  # pragma: no cover - exotic layouts
+        _headers_patch_installed = False
+
+
 def _header(headers: Any, name: str) -> Optional[str]:
     """Case-tolerant header lookup (library header dicts vary in casing)."""
     if not headers:
@@ -57,7 +112,12 @@ def _header(headers: Any, name: str) -> Optional[str]:
 class RealDiscordClient:
     """DiscordClient protocol implementation over a lazily imported library."""
 
-    def __init__(self, token: str, logger: Optional[logging.Logger] = None) -> None:
+    def __init__(
+        self,
+        token: str,
+        logger: Optional[logging.Logger] = None,
+        identify_gate: Optional["IdentifyGate"] = None,
+    ) -> None:
         self._token = token
         self._discord: Any = None          # the discord module (set in connect)
         self._client: Any = None           # the live Client instance
@@ -65,11 +125,20 @@ class RealDiscordClient:
         self._startup_error: Optional[Exception] = None
         self._run_task: Optional["asyncio.Task"] = None  # strong ref (see connect)
         self._logger = logger or LOG
+        self._identify_gate = identify_gate  # shared per process (factory-owned)
         #: best-effort account label for domain error messages (set by factory)
         self._account = ""
         #: callbacks assigned by the account manager BEFORE connect()
         self.on_message: Optional[Callable[[DiscordMessage], None]] = None
         self.on_disconnect: Optional[Callable[[str], None]] = None
+        # declared here so the adapter satisfies its own protocol contract
+        # (adapters/base.py) even when wired by someone other than the
+        # account manager — reading an undeclared attr would raise inside
+        # library dispatch, which logs-and-swallows => silently dropped
+        # edit/delete/reaction events (isolation audit K17)
+        self.on_message_edit: Optional[Callable[..., None]] = None
+        self.on_message_delete: Optional[Callable[..., None]] = None
+        self.on_reaction: Optional[Callable[..., None]] = None
         self.user_id: Optional[int] = None
 
     # ------------------------------------------------------------ labelling
@@ -104,6 +173,12 @@ class RealDiscordClient:
             self._client = discord.Client()
         except TypeError:
             self._client = discord.Client(intents=None)
+        if self._identify_gate is not None:
+            # K8: shadowing the instance method is the library-sanctioned
+            # extension point (see Client.before_identify_hook) — every
+            # IDENTIFY this client sends goes through the shared per-IP gate.
+            self._client.before_identify_hook = self._identify_gate.acquire
+        _install_headers_fetch_cache(discord)
         self._ready = asyncio.Event()
         self._startup_error = None
 
@@ -115,7 +190,16 @@ class RealDiscordClient:
         @self._client.event
         async def on_disconnect() -> None:
             if self.on_disconnect is not None:
-                self.on_disconnect("gateway closed")
+                # M1 (observability): surface the gateway close code so
+                # "gateway closed" can be told apart (1000 = server-initiated
+                # close, 4007/4015-style = session limits, None = abnormal).
+                ws = getattr(self._client, "ws", None)
+                code = getattr(ws, "close_code", None)
+                if code is None:
+                    code = getattr(ws, "_close_code", None)
+                reason = ("gateway closed" if code is None
+                          else f"gateway closed (code={code})")
+                self.on_disconnect(reason)
 
         @self._client.event
         async def on_message(message: Any) -> None:
@@ -187,6 +271,14 @@ class RealDiscordClient:
                 raise AccountError(
                     "live client connected without a user (bad token?)")
         except BaseException:
+            # K7 (isolation audit S10-C5): a cancelled/failed connect must
+            # close the LIBRARY client too — reaping only the _run task
+            # leaves the aiohttp/curl sessions (and any half-open gateway)
+            # unreaped; Client.close() is the sanctioned teardown.
+            try:
+                await self._client.close()
+            except Exception:  # half-open clients can throw on close
+                pass
             await self._cancel_run_task()  # no orphaned client task
             raise
         self._logger.info("live client connected as user %s", self.user_id)
@@ -459,6 +551,40 @@ class RealDiscordClient:
         }
 
 
+class IdentifyGate:
+    """Fleet-wide IDENTIFY pacer (Discord's identify limit is per-IP).
+
+    discord.py-self 2.1.0 ships NO identify serializer — the library's
+    ``before_identify_hook`` is a no-op by default — so N clients in one
+    process can IDENTIFY simultaneously and trip Discord's per-IP gateway
+    connection limit (observed live as ``Connection reset by peer`` during
+    startup and, worse, during synchronized reconnect storms that
+    ``start_all``'s stagger does not cover). One gate instance is shared
+    by every client the factory builds; waiters are released FIFO with
+    at least ``interval`` seconds between consecutive IDENTIFYs
+    (isolation audit K8 / S3-3.1, S7-A2).
+    """
+
+    __slots__ = ("interval", "_lock", "_last")
+
+    def __init__(self, interval: float = 5.0) -> None:
+        self.interval = float(interval)
+        self._lock: Optional[asyncio.Lock] = None  # bound lazily to the loop
+        self._last: float = float("-inf")
+
+    async def acquire(self, *, initial: bool = False) -> None:
+        """Space consecutive IDENTIFYs by ``interval`` seconds."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:  # FIFO: hold while sleeping so waiters queue
+            now = asyncio.get_running_loop().time()
+            wait = self._last + self.interval - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+                now = asyncio.get_running_loop().time()
+            self._last = now
+
+
 class RealClientFactory:
     """ClientFactory protocol implementation building live clients.
 
@@ -473,9 +599,13 @@ class RealClientFactory:
         self,
         credentials: Optional[Credentials] = None,
         logger: Optional[logging.Logger] = None,
+        identify_interval: float = 5.0,
     ) -> None:
         self._credentials = credentials  # kept for metadata only (mudae id, owner ids)
         self._logger = logger or LOG
+        # ONE gate per process (the factory is built once in bootstrap):
+        # every client this factory produces IDENTIFYs through it.
+        self._identify_gate = IdentifyGate(identify_interval)
 
     def __call__(self, name: str, token: str) -> RealDiscordClient:
         """Build a RealDiscordClient for one account.
@@ -488,9 +618,14 @@ class RealClientFactory:
                 f"account {name!r} has no stored credential — add one "
                 "through the dashboard or CLI 'accounts credential'"
             )
-        client = RealDiscordClient(token=token, logger=self._logger)
+        # K13 (S9-C1): a per-account child logger keeps adapter lines
+        # (connected/terminated/close-failed) attributable — the bridge
+        # maps slaughtermudae.adapter.<name> to source "adapter:<name>".
+        logger = self._logger.getChild(name) if name else self._logger
+        client = RealDiscordClient(
+            token=token, logger=logger, identify_gate=self._identify_gate)
         client.account = name  # enrich AccessDenied reasons, best effort
         return client
 
 
-__all__ = ["RealDiscordClient", "RealClientFactory"]
+__all__ = ["IdentifyGate", "RealDiscordClient", "RealClientFactory"]
