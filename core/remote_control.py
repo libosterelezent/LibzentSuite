@@ -133,13 +133,7 @@ class RemoteControl:
                 priority=Priority.NORMAL, name=f"control-reply-{event.message_id}",
             )
         except Exception:
-            # e.g. the global `estop` just stopped the scheduler: the reply
-            # CANNOT be delivered in-band. Log at ERROR with the full text —
-            # the owner's confirmation must at least survive in the logs.
-            self._logger.error(
-                "remote control reply undeliverable (scheduler stopped?) — "
-                "reply was: %s", reply
-            )
+            self._logger.exception("remote control reply submission failed")
 
     # -------------------------------------------------------------- commands
     async def _execute(self, line: str) -> str:
@@ -213,11 +207,9 @@ class RemoteControl:
             info = await api.accounts_info(rest[0])
             st = info.get("status") or {}
             rt = info.get("runtime") or {}
-            latency = st.get("latency_ms")
             return (
                 f"{info['name']} — {st.get('state')}\n"
-                f"latency {latency if latency is not None else '-'}ms · "
-                f"uptime {(st.get('uptime_s') or 0):.0f}s\n"
+                f"latency {st.get('latency_ms')}ms · uptime {st.get('uptime_s', 0):.0f}s\n"
                 f"cached: {rt.get('cached_guilds')}g {rt.get('cached_channels')}c "
                 f"{rt.get('cached_dms')}d (client cache)"
             )

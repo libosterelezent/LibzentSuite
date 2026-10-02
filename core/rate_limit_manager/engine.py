@@ -118,8 +118,7 @@ class Grant:
         wait_s:    TOTAL pre-jitter wait (server cooldown + pacing + queue).
         jitter_s:  the human-like jitter actually slept after the grant.
         reason:    "server" when a server cooldown contributed to the wait,
-                   "lane" when the sequential send lane contributed, else
-                   "pacing" ("" when there was no wait at all).
+                   else "pacing" ("" when there was no wait at all).
     """
 
     action: str

@@ -709,17 +709,11 @@ class ControlAPI:
         return {"resumed": True, "status": await self.status()}
 
     async def shutdown(self) -> Dict[str, Any]:
-        """Graceful shutdown of the scheduler + accounts (quit/dashboard).
-
-        Does NOT close the database: the persistence queues (logs/audit)
-        are owned by Framework.shutdown(), whose ordered teardown
-        (stop_persistence BEFORE db.close) is the pinned contract —
-        closing here would drain queued records into a dead DB and
-        silently lose them. When no framework runs the teardown (direct
-        ControlAPI use in tests), callers own the database.
-        """
+        """Graceful shutdown of everything (used by quit/dashboard shutdown)."""
         await self._scheduler.stop(drain=True)
         await self._accounts.stop_all()
+        if self._database is not None and hasattr(self._database, "close"):
+            await _resolved(self._database.close())  # sync or async owner
         return {"shutdown": True}
 
     # ------------------------------------------------------- mgmt audit trail

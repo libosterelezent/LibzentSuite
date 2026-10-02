@@ -31,12 +31,6 @@ _INSERT = """
 """
 
 
-#: per-account tables (keyed by account NAME) removed by ``delete``
-_DEPENDENT_TABLES = ("account_settings", "plugin_settings", "plugin_states",
-                     "account_profiles", "api_cache", "credentials",
-                     "cooldowns")
-
-
 class AccountsRepository(BaseRepository):
     """CRUD for accounts and their profile assignments, keyed by NAME."""
 
@@ -88,8 +82,7 @@ class AccountsRepository(BaseRepository):
             except sqlite3.IntegrityError as exc:
                 raise DatabaseError(f"account {name!r} already exists") from exc
         record = await self.get(name)
-        if record is None:  # vanished between insert and read (never silent)
-            raise DatabaseError(f"account {name!r} could not be read back")
+        assert record is not None  # just inserted in the same transaction
         return record
 
     # ----------------------------------------------------------------- read
@@ -157,15 +150,15 @@ class AccountsRepository(BaseRepository):
         """Delete an account AND every dependent row; True when it existed.
 
         Cascades (all in one transaction): account_settings, plugin_settings,
-        plugin_states, account_profiles, api_cache, credentials (the
-        encrypted token must never outlive its account) and cooldowns. The
-        account's profiles themselves and other accounts' rows are untouched.
+        plugin_states, account_profiles. The account's profiles themselves
+        and other accounts' rows are untouched.
         """
         async with self._tx(f"delete account {name!r}") as conn:
             cur = await conn.execute("DELETE FROM accounts WHERE name = ?", (name,))
             existed = cur.rowcount > 0
             if existed:
-                for table in _DEPENDENT_TABLES:
+                for table in ("account_settings", "plugin_settings", "plugin_states",
+                              "account_profiles", "api_cache"):
                     await conn.execute(f"DELETE FROM {table} WHERE account = ?", (name,))
         return existed
 

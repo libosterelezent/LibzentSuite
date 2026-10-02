@@ -63,15 +63,9 @@ LOG = logging.getLogger("slaughtermudae.services")
 class TaskAckRegistry:
     """task_id -> future map fed by the bus Task* events (one subscription)."""
 
-    def __init__(self, bus: EventBus, scheduler: Any = None) -> None:
-        """Subscribe the three completion events on ``bus`` (idempotent per bus).
-
-        ``scheduler`` (optional) enables best-effort cancellation when a
-        waiter times out — a plugin must never see a failure for a send
-        that still executes later.
-        """
+    def __init__(self, bus: EventBus) -> None:
+        """Subscribe the three completion events on ``bus`` (idempotent per bus)."""
         self._bus = bus
-        self._scheduler = scheduler
         self._futures: Dict[int, "asyncio.Future[Any]"] = {}
         bus.subscribe(TaskCompleted, self._on_completed)
         bus.subscribe(TaskFailed, self._on_failed)
@@ -137,24 +131,15 @@ class TaskAckRegistry:
 
         Raises:
             SchedulerError: the task failed, was cancelled, or did not
-            produce a completion event within ``timeout`` seconds (in the
-            timeout case the task is CANCELLED first — a plugin must never
-            observe a failure for a send that still executes minutes later).
+                produce a completion event within ``timeout`` seconds.
         """
         future = self.register(task_id)
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             self._futures.pop(task_id, None)
-            cancel = getattr(self._scheduler, "cancel", None)
-            if callable(cancel):  # best-effort: queued tasks die now instead
-                try:  # of delivering a surprise duplicate later
-                    cancel(task_id)
-                except Exception:
-                    pass
             raise SchedulerError(
-                f"task {task_id} did not complete within {timeout:.0f}s "
-                "(cancelled)"
+                f"task {task_id} did not complete within {timeout:.0f}s"
             ) from None
 
     def pending(self) -> List[int]:
@@ -222,8 +207,6 @@ class AccountPluginServices:
         """The shared registry, lazily building a private one if unbound."""
         if self._ack_registry is None:
             self._ack_registry = TaskAckRegistry(self._bus)
-        if self._ack_registry._scheduler is None and self._scheduler is not None:
-            self._ack_registry._scheduler = self._scheduler  # timeout cancels
         return self._ack_registry
 
     def _client(self) -> Any:
