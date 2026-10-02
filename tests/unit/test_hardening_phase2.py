@@ -320,6 +320,41 @@ class DashboardHardening(unittest.IsolatedAsyncioTestCase):
         status, _ = await self._request(server, "GET", "/api/status")
         self.assertEqual(status, 200)
 
+    async def test_keepalive_survives_unread_body_reject(self) -> None:
+        """HTTP/1.1 keep-alive: a 401 answered BEFORE the POST body was read
+        must announce Connection: close — otherwise the leftover body is
+        parsed as the next request line and corrupts the reused stream."""
+        import http.client
+
+        server = self._make_server(token="s3cret")
+
+        def first_exchange() -> None:
+            conn = http.client.HTTPConnection("127.0.0.1", server.bound_port, timeout=5)
+            conn.request(
+                "POST", "/api/ratelimit/set", body='{"a": 1}',
+                headers={"Content-Type": "application/json"},  # NO token -> 401
+            )
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 401)
+            # the poisoned-stream contract: server announces the close
+            self.assertEqual(resp.getheader("Connection", "").lower(), "close")
+            resp.read()
+            conn.close()
+
+        def second_exchange() -> None:
+            conn = http.client.HTTPConnection("127.0.0.1", server.bound_port, timeout=5)
+            conn.request("GET", "/api/status", headers={"X-Dashboard-Token": "s3cret"})
+            resp = conn.getresponse()
+            data = resp.read()
+            self.assertEqual(resp.status, 200)
+            self.assertTrue(json.loads(data)["ok"])
+            conn.close()
+
+        # to_thread: the dashboard routes itself ON the main loop — blocking
+        # it with a sync request would starve the very coroutine we await
+        await asyncio.to_thread(first_exchange)
+        await asyncio.to_thread(second_exchange)
+
 
 # ---------------------------------------------------------------------- CLI
 class CliEmptyName(unittest.IsolatedAsyncioTestCase):

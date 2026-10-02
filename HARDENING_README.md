@@ -83,6 +83,21 @@ fidelity.** Five parallel audits; every fix below has a regression test in
   `ScenarioFinished` is published after teardown (agrees with the report),
   dead scenario check branch removed.
 
+## Post-rebase fixes (upstream sync with master `4a67b08`)
+Upstream moved to DB-only credentials, HTTP/1.1 keep-alive, first-boot-only
+config policy defaults and its own knowledgebase gitignore. Rebasing kept all
+phase-1/2 fixes intact (704 tests) and fixed one bug the keep-alive commit
+introduced:
+
+* **HTTP/1.1 keep-alive + early rejects corrupted connections.** A 401/403/
+  400/413 answered BEFORE the POST body was read left the body in the
+  socket; the reused keep-alive connection then parsed it as the next
+  request line. Every pre-body reject now sends ``Connection: close`` and
+  tears the connection down; the websocket upgrade path sets
+  ``close_connection`` before hijacking the socket so the stdlib loop never
+  reads from the detached file object. Regression:
+  ``test_keepalive_survives_unread_body_reject`` (705 total).
+
 ## Not changed (deliberately)
 * No DB schema change, no public API signature change.
 * Internal exception text still reaches dashboard clients (loopback admin

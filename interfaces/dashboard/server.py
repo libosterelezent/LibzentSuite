@@ -1072,7 +1072,8 @@ def _make_handler(server: "DashboardServer") -> type:
             return True
 
         def _respond(
-            self, status: int, payload: Dict[str, Any], content_type: str = "application/json"
+            self, status: int, payload: Dict[str, Any], content_type: str = "application/json",
+            *, close: bool = False,
         ) -> None:
             if content_type == "application/json":
                 # allow_nan=False: a stored NaN must not serialize to the
@@ -1089,6 +1090,8 @@ def _make_handler(server: "DashboardServer") -> type:
             self.send_header("Content-Type", content_type)
             for header, value in SECURITY_HEADERS:
                 self.send_header(header, value)
+            if close:
+                self.send_header("Connection", "close")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             try:
@@ -1096,9 +1099,23 @@ def _make_handler(server: "DashboardServer") -> type:
             except OSError:
                 pass  # ERROR AUDIT: client aborted mid-response — not an error worth a traceback
 
+        def _reject(
+            self, status: int, payload: Dict[str, Any], content_type: str = "application/json"
+        ) -> None:
+            """Respond + CLOSE the connection (keep-alive safety).
+
+            Used on paths that answer BEFORE the request body was consumed
+            (pre-auth rejects, header rejects): with HTTP/1.1 keep-alive the
+            unread body would be parsed as the NEXT request line and corrupt
+            the connection. The explicit ``Connection: close`` header lets
+            browser pools drop the socket instead of reusing it.
+            """
+            self.close_connection = True
+            self._respond(status, payload, content_type, close=True)
+
         def _handle(self, method: str) -> None:
             if not self._origin_allowed():
-                self._respond(403, {"ok": False, "error": "cross-site request refused"})
+                self._reject(403, {"ok": False, "error": "cross-site request refused"})
                 return
             parsed = urlparse(self.path)
             path, query = parsed.path, parse_qs(parsed.query)
@@ -1117,7 +1134,7 @@ def _make_handler(server: "DashboardServer") -> type:
             if not self._authorized(
                 self.headers.get("X-Dashboard-Token") or (query.get("token") or [None])[0]
             ):
-                self._respond(
+                self._reject(
                     401,
                     {"ok": False, "error": "bad or missing token (X-Dashboard-Token header or ?token=)"},
                 )
@@ -1127,10 +1144,10 @@ def _make_handler(server: "DashboardServer") -> type:
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
                 except ValueError:
-                    self._respond(400, {"ok": False, "error": "invalid Content-Length header"})
+                    self._reject(400, {"ok": False, "error": "invalid Content-Length header"})
                     return
                 if length < 0:  # read(-1) would block until the peer closes
-                    self._respond(400, {"ok": False, "error": "invalid Content-Length header"})
+                    self._reject(400, {"ok": False, "error": "invalid Content-Length header"})
                     return
                 if length > MAX_BODY_BYTES:
                     # drain a bounded amount so the client's send completes,
@@ -1141,7 +1158,7 @@ def _make_handler(server: "DashboardServer") -> type:
                         if not chunk:
                             break
                         remaining -= len(chunk)
-                    self._respond(
+                    self._reject(
                         413,
                         {"ok": False, "error": f"request body too large (> {MAX_BODY_BYTES} bytes)"},
                     )
@@ -1195,11 +1212,15 @@ def _make_handler(server: "DashboardServer") -> type:
             if not self._authorized(
                 (query.get("token") or [None])[0] or self.headers.get("X-Dashboard-Token")
             ):
-                self._respond(
+                self._reject(
                     401,
                     {"ok": False, "error": "bad or missing ws token (use ?token= or the X-Dashboard-Token header)"},
                 )
                 return
+            # the socket is about to be HIJACKED (detached from the handler):
+            # the stdlib keep-alive loop must never try to read another
+            # request from the detached file object after serve() returns
+            self.close_connection = True
             self.connection.sendall(wsproto.handshake_response(key))
             fd = self.connection.detach()  # we own the socket now
             sock = socket.socket(fileno=fd)
