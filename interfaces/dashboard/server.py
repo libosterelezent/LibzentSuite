@@ -899,6 +899,11 @@ def _make_handler(server: "DashboardServer") -> type:
     """Build the request-handler class closing over the server instance."""
 
     class Handler(BaseHTTPRequestHandler):
+        # HTTP/1.1: enables keep-alive so the browser's connection pool
+        # doesn't race the HTTP/1.0 per-request close (fixes 'server
+        # returned 200 with a non-JSON body' — fetch() getting a truncated
+        # body when ThreadingHTTPServer closed the connection mid-read)
+        protocol_version = "HTTP/1.1"
         def _authorized(self, provided: Optional[str]) -> bool:
             """Accept the token via X-Dashboard-Token header OR ?token= query."""
             if server._token is None:
