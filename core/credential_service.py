@@ -172,12 +172,16 @@ class CredentialService:
         return None
 
     async def delete(self, account: str) -> bool:
-        """Remove the stored credential + cached plaintext."""
-        existed = await self._repo.delete(account) \
-            if self._repo is not None else False
+        """Remove the stored credential + cached plaintext.
+
+        Memory caches are cleared FIRST: a DB failure mid-delete must not
+        leave the plaintext token cached for the rest of the process.
+        """
         self._memory.pop(account, None)
         self._runtime_sources.pop(account, None)
         self._db_accounts.discard(account)
+        existed = await self._repo.delete(account) \
+            if self._repo is not None else False
         return existed
 
     # ------------------------------------------------------------- status

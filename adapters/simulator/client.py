@@ -265,10 +265,18 @@ class SimClient:
 
     # ------------------------------------------------- capability actions
     async def add_reaction(self, channel_id: int, message_id: int, emoji: str) -> Any:
-        """React via the world (echoes a ReactionAdded to other subscribers)."""
+        """React via the world (echoes a ReactionAdded to other subscribers).
+
+        TargetGone for a vanished message — matching click_button and the
+        live adapter's contract (a generic error cannot be reconstructed
+        into FlowBlocked by the services layer).
+        """
         if not self.connected:
             raise ConnectionError("client not connected")
-        self._world.react(self.user_id, message_id, emoji, kind="add")
+        try:
+            self._world.react(self.user_id, message_id, emoji, kind="add")
+        except KeyError:
+            raise TargetGone("", f"message {message_id} vanished") from None
         return None
 
     async def click_button(self, channel_id: int, message_id: int, custom_id: str) -> Any:

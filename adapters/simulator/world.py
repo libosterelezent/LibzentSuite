@@ -272,9 +272,16 @@ class SimWorld:
                     if kind == "add":
                         from adapters.model import DiscordReaction
 
-                        for existing in message.reactions:
+                        for index, existing in enumerate(message.reactions):
                             if existing.emoji == emoji:
-                                object.__setattr__(existing, "count", existing.count + 1)
+                                # rebuild, never mutate: the frozen DTO may
+                                # already sit in a plugin's DiscordMessage
+                                message.reactions = (
+                                    message.reactions[:index]
+                                    + (DiscordReaction(
+                                        emoji=existing.emoji, name=existing.name,
+                                        count=existing.count + 1),)
+                                    + message.reactions[index + 1:])
                                 break
                         else:
                             message.reactions = message.reactions + (
@@ -295,7 +302,9 @@ class SimWorld:
                 if message.id == message_id:
                     message.content = content
                     for client in list(self.subscribers):
-                        if client.on_message_edit is not None:
+                        # self-filter: live adapters never echo your own
+                        # edits/deletes back as events (fidelity parity)
+                        if client.user_id != message.author_id and client.on_message_edit is not None:
                             client.on_message_edit(message)
                     return message
         raise KeyError(f"unknown message {message_id}")
@@ -307,7 +316,7 @@ class SimWorld:
                 if message.id == message_id:
                     messages.pop(index)
                     for client in list(self.subscribers):
-                        if client.on_message_delete is not None:
+                        if client.user_id != message.author_id and client.on_message_delete is not None:
                             client.on_message_delete(
                                 message_id, channel_id, message.guild_id, message)
                     return message

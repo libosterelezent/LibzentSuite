@@ -131,7 +131,7 @@ class RateLimitTriggered(Event):
 
     action: str = ""
     wait_s: float = 0.0
-    reason: str = ""  # "pacing" | "server"
+    reason: str = ""  # "pacing" | "server" | "lane"
 
 
 # ---------------------------------------------------------------- settings

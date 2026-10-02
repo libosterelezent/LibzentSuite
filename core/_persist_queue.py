@@ -86,7 +86,13 @@ class PersistQueue:
         return self._worker
 
     async def stop(self, timeout: float = 5.0) -> None:
-        """Stop accepting, finish the in-flight batch, drain the rest."""
+        """Stop accepting, finish the in-flight batch, drain the rest.
+
+        Every remaining batch write is bounded by the time still left on
+        the overall ``timeout`` budget — a slow/locked repository cannot
+        stretch shutdown past it. Items still queued when the budget runs
+        out are counted in ``dropped`` (visible via stats()).
+        """
         worker = self._worker
         if worker is None:
             return
@@ -97,12 +103,27 @@ class PersistQueue:
         await asyncio.wait({worker}, timeout=min(0.5, max(0.0, float(timeout))))
         worker.cancel()  # no-op when it already exited gracefully
         await asyncio.gather(worker, return_exceptions=True)
-        while loop.time() < deadline:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
             batch = self._next_batch()
             if not batch:
                 return
-            await self._write(batch)
+            try:
+                await asyncio.wait_for(self._write(batch), timeout=remaining)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                # budget exhausted mid-batch: count what never landed
+                with self._lock:
+                    self.dropped += len(self._carry) + self._q.qsize()
+                self._carry = []
+                return
             await asyncio.sleep(0)  # yield between batches (big drains)
+        leftover = len(self._carry) + self._q.qsize()
+        if leftover:
+            with self._lock:
+                self.dropped += leftover
+            self._carry = []
 
     # --------------------------------------------------------------- drain
     def _next_batch(self) -> List[Dict[str, Any]]:
@@ -146,16 +167,21 @@ class PersistQueue:
             raise
 
     async def _write_each(self, repo: Any, batch: List[Dict[str, Any]]) -> None:
-        for item in batch:
+        while batch:
+            item = batch[0]
             try:
                 await repo.add(item)
                 self._notified = False
             except asyncio.CancelledError:
-                raise
+                raise  # batch[0] never landed: it stays for the re-drain
             except Exception as exc:
                 with self._lock:
                     self.db_failures += 1
                 self._notify(exc)
+            # remove ONLY after add() returned/failed-for-good: a cancellation
+            # mid-batch must not leave committed rows in _carry (the inline
+            # drain would re-write them -> duplicate rows)
+            batch.pop(0)
 
     def _notify(self, exc: BaseException) -> None:
         """One raw stderr one-liner per failure BURST (reset on success)."""

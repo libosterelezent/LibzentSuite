@@ -150,6 +150,7 @@ class AccountRuntime:
     supervisor: Optional["asyncio.Task[None]"] = None
     stop_requested: bool = False
     lost: asyncio.Event = field(default_factory=asyncio.Event)
+    stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 @dataclass
@@ -367,18 +368,29 @@ class AccountManager:
         """Remove a STOPPED account: detach plugins, cancel supervisor, delete.
 
         Cascades every account-scoped persistent state: the stored
-        credential (when a credential service is wired) and every cooldown
-        row (when a cooldown service is wired).
+        credential (when a credential service is wired), every cooldown row
+        (when a cooldown service is wired) and every kv-backed plugin-state
+        row (when a plugin state service is wired) — nothing survives for a
+        future same-named account to inherit.
 
         Raises:
             AccountError: unknown account, or still running/reconnecting
                 (stop it first — the refusal happens BEFORE any mutation).
         """
-        account = self._get(name)
+        # pop FIRST: the registry delete is the single atomic act that makes
+        # every concurrent start()/stop()/remove() fail with "unknown
+        # account" from here on — no check-then-act window can leave a live
+        # untracked client behind, and a double remove raises cleanly below
+        try:
+            account = self._accounts.pop(name)
+        except KeyError:
+            raise AccountError(f"unknown account {name!r}") from None
         rt = account.runtime
         if rt.status in (
             AccountStatus.RUNNING, AccountStatus.RECONNECTING, AccountStatus.CONNECTING,
         ):
+            # put it back: refusal must not mutate the registry
+            self._accounts[name] = account
             raise AccountError(
                 f"stop account {name!r} before removing it "
                 f"(status: {rt.status.value})"
@@ -388,6 +400,19 @@ class AccountManager:
         rt.supervisor = None
         if supervisor is not None:  # sync context: cancel, the loop reaps it
             supervisor.cancel()
+        if self._scheduler is not None:
+            try:  # drop queued/parked tasks so nothing fires against a
+                # re-created same-named account later
+                self._scheduler.cancel_matching(account=name)
+            except Exception:
+                self._logger.exception("task cancel failed for %s", name)
+        stale_client = rt.client
+        rt.client = None
+        if stale_client is not None:  # FAILED account never stopped: no leak
+            try:
+                await stale_client.disconnect()
+            except Exception:
+                self._logger.warning("stale client close failed for %s", name)
         try:
             outcome = self._plugin_manager.detach_account(name)
             if asyncio.iscoroutine(outcome):  # tolerant: sync pinned, async OK
@@ -406,8 +431,12 @@ class AccountManager:
                 await self._cooldowns.delete_account(name)
             except Exception:
                 self._logger.exception("cooldown cascade failed for %s", name)
+        if self._plugin_state is not None:
+            try:
+                await self._plugin_state.cascade_account(name)
+            except Exception:
+                self._logger.exception("plugin-state cascade failed for %s", name)
         existed = bool(await self._accounts_repo.delete(name))
-        del self._accounts[name]
         self._logger.info("account %s removed (existed=%s)", name, existed)
         return {"removed": name, "existed": existed}
 
@@ -507,46 +536,53 @@ class AccountManager:
         while the cache is still available), ``await client.disconnect()``
         (None-safe), reap the supervisor (bounded 1s wait, then cancel),
         status stopped, publish ``AccountDisconnected(reason="stopped")``.
+
+        Single-flight: concurrent stop() calls (a background estop task +
+        a dashboard stop, stop_all racing a user stop) join the in-flight
+        stop instead of re-running the teardown — the disconnect event and
+        plugin hooks fire exactly once.
         """
         account = self._get(name)
         rt = account.runtime
-        if rt.status == AccountStatus.STOPPED:
-            return account.status_dict()  # idempotent: nothing re-fires
-        was_live = rt.status in (
-            AccountStatus.RUNNING, AccountStatus.RECONNECTING, AccountStatus.CONNECTING,
-        ) or rt.client is not None
-        rt.stop_requested = True
-        rt.lost.set()  # wake the supervisor so it sees stop_requested NOW
-        try:
-            outcome = self._plugin_manager.deactivate_account(name)
-            if asyncio.iscoroutine(outcome):  # pinned sync; async tolerated
-                await outcome
-        except Exception:
-            self._logger.exception("plugin deactivation failed for %s", name)
-        client = rt.client
-        if client is not None:
+        async with rt.stop_lock:
+            if rt.status == AccountStatus.STOPPED:
+                return account.status_dict()  # idempotent: nothing re-fires
+            was_live = rt.status in (
+                AccountStatus.RUNNING, AccountStatus.RECONNECTING, AccountStatus.CONNECTING,
+            ) or rt.client is not None
+            rt.stop_requested = True
+            rt.lost.set()  # wake the supervisor so it sees stop_requested NOW
             try:
-                await client.disconnect()
+                outcome = self._plugin_manager.deactivate_account(name)
+                if asyncio.iscoroutine(outcome):  # pinned sync; async tolerated
+                    await outcome
             except Exception:
-                self._logger.exception("client disconnect failed for %s", name)
-        supervisor = rt.supervisor
-        rt.supervisor = None
-        if supervisor is not None:
-            try:
-                await asyncio.wait_for(asyncio.shield(supervisor), timeout=1.0)
-            except asyncio.TimeoutError:
-                supervisor.cancel()
-                await asyncio.wait({supervisor}, timeout=1.0)  # bounded reap
-            except asyncio.CancelledError:
-                supervisor.cancel()  # caller cancelled us — don't leak the task
-                raise
-        rt.status = AccountStatus.STOPPED
-        rt.lost.clear()
-        self._drop_services(name)
-        if was_live:
-            self._bus.publish_nowait(AccountDisconnected(account=name, reason="stopped"))
-        self._logger.info("account %s stopped", name)
-        return account.status_dict()
+                self._logger.exception("plugin deactivation failed for %s", name)
+            client = rt.client
+            rt.client = None  # callbacks go stale from here on (see _wire_client)
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    self._logger.exception("client disconnect failed for %s", name)
+            supervisor = rt.supervisor
+            rt.supervisor = None
+            if supervisor is not None:
+                try:
+                    await asyncio.wait_for(asyncio.shield(supervisor), timeout=1.0)
+                except asyncio.TimeoutError:
+                    supervisor.cancel()
+                    await asyncio.wait({supervisor}, timeout=1.0)  # bounded reap
+                except asyncio.CancelledError:
+                    supervisor.cancel()  # caller cancelled us — don't leak the task
+                    raise
+            rt.status = AccountStatus.STOPPED
+            rt.lost.clear()
+            self._drop_services(name)
+            if was_live:
+                self._bus.publish_nowait(AccountDisconnected(account=name, reason="stopped"))
+            self._logger.info("account %s stopped", name)
+            return account.status_dict()
 
     async def start_all(self) -> Dict[str, Any]:
         """Start every ENABLED account; logs and continues per account."""
@@ -633,6 +669,9 @@ class AccountManager:
             while not rt.stop_requested:
                 if name not in self._accounts:  # removed mid-flight
                     return
+                await asyncio.sleep(0)  # always yield: the reconnect-disabled
+                # path below can return without awaiting, and a fully
+                # synchronous while body would starve the entire event loop
                 if rt.status == AccountStatus.RECONNECTING or rt.lost.is_set():
                     await self._reconnect_loop(name, rt)
                     continue
@@ -660,8 +699,14 @@ class AccountManager:
                 return
             cfg = self._reconnect_settings(name)
             if not cfg["enabled"]:
+                # stand down WITHOUT leaving the re-entry conditions set:
+                # status RECONNECTING / lost set would spin _supervise (see
+                # the yield note there) — settle the account as failed
+                rt.status = AccountStatus.FAILED
+                rt.last_error = rt.last_error or "connection lost (reconnect disabled)"
+                rt.lost.clear()
                 self._logger.info(
-                    "reconnect disabled for %s; standing down (status stays %s)",
+                    "reconnect disabled for %s; standing down (status %s)",
                     name, rt.status.value,
                 )
                 return
@@ -712,6 +757,18 @@ class AccountManager:
             raise AccountError(f"unknown account {name!r}")
         token = await self._resolve_token(account.record)
         client = self._client_factory(name, token)
+        old = rt.client
+        if old is not None and old is not client:
+            # reconnect path: the previous client may have auto-resumed its
+            # gateway on its own — tear it down (best-effort) so its still-
+            # wired callbacks can never double-publish events
+            rt.client = None
+            try:
+                await old.disconnect()
+            except Exception as exc:
+                self._logger.warning(
+                    "stale client teardown for %s raised %s", name, exc
+                )
         self._wire_client(name, rt, client)
         rt.client = client
         rt.status = AccountStatus.CONNECTING
@@ -722,7 +779,13 @@ class AccountManager:
         rt.cache.ingest_snapshot(client.cached_snapshot())
 
     def _wire_client(self, name: str, rt: AccountRuntime, client: Any) -> None:
-        """Wire client callbacks BEFORE connect (pinned ordering)."""
+        """Wire client callbacks BEFORE connect (pinned ordering).
+
+        Every closure is guarded against staleness: a replaced client's
+        callbacks (a reconnect built client #2 while #1 auto-resumed) must
+        never publish events — ``rt.client is not client`` means this wiring
+        has been superseded.
+        """
 
         def _on_message(message: DiscordMessage) -> None:
             """Client callback -> fire-and-forget MessageReceived on the bus.
@@ -730,6 +793,8 @@ class AccountManager:
             The rich DTO rides along (``.message``): flat fields stay the
             compatibility surface; embeds/components/... are additive.
             """
+            if rt.client is not client:
+                return
             self._bus.publish_nowait(MessageReceived(
                 account=name,
                 message_id=message.id,
@@ -749,6 +814,8 @@ class AccountManager:
             """
             from ..event_bus import ReactionAdded
 
+            if rt.client is not client:
+                return
             if kind != "add":  # removal events: reserved for future plugins
                 return
             text = emoji if isinstance(emoji, str) else getattr(emoji, "name", str(emoji))
@@ -764,6 +831,8 @@ class AccountManager:
         def _on_message_edit(message: DiscordMessage) -> None:
             from ..event_bus import MessageEdited
 
+            if rt.client is not client:
+                return
             self._bus.publish_nowait(MessageEdited(
                 account=name, message_id=message.id,
                 channel_id=message.channel_id, guild_id=message.guild_id,
@@ -773,6 +842,8 @@ class AccountManager:
         def _on_message_delete(message_id: int, channel_id: int, guild_id, raw) -> None:
             from ..event_bus import MessageDeleted
 
+            if rt.client is not client:
+                return
             self._bus.publish_nowait(MessageDeleted(
                 account=name, message_id=int(message_id),
                 channel_id=int(channel_id), guild_id=guild_id,
@@ -780,12 +851,18 @@ class AccountManager:
 
         def _on_disconnect(reason: str = "") -> None:
             """Client callback on UNEXPECTED loss; deliberate stops ignore it."""
-            if rt.stop_requested:
+            if rt.stop_requested or rt.client is not client:
                 return
             if rt.status in (AccountStatus.RUNNING, AccountStatus.CONNECTING):
-                rt.status = AccountStatus.RECONNECTING
+                if rt.supervisor is None:
+                    # nobody will act on RECONNECTING (no supervisor was
+                    # spawned): FAILED keeps start() usable for automation,
+                    # and `lost` stays clear (nothing waits on it)
+                    rt.status = AccountStatus.FAILED
+                else:
+                    rt.status = AccountStatus.RECONNECTING
+                    rt.lost.set()
                 rt.last_error = reason or "connection lost"
-                rt.lost.set()
                 self._logger.warning(
                     "account %s connection lost (%s)", name, rt.last_error
                 )
@@ -887,13 +964,27 @@ class AccountManager:
             rt.cache.validate_channel(int(task.channel_id))  # TargetGone propagates
             channel_id = int(task.channel_id)
             await self._maybe_typing(name, rt, channel_id)
-            message = await client.send_message(channel_id, task.content)
+            try:
+                message = await client.send_message(channel_id, task.content)
+            except Exception as exc:
+                if type(exc).__name__ == "TargetGone":
+                    # stale guild-channel cache must HEAL (deleted channel /
+                    # revoked access / left guild): without this the cache
+                    # keeps passing validate_channel and every future send
+                    # re-fails forever (only a restart healed it)
+                    rt.cache.invalidate_channel(channel_id, str(exc) or "send failed")
+                raise
         elif action == "reaction":
             # kakerareact capability: emoji rides in task.content; target
             # channel validated like a send, message id is opaque to us
             rt.cache.validate_channel(int(task.channel_id))
             channel_id = int(task.channel_id)
-            await client.add_reaction(channel_id, int(task.message_id), task.content)
+            try:
+                await client.add_reaction(channel_id, int(task.message_id), task.content)
+            except Exception as exc:
+                if type(exc).__name__ == "TargetGone":
+                    rt.cache.invalidate_channel(channel_id, str(exc) or "reaction failed")
+                raise
             return None  # no DiscordMessage shape for reactions
         elif action == "button":
             # kakeraloot capability: custom_id rides in task.content; the

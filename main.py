@@ -71,7 +71,7 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
             from interfaces.dashboard import DashboardServer
 
             dashboard = DashboardServer(api, token=api.dashboard_token, port=args.port,
-                                         bus=framework.bus)
+                                         bus=framework.bus, exit_signal=True)
             dashboard.start().attach_logs(api.logs_service())
             if api.audit_recorder() is not None:
                 dashboard.attach_audit(api.audit_recorder())

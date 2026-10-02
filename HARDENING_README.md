@@ -4,6 +4,100 @@ Scope of Phase 1: **database layer, logging/audit persistence, boot &
 shutdown, credentials/config, event-bus + scheduler cancellation, adapter
 task hygiene.** Phases 2+ (below) have NOT been audited yet.
 
+## Phase 1 verification update (post-recovery)
+* Recovered zip was validated on **real aiosqlite** (the original run used a
+  stand-in): one genuine defect surfaced and was fixed — `TaskScheduler.stop()`
+  exited its drain loop the moment `_tasks` emptied, which happens BEFORE the
+  awaited history write lands, so the lane cancel cut the write mid-flight and
+  silently dropped the final task row (`[1, 2]` vs `[1, 2, 3]`). `stop()` now
+  drains in-flight finish tails too, and the history-write failure log no
+  longer raises `NameError` (missing `as exc`).
+
+# Hardening pass — Phase 2
+
+Scope: **account manager lifecycle, scheduler/rate-limiter races, dashboard
+HTTP+WS surface, CLI/remote-control/bootstrap, persist queue, simulator
+fidelity.** Five parallel audits; every fix below has a regression test in
+`tests/unit/test_hardening_phase2.py` where testable.
+
+## Verification
+* **704 tests pass** (689 after phase 1 + 15 new).
+* Run: `python3 -m unittest discover -s tests -t .` (needs `aiosqlite` +
+  `cryptography`, per `requirements.txt`).
+
+## Bugs fixed
+
+### Event-loop wedges / duplicate events (high)
+| # | Problem | Fix |
+|---|---------|-----|
+| 1 | **Supervisor busy-spun with the whole loop frozen** when reconnect was disabled while an account was down (`_reconnect_loop` returned without awaiting; `_supervise` re-entered forever). | `_supervise` yields every iteration; the disabled branch settles the account FAILED and clears `lost`. |
+| 2 | **Zombie live client on reconnect**: the old client was never torn down while the library auto-resumed it → two gateways, every plugin event fired twice, unbounded client leak; callbacks from replaced clients kept publishing. | `_connect_client` disconnects the previous client first; every wired callback is staleness-guarded (`rt.client is not client`). |
+| 3 | **Ghost dashboard WS client**: registration timeout (busy main loop) left a permanently-registered dead client whose queue grew forever. | `_register` skips dead clients; the timeout path marks dead + schedules an explicit unregister. |
+
+### Races / correctness (medium)
+| # | Problem | Fix |
+|---|---------|-----|
+| 4 | `remove_account` check-then-act window: a concurrent `start` could leave a live untracked client; double-remove raised raw `KeyError`. | Registry pop FIRST (atomic), refusal restores it; also cancels the account's scheduler tasks and disconnects a leftover client. |
+| 5 | `stop()` on one account could run twice concurrently (duplicate events, double hooks). | Per-account `stop_lock` (single-flight). |
+| 6 | Scheduler `stop()` was not concurrency-safe: an estop racing a drain could kill a scheduler that `start()` had re-armed. | Single-flight stop latch; joiners await the in-flight teardown. |
+| 7 | Send-ack timeout raised a failure while the task stayed queued — the message still landed minutes later (duplicate-send hazard). | `wait_for_task` best-effort cancels the task on timeout. |
+| 8 | Guild-channel cache never healed on `TargetGone` (deleted channel failed forever until restart). | Message + reaction paths invalidate the channel on `TargetGone`. |
+| 9 | `accounts remove` left kv-backed plugin state behind; a same-named new account inherited the old one's counters/markers. | `PluginStateService.cascade_account` + `KvRepository.delete_prefix`. |
+| 10 | `ControlAPI.shutdown()` closed the DB out of order — REPL/dashboard exits drained log/audit queues into a dead DB (silent record loss). | The facade no longer closes the DB (Framework owns the ordered teardown); dashboard shutdown routes process exit through main.py's graceful signal path (opt-in `exit_signal=`). |
+| 11 | Global remote-control `estop` reply could never be sent (scheduler already stopped) and the failure was invisible. | Undeliverable replies are logged at ERROR with the full text. |
+| 12 | `services.settings` forked from the live view at activate (fresh dict rebind). | `_activate_one` updates the runtime dict in place. |
+| 13 | `PersistQueue.stop()` drain was unbounded per batch and silently discarded leftovers. | Every batch is bounded by the remaining budget; undrained items are counted in `dropped`; per-item fallback no longer re-persists committed rows after a mid-batch cancel. |
+
+### Dashboard / input surface
+* Cross-site protection: loopback-bound servers refuse non-loopback `Host`
+  (DNS rebinding) and browser `Origin` must match `Host` (CSRF / WS hijack).
+* Constant-time token compare; empty-string tokens normalized; `?token=`
+  redacted from DEBUG request logs; security headers on every response.
+* Slowloris guard (`Handler.timeout`), negative `Content-Length` → 400,
+  504-timeout catch fixed for Python 3.10, `require_number` rejects bools,
+  `NaN` can no longer produce invalid-JSON responses.
+* WS inbound strictness per RFC 6455: unexpected continuation/binary frames,
+  fragmented control frames and invalid UTF-8 fail the connection;
+  `refresh` flood debounced; `stop()` tears live WS sockets down.
+
+### Simpler fixes
+* Drop without a supervisor now marks the account FAILED (start() stays
+  usable) instead of wedging RECONNECTING forever.
+* `CredentialService.delete` clears plaintext memory caches BEFORE the DB
+  call (a failed delete no longer leaves the token cached).
+* Scheduler: `timeout=0` now means "no per-attempt budget" (was instant
+  timeout after burning a pacing grant); cooperative-cancel checkpoint added
+  to the non-retryable failure path (estop raced failures now report
+  CANCELLED); lane `held_off_seconds` actually accumulates; `"lane"` added
+  to the documented Grant/reason vocabulary.
+* Bootstrap: a CancelledError inside one shutdown step no longer skips the
+  rest (the DB is always closed; the cancellation re-raises at the end).
+* Settings/cooldown boot loads are best-effort as documented (a locked read
+  no longer fails the whole boot).
+* Remote-control `accounts info` no longer crashes formatting a stopped
+  account (`None` uptime/latency); CLI `accounts start ""` is a usage error
+  instead of starting every account.
+* Simulator fidelity: `add_reaction` raises `TargetGone` for vanished
+  messages (parity with live), reactions rebuild frozen DTOs instead of
+  mutating them, self-authored edit/delete events are filtered like live,
+  `ScenarioFinished` is published after teardown (agrees with the report),
+  dead scenario check branch removed.
+
+## Not changed (deliberately)
+* No DB schema change, no public API signature change.
+* Internal exception text still reaches dashboard clients (loopback admin
+  tool; no stack traces leak).
+
+## Backlog for Phase 3+
+1. Docs: ARCHITECTURE.md / docs/ for the account-manager lifecycle changes
+   (staleness guards, single-flight stop), dashboard auth model, and the
+   `/api/shutdown` exit-signal contract.
+2. Re-audit `core/account_manager/manager.py` send-hook paths under the new
+   cache-invalidation behavior (integration-level, with the simulator).
+3. Load/soak: long-running simulation with reconnect storms to validate the
+   zombie-client and supervisor fixes at scale.
+
+
 ## Verification
 * Original suite: **658 tests pass** (baseline, before any change).
 * Now: **689 tests pass** — the 658 originals untouched + 31 new in

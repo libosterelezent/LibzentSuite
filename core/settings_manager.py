@@ -195,8 +195,15 @@ class SettingsManager:
                 self._account_plugin = {}
         if self._account_repo is not None:
             listing = getattr(self._account_repo, "list_accounts", None)
-            names = await listing() if callable(listing) else []
-            for name in names or []:
+            if callable(listing):
+                try:  # best-effort like the layers above: a locked read
+                    names = await listing() or []  # must not fail the boot
+                except Exception:
+                    self._logger.exception("could not load account settings layer")
+                    names = []
+            else:
+                names = []
+            for name in names:
                 try:
                     self._account_framework[name] = dict(
                         await self._account_repo.get(name) or {}

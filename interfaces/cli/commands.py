@@ -384,6 +384,11 @@ async def _accounts_group(api: Any, args: List[str]) -> str:
             raise UsageError(f"usage: {_ACCOUNTS_USAGE[sub]}")
         name: Optional[str] = None
         if rest and rest[0].lower() != "all":
+            if not rest[0]:  # a quoted empty token must never mean "all"
+                raise UsageError(
+                    f"account name cannot be empty — use 'all' for every account "
+                    f"(usage: {_ACCOUNTS_USAGE[sub]})"
+                )
             name = rest[0]
         method = api.accounts_start if sub == "start" else api.accounts_stop
         return _result(await method(name, surface="cli"), verb=sub)

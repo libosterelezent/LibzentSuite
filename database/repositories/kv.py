@@ -83,3 +83,20 @@ class KvRepository(BaseRepository):
             row["key"]: loads_tolerant(row["value"], row["value"], f"kv[{row['key']!r}]")
             for row in rows
         }
+
+    async def delete_prefix(self, p: str) -> int:
+        """Delete every entry whose key starts with ``p``; returns the count.
+
+        LIKE wildcards inside the prefix are escaped like ``prefix()``; an
+        empty prefix is refused (it would truncate the whole table).
+        """
+        if not isinstance(p, str) or not p:
+            raise DatabaseError("kv delete_prefix needs a non-empty string")
+        pattern = (
+            p.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        )
+        async with self._tx(f"kv delete_prefix {p!r}") as conn:
+            cur = await conn.execute(
+                "DELETE FROM kv WHERE key LIKE ? ESCAPE '\\'", (pattern,)
+            )
+            return int(cur.rowcount or 0)

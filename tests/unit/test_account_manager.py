@@ -341,8 +341,13 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         h.manager.get("alpha").runtime.client.drop("bye")
         await asyncio.sleep(0.2)
         runtime = h.manager.get("alpha").runtime
-        self.assertEqual(runtime.status, AccountStatus.RECONNECTING)  # stuck
+        # FAILED (not wedged RECONNECTING): start() stays usable for automation
+        self.assertEqual(runtime.status, AccountStatus.FAILED)
         self.assertEqual(len(h.factory.clients), 1)  # never retried
+        self.assertFalse(runtime.lost.is_set())  # no stale wake-ups
+        # and the account can be started again
+        await h.manager.start("alpha")
+        self.assertEqual(runtime.status, AccountStatus.RUNNING)
         await h.manager.stop("alpha")
 
     async def test_stop_during_backoff_cancels_supervisor(self) -> None:

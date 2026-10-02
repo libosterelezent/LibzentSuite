@@ -159,6 +159,10 @@ class Framework:
         closed (a failing ``accounts.stop_all`` used to skip the log drain
         and leak the connection thread, which can hang interpreter exit).
 
+        A CancelledError inside one step is recorded like any failure —
+        the remaining steps (crucially database.close) still run; the
+        cancellation re-raises at the END so the caller still sees it.
+
         ORDER MATTERS (logging shutdown): the db sink detaches and the
         stdlib bridge is removed BEFORE database.close() — otherwise the
         bridge keeps ingesting stdlib lines into a service whose sink is a
@@ -178,16 +182,23 @@ class Framework:
             ("stdlib bridge", self._detach_bridge),
             ("database", self.database.close),
         )
+        cancelled: Optional[asyncio.CancelledError] = None
         for label, step in steps:
             try:
                 outcome = step()
                 if asyncio.iscoroutine(outcome):
                     await outcome
-            except asyncio.CancelledError:
-                raise
+            except asyncio.CancelledError as exc:
+                if cancelled is None:
+                    cancelled = exc
+                    ROOT_LOGGER.warning(
+                        "shutdown step %r was cancelled (continuing teardown)",
+                        label)
             except Exception as exc:
                 ROOT_LOGGER.warning("shutdown step %r failed: %s: %s",
                                     label, type(exc).__name__, exc)
+        if cancelled is not None:
+            raise cancelled
 
     async def _stop_remote_control(self) -> None:
         if self.remote_control is not None:
@@ -243,6 +254,9 @@ async def build(
                 outcome = undo()
                 if asyncio.iscoroutine(outcome):
                     await outcome
+            except asyncio.CancelledError:
+                ROOT_LOGGER.warning(
+                    "build cleanup step %r was cancelled (continuing)", label)
             except Exception as exc:
                 ROOT_LOGGER.warning("build cleanup step %r failed: %s: %s",
                                     label, type(exc).__name__, exc)

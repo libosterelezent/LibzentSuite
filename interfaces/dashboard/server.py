@@ -57,10 +57,15 @@ pass the real bus explicitly.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import hmac
+import ipaddress
 import json
 import logging
 import math
+import os
 import queue as thread_queue
+import signal
 import socket
 import threading
 from dataclasses import asdict, is_dataclass
@@ -88,9 +93,39 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 BROADCAST_INTERVAL = 1.0
 #: request/WS-frame sanity caps (ERROR AUDIT: half-open posts pinned threads)
 MAX_BODY_BYTES = 1_000_000
-MAX_WS_FRAME_BYTES = 1_000_000
+#: per-connection socket timeout for plain HTTP requests (slow-loris guard);
+#: an upgraded WebSocket detaches the socket and manages its own timeouts
+HTTP_SOCKET_TIMEOUT_S = 30.0
+#: hostnames a loopback-bound dashboard accepts in the Host header
+LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+#: response headers for every reply (clickjacking / sniffing / caching hardening)
+SECURITY_HEADERS = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Content-Security-Policy", "frame-ancestors 'none'"),
+    ("Cache-Control", "no-store"),
+)
 #: how long a route coroutine may take on the main loop before we 504
 ROUTE_TIMEOUT_S = 10.0
+
+
+def _split_host(value: str) -> str:
+    """Hostname part of a Host header / URL netloc (port and [] stripped)."""
+    value = (value or "").strip().lower()
+    if value.startswith("["):  # [::1]:8070
+        return value[1:value.find("]")] if "]" in value else value[1:]
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True for localhost / 127.0.0.0/8 / ::1 addresses."""
+    host = (host or "").strip().lower()
+    if host in LOOPBACK_HOSTNAMES:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 #: task event types forwarded to WS clients (JSON-safe payloads)
 TASK_EVENT_TYPES = (TaskStarted, TaskCompleted, TaskFailed, TaskCancelled)
@@ -141,8 +176,14 @@ def require_str(body: Dict[str, Any], key: str, route: str) -> str:
 
 
 def require_number(body: Dict[str, Any], key: str, route: str) -> float:
-    """Required numeric field; finite-ness is checked separately by callers."""
+    """Required numeric field; finite-ness is checked separately by callers.
+
+    Bools are rejected (parity with require_int): ``float(True)`` would
+    silently set a 1-second interval from ``{"interval": true}``.
+    """
     value = require_field(body, key, route)
+    if isinstance(value, bool):
+        raise ValueError(f"field '{key}' in POST {route} must be a number, got {value!r}")
     try:
         return float(value)
     except (TypeError, ValueError) as exc:
@@ -243,6 +284,8 @@ class WebSocketClient:
         self._server = server
         self._sendq: "thread_queue.SimpleQueue[Tuple[str, bytes]]" = thread_queue.SimpleQueue()
         self.alive = True
+        self._refresh_inflight = False
+        self._last_refresh = 0.0
 
     def push_text(self, text: str) -> None:
         """Queue a text frame (thread-safe; sent by the owning reader loop)."""
@@ -270,7 +313,7 @@ class WebSocketClient:
                 buffer += chunk
                 while buffer:
                     try:
-                        opcode, _fin, payload, consumed = wsproto.decode_frame(buffer)
+                        opcode, fin, payload, consumed = wsproto.decode_frame(buffer)
                     except wsproto.IncompleteFrame:
                         break  # wait for more bytes
                     except wsproto.ProtocolViolation as exc:
@@ -286,9 +329,32 @@ class WebSocketClient:
                         self._drain()
                         return
                     if opcode == wsproto.OP_PING:
+                        if not fin:  # RFC 6455 §5.5: control frames are whole
+                            LOG.warning("websocket: fragmented control frame")
+                            self._sendq.put(("raw", wsproto.encode_close_frame()))
+                            self._drain()
+                            return
                         self._sendq.put(("raw", wsproto.encode_pong(payload)))
                     elif opcode == wsproto.OP_TEXT:
-                        self._handle_text(payload.decode("utf-8", "replace"))
+                        try:
+                            text = payload.decode("utf-8")
+                        except UnicodeDecodeError:
+                            # RFC 6455 §8.1: invalid UTF-8 in a text frame
+                            # fails the connection (1007), not a quiet U+FFFD
+                            LOG.warning("websocket: invalid UTF-8 in text frame")
+                            self._sendq.put(("raw", wsproto.encode_close_frame()))
+                            self._drain()
+                            return
+                        self._handle_text(text)
+                    elif opcode in (wsproto.OP_CONT, wsproto.OP_BINARY):
+                        # one-word app protocol: fragmentation and binary
+                        # frames are protocol violations, not data
+                        LOG.warning("websocket: unexpected frame (opcode=%d)", opcode)
+                        self._sendq.put(("raw", wsproto.encode_close_frame()))
+                        self._drain()
+                        return
+                    # unknown/reserved opcodes: ignored (already decoded; the
+                    # one-word protocol never consumes them)
         finally:
             self.alive = False
             self._server.unregister_threadsafe(self)
@@ -298,9 +364,28 @@ class WebSocketClient:
                 pass
 
     def _handle_text(self, text: str) -> None:
-        """Minimal app-level protocol: 'refresh' forces an immediate push."""
-        if text.strip() == "refresh":
-            self._server.push_stats_to(self)
+        """Minimal app-level protocol: 'refresh' forces an immediate push.
+
+        Debounced: a flooding client cannot schedule unbounded status
+        fetches — at most one in flight, with a 0.1s minimum interval.
+        """
+        if text.strip() != "refresh":
+            return
+        import time as _time
+        now = _time.monotonic()
+        if self._refresh_inflight or now - self._last_refresh < 0.1:
+            return
+        self._refresh_inflight = True
+        self._last_refresh = now
+
+        def _done(_fut: Any = None) -> None:
+            self._refresh_inflight = False
+
+        future = self._server.push_stats_to(self)
+        if future is not None:
+            future.add_done_callback(_done)
+        else:  # loop unavailable: nothing was scheduled
+            self._refresh_inflight = False
 
     def _drain(self) -> None:
         while True:
@@ -329,9 +414,13 @@ class DashboardServer:
         host: str = "127.0.0.1",
         port: int = 8070,
         bus: Optional[EventBus] = None,
+        exit_signal: bool = False,
     ) -> None:
         self._api = api
-        self._token = token
+        self._token = token or None  # "" behaves like "no token" everywhere
+                                        # (WS + REST parity)
+        self._exit_signal = bool(exit_signal)  # /api/shutdown may signal the
+        # host process to exit (main.py only — never in tests/embedded use)
         self._host, self._port = host, port
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._httpd: Optional[ThreadingHTTPServer] = None
@@ -384,7 +473,18 @@ class DashboardServer:
         return self
 
     def stop(self) -> None:
-        """Shut the HTTP server + broadcaster + subscriptions down."""
+        """Shut the HTTP server + broadcaster + subscriptions down.
+
+        Live websocket clients are torn down too: their handler threads
+        would otherwise sit on open sockets until each PEER disconnects.
+        """
+        for client in list(self._clients):
+            client.alive = False
+            try:
+                client._sock.shutdown(socket.SHUT_RDWR)  # noqa: SLF001 — own class
+            except OSError:
+                pass
+        self._clients.clear()
         if self._broadcaster is not None:
             try:
                 self._broadcaster.cancel()
@@ -486,6 +586,8 @@ class DashboardServer:
         asyncio.run_coroutine_threadsafe(self._register(client), self._loop).result(timeout=2)
 
     async def _register(self, client: WebSocketClient) -> None:
+        if not client.alive:  # died while registration was queued: no ghost
+            return
         self._clients.append(client)
         LOG.info("websocket client connected (%d online)", len(self._clients))
         self.push_stats_to(client)
@@ -504,10 +606,14 @@ class DashboardServer:
         LOG.info("websocket client gone (%d online)", len(self._clients))
 
     # ------------------------------------------------------------ broadcast
-    def push_stats_to(self, client: WebSocketClient) -> None:
-        """Queue a fresh stats snapshot for one client (async fetch, thread-safe)."""
+    def push_stats_to(self, client: WebSocketClient) -> Optional["concurrent.futures.Future[None]"]:
+        """Queue a fresh stats snapshot for one client (async fetch, thread-safe).
+
+        Returns the completion future (None when no loop is available) so
+        callers can debounce on actual completion.
+        """
         if self._loop is None or self._loop.is_closed():
-            return
+            return None
 
         async def _fetch_and_push() -> None:
             try:
@@ -516,7 +622,10 @@ class DashboardServer:
             except Exception as exc:  # never kill anything downstream
                 client.push_json({"type": "error", "error": str(exc)})
 
-        asyncio.run_coroutine_threadsafe(_fetch_and_push(), self._loop)
+        try:
+            return asyncio.run_coroutine_threadsafe(_fetch_and_push(), self._loop)
+        except RuntimeError:  # loop closed between check and call
+            return None
 
     async def _broadcast_loop(self) -> None:
         """Push a stats snapshot to every connected client once per second.
@@ -562,7 +671,8 @@ class DashboardServer:
         )
         try:
             return future.result(timeout=ROUTE_TIMEOUT_S)
-        except asyncio.TimeoutError:
+        except (concurrent.futures.TimeoutError, asyncio.TimeoutError, TimeoutError):
+            # all three spelled: they only alias each other on 3.11+
             return 504, {
                 "ok": False,
                 "error": f"{method} {path} timed out after {ROUTE_TIMEOUT_S:.0f}s (may still complete)",
@@ -588,6 +698,19 @@ class DashboardServer:
             if (method, path) == ("POST", "/api/estop"):
                 return 200, {"ok": True, "data": await api.emergency_stop_all()}
             if (method, path) == ("POST", "/api/shutdown"):
+                if self._exit_signal:
+                    # scheduler + accounts stop now; the PROCESS exits through
+                    # the graceful path — a delayed SIGINT (what Ctrl-C sends)
+                    # unwinds run_app: REPL readline raises KeyboardInterrupt /
+                    # headless's signal handler sets its stop event, and the
+                    # finally-block owns the ordered teardown (persistence
+                    # drains, then db.close). The delay lets this response
+                    # reach the browser first. Opt-in (main.py) so embedded
+                    # servers (tests) never signal their host process.
+                    def _request_exit() -> None:
+                        os.kill(os.getpid(), signal.SIGINT)
+
+                    threading.Timer(0.25, _request_exit).start()
                 return 200, {"ok": True, "data": await api.shutdown()}
             if (method, path) == ("POST", "/api/resume"):
                 return 200, {"ok": True, "data": await api.system_resume()}
@@ -904,21 +1027,68 @@ def _make_handler(server: "DashboardServer") -> type:
         # returned 200 with a non-JSON body' — fetch() getting a truncated
         # body when ThreadingHTTPServer closed the connection mid-read)
         protocol_version = "HTTP/1.1"
+        timeout = HTTP_SOCKET_TIMEOUT_S  # stalled requests free their thread
+
         def _authorized(self, provided: Optional[str]) -> bool:
-            """Accept the token via X-Dashboard-Token header OR ?token= query."""
+            """Accept the token via X-Dashboard-Token header OR ?token= query.
+
+            Constant-time comparison (hmac): no timing side channel on the
+            token. An empty provided value never matches (WS + REST parity).
+            """
             if server._token is None:
                 return True
-            return provided is not None and provided.strip() == server._token
+            if provided is None:
+                return False
+            provided = provided.strip()
+            if not provided:
+                return False
+            return hmac.compare_digest(
+                provided.encode("utf-8"), server._token.encode("utf-8")
+            )
+
+        def _origin_allowed(self) -> bool:
+            """Reject cross-site requests (CSRF / DNS rebinding / WS hijacking).
+
+            Any web page the operator visits can fire requests at a loopback
+            service, so the dashboard — which can start accounts and send
+            messages — must not trust the network position alone:
+              * a loopback-bound server only accepts loopback ``Host`` values
+                (defeats DNS rebinding);
+              * a browser-supplied ``Origin`` must match the ``Host`` it
+                addressed (defeats cross-site fetch/XHR and WebSocket).
+            Non-browser clients (curl, tests) send no Origin and still work.
+            """
+            host_header = self.headers.get("Host", "")
+            if _is_loopback_host(server._host):
+                if _split_host(host_header) not in LOOPBACK_HOSTNAMES:
+                    return False
+            origin = self.headers.get("Origin")
+            if origin is not None:
+                if origin.strip().lower() == "null":  # sandboxed iframe / file://
+                    return False
+                netloc = urlparse(origin).netloc.lower()
+                if netloc != host_header.strip().lower():
+                    return False
+            return True
 
         def _respond(
             self, status: int, payload: Dict[str, Any], content_type: str = "application/json"
         ) -> None:
             if content_type == "application/json":
-                data = json.dumps(payload).encode("utf-8")
+                # allow_nan=False: a stored NaN must not serialize to the
+                # bare `NaN` token (invalid JSON — breaks every JSON client)
+                try:
+                    data = json.dumps(payload, allow_nan=False).encode("utf-8")
+                except ValueError:
+                    data = json.dumps(
+                        {"ok": False, "error": "response contained a non-finite number"}
+                    ).encode("utf-8")
             else:
                 data = payload if isinstance(payload, bytes) else str(payload).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", content_type)
+            for header, value in SECURITY_HEADERS:
+                self.send_header(header, value)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             try:
@@ -927,6 +1097,9 @@ def _make_handler(server: "DashboardServer") -> type:
                 pass  # ERROR AUDIT: client aborted mid-response — not an error worth a traceback
 
         def _handle(self, method: str) -> None:
+            if not self._origin_allowed():
+                self._respond(403, {"ok": False, "error": "cross-site request refused"})
+                return
             parsed = urlparse(self.path)
             path, query = parsed.path, parse_qs(parsed.query)
             if path == "/ws":
@@ -954,6 +1127,9 @@ def _make_handler(server: "DashboardServer") -> type:
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
                 except ValueError:
+                    self._respond(400, {"ok": False, "error": "invalid Content-Length header"})
+                    return
+                if length < 0:  # read(-1) would block until the peer closes
                     self._respond(400, {"ok": False, "error": "invalid Content-Length header"})
                     return
                 if length > MAX_BODY_BYTES:
@@ -1032,6 +1208,12 @@ def _make_handler(server: "DashboardServer") -> type:
                 server.register_threadsafe(client)
             except Exception:
                 LOG.exception("websocket registration failed; closing socket")
+                client.alive = False
+                # the registration coroutine may ALREADY be queued on the
+                # loop (run_coroutine_threadsafe fired before the timeout):
+                # mark dead (checked by _register) and schedule an explicit
+                # unregister so no ghost client keeps receiving pushes
+                server.unregister_threadsafe(client)
                 try:
                     sock.close()
                 except OSError:
@@ -1046,6 +1228,14 @@ def _make_handler(server: "DashboardServer") -> type:
             self._handle("POST")
 
         def log_message(self, fmt: str, *args: Any) -> None:  # route to our logger
-            LOG.debug("%s - %s", self.address_string(), fmt % args)
+            # redact the query: the ?token= demo-link flow would otherwise
+            # persist auth tokens into DEBUG logs on every page load
+            try:
+                request = fmt % args
+                if "?" in request:
+                    request = request.split("?", 1)[0] + " ?[redacted]"
+            except Exception:
+                request = fmt
+            LOG.debug("%s - %s", self.address_string(), request)
 
     return Handler

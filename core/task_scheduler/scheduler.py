@@ -231,6 +231,7 @@ class TaskScheduler:
         self._started = False
         self._stopping = False
         self._stopped = False
+        self._stop_latch: Optional["asyncio.Future[None]"] = None  # single-flight stop
 
     # ----------------------------------------------------------- lifecycle
     @staticmethod
@@ -290,6 +291,7 @@ class TaskScheduler:
         if self._stopping:
             raise SchedulerError("scheduler is stopping; wait for stop() to finish")
         self._stopped = False
+        self._stop_latch = None  # a fresh arm retires any completed latch
         self._started = True
 
     async def stop(self, *, drain: bool = True, timeout: float = 10.0) -> None:
@@ -303,9 +305,22 @@ class TaskScheduler:
 
         Tasks still alive when a drain times out are cancelled as well —
         stop() never hangs and never leaves a task non-terminal.
+
+        Single-flight: concurrent callers JOIN the in-flight stop instead of
+        running overlapping teardowns. Without this, a drain=True stop that
+        finishes can be followed by a still-running drain=False stop (e.g.
+        estop racing shutdown) re-cancelling tasks submitted to a scheduler
+        that start() had already re-armed.
         """
         if self._stopped:
             return
+        if self._stop_latch is not None:
+            # a stop is already in flight: join it (shielded — cancelling
+            # THIS caller must never cancel the underlying teardown)
+            await asyncio.wait([asyncio.shield(self._stop_latch)], timeout=30.0)
+            return
+        latch = asyncio.get_running_loop().create_future()
+        self._stop_latch = latch
         self._stopping = True
         try:
             if drain:
@@ -336,6 +351,8 @@ class TaskScheduler:
         finally:
             self._stopped = True
             self._stopping = False
+            if not latch.done():
+                latch.set_result(None)
 
     # ------------------------------------------------------------- submit
     def submit(
@@ -663,7 +680,10 @@ class TaskScheduler:
                 retryable: Optional[BaseException] = None
                 try:
                     task.sender_ran = True  # the API call is going out NOW
-                    result = await asyncio.wait_for(self._sender(task), task.timeout_s)
+                    if task.timeout_s and task.timeout_s > 0:
+                        result = await asyncio.wait_for(self._sender(task), task.timeout_s)
+                    else:  # timeout=0/None convention: NO per-attempt budget
+                        result = await self._sender(task)
                 except asyncio.CancelledError:
                     if self._outer_cancelled():
                         raise  # worker cancellation (stop sweep)
@@ -686,6 +706,9 @@ class TaskScheduler:
                 except (ConnectionError, TimeoutError) as exc:
                     retryable = exc
                 except FlowBlocked as exc:
+                    if task.cancelled:  # checkpoint 2 (estop raced the failure)
+                        await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
+                        return
                     await self._finish(
                         task, STATUS_FAILED,
                         error=f"{type(exc).__name__}: {exc}",
@@ -693,6 +716,9 @@ class TaskScheduler:
                     )
                     return
                 except Exception as exc:
+                    if task.cancelled:  # checkpoint 2 (estop raced the failure)
+                        await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
+                        return
                     await self._finish(
                         task, STATUS_FAILED,
                         error=f"{type(exc).__name__}: {exc}",

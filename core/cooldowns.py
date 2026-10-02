@@ -41,11 +41,20 @@ class CooldownService:
         the dashboard. Deterministic via the injected time seam in tests.
         """
         now = self._now()
-        expired = await self._repo.clear_expired(now=now) \
-            if self._repo is not None else 0
+        try:
+            expired = await self._repo.clear_expired(now=now) \
+                if self._repo is not None else 0
+        except Exception:  # best-effort restore: a locked read must not
+            LOG.exception("cooldown expiry sweep failed (continuing)")  # fail boot
+            expired = 0
         restored = 0
         if self._repo is not None:
-            for row in await self._repo.active_all(now=now):
+            try:
+                active = await self._repo.active_all(now=now)
+            except Exception:
+                LOG.exception("cooldown restore failed (starting empty)")
+                active = []
+            for row in active:
                 self._active[(row["account"], row["plugin"],
                               row["cooldown_key"])] = row
                 restored += 1

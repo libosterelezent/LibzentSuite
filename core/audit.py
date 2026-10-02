@@ -195,6 +195,11 @@ class AuditRecorder:
         worker when one is live; every subscriber callback is individually
         isolated — auditing must never break the send path.
         """
+        if channel_id is not None:  # coerce defensively: record() never raises
+            try:
+                channel_id = int(channel_id)
+            except (TypeError, ValueError):
+                channel_id = None
         entry = AuditEntry(
             ts=time.time(),
             account=str(account),
