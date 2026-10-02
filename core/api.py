@@ -346,13 +346,30 @@ class ControlAPI:
         """
         if self._credentials is None:
             return {}
-        explicit = getattr(self._credentials, "account_tokens", None)
+        credentials = self._credentials
+        # the boot snapshot is FROZEN: a .env edited after boot must still
+        # be importable from a long-lived dashboard/REPL (re-read on demand)
+        source_path = getattr(credentials, "source_path", None)
+        if callable(source_path):
+            try:
+                path = source_path()
+            except Exception:
+                path = None
+            if path:
+                try:
+                    from .credentials import Credentials as _Creds
+                    fresh = _Creds.from_file(str(path))
+                    if fresh is not None:
+                        credentials = fresh
+                except Exception:
+                    pass  # unreadable now: fall back to the boot snapshot
+        explicit = getattr(credentials, "account_tokens", None)
         if callable(explicit):
             mapping = explicit()
             if isinstance(mapping, dict):
                 return {str(k): v for k, v in mapping.items() if v}
             return {}
-        token_for = getattr(self._credentials, "token_for", None)
+        token_for = getattr(credentials, "token_for", None)
         if not callable(token_for):
             return {}
         tokens: Dict[str, str] = {}
@@ -510,17 +527,27 @@ class ControlAPI:
         path: a failing DB write is logged, never a failed API call, and
         pacing safety never depends on the database.
         """
+        action = (action or "").strip()
+        if owner is not None:
+            owner = owner.strip() or None
         policy = self._limiter.set_policy_values(
             action, interval, jitter_min, jitter_max, level, owner
         )
         await self._persist_policy(level, owner, policy)
+        await self._write_removed_defaults(level, owner, action, removed=False)
         return {"action": action, "level": level, "owner": owner, "policy": str(policy)}
 
     async def ratelimit_clear(
         self, level: str, owner: Optional[str], action: str
     ) -> Dict[str, Any]:
+        # normalize FIRST: the engine strips internally and the repo delete
+        # must target the same key or the row silently survives a "clear"
+        action = (action or "").strip()
+        if owner is not None:
+            owner = owner.strip() or None
         removed = self._limiter.clear_policy(level, owner, action)
         await self._forget_policy(level, owner, action)
+        await self._write_removed_defaults(level, owner, action, removed=True)
         return {"cleared": removed, "level": level, "owner": owner, "action": action}
 
     async def ratelimit_effective(
@@ -538,8 +565,10 @@ class ControlAPI:
         return self._limiter.warnings()
 
     async def ratelimit_set_floor(self, seconds: float) -> Dict[str, Any]:
-        """Raise the pacing floor (can never drop below 1.5s)."""
-        return {"floor": self._limiter.set_floor(seconds)}
+        """Raise the pacing floor (can never drop below 1.5s; persisted)."""
+        floor = self._limiter.set_floor(seconds)
+        await self._persist_floor(floor)
+        return {"floor": floor}
 
     async def ratelimit_lane(self) -> Dict[str, Any]:
         """Sequential send lane state (server-wide serialization)."""
@@ -605,6 +634,43 @@ class ControlAPI:
             })
         except Exception as exc:
             LOG.warning("could not persist send-lane configuration: %s", exc)
+
+    async def _persist_floor(self, floor: float) -> None:
+        """Persist the raised floor (kv): a restart must not silently revert
+        a post-incident safety measure to the 1.5s default."""
+        kv = getattr(self._database, "kv", None) \
+            if self._database is not None else None
+        if kv is None:
+            return
+        try:
+            await kv.set("ratelimit:floor", float(floor))
+        except Exception as exc:
+            LOG.warning("could not persist rate-limit floor: %s", exc)
+
+    async def _write_removed_defaults(
+        self, level: str, owner: Optional[str], action: str, *, removed: bool
+    ) -> None:
+        """Tombstone bookkeeping: a CLEARED first-boot default must never be
+        re-seeded from the config file on the next boot; an explicit SET
+        clears the tombstone again."""
+        kv = getattr(self._database, "kv", None) \
+            if self._database is not None else None
+        if kv is None:
+            return
+        key = f"{level}|{owner or ''}|{action}"
+        try:
+            raw = await kv.get("ratelimit:removed") or []
+            entries = list(raw) if isinstance(raw, list) else []
+            if removed and key not in entries:
+                entries.append(key)
+            if not removed and key in entries:
+                entries.remove(key)
+            await kv.set("ratelimit:removed", entries)
+            sync = getattr(self._limiter, "set_removed_defaults", None)
+            if callable(sync):
+                sync(entries)
+        except Exception as exc:
+            LOG.warning("could not persist cleared-policy tombstone: %s", exc)
 
     @staticmethod
     def _parse_lane_bool(value: Any) -> bool:

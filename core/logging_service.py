@@ -44,6 +44,8 @@ from typing import Any, Callable, Deque, Dict, List, Optional
 from ._persist_queue import MAX_INFLIGHT as _MAX_INFLIGHT, PersistQueue
 
 SEVERITIES = ("DEBUG", "INFO", "WARNING", "ERROR")
+#: per-entry message cap (ring memory + DB row size stay bounded)
+_MESSAGE_CAP = 16_000
 _LEVEL_BY_SEVERITY = {
     "DEBUG": logging.DEBUG, "INFO": logging.INFO,
     "WARNING": logging.WARNING, "ERROR": logging.ERROR,
@@ -201,11 +203,19 @@ class LogService:
         not break the caller's flow. Without start_persistence() the queue
         is simply unused (zero extra work, no warnings).
         """
-        severity = severity.upper()
+        try:  # never raises (contract): a broken __str__/severity degrades
+            severity = str(severity or "INFO").upper()
+            message = str(message)
+        except Exception:
+            return {"ts": time.time(), "severity": "INFO", "source": str(source),
+                    "message": "<unloggable message>", "account": account,
+                    "plugin": plugin, "task_id": task_id, "event": event}
         if severity not in SEVERITIES:
             severity = "INFO"
+        if len(message) > _MESSAGE_CAP:  # ring + DB rows bounded per entry
+            message = message[:_MESSAGE_CAP] + f"…(+{len(message) - _MESSAGE_CAP} chars)"
         entry = LogEntry(
-            ts=time.time(), severity=severity, source=source, message=str(message),
+            ts=time.time(), severity=severity, source=source, message=message,
             account=account, plugin=plugin, task_id=task_id, event=event,
         )
         with self._lock:
@@ -222,14 +232,16 @@ class LogService:
                 _LEVEL_BY_SEVERITY[severity], "%s", entry.message,
                 extra={"_sm_from_service": True},
             )
+        payload = entry.as_dict()  # built ONCE (was 2x per record)
         if self._persist.active:
-            self._persist.put(entry.as_dict())
-        for callback in list(self._subscribers):
-            try:
-                callback(entry)
-            except Exception:
-                self._subscriber_failures += 1  # observable, never recursive
-        return entry.as_dict()
+            self._persist.put(payload)
+        if self._subscribers:  # no per-record copy when nobody listens
+            for callback in list(self._subscribers):
+                try:
+                    callback(entry)
+                except Exception:
+                    self._subscriber_failures += 1  # observable, never recursive
+        return payload
 
     def info(self, source: str, message: str, **ctx: Any) -> Dict[str, Any]:
         return self.record("INFO", source, message, **ctx)

@@ -247,12 +247,13 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
         self.assertEqual(service.tail(1)[0]["message"], "m249")
 
     def test_large_message_handled(self) -> None:
-        """No cap ships today (deferred by the reviewer); large messages
-        must at least be handled without breaking the invariant."""
+        """Messages are capped at 16k chars (+ a visible truncation marker)
+        so ring memory and DB rows stay bounded per entry."""
         service = LogService()
         service.record("INFO", "a", "A" * 100_000)
         entry = service.tail(1)[0]
-        self.assertEqual(len(entry["message"]), 100_000)
+        self.assertLessEqual(len(entry["message"]), 16_040)
+        self.assertIn("(+", entry["message"])  # truncation is visible
 
     def test_bridge_ingested_record_single_db_row(self) -> None:
         class CountingRepo:

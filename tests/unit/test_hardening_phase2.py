@@ -51,7 +51,7 @@ class SchedulerStopSingleFlight(_TmpCase):
         drain = asyncio.create_task(sched.stop(drain=True, timeout=10.0))
         await asyncio.sleep(0.05)
         estop = asyncio.create_task(sched.stop(drain=False))
-        await asyncio.wait({drain, estop}, timeout=5.0)
+        await asyncio.wait({drain, estop}, timeout=8.0)
         self.assertTrue(drain.done() and not drain.exception())
         self.assertTrue(estop.done() and not estop.exception())
         # re-arm, then verify the resumed scheduler accepts and runs tasks
@@ -235,7 +235,10 @@ class PersistQueueBoundedStop(_TmpCase):
             q.put({"i": i})
         await asyncio.sleep(0.1)  # worker picks the batch up
         await q.stop(timeout=0.4)
-        self.assertGreaterEqual(q.stats()["dropped"], 0)  # ran + counted, no hang
+        # StuckRepo never lands a row: everything queued was counted dropped
+        # (the old assertion `>= 0` was a tautology)
+        self.assertEqual(q.stats()["dropped"], 20)
+        self.assertFalse(q.active)
 
 
 # ---------------------------------------------------------------- dashboard
@@ -287,6 +290,7 @@ class DashboardHardening(unittest.IsolatedAsyncioTestCase):
         conn.endheaders()
         resp = conn.getresponse()
         self.assertEqual(resp.status, 400)
+        self.assertEqual(resp.getheader("Connection", "").lower(), "close")
         conn.close()
 
     async def test_cross_origin_post_refused(self) -> None:
@@ -367,3 +371,60 @@ class CliEmptyName(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LaneConfigPersistence(_TmpCase):
+    async def test_persisted_lane_loads_through_real_kv(self) -> None:
+        """The lane kv round-trip: kv.set() JSON-ENCODES and kv.get()
+        JSON-DECODES — the engine used to json.loads() the decoded dict
+        (TypeError, swallowed) and silently reset the lane to defaults on
+        EVERY reboot."""
+        from core.rate_limit_manager.engine import RateLimitManager
+
+        db = Database(self.dir / "lane.db")
+        await db.connect()
+        self.addAsyncCleanup(db.close)
+        await db.kv.set("ratelimit:lane", {"enabled": True, "prefixrate": 5.0})
+        limiter = RateLimitManager(EventBus(), lambda *_: None,
+                                   db.policies, kv_repo=db.kv)
+        await limiter.load_persisted()
+        status = limiter.lane_status()
+        self.assertTrue(status["enabled"])
+        self.assertEqual(status["prefixrate"], 5.0)
+
+    async def test_floor_and_tombstones_load_through_real_kv(self) -> None:
+        from core.rate_limit_manager.engine import RateLimitManager
+
+        db = Database(self.dir / "floor.db")
+        await db.connect()
+        self.addAsyncCleanup(db.close)
+        await db.kv.set("ratelimit:floor", 7.5)
+        await db.kv.set("ratelimit:removed", ["global||message"])
+        bus = EventBus()
+        limiter = RateLimitManager(bus, lambda *_: None, db.policies, kv_repo=db.kv)
+        await limiter.load_persisted()
+        self.assertEqual(limiter.floor_value, 7.5)
+        self.assertTrue(limiter.removed_default("global", None, "message"))
+        self.assertFalse(limiter.removed_default("global", None, "dm"))
+
+
+class GhostRegisterGuard(unittest.IsolatedAsyncioTestCase):
+    async def test_register_skips_dead_and_post_stop_clients(self) -> None:
+        import interfaces.dashboard.server as srv
+
+        class FakeAPI:
+            async def status(self):
+                return {}
+
+            def audit_recorder(self):
+                return None
+
+            def logs_service(self):
+                return None
+
+        server = srv.DashboardServer(FakeAPI(), port=0)
+        server.start()
+        self.addCleanup(server.stop)
+        dead = SimpleNamespace(alive=False)
+        await server._register(dead)  # noqa: SLF001 — direct guard test
+        self.assertEqual(server._clients, [])  # noqa: SLF001

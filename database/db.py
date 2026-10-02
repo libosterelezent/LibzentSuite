@@ -57,7 +57,7 @@ class Database:
         self.policies = RatePolicyRepository(self)
         self.audit = AuditRepository(self, keep=self._audit_keep)
         self.logs = LogRepository(self, keep=self._log_keep)
-        self.tasks = TaskHistoryRepository(self)
+        self.tasks = TaskHistoryRepository(self, keep=10_000)
         self.kv = KvRepository(self)
         self.cache = CacheRepository(self)
         self.credentials = CredentialsRepository(self)

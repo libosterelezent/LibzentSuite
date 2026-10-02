@@ -334,6 +334,10 @@ class AccountManager:
             AccountError: invalid name (must match NAME_RE) or duplicate.
             ProfileError: any requested profile is unknown.
         """
+        if isinstance(name, str) and name.lower() == "all":
+            # reserved by 'accounts start all': an account so named could
+            # never be started/stopped/filtered individually from the CLI
+            raise AccountError("account name 'all' is reserved")
         if not isinstance(name, str) or not NAME_RE.match(name or ""):
             raise AccountError(
                 f"account name {name!r} must match {NAME_RE.pattern} "
@@ -425,6 +429,12 @@ class AccountManager:
                 await stale_client.disconnect()
             except Exception:
                 self._logger.warning("stale client close failed for %s", name)
+        try:  # a FAILED account's plugins may still be ACTIVE (a drop with
+            outcome = self._plugin_manager.deactivate_account(name)  # no
+            if asyncio.iscoroutine(outcome):  # supervisor never ran the
+                await outcome  # stop path) — fire on_disable/on_unload too
+        except Exception:
+            self._logger.exception("plugin deactivation failed for %s", name)
         try:
             # K6 (S1-C7/S5-C3/S10-C3): a FAILED account was never stop()ed,
             # so its plugins may still be ACTIVE (roll's recovery loop,
@@ -442,6 +452,18 @@ class AccountManager:
                 await outcome
         except Exception:
             self._logger.exception("plugin detach failed for %s", name)
+        if self._settings is not None:
+            try:  # in-memory settings layers must not survive removal — a
+                forget = getattr(self._settings, "forget_account", None)
+                if forget is not None:  # re-created same-named account would
+                    forget(name)  # inherit the old account's plugin settings
+            except Exception:
+                self._logger.exception("settings forget failed for %s", name)
+        if self._api_cache is not None:
+            try:  # persisted DM/user rows are keyed by NAME: a re-created
+                await self._api_cache.drop_account(name)  # account must not
+            except Exception:  # inherit the old one's DM channel ids
+                self._logger.exception("api-cache cascade failed for %s", name)
         self._drop_services(name)
         self._sync_group_scope(name, None)
         if self._credential_service is not None:
@@ -536,12 +558,25 @@ class AccountManager:
         try:
             await self._connect_client(name, rt)
         except asyncio.CancelledError:
+            if rt.stop_requested:  # a stop() raced the start: not a failure
+                rt.status = AccountStatus.STOPPED
+                self._discard_half_built_client(name, rt)
+                raise
             rt.status = AccountStatus.FAILED
             rt.last_error = "start cancelled"
             raise
         except (KeyboardInterrupt, SystemExit):
             raise  # process-level signals are never swallowed here
         except Exception as exc:
+            if rt.stop_requested:
+                # stop() completed while connect() was parked: its teardown
+                # already ran (rt.client was None then). This is a benign
+                # race — NOT an account failure: leave STOPPED and never
+                # publish AccountFailed after AccountDisconnected.
+                rt.status = AccountStatus.STOPPED
+                self._discard_half_built_client(name, rt)
+                self._logger.info("account %s start aborted by concurrent stop", name)
+                raise AccountError(f"account {name!r} start cancelled by stop") from exc
             self._start_failed(name, rt, exc)
             if isinstance(exc, (AccountError, CredentialsError)):
                 raise
@@ -563,6 +598,7 @@ class AccountManager:
                     self._logger.exception(
                         "abort-disconnect failed for %s", name)
             rt.status = AccountStatus.STOPPED
+            self._discard_half_built_client(name, rt)
             self._logger.info("account %s start aborted by concurrent stop", name)
             return account.status_dict()
         rt.status = AccountStatus.RUNNING
@@ -583,6 +619,11 @@ class AccountManager:
             self._logger.exception(
                 "plugin activation failed for %s (account keeps running)", name
             )
+        if rt.stop_requested:  # stop() raced the post-connect section: do
+            rt.status = AccountStatus.STOPPED  # not publish/activate past it
+            self._discard_half_built_client(name, rt)
+            self._logger.info("account %s start aborted by concurrent stop", name)
+            return account.status_dict()
         self._bus.publish_nowait(AccountConnected(account=name))
         if self._reconnect_settings(name)["enabled"]:
             # K5 (S1-C4): a stand-down (FAILED) or interrupted reconnect
@@ -596,6 +637,28 @@ class AccountManager:
                 self._supervise(name, rt), name=f"supervise-{name}"
             )
         return account.status_dict()
+
+    def _discard_half_built_client(self, name: str, rt: AccountRuntime) -> None:
+        """Drop a client a concurrent stop() never saw (start-race cleanup).
+
+        Synchronous best-effort: the client's disconnect is scheduled (or
+        called when it exposes a sync close) so a gateway connected during
+        the race window can never linger invisible to every future stop().
+        """
+        client = rt.client
+        rt.client = None
+        if client is None:
+            return
+        try:
+            outcome = client.disconnect()
+            if asyncio.iscoroutine(outcome):
+                task = asyncio.get_running_loop().create_task(
+                    outcome, name=f"discard-client-{name}"
+                )
+                self._background.add(task)
+                task.add_done_callback(self._background.discard)
+        except Exception:
+            self._logger.warning("half-built client cleanup failed for %s", name)
 
     async def stop(self, name: str) -> Dict[str, Any]:
         """Stop one account (idempotent; plugins deactivated first).
@@ -613,8 +676,11 @@ class AccountManager:
         account = self._get(name)
         rt = account.runtime
         async with rt.stop_lock:
-            if rt.status == AccountStatus.STOPPED:
+            if (rt.status == AccountStatus.STOPPED
+                    and rt.client is None and rt.supervisor is None):
                 return account.status_dict()  # idempotent: nothing re-fires
+            # STOPPED with a lingering client/supervisor (a start-race
+            # survivor) falls THROUGH to the full teardown below
             was_live = rt.status in (
                 AccountStatus.RUNNING, AccountStatus.RECONNECTING, AccountStatus.CONNECTING,
             ) or rt.client is not None
@@ -685,16 +751,33 @@ class AccountManager:
         return {"started": started, "failed": failed, "skipped": skipped}
 
     async def stop_all(self) -> Dict[str, Any]:
-        """Graceful shutdown of every account; logs and continues per account."""
+        """Graceful shutdown of every account; logs and continues per account.
+
+        Accounts stop CONCURRENTLY (bounded): a fleet-wide halt is a
+        safety-critical latency — sequential per-account disconnects could
+        outlive a dashboard estop's 10s route budget.
+        """
         stopped: List[str] = []
         failed: Dict[str, str] = {}
-        for name in sorted(self._accounts):
+
+        async def _stop_one(name: str) -> None:
             try:
                 await self.stop(name)
                 stopped.append(name)
             except Exception as exc:
                 failed[name] = f"{type(exc).__name__}: {exc}"
                 self._logger.exception("failed to stop account %s", name)
+
+        names = sorted(self._accounts)
+        if not names:
+            return {"stopped": stopped, "failed": failed}
+        semaphore = asyncio.Semaphore(8)
+
+        async def _limited(name: str) -> None:
+            async with semaphore:
+                await _stop_one(name)
+
+        await asyncio.gather(*(_limited(n) for n in names))
         return {"stopped": stopped, "failed": failed}
 
     def emergency_stop(self, name: str) -> Dict[str, Any]:
@@ -827,11 +910,17 @@ class AccountManager:
             except asyncio.CancelledError:
                 raise
             except (KeyboardInterrupt, SystemExit) as exc:
+                if rt.stop_requested:
+                    return
                 rt.status = AccountStatus.FAILED
                 rt.last_error = f"reconnect interrupted: {exc}"
                 self._logger.error("reconnect for %s interrupted: %r", name, exc)
                 return
             except Exception as exc:
+                if rt.stop_requested:
+                    # stop() won the race: its teardown already ran. Never
+                    # resurrect status/publish past a completed stop.
+                    return
                 attempt += 1
                 if not rt.stop_requested:
                     # FIX (S1 #3): never regress STOPPED back to RECONNECTING
@@ -915,6 +1004,14 @@ class AccountManager:
             """
             if rt.client is not client:
                 return
+            if rt.cache is not None:
+                try:  # inbound traffic TEACHES the cache: channels created
+                    rt.cache.learn_channel(  # after READY must not fail
+                        int(message.channel_id),  # validate_channel forever
+                        getattr(message, "guild_id", None),
+                    )
+                except Exception:
+                    pass  # cache learning is best-effort by contract
             self._bus.publish_nowait(MessageReceived(
                 account=name,
                 message_id=message.id,

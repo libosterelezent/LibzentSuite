@@ -89,8 +89,10 @@ class DiscordCache:
                 self.channels[cid] = ChannelInfo(
                     channel_id=cid, name=name, dm=True, recipient=recipient
                 )
-            else:  # guild view intact; just remember the recipient
-                self.channels[cid].recipient = recipient
+            else:  # guild view intact; refresh recipient + heal a stale
+                existing.recipient = recipient  # deleted flag (the snapshot
+                existing.deleted = False  # just proved the channel exists)
+                existing.gone_since = None
         self.ready = True
 
     # ------------------------------------------------------------ DM helper
@@ -127,6 +129,33 @@ class DiscordCache:
         info.deleted = False
         info.gone_since = None
         return info
+
+    def learn_channel(self, channel_id: int, guild_id: Optional[int],
+                      name: str = "") -> None:
+        """Teach the cache a channel seen in INBOUND traffic.
+
+        The READY snapshot is the only other teacher — without this, a
+        channel created after READY (or a DM the other party opened) would
+        fail validate_channel forever even though the account can clearly
+        see (and could send to) it. Never downgrades an existing entry.
+        """
+        if channel_id in self.channels:
+            info = self.channels[channel_id]
+            if guild_id is None and not info.dm:
+                return  # guild entry already fine
+            return
+        if guild_id is None:  # DM-shaped but unknown recipient
+            self.channels[channel_id] = ChannelInfo(
+                channel_id=channel_id, name=name or f"dm-{channel_id}", dm=True
+            )
+            return
+        self.channels[channel_id] = ChannelInfo(
+            channel_id=channel_id, name=name or f"channel-{channel_id}",
+            guild_id=guild_id,
+        )
+        guild = self.guilds.get(guild_id)
+        if guild is not None:
+            guild["channels"][channel_id] = name or f"channel-{channel_id}"
 
     # -------------------------------------------------------------- queries
     def channel(self, channel_id: int) -> ChannelInfo:

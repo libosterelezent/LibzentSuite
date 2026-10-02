@@ -72,6 +72,10 @@ def load_config(config_dir: str | Path) -> ProjectConfig:
     policies = _deep_copy(DEFAULT_POLICIES)
     raw_policies = _skip_doc_keys(_read_json(base / "rate_limits.json"))
     lane = raw_policies.pop("lane", None) or {}
+    if lane and not isinstance(lane, dict):
+        raise ValueError(
+            "config/rate_limits.json: 'lane' must be a JSON object "
+            f"(got {type(lane).__name__})")
     if "global" in raw_policies or "accounts" in raw_policies:
         glob = raw_policies.get("global") or {}
         accts = raw_policies.get("accounts") or {}

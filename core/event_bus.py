@@ -245,6 +245,17 @@ class EventBus:
 
         return _unsubscribe
 
+    async def drain(self, timeout: float = 2.0) -> None:
+        """Await the fire-and-forget dispatch backlog (shutdown tail).
+
+        publish_nowait defers dispatch to loop tasks; at shutdown those
+        orphans would be cancelled by loop close — this makes tail-event
+        delivery (AccountDisconnected etc.) contractual, not lucky.
+        """
+        pending = [t for t in list(self._background) if not t.done()]
+        if pending:
+            await asyncio.wait(pending, timeout=timeout)
+
     def publish_nowait(self, event: Event) -> "asyncio.Task[List[Any]]":
         """Fire-and-forget publish; safe from sync callbacks inside a loop."""
         task = asyncio.get_running_loop().create_task(self.publish(event))
@@ -277,13 +288,13 @@ class EventBus:
                     if outer_cancel_pending(unknown=True):
                         raise
                     LOG.exception(
-                        "event handler %r cancelled internally for %s", handler, event.name
+                        "event handler %r cancelled internally for %s", handler, type(event).__name__
                     )
                     results.append(asyncio.CancelledError("handler cancelled"))
                 except (KeyboardInterrupt, SystemExit):
                     raise
                 except Exception as exc:  # isolation by design
-                    LOG.exception("event handler %r failed for %s", handler, event.name)
+                    LOG.exception("event handler %r failed for %s", handler, type(event).__name__)
                     results.append(exc)
         return results
 

@@ -19,8 +19,10 @@ Decisions for things INTEGRATION.md left open:
 """
 from __future__ import annotations
 
+import asyncio
 import shlex
 import sys
+import threading
 from typing import Any, Optional, TextIO
 
 from core.errors import (
@@ -83,16 +85,59 @@ class Repl:
         self.running = False
 
     async def run(self) -> None:
-        """Main loop; ``api.shutdown()`` and ``bye.`` run on every exit path."""
+        """Main loop; ``api.shutdown()`` and ``bye.`` run on every exit path.
+
+        Input is read by a DAEMON reader thread feeding an asyncio queue:
+        a synchronous readline() on the loop thread would freeze the entire
+        event loop at the prompt (dashboard 504s, WS stalls, gateway
+        heartbeats starve) — the exact failure the queue hop prevents.
+        Ctrl-C still works: SIGINT is delivered to the MAIN thread, which
+        is parked in ``await queue.get()`` and unwinds through the runner's
+        cancellation/KeyboardInterrupt path.
+        """
         self.running = True
         self._write(BANNER)
+        loop = asyncio.get_running_loop()
+        lines: "asyncio.Queue[str]" = asyncio.Queue()
+        reader_done = loop.create_future()
+
+        def _reader() -> None:
+            try:
+                while True:
+                    try:
+                        line = self._in.readline()
+                    except (EOFError, KeyboardInterrupt):
+                        line = ""
+                    try:
+                        loop.call_soon_threadsafe(lines.put_nowait, line)
+                    except RuntimeError:  # loop closed: process exiting
+                        return
+                    if not line:
+                        return
+            finally:
+                try:
+                    loop.call_soon_threadsafe(_finish_reader)
+                except RuntimeError:
+                    pass
+
+        def _finish_reader() -> None:
+            if not reader_done.done():
+                reader_done.set_result(None)
+
+        threading.Thread(
+            target=_reader, name="repl-reader", daemon=True
+        ).start()
         try:
             while self.running:
                 self._write(PROMPT, end="")
-                try:
-                    line = self._in.readline()
-                except (EOFError, KeyboardInterrupt):
+                get = asyncio.ensure_future(lines.get())
+                done, _ = await asyncio.wait(
+                    {get, reader_done}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if get not in done:
+                    get.cancel()  # reader died (EOF seen): nothing more
                     break
+                line = get.result()
                 if not line:  # EOF
                     break
                 if not await self.execute(line.strip()):

@@ -73,6 +73,10 @@ class Setting:
                 if isinstance(value, bool):
                     return value
                 raise ValueError(value)
+            if self.type in ("int", "float") and isinstance(value, bool):
+                # float(True) == 1.0 silently inverted the operator's intent
+                # ({"interval": true} must not become a 1s interval)
+                raise ValueError(value)
             if self.type == "int":
                 coerced = int(value)
                 if isinstance(value, float) and not value.is_integer():
@@ -287,6 +291,17 @@ class SettingsManager:
         return validated
 
     # ----------------------------------------------------------- accounts
+    def forget_account(self, account: str) -> None:
+        """Drop every in-memory layer entry for a REMOVED account.
+
+        The DB cascade already deleted the rows; without this the boot-time
+        snapshots would outlive the account and a re-created same-named
+        account would silently inherit its plugin settings (or fail
+        resolution on a stale key and start every plugin disabled).
+        """
+        self._account_plugin.pop(account, None)
+        self._account_framework.pop(account, None)
+
     def account_settings(self, account: str) -> Dict[str, Any]:
         """Resolved framework account settings (reconnect policy...).
 
