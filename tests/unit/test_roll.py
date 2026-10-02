@@ -69,7 +69,7 @@ async def flow(content: str, author: int = OWNER_ID, overrides=None) -> RollServ
         plugin_dir="plugins",
     )
     manager.discover()
-    manager.attach_account("alpha", allowed={"roll"})
+    await manager.attach_account("alpha", allowed={"roll"})
     services = RollServices()
     await manager.activate_account("alpha", services)
     bus.publish_nowait(MessageReceived(

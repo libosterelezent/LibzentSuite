@@ -85,8 +85,9 @@ class FakeServices:
         return "#grind" if channel_id == TRIGGER_CHANNEL else f"channel-{channel_id}"
 
 
-def make_plugin(pages: List[str], settings_overrides=None):
-    """Build a live SoulcopyPlugin instance through the real manager."""
+async def make_plugin(pages: List[str], settings_overrides=None):
+    """Build a live SoulcopyPlugin instance through the real manager
+    (async: attach_account reads persisted plugin state)."""
     bus = EventBus()
     global_layer = {"soulcopy": settings_overrides or {}}
     manager = PluginManager(
@@ -95,7 +96,7 @@ def make_plugin(pages: List[str], settings_overrides=None):
         plugin_dir="plugins",
     )
     manager.discover()
-    manager.attach_account("alpha", allowed={"soulcopy"})
+    await manager.attach_account("alpha", allowed={"soulcopy"})
     services = FakeServices(bus, pages)
     asyncio.get_event_loop_policy()
     return manager, services
@@ -147,7 +148,7 @@ class TestSoulcopyFlow(unittest.IsolatedAsyncioTestCase):
             plugin_dir="plugins",
         )
         manager.discover()
-        manager.attach_account("alpha", allowed={"soulcopy"})
+        await manager.attach_account("alpha", allowed={"soulcopy"})
         services = FakeServices(bus, pages)
         await manager.activate_account("alpha", services)
         bus.publish_nowait(MessageReceived(
@@ -204,7 +205,7 @@ class TestSoulcopyFlow(unittest.IsolatedAsyncioTestCase):
             plugin_dir="plugins",
         )
         manager.discover()
-        manager.attach_account("alpha", allowed={"soulcopy"})
+        await manager.attach_account("alpha", allowed={"soulcopy"})
         services = FakeServices(bus, ["page"])
         await manager.activate_account("alpha", services)
         # trigger in a channel the services does not know -> TargetGone

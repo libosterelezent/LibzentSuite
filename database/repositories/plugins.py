@@ -28,7 +28,7 @@ class PluginRepository(BaseRepository):
     """Manifest + state + settings persistence for plugins, keyed by NAME."""
 
     # ------------------------------------------------------------ metadata
-    def upsert_metadata(
+    async def upsert_metadata(
         self,
         name: str,
         version: str,
@@ -49,8 +49,8 @@ class PluginRepository(BaseRepository):
             raise DatabaseError(
                 f"settings manifest for plugin {name!r} is not JSON-serializable: {exc}"
             ) from exc
-        with self._tx(f"upsert metadata for plugin {name!r}") as conn:
-            conn.execute(
+        async with self._tx(f"upsert metadata for plugin {name!r}") as conn:
+            await conn.execute(
                 """INSERT INTO plugins (name, version, description, settings_json)
                    VALUES (?, ?, ?, ?)
                    ON CONFLICT(name) DO UPDATE SET
@@ -60,13 +60,13 @@ class PluginRepository(BaseRepository):
                 (name, str(version), str(description or ""), manifest),
             )
 
-    def metadata(self) -> List[Dict[str, Any]]:
+    async def metadata(self) -> List[Dict[str, Any]]:
         """All plugin manifests as PluginMetadata-shaped dicts (name order).
 
         A corrupt manifest degrades to an empty settings list, not a crash.
         """
         out: List[Dict[str, Any]] = []
-        for row in self._read("SELECT * FROM plugins ORDER BY name"):
+        for row in await self._fetch_all("SELECT * FROM plugins ORDER BY name"):
             settings = loads_tolerant(
                 row["settings_json"], [], f"plugins[{row['name']!r}].settings_json"
             )
@@ -80,9 +80,9 @@ class PluginRepository(BaseRepository):
             )
         return out
 
-    def metadata_for(self, name: str) -> Optional[Dict[str, Any]]:
+    async def metadata_for(self, name: str) -> Optional[Dict[str, Any]]:
         """One plugin's manifest dict (None when the plugin is unknown)."""
-        row = self._read_one("SELECT * FROM plugins WHERE name = ?", (name,))
+        row = await self._fetch_one("SELECT * FROM plugins WHERE name = ?", (name,))
         if row is None:
             return None
         settings = loads_tolerant(row["settings_json"], [], f"plugins[{name!r}].settings_json")
@@ -94,31 +94,31 @@ class PluginRepository(BaseRepository):
         ).to_dict()
 
     # --------------------------------------------------------------- state
-    def state(self, account: str, plugin: str) -> Optional[bool]:
+    async def state(self, account: str, plugin: str) -> Optional[bool]:
         """Persisted enabled flag for (account, plugin).
 
         None means "no row" — the caller applies its own default (True for
         fresh plugin instances), which is why absent is distinct from False.
         """
-        row = self._read_one(
+        row = await self._fetch_one(
             "SELECT enabled FROM plugin_states WHERE account = ? AND plugin = ?",
             (account, plugin),
         )
         return None if row is None else bool(row["enabled"])
 
-    def set_state(self, account: str, plugin: str, enabled: bool) -> None:
+    async def set_state(self, account: str, plugin: str, enabled: bool) -> None:
         """Persist the enabled flag (upsert); survives restarts."""
-        with self._tx(f"set plugin state {account!r}/{plugin!r}") as conn:
-            conn.execute(
+        async with self._tx(f"set plugin state {account!r}/{plugin!r}") as conn:
+            await conn.execute(
                 """INSERT INTO plugin_states (account, plugin, enabled) VALUES (?, ?, ?)
                    ON CONFLICT(account, plugin) DO UPDATE SET enabled = excluded.enabled""",
                 (account, plugin, int(bool(enabled))),
             )
 
     # ------------------------------------------------------------ settings
-    def setting(self, account: str, plugin: str, key: str) -> Any:
+    async def setting(self, account: str, plugin: str, key: str) -> Any:
         """One stored setting value (None when absent)."""
-        row = self._read_one(
+        row = await self._fetch_one(
             "SELECT value_json FROM plugin_settings WHERE account = ? AND plugin = ? AND key = ?",
             (account, plugin, key),
         )
@@ -128,10 +128,10 @@ class PluginRepository(BaseRepository):
             row["value_json"], None, f"plugin_settings[{account!r}/{plugin!r}].{key}"
         )
 
-    def settings(self, account: str, plugin: str) -> Dict[str, Any]:
+    async def settings(self, account: str, plugin: str) -> Dict[str, Any]:
         """All stored overrides for one (account, plugin) ({} when none)."""
         out: Dict[str, Any] = {}
-        for row in self._read(
+        for row in await self._fetch_all(
             "SELECT key, value_json FROM plugin_settings WHERE account = ? AND plugin = ? ORDER BY key",
             (account, plugin),
         ):
@@ -142,7 +142,7 @@ class PluginRepository(BaseRepository):
                 out[row["key"]] = value
         return out
 
-    def set_setting(self, account: str, plugin: str, key: str, value: Any) -> None:
+    async def set_setting(self, account: str, plugin: str, key: str, value: Any) -> None:
         """Store one per-account setting override (upsert, JSON value).
 
         Raises DatabaseError for an empty/non-string key or a value that
@@ -156,8 +156,8 @@ class PluginRepository(BaseRepository):
             raise DatabaseError(
                 f"setting {plugin!r}.{key} for {account!r} is not JSON-serializable: {exc}"
             ) from exc
-        with self._tx(f"store plugin setting {account!r}/{plugin!r}.{key}") as conn:
-            conn.execute(
+        async with self._tx(f"store plugin setting {account!r}/{plugin!r}.{key}") as conn:
+            await conn.execute(
                 """INSERT INTO plugin_settings (account, plugin, key, value_json)
                    VALUES (?, ?, ?, ?)
                    ON CONFLICT(account, plugin, key)
@@ -165,14 +165,14 @@ class PluginRepository(BaseRepository):
                 (account, plugin, key, payload),
             )
 
-    def all_account_settings(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    async def all_account_settings(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
         """The whole override layer: account -> plugin -> key -> value.
 
         Consumed by SettingsManager to preload every override in one query.
         Corrupt rows are skipped with a warning (never a crash).
         """
         out: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        for row in self._read(
+        for row in await self._fetch_all(
             "SELECT account, plugin, key, value_json FROM plugin_settings ORDER BY account, plugin, key"
         ):
             value = loads_tolerant(

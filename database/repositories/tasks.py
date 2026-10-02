@@ -32,7 +32,7 @@ _TASK_COLUMNS = (
 class TaskHistoryRepository(BaseRepository):
     """add/update/recent for the task history archive."""
 
-    def add(self, entry: Dict[str, Any]) -> int:
+    async def add(self, entry: Dict[str, Any]) -> int:
         """Insert one history row; returns its id.
 
         Only whitelisted columns are taken from ``entry`` (extra keys are
@@ -60,9 +60,9 @@ class TaskHistoryRepository(BaseRepository):
 
         columns = ", ".join(row)
         placeholders = ", ".join("?" for _ in row)
-        with self._tx("append task history") as conn:
+        async with self._tx("append task history") as conn:
             try:
-                cur = conn.execute(
+                cur = await conn.execute(
                     f"INSERT INTO task_history ({columns}) VALUES ({placeholders})",
                     tuple(row.values()),
                 )
@@ -72,7 +72,7 @@ class TaskHistoryRepository(BaseRepository):
                 ) from exc
             return int(row["id"]) if "id" in row else int(cur.lastrowid)
 
-    def update(self, task_id: int, **fields: Any) -> None:
+    async def update(self, task_id: int, **fields: Any) -> None:
         """Update ONLY the provided columns of one history row.
 
         "result_summary" is accepted as the "summary" alias. Raises
@@ -93,15 +93,15 @@ class TaskHistoryRepository(BaseRepository):
                 )
             updates[col] = value
         assignments = ", ".join(f"{col} = ?" for col in updates)
-        with self._tx(f"update task history {task_id}") as conn:
-            cur = conn.execute(
+        async with self._tx(f"update task history {task_id}") as conn:
+            cur = await conn.execute(
                 f"UPDATE task_history SET {assignments} WHERE id = ?",
                 (*updates.values(), task_id),
             )
             if cur.rowcount == 0:
                 raise DatabaseError(f"no task history row for id {task_id}")
 
-    def recent(self, limit: int = 50, account: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def recent(self, limit: int = 50, account: Optional[str] = None) -> List[Dict[str, Any]]:
         """The newest ``limit`` rows (oldest-first), optionally per-account.
 
         Same DESC-fetch-then-reverse tail ordering as the audit trail, so
@@ -109,13 +109,13 @@ class TaskHistoryRepository(BaseRepository):
         """
         limit = max(0, int(limit))
         if account:
-            rows = self._read(
+            rows = await self._fetch_all(
                 "SELECT * FROM task_history WHERE account = ? ORDER BY id DESC LIMIT ?",
                 (account, limit),
                 what="read task history",
             )
         else:
-            rows = self._read(
+            rows = await self._fetch_all(
                 "SELECT * FROM task_history ORDER BY id DESC LIMIT ?",
                 (limit,),
                 what="read task history",

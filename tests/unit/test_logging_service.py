@@ -9,6 +9,11 @@ events' plus the coordinator-confirmed hardening: stderr-exactly-once for
 bridge-ingested records, severity mapping, failure observability, bridge
 detach, and shutdown sink ordering.
 
+Queued persistence (spec §29): record() never touches SQLite — DB writes
+flow through start_persistence()/stop_persistence() and an async drain
+worker. The DB-facing tests here drive that lifecycle with asyncio.run;
+the dedicated matrix lives in tests/unit/test_queued_persistence.py.
+
 Process-global hazard: the stdlib logger tree is shared by the whole test
 process — setUp strips bridges and installs a counting probe, tearDown
 RESTORES the original handlers (strip-only was fragile). configure_stderr is
@@ -16,6 +21,9 @@ NEVER called here (its module-global latch would poison later tests).
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import io
 import logging
 import sqlite3
 import threading
@@ -184,14 +192,20 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
             def __init__(self) -> None:
                 self.calls = 0
 
-            def add(self, entry: dict) -> None:
+            async def add(self, entry: dict) -> None:
                 self.calls += 1
                 raise sqlite3.OperationalError("disk full")
 
-        service = LogService()
-        repo = BoomRepo()
-        service.attach_db(repo)
-        service.record("ERROR", "db", "x")          # must not raise
+        async def scenario() -> tuple:
+            service = LogService()
+            repo = BoomRepo()
+            with contextlib.redirect_stderr(io.StringIO()):  # silence the burst one-liner
+                await service.start_persistence(repo)
+                service.record("ERROR", "db", "x")      # must not raise
+                await service.stop_persistence()        # drain (the one add fails)
+            return service, repo
+
+        service, repo = asyncio.run(scenario())
         self.assertEqual(repo.calls, 1)             # exactly one attempt
         self.assertEqual(len(service.tail(10)), 1)  # canonical entry kept
         self.assertEqual(service.stats()["db_failures"], 1)  # observable
@@ -245,14 +259,19 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
             def __init__(self) -> None:
                 self.rows: list = []
 
-            def add(self, entry: dict) -> None:
+            async def add(self, entry: dict) -> None:
                 self.rows.append(entry)
 
-        service = LogService()
-        repo = CountingRepo()
-        service.attach_db(repo)
-        attach_stdlib_bridge(service)
-        logging.getLogger("slaughtermudae.loader").info("once to db")
+        async def scenario() -> CountingRepo:
+            service = LogService()
+            repo = CountingRepo()
+            await service.start_persistence(repo)
+            attach_stdlib_bridge(service)
+            logging.getLogger("slaughtermudae.loader").info("once to db")
+            await service.stop_persistence()  # drain before the repo could close
+            return repo
+
+        repo = asyncio.run(scenario())
         self.assertEqual(len(repo.rows), 1)
 
     def test_detach_stdlib_bridge(self) -> None:
@@ -269,20 +288,26 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
         self.assertEqual(service_a.tail(10), [])
         detach_stdlib_bridge()
 
-    def test_attach_db_none_detaches_sink(self) -> None:
+    def test_stop_persistence_detaches_sink(self) -> None:
+        """Shutdown ordering (spec §29): stop_persistence() BEFORE
+        db.close(); records after the stop stay in the ring only."""
         class CountingRepo:
             def __init__(self) -> None:
                 self.rows: list = []
 
-            def add(self, entry: dict) -> None:
+            async def add(self, entry: dict) -> None:
                 self.rows.append(entry)
 
-        service = LogService()
-        repo = CountingRepo()
-        service.attach_db(repo)
-        service.record("INFO", "a", "before")
-        service.attach_db(None)                     # shutdown ordering
-        service.record("INFO", "a", "after")
+        async def scenario() -> tuple:
+            service = LogService()
+            repo = CountingRepo()
+            await service.start_persistence(repo)
+            service.record("INFO", "a", "before")
+            await service.stop_persistence()       # the off-switch now
+            service.record("INFO", "a", "after")   # no worker -> not persisted
+            return service, repo
+
+        service, repo = asyncio.run(scenario())
         self.assertEqual(len(repo.rows), 1)
         self.assertEqual(len(service.tail(10)), 2)  # ring unaffected
 

@@ -1,22 +1,22 @@
 # SlaughterMudae — Python dependencies
 # ---------------------------------------------------------------------------
-# The framework has ZERO hard dependencies: core, plugins, CLI, TUI,
-# dashboard (HTTP + WebSocket), SQLite persistence, audit trail and the
-# entire test/simulation suite run on the Python standard library.
+# Core framework dependencies (runtime): the async database layer and the
+# credential encryption service. Everything else remains stdlib-only.
 #
-#   python3 -m unittest discover -s tests -t .     # verify: no installs needed
-#
-# Requires Python >= 3.10 (uses asyncio.Task cancellation semantics,
-# match-free stdlib APIs tested on 3.13).
+#   python3 -m unittest discover -s tests -t .     # full suite
 # ---------------------------------------------------------------------------
 
+# Async SQLite access layer: one background-thread connection keeps every
+# database operation OFF the event loop (see database/connection.py).
+aiosqlite>=0.20
+
+# Credential encryption at rest (Fernet — AES128-CBC + HMAC-SHA256).
+# Never homemade crypto; keys live outside the database.
+cryptography>=42
+
 # --- OPTIONAL: live Discord mode only ---------------------------------------
-# Live selfbot access needs a user-account-capable client fork. It is imported
-# LAZILY inside core/discord_adapter.py (never during tests/simulations), so
-# uncomment and install ONLY if you run `python main.py --start-all`:
+# Live selfbot access needs a user-account-capable client fork. It is
+# imported LAZILY inside adapters/discord/client.py (never during
+# tests/simulations), so install ONLY if you run live accounts:
 #
-     pip install discord.py-self
-#
-# (any fork exposing Client/start/close/on_ready/on_message/get_channel/
-#  fetch_channel.send/fetch_user.dm_channel works — see adapters/base.py
-#  for the exact client protocol the adapter expects)
+#      pip install discord.py-self

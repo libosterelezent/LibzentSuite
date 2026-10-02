@@ -9,11 +9,31 @@ calls or raw logger text. Each entry carries:
 Consumers:
   * stderr mirror (human-readable, one line per record),
   * the dashboard Logs page (live tail over WebSocket — no text parsing),
-  * the database `logs` table (bounded, best-effort).
+  * the database `logs` table (bounded, best-effort — via an ASYNC drain
+    worker fed by a thread-safe queue, spec §29: the record path NEVER
+    touches SQLite synchronously).
+
+Persistence model (async DB layer): ``record()`` only appends to the ring,
+bumps counters, mirrors to stdlib, notifies subscribers and ENQUEUES a dict
+on a ``queue.SimpleQueue`` (thread-safe; callable from any thread, never
+awaits, never blocks). ``await start_persistence(repo)`` spawns one asyncio
+drain worker that awaits ``repo.add(entry)`` per dequeued item; failures are
+counted in ``stats()['db_failures']`` and never raise (one raw stderr
+one-liner per failure burst at most). The queue is capped at
+``_MAX_INFLIGHT`` in-flight items — beyond that records are DROPPED from
+persistence (ring/counters unaffected) and counted in ``stats()['dropped']``.
+
+STARTUP ORDER: ``await start_persistence(...)`` BEFORE heavy logging begins
+(early records otherwise never persist). SHUTDOWN ORDER: ``await
+stop_persistence(...)`` BEFORE ``await database.close()`` so the drain
+finishes against a live connection. With no persistence started, record()
+does zero extra work and never warns (simulator/headless boots).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import queue
 import sys
 import threading
 import time
@@ -36,6 +56,12 @@ _SEVERITY_BY_LEVELNAME = {
     "ERROR": "ERROR", "CRITICAL": "ERROR", "FATAL": "ERROR",
     "WARN": "WARNING",
 }
+
+#: in-flight persistence cap: items enqueued but not yet drained. Above it,
+#: new records are dropped FROM PERSISTENCE ONLY (ring/counters keep them)
+#: and counted in stats()['dropped'] — a wedged DB must never balloon
+#: memory or leak back into the record path.
+_MAX_INFLIGHT = 10_000
 
 
 @dataclass
@@ -74,17 +100,36 @@ def configure_stderr(level: int = logging.INFO) -> None:
 
 
 class LogService:
-    """Ring buffer + live subscribers + optional DB sink for structured logs."""
+    """Ring buffer + live subscribers + queued-async-DB sink for logs.
+
+    Lifecycle (spec §29 — application/event paths never touch SQLite):
+
+        service = LogService()
+        service.attach_db(repo)                  # configuration only
+        await service.start_persistence(repo)    # BEFORE heavy logging
+        ...
+        await service.stop_persistence()         # BEFORE db.close()
+    """
 
     def __init__(self, capacity: int = 4000) -> None:
         self._ring: Deque[LogEntry] = deque(maxlen=capacity)
         self._subscribers: List[Callable[[LogEntry], None]] = []
         self._lock = threading.Lock()
-        self._db = None  # LogRepository (duck-typed, attached later)
+        self._db = None  # LogRepository (duck-typed) — CONFIG ONLY until start_persistence
         self._counts: Dict[str, int] = {sev: 0 for sev in SEVERITIES}
         # OBSERVABILITY (dead sinks must not be silent): drop/failure counters
         self._db_failures = 0
         self._subscriber_failures = 0
+        self._dropped = 0  # records dropped from persistence (queue overflow)
+        # QUEUED PERSISTENCE: producers (any thread) put; ONE async drain
+        # worker (event loop) consumes. SimpleQueue: put/get never block.
+        self._pqueue: "queue.SimpleQueue" = queue.SimpleQueue()
+        self._worker: Optional["asyncio.Task"] = None
+        self._worker_stopping = False
+        self._persist_repo: Any = None
+        self._persist_batch = 50
+        self._persist_interval = 0.25
+        self._db_failure_notified = False  # one stderr line per failure burst
         # INBOUND/OUTBOUND SEPARATION: while a StdlibBridge is ingesting a
         # raw stdlib record ON THIS THREAD, the mirror is suppressed — the
         # record came FROM stdlib (stderr already printed it once), so
@@ -107,8 +152,148 @@ class LogService:
 
     # ---------------------------------------------------------------- sink
     def attach_db(self, repository: Any) -> None:
-        """Persist every record to a LogRepository (best-effort, never raises)."""
+        """Configure the persistence repository — CONFIGURATION ONLY.
+
+        No write happens until ``await start_persistence(...)`` spawns the
+        drain worker; ``attach_db(None)`` just clears the configuration
+        (stop_persistence() is the runtime off-switch).
+        """
         self._db = repository
+
+    # ------------------------------------------------- queued persistence
+    async def start_persistence(
+        self, repo: Any, *, batch: int = 50, interval: float = 0.25
+    ) -> Optional["asyncio.Task"]:
+        """Spawn the async drain worker (call BEFORE heavy logging).
+
+        The worker polls the queue, awaits ``repo.add(entry_dict)`` per
+        dequeued item (batch-commit friendliness is the repository's
+        business) and sleeps ``interval`` seconds when idle. Failures are
+        counted in ``stats()['db_failures']`` — never raised, never logged
+        through LogService (one raw stderr one-liner per failure burst).
+
+        Idempotent: when a worker is already alive it is returned as-is
+        (stop_persistence() first to restart with a different repo/batch).
+        """
+        if repo is None:
+            return self._worker
+        if self._worker is not None and not self._worker.done():
+            return self._worker
+        self._db = repo
+        self._persist_repo = repo
+        self._persist_batch = max(1, int(batch))
+        self._persist_interval = max(0.0, float(interval))
+        self._worker_stopping = False
+        self._worker = asyncio.get_running_loop().create_task(
+            self._persistence_worker(repo), name="logservice-persistence"
+        )
+        return self._worker
+
+    async def stop_persistence(self, timeout: float = 5.0) -> None:
+        """Stop the drain worker (idempotent); call BEFORE ``db.close()``.
+
+        Order: records stop being enqueued, the worker is asked to finish
+        its current batch and exit (bounded join — a HEALTHY worker is
+        never cancelled mid-``repo.add``, so no item is lost or doubled),
+        a stuck worker is cancelled after the grace window, and whatever
+        still remains in the queue is drained inline (bounded by
+        ``timeout`` — a hung repo cannot wedge shutdown).
+        """
+        worker = self._worker
+        if worker is None:
+            return
+        self._worker = None  # record() stops enqueueing from now on
+        self._worker_stopping = True
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, float(timeout))
+        # graceful join: the worker checks the flag between adds and exits
+        # on its own; 0.5s grace covers one in-flight add + batch tail
+        await asyncio.wait({worker}, timeout=min(0.5, max(0.0, float(timeout))))
+        worker.cancel()  # no-op when the graceful exit already finished it
+        await asyncio.gather(worker, return_exceptions=True)
+        repo = self._persist_repo
+        if repo is not None:
+            while loop.time() < deadline:
+                got = 0
+                while got < self._persist_batch:
+                    try:
+                        item = self._pqueue.get_nowait()
+                    except queue.Empty:
+                        return
+                    try:
+                        await repo.add(item)
+                        self._db_failure_notified = False
+                    except Exception as exc:  # best-effort to the very end
+                        with self._lock:
+                            self._db_failures += 1
+                        self._notify_db_failure(exc)
+                    got += 1
+                await asyncio.sleep(0)  # yield between batches (big drains)
+
+    def _enqueue(self, entry: LogEntry) -> None:
+        """Hand one entry to the drain worker (never blocks, never raises).
+
+        The qsize() check is advisory: concurrent producer threads may
+        overshoot the cap by a hair before the single consumer catches up —
+        the bound exists to keep memory finite, not to be exact.
+        """
+        q = self._pqueue
+        if q.qsize() >= _MAX_INFLIGHT:
+            with self._lock:
+                self._dropped += 1
+            return
+        q.put(entry.as_dict())
+
+    async def _persistence_worker(self, repo: Any) -> None:
+        """Drain loop: batch of awaits, then yield (or idle-sleep).
+
+        Checks ``_worker_stopping`` between items so stop_persistence() can
+        join this task WITHOUT cancelling it mid-``repo.add`` (a cancelled
+        in-flight insert is the one place an item could be lost or
+        doubled); the idle sleep is the other cancellation point and is
+        always clean.
+        """
+        try:
+            while not self._worker_stopping:
+                drained = 0
+                while drained < self._persist_batch and not self._worker_stopping:
+                    try:
+                        item = self._pqueue.get_nowait()
+                    except queue.Empty:
+                        break
+                    try:
+                        await repo.add(item)
+                        self._db_failure_notified = False
+                    except Exception as exc:
+                        # OBSERVABLE, never recursive: no logging here (a
+                        # log call inside the write path is what fed the
+                        # original feedback loop)
+                        with self._lock:
+                            self._db_failures += 1
+                        self._notify_db_failure(exc)
+                    drained += 1
+                await asyncio.sleep(
+                    self._persist_interval if drained == 0 else 0
+                )
+        except asyncio.CancelledError:
+            raise  # stop_persistence()
+
+    def _notify_db_failure(self, exc: BaseException) -> None:
+        """One raw stderr one-liner per failure BURST (reset on success).
+
+        Deliberately not LogService/stdlib logging: a log call inside the
+        persistence path re-enters the very machinery that is failing.
+        """
+        if self._db_failure_notified:
+            return
+        self._db_failure_notified = True
+        try:
+            sys.stderr.write(
+                f"[slaughtermudae] log persistence failing: "
+                f"{type(exc).__name__}: {exc} (further errors counted silently)\n"
+            )
+        except Exception:
+            pass  # even stderr must never break the drain
 
     def record(
         self,
@@ -123,8 +308,11 @@ class LogService:
     ) -> Dict[str, Any]:
         """Store one structured entry; returns its JSON-safe dict.
 
-        Mirrors to the stdlib logger (stderr) and notifies live subscribers.
-        Never raises — logging must not break the caller's flow.
+        FULLY non-blocking (spec §29): ring append + counters + guarded
+        stdlib mirror + subscriber dispatch + queue ENQUEUE when a drain
+        worker is live. No DB call, no await, never raises — logging must
+        not break the caller's flow. Without start_persistence() the queue
+        is simply unused (zero extra work, no warnings).
         """
         severity = severity.upper()
         if severity not in SEVERITIES:
@@ -147,13 +335,9 @@ class LogService:
                 _LEVEL_BY_SEVERITY[severity], "%s", entry.message,
                 extra={"_sm_from_service": True},
             )
-        if self._db is not None:
-            try:
-                self._db.add(entry.as_dict())
-            except Exception:
-                # OBSERVABLE, never recursive: no logging here (a log call
-                # inside the write path is what fed the original loop)
-                self._db_failures += 1
+        worker = self._worker
+        if worker is not None and not worker.done():
+            self._enqueue(entry)
         for callback in list(self._subscribers):
             try:
                 callback(entry)
@@ -212,11 +396,13 @@ class LogService:
             counts = dict(self._counts)
             db_failures = self._db_failures
             subscriber_failures = self._subscriber_failures
+            dropped = self._dropped
         return {
             "entries": sum(counts.values()),
             "by_severity": counts,
             "db_failures": db_failures,
             "subscriber_failures": subscriber_failures,
+            "dropped": dropped,
         }
 
 

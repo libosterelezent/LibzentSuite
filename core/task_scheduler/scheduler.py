@@ -170,8 +170,11 @@ class TaskScheduler:
             recorded exactly once with their grant wait/jitter.
         default_timeout: sender budget per attempt when submit() omits one.
         retry_backoff / max_backoff: exponential backoff between attempts.
-        history_repo: duck-typed TaskHistoryRepository (add/update/recent);
-            one row per terminal task, best-effort.
+        history_repo: duck-typed TaskHistoryRepository (async
+            add/update/recent); one row per terminal task, best-effort —
+            written via ``await`` on the worker/stop paths and via a
+            scheduled tail from the sync cancel paths (spec §29: no
+            synchronous SQLite anywhere).
     """
 
     def __init__(
@@ -221,6 +224,7 @@ class TaskScheduler:
         self._lane_events: Dict[str, asyncio.Event] = {}
         self._lanes: Dict[str, asyncio.Task] = {}
         self._worker_refs: set = set()  # strong refs to spawned lane tasks
+        self._tail_refs: set = set()  # strong refs to scheduled finish tails
         self._gate = _GrantGate()
         self._started = False
         self._stopping = False
@@ -292,12 +296,18 @@ class TaskScheduler:
                 while self._tasks and time.monotonic() < deadline:
                     await asyncio.sleep(0.01)
             for task in list(self._tasks.values()):
-                self._finish(task, STATUS_CANCELLED)
+                await self._finish(task, STATUS_CANCELLED)
             for lane in list(self._lanes.values()):
                 if not lane.done():
                     lane.cancel()
             if self._lanes:
                 await asyncio.gather(*self._lanes.values(), return_exceptions=True)
+            # join the async tails scheduled by sync cancel() calls (bounded:
+            # each tail is at most one awaited repo.add) so their history
+            # rows land BEFORE the caller proceeds to database.close()
+            pending_tails = [t for t in list(self._tail_refs) if not t.done()]
+            if pending_tails:
+                await asyncio.wait(pending_tails, timeout=5.0)
         finally:
             self._stopped = True
             self._stopping = False
@@ -420,7 +430,7 @@ class TaskScheduler:
         if task is None:
             return False
         if task.status == STATUS_QUEUED:
-            self._finish(task, STATUS_CANCELLED)
+            self._finish_sync(task, STATUS_CANCELLED)
             return True
         if task.status == STATUS_RUNNING:
             task.cancelled = True
@@ -444,7 +454,7 @@ class TaskScheduler:
             if action is not None and task.action != action:
                 continue
             if task.status == STATUS_QUEUED:
-                self._finish(task, STATUS_CANCELLED)
+                self._finish_sync(task, STATUS_CANCELLED)
             elif task.status == STATUS_RUNNING:
                 task.cancelled = True
             else:
@@ -473,15 +483,16 @@ class TaskScheduler:
             rows = [r for r in rows if r.get("account") == account]
         return rows
 
-    def history(self, limit: int = 50, account: Optional[str] = None) -> List[dict]:
-        """Finished tasks, newest last — repo-backed, else the memory tail."""
+    async def history(self, limit: int = 50, account: Optional[str] = None) -> List[dict]:
+        """Finished tasks, newest last — repo-backed (awaited), else the
+        in-memory tail."""
         try:
             limit = int(limit)
         except (TypeError, ValueError):
             limit = 50
         if self._history_repo is not None:
             try:
-                return list(self._history_repo.recent(limit, account))
+                return list(await self._history_repo.recent(limit, account))
             except Exception:
                 self._log("warning", "scheduler", "task history read failed; falling back to in-memory tail")
         rows = list(self._finished_rows)
@@ -594,7 +605,7 @@ class TaskScheduler:
                 # checkpoint 0: cancelled before we even ask for a grant
                 # (a retry iteration legitimately re-enters here while RUNNING)
                 if task.cancelled or task.status not in (STATUS_QUEUED, STATUS_RUNNING):
-                    self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
+                    await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                     return
 
                 await self._gate.enter(int(task.priority), task.id)
@@ -605,14 +616,14 @@ class TaskScheduler:
                 except asyncio.CancelledError:
                     if self._outer_cancelled():
                         raise  # outer handler finishes the task as cancelled
-                    self._finish(
+                    await self._finish(
                         task, STATUS_FAILED,
                         error="rate limiter acquire was cancelled",
                         started_mono=started_mono,
                     )
                     return
                 except Exception as exc:
-                    self._finish(
+                    await self._finish(
                         task, STATUS_FAILED,
                         error=f"rate limiter error: {type(exc).__name__}: {exc}",
                         started_mono=started_mono,
@@ -623,7 +634,7 @@ class TaskScheduler:
 
                 # checkpoint 1: cancelled while waiting for the grant
                 if task.cancelled or task.status not in (STATUS_QUEUED, STATUS_RUNNING):
-                    self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
+                    await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                     return
 
                 if task.status == STATUS_QUEUED:  # first attempt: queued -> running
@@ -640,7 +651,7 @@ class TaskScheduler:
                 except asyncio.CancelledError:
                     if self._outer_cancelled():
                         raise  # worker cancellation (stop sweep)
-                    self._finish(
+                    await self._finish(
                         task, STATUS_FAILED,
                         error="sender was cancelled before completing",
                         started_mono=started_mono,
@@ -659,14 +670,14 @@ class TaskScheduler:
                 except (ConnectionError, TimeoutError) as exc:
                     retryable = exc
                 except FlowBlocked as exc:
-                    self._finish(
+                    await self._finish(
                         task, STATUS_FAILED,
                         error=f"{type(exc).__name__}: {exc}",
                         started_mono=started_mono,
                     )
                     return
                 except Exception as exc:
-                    self._finish(
+                    await self._finish(
                         task, STATUS_FAILED,
                         error=f"{type(exc).__name__}: {exc}",
                         started_mono=started_mono,
@@ -675,9 +686,9 @@ class TaskScheduler:
                 else:
                     # checkpoint 2: cancelled while the sender ran -> discard
                     if task.cancelled:
-                        self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
+                        await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                         return
-                    self._finish(
+                    await self._finish(
                         task, STATUS_COMPLETED,
                         summary=self._summarize(result, task),
                         started_mono=started_mono,
@@ -686,7 +697,7 @@ class TaskScheduler:
 
                 # retryable failure (timeout / ConnectionError / 429...)
                 if task.cancelled:
-                    self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
+                    await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                     return
                 # Server-provided limits ALWAYS earn at least one retry (spec:
                 # the framework respects server rate-limit information) — the
@@ -702,20 +713,20 @@ class TaskScheduler:
                     except asyncio.CancelledError:
                         if self._outer_cancelled():
                             raise
-                        self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
+                        await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                         return
                     continue
 
                 # retries exhausted -> terminal
                 if timed_out:
-                    self._finish(
+                    await self._finish(
                         task, STATUS_TIMED_OUT,
                         error=f"timed out after {task.timeout_s:g}s ({task.attempts + 1} attempt(s))",
                         started_mono=started_mono,
                     )
                 else:
                     exc = retryable
-                    self._finish(
+                    await self._finish(
                         task, STATUS_FAILED,
                         error=f"{type(exc).__name__}: {exc}" if exc is not None else "failed",
                         started_mono=started_mono,
@@ -724,7 +735,7 @@ class TaskScheduler:
         except asyncio.CancelledError:
             # the worker itself was cancelled (stop()); guarantee a terminal
             # status even if the sweep has not reached this task yet
-            self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
+            await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
             raise
 
     @staticmethod
@@ -740,7 +751,7 @@ class TaskScheduler:
         match = re.match(r"^([A-Z][A-Za-z0-9_]+): ", error)
         return match.group(1) if match else ""
 
-    def _finish(
+    def _apply_terminal(
         self,
         task: Task,
         status: str,
@@ -748,16 +759,17 @@ class TaskScheduler:
         error: Optional[str] = None,
         summary: Optional[str] = None,
         started_mono: Optional[float] = None,
-    ) -> None:
-        """Apply ONE terminal transition: fields, memory, repo, audit, event.
+    ) -> Optional[dict]:
+        """Synchronous exactly-once half of a terminal transition.
 
-        Exactly-once by construction: live tasks are removed from the
-        registry here, and already-terminal tasks make this a no-op. History
-        and audit failures are swallowed (logged) — recording must never
-        break the send pipeline.
+        Applies the status/error/summary fields, finished-task memory,
+        counters and registry removal; returns the history row when THIS
+        call performed the transition, else None (already terminal). Runs
+        no I/O — safe from any context, and the reason cancel() can still
+        promise an immediate terminal status while persistence is async.
         """
         if task.status in TERMINAL_STATUSES:
-            return
+            return None
         task.status = status  # type: ignore[assignment]
         task.error = error
         task.result_summary = summary
@@ -770,10 +782,51 @@ class TaskScheduler:
         self._finished_rows.append(row)
         self._finished_tasks.append(task)
         self._counts[status] = self._counts.get(status, 0) + 1
+        return row
 
+    async def _finish(
+        self,
+        task: Task,
+        status: str,
+        *,
+        error: Optional[str] = None,
+        summary: Optional[str] = None,
+        started_mono: Optional[float] = None,
+    ) -> None:
+        """Apply ONE terminal transition: fields, memory, repo, audit, event.
+
+        Exactly-once by construction (see _apply_terminal). The history
+        write is AWAITED — the repository layer is async (aiosqlite), so
+        this method must be called from a coroutine (worker lanes, stop()).
+        Synchronous call sites (cancel/cancel_matching) use _finish_sync(),
+        which applies the mutation immediately and schedules this same tail
+        on the running loop. History and audit failures are swallowed
+        (logged) — recording must never break the send pipeline.
+        """
+        row = self._apply_terminal(
+            task, status, error=error, summary=summary, started_mono=started_mono
+        )
+        if row is not None:
+            await self._finish_tail(task, status, row, error=error, summary=summary)
+
+    async def _finish_tail(
+        self,
+        task: Task,
+        status: str,
+        row: dict,
+        *,
+        error: Optional[str] = None,
+        summary: Optional[str] = None,
+    ) -> None:
+        """Persistence + notification half of a terminal transition.
+
+        Exactly-once by construction: only the caller that won the
+        _apply_terminal race reaches this. Order matches the historical
+        contract: history row, audit row, terminal events.
+        """
         if self._history_repo is not None:
             try:
-                self._history_repo.add(row)
+                await self._history_repo.add(row)
             except Exception:
                 self._log("warning", "scheduler", f"task {task.id} history write failed (continuing)")
 
@@ -819,6 +872,29 @@ class TaskScheduler:
             ))
         elif status == STATUS_CANCELLED:
             self._emit(TaskCancelled(account=task.account, task_id=task.id))
+
+    def _finish_sync(self, task: Task, status: str) -> None:
+        """Terminal transition from SYNCHRONOUS call sites (cancel paths).
+
+        The exactly-once mutation (status, memory, counters) happens NOW —
+        callers read ``task.status`` immediately after — while the async
+        tail (awaited history write + audit row + terminal events) is
+        scheduled on the running loop: no SQLite call ever happens
+        synchronously (spec §29). Without a running loop the tail is
+        dropped with a warning (best-effort, like _emit's no-loop path).
+        """
+        row = self._apply_terminal(task, status)
+        if row is None:
+            return
+        try:
+            tail = asyncio.get_running_loop().create_task(
+                self._finish_tail(task, status, row), name="scheduler-finish-tail"
+            )
+        except RuntimeError:
+            self._log("warning", "scheduler", f"task {task.id} history write skipped (no running loop)")
+            return
+        self._tail_refs.add(tail)  # strong ref: never GC'd mid-flight
+        tail.add_done_callback(self._tail_refs.discard)
 
 
 __all__ = ["TaskScheduler"]

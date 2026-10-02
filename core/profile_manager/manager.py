@@ -6,10 +6,13 @@ An account with NO known profile is UNRESTRICTED (backwards compatible with
 pre-profile configurations) — this mirrors the audited ``core/roles.py``
 semantics exactly (``allowed_plugins`` returning ``None``).
 
-Persistence is read-through: the ``ProfilesRepository`` (and the optional
-``AccountsRepository`` for assignments) is the single source of truth; this
-manager keeps no duplicate cache, so CLI/dashboard edits through any path are
-immediately visible here.
+Persistence is read-through into an in-memory cache: the repositories are
+the source of truth, :meth:`load` (awaited once at boot, after
+``database.connect()``) populates the cache and every mutating method
+updates it right after the repository write succeeds. Mutating methods are
+async (aiosqlite repos underneath); :meth:`allowed_plugins` stays SYNC and
+answers from the cache because the account manager calls it from attach
+paths that must not grow another await.
 
 Ported from ``git show HEAD:core/roles.py`` (name regex, dedupe+sort plugin
 lists, unknown-role warning behaviour) with the new repository API names.
@@ -30,8 +33,9 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 class ProfileManager:
     """CRUD + assignment for profiles; validates at every boundary.
 
-    All mutating methods persist FIRST through the repository and only then
-    report success; read methods go straight to the repository.
+    All mutating methods persist FIRST through the repository (awaited)
+    and only then report success + update the in-memory cache; reads go
+    through the cache kept fresh by :meth:`load` and the mutators.
     """
 
     NAME_RE = NAME_RE
@@ -40,20 +44,46 @@ class ProfileManager:
                  accounts_repo: Any = None) -> None:
         """``profiles_repo``: ProfilesRepository; ``accounts_repo`` (optional)
         enables assignment validation + lookups; ``logger``: stdlib-style.
+        The constructor does NO I/O — await :meth:`load` at boot.
         """
         self._profiles = profiles_repo
         self._accounts = accounts_repo
         self._logger = (logger or logging.getLogger("slaughtermudae.profiles"))
+        #: name -> ProfileRecord (cache; refresh via load()/set_profile)
+        self._profile_cache: Dict[str, Any] = {}
+        #: account -> sorted profile names (cache; refresh via load()/assign)
+        self._assignment_cache: Dict[str, List[str]] = {}
+
+    # ---------------------------------------------------------------- boot
+    async def load(self) -> None:
+        """Populate the caches from the repositories (boot path).
+
+        Best-effort per repository: a failure is logged and leaves that
+        cache empty — profile checks then degrade to "unrestricted" rather
+        than failing the boot.
+        """
+        try:
+            for record in (await self._profiles.list() or []):
+                self._profile_cache[record.name] = record
+        except Exception:
+            self._logger.exception("could not load profiles from repository")
+        if self._accounts is not None:
+            try:
+                for record in (await self._accounts.list() or []):
+                    self._assignment_cache[record.name] = sorted(record.profiles or [])
+            except Exception:
+                self._logger.exception("could not load profile assignments")
 
     # ---------------------------------------------------------------- CRUD
-    def set_profile(self, name: str, plugins: Any, description: str = "") -> Dict[str, Any]:
+    async def set_profile(self, name: str, plugins: Any,
+                          description: str = "") -> Dict[str, Any]:
         """Create or fully replace a profile (persisted via repo.upsert).
 
         The plugin list is stripped, de-duplicated and sorted (canonical form
         on disk — ported from the audited roles code).
 
         Raises:
-            ProfileError: bad name (must match ``^[a-z][a-z0-9_-]{0,31}$``),
+            ProfileError: bad name (must match ``^[a-z][a-z0-9_-]{0,31}``),
                 a non-list plugin argument, or an empty/dirty plugin list.
         """
         if not isinstance(name, str) or not NAME_RE.match(name or ""):
@@ -77,26 +107,46 @@ class ProfileManager:
                 f"profile {name!r} must allow at least one plugin "
                 "(got an empty list)"
             )
-        self._profiles.upsert(name, cleaned, description)
+        await self._profiles.upsert(name, cleaned, description)
+        try:  # cache the canonical persisted form (best-effort)
+            record = await self._profiles.get(name)
+            if record is not None:
+                self._profile_cache[name] = record
+        except Exception:
+            pass
         self._logger.info("profile %s set (plugins=%s)", name, cleaned)
         return {"name": name, "description": description, "plugins": cleaned}
 
-    def delete_profile(self, name: str) -> Dict[str, Any]:
+    async def delete_profile(self, name: str) -> Dict[str, Any]:
         """Delete a profile (repo cascades account assignments).
 
         Returns ``{"deleted": name, "existed": bool}`` — deleting an unknown
         profile is NOT an error (idempotent).
         """
-        existed = bool(self._profiles.delete(name))
+        existed = bool(await self._profiles.delete(name))
+        self._profile_cache.pop(name, None)
+        for assigned in self._assignment_cache.values():
+            if name in assigned:
+                assigned.remove(name)
         if existed:
             self._logger.info("profile %s deleted", name)
         else:
             self._logger.info("profile %r did not exist (delete no-op)", name)
         return {"deleted": name, "existed": existed}
 
-    def profiles(self) -> List[Dict[str, Any]]:
-        """Every profile as ``[{"name","description","plugins"}]``, sorted."""
-        records = self._profiles.list() or []
+    async def profiles(self) -> List[Dict[str, Any]]:
+        """Every profile as ``[{"name","description","plugins"}]``, sorted.
+
+        Read-through: refreshes the cache from the repository so edits made
+        through any path are visible here.
+        """
+        try:
+            records = await self._profiles.list() or []
+        except Exception:
+            self._logger.exception("could not list profiles")
+            records = list(self._profile_cache.values())
+        for record in records:
+            self._profile_cache[record.name] = record
         return [
             {
                 "name": r.name,
@@ -107,7 +157,7 @@ class ProfileManager:
         ]
 
     # ---------------------------------------------------------- assignment
-    def assign(self, account: str, profile: str) -> Dict[str, Any]:
+    async def assign(self, account: str, profile: str) -> Dict[str, Any]:
         """Attach a profile to an account (persisted via accounts repo).
 
         Validates BOTH sides first: the profile must exist (otherwise
@@ -117,26 +167,27 @@ class ProfileManager:
 
         Assignments take effect on the account's NEXT start.
         """
-        known = self._known_profile_names()
+        known = await self._known_profile_names()
         if profile not in known:
             raise ProfileError(
                 f"unknown profile {profile!r} (known profiles: {known})"
             )
-        if self._accounts is not None and self._accounts.get(account) is None:
+        if self._accounts is not None and await self._accounts.get(account) is None:
             raise ProfileError(
                 f"unknown account {account!r} "
-                f"(known accounts: {self._known_account_names()})"
+                f"(known accounts: {await self._known_account_names()})"
             )
         if self._accounts is not None:
-            self._accounts.assign_profile(account, profile)
+            await self._accounts.assign_profile(account, profile)
+        assigned = await self.assigned(account)
         self._logger.info("profile %r assigned to account %r", profile, account)
         return {
             "account": account,
             "profile": profile,
-            "profiles": self.assigned(account),
+            "profiles": assigned,
         }
 
-    def unassign(self, account: str, profile: str) -> Dict[str, Any]:
+    async def unassign(self, account: str, profile: str) -> Dict[str, Any]:
         """Detach a profile from an account (idempotent; persisted).
 
         The PROFILE's existence is deliberately not required — a profile
@@ -144,28 +195,39 @@ class ProfileManager:
         stale detach must never hard-fail. The ACCOUNT is validated when an
         accounts repository is available (typo trap).
         """
-        if self._accounts is not None and self._accounts.get(account) is None:
+        if self._accounts is not None and await self._accounts.get(account) is None:
             raise ProfileError(
                 f"unknown account {account!r} "
-                f"(known accounts: {self._known_account_names()})"
+                f"(known accounts: {await self._known_account_names()})"
             )
-        existed = profile in self.assigned(account)
+        existed = profile in await self.assigned(account)
         if self._accounts is not None:
-            self._accounts.unassign_profile(account, profile)
+            await self._accounts.unassign_profile(account, profile)
+        assigned = await self.assigned(account)
         self._logger.info("profile %r unassigned from account %r (was assigned: %s)",
                           profile, account, existed)
         return {
             "account": account,
             "profile": profile,
             "existed": existed,
-            "profiles": self.assigned(account),
+            "profiles": assigned,
         }
 
-    def assigned(self, account: str) -> List[str]:
-        """Sorted names of the profiles assigned to ``account`` ([] if none)."""
+    async def assigned(self, account: str) -> List[str]:
+        """Sorted names of the profiles assigned to ``account`` ([] if none).
+
+        Read-through into the cache (assignment cache stays fresh for the
+        sync :meth:`allowed_plugins`).
+        """
         if self._accounts is None:
             return []
-        return sorted(self._accounts.profiles_of(account) or [])
+        try:
+            names = sorted(await self._accounts.profiles_of(account) or [])
+        except Exception:
+            self._logger.exception("could not read profiles of %r", account)
+            return list(self._assignment_cache.get(account, []))
+        self._assignment_cache[account] = names
+        return names
 
     def allowed_plugins(self, account: str) -> Optional[Set[str]]:
         """UNION of plugin grants across the account's KNOWN profiles.
@@ -174,11 +236,15 @@ class ProfileManager:
         "no restriction" (backwards-compatible default, ported from the
         audited roles code). Unknown profile names are logged and skipped:
         a typo must never widen or silently narrow the grant.
+
+        SYNC by design: answers from the in-memory cache populated by
+        :meth:`load` and kept fresh by assign/unassign/delete (the account
+        manager calls this from its attach path).
         """
         allowed: Set[str] = set()
         seen_known = False
-        for name in self.assigned(account):
-            record = self._profiles.get(name)
+        for name in self._assignment_cache.get(account, []):
+            record = self._profile_cache.get(name)
             if record is None:
                 self._logger.warning(
                     "account %r references unknown profile %r (ignored)",
@@ -190,18 +256,24 @@ class ProfileManager:
         return allowed if seen_known else None
 
     # -------------------------------------------------------------- helpers
-    def _known_profile_names(self) -> List[str]:
+    async def _known_profile_names(self) -> List[str]:
         """Sorted known profile names (for human error messages)."""
-        return sorted(r.name for r in (self._profiles.list() or []))
+        try:
+            records = await self._profiles.list() or []
+        except Exception:  # repository shape drift — never mask the real error
+            records = list(self._profile_cache.values())
+        for record in records:
+            self._profile_cache[record.name] = record
+        return sorted(r.name for r in records)
 
-    def _known_account_names(self) -> List[str]:
+    async def _known_account_names(self) -> List[str]:
         """Sorted known account names (for human error messages)."""
         if self._accounts is None:
             return []
         try:
-            return sorted(r.name for r in (self._accounts.list() or []))
+            return sorted(r.name for r in (await self._accounts.list() or []))
         except Exception:  # repository shape drift — never mask the real error
-            return []
+            return sorted(self._assignment_cache)
 
 
 __all__ = ["ProfileManager", "NAME_RE"]

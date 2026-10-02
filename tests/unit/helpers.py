@@ -32,30 +32,30 @@ LOG = logging.getLogger("tests.helpers")
 
 # ------------------------------------------------------------ repositories
 class FakeProfilesRepo:
-    """Dict-backed ProfilesRepository."""
+    """Dict-backed ProfilesRepository (async methods, like the real one)."""
 
     def __init__(self) -> None:
         self.data: Dict[str, ProfileRecord] = {}
 
-    def upsert(self, name, plugins, description="") -> None:
+    async def upsert(self, name, plugins, description="") -> None:
         self.data[name] = ProfileRecord(
             name=name, plugins=sorted(set(plugins)), description=description
         )
 
-    def delete(self, name) -> bool:
+    async def delete(self, name) -> bool:
         existed = name in self.data
         self.data.pop(name, None)
         return existed
 
-    def get(self, name) -> Optional[ProfileRecord]:
+    async def get(self, name) -> Optional[ProfileRecord]:
         return self.data.get(name)
 
-    def list(self) -> List[ProfileRecord]:
+    async def list(self) -> List[ProfileRecord]:
         return [self.data[k] for k in sorted(self.data)]
 
 
 class FakeAccountsRepo:
-    """Dict-backed AccountsRepository with injectable failures."""
+    """Dict-backed AccountsRepository with injectable failures (async)."""
 
     def __init__(self) -> None:
         self.records: Dict[str, AccountRecord] = {}
@@ -66,7 +66,7 @@ class FakeAccountsRepo:
         if self.fail_on == what:
             raise RuntimeError(f"injected repository failure: {what}")
 
-    def add(self, name, *, token_ref=None, enabled=True, sync_group=None):
+    async def add(self, name, *, token_ref=None, enabled=True, sync_group=None):
         self._maybe_fail("add")
         record = AccountRecord(
             id=self.next_id, name=name, token_ref=token_ref,
@@ -76,44 +76,44 @@ class FakeAccountsRepo:
         self.records[name] = record
         return self._copy(record)
 
-    def get(self, name) -> Optional[AccountRecord]:
+    async def get(self, name) -> Optional[AccountRecord]:
         self._maybe_fail("get")
         record = self.records.get(name)
         return self._copy(record) if record is not None else None
 
-    def list(self) -> List[AccountRecord]:
+    async def list(self) -> List[AccountRecord]:
         return [self._copy(r) for _, r in sorted(self.records.items())]
 
-    def set_enabled(self, name, enabled) -> None:
+    async def set_enabled(self, name, enabled) -> None:
         self._maybe_fail("set_enabled")
         record = self.records.get(name)
         if record is None:
             raise RuntimeError(f"unknown account {name!r}")
         record.enabled = bool(enabled)
 
-    def set_settings(self, name, settings: Dict[str, Any]) -> None:
+    async def set_settings(self, name, settings: Dict[str, Any]) -> None:
         record = self.records.get(name)
         if record is None:
             raise RuntimeError(f"unknown account {name!r}")
         record.settings = dict(settings)
 
-    def delete(self, name) -> bool:
+    async def delete(self, name) -> bool:
         self._maybe_fail("delete")
         return self.records.pop(name, None) is not None
 
-    def assign_profile(self, name, profile) -> None:
+    async def assign_profile(self, name, profile) -> None:
         record = self.records.get(name)
         if record is None:
             raise RuntimeError(f"unknown account {name!r}")
         if profile not in record.profiles:
             record.profiles.append(profile)
 
-    def unassign_profile(self, name, profile) -> None:
+    async def unassign_profile(self, name, profile) -> None:
         record = self.records.get(name)
         if record is not None and profile in record.profiles:
             record.profiles.remove(profile)
 
-    def profiles_of(self, name) -> List[str]:
+    async def profiles_of(self, name) -> List[str]:
         record = self.records.get(name)
         return sorted(record.profiles) if record is not None else []
 
@@ -124,7 +124,12 @@ class FakeAccountsRepo:
 
 # ------------------------------------------------------------- collaborators
 class FakePluginManager:
-    """Records attach/detach/activate/deactivate; serves canned states()."""
+    """Records attach/detach/activate/deactivate; serves canned states().
+
+    ``attach_account`` is async like the real plugin manager (it reads
+    persisted enabled state); the account manager also tolerates a sync
+    return for duck-typed doubles.
+    """
 
     def __init__(self) -> None:
         self.attached: List[Any] = []       # (account, allowed)
@@ -134,22 +139,28 @@ class FakePluginManager:
         self.states_map: Dict[str, List[Dict[str, Any]]] = {}
         self.fail_states = False
 
-    def attach_account(self, account, allowed) -> None:
+    async def attach_account(self, account, allowed) -> None:
         self.attached.append((account, allowed))
 
     def detach_account(self, account) -> None:
         self.detached.append(account)
 
-    def activate_account(self, account, services_factory) -> None:
+    async def activate_account(self, account, services_factory) -> None:
         self.activated.append((account, services_factory))
 
-    def deactivate_account(self, account) -> None:
+    async def deactivate_account(self, account) -> None:
         self.deactivated.append(account)
 
     def states(self, account) -> List[Dict[str, Any]]:
         if self.fail_states:
             raise RuntimeError("states() boom")
         return [dict(s) for s in self.states_map.get(account, [])]
+
+    def live_settings(self, account, plugin):
+        for state in self.states_map.get(account, []):
+            if state.get("name") == plugin:
+                return state.get("settings") or {}
+        return None
 
 
 class FakeScheduler:
@@ -399,7 +410,8 @@ class ManagerHarness:
     credentials: Credentials
     collector: EventCollector = field(default_factory=lambda: EventCollector(EventBus()))
 
-    def add_profile(self, name: str, *plugin_names: str) -> Dict[str, Any]:
+    def add_profile(self, name: str, *plugin_names: str) -> Any:
+        """Create a profile through the async profile manager (AWAIT this)."""
         return self.profile_manager.set_profile(name, list(plugin_names))
 
 

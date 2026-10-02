@@ -6,23 +6,42 @@ facade is intentionally duck-typed over the managers: it stores whatever it
 is given and delegates. Managers are constructed by core/bootstrap.py.
 
 Method map (grouped like the dashboard navigation, spec §12):
-  status            overview: accounts + limits + tasks + warnings
+  status            overview: accounts (+credential status, cooldown count)
+                    + limits + tasks + warnings
   accounts_*        list/add/remove/info/enable/start/stop/emergency-stop
+  credentials       set_credential / credential_status / import_env over the
+                    encrypted CredentialService (values NEVER echoed back)
+  cooldowns_*       list/clear persistent cooldowns (CooldownService)
   plugins_*         manifests/state/enable/settings/set-setting
   profiles_*        list/create/delete/assign/unassign
   ratelimit_*       policies/set/clear/effective/stats/warnings/set-floor
+                    (+lane; every mutation persists through the db repos)
   tasks_*           list/cancel/cancel-matching/history
   simulation_*      list/run
   logs_tail / audit_tail / credentials_summary
   emergency_stop_all / shutdown
+
+Management audit: every management mutation emits an audit row via the
+recorder (``action="mgmt:*"``, ``direction="out"``, note naming the calling
+surface). Credential material NEVER reaches the audit trail — account names
+and counters only.
+
+Manager migration note: the managers are moving to aiosqlite-backed async
+persistence; call sites below tolerate BOTH sync and async manager results
+through ``_resolved()`` so this facade keeps working at every step.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
+import time as _time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:  # duck-typed at runtime — no manager imports here
     from .account_manager import AccountManager
     from .audit import AuditRecorder
+    from .cooldowns import CooldownService
+    from .credential_service import CredentialService
     from .credentials import Credentials
     from .logging_service import LogService
     from .plugin_manager import PluginManager
@@ -30,6 +49,23 @@ if TYPE_CHECKING:  # duck-typed at runtime — no manager imports here
     from .rate_limit_manager import RateLimitManager
     from .settings_manager import SettingsManager
     from .task_scheduler import TaskScheduler
+
+LOG = logging.getLogger("slaughtermudae.api")
+
+#: kv key persisting the sequential send-lane configuration
+LANE_KV_KEY = "ratelimit:lane"
+
+
+async def _resolved(outcome: Any) -> Any:
+    """Await manager results when the manager went async (migration shim).
+
+    Same tolerance pattern AccountManager uses for its collaborators: a
+    method may return a plain value today and a coroutine after the async
+    persistence switch — both shapes work through here.
+    """
+    if asyncio.iscoroutine(outcome):
+        return await outcome
+    return outcome
 
 
 def parse_bool(value: Any, field: str) -> bool:
@@ -62,6 +98,8 @@ class ControlAPI:
         simulation: Any = None,          # adapters.simulator.runner.SimulationRunner
         credentials: Optional["Credentials"] = None,
         database: Any = None,
+        credentials_svc: Optional["CredentialService"] = None,
+        cooldowns: Optional["CooldownService"] = None,
         started_at: float = 0.0,
     ) -> None:
         self._accounts = accounts
@@ -75,36 +113,81 @@ class ControlAPI:
         self._simulation = simulation
         self._credentials = credentials
         self._database = database
+        self._credentials_svc = credentials_svc
+        self._cooldowns = cooldowns
         self._started_at = started_at
-        self._booted_at = __import__("time").time()
+        self._booted_at = _time.time()
 
     # ---------------------------------------------------------------- status
     async def status(self) -> Dict[str, Any]:
-        """Overview snapshot: accounts + rate limits + tasks + warnings."""
-        import time as _time
+        """Overview snapshot: accounts + rate limits + tasks + warnings.
 
+        Account rows are enriched with their credential status
+        ("db"|"env"|None) and the number of active persistent cooldowns —
+        both filled in ONLY when the manager snapshot lacks them, so a
+        manager that already knows never gets second-guessed.
+        """
         return {
-            "accounts": await self._accounts.accounts(),
+            "accounts": await self._enrich_accounts(await self._accounts.accounts()),
             "ratelimit": self._limiter.stats(),
             "tasks": self._scheduler.stats(),
             "warnings": self._limiter.warnings(),
             "uptime_s": round(_time.time() - self._booted_at, 1),
         }
 
+    async def _enrich_accounts(
+        self, accounts: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Add 'credential' + 'cooldowns' to manager status dicts (in place)."""
+        if not isinstance(accounts, list):
+            return accounts
+        for account in accounts:
+            if not isinstance(account, dict) or not account.get("name"):
+                continue
+            name = account["name"]
+            if "credential" not in account:
+                account["credential"] = self._credential_state(name)
+            if "cooldowns" not in account and self._cooldowns is not None:
+                try:
+                    account["cooldowns"] = len(await self._cooldowns.active_for(name))
+                except Exception:
+                    account["cooldowns"] = 0
+        return accounts
+
+    def _credential_state(self, name: str) -> Optional[str]:
+        """'db' | 'env' | 'missing' | None (no service wired). Never a value."""
+        if self._credentials_svc is None:
+            return None
+        try:
+            return self._credentials_svc.status(name)
+        except Exception:
+            return None
+
     # -------------------------------------------------------------- accounts
     async def accounts_list(self) -> List[Dict[str, Any]]:
-        """Every account: name, discord id (when running), status, profiles."""
-        return await self._accounts.accounts()
+        """Every account: name, discord id (when running), status, profiles,
+        credential status and active-cooldown count."""
+        return await self._enrich_accounts(await self._accounts.accounts())
 
-    async def accounts_add(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Register + persist an account. Token VALUE stays in .env.
+    async def accounts_add(
+        self, payload: Dict[str, Any], surface: str = "api"
+    ) -> Dict[str, Any]:
+        """Register + persist an account; optionally store its credential.
 
         payload: {name (required), token_ref?, sync_group?, enabled?,
-                  profiles?: [names]}. Unknown keys are rejected (typo trap).
+                  profiles?: [names], credential?: str}. Unknown keys are
+        rejected (typo trap).
+
+        ``credential`` (the token VALUE) is handed to the encrypted
+        CredentialService AFTER the account row exists — never into the
+        accounts table, never into any response payload, and storing it
+        performs NO network activity (saving is always separate from
+        connecting, spec §16).
         """
         if not isinstance(payload, dict) or not payload.get("name"):
             raise ValueError("account payload needs at least {'name': ...}")
-        allowed = {"name", "token_ref", "sync_group", "enabled", "profiles"}
+        allowed = {"name", "token_ref", "sync_group", "enabled", "profiles",
+                   "credential"}
         unknown = set(payload) - allowed
         if unknown:
             raise ValueError(f"unknown account payload keys: {sorted(unknown)}")
@@ -114,36 +197,244 @@ class ControlAPI:
         enabled = payload.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ValueError("field 'enabled' must be a boolean")
-        return self._accounts.add_account(
+        credential = payload.get("credential")
+        if credential is not None:
+            if not isinstance(credential, str) or not credential.strip():
+                raise ValueError("field 'credential' must be a non-empty string")
+            credential = credential.strip()
+            if self._credentials_svc is None:
+                raise RuntimeError(
+                    "a credential was supplied but credential storage is not "
+                    "configured on this api"
+                )
+        out = await _resolved(self._accounts.add_account(
             payload["name"],
             token_ref=payload.get("token_ref"),
             enabled=enabled,
             sync_group=payload.get("sync_group"),
             profiles=profiles or None,
-        )
+        ))
+        name = out.get("name", payload["name"]) if isinstance(out, dict) else payload["name"]
+        self._audit_mgmt(name, "mgmt:account.created", surface)
+        if credential is not None:
+            await self._credentials_svc.store(name, credential)
+            self._audit_mgmt(name, "mgmt:credential.stored", surface)
+            if isinstance(out, dict):
+                out["credential"] = self._credential_state(name)
+        return out
 
-    async def accounts_remove(self, name: str) -> Dict[str, Any]:
-        """Remove a STOPPED account from runtime + database (cascade)."""
-        return self._accounts.remove_account(name)
+    async def accounts_remove(self, name: str, surface: str = "api") -> Dict[str, Any]:
+        """Remove a STOPPED account from runtime + database (cascade).
+
+        Cascade (spec §32): the account's stored credential and every one
+        of its persistent cooldowns are deleted afterwards, each guarded —
+        the removal itself must never fail because a service is unwired.
+        """
+        out = await _resolved(self._accounts.remove_account(name))
+        self._audit_mgmt(name, "mgmt:account.removed", surface)
+        if self._credentials_svc is not None:
+            try:
+                await self._credentials_svc.delete(name)
+            except Exception:
+                LOG.exception("credential cascade failed for %r", name)
+        if self._cooldowns is not None:
+            try:
+                await self._cooldowns.delete_account(name)
+            except Exception:
+                LOG.exception("cooldown cascade failed for %r", name)
+        return out
 
     async def accounts_info(self, name: str) -> Dict[str, Any]:
         """Account details page (spec §8): status/identity/runtime/plugins/rate."""
-        return self._accounts.details(name)
+        out = await _resolved(self._accounts.details(name))
+        if isinstance(out, dict) and "credential" not in out:
+            out["credential"] = self._credential_state(out.get("name", name))
+        return out
 
     async def accounts_enable(self, name: str, enabled: bool) -> Dict[str, Any]:
-        return self._accounts.set_enabled(name, parse_bool(enabled, "enabled"))
+        return await _resolved(
+            self._accounts.set_enabled(name, parse_bool(enabled, "enabled"))
+        )
 
-    async def accounts_start(self, name: Optional[str] = None) -> Dict[str, Any]:
+    async def accounts_start(
+        self, name: Optional[str] = None, surface: str = "api"
+    ) -> Dict[str, Any]:
         """Start one account (None = every enabled account)."""
-        return await self._accounts.start(name) if name else await self._accounts.start_all()
+        out = await self._accounts.start(name) if name else await self._accounts.start_all()
+        self._audit_mgmt(name or "system", "mgmt:account.started", surface)
+        return out
 
-    async def accounts_stop(self, name: Optional[str] = None) -> Dict[str, Any]:
+    async def accounts_stop(
+        self, name: Optional[str] = None, surface: str = "api"
+    ) -> Dict[str, Any]:
         """Stop one account (None = all) — graceful."""
-        return await self._accounts.stop(name) if name else await self._accounts.stop_all()
+        out = await self._accounts.stop(name) if name else await self._accounts.stop_all()
+        self._audit_mgmt(name or "system", "mgmt:account.stopped", surface)
+        return out
 
-    async def accounts_emergency_stop(self, name: str) -> Dict[str, Any]:
+    async def accounts_emergency_stop(
+        self, name: str, surface: str = "api"
+    ) -> Dict[str, Any]:
         """Account-scoped emergency stop: cancel its tasks NOW + disconnect."""
-        return self._accounts.emergency_stop(name)
+        out = await _resolved(self._accounts.emergency_stop(name))
+        self._audit_mgmt(name, "mgmt:account.estop", surface)
+        return out
+
+    # ----------------------------------------------------------- credentials
+    async def accounts_set_credential(
+        self, name: str, credential: str, surface: str = "api"
+    ) -> Dict[str, Any]:
+        """Store (replace) one account's credential — encrypt-at-rest only.
+
+        No network activity whatsoever. Unknown accounts raise the
+        manager's AccountError; the response carries the account name and
+        the new credential STATUS, never the value.
+        """
+        await _resolved(self._accounts.get(name))  # AccountError when unknown
+        if self._credentials_svc is None:
+            raise RuntimeError("credential storage is not configured on this api")
+        if not isinstance(credential, str) or not credential.strip():
+            raise ValueError("credential must be a non-empty string")
+        await self._credentials_svc.store(name, credential)
+        self._audit_mgmt(name, "mgmt:credential.stored", surface)
+        return {"account": name, "credential": self._credential_state(name)}
+
+    async def accounts_credential_status(self) -> List[Dict[str, Any]]:
+        """[{name, credential}] for every account — display-safe, no values."""
+        out: List[Dict[str, Any]] = []
+        for account in await self._accounts.accounts():
+            name = account.get("name") if isinstance(account, dict) else None
+            if not name:
+                continue
+            out.append({"name": name, "credential": self._credential_state(name)})
+        return out
+
+    async def credentials_import_env(
+        self, overwrite: bool = False, surface: str = "api"
+    ) -> Dict[str, Any]:
+        """EXPLICIT one-shot import of legacy .env tokens (spec §17).
+
+        Feeds the CredentialService every registered account's
+        ``DISCORD_TOKEN_<NAME>`` .env value; the service skips accounts
+        that already have a stored DB credential unless ``overwrite``.
+        Returns the service's report — account NAMES only.
+        """
+        overwrite = parse_bool(overwrite, "overwrite")
+        if self._credentials_svc is None:
+            raise RuntimeError("credential storage is not configured on this api")
+        report = await self._credentials_svc.import_from_env(
+            await self._env_account_tokens(), overwrite
+        )
+        self._audit_mgmt(
+            "system", "mgmt:credential.imported", surface,
+            extra=(
+                f"imported={len(report.get('imported') or [])} "
+                f"skipped={len(report.get('skipped') or [])} "
+                f"failed={len(report.get('failed') or {})}"
+            ),
+        )
+        return report
+
+    async def _env_account_tokens(self) -> Dict[str, str]:
+        """account -> token mapping from the legacy .env view (no DB writes).
+
+        Prefers an explicit ``credentials.account_tokens()`` aggregate when
+        the Credentials object grows one; otherwise enumerates REGISTERED
+        accounts and resolves each ``DISCORD_TOKEN_<NAME>`` entry.
+        """
+        if self._credentials is None:
+            return {}
+        explicit = getattr(self._credentials, "account_tokens", None)
+        if callable(explicit):
+            mapping = explicit()
+            if isinstance(mapping, dict):
+                return {str(k): v for k, v in mapping.items() if v}
+            return {}
+        token_for = getattr(self._credentials, "token_for", None)
+        if not callable(token_for):
+            return {}
+        tokens: Dict[str, str] = {}
+        for account in await self._accounts.accounts():
+            name = account.get("name") if isinstance(account, dict) else None
+            if not name:
+                continue
+            token = token_for(name)
+            if token:
+                tokens[name] = token
+        return tokens
+
+    # ------------------------------------------------------------- cooldowns
+    async def cooldowns_list(
+        self, account: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Active persistent cooldowns of one account (None = every account).
+
+        JSON-safe rows: account/plugin/cooldown_key, the REMAINING seconds
+        (absolute expiry minus now — restart-correct), source and reason.
+        """
+        if self._cooldowns is None:
+            return []
+        if account is not None:
+            names: List[str] = [account]
+        else:
+            names = [
+                row.get("name")
+                for row in await self._accounts.accounts()
+                if isinstance(row, dict) and row.get("name")
+            ]
+        now = _time.time()
+        rows: List[Dict[str, Any]] = []
+        for name in names:
+            if not name:
+                continue
+            for row in await self._cooldowns.active_for(name):
+                expires_at = float(row.get("expires_at", 0.0) or 0.0)
+                rows.append({
+                    "account": row.get("account", name),
+                    "plugin": row.get("plugin"),
+                    "cooldown_key": row.get("cooldown_key"),
+                    "remaining_s": round(max(0.0, expires_at - now), 1),
+                    "source": row.get("source"),
+                    "reason": row.get("reason") or "",
+                })
+        rows.sort(key=lambda r: r["remaining_s"])  # soonest-expiring first
+        return rows
+
+    async def cooldowns_clear(
+        self,
+        account: str,
+        plugin: str,
+        cooldown_key: Optional[str] = None,
+        surface: str = "api",
+    ) -> Dict[str, Any]:
+        """Clear ONE cooldown (``cooldown_key`` given) or ALL of a plugin."""
+        if self._cooldowns is None:
+            raise RuntimeError("cooldown service is not configured on this api")
+        for label, value in (("account", account), ("plugin", plugin)):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"cooldown {label} must be a non-empty string")
+        if cooldown_key is not None and (
+            not isinstance(cooldown_key, str) or not cooldown_key
+        ):
+            raise ValueError("cooldown_key must be a non-empty string when given")
+        cleared = 0
+        if cooldown_key:
+            cleared = 1 if await self._cooldowns.clear(account, plugin, cooldown_key) else 0
+        else:
+            for row in await self._cooldowns.active_for(account, plugin=plugin):
+                key = row.get("cooldown_key")
+                if key and await self._cooldowns.clear(account, plugin, key):
+                    cleared += 1
+        self._audit_mgmt(
+            account, "mgmt:cooldown.cleared", surface,
+            extra=f"plugin={plugin} key={cooldown_key or '*'} cleared={cleared}",
+        )
+        return {
+            "account": account,
+            "plugin": plugin,
+            "cooldown_key": cooldown_key,
+            "cleared": cleared,
+        }
 
     # --------------------------------------------------------------- plugins
     async def plugins_manifests(self) -> List[Dict[str, Any]]:
@@ -172,29 +463,29 @@ class ControlAPI:
         self, account: str, plugin: str, key: str, value: Any
     ) -> Dict[str, Any]:
         """Change ONE plugin setting for ONE account (validated + persisted)."""
-        out = self._plugins.set_setting(account, plugin, key, value)
+        out = await self._plugins.set_setting(account, plugin, key, value)
         return {"account": account, "plugin": plugin, "key": key, "value": out}
 
     # -------------------------------------------------------------- profiles
     async def profiles_list(self) -> List[Dict[str, Any]]:
-        return self._profiles.profiles()
+        return await _resolved(self._profiles.profiles())
 
     async def profiles_create(
         self, name: str, plugins: List[str], description: str = ""
     ) -> Dict[str, Any]:
         if not isinstance(plugins, list) or not all(isinstance(p, str) for p in plugins):
             raise ValueError("'plugins' must be a list of plugin names")
-        return self._profiles.set_profile(name, plugins, description)
+        return await _resolved(self._profiles.set_profile(name, plugins, description))
 
     async def profiles_delete(self, name: str) -> Dict[str, Any]:
-        return self._profiles.delete_profile(name)
+        return await _resolved(self._profiles.delete_profile(name))
 
     async def profiles_assign(self, account: str, profile: str) -> Dict[str, Any]:
         """Grant a profile (applies on the account's next start)."""
-        return self._profiles.assign(account, profile)
+        return await _resolved(self._profiles.assign(account, profile))
 
     async def profiles_unassign(self, account: str, profile: str) -> Dict[str, Any]:
-        return self._profiles.unassign(account, profile)
+        return await _resolved(self._profiles.unassign(account, profile))
 
     # ------------------------------------------------------------- rate limits
     async def ratelimit_policies(self) -> List[Dict[str, Any]]:
@@ -210,16 +501,24 @@ class ControlAPI:
         level: str = "global",
         owner: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Set a policy. Enforces the safety floor: < 1.5s/action is REJECTED."""
+        """Set a policy. Enforces the safety floor: < 1.5s/action is REJECTED.
+
+        Engine mutation first (memory takes effect immediately), then the
+        awaited repository write — best-effort exactly like the old engine
+        path: a failing DB write is logged, never a failed API call, and
+        pacing safety never depends on the database.
+        """
         policy = self._limiter.set_policy_values(
             action, interval, jitter_min, jitter_max, level, owner
         )
+        await self._persist_policy(level, owner, policy)
         return {"action": action, "level": level, "owner": owner, "policy": str(policy)}
 
     async def ratelimit_clear(
         self, level: str, owner: Optional[str], action: str
     ) -> Dict[str, Any]:
         removed = self._limiter.clear_policy(level, owner, action)
+        await self._forget_policy(level, owner, action)
         return {"cleared": removed, "level": level, "owner": owner, "action": action}
 
     async def ratelimit_effective(
@@ -259,7 +558,51 @@ class ControlAPI:
             self._limiter.set_lane_enabled(self._parse_lane_bool(enabled))
         if prefixrate is not None:
             self._limiter.set_lane_prefixrate(self._parse_lane_number(prefixrate))
-        return self._limiter.lane_status()
+        lane = self._limiter.lane_status()
+        await self._persist_lane(lane)
+        return lane
+
+    async def _persist_policy(self, level: str, owner: Optional[str],
+                              policy: Any) -> None:
+        """Best-effort awaited policy write (pacing never depends on the DB)."""
+        repo = getattr(self._database, "policies", None) \
+            if self._database is not None else None
+        if repo is None:
+            return
+        try:
+            await repo.set(level, owner, policy.action, policy.interval,
+                           policy.jitter_min, policy.jitter_max)
+        except Exception as exc:
+            LOG.warning("could not persist rate policy %r at %s/%s: %s "
+                        "(policy is still active in memory)",
+                        policy.action, level, owner or "-", exc)
+
+    async def _forget_policy(self, level: str, owner: Optional[str],
+                             action: str) -> None:
+        """Best-effort awaited policy delete."""
+        repo = getattr(self._database, "policies", None) \
+            if self._database is not None else None
+        if repo is None:
+            return
+        try:
+            await repo.delete(level, owner, action)
+        except Exception as exc:
+            LOG.warning("could not delete rate policy %r at %s/%s: %s",
+                        action, level, owner or "-", exc)
+
+    async def _persist_lane(self, lane: Dict[str, Any]) -> None:
+        """Persist the lane config under the ``ratelimit:lane`` kv key."""
+        kv = getattr(self._database, "kv", None) \
+            if self._database is not None else None
+        if kv is None:
+            return
+        try:
+            await kv.set(LANE_KV_KEY, {
+                "enabled": bool(lane.get("enabled", False)),
+                "prefixrate": float(lane.get("prefixrate", 0.0) or 0.0),
+            })
+        except Exception as exc:
+            LOG.warning("could not persist send-lane configuration: %s", exc)
 
     @staticmethod
     def _parse_lane_bool(value: Any) -> bool:
@@ -292,7 +635,8 @@ class ControlAPI:
         return {"cancelled": self._scheduler.cancel_matching(account=account, plugin=plugin)}
 
     async def tasks_history(self, limit: int = 50, account: Optional[str] = None) -> List[Dict[str, Any]]:
-        return self._scheduler.history(limit=limit, account=account)
+        # scheduler.history() is async now (aiosqlite repo reads)
+        return await _resolved(self._scheduler.history(limit=limit, account=account))
 
     # ------------------------------------------------------------- simulation
     async def simulation_list(self) -> List[Dict[str, Any]]:
@@ -326,7 +670,8 @@ class ControlAPI:
     ) -> List[Dict[str, Any]]:
         if self._audit is None:
             return []
-        return self._audit.history(limit=n, account=account)
+        # AuditRecorder.history() is async now (aiosqlite repo reads)
+        return await _resolved(self._audit.history(limit=n, account=account))
 
     # ---------------------------------------------------------------- system
     def credentials_summary(self) -> Dict[str, str]:
@@ -337,12 +682,14 @@ class ControlAPI:
     def dashboard_token(self) -> Optional[str]:
         return self._credentials.dashboard_token if self._credentials else None
 
-    async def emergency_stop_all(self) -> Dict[str, Any]:
+    async def emergency_stop_all(self, surface: str = "api") -> Dict[str, Any]:
         """GLOBAL emergency stop: cancel all tasks, stop all accounts, halt."""
         cancelled = self._scheduler.cancel_matching()
         await self._scheduler.stop(drain=False)
         stopped = await self._accounts.stop_all()
         self._logs.error("system", f"GLOBAL EMERGENCY STOP executed ({cancelled} task(s) cancelled)")
+        self._audit_mgmt("system", "mgmt:estop", surface,
+                         extra=f"cancelled={cancelled}")
         return {"cancelled_tasks": cancelled, "accounts": stopped, "halted": True}
 
     async def system_resume(self) -> Dict[str, Any]:
@@ -364,8 +711,32 @@ class ControlAPI:
         await self._scheduler.stop(drain=True)
         await self._accounts.stop_all()
         if self._database is not None and hasattr(self._database, "close"):
-            self._database.close()
+            await _resolved(self._database.close())  # sync or async owner
         return {"shutdown": True}
 
+    # ------------------------------------------------------- mgmt audit trail
+    def _audit_mgmt(self, account: str, action: str, surface: str = "",
+                    extra: str = "") -> None:
+        """One management audit row — value-free by construction (spec audit).
 
-__all__ = ["ControlAPI", "parse_bool"]
+        The note names the calling surface ('cli' / 'dashboard' / 'api')
+        plus counters; credential MATERIAL never reaches this trail, only
+        account names. Never raises: auditing must not break management.
+        """
+        if self._audit is None:
+            return
+        note = f"surface={surface or 'api'}"
+        if extra:
+            note += f" {extra}"
+        try:
+            self._audit.record(
+                account=str(account or "system"),
+                direction="out",
+                action=action,
+                note=note,
+            )
+        except Exception:
+            LOG.debug("management audit write failed", exc_info=True)
+
+
+__all__ = ["ControlAPI", "parse_bool", "LANE_KV_KEY"]

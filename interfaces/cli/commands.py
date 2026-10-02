@@ -21,6 +21,14 @@ Decisions for things INTEGRATION.md left open (documented per the contract):
     available scenarios instead of guessing one.
   * ``accounts enable <name> <on|off>`` also accepts true/false; a real bool
     is passed down (ControlAPI.parse_bool re-validates on its side anyway).
+  * ``accounts credential <name> <token>`` prints a shell-history warning:
+    values are stored encrypted, but the CLI argument itself may linger in
+    the shell's history — the dashboard dialog is the preferred entry.
+  * ``credentials import-env`` accepts exactly one flag, ``--overwrite``
+    (anything else is a usage error, never a silent ignore).
+  * ``cooldowns`` with no argument lists every account's cooldowns;
+    ``cooldowns clear`` without a key clears ALL cooldowns of that plugin
+    on that account.
   * Mutation results are rendered generically (``key=value`` pairs) from the
     JSON payload the facade returns, keeping CLI/dashboard parity by
     construction.
@@ -37,6 +45,7 @@ __all__ = [
     "format_plugin_state", "format_profiles", "format_policies",
     "format_effective", "format_tasks", "format_history", "format_logs",
     "format_audit", "format_warnings", "format_simulation_report",
+    "format_credential_status", "format_import_report", "format_cooldowns",
 ]
 
 
@@ -56,8 +65,19 @@ HELP: Dict[str, Tuple[str, str]] = {
     "status": ("", "overview: accounts, tasks, rate limits, warnings"),
     "accounts": (
         "list|add <name> [profile ...]|remove <name>|info <name>"
-        "|enable <name> <on|off>|start [name|all]|stop [name|all]|estop <name>",
-        "account management",
+        "|credential <name> <token>|enable <name> <on|off>"
+        "|start [name|all]|stop [name|all]|estop <name>",
+        "account management (credentials: dashboard or 'accounts credential'"
+        " — CAUTION: the token lands in your shell history)",
+    ),
+    "credentials": (
+        "status|import-env [--overwrite]",
+        "credential management: per-account status; one-shot import of the"
+        " legacy .env tokens into encrypted db storage",
+    ),
+    "cooldowns": (
+        "[account]|clear <account> <plugin> [key]",
+        "active persistent cooldowns (survive restarts; absolute expiry)",
     ),
     "plugins": (
         "list|state <account>|enable <account> <plugin>"
@@ -138,6 +158,10 @@ async def run_command(api: Any, line: str) -> Optional[str]:
         return format_status(await api.status())
     if cmd == "accounts":
         return await _accounts_group(api, args)
+    if cmd == "credentials":
+        return await _credentials_group(api, args)
+    if cmd == "cooldowns":
+        return await _cooldowns_group(api, args)
     if cmd == "plugins":
         return await _plugins_group(api, args)
     if cmd == "profiles":
@@ -159,7 +183,8 @@ async def run_command(api: Any, line: str) -> Optional[str]:
             return _result(await api.system_resume(), verb="resume")
         if args:
             raise UsageError("usage: estop [resume]")
-        return _result(await api.emergency_stop_all(), verb="EMERGENCY STOP")
+        return _result(await api.emergency_stop_all(surface="cli"),
+                       verb="EMERGENCY STOP")
     return f"unknown command {cmd!r} — try 'help'"
 
 
@@ -169,10 +194,18 @@ _ACCOUNTS_USAGE = {
     "add": "accounts add <name> [profile ...]",
     "remove": "accounts remove <name>",
     "info": "accounts info <name>",
+    "credential": "accounts credential <name> <token>",
     "enable": "accounts enable <name> <on|off>",
     "start": "accounts start [name|all]",
     "stop": "accounts stop [name|all]",
     "estop": "accounts estop <name>",
+}
+_CREDENTIALS_USAGE = {
+    "status": "credentials status",
+    "import-env": "credentials import-env [--overwrite]",
+}
+_COOLDOWNS_USAGE = {
+    "clear": "cooldowns clear <account> <plugin> [key]",
 }
 _PLUGINS_USAGE = {
     "list": "plugins list",
@@ -237,7 +270,8 @@ def _usage_for(ctx: str) -> str:
     table = {
         "accounts": _ACCOUNTS_USAGE, "plugins": _PLUGINS_USAGE,
         "profiles": _PROFILES_USAGE, "ratelimit": _RATELIMIT_USAGE,
-        "tasks": _TASKS_USAGE,
+        "tasks": _TASKS_USAGE, "credentials": _CREDENTIALS_USAGE,
+        "cooldowns": _COOLDOWNS_USAGE,
     }.get(group, {})
     return table.get(sub, "")
 
@@ -311,7 +345,7 @@ def _tail_args(cmd: str, args: Sequence[str]) -> Tuple[int, Optional[str]]:
 
 # ------------------------------------------------------------ group impls
 async def _accounts_group(api: Any, args: List[str]) -> str:
-    """accounts list|add|remove|info|enable|start|stop|estop."""
+    """accounts list|add|remove|info|credential|enable|start|stop|estop."""
     sub, rest = _sub(_ACCOUNTS_USAGE, args, "accounts")
     ctx = f"accounts {sub}"
     if sub == "list":
@@ -323,9 +357,21 @@ async def _accounts_group(api: Any, args: List[str]) -> str:
         payload: Dict[str, Any] = {"name": rest[0]}
         if rest[1:]:
             payload["profiles"] = rest[1:]
-        return _result(await api.accounts_add(payload), verb="added")
+        return _result(await api.accounts_add(payload, surface="cli"), verb="added")
+    if sub == "credential":
+        name, token = _exact(rest, 2, ctx)
+        out = await api.accounts_set_credential(name, token, surface="cli")
+        # SECURITY: only the account name + new status are echoed — never
+        # the token (it already lives in the shell history, which we say).
+        return (
+            f"{_result(out, verb='credential stored')}\n"
+            "  warning: the token may now sit in your shell history —"
+            " prefer the dashboard dialog, or clear that history"
+        )
     if sub == "remove":
-        return _result(await api.accounts_remove(_exact(rest, 1, ctx)), verb="removed")
+        name = _exact(rest, 1, ctx)
+        return _result(await api.accounts_remove(name, surface="cli"),
+                       verb="removed")
     if sub == "info":
         return format_account_info(await api.accounts_info(_exact(rest, 1, ctx)))
     if sub == "enable":
@@ -340,11 +386,54 @@ async def _accounts_group(api: Any, args: List[str]) -> str:
         if rest and rest[0].lower() != "all":
             name = rest[0]
         method = api.accounts_start if sub == "start" else api.accounts_stop
-        return _result(await method(name), verb=sub)
+        return _result(await method(name, surface="cli"), verb=sub)
     if sub == "estop":
         name = _exact(rest, 1, ctx)
-        return _result(await api.accounts_emergency_stop(name), verb="emergency stop")
+        return _result(
+            await api.accounts_emergency_stop(name, surface="cli"),
+            verb="emergency stop",
+        )
     raise UsageError(f"accounts: unknown subcommand {sub!r}")  # pragma: no cover
+
+
+async def _credentials_group(api: Any, args: List[str]) -> str:
+    """credentials status|import-env [--overwrite]."""
+    sub, rest = _sub(_CREDENTIALS_USAGE, args, "credentials")
+    ctx = f"credentials {sub}"
+    if sub == "status":
+        _exact(rest, 0, ctx)
+        return format_credential_status(await api.accounts_credential_status())
+    # import-env: the ONLY accepted flag is --overwrite (typo trap)
+    overwrite = False
+    if rest and rest[0] == "--overwrite":
+        overwrite = True
+        rest = rest[1:]
+    if rest:
+        raise UsageError(f"usage: {_CREDENTIALS_USAGE['import-env']}")
+    return format_import_report(
+        await api.credentials_import_env(overwrite=overwrite, surface="cli")
+    )
+
+
+async def _cooldowns_group(api: Any, args: List[str]) -> str:
+    """cooldowns [account] | cooldowns clear <account> <plugin> [key]."""
+    if args and args[0].lower() == "clear":
+        rest = args[1:]
+        if not 2 <= len(rest) <= 3:
+            raise UsageError(
+                f"cooldowns clear: expects 2 or 3 arguments, got {len(rest)}"
+                f" — usage: {_COOLDOWNS_USAGE['clear']}"
+            )
+        cooldown_key = rest[2] if len(rest) == 3 else None
+        return _result(
+            await api.cooldowns_clear(rest[0], rest[1], cooldown_key,
+                                      surface="cli"),
+            verb="cooldown cleared",
+        )
+    if len(args) > 1:
+        raise UsageError(f"usage: cooldowns {HELP['cooldowns'][0]}")
+    account = args[0] if args else None
+    return format_cooldowns(await api.cooldowns_list(account))
 
 
 async def _plugins_group(api: Any, args: List[str]) -> str:
@@ -898,6 +987,55 @@ def format_simulation_report(report: dict) -> str:
     summary = report.get("summary")
     if summary:
         lines.append(f"summary: {summary}")
+    return "\n".join(lines)
+
+
+def format_credential_status(rows: List[dict]) -> str:
+    """Credential status payload (api.accounts_credential_status) -> table.
+
+    One line per account: name + db/env/missing chip. NEVER a value — the
+    payload does not even carry one.
+    """
+    if not rows:
+        return "  (no accounts registered — 'accounts add <name>')"
+    labels = {"db": "db (encrypted)", "env": "env (.env fallback)"}
+    lines: List[str] = []
+    for row in rows:
+        state = row.get("credential")
+        state_text = labels.get(state, str(state or "missing"))
+        lines.append(f"  {str(row.get('name', '?')):<20}credential: {state_text}")
+    return "\n".join(lines)
+
+
+def format_import_report(report: dict) -> str:
+    """Import report (api.credentials_import_env) -> names-only summary."""
+    imported = report.get("imported") or []
+    skipped = report.get("skipped") or []
+    failed = report.get("failed") or {}
+    lines = [f"  imported: {', '.join(imported) if imported else '(none)'}"]
+    lines.append(f"  skipped : {', '.join(skipped) if skipped else '(none)'}"
+                 "  (already stored; use --overwrite)")
+    if failed:
+        lines.append("  failed  :")
+        lines.extend(f"      {name}: {reason}" for name, reason in failed.items())
+    else:
+        lines.append("  failed  : (none)")
+    return "\n".join(lines)
+
+
+def format_cooldowns(rows: List[dict]) -> str:
+    """Active cooldowns (api.cooldowns_list) -> account/plugin/key table."""
+    if not rows:
+        return "  (no active cooldowns)"
+    lines: List[str] = []
+    for row in rows:
+        lines.append(
+            f"  {str(row.get('account', '?')):<16}"
+            f"{str(row.get('plugin') or '-'):<16}"
+            f"{str(row.get('cooldown_key') or '-'):<20}"
+            f"{_fmt_duration(row.get('remaining_s') or 0.0):>10}"
+            f"  {str(row.get('source') or '-')}"
+        )
     return "\n".join(lines)
 
 

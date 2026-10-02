@@ -149,27 +149,41 @@ class SettingsManager:
         for plugin, layer in (global_layer or {}).items():
             if not isinstance(layer, Mapping):
                 self._logger.warning("ignoring malformed global settings for %r", plugin)
-        #: account -> plugin -> {key: raw value}  (lazy-loaded DB layer)
+        #: account -> plugin -> {key: raw value}  (DB layer, loaded at boot)
         self._account_plugin: Dict[str, Dict[str, Dict[str, Any]]] = {}
         #: account -> {key: raw value}            (framework account settings)
         self._account_framework: Dict[str, Dict[str, Any]] = {}
         self._loaded = plugin_repo is None and account_settings_repo is None
 
     # ------------------------------------------------------------ loading
-    def _ensure_loaded(self) -> None:
-        if self._loaded:
-            return
+    async def load(self) -> None:
+        """Pull the persisted account layers into memory (boot path).
+
+        Called ONCE by the bootstrap (and the simulation runner) after
+        ``database.connect()``; every read below (:meth:`resolve`,
+        :meth:`account_settings`, :meth:`layers_view`) is then pure memory
+        and stays SYNC by design — the account manager and the plugin
+        manager call them from sync code paths.
+
+        Best-effort per layer: a repository failure is logged and leaves
+        that layer empty (defaults still resolve, boot still completes).
+        """
         if self._plugin_repo is not None:
             try:
-                self._account_plugin = self._plugin_repo.all_account_settings() or {}
+                self._account_plugin = (
+                    await self._plugin_repo.all_account_settings() or {}
+                )
             except Exception:
                 self._logger.exception("could not load plugin settings layer")
                 self._account_plugin = {}
         if self._account_repo is not None:
-            for name in (self._account_repo.list_accounts() if hasattr(
-                    self._account_repo, "list_accounts") else []):
+            listing = getattr(self._account_repo, "list_accounts", None)
+            names = await listing() if callable(listing) else []
+            for name in names or []:
                 try:
-                    self._account_framework[name] = dict(self._account_repo.get(name) or {})
+                    self._account_framework[name] = dict(
+                        await self._account_repo.get(name) or {}
+                    )
                 except Exception:
                     self._account_framework[name] = {}
         self._loaded = True
@@ -186,14 +200,12 @@ class SettingsManager:
         Merge order: validated defaults <- global layer <- account layer.
         Raises SettingsValidationError (with the layer named) for unknown keys
         or bad values — at boot this fails fast, at runtime it surfaces as a
-        clean error line.
+        clean error line. Pure memory (call :meth:`load` first at boot).
         """
-        self._ensure_loaded()
         defs = {s.name: s for s in schema}
         values: Dict[str, Any] = {s.name: s.validate(s.default) for s in schema}
         layers = [("global layer", self._global.get(plugin_name, {}))]
         if account is not None:
-            self._ensure_loaded()
             layers.append(
                 (f"account '{account}' layer",
                  self._account_plugin.get(account, {}).get(plugin_name, {}))
@@ -213,7 +225,7 @@ class SettingsManager:
                     ) from exc
         return values
 
-    def set_plugin_setting(
+    async def set_plugin_setting(
         self, account: str, plugin: str, key: str, value: Any, schema: Sequence[Setting]
     ) -> Any:
         """Validate + persist one account-layer plugin setting; returns typed value.
@@ -231,7 +243,7 @@ class SettingsManager:
         validated = defs[key].validate(value)
         old = self._account_plugin.get(account, {}).get(plugin, {}).get(key)
         if self._plugin_repo is not None:
-            self._plugin_repo.set_setting(account, plugin, key, validated)
+            await self._plugin_repo.set_setting(account, plugin, key, validated)
         self._account_plugin.setdefault(account, {}).setdefault(plugin, {})[key] = validated
         self._bus.publish_nowait(SettingChanged(
             account=account, scope=f"account:{account}/plugin:{plugin}/key:{key}",
@@ -241,8 +253,11 @@ class SettingsManager:
 
     # ----------------------------------------------------------- accounts
     def account_settings(self, account: str) -> Dict[str, Any]:
-        """Resolved framework account settings (reconnect policy...)."""
-        self._ensure_loaded()
+        """Resolved framework account settings (reconnect policy...).
+
+        Pure memory after :meth:`load` (sync by design — called from sync
+        reconnect/typing paths in the account manager).
+        """
         defs = {s.name: s for s in ACCOUNT_SETTINGS}
         stored = self._account_framework.get(account, {})
         values = {s.name: s.validate(s.default) for s in ACCOUNT_SETTINGS}
@@ -256,7 +271,7 @@ class SettingsManager:
                     )
         return values
 
-    def set_account_setting(self, account: str, key: str, value: Any) -> Any:
+    async def set_account_setting(self, account: str, key: str, value: Any) -> Any:
         """Validate + persist one framework account setting."""
         defs = {s.name: s for s in ACCOUNT_SETTINGS}
         if key not in defs:
@@ -267,7 +282,7 @@ class SettingsManager:
         validated = defs[key].validate(value)
         old = self._account_framework.get(account, {}).get(key)
         if self._account_repo is not None:
-            self._account_repo.set(account, key, validated)
+            await self._account_repo.set(account, key, validated)
         self._account_framework.setdefault(account, {})[key] = validated
         self._bus.publish_nowait(SettingChanged(
             account=account, scope=f"account:{account}/key:{key}",
@@ -277,8 +292,10 @@ class SettingsManager:
 
     # -------------------------------------------------------------- views
     def layers_view(self) -> Dict[str, Any]:
-        """Both layers as JSON-safe dicts (dashboard Advanced page)."""
-        self._ensure_loaded()
+        """Both layers as JSON-safe dicts (dashboard Advanced page).
+
+        Pure memory after :meth:`load`.
+        """
         return {
             "global": {p: dict(v) for p, v in self._global.items()},
             "accounts": {

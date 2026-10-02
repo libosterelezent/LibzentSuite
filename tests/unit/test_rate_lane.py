@@ -218,42 +218,72 @@ class TestLaneInGrant(unittest.IsolatedAsyncioTestCase):
 
 
 class FakeKv:
+    """Async kv-repo double (the real KvRepository is aiosqlite-backed)."""
+
     def __init__(self):
         self.rows = {}
 
-    def get(self, key, default=None):
+    async def get(self, key, default=None):
         return self.rows.get(key, default)
 
-    def set(self, key, value):
+    async def set(self, key, value):
         self.rows[key] = value
 
 
 class TestLanePersistence(unittest.IsolatedAsyncioTestCase):
-    async def test_kv_roundtrip(self) -> None:
+    """Lane persistence split: the ENGINE keeps memory only; the kv row is
+    READ at boot (``await load_persisted()``) and WRITTEN by the ControlAPI
+    layer. These tests pin the engine side of that contract."""
+
+    async def test_kv_roundtrip_via_load_persisted(self) -> None:
         import json
 
         clock = ManualClock(0.0)
         kv = FakeKv()
+        kv.rows["ratelimit:lane"] = json.dumps(
+            {"enabled": True, "prefixrate": 0.75}
+        )
         manager = RateLimitManager(
             EventBus(), StubLogger(), None, clock=clock, kv_repo=kv,
-            lane_enabled=True, lane_prefixrate=0.75,
+            lane_enabled=False, lane_prefixrate=1.5,
         )
+        # constructor defaults apply until the persisted row is loaded
+        self.assertFalse(manager.lane_status()["enabled"])
+        await manager.load_persisted()
         self.assertTrue(manager.lane_status()["enabled"])
         self.assertEqual(manager.lane_status()["prefixrate"], 0.75)
-        stored = json.loads(kv.rows["ratelimit:lane"])
-        self.assertEqual(stored, {"enabled": True, "prefixrate": 0.75})
 
+        # engine mutations are MEMORY-ONLY now (ControlAPI persists)
         manager.set_lane_enabled(False)
         manager.set_lane_prefixrate(2.0)
-        stored = json.loads(kv.rows["ratelimit:lane"])
-        self.assertEqual(stored, {"enabled": False, "prefixrate": 2.0})
-
-        # a fresh manager on the same kv restores the persisted state
-        second = RateLimitManager(
-            EventBus(), StubLogger(), None, clock=ManualClock(0.0), kv_repo=kv
+        lane = manager.lane_status()
+        self.assertFalse(lane["enabled"])
+        self.assertEqual(lane["prefixrate"], 2.0)
+        self.assertEqual(
+            json.loads(kv.rows["ratelimit:lane"]),
+            {"enabled": True, "prefixrate": 0.75},  # the kv row is untouched
         )
-        self.assertFalse(second.lane_status()["enabled"])
-        self.assertEqual(second.lane_status()["prefixrate"], 2.0)
+
+    async def test_ctor_defaults_apply_without_kv_row(self) -> None:
+        kv = FakeKv()
+        manager = RateLimitManager(
+            EventBus(), StubLogger(), None, kv_repo=kv,
+            lane_enabled=True, lane_prefixrate=0.75,
+        )
+        await manager.load_persisted()  # no row -> constructor defaults win
+        self.assertTrue(manager.lane_status()["enabled"])
+        self.assertEqual(manager.lane_status()["prefixrate"], 0.75)
+
+    async def test_corrupt_kv_row_falls_back_to_defaults(self) -> None:
+        kv = FakeKv()
+        kv.rows["ratelimit:lane"] = "{not json"
+        manager = RateLimitManager(
+            EventBus(), StubLogger(), None, kv_repo=kv,
+            lane_enabled=True, lane_prefixrate=0.75,
+        )
+        await manager.load_persisted()  # logged + skipped, never fatal
+        self.assertTrue(manager.lane_status()["enabled"])
+        self.assertEqual(manager.lane_status()["prefixrate"], 0.75)
 
     async def test_corrupt_kv_falls_back(self) -> None:
         kv = FakeKv()
@@ -262,6 +292,9 @@ class TestLanePersistence(unittest.IsolatedAsyncioTestCase):
             EventBus(), StubLogger(), None, clock=ManualClock(0.0), kv_repo=kv
         )
         self.assertFalse(manager.lane_status()["enabled"])  # safe default
+        await manager.load_persisted()
+        self.assertFalse(manager.lane_status()["enabled"])  # still safe
+        self.assertEqual(manager.lane_status()["prefixrate"], 1.5)
 
 
 if __name__ == "__main__":

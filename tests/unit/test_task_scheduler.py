@@ -142,7 +142,7 @@ class FakeLogger:
 
 
 class FakeHistoryRepo:
-    """Dict-backed TaskHistoryRepository (add/update/recent), fault-togglable."""
+    """Dict-backed TaskHistoryRepository (async add/update/recent), fault-togglable."""
 
     def __init__(self) -> None:
         self.rows = {}
@@ -150,20 +150,20 @@ class FakeHistoryRepo:
         self.update_calls = []
         self.fail = False
 
-    def add(self, entry):
+    async def add(self, entry):
         if self.fail:
             raise RuntimeError("task history db down")
         self.add_calls.append(dict(entry))
         self.rows[entry["id"]] = dict(entry)
         return entry["id"]
 
-    def update(self, task_id, **fields):
+    async def update(self, task_id, **fields):
         if self.fail:
             raise RuntimeError("task history db down")
         self.update_calls.append((task_id, fields))
         self.rows[task_id].update(fields)
 
-    def recent(self, limit=50, account=None):
+    async def recent(self, limit=50, account=None):
         if self.fail:
             raise RuntimeError("task history db down")
         rows = sorted(self.rows.values(), key=lambda r: r["id"])
@@ -553,9 +553,11 @@ class TestHistoryAndStats(SchedulerTestBase):
         self.assertEqual(self.repo.rows[t3.id]["status"], "failed")
         self.assertIn("nope", self.repo.rows[t3.id]["error"])
 
-        # scheduler.history() is repo-backed
-        self.assertEqual([r["id"] for r in self.scheduler.history()], [t1.id, t2.id, t3.id])
-        self.assertEqual([r["id"] for r in self.scheduler.history(account="alpha")], [t1.id, t2.id])
+        # scheduler.history() is repo-backed (awaited)
+        self.assertEqual([r["id"] for r in await self.scheduler.history()], [t1.id, t2.id, t3.id])
+        self.assertEqual(
+            [r["id"] for r in await self.scheduler.history(account="alpha")], [t1.id, t2.id]
+        )
 
     async def test_history_repo_failure_never_breaks_pipeline(self) -> None:
         self.repo.fail = True
@@ -564,7 +566,7 @@ class TestHistoryAndStats(SchedulerTestBase):
         self.assertEqual(task.status, "completed")
         self.assertEqual(self.repo.add_calls, [])
         # read fails too -> in-memory fallback
-        self.assertEqual([r["id"] for r in self.scheduler.history()], [task.id])
+        self.assertEqual([r["id"] for r in await self.scheduler.history()], [task.id])
 
     async def test_history_memory_fallback_without_repo(self) -> None:
         scheduler = TaskScheduler(
@@ -575,8 +577,8 @@ class TestHistoryAndStats(SchedulerTestBase):
             task = scheduler.submit("alpha", "p", "message")
             await asyncio.sleep(0.05)
             self.assertEqual(task.status, "completed")
-            self.assertEqual([r["id"] for r in scheduler.history()], [task.id])
-            self.assertEqual(scheduler.history(limit=0), [])
+            self.assertEqual([r["id"] for r in await scheduler.history()], [task.id])
+            self.assertEqual(await scheduler.history(limit=0), [])
         finally:
             await scheduler.stop(drain=False)
 

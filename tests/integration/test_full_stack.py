@@ -50,7 +50,8 @@ def make_config_dir() -> Path:
 
 
 class Stack:
-    """A fully wired production framework over one simulated world."""
+    """A fully wired production framework over one simulated world
+    (``stack = await Stack(...).boot()`` — build is async now)."""
 
     def __init__(self, db_path: str | None = None, extra_accounts: list = ()) -> None:
         self.world = SimWorld(
@@ -75,7 +76,12 @@ class Stack:
             "DISCORD_TOKEN_BETA": "sim-beta",
         })
         self.db = Database(db_path if db_path is not None else ":memory:")
-        self.framework = build(
+        self.framework = None
+        self._extra = extra_accounts
+
+    async def boot(self) -> "Stack":
+        """``build()`` is async now (aiosqlite database layer)."""
+        self.framework = await build(
             config_dir=str(self.config_dir),
             plugin_dir="plugins",
             client_factory=self._client_factory,
@@ -83,7 +89,7 @@ class Stack:
             database=self.db,
             quiet=True,
         )
-        self._extra = extra_accounts
+        return self
 
     def _client_factory(self, name: str, token: str) -> SimClient:
         return SimClient(self.world, self.user_ids[name], seed=hash(name) % 1000)
@@ -102,7 +108,7 @@ class Stack:
 
 class TestFullStackSoulcopy(unittest.IsolatedAsyncioTestCase):
     async def test_flow_end_to_end(self) -> None:
-        stack = Stack()
+        stack = await Stack().boot()
         await stack.start()
         try:
             await stack.owner_says("slcopy")
@@ -114,11 +120,19 @@ class TestFullStackSoulcopy(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(chunks), 1)
             self.assertIn("Alice", chunks[0])
 
-            # audit trail recorded outbound interactions with pacing data
-            audit = await stack.framework.api.audit_tail(n=20)
-            outs = [e for e in audit if e["direction"] == "out"]
+            # outbound audit trail with pacing data (queued persistence:
+            # give the drain worker a beat to land rows in the DB)
+            audit = []
+            for _ in range(20):
+                await asyncio.sleep(0.15)
+                audit = await stack.framework.api.audit_tail(n=20)
+                if any(e.get("direction") == "out" for e in audit):
+                    break
+            outs = [e for e in audit if e.get("direction") == "out"
+                    and e.get("action") in ("message", "dm")]
             self.assertGreaterEqual(len(outs), 2)
-            self.assertTrue(all("plugin=soulcopy" in (e.get("note") or "") for e in outs))
+            self.assertTrue(all("plugin=soulcopy" in (e.get("note") or "")
+                                for e in outs))
 
             # task history persisted with statuses
             hist = await stack.framework.api.tasks_history(limit=10)
@@ -134,17 +148,21 @@ class TestFullStackSoulcopy(unittest.IsolatedAsyncioTestCase):
             await stack.stop()
 
     async def test_pacing_enforced_between_sends(self) -> None:
-        stack = Stack()
+        stack = await Stack().boot()
         await stack.start()
         try:
             await stack.owner_says("slcopy")
             await stack.world.wait_for_quiet(GUILD_CHANNEL, quiet=2.2, limit=30.0)
-            audit = await stack.framework.api.audit_tail(n=20)
+            # config policy: 1.5s interval (+50ms jitter max) -> every gap
+            # between the account's outbound messages >= 1.45. Measured on
+            # the world journal (the source of truth for what actually hit
+            # the wire) — the audit trail's ts view is equivalent.
             outs = sorted(
-                (e["ts"] for e in audit if e["direction"] == "out"),
+                m.ts for m in stack.world.history.get(GUILD_CHANNEL, [])
+                if m.author_id == stack.user_ids["alpha"]
             )
+            self.assertGreaterEqual(len(outs), 2)
             gaps = [b - a for a, b in zip(outs, outs[1:])]
-            # config policy: 1.5s interval (+50ms jitter max) -> every gap >= 1.45
             self.assertTrue(all(g >= 1.45 for g in gaps), gaps)
         finally:
             await stack.stop()
@@ -152,7 +170,7 @@ class TestFullStackSoulcopy(unittest.IsolatedAsyncioTestCase):
 
 class TestProfilesGating(unittest.IsolatedAsyncioTestCase):
     async def test_profile_limits_plugin_set(self) -> None:
-        stack = Stack(extra_accounts=["alpha", "beta"])
+        stack = await Stack(extra_accounts=["alpha", "beta"]).boot()
         api = stack.framework.api
         await api.profiles_create("copier", ["soulcopy"], "copy duty")
         await api.accounts_add({"name": "alpha", "profiles": ["copier"]})
@@ -171,7 +189,7 @@ class TestPersistenceRoundtrip(unittest.IsolatedAsyncioTestCase):
     async def test_state_survives_reboot(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sm-state-") as tmp:
             db_path = str(Path(tmp) / "slaughter.db")
-            stack = Stack(db_path=db_path)
+            stack = await Stack(db_path=db_path).boot()
             api = stack.framework.api
             await api.profiles_create("copier", ["soulcopy"])
             await api.accounts_add({"name": "alpha", "profiles": ["copier"]})
@@ -181,7 +199,7 @@ class TestPersistenceRoundtrip(unittest.IsolatedAsyncioTestCase):
             await stack.stop()
 
             # second boot on the same DB restores everything
-            stack2 = Stack(db_path=db_path)
+            stack2 = await Stack(db_path=db_path).boot()
             api2 = stack2.framework.api
             try:
                 accounts = await api2.accounts_list()
@@ -203,7 +221,7 @@ class TestPersistenceRoundtrip(unittest.IsolatedAsyncioTestCase):
 
 class TestEmergencyStop(unittest.IsolatedAsyncioTestCase):
     async def test_global_estop_halts_everything(self) -> None:
-        stack = Stack()
+        stack = await Stack().boot()
         await stack.start()
         try:
             out = await stack.framework.api.emergency_stop_all()
@@ -219,7 +237,7 @@ class TestLaneIntegration(unittest.IsolatedAsyncioTestCase):
         """Two accounts sending through the production bootstrap: with the
         lane on, EVERY pair of outbound sends (across accounts too) is spaced
         by at least the prefixrate — the FarmLite guarantee, fleet-wide."""
-        stack = Stack()
+        stack = await Stack().boot()
         # enable the lane with a recognizable spacing (runtime call path)
         lane = await stack.framework.api.ratelimit_set_lane(enabled=True, prefixrate=1.6)
         self.assertTrue(lane["enabled"])
@@ -228,8 +246,12 @@ class TestLaneIntegration(unittest.IsolatedAsyncioTestCase):
             # alpha and beta both fire the soulcopy flow
             await stack.owner_says("slcopy")
             await stack.world.wait_for_quiet(GUILD_CHANNEL, quiet=2.5, limit=40.0)
-            audit = await stack.framework.api.audit_tail(n=30)
-            outs = sorted(e["ts"] for e in audit if e["direction"] == "out")
+            # lane spacing measured on the world journal (what actually hit
+            # the wire across BOTH accounts)
+            outs = sorted(
+                m.ts for m in stack.world.history.get(GUILD_CHANNEL, [])
+                if m.author_id in stack.user_ids.values()
+            )
             self.assertGreaterEqual(len(outs), 2)
             gaps = [b - a for a, b in zip(outs, outs[1:])]
             self.assertTrue(all(g >= 1.5 for g in gaps), gaps)
@@ -244,7 +266,7 @@ class TestLaneIntegration(unittest.IsolatedAsyncioTestCase):
             await stack.stop()
 
     async def test_lane_pause_holds_and_resumes(self) -> None:
-        stack = Stack()
+        stack = await Stack().boot()
         await stack.framework.api.ratelimit_set_lane(enabled=True, prefixrate=1.5)
         await stack.start()
         try:
@@ -272,7 +294,7 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
     async def test_dm_resolved_once_across_restarts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sm-dm-") as tmp:
             db_path = str(Path(tmp) / "slaughter.db")
-            stack = Stack(db_path=db_path)
+            stack = await Stack(db_path=db_path).boot()
             api = stack.framework.api
             await api.accounts_add({"name": "alpha"})
             await api.accounts_start()
@@ -288,7 +310,7 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
                 await stack.stop()
 
             # second boot on the same DB: still exactly ONE call ever
-            stack2 = Stack(db_path=db_path)
+            stack2 = await Stack(db_path=db_path).boot()
             api2 = stack2.framework.api
             # alpha was restored from the database by the AccountManager
             names = [a["name"] for a in await api2.accounts_list()]
@@ -304,7 +326,7 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
                 await stack2.stop()
 
     async def test_typing_indicator_opt_in(self) -> None:
-        stack = Stack()
+        stack = await Stack().boot()
         api = stack.framework.api
         await api.accounts_add({"name": "alpha"})
         await stack.framework.accounts.start("alpha")
@@ -317,7 +339,7 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
                                 channel_id=GUILD_CHANNEL, content="x"))
             self.assertEqual(client.typing_calls, [])
             # opted in at 1.0 -> every guild send fires typing first
-            settings.set_account_setting("alpha", "typing_probability", 1.0)
+            await settings.set_account_setting("alpha", "typing_probability", 1.0)
             await stack.framework.accounts.send_hook(
                 SimpleNamespace(account="alpha", action="message",
                                 channel_id=GUILD_CHANNEL, content="y"))
@@ -326,7 +348,7 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
             await stack.stop()
 
     async def test_remote_control_end_to_end(self) -> None:
-        stack = Stack()
+        stack = await Stack().boot()
         api = stack.framework.api
         await api.accounts_add({"name": "alpha"})
         await stack.framework.accounts.start("alpha")
@@ -347,7 +369,7 @@ class TestEmergencyStopResume(unittest.IsolatedAsyncioTestCase):
     re-arms the scheduler so plugin sends work again."""
 
     async def test_estop_then_resume_restores_sending(self) -> None:
-        stack = Stack()
+        stack = await Stack().boot()
         api = stack.framework.api
         await api.accounts_add({"name": "alpha"})
         await api.accounts_start()
@@ -380,7 +402,7 @@ class TestGroupRateScope(unittest.IsolatedAsyncioTestCase):
     one sync_group serialize their API activity on a shared clock."""
 
     async def test_group_members_serialize(self) -> None:
-        stack = Stack()
+        stack = await Stack().boot()
         api = stack.framework.api
         await api.accounts_add({"name": "alpha", "sync_group": "grinders"})
         await api.accounts_add({"name": "beta", "sync_group": "grinders"})
@@ -404,12 +426,14 @@ class TestGroupRateScope(unittest.IsolatedAsyncioTestCase):
             history = [m for m in stack.world.messages_of(GUILD_CHANNEL)
                        if m.startswith("hi-")]
             self.assertEqual(len(history), 4)
-            audit = await api.audit_tail(n=20)
-            outs = sorted(e["ts"] for e in audit if e["direction"] == "out"
-                          and e["content"].startswith("hi-"))
-            gaps = [b - a for a, b in zip(outs, outs[1:])]
             # every gap between GROUP members (and each account's own calls)
-            # respects the 1.5s config interval across the shared clock
+            # respects the 1.5s config interval across the shared clock —
+            # measured on the world journal (what actually hit the wire)
+            outs = sorted(
+                m.ts for m in stack.world.history.get(GUILD_CHANNEL, [])
+                if m.author_id in stack.user_ids.values()
+            )
+            gaps = [b - a for a, b in zip(outs, outs[1:])]
             self.assertTrue(all(g >= 1.45 for g in gaps), gaps)
         finally:
             await stack.stop()

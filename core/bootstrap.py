@@ -2,12 +2,21 @@
 
 Construction order (the only place that knows how the managers interconnect):
 
-  Credentials -> Config -> Database -> LogService(+db sink) -> EventBus
-    -> RateLimitManager(+config policies) -> SettingsManager
-    -> AuditRecorder -> TaskScheduler(late-bound sender) -> PluginManager
-    -> ProfileManager -> AccountManager(restores persisted accounts)
+  Credentials -> Config -> Database(await connect) -> LogService(+db sink)
+    -> EventBus -> RateLimitManager(+config policies, await load_persisted)
+    -> SettingsManager(await load) -> AuditRecorder
+    -> TaskScheduler(late-bound sender) -> PluginManager(discover + await
+    persist_metadata) -> ProfileManager(await load)
+    -> AccountManager(await load; restores persisted accounts)
+    -> CredentialService(+refresh)/CooldownService(await restore)/
+       PluginStateService wired into the managers
     -> sender bound (accounts.send_hook) -> scheduler.start()
     -> SimulationRunner -> ControlAPI
+
+``build`` is ASYNC (``framework = await build(...)``): the database layer
+is aiosqlite, so the connection+migrations and every boot-time repository
+read (settings, policies, profiles, accounts, cooldown restore, plugin
+metadata) are awaited here before any manager serves traffic.
 
 The sender cycle (scheduler needs accounts.send_hook; accounts needs the
 scheduler for submits/cancels) is broken with a late-bound holder — the same
@@ -19,15 +28,19 @@ tests, `main.py --sim` and the dashboard's Simulation page.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from .api import ControlAPI
 from .audit import AuditRecorder
 from .config import ProjectConfig, load_config
+from .cooldowns import CooldownService
+from .credential_service import CredentialService
 from .credentials import Credentials
 from .event_bus import EventBus
 from .logging_service import LogService, ServiceLogger, attach_stdlib_bridge, configure_stderr, detach_stdlib_bridge
 from .plugin_manager import PluginManager
+from .plugin_state import PluginStateService
 from .profile_manager import ProfileManager
 from .rate_limit_manager import RateLimitManager
 from .settings_manager import SettingsManager
@@ -100,7 +113,10 @@ class Framework:
                  profiles: ProfileManager, settings: SettingsManager,
                  audit: AuditRecorder, database: Any,
                  credentials: Credentials, config: ProjectConfig,
-                 remote_control: Any = None) -> None:
+                 remote_control: Any = None,
+                 credential_service: Any = None,
+                 cooldowns: Any = None,
+                 plugin_state: Any = None) -> None:
         self.api = api
         self.bus = bus
         self.logs = logs
@@ -115,6 +131,10 @@ class Framework:
         self.credentials = credentials
         self.config = config
         self.remote_control = remote_control
+        #: shared services (also wired into the managers/plugin facades)
+        self.credential_service = credential_service
+        self.cooldowns = cooldowns
+        self.plugin_state = plugin_state
 
     async def shutdown(self) -> None:
         """Graceful: drain the scheduler, stop accounts, detach logging
@@ -129,12 +149,15 @@ class Framework:
             self.remote_control.stop()
         await self.scheduler.stop(drain=True)
         await self.accounts.stop_all()
-        self.logs.attach_db(None)          # stop persisting first
+        # QUEUED PERSISTENCE shutdown (agent C contract): drain the log +
+        # audit queues BEFORE closing the DB — bounded, never hangs
+        await self.logs.stop_persistence()
+        await self.audit.stop_persistence()
         detach_stdlib_bridge()             # then stop ingesting stdlib
-        self.database.close()
+        await self.database.close()
 
 
-def build(
+async def build(
     *,
     env_file: str = ".env",
     config_dir: str = "config",
@@ -146,7 +169,11 @@ def build(
     database: Any = None,
     quiet: bool = False,
 ) -> Framework:
-    """Compose the live framework (the boot flow of ``main.py``)."""
+    """Compose the live framework (the boot flow of ``main.py``).
+
+    ASYNC: opens the database connection (with migrations) and awaits every
+    boot-time repository read before the stack serves anything.
+    """
     import time as _time
 
     if not quiet:
@@ -157,6 +184,16 @@ def build(
     from database.db import Database
 
     database = database if database is not None else Database(db_path)
+    await database.connect()  # open + pragmas + migrations, FIRST
+
+    # shared services over the database (credentials encrypted at rest,
+    # persistent cooldowns, scoped plugin state)
+    credential_service = CredentialService(
+        database.credentials, key_path=Path("state/credentials.key")
+    )
+    cooldowns = CooldownService(database.cooldowns)
+    plugin_state = PluginStateService(database.kv)
+
     logs = LogService()
     logs.attach_db(database.logs)
     attach_stdlib_bridge(logs)  # plugin/stdlib logger records -> structured page
@@ -169,6 +206,7 @@ def build(
         lane_enabled=bool((config.policies.get("lane") or {}).get("enabled", False)),
         lane_prefixrate=float((config.policies.get("lane") or {}).get("prefixrate", 1.5)),
     )
+    await limiter.load_persisted()  # stored policies + lane config -> memory
     _apply_policies(limiter, config)
 
     settings = SettingsManager(
@@ -176,6 +214,7 @@ def build(
         plugin_repo=database.plugins, account_settings_repo=database.account_settings,
         global_layer=config.global_settings,
     )
+    await settings.load()
     audit = AuditRecorder(database.audit)
 
     sender_box: Dict[str, Any] = {"send": None}
@@ -194,12 +233,16 @@ def build(
     plugins = PluginManager(
         bus, ServiceLogger(logs, "plugins"), settings,
         plugin_repo=database.plugins, plugin_dir=plugin_dir,
+        credential_service=credential_service, cooldowns=cooldowns,
+        plugin_state=plugin_state,
     )
     plugins.discover()
+    await plugins.persist_metadata()
 
     profiles = ProfileManager(
         database.profiles, ServiceLogger(logs, "profiles"), database.accounts
     )
+    await profiles.load()
 
     if client_factory is None:
         from adapters.discord import RealClientFactory
@@ -211,13 +254,23 @@ def build(
         plugins, profiles, scheduler, settings, audit,
         client_factory, credentials, limiter=limiter,
         api_cache_repo=database.cache,
+        credential_service=credential_service, cooldowns=cooldowns,
+        plugin_state=plugin_state,
     )
+    await accounts.load()  # restore persisted accounts (attach their plugins)
     sender_box["send"] = accounts.send_hook
 
-    # config-dir account files (DB rows were restored by AccountManager itself)
+    # boot recovery for the shared services (before any traffic)
+    try:
+        await credential_service.refresh()  # status pages know 'db' sources
+    except Exception:
+        pass
+    await cooldowns.restore()
+
+    # config-dir account files (DB rows were restored by accounts.load())
     for payload in config.accounts:
         try:
-            accounts.add_account(
+            await accounts.add_account(
                 payload["name"],
                 token_ref=payload.get("token_ref"),
                 enabled=bool(payload.get("enabled", True)),
@@ -229,6 +282,12 @@ def build(
                        account=payload.get("name"))
 
     scheduler.start()
+
+    # QUEUED PERSISTENCE startup (agent C contract): the log + audit queues
+    # drain to aiosqlite on a worker task — record() never touches SQLite
+    # inline, so event paths never block on database I/O
+    await logs.start_persistence(database.logs)
+    await audit.start_persistence(database.audit)
 
     if simulation_runner is None:
         try:
@@ -242,6 +301,7 @@ def build(
         accounts=accounts, plugins=plugins, profiles=profiles, settings=settings,
         limiter=limiter, scheduler=scheduler, logs=logs, audit=audit,
         simulation=simulation_runner, credentials=credentials, database=database,
+        credentials_svc=credential_service, cooldowns=cooldowns,
         started_at=_time.time(),
     )
 
@@ -261,4 +321,6 @@ def build(
         accounts=accounts, plugins=plugins, profiles=profiles, settings=settings,
         audit=audit, database=database, credentials=credentials, config=config,
         remote_control=remote_control,
+        credential_service=credential_service, cooldowns=cooldowns,
+        plugin_state=plugin_state,
     )

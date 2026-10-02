@@ -91,6 +91,29 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 #: fallback reconnect policy when the settings manager is unavailable/blank
 _DEFAULT_RECONNECT = {"initial": 1.0, "max": 60.0, "multiplier": 2.0}
 
+#: login-failure text markers used to classify INVALID_CREDENTIAL (the live
+#: client surfaces library LoginFailures as plain AccountError strings, so
+#: message text is the portable detection seam — documented heuristic)
+_AUTH_ERROR_MARKERS = ("bad token", "401", "improper token")
+
+
+def _looks_like_auth_error(exc: BaseException) -> bool:
+    """True when an exception's text looks like a credential rejection.
+
+    Matches 'bad token', '401' or 'improper token' (case-insensitive) in
+    the exception message or any chained cause — the strings discord
+    client libraries emit for rejected tokens.
+    """
+    seen = 0
+    walker: Optional[BaseException] = exc
+    while walker is not None and seen < 5:  # bounded cause chain walk
+        text = str(walker).lower()
+        if any(marker in text for marker in _AUTH_ERROR_MARKERS):
+            return True
+        walker = walker.__cause__ or walker.__context__
+        seen += 1
+    return False
+
 
 class AccountStatus(str, Enum):
     """Lifecycle states of one account's connection."""
@@ -101,6 +124,12 @@ class AccountStatus(str, Enum):
     RECONNECTING = "reconnecting"
     STOPPED = "stopped"
     FAILED = "failed"
+    #: no credential resolvable for the account (DB absent AND legacy .env
+    #: key absent) — fix by storing a credential, not by restarting
+    MISSING_CREDENTIAL = "missing_credential"
+    #: the credential was REJECTED by Discord at login/startup (distinct
+    #: from a network failure: the token itself must be replaced)
+    INVALID_CREDENTIAL = "invalid_credential"
 
 
 @dataclass
@@ -131,11 +160,14 @@ class Account:
     (``{name: {"enabled","last_error","error_count"}}``); it is refreshed from
     ``plugin_manager.states()`` whenever a status snapshot is built and the
     plugin manager has the account, and keeps the last known values otherwise.
+    ``credential_source`` mirrors ``CredentialService.status(name)`` ("db" /
+    "env", None when no credential service is wired) for display snapshots.
     """
 
     record: AccountRecord
     runtime: AccountRuntime = field(default_factory=AccountRuntime)
     plugins: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    credential_source: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Every account owns exactly one DiscordCache for its whole life."""
@@ -162,6 +194,7 @@ class Account:
             "latency_ms": latency,
             "uptime_s": uptime,
             "last_error": rt.last_error,
+            "credential": self.credential_source,
             "plugins": {
                 name: dict(info) for name, info in sorted(self.plugins.items())
             },
@@ -187,11 +220,23 @@ class AccountManager:
         limiter: Any = None,
         supervisor_tick: float = 0.2,
         api_cache_repo: Any = None,
+        credential_service: Any = None,
+        cooldowns: Any = None,
+        plugin_state: Any = None,
     ) -> None:
         """``limiter`` (optional) enriches details() with effective rate data;
         ``supervisor_tick`` is the supervisor's poll granularity in seconds;
         ``api_cache_repo`` (optional) persists resolved Discord entities
-        (DM channels, users) per account so restarts never re-fetch them.
+        (DM channels, users) per account so restarts never re-fetch them;
+        ``credential_service`` (optional CredentialService) resolves tokens
+        DB-first with the legacy .env as fallback and reports the
+        db/env/missing source for status pages; ``cooldowns`` (optional
+        CooldownService) and ``plugin_state`` (optional PluginStateService)
+        are handed to the per-plugin services facades (plugin API).
+
+        The constructor does NO repository I/O — persisted accounts are
+        restored by awaiting :meth:`load` (the bootstrap does, right after
+        construction).
         """
         self._bus = bus
         self._logger = logger or logging.getLogger("slaughtermudae.accounts")
@@ -206,6 +251,9 @@ class AccountManager:
         self._limiter = limiter
         self._supervisor_tick = float(supervisor_tick)
         self._api_cache = api_cache_repo
+        self._credential_service = credential_service
+        self._cooldowns = cooldowns
+        self._plugin_state = plugin_state
         # typing-indicator RNG (anti-flag: humans trigger typing; disabled
         # by default via the typing_probability account setting = 0.0)
         import random as _random
@@ -222,9 +270,6 @@ class AccountManager:
         # inbound audit trail (spec §10): every message seen by any account
         bus.subscribe(MessageReceived, self._audit_inbound)
 
-        # restore accounts persisted in the database (boot path)
-        self._load_from_repo()
-
     # ------------------------------------------------------- rate-scope sync
     def _sync_group_scope(self, name: str, group: Optional[str]) -> None:
         """Feed the account's group membership to the limiter (per-account/
@@ -239,27 +284,30 @@ class AccountManager:
             self._logger.exception("group scope registration failed for %s", name)
 
     # ------------------------------------------------------------------ boot
-    def _load_from_repo(self) -> None:
+    async def load(self) -> None:
         """Rebuild Account objects (and attach their plugins) from the repo.
 
-        Best-effort: a repository failure must not break construction.
+        Boot path: awaited by the bootstrap (and the simulation runner)
+        right after construction — the constructor itself does no I/O.
+        Best-effort: a repository failure must not break the boot.
         """
         try:
-            records = self._accounts_repo.list() or []
+            records = await self._accounts_repo.list() or []
         except Exception:
             self._logger.exception("could not load accounts from repository")
             return
         for record in records:
             try:
                 account = Account(record=record)
+                self._refresh_credential_source(account)
                 self._accounts[record.name] = account
-                self._attach_plugins(record.name)
+                await self._attach_plugins(record.name)
                 self._sync_group_scope(record.name, record.sync_group)
             except Exception:
                 self._logger.exception("could not restore account %r", record.name)
 
     # ------------------------------------------------------------ registry
-    def add_account(
+    async def add_account(
         self,
         name: str,
         *,
@@ -290,23 +338,24 @@ class AccountManager:
                 isinstance(p, str) for p in profiles
             ):
                 raise AccountError("'profiles' must be a list of profile names")
-            self._validate_profiles_known(profiles)
-        record = self._accounts_repo.add(
+            await self._validate_profiles_known(profiles)
+        record = await self._accounts_repo.add(
             name, token_ref=token_ref, enabled=bool(enabled), sync_group=sync_group
         )
         account = Account(record=record)
+        self._refresh_credential_source(account)
         self._accounts[name] = account
         for profile in dict.fromkeys(profiles or []):
             try:
-                self._profile_manager.assign(name, profile)
+                await self._profile_manager.assign(name, profile)
             except Exception:
                 self._logger.exception(
                     "could not assign profile %r to new account %r", profile, name
                 )
-        fresh = self._repo_get(name)
+        fresh = await self._repo_get(name)
         if fresh is not None:
             account.record = fresh
-        self._attach_plugins(name)
+        await self._attach_plugins(name)
         self._sync_group_scope(name, sync_group)
         self._logger.info(
             "account %s added (enabled=%s sync_group=%s profiles=%s)",
@@ -314,8 +363,12 @@ class AccountManager:
         )
         return account.status_dict()
 
-    def remove_account(self, name: str) -> Dict[str, Any]:
+    async def remove_account(self, name: str) -> Dict[str, Any]:
         """Remove a STOPPED account: detach plugins, cancel supervisor, delete.
+
+        Cascades every account-scoped persistent state: the stored
+        credential (when a credential service is wired) and every cooldown
+        row (when a cooldown service is wired).
 
         Raises:
             AccountError: unknown account, or still running/reconnecting
@@ -336,12 +389,24 @@ class AccountManager:
         if supervisor is not None:  # sync context: cancel, the loop reaps it
             supervisor.cancel()
         try:
-            self._plugin_manager.detach_account(name)
+            outcome = self._plugin_manager.detach_account(name)
+            if asyncio.iscoroutine(outcome):  # tolerant: sync pinned, async OK
+                await outcome
         except Exception:
             self._logger.exception("plugin detach failed for %s", name)
         self._drop_services(name)
         self._sync_group_scope(name, None)
-        existed = bool(self._accounts_repo.delete(name))
+        if self._credential_service is not None:
+            try:
+                await self._credential_service.delete(name)
+            except Exception:
+                self._logger.exception("credential delete failed for %s", name)
+        if self._cooldowns is not None:
+            try:
+                await self._cooldowns.delete_account(name)
+            except Exception:
+                self._logger.exception("cooldown cascade failed for %s", name)
+        existed = bool(await self._accounts_repo.delete(name))
         del self._accounts[name]
         self._logger.info("account %s removed (existed=%s)", name, existed)
         return {"removed": name, "existed": existed}
@@ -359,15 +424,16 @@ class AccountManager:
         out: List[Dict[str, Any]] = []
         for name in sorted(self._accounts):
             account = self._accounts[name]
-            self._refresh_record(account)
+            await self._refresh_record(account)
             self._refresh_plugins(account)
+            self._refresh_credential_source(account)
             out.append(account.status_dict())
         return out
 
-    def set_enabled(self, name: str, enabled: bool) -> Dict[str, Any]:
+    async def set_enabled(self, name: str, enabled: bool) -> Dict[str, Any]:
         """Flip the persisted enabled flag (False = skipped by start_all)."""
         account = self._get(name)
-        self._accounts_repo.set_enabled(name, bool(enabled))  # persist first
+        await self._accounts_repo.set_enabled(name, bool(enabled))  # persist first
         account.record.enabled = bool(enabled)
         return account.status_dict()
 
@@ -412,10 +478,11 @@ class AccountManager:
             return account.status_dict()
         rt.status = AccountStatus.RUNNING
         rt.started_at = time.monotonic()
+        self._refresh_credential_source(account)
         self._logger.info("account %s running (user_id=%s)", name, rt.user_id)
         # plugins: re-attach with the CURRENT profile grants (assignments
         # take effect on the next start — ported semantics), then activate
-        self._attach_plugins(name)
+        await self._attach_plugins(name)
         try:
             outcome = self._plugin_manager.activate_account(
                 name, self._services_factory(name)
@@ -635,13 +702,15 @@ class AccountManager:
     async def _connect_client(self, name: str, rt: AccountRuntime) -> None:
         """Build a client, wire callbacks, connect and ingest the cache.
 
-        Raises CredentialsError (missing token), whatever the factory raises,
-        or AccountError when connect() fails — ``start``/reconnect translate.
+        Raises CredentialsError (no resolvable credential — DB store absent
+        AND the legacy .env key absent when a credential service is wired;
+        missing .env key otherwise), whatever the factory raises, or
+        AccountError when connect() fails — ``start``/reconnect translate.
         """
         account = self._accounts.get(name)
         if account is None:
             raise AccountError(f"unknown account {name!r}")
-        token = self._resolve_token(account.record)
+        token = await self._resolve_token(account.record)
         client = self._client_factory(name, token)
         self._wire_client(name, rt, client)
         rt.client = client
@@ -730,8 +799,24 @@ class AccountManager:
         client.on_message_delete = _on_message_delete
 
     def _start_failed(self, name: str, rt: AccountRuntime, exc: BaseException) -> None:
-        """Record a start failure: status failed + last_error + AccountFailed."""
-        rt.status = AccountStatus.FAILED
+        """Record a start failure: classified status + last_error + AccountFailed.
+
+        Status classification (heuristic, documented):
+          * CredentialsError            -> MISSING_CREDENTIAL (nothing to
+            connect with — store a credential, do not retry-loop it),
+          * an auth-shaped login error  -> INVALID_CREDENTIAL (the token was
+            REJECTED). Detected by message text containing 'bad token' or
+            '401' (case-insensitive): the live client raises plain
+            AccountError("... (bad token?)") / wraps the library's
+            LoginFailure, so text matching is the portable seam,
+          * anything else               -> FAILED (network/library/unknown).
+        """
+        if isinstance(exc, CredentialsError):
+            rt.status = AccountStatus.MISSING_CREDENTIAL
+        elif _looks_like_auth_error(exc):
+            rt.status = AccountStatus.INVALID_CREDENTIAL
+        else:
+            rt.status = AccountStatus.FAILED
         rt.last_error = str(exc) or f"{type(exc).__name__}: {exc!r}"
         self._logger.error("account %s failed to start: %s", name, rt.last_error)
         self._bus.publish_nowait(AccountFailed(account=name, error=rt.last_error))
@@ -795,8 +880,8 @@ class AccountManager:
                 message = await client.send_message(channel_id, task.content)
             except Exception as exc:
                 if type(exc).__name__ == "TargetGone":
-                    invalidate_dm_channel(rt.cache, self._api_cache,
-                                          int(task.user_id), name)
+                    await invalidate_dm_channel(rt.cache, self._api_cache,
+                                                int(task.user_id), name)
                 raise
         elif action == "message":
             rt.cache.validate_channel(int(task.channel_id))  # TargetGone propagates
@@ -829,13 +914,14 @@ class AccountManager:
         return message
 
     # -------------------------------------------------------------- details
-    def details(self, name: str) -> Dict[str, Any]:
+    async def details(self, name: str) -> Dict[str, Any]:
         """Account details page (spec §8) — EXACT shape:
 
         ``{"name", "status": {"connected","state","latency_ms","uptime_s"},
         "identity": {"name","discord_id"}, "runtime": {"cached_guilds",
         "cached_channels","cached_dms","cache_source"}, "plugins":
-        [{"name","enabled"}], "profiles": [...], "rate_limit": {...}}``
+        [{"name","enabled"}], "profiles": [...], "rate_limit": {...},
+        "credential": "db"|"env"|None}``
 
         Everything runtime-y draws ONLY from the live client's ingested cache.
         ``rate_limit`` is built only when a limiter was injected: actions come
@@ -843,10 +929,14 @@ class AccountManager:
         name)``; ``source`` is ``"inherited from global"`` when at most one
         level applies, else the comma-joined ``level:owner`` list (owner
         omitted for the global level, which has none).
+
+        Async: the persistent record (profiles, enabled flag) is re-read
+        from the repository here.
         """
         account = self._get(name)
         rt = account.runtime
-        self._refresh_record(account)
+        await self._refresh_record(account)
+        self._refresh_credential_source(account)
         record = account.record
         client = rt.client
         state = rt.status.value
@@ -876,6 +966,7 @@ class AccountManager:
             "plugins": self._plugin_rows(account),
             "profiles": list(record.profiles),
             "rate_limit": self._rate_limit_rows(name),
+            "credential": account.credential_source,
         }
 
     def _rate_limit_rows(self, name: str) -> Dict[str, Dict[str, Any]]:
@@ -937,12 +1028,15 @@ class AccountManager:
 
         return factory
 
-    def services_for(self, account_name: str, plugin_name: str) -> AccountPluginServices:
+    def services_for(self, account_name: str,
+                     plugin_name: str) -> AccountPluginServices:
         """One AccountPluginServices per (account, plugin); cached per start.
 
         The settings dict is seeded from ``plugin_manager.states`` when
         available — the plugin manager refreshes that same dict in place, so
-        ``services.settings`` stays a live view.
+        ``services.settings`` stays a live view. When the manager was built
+        with a CooldownService / PluginStateService, both are handed to the
+        facade (pair-scoped ``cooldown_*`` / ``state_*`` plugin API).
         """
         key = (account_name, plugin_name)
         if key in self._services:
@@ -977,6 +1071,8 @@ class AccountManager:
             ack_registry=self._ack_registry,
             client_getter=lambda: self._client_of(account_name),
             api_cache_repo=self._api_cache,
+            cooldowns=self._cooldowns,
+            plugin_state=self._plugin_state,
         )
         self._services[key] = services
         return services
@@ -992,22 +1088,28 @@ class AccountManager:
             del self._services[key]
 
     # --------------------------------------------------------------- plugins
-    def _attach_plugins(self, name: str) -> None:
+    async def _attach_plugins(self, name: str) -> None:
         """attach_account with the CURRENT profile grants (None = all).
 
-        Pinned sync; when the plugin manager nonetheless returns a coroutine
-        it is scheduled as a tracked background task (no loop -> dropped).
+        The plugin manager's attach is async (it reads persisted enabled
+        state from the repository); a collaborator returning plain None
+        (sync duck-typed doubles) is accepted unchanged.
         """
         try:
             outcome = self._plugin_manager.attach_account(
                 name, self._allowed_plugins(name)
             )
-            self._spawn_maybe_async(outcome, f"attach_account({name!r})")
+            if asyncio.iscoroutine(outcome):
+                await outcome
         except Exception:
             self._logger.exception("plugin attach failed for %s", name)
 
     def _spawn_maybe_async(self, outcome: Any, label: str) -> None:
-        """Run a collaborator's coroutine result in the background (strong ref)."""
+        """Run a collaborator's coroutine result in the background (strong ref).
+
+        Retained for duck-typed collaborators whose hooks are still sync
+        fire-and-forget; the pinned collaborators are awaited inline now.
+        """
         if not asyncio.iscoroutine(outcome):
             return
         try:
@@ -1128,26 +1230,55 @@ class AccountManager:
             )
         return account
 
-    def _repo_get(self, name: str) -> Optional[AccountRecord]:
+    async def _repo_get(self, name: str) -> Optional[AccountRecord]:
         """Fresh record from the repository (None on failure/unknown)."""
         try:
-            return self._accounts_repo.get(name)
+            return await self._accounts_repo.get(name)
         except Exception:
             self._logger.exception("could not read account %r from repository", name)
             return None
 
-    def _refresh_record(self, account: Account) -> None:
+    async def _refresh_record(self, account: Account) -> None:
         """Pull persistent state (profiles, enabled...) from the repository."""
-        fresh = self._repo_get(account.record.name)
+        fresh = await self._repo_get(account.record.name)
         if fresh is not None:
             account.record = fresh
 
-    def _resolve_token(self, record: AccountRecord) -> str:
-        """Token value for an account (.env lookup by convention key).
+    def _refresh_credential_source(self, account: Account) -> None:
+        """Mirror ``CredentialService.status(name)`` onto the Account (display
+        snapshot field; None when no credential service is wired — never
+        token material)."""
+        if self._credential_service is None:
+            account.credential_source = None
+            return
+        try:
+            account.credential_source = self._credential_service.status(
+                account.record.name
+            ) or None
+        except Exception:
+            account.credential_source = None
+
+    async def _resolve_token(self, record: AccountRecord) -> str:
+        """Token value for an account, DB-first when a credential service is
+        wired (stored credential -> legacy .env convention key -> error);
+        legacy .env lookup only otherwise (back-compat for unwired tests).
 
         Raises:
-            CredentialsError: actionable message when the key is missing.
+            CredentialsError: actionable message when nothing resolves.
         """
+        if self._credential_service is not None:
+            token = await self._credential_service.resolve(
+                record.name,
+                legacy_env_lookup=lambda n: self._credentials.token_for(n),
+            )
+            if not token:
+                ref = record.effective_token_ref()
+                raise CredentialsError(
+                    f"account {record.name!r} has no credential: none stored "
+                    f"in the database and {ref!r} is unset in .env "
+                    f"(store one via the credentials API, or set {ref!r})"
+                )
+            return token
         ref = record.effective_token_ref()
         token = self._credentials.get(ref)
         if not token:
@@ -1177,10 +1308,10 @@ class AccountManager:
         except (TypeError, ValueError):
             return {"enabled": True, **_DEFAULT_RECONNECT}
 
-    def _validate_profiles_known(self, profiles: List[str]) -> None:
+    async def _validate_profiles_known(self, profiles: List[str]) -> None:
         """Reject unknown profile names up front (typo trap) with the known list."""
         try:
-            known = sorted(p["name"] for p in self._profile_manager.profiles())
+            known = sorted(p["name"] for p in (await self._profile_manager.profiles()))
         except Exception:
             known = []
         unknown = [p for p in profiles if p not in known]

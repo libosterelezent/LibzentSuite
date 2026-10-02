@@ -138,6 +138,21 @@ class PluginServices(Protocol):
 
     NOTE: ``open_dm`` was added by A3 (see module docstring) — soulcopy uses
     it to learn the Mudae DM channel id before collecting pages.
+
+    PERSISTENT PLUGIN API (public, documented): ``cooldown_*`` and ``state_*``
+    give plugins durable, account-scoped persistence without touching SQL
+    or connections (spec §20/§22):
+
+      * ``cooldown_set/cooldown_remaining/cooldown_active/cooldown_clear/
+        cooldown_list`` — persistent cooldowns for THIS (account, plugin)
+        pair; absolute expiry survives restarts with the correct remaining
+        time,
+      * ``state_get/state_set/state_delete`` — a small JSON key/value store
+        scoped to THIS (account, plugin) pair.
+
+    Both families raise :class:`core.errors.PluginError` with a clear
+    message when the framework did not wire the underlying service (e.g. a
+    stripped-down test stack).
     """
 
     async def send_message(
@@ -152,6 +167,37 @@ class PluginServices(Protocol):
 
     async def open_dm(self, user_id: int) -> int:
         """Resolve (opening if needed) the DM channel id for a user."""
+
+    async def cooldown_set(self, key: str, duration_s: float, *,
+                           source: str = "plugin", reason: str = "",
+                           metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Start (or replace) a persistent cooldown for this account+plugin.
+
+        ``duration_s`` counts from NOW; the absolute expiry is persisted so
+        restarts keep the correct remaining time. Returns the cooldown row.
+        """
+
+    async def cooldown_remaining(self, key: str) -> float:
+        """Seconds left on a cooldown (0.0 when none/expired)."""
+
+    async def cooldown_active(self, key: str) -> bool:
+        """True when a cooldown is currently active for this key."""
+
+    async def cooldown_clear(self, key: str) -> bool:
+        """Remove one cooldown; True when it existed."""
+
+    async def cooldown_list(self) -> List[Dict[str, Any]]:
+        """Every ACTIVE cooldown of this account+plugin, soonest first."""
+
+    async def state_get(self, key: str, default: Any = None) -> Any:
+        """Read one persisted value from this account+plugin scope."""
+
+    async def state_set(self, key: str, value: Any) -> None:
+        """Persist one JSON-serializable value in this account+plugin scope."""
+
+    async def state_delete(self, key: str) -> bool:
+        """Delete one value from this account+plugin scope; True when it
+        existed."""
 
     async def wait_for_message(
         self, check: Callable[["MessageReceived"], bool], timeout: float

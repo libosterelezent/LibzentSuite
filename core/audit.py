@@ -12,18 +12,25 @@ every message event dispatched to plugins.
 
 Ported from the audited ``git show HEAD:core/audit.py`` with the rewrite's
 renames: ``db_repo`` instead of ``database`` (duck-typed repository with
-``add(entry)`` / ``recent(limit, account)``), ``jitter_ms`` instead of the
-old ``delay_ms``, and a dict boundary — ``record()``/``tail()``/``history()``
-all speak JSON-safe dicts so the CLI, dashboard and simulations share one
-shape. Kept from the original: the best-effort DB write, per-subscriber
-error isolation, the ring capacity bound, and the n<=0 tail guard.
+async ``add(entry)`` / ``recent(limit, account)``), ``jitter_ms`` instead
+of the old ``delay_ms``, and a dict boundary — ``record()``/``tail()``/
+``history()`` all speak JSON-safe dicts so the CLI, dashboard and
+simulations share one shape. Kept from the original: the best-effort DB
+write (now QUEUED — record() never touches SQLite, spec §29; one async
+drain worker per recorder), per-subscriber error isolation, the ring
+capacity bound, and the n<=0 tail guard. ``tail()`` stays synchronous
+(ring-only); ``history()`` is async (awaits the repository, falls back to
+the ring).
 
 Consumers: the dashboard Audit page (live via WS + history via REST), the
 CLI 'audit' command, scripts, and the simulation reports.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import queue
+import sys
 import threading
 import time
 from collections import deque
@@ -34,6 +41,9 @@ LOG = logging.getLogger("slaughtermudae.audit")
 
 #: content previews are truncated to this length in format_audit lines
 _PREVIEW_LIMIT = 60
+
+#: in-flight persistence cap (same contract as LogService._MAX_INFLIGHT)
+_MAX_INFLIGHT = 10_000
 
 
 @dataclass
@@ -107,12 +117,22 @@ def format_audit(entries: Iterable[Any]) -> List[str]:
 
 
 class AuditRecorder:
-    """Ring buffer + optional DB sink + live subscribers for audit entries.
+    """Ring buffer + queued-async-DB sink + live subscribers for audit entries.
 
     Parameters:
-        db_repo: duck-typed AuditRepository (``add(entry)`` /
-            ``recent(limit, account)``); None keeps everything in memory.
+        db_repo: duck-typed AuditRepository (async ``add(entry)`` /
+            ``recent(limit, account)``); CONFIGURATION ONLY — nothing is
+            written until ``await start_persistence(repo)`` spawns the
+            drain worker (spec §29: record() never touches SQLite).
+            ``None`` keeps everything in memory (simulator/headless boots:
+            the queue stays unused, record() does zero extra work).
         capacity: ring size (older entries are dropped first).
+
+    Lifecycle:
+        recorder = AuditRecorder()                # or AuditRecorder(repo)
+        await recorder.start_persistence(repo)    # BEFORE traffic
+        ...
+        await recorder.stop_persistence()         # BEFORE db.close()
     """
 
     def __init__(self, db_repo: Any = None, capacity: int = 2000) -> None:
@@ -122,6 +142,131 @@ class AuditRecorder:
         self._ring: Deque[AuditEntry] = deque(maxlen=capacity)
         self._subscribers: List[Callable[[AuditEntry], None]] = []
         self._lock = threading.Lock()
+        # QUEUED PERSISTENCE (mirror of LogService's drain machinery)
+        self._pqueue: "queue.SimpleQueue" = queue.SimpleQueue()
+        self._worker: Optional["asyncio.Task"] = None
+        self._worker_stopping = False
+        self._persist_batch = 50
+        self._persist_interval = 0.25
+        self._db_failures = 0
+        self._dropped = 0
+        self._db_failure_notified = False
+
+    # ------------------------------------------------- queued persistence
+    async def start_persistence(
+        self, repo: Any, *, batch: int = 50, interval: float = 0.25
+    ) -> Optional["asyncio.Task"]:
+        """Spawn the async drain worker (call BEFORE traffic flows).
+
+        The worker polls the queue and awaits ``repo.add(entry_dict)`` per
+        dequeued item; failures increment the ``db_failures`` counter and
+        never raise (one raw stderr one-liner per failure burst at most).
+        Idempotent: a live worker is returned as-is.
+        """
+        if repo is None:
+            return self._worker
+        if self._worker is not None and not self._worker.done():
+            return self._worker
+        self._db = repo
+        self._worker_stopping = False
+        self._persist_batch = max(1, int(batch))
+        self._persist_interval = max(0.0, float(interval))
+        self._worker = asyncio.get_running_loop().create_task(
+            self._persistence_worker(repo), name="audit-persistence"
+        )
+        return self._worker
+
+    async def stop_persistence(self, timeout: float = 5.0) -> None:
+        """Stop the drain worker (idempotent); call BEFORE ``db.close()``.
+
+        Records stop being enqueued, the worker finishes its current batch
+        and exits (bounded join — never cancelled mid-``repo.add`` when
+        healthy), a stuck worker is cancelled after the grace window, and
+        the remaining queue is drained inline (bounded by ``timeout``).
+        """
+        worker = self._worker
+        if worker is None:
+            return
+        self._worker = None
+        self._worker_stopping = True
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, float(timeout))
+        await asyncio.wait({worker}, timeout=min(0.5, max(0.0, float(timeout))))
+        worker.cancel()  # no-op when the graceful exit already finished it
+        await asyncio.gather(worker, return_exceptions=True)
+        repo = self._db
+        if repo is not None:
+            while loop.time() < deadline:
+                got = 0
+                while got < self._persist_batch:
+                    try:
+                        item = self._pqueue.get_nowait()
+                    except queue.Empty:
+                        return
+                    try:
+                        await repo.add(item)
+                        self._db_failure_notified = False
+                    except Exception as exc:
+                        with self._lock:
+                            self._db_failures += 1
+                        self._notify_db_failure(exc)
+                    got += 1
+                await asyncio.sleep(0)  # yield between batches (big drains)
+
+    def _enqueue(self, entry: AuditEntry) -> None:
+        """Hand one entry to the drain worker (never blocks, never raises)."""
+        q = self._pqueue
+        if q.qsize() >= _MAX_INFLIGHT:
+            with self._lock:
+                self._dropped += 1
+            return
+        q.put(entry.as_dict())
+
+    async def _persistence_worker(self, repo: Any) -> None:
+        """Drain loop: batch of awaits, then yield (or idle-sleep).
+
+        Checks ``_worker_stopping`` between items so stop_persistence() can
+        join this task WITHOUT cancelling it mid-``repo.add``.
+        """
+        try:
+            while not self._worker_stopping:
+                drained = 0
+                while drained < self._persist_batch and not self._worker_stopping:
+                    try:
+                        item = self._pqueue.get_nowait()
+                    except queue.Empty:
+                        break
+                    try:
+                        await repo.add(item)
+                        self._db_failure_notified = False
+                    except Exception as exc:
+                        with self._lock:
+                            self._db_failures += 1
+                        self._notify_db_failure(exc)
+                    drained += 1
+                await asyncio.sleep(
+                    self._persist_interval if drained == 0 else 0
+                )
+        except asyncio.CancelledError:
+            raise  # stop_persistence()
+
+    def _notify_db_failure(self, exc: BaseException) -> None:
+        """One raw stderr one-liner per failure BURST (reset on success)."""
+        if self._db_failure_notified:
+            return
+        self._db_failure_notified = True
+        try:
+            sys.stderr.write(
+                f"[slaughtermudae] audit persistence failing: "
+                f"{type(exc).__name__}: {exc} (further errors counted silently)\n"
+            )
+        except Exception:
+            pass
+
+    def persistence_stats(self) -> Dict[str, int]:
+        """Queued-persistence counters (db_failures / dropped)."""
+        with self._lock:
+            return {"db_failures": self._db_failures, "dropped": self._dropped}
 
     def record(
         self,
@@ -134,11 +279,13 @@ class AuditRecorder:
         jitter_ms: float = 0.0,
         note: str = "",
     ) -> Dict[str, Any]:
-        """Store one interaction (ring + best-effort DB) and notify subscribers.
+        """Store one interaction (ring + queued best-effort DB) and notify
+        subscribers.
 
-        Returns the JSON-safe dict form of the stored entry. Never raises:
-        the DB write and every subscriber callback are individually isolated
-        — auditing must never break the send path.
+        Returns the JSON-safe dict form of the stored entry. Never raises
+        and never awaits (spec §29): the DB write is ENQUEUED for the drain
+        worker when one is live; every subscriber callback is individually
+        isolated — auditing must never break the send path.
         """
         entry = AuditEntry(
             ts=time.time(),
@@ -153,11 +300,9 @@ class AuditRecorder:
         )
         with self._lock:
             self._ring.append(entry)
-        if self._db is not None:
-            try:
-                self._db.add(entry.as_dict())
-            except Exception:  # auditing must never break the send path
-                LOG.exception("audit DB write failed")
+        worker = self._worker
+        if worker is not None and not worker.done():
+            self._enqueue(entry)
         for callback in list(self._subscribers):
             try:
                 callback(entry)
@@ -190,15 +335,17 @@ class AuditRecorder:
 
         return _unsubscribe
 
-    def history(self, limit: int = 200, account: Optional[str] = None) -> List[Dict[str, Any]]:
-        """DB-backed history (falls back to the ring when no DB / DB failure).
+    async def history(self, limit: int = 200, account: Optional[str] = None) -> List[Dict[str, Any]]:
+        """DB-backed history (awaits the repository; falls back to the ring).
 
-        Rows coming from the DB drop their internal 'id' and get 'ts' rounded
-        so both sources look identical to consumers.
+        Rows coming from the DB drop their internal 'id' and get 'ts'
+        rounded so both sources look identical to consumers. Reads are the
+        one place audit touches SQLite directly — they run in async
+        contexts (dashboard REST / CLI) and never on the record() path.
         """
         if self._db is not None:
             try:
-                rows = self._db.recent(limit=limit, account=account)
+                rows = await self._db.recent(limit=limit, account=account)
                 normalized: List[Dict[str, Any]] = []
                 for row in rows:
                     row = dict(row)

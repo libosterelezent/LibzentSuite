@@ -25,12 +25,12 @@ __all__ = ["AuditRepository", "LogRepository"]
 class AuditRepository(BaseRepository):
     """Interaction audit trail (bounded, newest-kept pruning)."""
 
-    def __init__(self, conn, lock, keep: int = 10_000) -> None:
+    def __init__(self, database, keep: int = 10_000) -> None:
         """``keep`` is the pruning bound applied on every add."""
-        super().__init__(conn, lock)
+        super().__init__(database)
         self._keep = max(0, int(keep))
 
-    def add(self, entry: Dict[str, Any]) -> None:
+    async def add(self, entry: Dict[str, Any]) -> None:
         """Append one interaction record, then prune to the newest ``keep``.
 
         Missing fields get audited-old defaults ('?' markers) so a malformed
@@ -41,8 +41,8 @@ class AuditRepository(BaseRepository):
         """
         if not isinstance(entry, dict):
             raise DatabaseError(f"audit entry must be a dict, got {type(entry).__name__}")
-        with self._tx("append audit entry") as conn:
-            conn.execute(
+        async with self._tx("append audit entry") as conn:
+            await conn.execute(
                 """INSERT INTO audit_logs
                        (ts, account, direction, action, channel_id, content,
                         wait_ms, jitter_ms, note)
@@ -59,9 +59,9 @@ class AuditRepository(BaseRepository):
                     entry.get("note"),
                 ),
             )
-            self._prune_newest("audit_logs", self._keep)
+            await self._prune_newest(conn, "audit_logs", self._keep)
 
-    def recent(self, limit: int = 100, account: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def recent(self, limit: int = 100, account: Optional[str] = None) -> List[Dict[str, Any]]:
         """The newest ``limit`` audit rows, returned oldest-first.
 
         ``account`` filters to one account's interactions. The DESC-fetch +
@@ -70,13 +70,13 @@ class AuditRepository(BaseRepository):
         """
         limit = max(0, int(limit))
         if account:
-            rows = self._read(
+            rows = await self._fetch_all(
                 "SELECT * FROM audit_logs WHERE account = ? ORDER BY id DESC LIMIT ?",
                 (account, limit),
                 what="read audit trail",
             )
         else:
-            rows = self._read(
+            rows = await self._fetch_all(
                 "SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?",
                 (limit,),
                 what="read audit trail",
@@ -87,12 +87,12 @@ class AuditRepository(BaseRepository):
 class LogRepository(BaseRepository):
     """Structured log persistence (bounded, newest-kept pruning)."""
 
-    def __init__(self, conn, lock, keep: int = 10_000) -> None:
+    def __init__(self, database, keep: int = 10_000) -> None:
         """``keep`` is the pruning bound applied on every add."""
-        super().__init__(conn, lock)
+        super().__init__(database)
         self._keep = max(0, int(keep))
 
-    def add(self, entry: Dict[str, Any]) -> None:
+    async def add(self, entry: Dict[str, Any]) -> None:
         """Append one structured log entry, then prune to the newest ``keep``.
 
         Accepts the LogEntry.as_dict() shape; missing fields default safely.
@@ -101,8 +101,8 @@ class LogRepository(BaseRepository):
         """
         if not isinstance(entry, dict):
             raise DatabaseError(f"log entry must be a dict, got {type(entry).__name__}")
-        with self._tx("append log entry") as conn:
-            conn.execute(
+        async with self._tx("append log entry") as conn:
+            await conn.execute(
                 """INSERT INTO logs (ts, severity, source, account, plugin, task_id, event, message)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
@@ -116,9 +116,9 @@ class LogRepository(BaseRepository):
                     str(entry.get("message") or ""),
                 ),
             )
-            self._prune_newest("logs", self._keep)
+            await self._prune_newest(conn, "logs", self._keep)
 
-    def recent(
+    async def recent(
         self,
         limit: int = 100,
         *,
@@ -145,5 +145,5 @@ class LogRepository(BaseRepository):
             params.append(source)
         sql += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
-        rows = self._read(sql, params, what="read logs")
+        rows = await self._fetch_all(sql, params, what="read logs")
         return [dict(row) for row in reversed(rows)]

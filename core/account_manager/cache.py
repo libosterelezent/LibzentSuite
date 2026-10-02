@@ -219,6 +219,9 @@ async def resolve_dm_channel(
     3. ``await client.open_dm(user_id)`` — then the result is recorded in
        BOTH caches so it is never fetched again.
 
+    ``cache_repo`` is the (async) CacheRepository; every access is awaited
+    and guarded — persistence must never break the send path.
+
     Raises:
         AccountError: full miss and no live client available.
     """
@@ -229,7 +232,7 @@ async def resolve_dm_channel(
             return cached
     if cache_repo is not None:
         try:
-            stored = cache_repo.get(account, "dm", str(user_id))
+            stored = await cache_repo.get(account, "dm", str(user_id))
         except Exception:
             stored = None
         if isinstance(stored, int):
@@ -245,19 +248,20 @@ async def resolve_dm_channel(
         cache.record_dm(channel_id, user_id)
     if cache_repo is not None:
         try:
-            cache_repo.set(account, "dm", str(user_id), channel_id)
+            await cache_repo.set(account, "dm", str(user_id), channel_id)
         except Exception:
             pass  # persistence must never break the send path
     return channel_id
 
 
-def invalidate_dm_channel(
+async def invalidate_dm_channel(
     cache: Optional["DiscordCache"], cache_repo: Any, user_id: int, account: str = ""
 ) -> None:
     """Drop every cached DM mapping for a user (memory + database).
 
     Called when Discord reports the target gone — the next resolution
-    re-opens the DM instead of hammering a dead channel id.
+    re-opens the DM instead of hammering a dead channel id. Async: the
+    persistent row is deleted through the (aiosqlite) cache repository.
     """
     user_id = int(user_id)
     if cache is not None:
@@ -268,7 +272,7 @@ def invalidate_dm_channel(
             info.deleted = True
     if cache_repo is not None:
         try:
-            cache_repo.delete(account, "dm", str(user_id))
+            await cache_repo.delete(account, "dm", str(user_id))
         except Exception:
             pass
 

@@ -56,13 +56,39 @@ class FakeApi:
         return [{"name": "alpha", "status": "running", "user_id": 42, "enabled": True,
                  "profiles": ["roller"], "latency_ms": 83.0, "uptime_s": 100.0}]
 
-    async def accounts_add(self, payload):
-        self._record("accounts_add", payload)
-        return {"added": payload["name"], "profiles": payload.get("profiles", [])}
+    async def accounts_add(self, payload, surface="api"):
+        self._record("accounts_add", payload, surface=surface)
+        return {"added": payload["name"], "profiles": payload.get("profiles", []),
+                "credential": "db" if payload.get("credential") else None}
 
-    async def accounts_remove(self, name):
-        self._record("accounts_remove", name)
+    async def accounts_remove(self, name, surface="api"):
+        self._record("accounts_remove", name, surface=surface)
         return {"removed": name}
+
+    async def accounts_set_credential(self, name, credential, surface="api"):
+        self._record("accounts_set_credential", name, surface=surface)
+        return {"account": name, "credential": "db"}
+
+    async def accounts_credential_status(self):
+        self._record("accounts_credential_status")
+        return [{"name": "alpha", "credential": "db"},
+                {"name": "beta", "credential": "missing"}]
+
+    async def credentials_import_env(self, overwrite=False, surface="api"):
+        self._record("credentials_import_env", overwrite=overwrite, surface=surface)
+        return {"imported": ["alpha"], "skipped": ["beta"], "failed": {}}
+
+    async def cooldowns_list(self, account=None):
+        self._record("cooldowns_list", account)
+        return [{"account": "alpha", "plugin": "roll", "cooldown_key": "vote",
+                  "remaining_s": 90.0, "source": "plugin", "reason": ""}]
+
+    async def cooldowns_clear(self, account, plugin, cooldown_key=None,
+                              surface="api"):
+        self._record("cooldowns_clear", account, plugin, cooldown_key,
+                     surface=surface)
+        return {"account": account, "plugin": plugin,
+                "cooldown_key": cooldown_key, "cleared": 1}
 
     async def accounts_info(self, name):
         self._record("accounts_info", name)
@@ -84,16 +110,16 @@ class FakeApi:
         self._record("accounts_enable", name, enabled)
         return {"name": name, "enabled": enabled}
 
-    async def accounts_start(self, name=None):
-        self._record("accounts_start", name)
+    async def accounts_start(self, name=None, surface="api"):
+        self._record("accounts_start", name, surface=surface)
         return {"started": name or "all"}
 
-    async def accounts_stop(self, name=None):
-        self._record("accounts_stop", name)
+    async def accounts_stop(self, name=None, surface="api"):
+        self._record("accounts_stop", name, surface=surface)
         return {"stopped": name or "all"}
 
-    async def accounts_emergency_stop(self, name):
-        self._record("accounts_emergency_stop", name)
+    async def accounts_emergency_stop(self, name, surface="api"):
+        self._record("accounts_emergency_stop", name, surface=surface)
         return {"account": name, "cancelled_tasks": 2}
 
     # ---- plugins
@@ -231,8 +257,8 @@ class FakeApi:
                  "wait_ms": 150.0, "jitter_ms": 300.0, "note": "plugin=soulcopy"}]
 
     # ---- system
-    async def emergency_stop_all(self):
-        self._record("emergency_stop_all")
+    async def emergency_stop_all(self, surface="api"):
+        self._record("emergency_stop_all", surface=surface)
         return {"cancelled_tasks": 5, "halted": True}
 
     async def system_resume(self):
@@ -526,6 +552,98 @@ class TestSimulationLogsAudit(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(called(api, "system_resume"))
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), "estop sideways")
+
+
+class TestCredentialsAndCooldowns(unittest.IsolatedAsyncioTestCase):
+    """accounts credential / credentials [status|import-env] / cooldowns."""
+
+    async def test_accounts_credential_roundtrip(self) -> None:
+        api = FakeApi()
+        text = await run_command(api, "accounts credential alpha tok-1234")
+        # the fake deliberately records ONLY the name — never the secret
+        args, kwargs = called(api, "accounts_set_credential")
+        self.assertEqual(args, ("alpha",))
+        self.assertEqual(kwargs.get("surface"), "cli")
+        self.assertIn("credential stored", text)
+        self.assertIn("credential=db", text)
+        self.assertNotIn("tok-1234", text)  # the value is NEVER echoed
+        self.assertIn("shell history", text)  # the warning is always shown
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "accounts credential alpha")
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "accounts credential a b c")
+
+    async def test_accounts_credential_in_help(self) -> None:
+        text = help_text()
+        self.assertIn("credential <name> <token>", text)
+        self.assertIn("shell history", text)
+        self.assertIn("credentials status|import-env", text)
+        self.assertIn("cooldowns [account]", text)
+
+    async def test_credentials_status(self) -> None:
+        api = FakeApi()
+        text = await run_command(api, "credentials status")
+        self.assertTrue(called(api, "accounts_credential_status"))
+        self.assertIn("alpha", text)
+        self.assertIn("db (encrypted)", text)
+        self.assertIn("missing", text)
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "credentials status extra")
+
+    async def test_credentials_import_env(self) -> None:
+        api = FakeApi()
+        text = await run_command(api, "credentials import-env")
+        self.assertEqual(called(api, "credentials_import_env")[0], ())
+        self.assertEqual(
+            called(api, "credentials_import_env")[1].get("overwrite"), False)
+        self.assertIn("imported: alpha", text)
+        self.assertIn("skipped : beta", text)
+        text = await run_command(api, "credentials import-env --overwrite")
+        self.assertEqual(
+            called(api, "credentials_import_env")[1].get("overwrite"), True)
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "credentials import-env --force")
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "credentials import-env --overwrite x")
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "credentials frobnicate")
+
+    async def test_cooldowns_list_all_and_one(self) -> None:
+        api = FakeApi()
+        text = await run_command(api, "cooldowns")
+        self.assertEqual(called(api, "cooldowns_list")[0], (None,))
+        self.assertIn("alpha", text)
+        self.assertIn("roll", text)
+        self.assertIn("1m 30s", text)
+        await run_command(api, "cooldowns alpha")
+        self.assertEqual(called(api, "cooldowns_list")[0], ("alpha",))
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "cooldowns alpha beta")
+
+    async def test_cooldowns_clear_one_and_all(self) -> None:
+        api = FakeApi()
+        await run_command(api, "cooldowns clear alpha roll vote")
+        self.assertEqual(called(api, "cooldowns_clear")[0],
+                         ("alpha", "roll", "vote"))
+        self.assertEqual(called(api, "cooldowns_clear")[1].get("surface"), "cli")
+        await run_command(api, "cooldowns clear alpha roll")
+        self.assertEqual(called(api, "cooldowns_clear")[0],
+                         ("alpha", "roll", None))
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "cooldowns clear alpha")
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "cooldowns clear a b c d")
+
+    async def test_accounts_mutation_surfaces_are_clipped(self) -> None:
+        api = FakeApi()
+        await run_command(api, "accounts add bob")
+        self.assertEqual(called(api, "accounts_add")[1].get("surface"), "cli")
+        await run_command(api, "accounts remove bob")
+        self.assertEqual(called(api, "accounts_remove")[1].get("surface"), "cli")
+        await run_command(api, "accounts start bob")
+        self.assertEqual(called(api, "accounts_start")[1].get("surface"), "cli")
+        await run_command(api, "estop")
+        self.assertEqual(called(api, "emergency_stop_all")[1].get("surface"), "cli")
 
 
 class TestFormatters(unittest.TestCase):

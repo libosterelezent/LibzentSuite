@@ -66,12 +66,26 @@ class PluginManager:
         settings: SettingsManager,
         plugin_repo: Any = None,
         plugin_dir: str = "plugins",
+        *,
+        credential_service: Any = None,
+        cooldowns: Any = None,
+        plugin_state: Any = None,
     ) -> None:
+        """``credential_service``/``cooldowns``/``plugin_state`` accept the
+        framework's shared services (CredentialService, CooldownService,
+        PluginStateService) for symmetry with the AccountManager wiring;
+        they are stored as attributes (defaults None — back-compatible) and
+        the per-plugin facades the plugins actually use are built by the
+        account manager's services factory.
+        """
         self._bus = bus
         self._logger = logger
         self._settings = settings
         self._repo = plugin_repo            # database PluginRepository (optional)
         self._loader = PluginLoader(plugin_dir)
+        self.credential_service = credential_service
+        self.cooldowns = cooldowns
+        self.plugin_state = plugin_state
         #: account -> plugin name -> PluginRuntime
         self._accounts: Dict[str, Dict[str, PluginRuntime]] = {}
         #: account -> services factory: (plugin_name) -> PluginServices
@@ -90,23 +104,41 @@ class PluginManager:
     def discover(self) -> Dict[str, Any]:
         """Scan the plugin dir (raises PluginError on inconsistency).
 
-        Also refreshes plugin metadata rows in the repository when present —
-        the Plugins page reads them even before any account attaches.
+        Purely synchronous filesystem work — NO repository writes happen
+        here; await :meth:`persist_metadata` afterwards (the bootstrap does)
+        to refresh the plugin metadata rows the Plugins page reads even
+        before any account attaches.
         """
         records = self._loader.discover()
         self._discovered = True
-        if self._repo is not None:
-            for name, rec in records.items():
-                try:
-                    self._repo.upsert_metadata(
-                        name,
-                        rec.cls.version,
-                        rec.cls.description,
-                        [s.as_manifest() for s in rec.cls.settings],
-                    )
-                except Exception:
-                    self._logger.exception("plugin metadata persist failed for %s", name)
         return records
+
+    async def persist_metadata(self, repo: Any = None) -> int:
+        """Persist the discovered plugins' metadata rows (boot path).
+
+        ``repo`` defaults to the constructor's ``plugin_repo``; passing a
+        repository explicitly is supported for tests. Returns how many
+        manifest rows were written. Best-effort per plugin: one failing
+        row is logged and skipped, never fatal.
+        """
+        target = repo if repo is not None else self._repo
+        if target is None:
+            return 0
+        self._ensure_discovered()
+        written = 0
+        for name in self._loader.names():
+            try:
+                rec = self._loader.record(name)
+                await target.upsert_metadata(
+                    name,
+                    rec.cls.version,
+                    rec.cls.description,
+                    [s.as_manifest() for s in rec.cls.settings],
+                )
+                written += 1
+            except Exception:
+                self._logger.exception("plugin metadata persist failed for %s", name)
+        return written
 
     def _ensure_discovered(self) -> None:
         if not self._discovered:
@@ -128,12 +160,15 @@ class PluginManager:
         return tuple(record.cls.settings)
 
     # -------------------------------------------------------------- accounts
-    def attach_account(self, account: str, allowed: Optional[Set[str]] = None) -> None:
+    async def attach_account(self, account: str,
+                             allowed: Optional[Set[str]] = None) -> None:
         """Instantiate this account's plugins (profile allowlist applies).
 
         ``allowed=None`` keeps every discovered plugin; otherwise only names in
         the set survive (union of the account's profiles, computed by the
-        account manager). Settings resolve later, at activate time.
+        account manager). Settings resolve later, at activate time. Async:
+        the persisted enabled-state of each (account, plugin) pair is read
+        from the repository here.
         """
         self._ensure_discovered()
         wanted = [n for n in self._loader.names() if allowed is None or n in allowed]
@@ -142,7 +177,7 @@ class PluginManager:
             enabled = True
             if self._repo is not None:
                 try:
-                    enabled = self._repo.state(account, name)
+                    enabled = await self._repo.state(account, name)
                     if enabled is None:
                         enabled = True
                 except Exception:
@@ -256,7 +291,7 @@ class PluginManager:
         """Toggle a plugin at runtime (persisted BEFORE memory mutates)."""
         runtime = self._runtime(account, plugin)
         if self._repo is not None:
-            self._repo.set_state(account, plugin, bool(enabled))
+            await self._repo.set_state(account, plugin, bool(enabled))
         if enabled and not runtime.enabled:
             runtime.enabled = True
             if account in self._services:  # account is active: fire hooks
@@ -274,11 +309,13 @@ class PluginManager:
             PluginEnabledChanged(account=account, plugin=plugin, enabled=enabled)
         )
 
-    def set_setting(self, account: str, plugin: str, key: str, value: Any) -> Any:
+    async def set_setting(self, account: str, plugin: str, key: str, value: Any) -> Any:
         """Validate + persist + apply one plugin setting for one account."""
         runtime = self._runtime(account, plugin)
         schema = self._schema_for(plugin)
-        validated = self._settings.set_plugin_setting(account, plugin, key, value, schema)
+        validated = await self._settings.set_plugin_setting(
+            account, plugin, key, value, schema
+        )
         runtime.settings[key] = validated  # live view (contexts share the dict)
         return validated
 

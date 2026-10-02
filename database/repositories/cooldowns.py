@@ -1,0 +1,103 @@
+"""Persistent cooldown repository (spec §21/§22).
+
+Cooldowns persist ABSOLUTE epoch expiry (``expires_at``) so a restart
+restores the REMAINING time instead of restarting the window. The core
+CooldownService owns persistence/lookup/expiry/cleanup; plugins decide
+what a cooldown MEANS — nothing here is plugin-specific.
+"""
+from __future__ import annotations
+
+import time
+from typing import Any, Dict, List, Optional
+
+from .base import BaseRepository
+
+
+class CooldownRepository(BaseRepository):
+    """CRUD + expiry-aware queries over the ``cooldowns`` table."""
+
+    async def upsert(self, *, account: str, plugin: str, cooldown_key: str,
+                     started_at: float, expires_at: float, source: str = "",
+                     reason: str = "", metadata: Optional[Dict[str, Any]] = None
+                     ) -> None:
+        """Insert or replace one cooldown (same identity = same row)."""
+        import json
+
+        now = time.time()
+        async with self._tx(
+                f"upsert cooldown {account}/{plugin}/{cooldown_key}") as conn:
+            await conn.execute(
+                """INSERT INTO cooldowns (account, plugin, cooldown_key,
+                     started_at, expires_at, source, reason, metadata_json,
+                     created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(account, plugin, cooldown_key) DO UPDATE SET
+                     started_at=excluded.started_at,
+                     expires_at=excluded.expires_at,
+                     source=excluded.source, reason=excluded.reason,
+                     metadata_json=excluded.metadata_json,
+                     updated_at=excluded.updated_at""",
+                (account, plugin, cooldown_key, float(started_at),
+                 float(expires_at), source, reason,
+                 json.dumps(metadata or {}), now, now),
+            )
+
+    async def active_for(self, account: str, plugin: Optional[str] = None,
+                         now: Optional[float] = None
+                         ) -> List[Dict[str, Any]]:
+        """Non-expired cooldowns for an account (optionally one plugin)."""
+        now = time.time() if now is None else now
+        sql = ("SELECT * FROM cooldowns WHERE account=? AND expires_at>?"
+               " ORDER BY expires_at")
+        params: list = [account, now]
+        if plugin is not None:
+            sql = sql.replace("ORDER BY", "AND plugin=? ORDER BY")
+            params.append(plugin)
+        rows = await self._fetch_all(sql, params)
+        return [self._row_dict(row) for row in rows]
+
+    async def get(self, account: str, plugin: str, cooldown_key: str,
+                  now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        """One cooldown (None when absent or already expired)."""
+        now = time.time() if now is None else now
+        row = await self._fetch_one(
+            """SELECT * FROM cooldowns WHERE account=? AND plugin=?
+               AND cooldown_key=? AND expires_at>?""",
+            (account, plugin, cooldown_key, now))
+        return None if row is None else self._row_dict(row)
+
+    async def clear(self, account: str, plugin: str, cooldown_key: str) -> bool:
+        """Remove one cooldown; True when it existed."""
+        async with self._tx(
+                f"clear cooldown {account}/{plugin}/{cooldown_key}") as conn:
+            cur = await conn.execute(
+                "DELETE FROM cooldowns WHERE account=? AND plugin=? AND cooldown_key=?",
+                (account, plugin, cooldown_key))
+            return cur.rowcount > 0
+
+    async def clear_expired(self, now: Optional[float] = None) -> int:
+        """Delete every expired row; returns how many (boot cleanup)."""
+        now = time.time() if now is None else now
+        async with self._tx("clear expired cooldowns") as conn:
+            cur = await conn.execute(
+                "DELETE FROM cooldowns WHERE expires_at<=?", (now,))
+            return cur.rowcount
+
+    async def delete_account(self, account: str) -> int:
+        """Drop every cooldown owned by an account (deletion cascade)."""
+        async with self._tx(f"delete cooldowns for {account!r}") as conn:
+            cur = await conn.execute(
+                "DELETE FROM cooldowns WHERE account=?", (account,))
+            return cur.rowcount
+
+    @staticmethod
+    def _row_dict(row: Any) -> Dict[str, Any]:
+        import json
+
+        out = dict(row)
+        out.pop("id", None)
+        out["metadata"] = json.loads(out.pop("metadata_json", "{}") or "{}")
+        return out
+
+
+__all__ = ["CooldownRepository"]

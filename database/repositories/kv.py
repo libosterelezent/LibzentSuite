@@ -27,19 +27,19 @@ class KvRepository(BaseRepository):
         if not isinstance(key, str) or not key:
             raise DatabaseError("kv key must be a non-empty string")
 
-    def get(self, key: str, default: Any = None) -> Any:
+    async def get(self, key: str, default: Any = None) -> Any:
         """Value stored under key (JSON-decoded), or ``default`` when absent.
 
         Corrupt JSON falls back to the raw string (see module docstring).
         """
-        row = self._read_one(
+        row = await self._fetch_one(
             "SELECT value FROM kv WHERE key = ?", (key,), what="read kv"
         )
         if row is None:
             return default
         return loads_tolerant(row["value"], row["value"], f"kv[{key!r}]")
 
-    def set(self, key: str, value: Any) -> None:
+    async def set(self, key: str, value: Any) -> None:
         """Store value under key (upsert; JSON-encoded so types round-trip).
 
         Raises DatabaseError for a bad key or a non-serializable value.
@@ -49,20 +49,20 @@ class KvRepository(BaseRepository):
             payload = json.dumps(value)
         except (TypeError, ValueError) as exc:
             raise DatabaseError(f"kv value for {key!r} is not JSON-serializable: {exc}") from exc
-        with self._tx(f"kv set {key!r}") as conn:
-            conn.execute(
+        async with self._tx(f"kv set {key!r}") as conn:
+            await conn.execute(
                 """INSERT INTO kv (key, value) VALUES (?, ?)
                    ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
                 (key, payload),
             )
 
-    def delete(self, key: str) -> bool:
+    async def delete(self, key: str) -> bool:
         """Remove one entry; True when a row was deleted."""
-        with self._tx(f"kv delete {key!r}") as conn:
-            cur = conn.execute("DELETE FROM kv WHERE key = ?", (key,))
+        async with self._tx(f"kv delete {key!r}") as conn:
+            cur = await conn.execute("DELETE FROM kv WHERE key = ?", (key,))
             return cur.rowcount > 0
 
-    def prefix(self, p: str) -> Dict[str, Any]:
+    async def prefix(self, p: str) -> Dict[str, Any]:
         """All entries whose key starts with ``p`` (key -> decoded value).
 
         LIKE wildcards inside the prefix (%, _) are escaped so a literal
@@ -74,7 +74,7 @@ class KvRepository(BaseRepository):
         pattern = (
             p.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         )
-        rows = self._read(
+        rows = await self._fetch_all(
             "SELECT key, value FROM kv WHERE key LIKE ? ESCAPE '\\' ORDER BY key",
             (pattern,),
             what="read kv prefix",

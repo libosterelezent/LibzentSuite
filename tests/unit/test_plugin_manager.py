@@ -36,22 +36,22 @@ class FakeRepo:
         self.settings_rows: dict = {}
         self.metadata: dict = {}
 
-    def state(self, account, plugin):
+    async def state(self, account, plugin):
         return self.states.get((account, plugin))
 
-    def set_state(self, account, plugin, enabled):
+    async def set_state(self, account, plugin, enabled):
         self.states[(account, plugin)] = bool(enabled)
 
-    def set_setting(self, account, plugin, key, value):
+    async def set_setting(self, account, plugin, key, value):
         self.settings_rows[(account, plugin, key)] = value
 
-    def all_account_settings(self):
+    async def all_account_settings(self):
         out: dict = {}
         for (acct, plug, key), value in self.settings_rows.items():
             out.setdefault(acct, {}).setdefault(plug, {})[key] = value
         return out
 
-    def upsert_metadata(self, name, version, description, settings_manifest):
+    async def upsert_metadata(self, name, version, description, settings_manifest):
         self.metadata[name] = {
             "name": name, "version": version, "description": description,
             "settings": settings_manifest,
@@ -139,7 +139,7 @@ class TestLifecycle(unittest.IsolatedAsyncioTestCase):
 
     async def test_attach_activate_deactivate_order(self) -> None:
         manager, bus, _ = make_manager()
-        manager.attach_account("alpha")
+        await manager.attach_account("alpha")
         await manager.activate_account("alpha", FakeServices("alpha"))
         # spy + echo both attached; only spy records hooks
         spy = manager._accounts["alpha"]["spy"]
@@ -152,14 +152,14 @@ class TestLifecycle(unittest.IsolatedAsyncioTestCase):
 
     async def test_attach_allowlist_filters(self) -> None:
         manager, _, _ = make_manager()
-        manager.attach_account("alpha", allowed={"spy"})
+        await manager.attach_account("alpha", allowed={"spy"})
         self.assertEqual(manager.allowed_names("alpha"), ["spy"])
 
     async def test_enabled_state_from_repo(self) -> None:
         repo = FakeRepo()
         repo.states[("alpha", "spy")] = False
         manager, _, _ = make_manager(repo=repo)
-        manager.attach_account("alpha")
+        await manager.attach_account("alpha")
         await manager.activate_account("alpha", FakeServices("alpha"))
         spy = manager._accounts["alpha"]["spy"]
         self.assertFalse(spy.enabled)
@@ -168,7 +168,7 @@ class TestLifecycle(unittest.IsolatedAsyncioTestCase):
     async def test_set_enabled_persists_first_and_fires_hooks(self) -> None:
         repo = FakeRepo()
         manager, _, _ = make_manager(repo=repo)
-        manager.attach_account("alpha")
+        await manager.attach_account("alpha")
         await manager.activate_account("alpha", FakeServices("alpha"))
         spy = manager._accounts["alpha"]["spy"]
         self.assertTrue(spy.active)
@@ -187,29 +187,29 @@ class TestLifecycle(unittest.IsolatedAsyncioTestCase):
 
     async def test_set_enabled_unknown_plugin_raises(self) -> None:
         manager, _, _ = make_manager()
-        manager.attach_account("alpha")
+        await manager.attach_account("alpha")
         with self.assertRaises(PluginError):
             await manager.set_enabled("alpha", "nope", True)
 
     async def test_set_setting_validates_and_refreshes(self) -> None:
         manager, _, _ = make_manager()
-        manager.attach_account("alpha")
+        await manager.attach_account("alpha")
         await manager.activate_account("alpha", FakeServices("alpha"))
-        out = manager.set_setting("alpha", "spy", "count", 7)
+        out = await manager.set_setting("alpha", "spy", "count", 7)
         self.assertEqual(out, 7)
         spy = manager._accounts["alpha"]["spy"]
         self.assertEqual(spy.settings["count"], 7)  # live view refreshed
         with self.assertRaises(SettingsValidationError):
-            manager.set_setting("alpha", "spy", "count", 99)  # > max 10
+            await manager.set_setting("alpha", "spy", "count", 99)  # > max 10
         with self.assertRaises(SettingsValidationError):
-            manager.set_setting("alpha", "spy", "unknown_key", 1)
+            await manager.set_setting("alpha", "spy", "unknown_key", 1)
 
 
 class TestDispatch(unittest.IsolatedAsyncioTestCase):
     async def test_routing_and_isolation(self) -> None:
         manager, bus, _ = make_manager()
-        manager.attach_account("alpha")
-        manager.attach_account("beta")
+        await manager.attach_account("alpha")
+        await manager.attach_account("beta")
         await manager.activate_account("alpha", FakeServices("alpha"))
         await manager.activate_account("beta", FakeServices("beta"))
 
@@ -241,7 +241,7 @@ class TestDispatch(unittest.IsolatedAsyncioTestCase):
 
     async def test_disabled_plugin_not_dispatched(self) -> None:
         manager, bus, _ = make_manager()
-        manager.attach_account("alpha")
+        await manager.attach_account("alpha")
         await manager.activate_account("alpha", FakeServices("alpha"))
         await manager.set_enabled("alpha", "spy", False)
         spy = manager._accounts["alpha"]["spy"].instance
@@ -253,7 +253,7 @@ class TestDispatch(unittest.IsolatedAsyncioTestCase):
 
     async def test_services_factory_form(self) -> None:
         manager, _, _ = make_manager()
-        manager.attach_account("alpha")
+        await manager.attach_account("alpha")
         made: dict = {}
 
         def factory(plugin_name: str) -> FakeServices:
@@ -271,12 +271,29 @@ class TestDispatch(unittest.IsolatedAsyncioTestCase):
 
 
 class TestMetadataPersist(unittest.IsolatedAsyncioTestCase):
-    async def test_discover_upserts_metadata(self) -> None:
+    """discover() is repo-write-free now; persist_metadata() (boot path)
+    upserts the manifest rows."""
+
+    async def test_discover_alone_writes_nothing(self) -> None:
         repo = FakeRepo()
         manager, _, _ = make_manager(repo=repo)
         manager.discover()
+        self.assertEqual(repo.metadata, {})
+
+    async def test_persist_metadata_upserts_rows(self) -> None:
+        repo = FakeRepo()
+        manager, _, _ = make_manager(repo=repo)
+        manager.discover()
+        written = await manager.persist_metadata()
+        self.assertGreaterEqual(written, 2)  # spy + echo
         self.assertIn("spy", repo.metadata)
         self.assertEqual(repo.metadata["spy"]["version"], "1.0.0")
+        self.assertTrue(any(s["name"] == "count" for s in repo.metadata["spy"]["settings"]))
+
+    async def test_persist_metadata_without_repo_is_a_noop(self) -> None:
+        manager, _, _ = make_manager()
+        manager.discover()
+        self.assertEqual(await manager.persist_metadata(), 0)
 
 
 if __name__ == "__main__":

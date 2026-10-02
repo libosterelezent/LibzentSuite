@@ -26,14 +26,14 @@ __all__ = ["AccountSettingsRepository"]
 class AccountSettingsRepository(BaseRepository):
     """Framework account settings: get/set/delete keyed by (account, key)."""
 
-    def get(self, name: str) -> Dict[str, Any]:
+    async def get(self, name: str) -> Dict[str, Any]:
         """All stored settings for one account ({} when none/corrupt).
 
         Corrupt value rows are skipped with a warning — one bad row must not
         hide the healthy ones.
         """
         out: Dict[str, Any] = {}
-        for row in self._read(
+        for row in await self._fetch_all(
             "SELECT key, value_json FROM account_settings WHERE account = ? ORDER BY key",
             (name,),
         ):
@@ -42,7 +42,7 @@ class AccountSettingsRepository(BaseRepository):
                 out[row["key"]] = value
         return out
 
-    def set(self, name: str, key: str, value: Any) -> None:
+    async def set(self, name: str, key: str, value: Any) -> None:
         """Store one setting (upsert). Values must be JSON-serializable.
 
         Raises DatabaseError for an empty/non-string key or a value that
@@ -57,23 +57,23 @@ class AccountSettingsRepository(BaseRepository):
             raise DatabaseError(
                 f"setting {name!r}.{key} is not JSON-serializable: {exc}"
             ) from exc
-        with self._tx(f"store account setting {name!r}.{key}") as conn:
-            conn.execute(
+        async with self._tx(f"store account setting {name!r}.{key}") as conn:
+            await conn.execute(
                 """INSERT INTO account_settings (account, key, value_json) VALUES (?, ?, ?)
                    ON CONFLICT(account, key) DO UPDATE SET value_json = excluded.value_json""",
                 (name, key, payload),
             )
 
-    def delete(self, name: str, key: str) -> bool:
+    async def delete(self, name: str, key: str) -> bool:
         """Remove one setting; True when a row was actually deleted."""
-        with self._tx(f"delete account setting {name!r}.{key}") as conn:
-            cur = conn.execute(
+        async with self._tx(f"delete account setting {name!r}.{key}") as conn:
+            cur = await conn.execute(
                 "DELETE FROM account_settings WHERE account = ? AND key = ?", (name, key)
             )
             return cur.rowcount > 0
 
     # -------------------------------------------------- spine compat helper
-    def list_accounts(self) -> List[str]:
+    async def list_accounts(self) -> List[str]:
         """Sorted names of accounts that have at least one stored setting.
 
         Consumed by SettingsManager._ensure_loaded (probed with hasattr) to
@@ -81,5 +81,5 @@ class AccountSettingsRepository(BaseRepository):
         """
         return [
             row["account"]
-            for row in self._read("SELECT DISTINCT account FROM account_settings ORDER BY account")
+            for row in await self._fetch_all("SELECT DISTINCT account FROM account_settings ORDER BY account")
         ]

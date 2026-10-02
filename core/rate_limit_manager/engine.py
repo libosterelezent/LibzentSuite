@@ -42,9 +42,11 @@ Other documented decisions (INTEGRATION.md: pick the safest option):
   raised it past existing policy intervals.
 - waiters of one pacing key do NOT block other keys (per-account pacing),
   exactly as the pinned contract states.
-- persistence is best-effort: a failing repo.set/delete is logged but the
-  in-memory (runtime-enforced) policy still changes; pacing safety never
-  depends on the database.
+- persistence is NOT the engine's job anymore: ``set_policy``/
+  ``clear_policy``/``set_lane_*`` mutate MEMORY ONLY (sync, wake waiters);
+  the ControlAPI layer persists policy edits, and :meth:`load_persisted`
+  (awaited once at boot, after ``database.connect()``) loads the stored
+  rows into memory. Pacing safety never depends on the database.
 - single-event-loop assumption, like the audited limiter (no locks).
 """
 from __future__ import annotations
@@ -160,6 +162,13 @@ class RateLimitManager:
         lane_prefixrate: float = 1.5,
         kv_repo: Any = None,
     ) -> None:
+        """``policy_repo``/``kv_repo`` are kept for signature back-compat.
+
+        The engine performs NO repository I/O at construction anymore (and
+        no writes at all): await :meth:`load_persisted` once at boot to pull
+        stored policies + the lane config into memory. Persistence of policy
+        edits is owned by the ControlAPI layer.
+        """
         self._bus = bus
         self._logger = logger
         self._repo = policy_repo
@@ -200,8 +209,14 @@ class RateLimitManager:
             on_change=self._wake_waiters,
             log=self._log,
         )
-        self._load_stored_policies()
-        self._load_lane_config(lane_enabled, lane_prefixrate)
+        self._lane.set_enabled(bool(lane_enabled))
+        try:
+            self._lane.set_prefixrate(float(lane_prefixrate))
+        except RatePolicyError:
+            self._lane.set_prefixrate(1.5)
+        #: constructor defaults — the baseline :meth:`load_persisted` falls
+        #: back to when the kv has no persisted lane row
+        self._lane_defaults = (bool(lane_enabled), float(lane_prefixrate))
 
     # ------------------------------------------------------------ validation
     @staticmethod
@@ -222,45 +237,79 @@ class RateLimitManager:
             )
         return value
 
-    def _load_stored_policies(self) -> None:
-        """Load persisted policies from the repo at init (best-effort, both
-        RatePolicyRecord-shaped rows and plain dicts accepted).
+    async def load_persisted(self) -> None:
+        """Boot path: read the stored policies + lane config into memory.
 
-        A structurally bad row is logged and SKIPPED — a hand-edited database
+        Awaited once by the bootstrap (and the simulation runner) after
+        ``database.connect()`` — the constructor does no repository I/O.
+        Accepts both RatePolicyRecord-shaped rows and plain dicts; a
+        structurally bad row is logged and SKIPPED — a hand-edited database
         must never crash the process (ground rule). Rows below the current
         floor are kept (effective() clamps them via max(interval, floor)).
+
+        The lane config comes from the kv row ``ratelimit:lane`` when
+        present (precedence: persisted value > constructor defaults).
         """
-        if self._repo is None:
-            return
-        try:
-            rows = self._repo.list()
-        except Exception as exc:  # pragma: no cover - defensive
-            self._log("error", f"could not load rate policies: {exc}")
-            return
-        for row in rows or []:
+        if self._repo is not None:
             try:
-                level, owner, policy = policy_from_row(row)
+                rows = await self._repo.list()
+            except Exception as exc:  # pragma: no cover - defensive
+                self._log("error", f"could not load rate policies: {exc}")
+                rows = None
+            for row in rows or []:
+                try:
+                    level, owner, policy = policy_from_row(row)
+                except Exception as exc:
+                    self._log(
+                        "warning",
+                        f"skipping invalid stored rate policy {row!r}: {exc}",
+                    )
+                    continue
+                self._policies[(level, owner, policy.action)] = policy
+                if policy.interval < self._floor:
+                    scope = f"{level}/{owner}" if owner else level
+                    self._log(
+                        "warning",
+                        f"stored policy {policy.action!r} at {scope} is faster "
+                        f"than the floor; effective pacing is clamped to "
+                        f"{self._floor:g}s",
+                    )
+        await self._load_lane_config(*getattr(self, "_lane_defaults", (False, 1.5)))
+
+    async def _load_lane_config(self, default_enabled: bool = False,
+                                default_prefixrate: float = 1.5) -> None:
+        """Restore the lane config from kv when present (best-effort).
+
+        Precedence: persisted kv value > the constructor's defaults. A
+        corrupt row is logged and skipped — persistence must never crash
+        the limiter. (First-boot baseline persistence is the ControlAPI's
+        job now; the engine keeps memory only.)
+        """
+        enabled, prefixrate = bool(default_enabled), float(default_prefixrate)
+        if self._kv is not None:
+            try:
+                raw = await self._kv.get("ratelimit:lane")
+                if raw:
+                    import json as _json
+
+                    data = _json.loads(raw)
+                    enabled = bool(data.get("enabled", enabled))
+                    prefixrate = float(data.get("prefixrate", prefixrate))
             except Exception as exc:
-                self._log(
-                    "warning",
-                    f"skipping invalid stored rate policy {row!r}: {exc}",
-                )
-                continue
-            self._policies[(level, owner, policy.action)] = policy
-            if policy.interval < self._floor:
-                scope = f"{level}/{owner}" if owner else level
-                self._log(
-                    "warning",
-                    f"stored policy {policy.action!r} at {scope} is faster "
-                    f"than the floor; effective pacing is clamped to "
-                    f"{self._floor:g}s",
-                )
+                self._log("warning", f"could not load lane config: {exc}")
+        try:
+            self._lane.set_prefixrate(prefixrate)
+        except RatePolicyError:
+            self._log("warning", "stored lane config invalid; using defaults")
+            self._lane.set_prefixrate(1.5)
+        self._lane.set_enabled(enabled)
 
     # ------------------------------------------------------------- policies
     def set_policy(
         self, policy: RatePolicy, level: str = "global", owner: Optional[str] = None
     ) -> RatePolicy:
-        """Store a RatePolicy at (level, owner); persists via repo when present.
+        """Store a RatePolicy at (level, owner) — memory only (the ControlAPI
+        layer persists the edit).
 
         Raises:
             RatePolicyError: invalid level/owner scope, or policy is not a
@@ -299,7 +348,11 @@ class RateLimitManager:
     def _store(
         self, policy: RatePolicy, level: str, owner: Optional[str]
     ) -> RatePolicy:
-        """Shared set path: validate scope, enforce the floor, persist, wake."""
+        """Shared set path: validate scope, enforce the floor, wake waiters.
+
+        MEMORY ONLY — persisting the edit is the ControlAPI layer's job
+        (the engine no longer writes to the policy repository).
+        """
         level, owner = parse_scope(level, owner)
         if policy.interval < self._floor:
             raise UnsafePolicyError(
@@ -311,18 +364,6 @@ class RateLimitManager:
             )
         self._policies[(level, owner, policy.action)] = policy
         scope = f"{level}/{owner}" if owner else level
-        if self._repo is not None:
-            try:
-                self._repo.set(
-                    level, owner, policy.action,
-                    policy.interval, policy.jitter_min, policy.jitter_max,
-                )
-            except Exception as exc:  # best-effort persistence
-                self._log(
-                    "error",
-                    f"could not persist rate policy {policy.action!r} at "
-                    f"{scope}: {exc} (policy is still active in memory)",
-                )
         self._log(
             "info", f"rate policy set: {policy.action}={policy} at {scope}"
         )
@@ -330,7 +371,10 @@ class RateLimitManager:
         return policy
 
     def clear_policy(self, level: str, owner: Optional[str], action: str) -> bool:
-        """Remove one stored policy (repo + memory). True when it existed.
+        """Remove one stored policy from MEMORY. True when it existed.
+
+        Persisting the removal is the ControlAPI layer's job (the engine no
+        longer writes to the policy repository).
 
         Raises RatePolicyError for an invalid level/owner scope.
         """
@@ -339,11 +383,6 @@ class RateLimitManager:
             raise RatePolicyError(f"policy action must not be empty, got {action!r}")
         action = action.strip()
         existed = self._policies.pop((level, owner, action), None) is not None
-        if self._repo is not None:
-            try:
-                existed = self._repo.delete(level, owner, action) or existed
-            except Exception as exc:  # best-effort persistence
-                self._log("error", f"could not delete rate policy from db: {exc}")
         if existed:
             scope = f"{level}/{owner}" if owner else level
             self._log(
@@ -487,68 +526,19 @@ class RateLimitManager:
                 keys.append((f"group:{group}", action))
         return keys
 
-    def _load_lane_config(self, default_enabled: bool, default_prefixrate: float) -> None:
-        """Restore the lane config from kv when present (best-effort).
-
-        Precedence: persisted kv value > constructor defaults. A corrupt row
-        is logged and skipped — persistence must never crash the limiter.
-        """
-        enabled, prefixrate = bool(default_enabled), float(default_prefixrate)
-        if self._kv is not None:
-            try:
-                raw = self._kv.get("ratelimit:lane")
-                if raw:
-                    import json as _json
-
-                    data = _json.loads(raw)
-                    enabled = bool(data.get("enabled", enabled))
-                    prefixrate = float(data.get("prefixrate", prefixrate))
-            except Exception as exc:
-                self._log("warning", f"could not load lane config: {exc}")
-        try:
-            self._lane.set_prefixrate(prefixrate)
-            self._lane.set_enabled(enabled)
-        except RatePolicyError as exc:
-            self._log("warning", f"stored lane config invalid ({exc}); using defaults")
-            self._lane.set_prefixrate(1.5)
-            self._lane.set_enabled(False)
-        else:
-            # first-boot baseline: persist the effective config when the kv
-            # has no lane row yet, so CLI/dashboard edits have a base state
-            if self._kv is not None:
-                try:
-                    if self._kv.get("ratelimit:lane") is None:
-                        self._persist_lane()
-                except Exception:
-                    pass
-
-    def _persist_lane(self) -> None:
-        """Best-effort kv write of the lane config (never raises)."""
-        if self._kv is None:
-            return
-        try:
-            import json as _json
-
-            self._kv.set(
-                "ratelimit:lane",
-                _json.dumps({
-                    "enabled": self._lane.enabled,
-                    "prefixrate": self._lane.prefixrate,
-                }),
-            )
-        except Exception as exc:
-            self._log("warning", f"could not persist lane config: {exc}")
-
     def set_lane_enabled(self, enabled: bool) -> dict:
-        """Enable/disable the server-wide sequential send lane (persisted)."""
+        """Enable/disable the server-wide sequential send lane (memory only).
+
+        Persisting the lane config is the ControlAPI layer's job; the
+        engine keeps the in-memory state and exposes :meth:`lane_status`.
+        """
         self._lane.set_enabled(bool(enabled))
-        self._persist_lane()
         return self.lane_status()
 
     def set_lane_prefixrate(self, seconds: float) -> dict:
-        """Set the lane spacing; 0 PAUSES the lane (persisted)."""
+        """Set the lane spacing; 0 PAUSES the lane (memory only; persisted
+        by the ControlAPI layer)."""
         self._lane.set_prefixrate(seconds)  # RatePolicyError on bad input
-        self._persist_lane()
         return self.lane_status()
 
     def lane_status(self) -> dict:

@@ -18,6 +18,15 @@ or ``?token=`` and the WebSocket requires the same. The static index is
 served WITHOUT auth (the SPA prompts for the token itself). Serves on
 127.0.0.1 by default — do not expose publicly without the token.
 
+Credential routes (POST /api/accounts/credential, GET /api/credentials/
+status, POST /api/credentials/import-env, and POST /api/accounts/add when
+its body carries a ``credential``) are gated ONE step further: they require
+a CONFIGURED token. With no DASHBOARD_TOKEN set they answer 403 with
+"set DASHBOARD_TOKEN in .env to manage credentials" instead of becoming an
+open credential-writing surface; with a token set they just ride the normal
+401 auth. Credential VALUES never appear in any response — only account
+names and db/env/missing status (grep-proof).
+
 Error semantics (ported):
   * missing/invalid fields      -> 400 with an actionable message naming the
                                     field and the route (helpers below)
@@ -61,6 +70,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from core.api import ControlAPI
+from core.errors import AccountError
 from core.event_bus import (
     Event,
     EventBus,
@@ -84,6 +94,19 @@ ROUTE_TIMEOUT_S = 10.0
 
 #: task event types forwarded to WS clients (JSON-safe payloads)
 TASK_EVENT_TYPES = (TaskStarted, TaskCompleted, TaskFailed, TaskCancelled)
+
+#: routes that carry credential MATERIAL (a token value, or the power to
+#: import/copy one). Beyond the normal token auth they REQUIRE a configured
+#: DASHBOARD_TOKEN: with no token configured they answer 403 naming the fix —
+#: an accidentally-open loopback dashboard must never become a credential
+#: writing surface (spec §12). ``POST /api/accounts/add`` joins this set
+#: only when its body actually carries a ``credential``.
+CREDENTIAL_GATED_ROUTES = {
+    ("POST", "/api/accounts/credential"),
+    ("GET", "/api/credentials/status"),
+    ("POST", "/api/credentials/import-env"),
+}
+CREDENTIAL_GATE_MESSAGE = "set DASHBOARD_TOKEN in .env to manage credentials"
 
 
 def parse_json_bool(value: Any, field: str) -> bool:
@@ -575,7 +598,16 @@ class DashboardServer:
                 require_str(body, "name", path)  # api re-validates the full payload
                 if "enabled" in body:
                     body["enabled"] = parse_json_bool(body["enabled"], "enabled")
-                return 200, {"ok": True, "data": await api.accounts_add(body)}
+                # a 'credential' in the body flows ONE way: request ->
+                # CredentialService (encrypted at rest); the response data
+                # is the account status dict, never the value. A duplicate
+                # name is a conflict, not a bad request.
+                try:
+                    return 200, {"ok": True, "data": await api.accounts_add(body)}
+                except AccountError as exc:
+                    if "already exists" in str(exc):
+                        return 409, {"ok": False, "error": str(exc)}
+                    raise
             if (method, path) == ("POST", "/api/accounts/remove"):
                 return 200, {
                     "ok": True,
@@ -608,6 +640,50 @@ class DashboardServer:
                 return 200, {
                     "ok": True,
                     "data": await api.accounts_emergency_stop(require_str(body, "name", path)),
+                }
+            if (method, path) == ("POST", "/api/accounts/credential"):
+                # credential VALUE: one-way (request -> CredentialService).
+                # The response carries the account name + new STATUS only —
+                # grep-proof by construction, nothing echoes the token.
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_set_credential(
+                        require_str(body, "name", path),
+                        require_str(body, "credential", path),
+                        surface="dashboard",
+                    ),
+                }
+
+            # ------------------------------------------------------- credentials
+            if (method, path) == ("GET", "/api/credentials/status"):
+                return 200, {"ok": True, "data": await api.accounts_credential_status()}
+            if (method, path) == ("POST", "/api/credentials/import-env"):
+                overwrite = body.get("overwrite")
+                if overwrite is None:
+                    overwrite = False  # absent/null -> False; anything else strict
+                overwrite = parse_json_bool(overwrite, "overwrite")
+                return 200, {
+                    "ok": True,
+                    "data": await api.credentials_import_env(
+                        overwrite=overwrite, surface="dashboard"
+                    ),
+                }
+
+            # --------------------------------------------------------- cooldowns
+            if (method, path) == ("GET", "/api/cooldowns"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.cooldowns_list(q_opt(query, "account")),
+                }
+            if (method, path) == ("POST", "/api/cooldowns/clear"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.cooldowns_clear(
+                        require_str(body, "account", path),
+                        require_str(body, "plugin", path),
+                        body_opt_str(body, "cooldown_key", path),
+                        surface="dashboard",
+                    ),
                 }
 
             # --------------------------------------------------------------- plugins
@@ -898,6 +974,18 @@ def _make_handler(server: "DashboardServer") -> type:
                     if not isinstance(body, dict):
                         self._respond(400, {"ok": False, "error": "request body must be a JSON object"})
                         return
+            # credential-material routes additionally require a CONFIGURED
+            # token: with auth off entirely they are refused (403) instead of
+            # silently writable. Runs after the general check above, so a
+            # configured-but-wrong token has already been answered with 401.
+            if (method, path) in CREDENTIAL_GATED_ROUTES or (
+                (method, path) == ("POST", "/api/accounts/add")
+                and isinstance(body, dict)
+                and body.get("credential") not in (None, "")
+            ):
+                if server._token is None:
+                    self._respond(403, {"ok": False, "error": CREDENTIAL_GATE_MESSAGE})
+                    return
             status, payload = server.call(method, path, body, query)
             self._respond(status, payload)
 

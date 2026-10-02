@@ -99,7 +99,7 @@ class RatePolicyRepository(BaseRepository):
         )
 
     # --------------------------------------------------------------- write
-    def set(
+    async def set(
         self,
         level: str,
         owner: Optional[str],
@@ -116,8 +116,8 @@ class RatePolicyRepository(BaseRepository):
         """
         record = self._validated(level, owner, action, interval, jitter_min, jitter_max)
         owner_key = self._owner_key(record.level, record.owner)
-        with self._tx(f"set policy {record.level}/{owner_key}/{record.action}") as conn:
-            conn.execute(
+        async with self._tx(f"set policy {record.level}/{owner_key}/{record.action}") as conn:
+            await conn.execute(
                 """INSERT INTO rate_limit_policies
                        (level, owner, action, interval, jitter_min, jitter_max)
                    VALUES (?, ?, ?, ?, ?, ?)
@@ -129,7 +129,7 @@ class RatePolicyRepository(BaseRepository):
                  record.interval, record.jitter_min, record.jitter_max),
             )
 
-    def delete(self, level: str, owner: Optional[str], action: str) -> bool:
+    async def delete(self, level: str, owner: Optional[str], action: str) -> bool:
         """Remove one policy; True when a row was deleted.
 
         Lenient by design (writes strict, reads/deletes forgiving): an
@@ -137,35 +137,35 @@ class RatePolicyRepository(BaseRepository):
         clear_policy surfaces that as "nothing to clear".
         """
         owner_key = "" if level == "global" else (owner or "")
-        with self._tx(f"delete policy {level}/{owner_key}/{action}") as conn:
-            cur = conn.execute(
+        async with self._tx(f"delete policy {level}/{owner_key}/{action}") as conn:
+            cur = await conn.execute(
                 "DELETE FROM rate_limit_policies WHERE level = ? AND owner = ? AND action = ?",
                 (level, owner_key, action),
             )
             return cur.rowcount > 0
 
     # ---------------------------------------------------------------- read
-    def get(self, level: str, owner: Optional[str], action: str) -> Optional[RatePolicyRecord]:
+    async def get(self, level: str, owner: Optional[str], action: str) -> Optional[RatePolicyRecord]:
         """One policy by exact scope (None when nothing stored there).
 
         Owner forms are normalized on lookup: None and '' both address the
         global row, so callers never have to remember which spelling stuck.
         """
         owner_key = "" if level == "global" else (owner or "")
-        row = self._read_one(
+        row = await self._fetch_one(
             "SELECT * FROM rate_limit_policies WHERE level = ? AND owner = ? AND action = ?",
             (level, owner_key, action),
         )
         return None if row is None else self._record_from_row(row)
 
-    def list(self) -> List[RatePolicyRecord]:
+    async def list(self) -> List[RatePolicyRecord]:
         """Every stored policy (level, owner, action order).
 
         A row whose level/owner no longer constructs a valid record (corrupt
         row, future rename) is skipped with a warning instead of crashing.
         """
         records: List[RatePolicyRecord] = []
-        for row in self._read("SELECT * FROM rate_limit_policies ORDER BY level, owner, action"):
+        for row in await self._fetch_all("SELECT * FROM rate_limit_policies ORDER BY level, owner, action"):
             try:
                 records.append(self._record_from_row(row))
             except ValueError as exc:

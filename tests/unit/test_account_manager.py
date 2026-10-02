@@ -18,19 +18,20 @@ from tests.unit.helpers import (
 )
 
 STATUS_KEYS = {"id", "name", "status", "user_id", "enabled", "sync_group",
-               "profiles", "latency_ms", "uptime_s", "last_error", "plugins"}
+               "profiles", "latency_ms", "uptime_s", "last_error",
+               "credential", "plugins"}
 DETAILS_KEYS = {"name", "status", "identity", "runtime", "plugins",
-                "profiles", "rate_limit"}
+                "profiles", "rate_limit", "credential"}
 
 
 class RegistryTests(unittest.IsolatedAsyncioTestCase):
     async def test_add_account_happy_path(self) -> None:
         h = make_manager()
-        out = h.manager.add_account("alpha", sync_group="g1")
+        out = await h.manager.add_account("alpha", sync_group="g1")
         self.assertEqual(out["name"], "alpha")
         self.assertEqual(out["status"], "created")
         self.assertEqual(set(out), STATUS_KEYS)
-        self.assertIsNotNone(h.repo.get("alpha"))          # persisted
+        self.assertIsNotNone(await h.repo.get("alpha"))          # persisted
         self.assertEqual(h.manager.names(), ["alpha"])     # memory
         self.assertEqual(h.plugins.attached, [("alpha", None)])  # unrestricted
 
@@ -38,13 +39,13 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         h = make_manager()
         for bad in ("", "ALPHA", "a b", "-x", "x" * 33, 5, None):
             with self.assertRaises(AccountError):
-                h.manager.add_account(bad)
+                await h.manager.add_account(bad)
 
     async def test_add_account_duplicate(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         with self.assertRaises(AccountError) as ctx:
-            h.manager.add_account("alpha")
+            await h.manager.add_account("alpha")
         self.assertIn("already exists", str(ctx.exception))
         self.assertEqual(len(h.repo.records), 1)
 
@@ -52,28 +53,28 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         h = make_manager()
         h.repo.fail_on = "add"
         with self.assertRaises(RuntimeError):
-            h.manager.add_account("alpha")
+            await h.manager.add_account("alpha")
         self.assertEqual(h.manager.names(), [])  # memory clean
         self.assertEqual(len(h.repo.records), 0)
 
     async def test_add_with_profiles_assigns_and_gates(self) -> None:
         h = make_manager()
-        h.add_profile("basic", "soulcopy")
-        out = h.manager.add_account("alpha", profiles=["basic"])
+        await h.add_profile("basic", "soulcopy")
+        out = await h.manager.add_account("alpha", profiles=["basic"])
         self.assertEqual(out["profiles"], ["basic"])
         self.assertEqual(h.plugins.attached[-1], ("alpha", {"soulcopy"}))
 
     async def test_add_with_unknown_profile_rejected_before_persist(self) -> None:
         h = make_manager()
         with self.assertRaises(ProfileError):
-            h.manager.add_account("alpha", profiles=["nope"])
+            await h.manager.add_account("alpha", profiles=["nope"])
         self.assertEqual(h.manager.names(), [])
         self.assertEqual(len(h.repo.records), 0)
 
     async def test_get_unknown_and_names_sorted(self) -> None:
         h = make_manager()
-        h.manager.add_account("beta")
-        h.manager.add_account("alpha")
+        await h.manager.add_account("beta")
+        await h.manager.add_account("alpha")
         self.assertEqual(h.manager.names(), ["alpha", "beta"])
         self.assertEqual(h.manager.get("beta").record.name, "beta")
         with self.assertRaises(AccountError):
@@ -83,8 +84,8 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_accounts_sorted_status_dicts(self) -> None:
         h = make_manager()
-        h.manager.add_account("beta")
-        h.manager.add_account("alpha")
+        await h.manager.add_account("beta")
+        await h.manager.add_account("alpha")
         rows = await h.manager.accounts()
         self.assertEqual([r["name"] for r in rows], ["alpha", "beta"])
         for row in rows:
@@ -93,7 +94,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_accounts_reflect_plugin_states(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         h.plugins.states_map["alpha"] = [
             {"name": "soulcopy", "enabled": True, "settings": {"x": 1},
              "last_error": None, "error_count": 0},
@@ -107,7 +108,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_plugin_states_failure_keeps_last_known(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         h.plugins.states_map["alpha"] = [
             {"name": "soulcopy", "enabled": True, "settings": {},
              "last_error": None, "error_count": 0},
@@ -119,30 +120,30 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_set_enabled_persists(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
-        out = h.manager.set_enabled("alpha", False)
+        await h.manager.add_account("alpha")
+        out = await h.manager.set_enabled("alpha", False)
         self.assertFalse(out["enabled"])
-        self.assertFalse(h.repo.get("alpha").enabled)
-        self.assertTrue(h.manager.set_enabled("alpha", True)["enabled"])
+        self.assertFalse((await h.repo.get("alpha")).enabled)
+        self.assertTrue((await h.manager.set_enabled("alpha", True))["enabled"])
 
     async def test_remove_stopped_account(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
-        out = h.manager.remove_account("alpha")
+        await h.manager.add_account("alpha")
+        out = await h.manager.remove_account("alpha")
         self.assertEqual(out, {"removed": "alpha", "existed": True})
         self.assertEqual(h.manager.names(), [])
-        self.assertIsNone(h.repo.get("alpha"))
+        self.assertIsNone(await h.repo.get("alpha"))
         self.assertEqual(h.plugins.detached, ["alpha"])
 
     async def test_remove_while_running_refused(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         with self.assertRaises(AccountError) as ctx:
-            h.manager.remove_account("alpha")
+            await h.manager.remove_account("alpha")
         self.assertIn("stop account", str(ctx.exception))
         self.assertEqual(h.manager.names(), ["alpha"])  # untouched
-        self.assertIsNotNone(h.repo.get("alpha"))
+        self.assertIsNotNone(await h.repo.get("alpha"))
         await h.manager.stop("alpha")
 
 
@@ -153,7 +154,7 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
             {"name": "soulcopy", "enabled": True, "settings": {"k": 1},
              "last_error": None, "error_count": 0},
         ]
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         out = await h.manager.start("alpha")
         self.assertEqual(out["status"], "running")
         self.assertEqual(out["user_id"], 555)
@@ -175,25 +176,25 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_start_resolves_token_by_convention(self) -> None:
         h = make_manager(token_values={"DISCORD_TOKEN_ALPHA": "tok-alpha"})
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         self.assertEqual(h.factory.clients[0].token, "tok-alpha")
         await h.manager.stop("alpha")
 
     async def test_start_missing_token(self) -> None:
         h = make_manager(token_values={})
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         with self.assertRaises(CredentialsError) as ctx:
             await h.manager.start("alpha")
         self.assertIn("DISCORD_TOKEN_ALPHA", str(ctx.exception))
         runtime = h.manager.get("alpha").runtime
-        self.assertEqual(runtime.status, AccountStatus.FAILED)
+        self.assertEqual(runtime.status, AccountStatus.MISSING_CREDENTIAL)
         self.assertTrue(runtime.last_error)
         await h.collector.wait_for(AccountFailed, 1)
 
     async def test_start_connect_failure(self) -> None:
         h = make_manager(client_kwargs={"fail_connect": True})
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         with self.assertRaises(AccountError) as ctx:
             await h.manager.start("alpha")
         self.assertIn("failed to connect", str(ctx.exception))
@@ -206,7 +207,7 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_start_twice_refused(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         with self.assertRaises(AccountError):
             await h.manager.start("alpha")
@@ -214,7 +215,7 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_is_idempotent_and_publishes_once(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         client = h.manager.get("alpha").runtime.client
         out = await h.manager.stop("alpha")
@@ -236,7 +237,7 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_never_started_account(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         out = await h.manager.stop("alpha")
         self.assertEqual(out["status"], "stopped")
         await self._drain()
@@ -244,22 +245,22 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_start_all_skips_disabled_and_collects_failures(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
-        h.manager.add_account("beta", token_ref="DISCORD_TOKEN_MISSING")
-        h.manager.add_account("gamma")
-        h.manager.set_enabled("gamma", False)
+        await h.manager.add_account("alpha")
+        await h.manager.add_account("beta", token_ref="DISCORD_TOKEN_MISSING")
+        await h.manager.add_account("gamma")
+        await h.manager.set_enabled("gamma", False)
         out = await h.manager.start_all()
         self.assertEqual(out["started"], ["alpha"])
         self.assertEqual(out["skipped"], ["gamma"])
         self.assertIn("beta", out["failed"])
         self.assertEqual(h.manager.get("beta").runtime.status,
-                         AccountStatus.FAILED)
+                         AccountStatus.MISSING_CREDENTIAL)
         await h.manager.stop_all()
 
     async def test_stop_all_logs_and_continues(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
-        h.manager.add_account("beta")
+        await h.manager.add_account("alpha")
+        await h.manager.add_account("beta")
         await h.manager.start("alpha")
         await h.manager.start("beta")
         out = await h.manager.stop_all()
@@ -271,7 +272,7 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_emergency_stop_cancels_tasks_and_stops(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         for _ in range(3):
             h.scheduler.submit("alpha", "soulcopy", "message",
@@ -297,7 +298,7 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
 class SupervisorTests(unittest.IsolatedAsyncioTestCase):
     async def test_drop_triggers_reconnect_with_fresh_client(self) -> None:
         h = make_manager(settings=_fast_reconnect_settings())
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         first = h.manager.get("alpha").runtime.client
         await h.collector.wait_for(AccountConnected, 1)
@@ -315,7 +316,7 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_drop_reason_recorded(self) -> None:
         h = make_manager(settings=_fast_reconnect_settings())
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         h.manager.get("alpha").runtime.client.drop("heartbeat timeout")
         await h.collector.wait_for(AccountConnected, 2)
@@ -330,7 +331,7 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             "reconnect_initial_delay": 0.05,
         }
         h = make_manager(settings=settings)
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         self.assertIsNone(h.manager.get("alpha").runtime.supervisor)
         h.manager.get("alpha").runtime.client.drop("bye")
@@ -347,7 +348,7 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             "reconnect_max_delay": 30.0,
         }
         h = make_manager(settings=settings)
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         h.manager.get("alpha").runtime.client.drop("bye")
         await asyncio.sleep(0.05)
@@ -358,7 +359,7 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_repeated_drops_backoff_recovers(self) -> None:
         h = make_manager(settings=_fast_reconnect_settings())
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         for _ in range(2):
             await h.collector.wait_for(AccountConnected, 1)
@@ -384,7 +385,7 @@ def _fast_reconnect_settings():
 class SendHookTests(unittest.IsolatedAsyncioTestCase):
     async def test_message_action_sends_and_audits(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         message = await h.manager.send_hook(make_task(content="hello"))
         self.assertIsInstance(message, DiscordMessage)
@@ -399,7 +400,7 @@ class SendHookTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_dm_action_uses_cached_channel_first(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         client = h.manager.get("alpha").runtime.client
         message = await h.manager.send_hook(
@@ -414,7 +415,7 @@ class SendHookTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_dm_action_opens_and_records_missing_dm(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         runtime = h.manager.get("alpha").runtime
         await h.manager.send_hook(make_task(action="dm", user_id=888, content="hi"))
@@ -426,7 +427,7 @@ class SendHookTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_target_gone_propagates(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         with self.assertRaises(TargetGone):
             await h.manager.send_hook(make_task(channel_id=424242))
@@ -436,7 +437,7 @@ class SendHookTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_not_running_raises_connection_error(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         with self.assertRaises(ConnectionError) as ctx:
             await h.manager.send_hook(make_task())
         self.assertIn("is not running", str(ctx.exception))
@@ -448,7 +449,7 @@ class SendHookTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unsupported_action_raises_scheduler_error(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         with self.assertRaises(SchedulerError) as ctx:
             await h.manager.send_hook(make_task(action="poke"))
@@ -468,14 +469,14 @@ class DetailsTests(unittest.IsolatedAsyncioTestCase):
              "interval": 4.0, "jitter": [0.1, 0.3]},
         ]
         h = make_manager(limiter=limiter)
-        h.add_profile("basic", "soulcopy")
-        h.manager.add_account("alpha", profiles=["basic"])
+        await h.add_profile("basic", "soulcopy")
+        await h.manager.add_account("alpha", profiles=["basic"])
         h.plugins.states_map["alpha"] = [
             {"name": "soulcopy", "enabled": True, "settings": {},
              "last_error": None, "error_count": 0},
         ]
         await h.manager.start("alpha")
-        d = h.manager.details("alpha")
+        d = await h.manager.details("alpha")
         self.assertEqual(set(d), DETAILS_KEYS)
         self.assertEqual(d["name"], "alpha")
         self.assertEqual(set(d["status"]), {"connected", "state", "latency_ms", "uptime_s"})
@@ -502,8 +503,8 @@ class DetailsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_details_rate_limit_empty_without_limiter(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
-        d = h.manager.details("alpha")
+        await h.manager.add_account("alpha")
+        d = await h.manager.details("alpha")
         self.assertEqual(d["rate_limit"], {})
         self.assertEqual(d["identity"], {"name": "alpha", "discord_id": None})
         self.assertFalse(d["status"]["connected"])
@@ -511,31 +512,31 @@ class DetailsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_details_falls_back_to_account_plugin_view(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         h.manager.get("alpha").plugins = {
             "soulcopy": {"enabled": False, "last_error": None, "error_count": 0},
         }
-        d = h.manager.details("alpha")
+        d = await h.manager.details("alpha")
         self.assertEqual(d["plugins"], [{"name": "soulcopy", "enabled": False}])
 
     async def test_details_unknown_account(self) -> None:
         h = make_manager()
         with self.assertRaises(AccountError):
-            h.manager.details("ghost")
+            await h.manager.details("ghost")
 
     async def test_details_reflects_profile_assigned_after_add(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
-        h.add_profile("basic", "soulcopy")
-        h.profile_manager.assign("alpha", "basic")
-        d = h.manager.details("alpha")  # record refreshed from the repo
+        await h.manager.add_account("alpha")
+        await h.add_profile("basic", "soulcopy")
+        await h.profile_manager.assign("alpha", "basic")
+        d = await h.manager.details("alpha")  # record refreshed from the repo
         self.assertEqual(d["profiles"], ["basic"])
 
 
 class AuditTests(unittest.IsolatedAsyncioTestCase):
     async def test_inbound_messages_are_audited(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         client = h.manager.get("alpha").runtime.client
         client.receive(DiscordMessage(
@@ -566,12 +567,143 @@ class AuditTests(unittest.IsolatedAsyncioTestCase):
 
         manager = h.manager
         manager._audit = ExplodingAudit()  # type: ignore[attr-defined]
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         client = h.manager.get("alpha").runtime.client
         client.receive(DiscordMessage(id=1, channel_id=100, author_id=1, content="x"))
         await asyncio.sleep(0.05)  # must not raise
         await h.manager.stop("alpha")
+
+
+class CredentialWiringTests(unittest.IsolatedAsyncioTestCase):
+    """The new credential-service path: DB-first resolution, the
+    MISSING_CREDENTIAL / INVALID_CREDENTIAL classifications, and the
+    account-removal cascades."""
+
+    async def test_resolve_db_first_and_status_field(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from core.credential_service import CredentialService
+        from database.db import Database
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(":memory:")
+            await db.connect()
+            try:
+                h = make_manager(token_values={
+                    "DISCORD_TOKEN_ALPHA": "env-token",
+                })
+                service = CredentialService(
+                    db.credentials, key_path=Path(tmp) / "k.key"
+                )
+                await service.store("alpha", "db-token")
+                h.manager._credential_service = service  # type: ignore[attr-defined]
+                await h.manager.add_account("alpha")
+                await h.manager.start("alpha")
+                # DB credential wins over the legacy env value
+                self.assertEqual(h.factory.clients[0].token, "db-token")
+                row = (await h.manager.accounts())[0]
+                self.assertEqual(row["credential"], "db")
+                d = await h.manager.details("alpha")
+                self.assertEqual(d["credential"], "db")
+                await h.manager.stop("alpha")
+            finally:
+                await db.close()
+
+    async def test_env_fallback_reports_env(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from core.credential_service import CredentialService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            h = make_manager(token_values={"DISCORD_TOKEN_ALPHA": "env-token"})
+            service = CredentialService(None, key_path=Path(tmp) / "k.key")
+            h.manager._credential_service = service  # type: ignore[attr-defined]
+            await h.manager.add_account("alpha")
+            await h.manager.start("alpha")
+            self.assertEqual(h.factory.clients[0].token, "env-token")
+            row = (await h.manager.accounts())[0]
+            self.assertEqual(row["credential"], "env")
+            await h.manager.stop("alpha")
+
+    async def test_auth_error_classified_invalid_credential(self) -> None:
+        from core.errors import AccountError
+
+        h = make_manager()
+        await h.manager.add_account("alpha")
+        h.manager._client_factory = RejectingFactory()  # type: ignore[attr-defined]
+        with self.assertRaises(AccountError):
+            await h.manager.start("alpha")
+        runtime = h.manager.get("alpha").runtime
+        self.assertEqual(runtime.status, AccountStatus.INVALID_CREDENTIAL)
+        await h.collector.wait_for(AccountFailed, 1)
+
+    async def test_remove_cascades_credential_and_cooldowns(self) -> None:
+        class FakeCooldowns:
+            def __init__(self) -> None:
+                self.deleted: list = []
+
+            async def delete_account(self, account: str) -> int:
+                self.deleted.append(account)
+                return 1
+
+        import tempfile
+        from pathlib import Path
+        from core.credential_service import CredentialService
+        from database.db import Database
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(":memory:")
+            await db.connect()
+            try:
+                h = make_manager()
+                cooldowns = FakeCooldowns()
+                service = CredentialService(
+                    db.credentials, key_path=Path(tmp) / "k.key"
+                )
+                await service.store("alpha", "tok")
+                h.manager._cooldowns = cooldowns  # type: ignore[attr-defined]
+                h.manager._credential_service = service  # type: ignore[attr-defined]
+                await h.manager.add_account("alpha")
+                await h.manager.remove_account("alpha")
+                self.assertEqual(cooldowns.deleted, ["alpha"])
+                self.assertEqual(service.status("alpha"), "missing")
+                self.assertIsNone(await db.credentials.load("alpha"))
+            finally:
+                await db.close()
+
+
+class RejectingFactory:
+    """Builds clients whose connect() fails like a rejected token."""
+
+    def __init__(self) -> None:
+        self.clients: list = []
+
+    def __call__(self, name: str, token: str):
+        client = FakeRejectingClient()
+        client.token = token
+        self.clients.append(client)
+        return client
+
+
+class FakeRejectingClient:
+    """A client whose connect() fails like a rejected token."""
+
+    def __init__(self) -> None:
+        self.connected = False
+        self.user_id = None
+        self.latency_ms = None
+
+    async def connect(self) -> None:
+        from core.errors import AccountError
+
+        raise AccountError("live client connected without a user (bad token?)")
+
+    async def disconnect(self) -> None:
+        self.connected = False
+
+    def cached_snapshot(self):
+        return {"available": False}
 
 
 class CachePortTests(unittest.IsolatedAsyncioTestCase):

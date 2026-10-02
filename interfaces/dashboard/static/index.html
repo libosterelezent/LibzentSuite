@@ -7,12 +7,18 @@
     <style>   Dark theme ported from the audited original dashboard (CSS
               variables, cards, chips, status pills, warn banner, dialog).
     <body>    Two-column shell:
-                aside#sidebar   navigation — 9 sections exactly per spec §12,
-                                one panel visible at a time (data-section)
+                aside#sidebar   navigation — sections per spec §12
+                                (overview/accounts/plugins/profiles/
+                                ratelimit/cooldowns/tasks/logs/simulation/
+                                advanced), one panel visible at a time
+                                (data-section)
                 main#main       header (ws dot + conn message + token box),
                                 div#errbox  (error accrual: timestamped,
                                 never cleared by successes),
-                                section.panel × 9 + <dialog id="details">
+                                section.panel × 10 + <dialog id="details">
+                                + <dialog id="confirmbox">
+                                + <dialog id="credbox"> (credential entry —
+                                password input, value never displayed back)
     <script>  "use strict" ES module-free JS:
                 store/token     safe-storage fallback + ?token= seeding
                 api()/post()    fetch wrapper (401 hint, {ok,data} unwrap)
@@ -21,6 +27,12 @@
                 connectWS()     live push: stats/log/audit/task, retry cap 10
                 render*()       one renderer family per section
                 load*()         per-section REST loaders (lazy on first open)
+
+  CREDENTIALS: account cards carry a DB/ENV/MISSING chip + a "credential…"
+  dialog (one-way POST — values are stored encrypted server-side and NEVER
+  rendered back); the Advanced panel's ".env import" button is disabled with
+  a tooltip when the server reports credential management locked (no
+  DASHBOARD_TOKEN configured).
 
   HARDENING PORTED FROM THE ORIGINAL (3 audit rounds):
     * esc() on EVERY interpolated server value before innerHTML
@@ -115,6 +127,9 @@
   .chip { font-family: var(--mono); font-size: 11px; padding: 1px 8px; border-radius: 10px;
           background: var(--panel); border: 1px solid var(--line); color: var(--dim); }
   .chip.role { color: var(--accent); border-color: var(--accent); }
+  .chip.cred-db { color: var(--ok); border-color: var(--ok); }
+  .chip.cred-env { color: var(--warn); border-color: var(--warn); }
+  .chip.cred-missing { color: var(--err); border-color: var(--err); }
 
   .warn-item { display: flex; gap: 8px; align-items: baseline; padding: 6px 10px;
                margin-bottom: 6px; border-radius: 6px; font-size: 12.5px; }
@@ -176,6 +191,7 @@
     <button class="navbtn" data-section="plugins">Plugins</button>
     <button class="navbtn" data-section="profiles">Profiles</button>
     <button class="navbtn" data-section="ratelimit">Rate Limits</button>
+    <button class="navbtn" data-section="cooldowns">Cooldowns</button>
     <button class="navbtn" data-section="tasks">Tasks</button>
     <button class="navbtn" data-section="logs">Logs</button>
     <button class="navbtn" data-section="simulation">Simulation</button>
@@ -220,10 +236,16 @@
             <input id="newacct" placeholder="name" size="10">
             <input id="newacct-sync" placeholder="sync group (opt)" size="14">
             <input id="newacct-profiles" placeholder="profiles (opt, space-sep)" size="20">
+            <input id="newacct-cred" type="password" placeholder="credential (optional)"
+                   size="18" autocomplete="new-password">
             <button id="addacct">add account</button>
           </div>
-          <div class="dim mono" style="font-size:11px">token values live in .env — pass a
-            <span class="mono">token_ref</span> via the CLI if needed</div>
+          <div class="dim mono" style="font-size:11px">credentials live here now: an
+            optional value above is stored ENCRYPTED in the database (never echoed
+            back); set or replace it later via each card's "credential…" button. The
+            CLI offers <span class="mono">accounts credential</span> and
+            <span class="mono">credentials import-env</span> (legacy
+            <span class="mono">DISCORD_TOKEN_*</span> .env entries).</div>
         </section>
         <section class="card">
           <h4>Registered accounts</h4>
@@ -335,6 +357,21 @@
         </section>
       </section>
 
+      <!-- ==================================================== Cooldowns -->
+      <section class="panel" id="panel-cooldowns">
+        <h3>Cooldowns</h3>
+        <section class="card">
+          <h4>Active persistent cooldowns
+            <button id="cooldowns-refresh" style="float:right">refresh</button></h4>
+          <div class="rule-row">
+            <select id="cd-acct"><option value="">all accounts</option></select>
+            <span class="dim mono" style="font-size:11px">absolute expiry — remaining
+              time survives restarts</span>
+          </div>
+          <div id="cooldowns-list"><span class="dim">loading…</span></div>
+        </section>
+      </section>
+
       <!-- ======================================================= Tasks -->
       <section class="panel" id="panel-tasks">
         <h3>Tasks</h3>
@@ -396,6 +433,21 @@
       <section class="panel" id="panel-advanced">
         <h3>Advanced</h3>
         <section class="card">
+          <h4>Import .env credentials</h4>
+          <div class="dim">one-shot copy of the legacy
+            <span class="mono">DISCORD_TOKEN_*</span> .env entries of registered
+            accounts into ENCRYPTED database storage. Accounts that already have
+            a stored credential are skipped unless "overwrite" is checked. The
+            report shows account names only — never values.</div>
+          <div class="rule-row" style="margin-top:8px">
+            <label class="chip" style="cursor:pointer">
+              <input type="checkbox" id="imp-overwrite"> overwrite existing
+            </label>
+            <button id="imp-env">import .env credentials</button>
+            <span class="dim mono" id="imp-note" style="font-size:11px"></span>
+          </div>
+        </section>
+        <section class="card">
           <h4>Global emergency stop</h4>
           <div class="dim">cancels every task and stops every account NOW — the
             framework halts. Use when anything looks wrong.</div>
@@ -443,6 +495,20 @@
   </div>
 </dialog>
 
+<dialog id="credbox">
+  <h3 id="cred-title">set credential</h3>
+  <div class="dim" style="margin-bottom:8px">stored ENCRYPTED (Fernet) in the
+    database — saving performs no network activity. The value is never
+    displayed again; only its status (db / env / missing) is shown.</div>
+  <div class="rule-row">
+    <span class="name mono" id="cred-account"></span>
+    <input id="cred-value" type="password" placeholder="new credential" size="34"
+           autocomplete="new-password">
+    <button id="cred-save">save</button>
+  </div>
+  <div class="out-row"><button id="cred-close">close</button></div>
+</dialog>
+
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -483,6 +549,15 @@ function fmtDur(s) {
   if (s < 60) return s + "s";
   if (s < 3600) return Math.floor(s / 60) + "m " + (s % 60) + "s";
   return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+}
+function fmtMMSS(s) {
+  s = Math.max(0, Math.round(Number(s) || 0));
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+}
+function credLabel(state) {
+  if (state === "db") return "DB";
+  if (state === "env") return "ENV";
+  return "MISSING";
 }
 function fmtAge(ts) { return ts ? fmtDur((Date.now() - ts * 1000) / 1000) : "-"; }
 function accountNames() { return (lastStats && lastStats.accounts ? lastStats.accounts : []).map((a) => a.name); }
@@ -668,14 +743,17 @@ function renderAccountCards() {
       "Remove " + a.name + " (must be stopped)? Settings and assignments are deleted too.",
       () => post("/api/accounts/remove", { name: a.name })
         .then(loadAccountsQuiet).catch(showErr)), "danger");
-    row.append(title, status, start, stop, details, estop, remove);
+    const credBtn = btn("credential…", () => openCredentialDialog(a.name));
+    row.append(title, status, credChipFor(a), start, stop, details, credBtn,
+               estop, remove);
     card.appendChild(row);
     const sub = document.createElement("div"); sub.className = "sub";
     sub.textContent =
       "discord id: " + (a.discord_id ?? a.user_id ?? "(not running)") +
       "   latency: " + (a.latency_ms != null ? Math.round(a.latency_ms) + "ms" : "-") +
       "   uptime: " + fmtDur(a.uptime_s) +
-      "   group: " + (a.sync_group || "independent");
+      "   group: " + (a.sync_group || "independent") +
+      (a.cooldowns != null ? "   cooldowns: " + a.cooldowns : "");
     card.appendChild(sub);
     const chips = document.createElement("div"); chips.className = "chips";
     for (const p of a.profiles || []) {
@@ -688,6 +766,49 @@ function renderAccountCards() {
     root.appendChild(card);
   }
 }
+
+function credChipFor(a) {
+  const chip = document.createElement("span");
+  const state = a.credential || "missing";
+  chip.className = "chip cred-" + state;
+  chip.textContent = "credential: " + credLabel(state);
+  chip.title = state === "db" ? "encrypted credential stored in the database"
+    : state === "env" ? "no db credential — legacy .env fallback in use"
+    : "no credential stored (account cannot start)";
+  return chip;
+}
+
+// ---------------------------------------------------------- credential dialog
+let credAccount = null;
+function openCredentialDialog(name) {
+  credAccount = name;
+  $("cred-account").textContent = name;
+  $("cred-value").value = "";
+  $("credbox").showModal();
+  $("cred-value").focus();
+}
+function saveCredential() {
+  const value = $("cred-value").value;
+  if (!value) { showErr("enter a credential value first (or close the dialog)"); return; }
+  if (!token()) {
+    showErr("403 — set DASHBOARD_TOKEN in .env to manage credentials (enter it top right first)");
+    return;
+  }
+  post("/api/accounts/credential", { name: credAccount, credential: value })
+    .then((r) => {
+      $("credbox").close();
+      $("cred-value").value = "";
+      showNote("credential stored for " + credAccount +
+               " — status: " + credLabel(r.credential));
+      loadAccountsQuiet();
+    })
+    .catch(showErr);
+}
+$("cred-save").onclick = saveCredential;
+$("cred-value").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") saveCredential();
+});
+$("cred-close").onclick = () => { $("credbox").close(); $("cred-value").value = ""; };
 
 function loadAccountsQuiet() {
   return api("/api/accounts").then((accounts) => {
@@ -709,8 +830,11 @@ $("addacct").onclick = () => {
   payload.sync_group = $("newacct-sync").value.trim() || null;
   const profiles = $("newacct-profiles").value.trim().split(/\s+/).filter(Boolean);
   if (profiles.length) payload.profiles = profiles;
+  const cred = $("newacct-cred").value;
+  if (cred) payload.credential = cred;  // one-way: request -> encrypted store
   post("/api/accounts/add", payload).then(() => {
-    $("newacct").value = ""; $("newacct-sync").value = ""; $("newacct-profiles").value("");
+    $("newacct").value = ""; $("newacct-sync").value = "";
+    $("newacct-profiles").value = ""; $("newacct-cred").value = "";
     return loadAccountsQuiet();
   }).catch(showErr);
 };
@@ -1462,6 +1586,49 @@ function loadScenarios() {
 }
 LOADERS.simulation = loadScenarios;
 
+// ---------------------------------------------------------------- Cooldowns
+function renderCooldowns(rows) {
+  const root = $("cooldowns-list");
+  root.innerHTML = "";
+  fillSelect($("cd-acct"), accountNames(), "all accounts");
+  if (!(rows || []).length) {
+    root.innerHTML = '<span class="dim">no active cooldowns</span>';
+    return;
+  }
+  const table = document.createElement("table"); table.className = "tbl";
+  table.innerHTML = "<tr><th>account</th><th>plugin</th><th>key</th>" +
+    "<th>remaining</th><th>source</th><th></th></tr>";
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = "<td>" + esc(r.account) + "</td><td>" + esc(r.plugin) + "</td>" +
+      "<td>" + esc(r.cooldown_key) + "</td><td>" + esc(fmtMMSS(r.remaining_s)) +
+      '</td><td class="dim">' + esc(r.source || "-") + "</td>";
+    const td = document.createElement("td");
+    td.appendChild(btn("clear", () => post("/api/cooldowns/clear",
+        { account: r.account, plugin: r.plugin, cooldown_key: r.cooldown_key })
+      .then(loadCooldowns).catch(showErr), "danger"));
+    tr.appendChild(td);
+    table.appendChild(tr);
+  }
+  root.appendChild(table);
+}
+
+function loadCooldowns() {
+  const q = new URLSearchParams();
+  if ($("cd-acct").value) q.set("account", $("cd-acct").value);
+  return api("/api/cooldowns?" + q).then(renderCooldowns).catch((e) => {
+    $("cooldowns-list").innerHTML = "";
+    const line = document.createElement("div");
+    line.className = "dim";
+    line.textContent = "cooldowns unavailable: " + (e.message || e);
+    $("cooldowns-list").appendChild(line);
+    showErr(e);
+  });
+}
+LOADERS.cooldowns = loadCooldowns;
+$("cooldowns-refresh").onclick = () => loadCooldowns().then(() => showNote("cooldowns refreshed"));
+$("cd-acct").onchange = () => loadCooldowns();
+
 // ---------------------------------------------------------------- Advanced
 $("estop").onclick = () => askConfirm("GLOBAL EMERGENCY STOP",
   "Cancel EVERY task and stop EVERY account immediately?",
@@ -1469,6 +1636,40 @@ $("estop").onclick = () => askConfirm("GLOBAL EMERGENCY STOP",
     showNote("emergency stop executed — " + (r.cancelled_tasks ?? "?") + " tasks cancelled");
     loadAccountsQuiet();
   }).catch(showErr));
+
+$("imp-env").onclick = () => askConfirm("Import .env credentials",
+  "Copy every registered account's DISCORD_TOKEN_* .env entry into encrypted" +
+  " database storage" +
+  ($("imp-overwrite").checked ? " — OVERWRITING stored credentials" : "") + "?",
+  () => post("/api/credentials/import-env",
+             { overwrite: $("imp-overwrite").checked })
+    .then((report) => {
+      showNote("credentials imported: " + (report.imported || []).length +
+        " imported, " + (report.skipped || []).length + " skipped, " +
+        Object.keys(report.failed || {}).length + " failed");
+    }).catch(showErr));
+
+// The import button rides the server's credential gate: probe it once when
+// the Advanced panel first opens. 403 => NO DASHBOARD_TOKEN configured =>
+// keep the button disabled with the tooltip naming the fix. (401 = a token
+// IS configured — the button stays usable once it's entered top right.)
+function refreshImportGate() {
+  const impBtn = $("imp-env");
+  fetch("/api/credentials/status", { headers: { "X-Dashboard-Token": token() } })
+    .then((r) => {
+      if (r.status === 403) {
+        impBtn.disabled = true;
+        impBtn.title = "disabled: set DASHBOARD_TOKEN in .env to manage credentials";
+        $("imp-note").textContent = "credential management is locked (no DASHBOARD_TOKEN)";
+      } else {
+        impBtn.disabled = false;
+        impBtn.title = "";
+        $("imp-note").textContent = "";
+      }
+    })
+    .catch(() => { /* offline server: leave defaults, errors surface on use */ });
+}
+LOADERS.advanced = refreshImportGate;
 
 $("shutdown").onclick = () => askConfirm("Graceful shutdown",
   "Shut the whole framework down (drain tasks, stop accounts, close DB)?",

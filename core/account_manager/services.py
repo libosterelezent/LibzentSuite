@@ -42,6 +42,7 @@ from ..errors import (
     CacheInvalid,
     FetchRequired,
     FlowBlocked,
+    PluginError,
     SchedulerError,
     TargetGone,
 )
@@ -156,7 +157,11 @@ class AccountPluginServices:
       * ``ack_registry`` — shared TaskAckRegistry (the manager passes its
         own so the bus is subscribed exactly once),
       * ``client_getter`` — zero-arg callable returning the account's LIVE
-        client (or None); needed for cache-miss DM opens.
+        client (or None); needed for cache-miss DM opens,
+      * ``cooldowns`` — the framework's shared CooldownService; enables the
+        account+plugin-scoped ``cooldown_*`` plugin API below,
+      * ``plugin_state`` — the framework's shared PluginStateService;
+        enables the pair-scoped ``state_*`` plugin API below.
     """
 
     def __init__(
@@ -172,6 +177,8 @@ class AccountPluginServices:
         ack_registry: Optional[TaskAckRegistry] = None,
         client_getter: Optional[Callable[[], Any]] = None,
         api_cache_repo: Any = None,
+        cooldowns: Any = None,
+        plugin_state: Any = None,
     ) -> None:
         self._account = account
         self._plugin = plugin
@@ -187,6 +194,10 @@ class AccountPluginServices:
         self._client_getter = client_getter
         #: per-account persistent entity cache (database.cache repository)
         self._api_cache = api_cache_repo
+        #: shared cooldown service (None = cooldown API unavailable here)
+        self._cooldowns = cooldowns
+        #: shared plugin-state service (None = state API unavailable here)
+        self._plugin_state = plugin_state
         #: bounded wait for a task completion ack (seconds; configurable)
         self.task_ack_timeout: float = 30.0
 
@@ -279,7 +290,7 @@ class AccountPluginServices:
         user_id = int(user_id)
         if self._api_cache is not None:
             try:
-                stored = self._api_cache.get(self._account, "user", str(user_id))
+                stored = await self._api_cache.get(self._account, "user", str(user_id))
             except Exception:
                 stored = None
             if isinstance(stored, dict) and stored.get("id") == user_id:
@@ -290,13 +301,92 @@ class AccountPluginServices:
         user = await client.fetch_user(user_id)
         if user is not None and self._api_cache is not None:
             try:
-                self._api_cache.set(self._account, "user", str(user_id), {
+                await self._api_cache.set(self._account, "user", str(user_id), {
                     "id": user_id,
                     "name": getattr(user, "name", "") or "",
                 })
             except Exception:
                 pass
         return user
+
+    # ------------------------------------------------------------- cooldowns
+    def _require_cooldowns(self) -> Any:
+        """The shared CooldownService, or a clear error when unwired."""
+        if self._cooldowns is None:
+            raise PluginError(
+                f"cooldown service is not wired for {self._account}/{self._plugin} "
+                "(cooldowns require the framework's CooldownService)"
+            )
+        return self._cooldowns
+
+    async def cooldown_set(self, key: str, duration_s: float, *,
+                           source: str = "plugin", reason: str = "",
+                           metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Start (or replace) a cooldown for THIS (account, plugin) pair.
+
+        ``duration_s`` seconds from NOW; the absolute expiry is persisted,
+        so the cooldown survives restarts with the correct remaining time.
+        Returns the cooldown row (never contains token material).
+        """
+        return await self._require_cooldowns().set(
+            self._account, self._plugin, key, duration_s,
+            source=source, reason=reason, metadata=metadata,
+        )
+
+    async def cooldown_remaining(self, key: str) -> float:
+        """Seconds left on a cooldown (0.0 when none/expired)."""
+        return await self._require_cooldowns().remaining(
+            self._account, self._plugin, key
+        )
+
+    async def cooldown_active(self, key: str) -> bool:
+        """True when a cooldown is currently active for this key."""
+        return await self._require_cooldowns().is_active(
+            self._account, self._plugin, key
+        )
+
+    async def cooldown_clear(self, key: str) -> bool:
+        """Remove one cooldown (memory + database); True when it existed."""
+        return await self._require_cooldowns().clear(
+            self._account, self._plugin, key
+        )
+
+    async def cooldown_list(self) -> List[Dict[str, Any]]:
+        """Every ACTIVE cooldown of this (account, plugin) pair, soonest
+        expiry first."""
+        return await self._require_cooldowns().active_for(
+            self._account, plugin=self._plugin
+        )
+
+    # ----------------------------------------------------------- plugin state
+    def _require_plugin_state(self) -> Any:
+        """The shared PluginStateService, or a clear error when unwired."""
+        if self._plugin_state is None:
+            raise PluginError(
+                f"plugin-state service is not wired for "
+                f"{self._account}/{self._plugin} (state persistence requires "
+                "the framework's PluginStateService)"
+            )
+        return self._plugin_state
+
+    async def state_get(self, key: str, default: Any = None) -> Any:
+        """Read one persisted value from this (account, plugin) scope."""
+        return await self._require_plugin_state().get_pair(
+            self._account, self._plugin, key, default
+        )
+
+    async def state_set(self, key: str, value: Any) -> None:
+        """Persist one value in this (account, plugin) scope (JSON value)."""
+        await self._require_plugin_state().set_pair(
+            self._account, self._plugin, key, value
+        )
+
+    async def state_delete(self, key: str) -> bool:
+        """Delete one value from this (account, plugin) scope; True when it
+        existed."""
+        return await self._require_plugin_state().delete_pair(
+            self._account, self._plugin, key
+        )
 
     # -------------------------------------------------------------- inbound
     async def wait_for_message(

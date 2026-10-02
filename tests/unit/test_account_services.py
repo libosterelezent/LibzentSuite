@@ -168,12 +168,12 @@ class LiveSettingsTests(unittest.IsolatedAsyncioTestCase):
         from tests.unit.test_plugin_manager import make_manager as make_pm
 
         manager, bus, _ = make_pm()
-        manager.attach_account("alpha")
+        await manager.attach_account("alpha")
         await manager.activate_account("alpha", lambda _name: None)
         live = manager.live_settings("alpha", "spy")
         self.assertIsInstance(live, dict)
         # a runtime change through the manager mutates the LIVE dict...
-        manager.set_setting("alpha", "spy", "greeting", "changed")
+        await manager.set_setting("alpha", "spy", "greeting", "changed")
         self.assertEqual(live["greeting"], "changed")
         # ...and states() still renders the new value (display copy)
         states = {s["name"]: s for s in manager.states("alpha")}
@@ -303,6 +303,103 @@ class OpenDmTests(unittest.IsolatedAsyncioTestCase):
         services = make_services(client=None)
         with self.assertRaises(AccountError):
             await services.open_dm(123)
+
+
+class CooldownStateApiTests(unittest.IsolatedAsyncioTestCase):
+    """The pair-scoped cooldown_* / state_* plugin API on the services
+    facade: persistence, scoping, and the clear-error degradation when the
+    services are not wired."""
+
+    def _services(self, cooldowns=None, plugin_state=None):
+        cache = DiscordCache("alpha")
+        cache.ingest_snapshot(default_snapshot())
+        return AccountPluginServices(
+            "alpha", "soulcopy",
+            bus=EventBus(),
+            scheduler=FakeScheduler(),
+            credentials=Credentials.from_values({"MUDAE_BOT_ID": "123"}),
+            cache=cache,
+            settings_dict={},
+            cooldowns=cooldowns,
+            plugin_state=plugin_state,
+        )
+
+    async def test_cooldown_and_state_over_real_services(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from core.cooldowns import CooldownService
+        from core.plugin_state import PluginStateService
+        from database.db import Database
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "t.db")
+            await db.connect()
+            try:
+                cooldowns = CooldownService(db.cooldowns, time_fn=lambda: 1000.0)
+                await cooldowns.restore()
+                plugin_state = PluginStateService(db.kv)
+                services = self._services(cooldowns, plugin_state)
+
+                self.assertFalse(await services.cooldown_active("claim"))
+                row = await services.cooldown_set("claim", 60.0, reason="grinding")
+                self.assertAlmostEqual(row["expires_at"], 1060.0)
+                self.assertTrue(await services.cooldown_active("claim"))
+                self.assertAlmostEqual(await services.cooldown_remaining("claim"), 60.0)
+                listed = await services.cooldown_list()
+                self.assertEqual([r["cooldown_key"] for r in listed], ["claim"])
+                self.assertTrue(await services.cooldown_clear("claim"))
+                self.assertFalse(await services.cooldown_active("claim"))
+
+                self.assertIsNone(await services.state_get("counter"))
+                self.assertEqual(await services.state_get("counter", 5), 5)
+                await services.state_set("counter", 41)
+                self.assertEqual(await services.state_get("counter"), 41)
+                await services.state_set("counter", 42)
+                self.assertEqual(await services.state_get("counter"), 42)
+                self.assertTrue(await services.state_delete("counter"))
+                self.assertIsNone(await services.state_get("counter"))
+            finally:
+                await db.close()
+
+    async def test_pair_scoping_isolation(self) -> None:
+        from core.plugin_state import PluginStateService
+
+        written: dict = {}
+
+        class KvSpy:
+            async def get(self, key):
+                return written.get(key)
+
+            async def set(self, key, value):
+                written[key] = value
+
+            async def delete(self, key):
+                return written.pop(key, None) is not None
+
+        plugin_state = PluginStateService(KvSpy())
+        alpha = self._services(plugin_state=plugin_state)
+        beta = AccountPluginServices(
+            "beta", "soulcopy",
+            bus=EventBus(), scheduler=FakeScheduler(),
+            credentials=Credentials.from_values({}),
+            cache=DiscordCache("beta"), settings_dict={},
+            plugin_state=plugin_state,
+        )
+        await alpha.state_set("k", "alpha-value")
+        await beta.state_set("k", "beta-value")
+        self.assertEqual(await alpha.state_get("k"), "alpha-value")
+        self.assertEqual(await beta.state_get("k"), "beta-value")
+
+    async def test_unwired_services_raise_clear_errors(self) -> None:
+        from core.errors import PluginError
+
+        services = self._services()
+        with self.assertRaises(PluginError) as ctx:
+            await services.cooldown_set("k", 5)
+        self.assertIn("cooldown service is not wired", str(ctx.exception))
+        with self.assertRaises(PluginError) as ctx:
+            await services.state_get("k")
+        self.assertIn("plugin-state service is not wired", str(ctx.exception))
 
 
 class PassthroughTests(unittest.IsolatedAsyncioTestCase):

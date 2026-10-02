@@ -1,20 +1,26 @@
 """SimulationRunner — a COMPLETE ephemeral stack per scenario run (spec §16).
 
-Wiring follows the pinned constructors in INTEGRATION.md exactly::
+Wiring follows the pinned constructors in INTEGRATION.md exactly (async
+boot order, same as the production bootstrap)::
 
-    Database(":memory:") + migrate()
+    await Database(":memory:").connect()
+    CredentialService(db.credentials) / CooldownService(db.cooldowns) /
+        PluginStateService(db.kv)  <- synthetic creds, restore()d
     EventBus()
     LogService()                                   (no db — sim logs stay in RAM)
     SettingsManager(bus, logger, plugin_repo=db.plugins,
                     account_settings_repo=db.account_settings,
-                    global_layer=DEMO_PLUGIN_SETTINGS)
-    RateLimitManager(bus, logger, db.policies)
+                    global_layer=DEMO_PLUGIN_SETTINGS) + await load()
+    RateLimitManager(bus, logger, db.policies) + await load_persisted()
     AuditRecorder(db.audit)
     TaskScheduler(bus, logger, limiter, sender)    <- LATE-BOUND SENDER (below)
-    PluginManager(bus, logger, settings, db.plugins, plugin_dir) + discover()
-    ProfileManager(db.profiles, logger, db.accounts)
+    PluginManager(bus, logger, settings, db.plugins, plugin_dir)
+        + discover() + await persist_metadata()
+    ProfileManager(db.profiles, logger, db.accounts) + await load()
     AccountManager(bus, logger, db.accounts, plugins_mgr, profiles, scheduler,
-                   settings, audit, client_factory, credentials[, limiter])
+                   settings, audit, client_factory, credentials[, limiter],
+                   credential_service=..., cooldowns=..., plugin_state=...)
+        + await load()
 
 THE LATE-BOUND SENDER SEAM (documented for the integrator): the scheduler
 needs the account manager's ``send_hook`` as its sender, but the account
@@ -105,7 +111,10 @@ def _load_stack_modules() -> SimpleNamespace:
     try:
         from core.account_manager import AccountManager
         from core.audit import AuditRecorder
+        from core.cooldowns import CooldownService
+        from core.credential_service import CredentialService
         from core.plugin_manager import PluginManager
+        from core.plugin_state import PluginStateService
         from core.profile_manager import ProfileManager
         from core.rate_limit_manager import MIN_ACTION_INTERVAL, RateLimitManager
         from core.task_scheduler import TaskScheduler
@@ -120,7 +129,10 @@ def _load_stack_modules() -> SimpleNamespace:
     return SimpleNamespace(
         AccountManager=AccountManager,
         AuditRecorder=AuditRecorder,
+        CooldownService=CooldownService,
+        CredentialService=CredentialService,
         PluginManager=PluginManager,
+        PluginStateService=PluginStateService,
         ProfileManager=ProfileManager,
         RateLimitManager=RateLimitManager,
         TaskScheduler=TaskScheduler,
@@ -187,11 +199,18 @@ class SimulationRunner:
         # --- infrastructure (pinned constructors, INTEGRATION.md)
         try:
             db = mods.Database(":memory:")
-            db.migrate()
+            await db.connect()
         except Exception as exc:
             raise SimulationError(
                 f"scenario {name!r}: in-memory database failed: {exc}"
             ) from exc
+
+        # shared services over the ephemeral database, wired exactly like
+        # the production bootstrap so scenarios exercise them
+        credential_service = mods.CredentialService(db.credentials)
+        cooldowns = mods.CooldownService(db.cooldowns)
+        plugin_state = mods.PluginStateService(db.kv)
+
         bus = EventBus()
         logger = LogService()
         # LOGGER SEAM (documented in the module docstring): managers mix
@@ -211,7 +230,9 @@ class SimulationRunner:
             account_settings_repo=db.account_settings,
             global_layer=DEMO_PLUGIN_SETTINGS,
         )
+        await settings.load()
         limiter = mods.RateLimitManager(bus, log_ratelimit, db.policies)
+        await limiter.load_persisted()
         audit = mods.AuditRecorder(db.audit)
 
         # LATE-BOUND SENDER SEAM — see module docstring
@@ -226,18 +247,23 @@ class SimulationRunner:
         )
 
         plugins_mgr = mods.PluginManager(
-            bus, log_plugins, settings, db.plugins, self._plugin_dir
+            bus, log_plugins, settings, db.plugins, self._plugin_dir,
+            credential_service=credential_service, cooldowns=cooldowns,
+            plugin_state=plugin_state,
         )
         try:
             plugins_mgr.discover()
+            await plugins_mgr.persist_metadata()
         except Exception as exc:
-            db.close()
+            await db.close()
             raise SimulationError(
                 f"scenario {name!r}: plugin discovery failed in "
                 f"{self._plugin_dir!r}: {exc}"
             ) from exc
 
         profiles = mods.ProfileManager(db.profiles, log_profiles, db.accounts)
+        await profiles.load()
+        await cooldowns.restore()
 
         user_ids = {ACCOUNT_NAME: SYNTHETIC_ALPHA_ID}
 
@@ -251,11 +277,22 @@ class SimulationRunner:
                 f"DISCORD_TOKEN_{ACCOUNT_NAME.upper()}": f"sim-token-{ACCOUNT_NAME}",
             }
         )
+        # import the account's synthetic token into the ephemeral credential
+        # store so the DB-first resolution path is the one scenarios exercise
+        try:
+            await credential_service.store(
+                ACCOUNT_NAME, f"sim-token-{ACCOUNT_NAME}"
+            )
+        except Exception:
+            pass
 
         accounts = self._build_account_manager(
             mods, bus, log_accounts, db, plugins_mgr, profiles, scheduler,
             settings, audit, client_factory, credentials, limiter,
+            credential_service=credential_service, cooldowns=cooldowns,
+            plugin_state=plugin_state,
         )
+        await accounts.load()
         box["send"] = accounts.send_hook  # fill the seam BEFORE start()
 
         # a real ControlAPI + the mention-prefix bridge, so scenarios can
@@ -329,7 +366,7 @@ class SimulationRunner:
                 await bus.publish(ScenarioStarted(account="", name=name))
                 scheduler.start()
                 scheduler_started = True
-                accounts.add_account(ACCOUNT_NAME)
+                await accounts.add_account(ACCOUNT_NAME)
                 await accounts.start(ACCOUNT_NAME)
                 account_started = True
 
@@ -399,7 +436,7 @@ class SimulationRunner:
                 except Exception as exc:
                     failures.append(f"scheduler stop failed: {exc}")
             try:
-                db.close()
+                await db.close()
             except Exception as exc:
                 failures.append(f"database close failed: {exc}")
             unsub_audit()
@@ -435,25 +472,38 @@ class SimulationRunner:
         client_factory: Callable[[str, str], SimClient],
         credentials: Credentials,
         limiter: Any,
+        *,
+        credential_service: Any = None,
+        cooldowns: Any = None,
+        plugin_state: Any = None,
     ) -> Any:
         """AccountManager with the pinned positional arguments.
 
-        ``limiter`` is passed as a keyword when the constructor accepts it
-        (A7 assignment wording); the INTEGRATION.md pinned signature omits
-        it, so a TypeError falls back to the keyword-less construction —
-        both variants are supported (documented seam, see module docstring).
+        ``limiter`` (and the shared services) are passed as keywords when
+        the constructor accepts them; a TypeError falls back to the leaner
+        construction — both variants are supported (documented seam, see
+        module docstring).
         """
         try:
             return mods.AccountManager(
                 bus, logger, db.accounts, plugins_mgr, profiles, scheduler,
                 settings, audit, client_factory, credentials, limiter=limiter,
                 api_cache_repo=db.cache,
+                credential_service=credential_service, cooldowns=cooldowns,
+                plugin_state=plugin_state,
             )
         except TypeError:
-            return mods.AccountManager(
-                bus, logger, db.accounts, plugins_mgr, profiles, scheduler,
-                settings, audit, client_factory, credentials,
-            )
+            try:
+                return mods.AccountManager(
+                    bus, logger, db.accounts, plugins_mgr, profiles, scheduler,
+                    settings, audit, client_factory, credentials, limiter=limiter,
+                    api_cache_repo=db.cache,
+                )
+            except TypeError:
+                return mods.AccountManager(
+                    bus, logger, db.accounts, plugins_mgr, profiles, scheduler,
+                    settings, audit, client_factory, credentials,
+                )
 
 
 __all__ = ["SimulationRunner"]

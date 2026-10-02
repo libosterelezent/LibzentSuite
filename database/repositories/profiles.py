@@ -22,7 +22,7 @@ __all__ = ["ProfilesRepository"]
 class ProfilesRepository(BaseRepository):
     """CRUD for profiles, keyed by profile name."""
 
-    def upsert(self, name: str, plugins: Iterable[str], description: str = "") -> None:
+    async def upsert(self, name: str, plugins: Iterable[str], description: str = "") -> None:
         """Create or fully replace a profile (one transaction).
 
         The plugin list is deduplicated and sorted — canonical form on disk
@@ -36,48 +36,48 @@ class ProfilesRepository(BaseRepository):
             raise DatabaseError("profile name must be a non-empty string")
         name = name.strip()
         cleaned = sorted({str(p) for p in (plugins or [])})
-        with self._tx(f"upsert profile {name!r}") as conn:
-            conn.execute(
+        async with self._tx(f"upsert profile {name!r}") as conn:
+            await conn.execute(
                 """INSERT INTO profiles (name, description) VALUES (?, ?)
                    ON CONFLICT(name) DO UPDATE SET description = excluded.description""",
                 (name, description or ""),
             )
-            conn.execute("DELETE FROM profile_plugins WHERE profile = ?", (name,))
-            conn.executemany(
+            await conn.execute("DELETE FROM profile_plugins WHERE profile = ?", (name,))
+            await conn.executemany(
                 "INSERT INTO profile_plugins (profile, plugin) VALUES (?, ?)",
                 [(name, plugin) for plugin in cleaned],
             )
 
-    def delete(self, name: str) -> bool:
+    async def delete(self, name: str) -> bool:
         """Delete a profile, its plugin memberships AND its account
         assignments; True when the profile existed."""
-        with self._tx(f"delete profile {name!r}") as conn:
-            cur = conn.execute("DELETE FROM profiles WHERE name = ?", (name,))
+        async with self._tx(f"delete profile {name!r}") as conn:
+            cur = await conn.execute("DELETE FROM profiles WHERE name = ?", (name,))
             existed = cur.rowcount > 0
-            conn.execute("DELETE FROM profile_plugins WHERE profile = ?", (name,))
-            conn.execute("DELETE FROM account_profiles WHERE profile = ?", (name,))
+            await conn.execute("DELETE FROM profile_plugins WHERE profile = ?", (name,))
+            await conn.execute("DELETE FROM account_profiles WHERE profile = ?", (name,))
         return existed
 
-    def get(self, name: str) -> Optional[ProfileRecord]:
+    async def get(self, name: str) -> Optional[ProfileRecord]:
         """One profile with its sorted plugin list (None when unknown)."""
-        row = self._read_one("SELECT name, description FROM profiles WHERE name = ?", (name,))
+        row = await self._fetch_one("SELECT name, description FROM profiles WHERE name = ?", (name,))
         if row is None:
             return None
         plugins = [
             r["plugin"]
-            for r in self._read(
+            for r in await self._fetch_all(
                 "SELECT plugin FROM profile_plugins WHERE profile = ? ORDER BY plugin", (name,)
             )
         ]
         return ProfileRecord(name=row["name"], plugins=plugins, description=row["description"])
 
-    def list(self) -> List[ProfileRecord]:
+    async def list(self) -> List[ProfileRecord]:
         """All profiles ordered by name, each with its sorted plugins."""
-        rows = self._read("SELECT name, description FROM profiles ORDER BY name")
+        rows = await self._fetch_all("SELECT name, description FROM profiles ORDER BY name")
         if not rows:
             return []
         memberships = {}
-        for row in self._read("SELECT profile, plugin FROM profile_plugins ORDER BY plugin"):
+        for row in await self._fetch_all("SELECT profile, plugin FROM profile_plugins ORDER BY plugin"):
             memberships.setdefault(row["profile"], []).append(row["plugin"])
         return [
             ProfileRecord(

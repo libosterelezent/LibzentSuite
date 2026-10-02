@@ -135,6 +135,39 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         );
         """,
     ),
+    (
+        3,
+        "secure credentials + persistent cooldowns",
+        """
+        -- Encrypted account credentials (spec §12): Fernet ciphertext ONLY;
+        -- the key lives OUTSIDE the database (state/credentials.key 0600 or
+        -- SM_MASTER_KEY env) — a stolen DB never yields usable tokens.
+        CREATE TABLE IF NOT EXISTS credentials (
+            account    TEXT PRIMARY KEY,
+            ciphertext BLOB NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        -- Generic persistent cooldowns (spec §21/§22): ABSOLUTE epoch
+        -- expiry so a restart restores the REMAINING time, never restarts
+        -- it. Core owns persistence/lookup/expiry; plugins own meaning.
+        CREATE TABLE IF NOT EXISTS cooldowns (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            account       TEXT NOT NULL,
+            plugin        TEXT NOT NULL,
+            cooldown_key  TEXT NOT NULL,
+            started_at    REAL NOT NULL,
+            expires_at    REAL NOT NULL,
+            source        TEXT NOT NULL DEFAULT '',
+            reason        TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at    REAL NOT NULL,
+            updated_at    REAL NOT NULL,
+            UNIQUE (account, plugin, cooldown_key)
+        );
+        CREATE INDEX IF NOT EXISTS cooldown_expiry ON cooldowns (expires_at);
+        """,
+    ),
 ]
 
 

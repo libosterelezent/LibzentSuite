@@ -37,14 +37,15 @@ class StubLogger:
 
 
 class FakePolicyRepo:
-    """List-based RatePolicyRepository double backed by real RatePolicyRecords."""
+    """List-based RatePolicyRepository double backed by real RatePolicyRecords
+    (async methods, like the real repository)."""
 
     def __init__(self, rows=None):
         self.rows = list(rows or [])
         self.set_calls = []
         self.delete_calls = []
 
-    def list(self):
+    async def list(self):
         return list(self.rows)
 
     def set(self, level, owner, action, interval, jitter_min, jitter_max):
@@ -76,7 +77,7 @@ class DictRowRepo:
         self.set_calls = []
         self.delete_calls = []
 
-    def list(self):
+    async def list(self):
         return list(self.rows)
 
     def set(self, *args):
@@ -294,15 +295,16 @@ class TestSetPolicy(unittest.TestCase):
         with self.assertRaises(RatePolicyError):
             manager.set_policy_values("message", 2.0, level="account_plugin", owner="alpha")
 
-    def test_clear_policy_removes_repo_and_memory(self):
+    def test_clear_policy_removes_memory_only(self):
         repo = FakePolicyRepo()
         manager = make_manager(repo)
         manager.set_policy_values("message", 3.0, level="account", owner="alpha")
-        self.assertEqual(len(repo.rows), 1)
         self.assertTrue(manager.clear_policy("account", "alpha", "message"))
-        self.assertEqual(repo.rows, [])
         self.assertEqual(manager.policies(), [])
         self.assertFalse(manager.clear_policy("account", "alpha", "message"))
+        # the ENGINE does not persist anymore (ControlAPI owns it)
+        self.assertEqual(repo.set_calls, [])
+        self.assertEqual(repo.delete_calls, [])
 
     def test_clear_policy_invalid_scope(self):
         manager = make_manager()
@@ -323,56 +325,70 @@ class TestSetPolicy(unittest.TestCase):
 
 
 # ------------------------------------------------------------- persistence
-class TestPersistenceRoundTrip(unittest.TestCase):
-    """Stored policies load at init — both row shapes; bad rows are skipped."""
+class TestPersistenceRoundTrip(unittest.IsolatedAsyncioTestCase):
+    """Stored policies load via ``await load_persisted()`` (boot path) —
+    both row shapes; bad rows are skipped. The ENGINE no longer WRITES:
+    set/clear are memory-only and persistence belongs to the ControlAPI."""
 
-    def test_load_rate_policy_records(self):
+    async def test_load_rate_policy_records(self):
         repo = FakePolicyRepo([
             RatePolicyRecord("global", None, "message", 3.0, 0.2, 0.8),
             RatePolicyRecord("account", "alpha", "message", 5.0),
         ])
         manager = make_manager(repo)
+        self.assertEqual(manager.policies(), [])  # nothing before load
+        await manager.load_persisted()
         rows = manager.policies()
         self.assertEqual(len(rows), 2)
         self.assertEqual(manager.effective("message")["interval"], 3.0)
         self.assertEqual(manager.effective("message", account="alpha")["interval"], 5.0)
 
-    def test_load_dict_rows(self):
+    async def test_load_dict_rows(self):
         repo = DictRowRepo([
             {"level": "plugin", "owner": "roll", "action": "fire",
              "interval": 2.5, "jitter_min": 0.1, "jitter_max": 0.6},
         ])
         manager = make_manager(repo)
+        await manager.load_persisted()
         self.assertEqual(manager.effective("fire", plugin="roll")["interval"], 2.5)
 
-    def test_invalid_rows_skipped_not_fatal(self):
+    async def test_invalid_rows_skipped_not_fatal(self):
         repo = DictRowRepo([
             {"level": "bogus", "owner": None, "action": "x", "interval": 2.0},
             {"level": "global", "owner": None, "action": "ok", "interval": 4.0},
             {"level": "global", "owner": None, "action": "bad", "interval": "oops"},
         ])
         manager = make_manager(repo)
+        await manager.load_persisted()
         rows = manager.policies()
         self.assertEqual([r["action"] for r in rows], ["ok"])
 
-    def test_set_persists_via_repo(self):
+    async def test_set_is_memory_only_repo_untouched(self):
         repo = FakePolicyRepo()
         manager = make_manager(repo)
         manager.set_policy_values("poke", 2.0, 0.1, 0.5, level="account_plugin", owner="a/p")
         self.assertEqual(
             repo.set_calls,
-            [("account_plugin", "a/p", "poke", 2.0, 0.1, 0.5)],
+            [],  # persistence moved to the ControlAPI layer
         )
-        # a fresh manager on the same repo sees the policy again
+        self.assertEqual(repo.rows, [])
+        # reload of an unchanged repo therefore sees nothing
         reloaded = make_manager(FakePolicyRepo(repo.rows))
-        self.assertEqual(reloaded.effective("poke", account="a", plugin="p")["interval"], 2.0)
+        await reloaded.load_persisted()
+        self.assertEqual(reloaded.policies(), [])
 
-    def test_failing_repo_does_not_block_set(self):
+    async def test_load_persisted_without_repo_is_a_noop(self):
+        manager = make_manager()
+        await manager.load_persisted()  # must not raise
+        self.assertEqual(manager.policies(), [])
+
+    async def test_failing_repo_list_is_logged_not_fatal(self):
         class ExplodingRepo(FakePolicyRepo):
-            def set(self, *args):
+            async def list(self):
                 raise RuntimeError("db down")
 
         manager = make_manager(ExplodingRepo())
+        await manager.load_persisted()
         policy = manager.set_policy_values("message", 2.0)
         self.assertEqual(policy.interval, 2.0)
         self.assertEqual(manager.policies()[0]["interval"], 2.0)

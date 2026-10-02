@@ -1,6 +1,13 @@
-"""Unit tests for core.audit: ring, tail filters, DB sink, history, format."""
+"""Unit tests for core.audit: ring, tail filters, DB sink, history, format.
+
+Queued persistence (spec §29): record() enqueues; the DB write happens on
+the async drain worker started by ``start_persistence(repo)``. DB-facing
+tests drive that lifecycle; history() is async (awaits the repository) and
+falls back to the ring.
+"""
 from __future__ import annotations
 
+import asyncio
 import time
 import unittest
 
@@ -8,7 +15,7 @@ from core.audit import AuditEntry, AuditRecorder, format_audit
 
 
 class FakeAuditRepo:
-    """Duck-typed AuditRepository (add/recent), fault-togglable."""
+    """Duck-typed AuditRepository (async add/recent), fault-togglable."""
 
     def __init__(self) -> None:
         self.added = []
@@ -16,13 +23,13 @@ class FakeAuditRepo:
         self.rows = []
         self.fail = False
 
-    def add(self, entry):
+    async def add(self, entry):
         if self.fail:
             raise RuntimeError("audit db down")
         self.added.append(dict(entry))
         return len(self.added)
 
-    def recent(self, limit=100, account=None):
+    async def recent(self, limit=100, account=None):
         if self.fail:
             raise RuntimeError("audit db down")
         self.recent_args.append((limit, account))
@@ -82,25 +89,30 @@ class TestRecordAndTail(unittest.TestCase):
         self.assertEqual([e["content"] for e in recorder.tail(2)], ["m2", "m3"])
 
 
-class TestDbSink(unittest.TestCase):
-    def test_best_effort_db_write(self) -> None:
+class TestDbSink(unittest.IsolatedAsyncioTestCase):
+    async def test_best_effort_db_write(self) -> None:
         repo = FakeAuditRepo()
-        recorder = AuditRecorder(db_repo=repo)
+        recorder = AuditRecorder()
+        await recorder.start_persistence(repo)
         recorder.record("alpha", "out", "message", 500, "stored")
+        await recorder.stop_persistence()  # drain before asserting
         self.assertEqual(len(repo.added), 1)
         self.assertEqual(repo.added[0]["content"], "stored")
 
-    def test_db_sink_failure_never_breaks_recording(self) -> None:
+    async def test_db_sink_failure_never_breaks_recording(self) -> None:
         class Bomber:
-            def add(self, entry):
+            async def add(self, entry):
                 raise RuntimeError("db down")
 
-        recorder = AuditRecorder(db_repo=Bomber())
+        recorder = AuditRecorder()
+        await recorder.start_persistence(Bomber())
         entry = recorder.record("alpha", "out", "message", 500, "still fine")
+        await recorder.stop_persistence()
         self.assertEqual(entry["content"], "still fine")
         self.assertEqual(len(recorder.tail(1)), 1)
+        self.assertEqual(recorder.persistence_stats()["db_failures"], 1)
 
-    def test_history_from_repo_drops_id_and_rounds_ts(self) -> None:
+    async def test_history_from_repo_drops_id_and_rounds_ts(self) -> None:
         repo = FakeAuditRepo()
         repo.rows = [
             {"id": 7, "ts": 1700000000.123456, "account": "alpha",
@@ -108,30 +120,30 @@ class TestDbSink(unittest.TestCase):
              "content": "db row", "wait_ms": 10.0, "jitter_ms": 2.0, "note": ""}
         ]
         recorder = AuditRecorder(db_repo=repo)
-        rows = recorder.history(limit=10)
+        rows = await recorder.history(limit=10)
         self.assertEqual(len(rows), 1)
         self.assertNotIn("id", rows[0])
         self.assertEqual(rows[0]["ts"], round(1700000000.123456, 3))
 
-    def test_history_passes_limit_and_account_to_repo(self) -> None:
+    async def test_history_passes_limit_and_account_to_repo(self) -> None:
         repo = FakeAuditRepo()
         recorder = AuditRecorder(db_repo=repo)
-        recorder.history(limit=17, account="alpha")
+        await recorder.history(limit=17, account="alpha")
         self.assertEqual(repo.recent_args, [(17, "alpha")])
 
-    def test_history_falls_back_to_ring_when_repo_fails(self) -> None:
+    async def test_history_falls_back_to_ring_when_repo_fails(self) -> None:
         repo = FakeAuditRepo()
         recorder = AuditRecorder(db_repo=repo)
         recorder.record("alpha", "out", "message", 500, "ring row")
         repo.fail = True
-        rows = recorder.history()
+        rows = await recorder.history()
         self.assertEqual([r["content"] for r in rows], ["ring row"])
 
-    def test_history_without_repo_uses_ring(self) -> None:
+    async def test_history_without_repo_uses_ring(self) -> None:
         recorder = AuditRecorder()
         recorder.record("alpha", "out", "message", 500, "a")
         recorder.record("beta", "out", "message", 501, "b")
-        self.assertEqual([r["content"] for r in recorder.history(account="alpha")], ["a"])
+        self.assertEqual([r["content"] for r in await recorder.history(account="alpha")], ["a"])
 
 
 class TestSubscriptions(unittest.TestCase):

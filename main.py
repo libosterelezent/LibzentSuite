@@ -49,7 +49,7 @@ async def run_sim(name: str | None, list_only: bool) -> int:
 
 async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
     """Boot the live stack and attach the requested surfaces."""
-    framework = build(
+    framework = await build(
         env_file=args.env,
         config_dir=args.config,
         db_path=args.db,
