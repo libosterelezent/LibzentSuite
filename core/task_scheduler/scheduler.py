@@ -226,6 +226,7 @@ class TaskScheduler:
         self._lanes: Dict[str, asyncio.Task] = {}
         self._worker_refs: set = set()  # strong refs to spawned lane tasks
         self._tail_refs: set = set()  # strong refs to scheduled finish tails
+        self._inflight_tails = 0  # finish tails running now (drain barrier)
         self._gate = _GrantGate()
         self._started = False
         self._stopping = False
@@ -313,7 +314,11 @@ class TaskScheduler:
                 except (TypeError, ValueError):
                     budget = 10.0
                 deadline = time.monotonic() + budget
-                while self._tasks and time.monotonic() < deadline:
+                # drain BOTH the live tasks and their in-flight finish tails:
+                # _apply_terminal removes the task from _tasks BEFORE the
+                # awaited history write lands, so stopping at "no tasks" would
+                # cancel the lane mid-write and silently drop the row
+                while (self._tasks or self._inflight_tails) and time.monotonic() < deadline:
                     await asyncio.sleep(0.01)
             for task in list(self._tasks.values()):
                 await self._finish(task, STATUS_CANCELLED)
@@ -835,13 +840,15 @@ class TaskScheduler:
         _apply_terminal race reaches this. Order matches the historical
         contract: history row, audit row, terminal events.
         """
-        if self._history_repo is not None:
-            try:
-                await self._history_repo.add(row)
-            except Exception:
-                self._log("warning", "scheduler",
-                          f"task {task.id} history write failed (continuing): "
-                          f"{type(exc).__name__}: {exc}")
+        self._inflight_tails += 1
+        try:
+            if self._history_repo is not None:
+                try:
+                    await self._history_repo.add(row)
+                except Exception as exc:
+                    self._log("warning", "scheduler",
+                              f"task {task.id} history write failed (continuing): "
+                              f"{type(exc).__name__}: {exc}")
 
         # AUDIT INTEGRITY: only record an outbound row when the task could
         # actually have touched the API. COMPLETED/FAILED/TIMED_OUT attempts
@@ -849,42 +856,44 @@ class TaskScheduler:
         # cancelled mid-send (checkpoint 2) — a cancel while still queued or
         # parked on the grant NEVER sent and must not appear in the trail
         # (the pacing checks read audit timestamps as real send times).
-        auditable = status != STATUS_CANCELLED or task.sender_ran
-        if self._audit is not None and auditable and task.action in _AUDITED_ACTIONS:
-            note = f"plugin={task.plugin} task={task.id}"
-            if task.attempts > 0:
-                note += f" attempts={task.attempts + 1}"
-            try:
-                self._audit.record(
-                    account=task.account,
-                    direction="out",
-                    action=task.action,
-                    channel_id=task.channel_id,
-                    content=task.content,
-                    wait_ms=task.grant_wait_ms,
-                    jitter_ms=task.grant_jitter_ms,
-                    note=note,
-                )
-            except Exception:
-                self._log("warning", "scheduler", f"task {task.id} audit record failed (continuing)")
+            auditable = status != STATUS_CANCELLED or task.sender_ran
+            if self._audit is not None and auditable and task.action in _AUDITED_ACTIONS:
+                note = f"plugin={task.plugin} task={task.id}"
+                if task.attempts > 0:
+                    note += f" attempts={task.attempts + 1}"
+                try:
+                    self._audit.record(
+                        account=task.account,
+                        direction="out",
+                        action=task.action,
+                        channel_id=task.channel_id,
+                        content=task.content,
+                        wait_ms=task.grant_wait_ms,
+                        jitter_ms=task.grant_jitter_ms,
+                        note=note,
+                    )
+                except Exception:
+                    self._log("warning", "scheduler", f"task {task.id} audit record failed (continuing)")
 
-        if status == STATUS_COMPLETED:
-            self._emit(
-                TaskCompleted(
-                    account=task.account,
-                    task_id=task.id,
-                    duration_s=row["duration_s"],
-                    summary=summary or "",
+            if status == STATUS_COMPLETED:
+                self._emit(
+                    TaskCompleted(
+                        account=task.account,
+                        task_id=task.id,
+                        duration_s=row["duration_s"],
+                        summary=summary or "",
+                    )
                 )
-            )
-        elif status in (STATUS_FAILED, STATUS_TIMED_OUT):
-            self._emit(TaskFailed(
-                account=task.account, task_id=task.id,
-                error=error or status,
-                error_kind=self._error_kind(error or ""),
-            ))
-        elif status == STATUS_CANCELLED:
-            self._emit(TaskCancelled(account=task.account, task_id=task.id))
+            elif status in (STATUS_FAILED, STATUS_TIMED_OUT):
+                self._emit(TaskFailed(
+                    account=task.account, task_id=task.id,
+                    error=error or status,
+                    error_kind=self._error_kind(error or ""),
+                ))
+            elif status == STATUS_CANCELLED:
+                self._emit(TaskCancelled(account=task.account, task_id=task.id))
+        finally:
+            self._inflight_tails -= 1
 
     def _finish_sync(self, task: Task, status: str) -> None:
         """Terminal transition from SYNCHRONOUS call sites (cancel paths).
