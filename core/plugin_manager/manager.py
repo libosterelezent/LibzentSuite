@@ -237,7 +237,7 @@ class PluginManager:
         """Load + enable one runtime, isolating any hook failure."""
         services = self._services.get(account, lambda _n: None)(runtime.name)
         try:
-            runtime.settings = self._settings.resolve(
+            resolved = self._settings.resolve(
                 runtime.name, self._schema_for(runtime.name), account=account
             )
         except Exception as exc:
@@ -249,6 +249,11 @@ class PluginManager:
                 runtime.name, account, exc,
             )
             return
+        # update IN PLACE, never rebind: the services facade (captured above)
+        # and every context already hold THIS dict — a fresh object would
+        # fork the documented live-settings view
+        runtime.settings.clear()
+        runtime.settings.update(resolved)
         ctx = self._context(account, runtime, services)
         try:
             if not runtime.loaded:

@@ -16,12 +16,16 @@ plaintext tokens.
 """
 from __future__ import annotations
 
+import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
 
 from .connection import DatabaseConnection, DatabaseError  # noqa: F401 re-export
-from .schema import MIGRATIONS
+from .schema import MIGRATIONS, latest_version
+
+LOG = logging.getLogger("slaughtermudae.database")
 
 from .repositories.accounts import AccountsRepository
 from .repositories.cache import CacheRepository
@@ -67,22 +71,23 @@ class Database:
         """Open the connection, apply pragmas, run pending migrations.
 
         Returns how many migrations were applied (0 when current).
-        File permissions (0600 best-effort) applied after first creation.
+        The file is created 0600 up front (connection layer); the chmod
+        here also tightens a pre-existing, looser file (best-effort).
         """
         await self.connection.connect()
         if self._path != ":memory:":
             try:
-                import os
-
                 os.chmod(self._path, 0o600)
             except OSError:
                 pass
-        return await self.migrate()
+        try:
+            return await self.migrate()
+        except BaseException:
+            await self.connection.close()  # never leak the worker thread
+            raise
 
     async def migrate(self) -> int:
         """Apply pending migrations in order (idempotent, recorded)."""
-        from .connection import PRAGMAS  # noqa: F401 — applied in connect()
-
         conn = self.connection
         await conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations ("
@@ -90,17 +95,45 @@ class Database:
             "applied_at REAL NOT NULL)")
         done = {row["version"] for row in await conn.fetch_all(
             "SELECT version FROM schema_migrations")}
+        if done and max(done) > latest_version():
+            LOG.warning(
+                "database schema v%d is NEWER than this code (v%d): "
+                "running a downgrade is unsupported and may misbehave",
+                max(done), latest_version())
         applied = 0
         for version, name, sql in MIGRATIONS:
             if version in done:
                 continue
-            async with conn.write() as db:
-                await db.executescript(sql)
-                await db.execute(
-                    "INSERT INTO schema_migrations (version, name, applied_at) "
-                    "VALUES (?,?,?)", (version, name, time.time()))
+            await self._apply_migration(version, name, sql)
             applied += 1
         return applied
+
+    async def _apply_migration(self, version: int, name: str, sql: str) -> None:
+        """Run ONE migration and its bookkeeping row as a single unit.
+
+        ``executescript`` auto-commits before it runs and gives no
+        rollback of its own, so the script is wrapped in an explicit
+        BEGIN..COMMIT together with the schema_migrations insert: a failing
+        statement leaves NOTHING half-applied and no bookkeeping row.
+        """
+        safe_name = name.replace("'", "''")
+        script = (f"BEGIN IMMEDIATE;\n{sql}\n"
+                  f"INSERT INTO schema_migrations (version, name, applied_at) "
+                  f"VALUES ({int(version)}, '{safe_name}', {time.time()!r});\n"
+                  f"COMMIT;")
+        async with self.connection.write() as db:
+            await db.rollback()  # no stray open transaction before BEGIN
+            try:
+                await db.executescript(script)
+            except BaseException as exc:
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+                if isinstance(exc, Exception):
+                    raise DatabaseError(
+                        f"migration {version} ({name}) failed: {exc}") from exc
+                raise
 
     async def close(self) -> None:
         """Close the connection (idempotent; part of graceful shutdown)."""

@@ -190,13 +190,20 @@ class GlobalSendLane:
         entry = _LaneEntry(int(priority), next(self._seq))
         heapq.heappush(self._heap, entry)
         started_at = self._clock.now()
+        was_held = False
         try:
             while not entry.future.done():
                 self._grant_ready()
                 if entry.future.done():
                     break
+                was_held = was_held or self.paused()  # held at ANY poll pass
                 await self._wait_either(self._entry_wait(entry))
-            return max(0.0, self._clock.now() - started_at)
+            waited = max(0.0, self._clock.now() - started_at)
+            if was_held:
+                # telemetry: time waiters spent holding while the lane was
+                # PAUSED (the field existed but was never accumulated)
+                self.held_off_seconds += waited
+            return waited
         finally:
             entry.cancelled = True
             self._prune()

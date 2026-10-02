@@ -415,15 +415,8 @@ class SimulationRunner:
                 if bridge_attached_here:
                     detach_stdlib_bridge()  # never leak a bridge to a dead service
                 remote.stop()
-                await bus.publish(
-                    ScenarioFinished(
-                        account="", name=name,
-                        passed=not failures,
-                        duration_s=round(time.time() - run_start, 3),
-                    )
-                )
             except Exception:
-                pass  # event publish must never fail a finished run
+                pass  # teardown here must never fail a finished run
         finally:
             if account_started:
                 try:
@@ -441,6 +434,19 @@ class SimulationRunner:
                 failures.append(f"database close failed: {exc}")
             unsub_audit()
             unsub_log()
+
+        # publish AFTER teardown: the finally block above can still append
+        # failures — the event must agree with the returned report
+        try:
+            await bus.publish(
+                ScenarioFinished(
+                    account="", name=name,
+                    passed=not failures,
+                    duration_s=round(time.time() - run_start, 3),
+                )
+            )
+        except Exception:
+            pass  # event publish must never fail a finished run
 
         duration = round(time.time() - run_start, 3)
         verdict = "passed" if not failures else "failed"

@@ -49,9 +49,11 @@ def _read_json(path: Path) -> dict:
     if not path.is_file():
         return {}
     try:
-        parsed = json.loads(path.read_text(encoding="utf-8"))
+        parsed = json.loads(path.read_text(encoding="utf-8-sig"))  # tolerate a BOM
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON in {path}: {exc}") from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"cannot read {path}: {exc}") from exc
     if not isinstance(parsed, dict):
         raise ValueError(f"{path} must contain a JSON object, got {type(parsed).__name__}")
     return parsed
@@ -71,17 +73,32 @@ def load_config(config_dir: str | Path) -> ProjectConfig:
     raw_policies = _skip_doc_keys(_read_json(base / "rate_limits.json"))
     lane = raw_policies.pop("lane", None) or {}
     if "global" in raw_policies or "accounts" in raw_policies:
-        policies["global"].update(raw_policies.get("global") or {})
-        for account, actions in (raw_policies.get("accounts") or {}).items():
+        glob = raw_policies.get("global") or {}
+        accts = raw_policies.get("accounts") or {}
+        if not isinstance(glob, dict) or not isinstance(accts, dict):
+            raise ValueError(
+                "rate_limits.json: 'global' and 'accounts' must be JSON objects")
+        policies["global"].update(glob)
+        for account, actions in accts.items():
+            if actions is not None and not isinstance(actions, dict):
+                raise ValueError(
+                    f"rate_limits.json: policies for account {account!r} "
+                    "must be a JSON object")
             policies["accounts"].setdefault(account, {}).update(actions or {})
     else:  # tolerate a flat {action: {...}} file -> global level
         policies["global"].update(raw_policies)
     if isinstance(lane, dict) and lane:
         # server-wide sequential send lane config (kv runtime state wins on
         # later boots; this is the first-boot baseline)
+        try:
+            prefixrate = float(lane.get("prefixrate", 1.5))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"rate_limits.json: lane.prefixrate must be a number, "
+                f"got {lane.get('prefixrate')!r}") from exc
         policies["lane"] = {
             "enabled": bool(lane.get("enabled", False)),
-            "prefixrate": float(lane.get("prefixrate", 1.5)),
+            "prefixrate": prefixrate,
         }
 
     accounts: List[Dict[str, Any]] = []

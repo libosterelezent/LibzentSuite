@@ -58,6 +58,7 @@ import time
 from collections import deque
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional
 
+from core._asyncutil import outer_cancel_pending
 from core.errors import FlowBlocked, SchedulerError, ServerRateLimit
 from core.event_bus import (
     Event,
@@ -225,10 +226,12 @@ class TaskScheduler:
         self._lanes: Dict[str, asyncio.Task] = {}
         self._worker_refs: set = set()  # strong refs to spawned lane tasks
         self._tail_refs: set = set()  # strong refs to scheduled finish tails
+        self._inflight_tails = 0  # finish tails running now (drain barrier)
         self._gate = _GrantGate()
         self._started = False
         self._stopping = False
         self._stopped = False
+        self._stop_latch: Optional["asyncio.Future[None]"] = None  # single-flight stop
 
     # ----------------------------------------------------------- lifecycle
     @staticmethod
@@ -256,6 +259,25 @@ class TaskScheduler:
         except Exception:  # logging must never break the pipeline
             pass
 
+    async def restore_sequence(self) -> int:
+        """Continue task ids AFTER the highest one already in the history.
+
+        Ids used to restart at 1 on every boot and collided with rows of
+        earlier runs: the UNIQUE failure was swallowed, so a restarted
+        process silently archived NONE of its tasks. Call once at boot
+        (before :meth:`start`); returns the next id that will be issued.
+        """
+        floor = max(self._tasks, default=0)
+        if self._history_repo is not None:
+            try:
+                floor = max(floor, int(await self._history_repo.max_id()))
+            except Exception as exc:
+                self._log("warning", "scheduler",
+                          f"could not read task history high-water mark "
+                          f"({type(exc).__name__}: {exc}); ids restart at 1")
+        self._seq = itertools.count(floor + 1)
+        return floor + 1
+
     def start(self) -> None:
         """Mark the scheduler ready (idempotent; RE-ARMS after stop()).
 
@@ -269,6 +291,7 @@ class TaskScheduler:
         if self._stopping:
             raise SchedulerError("scheduler is stopping; wait for stop() to finish")
         self._stopped = False
+        self._stop_latch = None  # a fresh arm retires any completed latch
         self._started = True
 
     async def stop(self, *, drain: bool = True, timeout: float = 10.0) -> None:
@@ -282,9 +305,22 @@ class TaskScheduler:
 
         Tasks still alive when a drain times out are cancelled as well —
         stop() never hangs and never leaves a task non-terminal.
+
+        Single-flight: concurrent callers JOIN the in-flight stop instead of
+        running overlapping teardowns. Without this, a drain=True stop that
+        finishes can be followed by a still-running drain=False stop (e.g.
+        estop racing shutdown) re-cancelling tasks submitted to a scheduler
+        that start() had already re-armed.
         """
         if self._stopped:
             return
+        if self._stop_latch is not None:
+            # a stop is already in flight: join it (shielded — cancelling
+            # THIS caller must never cancel the underlying teardown)
+            await asyncio.wait([asyncio.shield(self._stop_latch)], timeout=30.0)
+            return
+        latch = asyncio.get_running_loop().create_future()
+        self._stop_latch = latch
         self._stopping = True
         try:
             if drain:
@@ -293,7 +329,11 @@ class TaskScheduler:
                 except (TypeError, ValueError):
                     budget = 10.0
                 deadline = time.monotonic() + budget
-                while self._tasks and time.monotonic() < deadline:
+                # drain BOTH the live tasks and their in-flight finish tails:
+                # _apply_terminal removes the task from _tasks BEFORE the
+                # awaited history write lands, so stopping at "no tasks" would
+                # cancel the lane mid-write and silently drop the row
+                while (self._tasks or self._inflight_tails) and time.monotonic() < deadline:
                     await asyncio.sleep(0.01)
             for task in list(self._tasks.values()):
                 await self._finish(task, STATUS_CANCELLED)
@@ -311,6 +351,8 @@ class TaskScheduler:
         finally:
             self._stopped = True
             self._stopping = False
+            if not latch.done():
+                latch.set_result(None)
 
     # ------------------------------------------------------------- submit
     def submit(
@@ -557,16 +599,7 @@ class TaskScheduler:
         """
         if self._stopping:
             return True
-        current = asyncio.current_task()
-        if current is None:
-            return False
-        cancelling = getattr(current, "cancelling", None)  # 3.11+
-        if callable(cancelling):
-            try:
-                return current.cancelling() > current.uncancel()
-            except Exception:  # pragma: no cover - defensive
-                return False
-        return False
+        return outer_cancel_pending()
 
     def _emit(self, event: Event) -> None:
         """Fire-and-forget publish; never breaks the pipeline."""
@@ -647,7 +680,10 @@ class TaskScheduler:
                 retryable: Optional[BaseException] = None
                 try:
                     task.sender_ran = True  # the API call is going out NOW
-                    result = await asyncio.wait_for(self._sender(task), task.timeout_s)
+                    if task.timeout_s and task.timeout_s > 0:
+                        result = await asyncio.wait_for(self._sender(task), task.timeout_s)
+                    else:  # timeout=0/None convention: NO per-attempt budget
+                        result = await self._sender(task)
                 except asyncio.CancelledError:
                     if self._outer_cancelled():
                         raise  # worker cancellation (stop sweep)
@@ -670,6 +706,9 @@ class TaskScheduler:
                 except (ConnectionError, TimeoutError) as exc:
                     retryable = exc
                 except FlowBlocked as exc:
+                    if task.cancelled:  # checkpoint 2 (estop raced the failure)
+                        await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
+                        return
                     await self._finish(
                         task, STATUS_FAILED,
                         error=f"{type(exc).__name__}: {exc}",
@@ -677,6 +716,9 @@ class TaskScheduler:
                     )
                     return
                 except Exception as exc:
+                    if task.cancelled:  # checkpoint 2 (estop raced the failure)
+                        await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
+                        return
                     await self._finish(
                         task, STATUS_FAILED,
                         error=f"{type(exc).__name__}: {exc}",
@@ -824,11 +866,15 @@ class TaskScheduler:
         _apply_terminal race reaches this. Order matches the historical
         contract: history row, audit row, terminal events.
         """
-        if self._history_repo is not None:
-            try:
-                await self._history_repo.add(row)
-            except Exception:
-                self._log("warning", "scheduler", f"task {task.id} history write failed (continuing)")
+        self._inflight_tails += 1
+        try:
+            if self._history_repo is not None:
+                try:
+                    await self._history_repo.add(row)
+                except Exception as exc:
+                    self._log("warning", "scheduler",
+                              f"task {task.id} history write failed (continuing): "
+                              f"{type(exc).__name__}: {exc}")
 
         # AUDIT INTEGRITY: only record an outbound row when the task could
         # actually have touched the API. COMPLETED/FAILED/TIMED_OUT attempts
@@ -836,42 +882,44 @@ class TaskScheduler:
         # cancelled mid-send (checkpoint 2) — a cancel while still queued or
         # parked on the grant NEVER sent and must not appear in the trail
         # (the pacing checks read audit timestamps as real send times).
-        auditable = status != STATUS_CANCELLED or task.sender_ran
-        if self._audit is not None and auditable and task.action in _AUDITED_ACTIONS:
-            note = f"plugin={task.plugin} task={task.id}"
-            if task.attempts > 0:
-                note += f" attempts={task.attempts + 1}"
-            try:
-                self._audit.record(
-                    account=task.account,
-                    direction="out",
-                    action=task.action,
-                    channel_id=task.channel_id,
-                    content=task.content,
-                    wait_ms=task.grant_wait_ms,
-                    jitter_ms=task.grant_jitter_ms,
-                    note=note,
-                )
-            except Exception:
-                self._log("warning", "scheduler", f"task {task.id} audit record failed (continuing)")
+            auditable = status != STATUS_CANCELLED or task.sender_ran
+            if self._audit is not None and auditable and task.action in _AUDITED_ACTIONS:
+                note = f"plugin={task.plugin} task={task.id}"
+                if task.attempts > 0:
+                    note += f" attempts={task.attempts + 1}"
+                try:
+                    self._audit.record(
+                        account=task.account,
+                        direction="out",
+                        action=task.action,
+                        channel_id=task.channel_id,
+                        content=task.content,
+                        wait_ms=task.grant_wait_ms,
+                        jitter_ms=task.grant_jitter_ms,
+                        note=note,
+                    )
+                except Exception:
+                    self._log("warning", "scheduler", f"task {task.id} audit record failed (continuing)")
 
-        if status == STATUS_COMPLETED:
-            self._emit(
-                TaskCompleted(
-                    account=task.account,
-                    task_id=task.id,
-                    duration_s=row["duration_s"],
-                    summary=summary or "",
+            if status == STATUS_COMPLETED:
+                self._emit(
+                    TaskCompleted(
+                        account=task.account,
+                        task_id=task.id,
+                        duration_s=row["duration_s"],
+                        summary=summary or "",
+                    )
                 )
-            )
-        elif status in (STATUS_FAILED, STATUS_TIMED_OUT):
-            self._emit(TaskFailed(
-                account=task.account, task_id=task.id,
-                error=error or status,
-                error_kind=self._error_kind(error or ""),
-            ))
-        elif status == STATUS_CANCELLED:
-            self._emit(TaskCancelled(account=task.account, task_id=task.id))
+            elif status in (STATUS_FAILED, STATUS_TIMED_OUT):
+                self._emit(TaskFailed(
+                    account=task.account, task_id=task.id,
+                    error=error or status,
+                    error_kind=self._error_kind(error or ""),
+                ))
+            elif status == STATUS_CANCELLED:
+                self._emit(TaskCancelled(account=task.account, task_id=task.id))
+        finally:
+            self._inflight_tails -= 1
 
     def _finish_sync(self, task: Task, status: str) -> None:
         """Terminal transition from SYNCHRONOUS call sites (cancel paths).

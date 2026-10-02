@@ -7,10 +7,11 @@ what a cooldown MEANS — nothing here is plugin-specific.
 """
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Dict, List, Optional
 
-from .base import BaseRepository
+from .base import BaseRepository, loads_tolerant
 
 
 class CooldownRepository(BaseRepository):
@@ -21,8 +22,6 @@ class CooldownRepository(BaseRepository):
                      reason: str = "", metadata: Optional[Dict[str, Any]] = None
                      ) -> None:
         """Insert or replace one cooldown (same identity = same row)."""
-        import json
-
         now = time.time()
         async with self._tx(
                 f"upsert cooldown {account}/{plugin}/{cooldown_key}") as conn:
@@ -54,6 +53,17 @@ class CooldownRepository(BaseRepository):
             sql = sql.replace("ORDER BY", "AND plugin=? ORDER BY")
             params.append(plugin)
         rows = await self._fetch_all(sql, params)
+        return [self._row_dict(row) for row in rows]
+
+    async def active_all(self, now: Optional[float] = None
+                         ) -> List[Dict[str, Any]]:
+        """Every non-expired cooldown of EVERY account in ONE query
+        (boot restore: replaces a DISTINCT-accounts query + N per-account
+        queries)."""
+        now = time.time() if now is None else now
+        rows = await self._fetch_all(
+            "SELECT * FROM cooldowns WHERE expires_at>? ORDER BY expires_at",
+            (now,))
         return [self._row_dict(row) for row in rows]
 
     async def get(self, account: str, plugin: str, cooldown_key: str,
@@ -92,11 +102,15 @@ class CooldownRepository(BaseRepository):
 
     @staticmethod
     def _row_dict(row: Any) -> Dict[str, Any]:
-        import json
-
+        """Row -> dict; corrupt ``metadata_json`` degrades to ``{}`` instead
+        of crashing the whole listing."""
         out = dict(row)
         out.pop("id", None)
-        out["metadata"] = json.loads(out.pop("metadata_json", "{}") or "{}")
+        meta = loads_tolerant(
+            out.pop("metadata_json", None), {},
+            f"cooldowns[{out.get('account')}/{out.get('plugin')}/"
+            f"{out.get('cooldown_key')}].metadata_json")
+        out["metadata"] = meta if isinstance(meta, dict) else {}
         return out
 
 

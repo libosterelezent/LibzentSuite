@@ -94,6 +94,25 @@ class PluginStateService:
     async def delete_pair(self, account: str, plugin: str, key: str) -> bool:
         return await self._delete(self._pair_key(account, plugin, key))
 
+    async def cascade_account(self, account: str) -> int:
+        """Delete EVERY kv row scoped to one account (both account scopes).
+
+        Used by account removal so a future same-named account never
+        inherits the old one's counters/markers. Returns rows removed
+        (0 when no repository is wired).
+        """
+        if self._kv is None:
+            return 0
+        if not account or any(c in account for c in (self.SCOPE_SEPARATOR, "\x00")):
+            raise PluginError(f"invalid account scope {account!r}")
+        delete_prefix = getattr(self._kv, "delete_prefix", None)
+        if delete_prefix is None:
+            return 0  # repository without prefix deletes: nothing to do
+        return int(
+            await delete_prefix(f"pstate:account:{account}:")
+            + await delete_prefix(f"pstate:account_plugin:{account}/")
+        )
+
     # ------------------------------------------------------------ internals
     async def _get(self, stored_key: str, default: Any) -> Any:
         raw = await self._kv.get(stored_key)
