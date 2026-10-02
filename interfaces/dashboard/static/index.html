@@ -230,6 +230,7 @@
       <!-- ==================================================== Accounts -->
       <section class="panel" id="panel-accounts">
         <h3>Accounts</h3>
+        <div class="section-err" id="panel-accounts-err"></div>
         <section class="card">
           <h4>Add account</h4>
           <div class="rule-row">
@@ -256,6 +257,7 @@
       <!-- ==================================================== Plugins -->
       <section class="panel" id="panel-plugins">
         <h3>Plugins</h3>
+        <div class="section-err" id="panel-plugins-err"></div>
         <section class="card">
           <h4>Installed plugins</h4>
           <div id="plugin-list"><span class="dim">loading…</span></div>
@@ -267,6 +269,7 @@
       <!-- ==================================================== Profiles -->
       <section class="panel" id="panel-profiles">
         <h3>Profiles</h3>
+        <div class="section-err" id="panel-profiles-err"></div>
         <section class="card">
           <h4>Create profile</h4>
           <div class="rule-row">
@@ -287,6 +290,7 @@
       <!-- ================================================== Rate Limits -->
       <section class="panel" id="panel-ratelimit">
         <h3>Rate Limits</h3>
+        <div class="section-err" id="panel-ratelimit-err"></div>
         <section class="card">
           <h4>Warnings</h4>
           <div id="rl-warnings"><span class="dim">loading…</span></div>
@@ -360,6 +364,7 @@
       <!-- ==================================================== Cooldowns -->
       <section class="panel" id="panel-cooldowns">
         <h3>Cooldowns</h3>
+        <div class="section-err" id="panel-cooldowns-err"></div>
         <section class="card">
           <h4>Active persistent cooldowns
             <button id="cooldowns-refresh" style="float:right">refresh</button></h4>
@@ -375,6 +380,7 @@
       <!-- ======================================================= Tasks -->
       <section class="panel" id="panel-tasks">
         <h3>Tasks</h3>
+        <div class="section-err" id="panel-tasks-err"></div>
         <section class="card">
           <h4>Live task events</h4>
           <div id="taskevents"></div>
@@ -419,6 +425,7 @@
       <!-- ================================================== Simulation -->
       <section class="panel" id="panel-simulation">
         <h3>Simulation</h3>
+        <div class="section-err" id="panel-simulation-err"></div>
         <section class="card">
           <h4>Scenarios</h4>
           <div id="sim-list"><span class="dim">loading…</span></div>
@@ -432,6 +439,7 @@
       <!-- ==================================================== Advanced -->
       <section class="panel" id="panel-advanced">
         <h3>Advanced</h3>
+        <div class="section-err" id="panel-advanced-err"></div>
         <section class="card">
           <h4>Import .env credentials</h4>
           <div class="dim">one-shot copy of the legacy
@@ -579,25 +587,33 @@ function api(path, opts = {}) {
 }
 const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body) });
 
-// ERROR AUDIT FIX: errors accrue with timestamps (last-one-wins hid earlier
-// ones) and are only cleared explicitly, never by unrelated successes
-function showErr(e) {
-  const box = $("errbox");
-  const line = document.createElement("div");
-  const clock = new Date().toTimeString().slice(0, 8);
-  line.textContent = clock + "  " + String(e && e.message || e);
-  box.appendChild(line);
-  while (box.childNodes.length > 50) box.removeChild(box.firstChild);
-  box.scrollTop = box.scrollHeight;
+// Contextual errors: showErr(e, sectionId) writes to the inline error
+// area of the named section (right under the form/button that failed).
+// Falls back to the global box only for unattributed errors.
+function sectionErr(sectionId) {
+  if (sectionId) {
+    const el = document.querySelector(sectionId + " .section-err") ||
+               document.getElementById(sectionId + "-err");
+    if (el) return el;
+  }
+  return $("errbox");
 }
-function showNote(text) {
-  const box = $("errbox");
+function showErr(e, sectionId) {
+  const box = sectionErr(sectionId);
+  box.textContent = "";
   const line = document.createElement("div");
-  const clock = new Date().toTimeString().slice(0, 8);
-  line.style.color = "var(--dim)";
-  line.textContent = clock + "  " + text;
+  line.style.color = "var(--err)";
+  line.textContent = String(e && e.message || e);
   box.appendChild(line);
-  while (box.childNodes.length > 50) box.removeChild(box.firstChild);
+  while (box.childNodes.length > 5) box.removeChild(box.firstChild);
+}
+function showNote(text, sectionId) {
+  const box = sectionErr(sectionId);
+  const line = document.createElement("div");
+  line.style.color = "var(--dim)";
+  line.textContent = text;
+  box.appendChild(line);
+  while (box.childNodes.length > 5) box.removeChild(box.firstChild);
 }
 function clearErrors() { $("errbox").textContent = ""; }
 
@@ -731,18 +747,18 @@ function renderAccountCards() {
     status.className = "status " + (a.status || "");
     status.textContent = a.status || "?";
     const start = btn("start", () => post("/api/accounts/start", { account: a.name })
-      .then(loadAccountsQuiet).catch(showErr));
+      .then(loadAccountsQuiet).catch(e => showErr(e, "#panel-accounts")));
     const stop = btn("stop", () => post("/api/accounts/stop", { account: a.name })
-      .then(loadAccountsQuiet).catch(showErr));
+      .then(loadAccountsQuiet).catch(e => showErr(e, "#panel-accounts")));
     const details = btn("details…", () => openDetails(a.name));
     const estop = btn("estop", () => askConfirm("Emergency stop",
       "Cancel every " + a.name + " task and disconnect NOW?",
       () => post("/api/accounts/emergency-stop", { name: a.name })
-        .then(loadAccountsQuiet).catch(showErr)), "danger");
+        .then(loadAccountsQuiet).catch(e => showErr(e, "#panel-accounts"))), "danger");
     const remove = btn("remove", () => askConfirm("Remove account",
       "Remove " + a.name + " (must be stopped)? Settings and assignments are deleted too.",
       () => post("/api/accounts/remove", { name: a.name })
-        .then(loadAccountsQuiet).catch(showErr)), "danger");
+        .then(loadAccountsQuiet).catch(e => showErr(e, "#panel-accounts"))), "danger");
     const credBtn = btn("credential…", () => openCredentialDialog(a.name));
     row.append(title, status, credChipFor(a), start, stop, details, credBtn,
                estop, remove);
@@ -802,7 +818,7 @@ function saveCredential() {
                " — status: " + credLabel(r.credential));
       loadAccountsQuiet();
     })
-    .catch(showErr);
+    .catch(e => showErr(e, "#panel-accounts"));
 }
 $("cred-save").onclick = saveCredential;
 $("cred-value").addEventListener("keydown", (e) => {
@@ -814,7 +830,7 @@ function loadAccountsQuiet() {
   return api("/api/accounts").then((accounts) => {
     if (lastStats) lastStats.accounts = accounts;
     renderAccountCards(); renderOverview();
-  }).catch(showErr);
+  }).catch(e => showErr(e, "#panel-accounts"));
 }
 LOADERS.accounts = loadAccountsQuiet;
 
@@ -836,7 +852,7 @@ $("addacct").onclick = () => {
     $("newacct").value = ""; $("newacct-sync").value = "";
     $("newacct-profiles").value = ""; $("newacct-cred").value = "";
     return loadAccountsQuiet();
-  }).catch(showErr);
+  }).catch(e => showErr(e, "#panel-accounts"));
 };
 
 // ------------------------------------------------------- details modal (§8)
@@ -898,7 +914,7 @@ function renderDetails(info, states, profiles) {
     const toggle = btn(p.enabled ? "◆ enabled" : "◇ disabled", () =>
       post("/api/plugins/set-enabled",
            { account: info.name, plugin: p.name, enabled: !p.enabled })
-        .then(() => openDetails(info.name)).catch(showErr),
+        .then(() => openDetails(info.name)).catch(e => showErr(e, "#panel-accounts")),
     p.enabled ? "on" : "off");
     row.appendChild(toggle);
     if ((p.error_count || 0) > 0) {
@@ -921,7 +937,7 @@ function renderDetails(info, states, profiles) {
     chip.className = "chip role"; chip.textContent = p;
     const x = btn("✕", () => post("/api/profiles/unassign",
         { account: info.name, profile: p })
-      .then(() => openDetails(info.name)).catch(showErr));
+      .then(() => openDetails(info.name)).catch(e => showErr(e, "#panel-accounts")));
     chip.appendChild(document.createTextNode(" "), x);
     chips.appendChild(chip);
   }
@@ -933,7 +949,7 @@ function renderDetails(info, states, profiles) {
   const assign = btn("assign profile", () => {
     if (!sel.value) { showErr("pick a profile first"); return; }
     post("/api/profiles/assign", { account: info.name, profile: sel.value })
-      .then(() => openDetails(info.name)).catch(showErr);
+      .then(() => openDetails(info.name)).catch(e => showErr(e, "#panel-accounts"));
   });
   const note = document.createElement("span");
   note.className = "dim mono"; note.style.fontSize = "11px";
@@ -1106,7 +1122,7 @@ function renderProfiles(profiles) {
     const del = btn("delete", () => askConfirm("Delete profile",
       "Delete profile " + p.name + "?",
       () => post("/api/profiles/delete", { name: p.name })
-        .then(loadProfiles).catch(showErr)), "danger");
+        .then(loadProfiles).catch(e => showErr(e, "#panel-accounts"))), "danger");
     row.appendChild(del);
     card.appendChild(row);
     const chips = document.createElement("div"); chips.className = "chips";
@@ -1122,7 +1138,7 @@ function renderProfiles(profiles) {
     const assign = btn("assign to", () => {
       if (!sel.value) { showErr("pick an account first (add one in Accounts)"); return; }
       post("/api/profiles/assign", { account: sel.value, profile: p.name })
-        .then(loadAccountsQuiet).catch(showErr);
+        .then(loadAccountsQuiet).catch(e => showErr(e, "#panel-accounts"));
     });
     const note = document.createElement("span");
     note.className = "dim mono"; note.style.fontSize = "11px";
@@ -1156,7 +1172,7 @@ $("prof-create").onclick = () => {
   post("/api/profiles/create",
        { name, plugins, description: $("prof-desc").value.trim() })
     .then(() => { $("prof-name").value = ""; $("prof-desc").value = ""; return loadProfiles(); })
-    .catch(showErr);
+    .catch(e => showErr(e, "#panel-accounts"));
 };
 
 // ---------------------------------------------------------------- Rate Limits
@@ -1183,7 +1199,7 @@ function renderPolicies(policies) {
     const td = document.createElement("td");
     td.appendChild(btn("clear", () => post("/api/ratelimit/clear",
         { level: p.level, owner: p.owner, action: p.action })
-      .then(loadRateLimits).catch(showErr), "danger"));
+      .then(loadRateLimits).catch(e => showErr(e, "#panel-ratelimit")), "danger"));
     tr.appendChild(td);
     table.appendChild(tr);
   }
@@ -1230,9 +1246,9 @@ function renderRlStats(stats) {
 function loadRateLimits() {
   fillSelect($("eff-account"), accountNames(), "— any account —");
   return Promise.all([
-    api("/api/ratelimit/warnings").then(renderRlWarnings).catch(showErr),
-    api("/api/ratelimit/policies").then(renderPolicies).catch(showErr),
-    api("/api/ratelimit/stats").then(renderRlStats).catch(showErr),
+    api("/api/ratelimit/warnings").then(renderRlWarnings).catch(e => showErr(e, "#panel-ratelimit")),
+    api("/api/ratelimit/policies").then(renderPolicies).catch(e => showErr(e, "#panel-ratelimit")),
+    api("/api/ratelimit/stats").then(renderRlStats).catch(e => showErr(e, "#panel-ratelimit")),
   ]);
 }
 LOADERS.ratelimit = loadRateLimits;
@@ -1259,7 +1275,7 @@ $("rl-set").onclick = () => {
   post("/api/ratelimit/set", payload).then(() => {
     $("rl-interval").value = ""; $("rl-jmin").value = ""; $("rl-jmax").value = "";
     return loadRateLimits();
-  }).catch(showErr);
+  }).catch(e => showErr(e, "#panel-ratelimit"));
 };
 
 $("eff-go").onclick = () => {
@@ -1288,7 +1304,7 @@ $("eff-go").onclick = () => {
       card.innerHTML += '<div class="sub dim">no stored policy — pacing at the floor</div>';
     else card.appendChild(table);
     root.appendChild(card);
-  }).catch(showErr);
+  }).catch(e => showErr(e, "#panel-ratelimit"));
 };
 
 $("rl-floor-set").onclick = () => {
@@ -1296,7 +1312,7 @@ $("rl-floor-set").onclick = () => {
   if (!Number.isFinite(seconds)) { showErr("floor must be a number (seconds)"); return; }
   post("/api/ratelimit/floor", { seconds })
     .then(() => { $("rl-floor-new").value = ""; return loadRateLimits(); })
-    .catch(showErr);
+    .catch(e => showErr(e, "#panel-ratelimit"));
 };
 
 // ------------------------------------------------- sequential send lane
@@ -1321,16 +1337,16 @@ $("lane-on").onclick = () => {
     if (!Number.isFinite(rate) || rate < 0) { showErr("spacing must be a number >= 0 (0 pauses)"); return; }
     payload.prefixrate = rate;
   }
-  post("/api/ratelimit/lane", payload).then(loadRateLimits).catch(showErr);
+  post("/api/ratelimit/lane", payload).then(loadRateLimits).catch(e => showErr(e, "#panel-ratelimit"));
 };
 $("lane-off").onclick = () =>
-  post("/api/ratelimit/lane", {enabled: false}).then(loadRateLimits).catch(showErr);
+  post("/api/ratelimit/lane", {enabled: false}).then(loadRateLimits).catch(e => showErr(e, "#panel-ratelimit"));
 $("lane-set").onclick = () => {
   const rate = parseFloat($("lane-rate").value);
   if (!Number.isFinite(rate) || rate < 0) { showErr("spacing must be a number >= 0 (0 pauses the lane)"); return; }
   post("/api/ratelimit/lane", {enabled: true, prefixrate: rate})
     .then(() => { $("lane-rate").value = ""; return loadRateLimits(); })
-    .catch(showErr);
+    .catch(e => showErr(e, "#panel-ratelimit"));
 };
 
 // ---------------------------------------------------------------- Tasks
@@ -1343,7 +1359,7 @@ function taskRow(t, live) {
   if (live) {
     const td = document.createElement("td");
     td.appendChild(btn("cancel", () => post("/api/tasks/cancel", { task_id: t.id })
-      .then(loadTasks).catch(showErr), "danger"));
+      .then(loadTasks).catch(e => showErr(e, "#panel-ratelimit")), "danger"));
     tr.appendChild(td);
   } else {
     const dur = t.finished_at && t.submitted_at
@@ -1468,7 +1484,7 @@ function backfillLogs() {
     $("logbox").innerHTML = "";
     for (const entry of entries) logLine(entry);
     $("logsync").textContent = entries.length + " entries";
-  }).catch(showErr);
+  }).catch(e => showErr(e, "#panel-ratelimit"));
 }
 $("log-backfill").onclick = backfillLogs;
 $("log-acct").onchange = backfillLogs;
@@ -1480,7 +1496,7 @@ function backfillAudit() {
   api("/api/audit?" + q).then((entries) => {
     $("auditbox").innerHTML = "";
     for (const entry of entries) auditLine(entry);
-  }).catch(showErr);
+  }).catch(e => showErr(e, "#panel-ratelimit"));
 }
 $("audit-backfill").onclick = backfillAudit;
 $("audit-acct").onchange = backfillAudit;
@@ -1606,7 +1622,7 @@ function renderCooldowns(rows) {
     const td = document.createElement("td");
     td.appendChild(btn("clear", () => post("/api/cooldowns/clear",
         { account: r.account, plugin: r.plugin, cooldown_key: r.cooldown_key })
-      .then(loadCooldowns).catch(showErr), "danger"));
+      .then(loadCooldowns).catch(e => showErr(e, "#panel-cooldowns")), "danger"));
     tr.appendChild(td);
     table.appendChild(tr);
   }
@@ -1635,7 +1651,7 @@ $("estop").onclick = () => askConfirm("GLOBAL EMERGENCY STOP",
   () => post("/api/estop", {}).then((r) => {
     showNote("emergency stop executed — " + (r.cancelled_tasks ?? "?") + " tasks cancelled");
     loadAccountsQuiet();
-  }).catch(showErr));
+  }).catch(e => showErr(e, "#panel-cooldowns")));
 
 $("imp-env").onclick = () => askConfirm("Import .env credentials",
   "Copy every registered account's DISCORD_TOKEN_* .env entry into encrypted" +
@@ -1647,7 +1663,7 @@ $("imp-env").onclick = () => askConfirm("Import .env credentials",
       showNote("credentials imported: " + (report.imported || []).length +
         " imported, " + (report.skipped || []).length + " skipped, " +
         Object.keys(report.failed || {}).length + " failed");
-    }).catch(showErr));
+    }).catch(e => showErr(e, "#panel-cooldowns")));
 
 // The import button rides the server's credential gate: probe it once when
 // the Advanced panel first opens. 403 => NO DASHBOARD_TOKEN configured =>
@@ -1675,7 +1691,7 @@ $("shutdown").onclick = () => askConfirm("Graceful shutdown",
   "Shut the whole framework down (drain tasks, stop accounts, close DB)?",
   () => post("/api/shutdown", {}).then(() => {
     showNote("shutdown requested — the server will stop responding");
-  }).catch(showErr));
+  }).catch(e => showErr(e, "#panel-cooldowns")));
 
 $("savetoken").onclick = () => {
   store.setItem("dash_token", $("token").value.trim());
@@ -1761,7 +1777,7 @@ $("token").value = token();
 $("adv-token").value = token();
 connectWS();
 // REST backfill so the overview renders even before the first WS push
-api("/api/status").then((stats) => { lastStats = stats; renderOverview(); renderAccountCards(); }).catch(showErr);
+api("/api/status").then((stats) => { lastStats = stats; renderOverview(); renderAccountCards(); }).catch(e => showErr(e, "#panel-cooldowns"));
 </script>
 </body>
 </html>

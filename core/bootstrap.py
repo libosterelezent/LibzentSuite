@@ -79,15 +79,29 @@ def _wire_event_logging(bus: EventBus, logs: LogService) -> None:
     bus.subscribe(Event, _on_event)
 
 
-def _apply_policies(limiter: RateLimitManager, config: ProjectConfig) -> None:
-    """Push the config file's policies into the manager (floor still applies)."""
+async def _seed_config_defaults(limiter: RateLimitManager, config: ProjectConfig,
+                                database: Any) -> None:
+    """Apply config-file policies ONLY where the DB has none (first boot).
+
+    For each (level, owner, action): if the DB already has a policy, the
+    config file's default is skipped — the database is the sole source of
+    truth after first boot. This prevents 'ghost' re-added defaults when
+    the user has explicitly removed them.
+    """
+    stored = set()
+    try:
+        stored = {(p.level, p.owner, p.action) for p in await database.policies.list()}
+    except Exception:
+        pass  # DB read failure: apply config defaults as a safe fallback
     for action, spec in (config.policies.get("global") or {}).items():
-        interval, jmin, jmax = _policy_triple(action, spec, "global")
-        limiter.set_policy_values(action, interval, jmin, jmax, "global", None)
+        if ("global", None, action) not in stored:
+            interval, jmin, jmax = _policy_triple(action, spec, "global")
+            limiter.set_policy_values(action, interval, jmin, jmax, "global", None)
     for account, actions in (config.policies.get("accounts") or {}).items():
         for action, spec in (actions or {}).items():
-            interval, jmin, jmax = _policy_triple(action, spec, f"account {account}")
-            limiter.set_policy_values(action, interval, jmin, jmax, "account", account)
+            if ("account", account, action) not in stored:
+                interval, jmin, jmax = _policy_triple(action, spec, f"account {account}")
+                limiter.set_policy_values(action, interval, jmin, jmax, "account", account)
 
 
 def _policy_triple(action: str, spec: Dict[str, Any], where: str) -> tuple:
@@ -207,7 +221,11 @@ async def build(
         lane_prefixrate=float((config.policies.get("lane") or {}).get("prefixrate", 1.5)),
     )
     await limiter.load_persisted()  # stored policies + lane config -> memory
-    _apply_policies(limiter, config)
+    # Config-file policies are FIRST-BOOT DEFAULTS only: they apply solely
+    # when no policy exists for that (level, owner, action) in the database.
+    # Once the user removes or changes a policy from either surface, the DB
+    # is the sole source of truth — the config file never re-adds it.
+    await _seed_config_defaults(limiter, config, database)
 
     settings = SettingsManager(
         bus, ServiceLogger(logs, "settings"),
