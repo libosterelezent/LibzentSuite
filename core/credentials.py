@@ -13,6 +13,8 @@ import logging
 from pathlib import Path
 from typing import Dict, Mapping, Optional
 
+from .errors import CredentialsError  # ONE class (was defined twice)
+
 LOG = logging.getLogger("slaughtermudae.credentials")
 
 #: keys whose values must be masked in any human-facing output
@@ -21,22 +23,20 @@ SENSITIVE_KEYS = ("token", "secret", "password")
 TOKEN_PREFIX = "DISCORD_TOKEN_"
 
 
-class CredentialsError(RuntimeError):
-    """Raised when a required credential is missing or malformed."""
-
-
 class Credentials:
     """Immutable-ish view over a parsed .env payload."""
 
     def __init__(self, values: Mapping[str, str], path: Optional[Path] = None) -> None:
         self._values: Dict[str, str] = {k: v for k, v in values.items() if v is not None}
         self._path = path
+        self._owner_ids: Optional[frozenset] = None  # parsed once, lazily
 
     # ------------------------------------------------------------------ load
     @staticmethod
     def parse_env(text: str) -> Dict[str, str]:
         """Parse .env text: comments, blank lines, optional 'export ', quotes."""
         out: Dict[str, str] = {}
+        text = text.lstrip("\ufeff")  # UTF-8 BOM (Windows editors) hides line 1's key
         for raw in text.splitlines():
             line = raw.strip()
             if not line or line.startswith("#"):
@@ -50,6 +50,14 @@ class Credentials:
             value = value.strip()
             if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
                 value = value[1:-1]
+            elif value[:1] not in ("\"", "'"):
+                # unquoted value: ' # comment' ends it (a '#' with no space
+                # before it is part of the value, e.g. tokens/passwords)
+                cut = value.find(" #")
+                if cut == -1:
+                    cut = value.find("\t#")
+                if cut != -1:
+                    value = value[:cut].rstrip()
             if key:
                 out[key] = value
         return out
@@ -61,7 +69,11 @@ class Credentials:
         if not p.is_file():
             LOG.warning("credentials file %s not found; using empty credentials", p)
             return cls({}, p)
-        return cls(cls.parse_env(p.read_text(encoding="utf-8")), p)
+        try:
+            text = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise CredentialsError(f"cannot read credentials file {p}: {exc}") from exc
+        return cls(cls.parse_env(text), p)
 
     @classmethod
     def from_values(cls, values: Mapping[str, str]) -> "Credentials":
@@ -103,7 +115,13 @@ class Credentials:
 
     @property
     def owner_user_ids(self) -> frozenset[int]:
-        """Comma-separated OWNER_USER_IDS -> frozenset of ints (empty if unset)."""
+        """Comma-separated OWNER_USER_IDS -> frozenset of ints (empty if unset).
+
+        Parsed once and cached (this is read on EVERY inbound message by
+        the remote-control gate; the values are immutable after load).
+        """
+        if self._owner_ids is not None:
+            return self._owner_ids
         raw = self._values.get("OWNER_USER_IDS", "") or ""
         ids = set()
         for part in raw.replace(";", ",").split(","):
@@ -116,7 +134,8 @@ class Credentials:
                 raise CredentialsError(
                     f"OWNER_USER_IDS contains a non-integer: {part!r}"
                 ) from exc
-        return frozenset(ids)
+        self._owner_ids = frozenset(ids)
+        return self._owner_ids
 
     @property
     def dashboard_token(self) -> Optional[str]:

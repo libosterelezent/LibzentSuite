@@ -125,6 +125,23 @@ ACCOUNT_SETTINGS: tuple = (
 )
 
 
+_ACCOUNT_DEFS_CACHE: Optional[tuple] = None
+
+
+def _account_defs() -> tuple:
+    """(name -> Setting, name -> validated default) for ACCOUNT_SETTINGS.
+
+    Built once: ``account_settings()`` runs on every reconnect/typing
+    decision and used to re-validate every default on each call.
+    """
+    global _ACCOUNT_DEFS_CACHE
+    if _ACCOUNT_DEFS_CACHE is None:
+        defs = {s.name: s for s in ACCOUNT_SETTINGS}
+        _ACCOUNT_DEFS_CACHE = (
+            defs, {name: s.validate(s.default) for name, s in defs.items()})
+    return _ACCOUNT_DEFS_CACHE
+
+
 class SettingsManager:
     """Layered, validated, persisted settings for plugins AND accounts."""
 
@@ -258,9 +275,9 @@ class SettingsManager:
         Pure memory after :meth:`load` (sync by design — called from sync
         reconnect/typing paths in the account manager).
         """
-        defs = {s.name: s for s in ACCOUNT_SETTINGS}
+        defs, defaults = _account_defs()  # cached: hot sync path
         stored = self._account_framework.get(account, {})
-        values = {s.name: s.validate(s.default) for s in ACCOUNT_SETTINGS}
+        values = dict(defaults)
         for key, raw in stored.items():
             if key in defs:
                 try:

@@ -22,7 +22,7 @@ from __future__ import annotations
 import random
 import time
 from types import SimpleNamespace
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from adapters.base import DiscordMessage
 from adapters.simulator.world import SimWorld, WorldMessage

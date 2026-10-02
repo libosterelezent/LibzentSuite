@@ -5,6 +5,7 @@
 accounts/
 *.token
 *_token.txt
+credentials.key
 
 
 # --- local runtime state ---

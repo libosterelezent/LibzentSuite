@@ -34,11 +34,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Iterator, List, Optional, Sequence
+from typing import Any, AsyncIterator, List, Optional, Sequence
 
 import aiosqlite
+
+from core.errors import DatabaseError  # ONE class for the whole framework
 
 LOG = logging.getLogger("slaughtermudae.database")
 
@@ -51,8 +54,58 @@ PRAGMAS = (
 )
 
 
-class DatabaseError(RuntimeError):
-    """Persistence-layer failure (kept importable from database.db)."""
+#: how long close() waits for an in-flight transaction before closing anyway
+CLOSE_TIMEOUT_S = 5.0
+
+
+class _TaskGuard:
+    """Re-entrant (per asyncio task) mutual exclusion for the ONE connection.
+
+    SQLite on a single connection has ONE transaction state shared by every
+    task, so a reader that runs while another task is mid-transaction sees
+    that task's UNCOMMITTED rows (and a commit by anyone commits everyone).
+    Every access therefore goes through this guard. The task that already
+    owns it may re-enter (read its own writes, nest writes) without
+    deadlocking; any other task waits its turn.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: Optional[asyncio.Task] = None
+
+    @asynccontextmanager
+    async def hold(self) -> AsyncIterator[bool]:
+        """Yield True for the outermost holder, False when re-entered."""
+        task = asyncio.current_task()
+        if task is not None and self._owner is task:
+            yield False
+            return
+        async with self._lock:
+            self._owner = task
+            try:
+                yield True
+            finally:
+                self._owner = None
+
+    async def acquire_bounded(self, timeout: float) -> bool:
+        try:
+            await asyncio.wait_for(self._lock.acquire(), timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    def release(self) -> None:
+        self._lock.release()
+
+
+def _touch_private(path: Path) -> None:
+    """Create the DB file with owner-only permissions BEFORE sqlite opens it
+    (no window where a fresh database is world-readable)."""
+    try:
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+        os.close(fd)
+    except OSError:
+        pass
 
 
 class DatabaseConnection:
@@ -61,7 +114,7 @@ class DatabaseConnection:
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path) if str(path) != ":memory:" else ":memory:"
         self._conn: Optional[aiosqlite.Connection] = None
-        self._lock = asyncio.Lock()  # serializes writers (SQLite rule)
+        self._guard = _TaskGuard()  # one transaction state -> one guard
 
     @property
     def connected(self) -> bool:
@@ -73,20 +126,45 @@ class DatabaseConnection:
             return
         if self._path != ":memory:":
             Path(self._path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = await aiosqlite.connect(str(self._path))
-        self._conn.row_factory = aiosqlite.Row
-        for pragma in PRAGMAS:
-            await self._conn.execute(pragma)
-        await self._conn.commit()
-
-    async def close(self) -> None:
-        """Close the connection (idempotent; safe during shutdown)."""
-        conn, self._conn = self._conn, None
-        if conn is not None:
+            _touch_private(Path(self._path))
+        conn = await aiosqlite.connect(str(self._path))
+        try:
+            conn.row_factory = aiosqlite.Row
+            for pragma in PRAGMAS:
+                await conn.execute(pragma)
+            await conn.commit()
+        except BaseException:
+            # never leak the worker thread when setup fails (it would keep
+            # the interpreter alive at exit)
             try:
                 await conn.close()
             except Exception:
                 pass
+            raise
+        self._conn = conn
+
+    async def close(self, timeout: float = CLOSE_TIMEOUT_S) -> None:
+        """Close the connection (idempotent; safe during shutdown).
+
+        Waits (bounded) for an in-flight transaction so a graceful shutdown
+        never cuts a write in half; after the timeout it closes anyway.
+        """
+        if self._conn is None:
+            return
+        locked = await self._guard.acquire_bounded(timeout)
+        if not locked:
+            LOG.warning("database close: transaction still running after "
+                        "%.1fs; closing anyway", timeout)
+        conn, self._conn = self._conn, None
+        try:
+            if conn is not None:
+                try:
+                    await conn.close()
+                except Exception:
+                    LOG.debug("database close failed", exc_info=True)
+        finally:
+            if locked:
+                self._guard.release()
 
     def _require(self) -> aiosqlite.Connection:
         if self._conn is None:
@@ -96,44 +174,58 @@ class DatabaseConnection:
 
     # ------------------------------------------------------------- queries
     async def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
-        """One statement, committed (simple writes / pragmas / DDL)."""
-        conn = self._require()
-        async with self._lock:
+        """One statement, committed (simple writes / pragmas / DDL).
+
+        Inside the caller's own open transaction it joins it (no commit).
+        """
+        async with self._guard.hold() as outer:
+            conn = self._require()
             await conn.execute(sql, tuple(params))
-            await conn.commit()
+            if outer:
+                await conn.commit()
 
     async def fetch_all(self, sql: str,
                         params: Sequence[Any] = ()) -> List[aiosqlite.Row]:
-        conn = self._require()
-        async with conn.execute(sql, tuple(params)) as cursor:
-            return list(await cursor.fetchall())
+        async with self._guard.hold():
+            conn = self._require()
+            async with conn.execute(sql, tuple(params)) as cursor:
+                return list(await cursor.fetchall())
 
     async def fetch_one(self, sql: str,
                         params: Sequence[Any] = ()) -> Optional[aiosqlite.Row]:
-        conn = self._require()
-        async with conn.execute(sql, tuple(params)) as cursor:
-            return await cursor.fetchone()
+        async with self._guard.hold():
+            conn = self._require()
+            async with conn.execute(sql, tuple(params)) as cursor:
+                return await cursor.fetchone()
 
     @asynccontextmanager
-    async def write(self) -> Iterator[aiosqlite.Connection]:
+    async def write(self) -> AsyncIterator[aiosqlite.Connection]:
         """Transaction: COMMIT on success, ROLLBACK on any exception.
 
-        Writers are serialized by an asyncio lock — SQLite allows one
-        writer; the lock turns SQLITE_BUSY races into an ordered queue.
+        Writers (and readers) are serialized by the task guard. A task that
+        already holds the transaction may nest ``write()``: the inner block
+        joins the outer one and the OUTERMOST block commits/rolls back.
         """
-        conn = self._require()
-        async with self._lock:
+        async with self._guard.hold() as outer:
+            conn = self._require()
+            if not outer:
+                yield conn
+                return
             try:
                 yield conn
                 await conn.commit()
             except BaseException:
-                await conn.rollback()
+                try:
+                    await conn.rollback()
+                except Exception:
+                    LOG.debug("rollback failed", exc_info=True)
                 raise
 
     @asynccontextmanager
-    async def read(self) -> Iterator[aiosqlite.Connection]:
-        """Read access without the writer lock (WAL readers don't block)."""
-        yield self._require()
+    async def read(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Read access that never observes another task's open transaction."""
+        async with self._guard.hold():
+            yield self._require()
 
 
 __all__ = ["DatabaseConnection", "DatabaseError", "PRAGMAS"]

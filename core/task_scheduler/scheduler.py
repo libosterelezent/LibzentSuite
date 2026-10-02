@@ -58,6 +58,7 @@ import time
 from collections import deque
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional
 
+from core._asyncutil import outer_cancel_pending
 from core.errors import FlowBlocked, SchedulerError, ServerRateLimit
 from core.event_bus import (
     Event,
@@ -255,6 +256,25 @@ class TaskScheduler:
                 method("%s: %s", source, message)
         except Exception:  # logging must never break the pipeline
             pass
+
+    async def restore_sequence(self) -> int:
+        """Continue task ids AFTER the highest one already in the history.
+
+        Ids used to restart at 1 on every boot and collided with rows of
+        earlier runs: the UNIQUE failure was swallowed, so a restarted
+        process silently archived NONE of its tasks. Call once at boot
+        (before :meth:`start`); returns the next id that will be issued.
+        """
+        floor = max(self._tasks, default=0)
+        if self._history_repo is not None:
+            try:
+                floor = max(floor, int(await self._history_repo.max_id()))
+            except Exception as exc:
+                self._log("warning", "scheduler",
+                          f"could not read task history high-water mark "
+                          f"({type(exc).__name__}: {exc}); ids restart at 1")
+        self._seq = itertools.count(floor + 1)
+        return floor + 1
 
     def start(self) -> None:
         """Mark the scheduler ready (idempotent; RE-ARMS after stop()).
@@ -557,16 +577,7 @@ class TaskScheduler:
         """
         if self._stopping:
             return True
-        current = asyncio.current_task()
-        if current is None:
-            return False
-        cancelling = getattr(current, "cancelling", None)  # 3.11+
-        if callable(cancelling):
-            try:
-                return current.cancelling() > current.uncancel()
-            except Exception:  # pragma: no cover - defensive
-                return False
-        return False
+        return outer_cancel_pending()
 
     def _emit(self, event: Event) -> None:
         """Fire-and-forget publish; never breaks the pipeline."""
@@ -828,7 +839,9 @@ class TaskScheduler:
             try:
                 await self._history_repo.add(row)
             except Exception:
-                self._log("warning", "scheduler", f"task {task.id} history write failed (continuing)")
+                self._log("warning", "scheduler",
+                          f"task {task.id} history write failed (continuing): "
+                          f"{type(exc).__name__}: {exc}")
 
         # AUDIT INTEGRITY: only record an outbound row when the task could
         # actually have touched the API. COMPLETED/FAILED/TIMED_OUT attempts

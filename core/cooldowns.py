@@ -16,6 +16,8 @@ deterministic without wall-clock sleeps.
 from __future__ import annotations
 
 import logging
+import math
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 LOG = logging.getLogger("slaughtermudae.cooldowns")
@@ -27,7 +29,7 @@ class CooldownService:
     def __init__(self, repository: Optional[Any] = None,
                  time_fn: Callable[[], float] = None) -> None:
         self._repo = repository
-        self._now = time_fn or (lambda: __import__("time").time())
+        self._now = time_fn or time.time
         # (account, plugin, key) -> {"expires_at":..., ...} restored at boot
         self._active: Dict[tuple, Dict[str, Any]] = {}
 
@@ -43,20 +45,14 @@ class CooldownService:
             if self._repo is not None else 0
         restored = 0
         if self._repo is not None:
-            for account in await self._accounts():
-                for row in await self._repo.active_for(account, now=now):
-                    self._active[(account, row["plugin"],
-                                  row["cooldown_key"])] = row
-                    restored += 1
+            for row in await self._repo.active_all(now=now):
+                self._active[(row["account"], row["plugin"],
+                              row["cooldown_key"])] = row
+                restored += 1
         if restored or expired:
             LOG.info("cooldowns restored=%d expired_cleared=%d",
                      restored, expired)
         return {"restored": restored, "expired_cleared": expired}
-
-    async def _accounts(self) -> List[str]:
-        rows = await self._repo._fetch_all(  # noqa: SLF001 — same layer
-            "SELECT DISTINCT account FROM cooldowns")
-        return [row["account"] for row in rows]
 
     # ------------------------------------------------------------------ api
     async def set(self, account: str, plugin: str, cooldown_key: str,
@@ -68,8 +64,17 @@ class CooldownService:
         Stores the ABSOLUTE ``expires_at`` — the persisted row survives
         restarts with the correct remaining time.
         """
+        try:
+            duration = float(duration_seconds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"cooldown duration must be a number, got {duration_seconds!r}"
+            ) from exc
+        if not math.isfinite(duration):
+            raise ValueError(
+                f"cooldown duration must be finite, got {duration_seconds!r}")
         now = self._now()
-        expires_at = now + max(0.0, float(duration_seconds))
+        expires_at = now + max(0.0, duration)
         row = {"account": account, "plugin": plugin,
                "cooldown_key": cooldown_key, "started_at": now,
                "expires_at": expires_at, "source": source,

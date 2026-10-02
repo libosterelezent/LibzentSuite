@@ -27,6 +27,7 @@ tests, `main.py --sim` and the dashboard's Simulation page.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -149,26 +150,52 @@ class Framework:
         self.credential_service = credential_service
         self.cooldowns = cooldowns
         self.plugin_state = plugin_state
+        self._shut_down = False
 
     async def shutdown(self) -> None:
         """Graceful: drain the scheduler, stop accounts, detach logging
-        sinks, close the database.
+        sinks, close the database. Idempotent and FAULT-TOLERANT: every step
+        runs even if an earlier one raised, and the database is ALWAYS
+        closed (a failing ``accounts.stop_all`` used to skip the log drain
+        and leak the connection thread, which can hang interpreter exit).
 
         ORDER MATTERS (logging shutdown): the db sink detaches and the
         stdlib bridge is removed BEFORE database.close() — otherwise the
         bridge keeps ingesting stdlib lines into a service whose sink is a
         closed database (every write silently failing forever).
         """
+        if self._shut_down:
+            return
+        self._shut_down = True
+        steps = (
+            ("remote control", self._stop_remote_control),
+            ("scheduler", lambda: self.scheduler.stop(drain=True)),
+            ("accounts", self.accounts.stop_all),
+            # QUEUED PERSISTENCE shutdown (agent C contract): drain the log
+            # + audit queues BEFORE closing the DB — bounded, never hangs
+            ("log persistence", self.logs.stop_persistence),
+            ("audit persistence", self.audit.stop_persistence),
+            ("stdlib bridge", self._detach_bridge),
+            ("database", self.database.close),
+        )
+        for label, step in steps:
+            try:
+                outcome = step()
+                if asyncio.iscoroutine(outcome):
+                    await outcome
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                ROOT_LOGGER.warning("shutdown step %r failed: %s: %s",
+                                    label, type(exc).__name__, exc)
+
+    async def _stop_remote_control(self) -> None:
         if self.remote_control is not None:
             self.remote_control.stop()
-        await self.scheduler.stop(drain=True)
-        await self.accounts.stop_all()
-        # QUEUED PERSISTENCE shutdown (agent C contract): drain the log +
-        # audit queues BEFORE closing the DB — bounded, never hangs
-        await self.logs.stop_persistence()
-        await self.audit.stop_persistence()
-        detach_stdlib_bridge()             # then stop ingesting stdlib
-        await self.database.close()
+
+    @staticmethod
+    async def _detach_bridge() -> None:
+        detach_stdlib_bridge()  # then stop ingesting stdlib
 
 
 async def build(
@@ -200,6 +227,42 @@ async def build(
     database = database if database is not None else Database(db_path)
     await database.connect()  # open + pragmas + migrations, FIRST
 
+    # PARTIAL-BUILD CLEANUP: anything failing from here on must release what
+    # was already started (DB connection thread, log/audit drain workers,
+    # stdlib bridge, lanes, remote control) — otherwise a failed boot leaks
+    # them and a real aiosqlite connection can keep the process from exiting
+    cleanups: list = []
+    try:
+        return await _assemble(
+            cleanups, _time, credentials, config, database,
+            plugin_dir=plugin_dir, client_factory=client_factory,
+            simulation_runner=simulation_runner)
+    except BaseException:
+        for label, undo in reversed(cleanups):
+            try:
+                outcome = undo()
+                if asyncio.iscoroutine(outcome):
+                    await outcome
+            except Exception as exc:
+                ROOT_LOGGER.warning("build cleanup step %r failed: %s: %s",
+                                    label, type(exc).__name__, exc)
+        await _safe_close(database)
+        raise
+
+
+async def _safe_close(database: Any) -> None:
+    try:
+        await database.close()
+    except Exception:
+        pass
+
+
+async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
+                    config: ProjectConfig, database: Any, *, plugin_dir: str,
+                    client_factory: Optional[Callable[[str, str], Any]],
+                    simulation_runner: Any) -> Framework:
+    """Wire every manager over an already-connected database."""
+
     # shared services over the database (credentials encrypted at rest,
     # persistent cooldowns, scoped plugin state)
     credential_service = CredentialService(
@@ -210,7 +273,13 @@ async def build(
 
     logs = LogService()
     logs.attach_db(database.logs)
+    # QUEUED PERSISTENCE startup (agent C contract): start the drain BEFORE
+    # the boot logging begins — records made earlier never persist. record()
+    # only enqueues, so it never blocks on SQLite
+    await logs.start_persistence(database.logs)
+    cleanups.append(("log persistence", logs.stop_persistence))
     attach_stdlib_bridge(logs)  # plugin/stdlib logger records -> structured page
+    cleanups.append(("stdlib bridge", detach_stdlib_bridge))
     bus = EventBus()
     _wire_event_logging(bus, logs)
 
@@ -234,6 +303,8 @@ async def build(
     )
     await settings.load()
     audit = AuditRecorder(database.audit)
+    await audit.start_persistence(database.audit)
+    cleanups.append(("audit persistence", audit.stop_persistence))
 
     sender_box: Dict[str, Any] = {"send": None}
 
@@ -247,6 +318,11 @@ async def build(
         bus, ServiceLogger(logs, "scheduler"), limiter, _sender,
         audit=audit, history_repo=database.tasks,
     )
+    # task ids continue after the archived ones (they used to restart at 1
+    # every boot, colliding with old rows; the swallowed insert error meant
+    # a restarted process archived none of its tasks)
+    await scheduler.restore_sequence()
+    cleanups.append(("scheduler", lambda: scheduler.stop(drain=False)))
 
     plugins = PluginManager(
         bus, ServiceLogger(logs, "plugins"), settings,
@@ -275,6 +351,7 @@ async def build(
         credential_service=credential_service, cooldowns=cooldowns,
         plugin_state=plugin_state,
     )
+    cleanups.append(("accounts", accounts.stop_all))
     await accounts.load()  # restore persisted accounts (attach their plugins)
     sender_box["send"] = accounts.send_hook
 
@@ -300,12 +377,6 @@ async def build(
                        account=payload.get("name"))
 
     scheduler.start()
-
-    # QUEUED PERSISTENCE startup (agent C contract): the log + audit queues
-    # drain to aiosqlite on a worker task — record() never touches SQLite
-    # inline, so event paths never block on database I/O
-    await logs.start_persistence(database.logs)
-    await audit.start_persistence(database.audit)
 
     if simulation_runner is None:
         try:
@@ -334,6 +405,7 @@ async def build(
             bus, scheduler, accounts, lambda: api, credentials,
             ServiceLogger(logs, "remote-control"),
         ).start()
+        cleanups.append(("remote control", remote_control.stop))
     return Framework(
         api=api, bus=bus, logs=logs, limiter=limiter, scheduler=scheduler,
         accounts=accounts, plugins=plugins, profiles=profiles, settings=settings,
