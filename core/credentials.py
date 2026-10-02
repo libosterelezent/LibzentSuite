@@ -83,7 +83,12 @@ class Credentials:
         return value
 
     def token_for(self, account_name: str) -> Optional[str]:
-        """Token lookup using the DISCORD_TOKEN_<NAME> convention."""
+        """MIGRATION-ONLY: reads DISCORD_TOKEN_<NAME> from .env.
+
+        Used exclusively by the explicit `credentials import-env`
+        migration command. Runtime credential resolution NEVER calls
+        this — the encrypted database is the sole source.
+        """
         return self._values.get(f"{TOKEN_PREFIX}{account_name.upper()}")
 
     # ------------------------------------------------------------- aggregates

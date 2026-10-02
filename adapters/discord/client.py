@@ -438,11 +438,11 @@ class RealDiscordClient:
 class RealClientFactory:
     """ClientFactory protocol implementation building live clients.
 
-    The pinned factory signature is ``(name, token)`` (adapters/base.py): the
-    account manager resolves the token from the account record's ref and hands
-    it over. When the caller passes an empty token, the factory falls back to
-    the conventional ``DISCORD_TOKEN_<NAME>`` entry of the injected
-    credentials before giving up with a human-readable CredentialsError.
+    The pinned factory signature is ``(name, token)`` (adapters/base.py):
+    the AccountManager resolves the token EXCLUSIVELY from the encrypted
+    CredentialService (database) and hands the decrypted value over.
+    No .env fallback exists — an empty token means MISSING_CREDENTIAL
+    upstream, surfaced as a CredentialsError here.
     """
 
     def __init__(
@@ -450,19 +450,19 @@ class RealClientFactory:
         credentials: Optional[Credentials] = None,
         logger: Optional[logging.Logger] = None,
     ) -> None:
-        self._credentials = credentials
+        self._credentials = credentials  # kept for metadata only (mudae id, owner ids)
         self._logger = logger or LOG
 
     def __call__(self, name: str, token: str) -> RealDiscordClient:
         """Build a RealDiscordClient for one account.
 
-        Raises CredentialsError when no token is available for the account.
+        Raises CredentialsError when no token is available (the caller's
+        credential resolution failed — dashboard: Accounts → credential…).
         """
-        if not token and self._credentials is not None:
-            token = self._credentials.token_for(name) or ""
         if not token:
             raise CredentialsError(
-                f"account {name!r} has no token (set DISCORD_TOKEN_{name.upper()} in .env)"
+                f"account {name!r} has no stored credential — add one "
+                "through the dashboard or CLI 'accounts credential'"
             )
         client = RealDiscordClient(token=token, logger=self._logger)
         client.account = name  # enrich AccessDenied reasons, best effort

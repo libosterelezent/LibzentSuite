@@ -1267,26 +1267,19 @@ class AccountManager:
             CredentialsError: actionable message when nothing resolves.
         """
         if self._credential_service is not None:
-            token = await self._credential_service.resolve(
-                record.name,
-                legacy_env_lookup=lambda n: self._credentials.token_for(n),
-            )
+            token = await self._credential_service.resolve(record.name)
             if not token:
-                ref = record.effective_token_ref()
                 raise CredentialsError(
-                    f"account {record.name!r} has no credential: none stored "
-                    f"in the database and {ref!r} is unset in .env "
-                    f"(store one via the credentials API, or set {ref!r})"
+                    f"account {record.name!r} has no stored credential — "
+                    "add one through the dashboard (Accounts → credential…) "
+                    "or the CLI 'accounts credential <name> <token>'"
                 )
             return token
-        ref = record.effective_token_ref()
-        token = self._credentials.get(ref)
-        if not token:
-            raise CredentialsError(
-                f"account {record.name!r} has no token: set {ref!r} in .env "
-                f"(or add the account with token_ref=<env key>)"
-            )
-        return token
+        # no credential service wired (tests): nothing can resolve
+        raise CredentialsError(
+            f"account {record.name!r} cannot start: credential storage "
+            "is not configured on this framework instance"
+        )
 
     def _reconnect_settings(self, name: str) -> Dict[str, float]:
         """Account reconnect policy via SettingsManager (duck-typed, defaults

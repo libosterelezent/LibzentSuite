@@ -339,41 +339,30 @@ class TestMultiAccountIsolation(AccountPersistenceTestBase):
             await self.shutdown(fw)
 
 
-class TestEnvPrecedence(AccountPersistenceTestBase):
+class TestEnvTokenIgnoredByRuntime(AccountPersistenceTestBase):
+    """NEGATIVE TEST (spec §34): .env DISCORD_TOKEN_* must be IGNORED by
+    normal runtime credential resolution — the database is the SOLE source.
+    Explicit import is the ONLY path by which .env tokens enter."""
+
     @_requires_pinned_contract
-    async def test_env_fallback_then_explicit_import(self) -> None:
-        """(e) DISCORD_TOKEN_X in .env: status 'env'; explicit import flips
-        to 'db'; an existing 'db' credential is never overwritten."""
-        self.write_env({
-            "DISCORD_TOKEN_X": TOKEN_ENV_X,
-            "DISCORD_TOKEN_IMPORTED": TOKEN_ENV_X,
-        })
+    async def test_env_token_ignored_and_import_is_explicit(self) -> None:
+        self.write_env({"DISCORD_TOKEN_X": TOKEN_ENV_X})
         fw = await self.build(env=True)
         api = fw.api
-        await api.accounts_add({"name": "x"})           # no DB credential
-        await self.add_account_with_credential(api, "secure", TOKEN_GAMMA)  # db-backed
+        await api.accounts_add({"name": "x"})  # no DB credential
         try:
-            # env fallback: resolve EXACTLY as the manager does at start
-            # (DB ciphertext absent -> legacy .env lookup, never stored)
-            creds0 = self.credential_service(fw)
-            resolved = await creds0.resolve(
-                "x", legacy_env_lookup=fw.credentials.token_for)
-            self.assertEqual(resolved, TOKEN_ENV_X)
-            self.assertNotIn("x", await fw.database.credentials.accounts_with_credential())
-            # ...which is what makes the status surface 'env'
-            self.assertEqual(await self.credential_status(api, "x", fw=fw), "env")
-
-            # explicit import: x converts to 'db'; secure keeps its OWN token
-            report = await api.credentials_import_env()
-            self.assertIsInstance(report, dict)
-            self.assertEqual(await self.credential_status(api, "x", fw=fw), "db")
             creds = self.credential_service(fw)
+            # runtime: env token is IGNORED -> MISSING (no fallback)
+            resolved = await creds.resolve("x")
+            self.assertIsNone(resolved)
+            self.assertEqual(await self.credential_status(api, "x", fw=fw),
+                             "missing")
+            # migration: explicit import stores it encrypted
+            report = await api.credentials_import_env()
+            self.assertIn("x", report.get("imported") or [])
             self.assertEqual(await creds.resolve("x"), TOKEN_ENV_X)
-            # never overwrites an existing db credential
-            self.assertEqual(await creds.resolve("secure"), TOKEN_GAMMA)
-            self.assertNotEqual(await creds.resolve("secure"), TOKEN_ENV_X)
-            if isinstance(report, dict) and "skipped" in report:
-                self.assertNotIn("secure", report["skipped"])  # not in .env at all
+            self.assertEqual(await self.credential_status(api, "x", fw=fw),
+                             "db")
         finally:
             await self.shutdown(fw)
 

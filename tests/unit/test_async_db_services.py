@@ -137,14 +137,9 @@ class TestCredentialService(AsyncTestCase):
             await db.connect()
             service = CredentialService(db.credentials,
                                         key_path=Path(tmp) / "k1.key")
-            # missing -> None, no env fallback
+            # missing -> None (NO env fallback exists anymore)
             self.assertIsNone(await service.resolve("alpha"))
-            # env fallback (legacy, never stored)
-            self.assertEqual(
-                await service.resolve(
-                    "alpha", legacy_env_lookup=lambda a: "env-tok"),
-                "env-tok")
-            self.assertEqual(service.status("alpha"), "env")  # runtime only
+            self.assertEqual(service.status("alpha"), "missing")
             # explicit import stores it
             report = await service.import_from_env(
                 {"alpha": "env-tok", "beta": ""})

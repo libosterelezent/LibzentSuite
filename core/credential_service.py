@@ -115,13 +115,13 @@ class CredentialService:
         self._memory[account] = token
         self._runtime_sources[account] = "db"
 
-    async def resolve(self, account: str,
-                      legacy_env_lookup=None) -> Optional[str]:
-        """Runtime resolution with the pinned precedence.
+    async def resolve(self, account: str) -> Optional[str]:
+        """Runtime resolution — DATABASE ONLY (no .env fallback).
 
-        ``legacy_env_lookup``: optional callable(account) -> token from the
-        legacy ``.env`` (used ONLY as a fallback when no DB credential
-        exists — never overwrites the DB, spec §17).
+        The decrypted credential comes exclusively from the encrypted
+        credentials table. No environment-variable account-token
+        convention exists at runtime; .env tokens enter only through
+        the EXPLICIT one-shot ``import_from_env`` migration command.
         """
         cached = self._memory.get(account)
         if cached is not None:
@@ -142,11 +142,6 @@ class CredentialService:
                 self._memory[account] = token
                 self._runtime_sources[account] = "db"
                 return token
-        if legacy_env_lookup is not None:
-            legacy = legacy_env_lookup(account)
-            if legacy:
-                self._runtime_sources[account] = "env"
-                return legacy  # NOT stored: explicit import only
         return None
 
     async def delete(self, account: str) -> bool:
@@ -160,15 +155,14 @@ class CredentialService:
 
     # ------------------------------------------------------------- status
     def status(self, account: str) -> str:
-        """'db' | 'env' | 'missing' — display-safe (never the token).
+        """'db' | 'missing' — display-safe (never the token).
 
         Sync by design (status_dict call sites): answers from the in-memory
-        account set kept fresh by store/delete/refresh.
+        account set kept fresh by store/delete/refresh. Only 'db' and
+        'missing' exist — the environment path is GONE at runtime.
         """
         if account in self._db_accounts:
             return "db"
-        if self._runtime_sources.get(account) == "env":
-            return "env"
         return "missing"
 
     async def import_from_env(self, env_tokens: dict,

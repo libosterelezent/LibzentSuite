@@ -186,7 +186,7 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.add_account("alpha")
         with self.assertRaises(CredentialsError) as ctx:
             await h.manager.start("alpha")
-        self.assertIn("DISCORD_TOKEN_ALPHA", str(ctx.exception))
+        self.assertIn("no stored credential", str(ctx.exception))
         runtime = h.manager.get("alpha").runtime
         self.assertEqual(runtime.status, AccountStatus.MISSING_CREDENTIAL)
         self.assertTrue(runtime.last_error)
@@ -244,9 +244,13 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(h.collector.of(AccountDisconnected), [])  # never live
 
     async def test_start_all_skips_disabled_and_collects_failures(self) -> None:
-        h = make_manager()
+        # only alpha and gamma have stored credentials; beta does not
+        h = make_manager(token_values={
+            "DISCORD_TOKEN_ALPHA": "tok-alpha",
+            "DISCORD_TOKEN_GAMMA": "tok-gamma",
+        })
         await h.manager.add_account("alpha")
-        await h.manager.add_account("beta", token_ref="DISCORD_TOKEN_MISSING")
+        await h.manager.add_account("beta")
         await h.manager.add_account("gamma")
         await h.manager.set_enabled("gamma", False)
         out = await h.manager.start_all()
@@ -610,21 +614,22 @@ class CredentialWiringTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await db.close()
 
-    async def test_env_fallback_reports_env(self) -> None:
+    async def test_env_token_ignored_no_fallback(self) -> None:
+        """NEGATIVE (spec §34): .env token exists but DB credential absent
+        -> MISSING_CREDENTIAL, NOT env fallback. The old .env path is GONE."""
         import tempfile
         from pathlib import Path
         from core.credential_service import CredentialService
 
         with tempfile.TemporaryDirectory() as tmp:
+            # .env HAS a token, but the credential service has NO DB store
             h = make_manager(token_values={"DISCORD_TOKEN_ALPHA": "env-token"})
             service = CredentialService(None, key_path=Path(tmp) / "k.key")
             h.manager._credential_service = service  # type: ignore[attr-defined]
             await h.manager.add_account("alpha")
-            await h.manager.start("alpha")
-            self.assertEqual(h.factory.clients[0].token, "env-token")
             row = (await h.manager.accounts())[0]
-            self.assertEqual(row["credential"], "env")
-            await h.manager.stop("alpha")
+            self.assertEqual(row["credential"], "missing")  # NOT "env"
+            await h.manager.stop("alpha") if h.manager.get("alpha").runtime.status.value == "running" else None
 
     async def test_auth_error_classified_invalid_credential(self) -> None:
         from core.errors import AccountError

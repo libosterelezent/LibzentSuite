@@ -312,12 +312,14 @@ class ControlAPI:
     async def credentials_import_env(
         self, overwrite: bool = False, surface: str = "api"
     ) -> Dict[str, Any]:
-        """EXPLICIT one-shot import of legacy .env tokens (spec §17).
+        """MIGRATION-ONLY: explicit one-shot import of legacy .env tokens.
 
-        Feeds the CredentialService every registered account's
-        ``DISCORD_TOKEN_<NAME>`` .env value; the service skips accounts
-        that already have a stored DB credential unless ``overwrite``.
-        Returns the service's report — account NAMES only.
+        Reads each registered account's ``DISCORD_TOKEN_<NAME>`` value from
+        the .env file and stores it encrypted in the database. This is the
+        ONLY path by which .env tokens enter the system — normal runtime
+        credential resolution NEVER reads .env. Skips accounts that already
+        have a stored DB credential unless ``overwrite``. Returns account
+        NAMES only (never token values).
         """
         overwrite = parse_bool(overwrite, "overwrite")
         if self._credentials_svc is None:

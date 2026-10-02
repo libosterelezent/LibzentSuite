@@ -440,9 +440,44 @@ def make_manager(
             "DISCORD_TOKEN_GAMMA": "tok-gamma",
         }
     )
+    # Wire a CredentialService backed by an in-memory store so the
+    # database-only resolution works in tests (no .env fallback exists)
+    from core.credential_service import CredentialService
+
+    class _MemCredRepo:
+        def __init__(self):
+            self.rows = {}
+
+        async def store(self, account, ciphertext):
+            self.rows[account] = ciphertext
+
+        async def load(self, account):
+            return self.rows.get(account)
+
+        async def delete(self, account):
+            return self.rows.pop(account, None) is not None
+
+        async def accounts_with_credential(self):
+            return sorted(self.rows)
+
+    cred_repo = _MemCredRepo()
+    credential_service = CredentialService(
+        cred_repo, key_path="/tmp/opencode/test-cred.key")
+    seed = token_values if token_values is not None else {
+        "DISCORD_TOKEN_ALPHA": "tok-alpha",
+        "DISCORD_TOKEN_BETA": "tok-beta",
+        "DISCORD_TOKEN_GAMMA": "tok-gamma",
+    }
+    for acct, tok in seed.items():
+        name = acct.replace("DISCORD_TOKEN_", "").lower()
+        credential_service._memory[name] = tok
+        credential_service._db_accounts.add(name)
+        credential_service._runtime_sources[name] = "db"
+
     manager = AccountManager(
         bus, LOG, repo, plugins, profile_manager, scheduler, settings, audit,
         factory, credentials, limiter=limiter, supervisor_tick=supervisor_tick,
+        credential_service=credential_service,
     )
     collector = EventCollector(bus)
     from core.event_bus import (

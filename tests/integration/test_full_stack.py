@@ -89,6 +89,18 @@ class Stack:
             database=self.db,
             quiet=True,
         )
+        # Seed credentials for the sim accounts (database-only resolution —
+        # the .env path no longer exists at runtime). We inject directly
+        # into the service's memory + DB cache to avoid generating a
+        # persistent key file for tests.
+        cs = getattr(self.framework, "credential_service", None)
+        if cs is not None:
+            for name in ("alpha", "beta"):
+                token = self.credentials.token_for(name)
+                if token:
+                    cs._memory[name] = token
+                    cs._db_accounts.add(name)
+                    cs._runtime_sources[name] = "db"
         return self
 
     def _client_factory(self, name: str, token: str) -> SimClient:
