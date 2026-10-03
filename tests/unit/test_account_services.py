@@ -144,7 +144,7 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_manager_services_for_uses_shared_registry(self) -> None:
         h = make_manager()
-        h.manager.add_account("alpha")
+        await h.manager.add_account("alpha")
         h.plugins.states_map["alpha"] = [
             {"name": "soulcopy", "enabled": True, "settings": {"k": 9},
              "last_error": None, "error_count": 0},

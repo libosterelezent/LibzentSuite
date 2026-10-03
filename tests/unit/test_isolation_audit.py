@@ -130,6 +130,34 @@ class StopDuringStartTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rt.status, AccountStatus.STOPPED)   # no regression
         self.assertEqual(h.collector.of(AccountFailed), [])  # no event
 
+    async def test_stop_during_activation_does_not_leave_plugins_active(self) -> None:
+        """stop() completing while start() is INSIDE activate_account must
+        not leave the re-activated plugins live on a STOPPED account."""
+        h = make_manager()
+        await h.manager.add_account("alpha")
+        gate = asyncio.Event()
+        original = h.plugins.activate_account
+
+        async def gated_activate(account, factory):
+            await gate.wait()
+            return await original(account, factory)
+
+        h.plugins.activate_account = gated_activate
+        start_task = asyncio.create_task(h.manager.start("alpha"))
+        while len(h.plugins.attached) < 2:  # add_account attach + start attach
+            await asyncio.sleep(0.01)
+        await h.manager.stop("alpha")
+        deactivated_before = len(h.plugins.deactivated)
+        gate.set()
+        out = await start_task
+
+        rt = h.manager.get("alpha").runtime
+        self.assertEqual(out["status"], "stopped")
+        self.assertEqual(rt.status, AccountStatus.STOPPED)
+        self.assertGreater(len(h.plugins.activated), 0)  # raced past the stop
+        self.assertGreater(
+            len(h.plugins.deactivated), deactivated_before)  # and undone
+
     async def test_in_flight_reconnect_cannot_resurrect_stopped_account(self) -> None:
         """K3: stop() landing while the supervisor is INSIDE connect() must
         tear the fresh client down instead of flipping back to RUNNING."""

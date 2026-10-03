@@ -62,9 +62,6 @@ class PluginStateService:
     async def set_global(self, key: str, value: Any) -> None:
         await self._set(self._global_key(key), value)
 
-    async def delete_global(self, key: str) -> bool:
-        return await self._delete(self._global_key(key))
-
     # ------------------------------------------------------------- account
     async def get_account(self, account: str, key: str, default: Any = None) -> Any:
         return await self._get(self._account_key(account, key), default)
@@ -81,9 +78,6 @@ class PluginStateService:
 
     async def set_plugin(self, plugin: str, key: str, value: Any) -> None:
         await self._set(self._plugin_key(plugin, key), value)
-
-    async def delete_plugin(self, plugin: str, key: str) -> bool:
-        return await self._delete(self._plugin_key(plugin, key))
 
     # ------------------------------------------------------- account+plugin
     async def get_pair(self, account: str, plugin: str, key: str,

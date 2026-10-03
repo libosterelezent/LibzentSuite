@@ -93,12 +93,6 @@ class PluginBase(abc.ABC):
         prologue here is multiplied by the plugin count.
         """
 
-    # --------------------------------------------------------------- helpers
-    @classmethod
-    def setting_defaults(cls) -> Dict[str, Any]:
-        """Manifest defaults as a plain dict (display/preview helper)."""
-        return {s.name: s.default for s in cls.settings}
-
     def __repr__(self) -> str:
         return f"<{type(self).__name__} name={self.name!r} v{self.version}>"
 

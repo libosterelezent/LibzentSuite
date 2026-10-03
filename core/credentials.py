@@ -4,8 +4,11 @@ Design rules enforced by this module:
   * values are read from a .env file (or an injected dict for tests/simulations),
   * nothing that could identify a real account is hardcoded anywhere else,
   * repr/redacted output never leaks token values (dashboard/CLI safe display),
-  * per spec §7: secrets are NOT considered safe merely because a DB exists —
-    token values never enter the database at all; only .env key references do.
+  * per spec §7: account tokens are NOT stored here at runtime — the
+    encrypted database store (core.credential_service.CredentialService) is
+    the sole source; this module keeps fleet-level ids/flags and the
+    DISCORD_TOKEN_* keys are read only by the one-shot `import-env`
+    migration.
 """
 from __future__ import annotations
 

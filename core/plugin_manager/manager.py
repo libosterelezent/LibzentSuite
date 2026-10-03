@@ -190,8 +190,19 @@ class PluginManager:
                         enabled = True
                 except Exception:
                     self._logger.exception("plugin state read failed for %s:%s", account, name)
+            try:
+                instance = self._loader.create(name)
+            except Exception as exc:
+                runtime = PluginRuntime(name=name, instance=None, enabled=False)
+                runtime.last_error = f"init: {type(exc).__name__}: {exc}"
+                runtime.error_count += 1
+                runtimes[name] = runtime
+                self._logger.exception(
+                    "plugin %s failed to instantiate on %s; skipped", name, account
+                )
+                continue
             runtimes[name] = PluginRuntime(
-                name=name, instance=self._loader.create(name), enabled=bool(enabled)
+                name=name, instance=instance, enabled=bool(enabled)
             )
         # resolve settings NOW (not just at activate) so bad config fails
         # fast at attach — ported behavior from the audited original
@@ -336,7 +347,9 @@ class PluginManager:
                 except Exception:
                     pass
         self._bus.publish_nowait(
-            PluginEnabledChanged(account=account, plugin=plugin, enabled=enabled)
+            PluginEnabledChanged(
+                account=account, plugin=plugin, enabled=runtime.enabled
+            )
         )
 
     async def set_setting(self, account: str, plugin: str, key: str, value: Any) -> Any:

@@ -39,6 +39,12 @@ class FakeAccounts:
         return self._accounts.get(name)
 
 
+class RaisingAccounts(FakeAccounts):
+    def get(self, name):
+        from core.errors import AccountError
+        raise AccountError(f"unknown account {name!r}")
+
+
 class FakeApi:
     async def status(self):
         return {"uptime_s": 12.0, "tasks": {"queued": 0, "completed": 3},
@@ -198,6 +204,41 @@ class TestRemoteControl(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         bridge.stop()
         self.assertIn("commands:", scheduler.submitted[0]["content"])
+
+    async def test_mention_for_removed_account_ignored(self) -> None:
+        bus = EventBus()
+        scheduler = FakeScheduler()
+        api = FakeApi()
+        credentials = Credentials.from_values({"OWNER_USER_IDS": str(OWNER)})
+        bridge = RemoteControl(
+            bus, scheduler, RaisingAccounts(), lambda: api, credentials,
+        ).start()
+        results = await asyncio.wait_for(bus.publish_nowait(
+            mention_message(f"<@{ALPHA_ID}> status", account="ghost")), 2)
+        bridge.stop()
+        self.assertEqual(scheduler.submitted, [])
+        self.assertNotIn(Exception, [type(r) for r in results])
+
+    async def test_partial_mention_id_not_matched(self) -> None:
+        bridge, bus, scheduler, _ = make_bridge()
+        bus.publish_nowait(mention_message("<@200> status"))
+        await asyncio.sleep(0.05)
+        bridge.stop()
+        self.assertEqual(scheduler.submitted, [])
+
+    async def test_malformed_owner_ids_rejected_quietly(self) -> None:
+        bus = EventBus()
+        scheduler = FakeScheduler()
+        api = FakeApi()
+        credentials = Credentials.from_values({"OWNER_USER_IDS": "abc,def"})
+        bridge = RemoteControl(
+            bus, scheduler, FakeAccounts(), lambda: api, credentials,
+        ).start()
+        results = await asyncio.wait_for(bus.publish_nowait(
+            mention_message(f"<@{ALPHA_ID}> status")), 2)
+        bridge.stop()
+        self.assertEqual(scheduler.submitted, [])
+        self.assertNotIn(Exception, [type(r) for r in results])
 
 
 if __name__ == "__main__":

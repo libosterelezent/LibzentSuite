@@ -126,6 +126,19 @@ class TestSends(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TargetGone):
             await client.send_dm(SYNTHETIC_MUDAE_ID, "ghost-dm")
 
+    async def test_vanished_dm_channel_does_not_consume_one_shot_limit(self) -> None:
+        world = _world()
+        client = await _connected(world, SYNTHETIC_ALPHA_ID)
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        world.server_limit_next(channel_id=dm, retry_after=0.4)
+        world.channel_gone(dm)
+        with self.assertRaises(TargetGone):
+            await client.send_dm(SYNTHETIC_MUDAE_ID, "ghost-dm")
+        self.assertEqual(world.blocked_sends, [])  # 429 not spent on a dead send
+        world.add_channel(dm, "dm-restored", dm=True)
+        with self.assertRaises(ServerRateLimit):  # still armed for a live send
+            await client.send_message(dm, "later")
+
     async def test_send_message_success_shape(self) -> None:
         world = _world()
         client = await _connected(world, SYNTHETIC_ALPHA_ID)

@@ -88,6 +88,11 @@ class Database:
 
     async def migrate(self) -> int:
         """Apply pending migrations in order (idempotent, recorded)."""
+        versions = [version for version, _, _ in MIGRATIONS]
+        if versions != sorted(versions) or len(set(versions)) != len(versions):
+            raise DatabaseError(
+                f"database.schema MIGRATIONS versions must be unique and "
+                f"strictly increasing, got {versions!r}")
         conn = self.connection
         await conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations ("

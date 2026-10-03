@@ -101,6 +101,71 @@ class TestDelivery(unittest.TestCase):
             world.deliver(424242, SYNTHETIC_OWNER_ID, "void")
 
 
+class _Boom:
+    """A subscriber whose callback always fails."""
+
+    user_id = 0
+
+    def receive(self, message) -> None:
+        raise RuntimeError("boom")
+
+
+class TestSubscriberIsolation(unittest.TestCase):
+    """One failing subscriber must not lose the event for the others."""
+
+    def test_failing_subscriber_does_not_block_later_subscribers(self) -> None:
+        world = _basic_world()
+        good = _Recorder()
+        world.subscribers.append(_Boom())
+        world.subscribers.append(good)
+        message = world.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "hello"
+        )
+        self.assertEqual(good.received, [message])
+
+    def test_cancel_pending_replies_stops_inflight_pages(self) -> None:
+        world = SimWorld(
+            responder_id=SYNTHETIC_MUDAE_ID,
+            responses={"$slud-s": ["page-one", "page-two"]},
+            reply_delay=30.0,
+        )
+        world.add_user(SYNTHETIC_MUDAE_ID, "mudae")
+        world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
+        world.add_channel(SYNTHETIC_GUILD_CHANNEL, "guild-channel")
+
+        async def _drive() -> None:
+            world.deliver(
+                SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "$slud-s"
+            )
+            await asyncio.sleep(0.05)
+            self.assertTrue(world._responder_tasks)  # reply mid-flight
+            world.cancel_pending_replies()
+            await asyncio.sleep(0.05)
+
+        asyncio.run(_drive())
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        self.assertEqual(world.messages_of(dm), [])  # pages never landed
+
+
+class TestSubscriberIsolationAsync(unittest.IsolatedAsyncioTestCase):
+    """The scripted responder survives a failing subscriber (async world)."""
+
+    async def test_failing_subscriber_does_not_kill_the_responder(self) -> None:
+        world = SimWorld(
+            responder_id=SYNTHETIC_MUDAE_ID,
+            responses={"$slud-s": ["page-one"]},
+            reply_delay=0.01,
+        )
+        world.add_user(SYNTHETIC_MUDAE_ID, "mudae")
+        world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
+        world.add_channel(SYNTHETIC_GUILD_CHANNEL, "guild-channel")
+        world.subscribers.append(_Boom())
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "$slud-s")
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        await world.wait_for_quiet(dm, quiet=0.2, limit=2.0)
+        self.assertEqual(world.messages_of(dm), ["page-one"])
+
+
 class TestScriptedResponder(unittest.IsolatedAsyncioTestCase):
     """Command-matched pages arrive via DM, in order, with delays."""
 

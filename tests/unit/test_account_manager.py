@@ -465,6 +465,24 @@ class SendHookTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("poke", str(ctx.exception))
         await h.manager.stop("alpha")
 
+    async def test_button_target_gone_heals_stale_channel_cache(self) -> None:
+        h = make_manager()
+        await h.manager.add_account("alpha")
+        await h.manager.start("alpha")
+        runtime = h.manager.get("alpha").runtime
+        client = runtime.client
+
+        async def vanish(channel_id, message_id, custom_id):
+            raise TargetGone("alpha", f"channel {channel_id} vanished")
+
+        client.click_button = vanish
+        with self.assertRaises(TargetGone):
+            await h.manager.send_hook(make_task(
+                action="button", channel_id=100, message_id=5, content="btn"))
+        with self.assertRaises(TargetGone):
+            runtime.cache.validate_channel(100)
+        await h.manager.stop("alpha")
+
 
 class DetailsTests(unittest.IsolatedAsyncioTestCase):
     async def test_details_exact_shape_with_limiter(self) -> None:

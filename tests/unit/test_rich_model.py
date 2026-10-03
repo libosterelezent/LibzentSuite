@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import sys
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace as NS
+from unittest import mock
 
 from adapters.model import (
     DiscordComponent,
@@ -151,6 +154,58 @@ class TestConversion(unittest.TestCase):
         self.assertEqual(dto.reactions[0].emoji, "<:kakera:77>")
         self.assertEqual(dto.reactions[0].id, 77)
         self.assertTrue(dto.reactions[0].me)
+
+    def test_animated_custom_emoji_repr(self) -> None:
+        reaction = NS(emoji=NS(name="kakera", id=77, animated=True),
+                      count=2, me=False)
+        dto = convert_message(library_message(reactions=[reaction]), dm=False)
+        self.assertEqual(dto.reactions[0].emoji, "<a:kakera:77>")
+
+    def test_embed_timestamp_datetime_becomes_iso(self) -> None:
+        from adapters.model import convert_embed as ce
+
+        embed = ce(NS(title="t", timestamp=datetime(
+            2026, 1, 1, tzinfo=timezone.utc)))
+        self.assertEqual(embed.timestamp, "2026-01-01T00:00:00+00:00")
+        passthrough = ce(NS(title="t", timestamp="2026-01-01T00:00:00"))
+        self.assertEqual(passthrough.timestamp, "2026-01-01T00:00:00")
+        self.assertIsNone(ce(NS(title="t", timestamp=None)).timestamp)
+
+    def test_deleted_referenced_sentinel_stays_none(self) -> None:
+        # discord.py-self shape: DeletedReferencedMessage exposes id via a
+        # _parent MessageReference (so plain hasattr(resolved, "id") lies)
+        sentinel = NS(id=999, channel_id=500, guild_id=42,
+                      _parent=NS(message_id=999, channel_id=500, guild_id=42))
+        lib = library_message(reference=NS(
+            message_id=999, channel_id=500, guild_id=42, resolved=sentinel))
+        dto = convert_message(lib, dm=False)
+        self.assertIsNone(dto.reference.referenced)
+        self.assertEqual(dto.reference.message_id, 999)
+        # upstream shape: the NamedTuple-style _deleted marker
+        marked = NS(id=999, channel_id=500, guild_id=42, _deleted=True)
+        lib2 = library_message(reference=NS(
+            message_id=999, channel_id=500, guild_id=42, resolved=marked))
+        self.assertIsNone(convert_message(lib2, dm=False).reference.referenced)
+
+    def test_reply_chain_conversion_is_bounded(self) -> None:
+        m1 = library_message(id=1, content="first", reference=None)
+        ref2 = NS(message_id=1, channel_id=500, guild_id=42, resolved=m1)
+        m2 = library_message(id=2, content="second", reference=ref2)
+        ref3 = NS(message_id=2, channel_id=500, guild_id=42, resolved=m2)
+        m3 = library_message(id=3, content="third", reference=ref3)
+        dto = convert_message(m3, dm=False)
+        self.assertEqual(dto.reference.referenced.id, 2)  # one level down
+        inner = dto.reference.referenced
+        self.assertEqual(inner.reference.message_id, 1)  # ids kept...
+        self.assertIsNone(inner.reference.referenced)     # ...chain capped
+
+    def test_self_referential_resolution_terminates(self) -> None:
+        lib = library_message(id=7, reference=NS(
+            message_id=7, channel_id=500, guild_id=42))
+        lib.reference.resolved = lib  # pathological cache cycle
+        dto = convert_message(lib, dm=False)
+        self.assertEqual(dto.reference.referenced.id, 7)
+        self.assertIsNone(dto.reference.referenced.reference.referenced)
 
 
 class TestBackwardCompatibility(unittest.TestCase):
@@ -393,6 +448,130 @@ class TestFuturePluginShapes(unittest.TestCase):
         dto = convert_message(lib, dm=True)
         self.assertTrue(dto.dm)          # DM detection lives on the flag;
         self.assertIn("Alice", dto.content)  # channel mgmt stays in services
+
+
+class TestLiveClientBoundary(unittest.IsolatedAsyncioTestCase):
+    """Live-adapter boundary fidelity that the simulator cannot mirror
+    (library error shapes, session-liveness gating, lazy import)."""
+
+    class NotFound(Exception):
+        pass
+
+    class Forbidden(Exception):
+        pass
+
+    class _FailingFetchClient:
+        def __init__(self, exc: Exception) -> None:
+            self._exc = exc
+
+        async def fetch_user(self, user_id: int):
+            raise self._exc
+
+    class _ReadyLibClient:
+        """discord.Client stand-in that reaches READY then parks."""
+
+        last_built = None
+
+        def __init__(self) -> None:
+            self.closed = False
+            self.user = NS(id=777)
+            self._park = asyncio.Event()
+
+        def event(self, coro):
+            setattr(self, coro.__name__, coro)
+            return coro
+
+        async def start(self, token: str) -> None:
+            await self.on_ready()
+            await self._park.wait()
+
+        async def close(self) -> None:
+            self.closed = True
+            self._park.set()
+
+    def test_module_import_never_pulls_the_library(self) -> None:
+        import importlib
+
+        saved = {name: sys.modules.get(name)
+                 for name in ("discord", "adapters.discord",
+                              "adapters.discord.client")}
+        for name in saved:
+            sys.modules.pop(name, None)
+        try:
+            importlib.import_module("adapters.discord")
+            self.assertNotIn("discord", sys.modules)
+        finally:
+            for name, mod in saved.items():
+                if mod is not None:
+                    sys.modules[name] = mod
+                else:
+                    sys.modules.pop(name, None)
+
+    async def test_fetch_user_none_for_gone_users(self) -> None:
+        from adapters.discord.client import RealDiscordClient
+
+        for exc in (
+            self.NotFound("404 Not Found (error code: 10013): Unknown User"),
+            self.Forbidden("403 Forbidden (error code: 10013): Unknown User"),
+        ):
+            client = RealDiscordClient("tok")
+            client._client = self._FailingFetchClient(exc)
+            client.connected = True
+            self.assertIsNone(await client.fetch_user(1))
+
+    async def test_fetch_user_raises_real_denials(self) -> None:
+        from adapters.discord.client import RealDiscordClient
+
+        client = RealDiscordClient("tok")
+        client._client = self._FailingFetchClient(
+            self.Forbidden("403 Forbidden (error code: 50001): Missing Access"))
+        client.connected = True
+        with self.assertRaises(self.Forbidden):
+            await client.fetch_user(1)
+
+    async def test_sends_raise_connection_error_offline(self) -> None:
+        from adapters.discord.client import RealDiscordClient
+
+        client = RealDiscordClient("tok")
+        self.assertFalse(client.connected)
+        with self.assertRaises(ConnectionError):
+            client._require_client()
+        client._client = object()
+        with self.assertRaises(ConnectionError):  # built but not connected
+            client._require_client()
+        client.connected = True
+        self.assertIs(client._require_client(), client._client)
+        client.connected = False
+        with self.assertRaises(ConnectionError):
+            client._require_client()
+
+    async def test_connected_lifecycle_through_connect_and_disconnect(self) -> None:
+        from adapters.discord.client import RealDiscordClient
+
+        lib_cls = type("LibClient", (self._ReadyLibClient,), {})
+        mod = NS(Client=lib_cls, DMChannel=type("DMChannel", (), {}))
+        with mock.patch.dict(sys.modules, {"discord": mod}):
+            client = RealDiscordClient("tok")
+            await client.connect()
+            self.assertTrue(client.connected)
+            self.assertEqual(client.user_id, 777)
+            self.assertTrue(client.cached_snapshot()["available"])
+            await client.disconnect()
+            self.assertFalse(client.connected)
+            self.assertFalse(client.cached_snapshot()["available"])
+            with self.assertRaises(ConnectionError):
+                client._require_client()
+
+    async def test_latency_ms_rejects_inf_and_nan(self) -> None:
+        from adapters.discord.client import RealDiscordClient
+
+        client = RealDiscordClient("tok")
+        self.assertIsNone(client.latency_ms)
+        for bad in (float("inf"), float("-inf"), float("nan"), -1.0):
+            client._client = NS(latency=bad)
+            self.assertIsNone(client.latency_ms)
+        client._client = NS(latency=0.021)
+        self.assertAlmostEqual(client.latency_ms, 21.0)
 
 
 if __name__ == "__main__":

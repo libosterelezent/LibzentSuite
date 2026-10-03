@@ -294,11 +294,9 @@ async def invalidate_dm_channel(
     """
     user_id = int(user_id)
     if cache is not None:
-        info = cache.channels.get(
-            cache.dm_channel_for(user_id) or -1
-        ) if cache.dm_channel_for(user_id) is not None else None
-        if info is not None:
-            info.deleted = True
+        cached = cache.dm_channel_for(user_id)
+        if cached is not None:
+            cache.invalidate_channel(cached, f"dm with {user_id} gone")
     if cache_repo is not None:
         try:
             await cache_repo.delete(account, "dm", str(user_id))

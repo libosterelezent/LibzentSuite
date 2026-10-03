@@ -239,6 +239,20 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
         self.assertEqual(entry["source"], "ext:discord.http")
         self.assertEqual(entry["severity"], "ERROR")
 
+    def test_hostile_payload_never_raises(self) -> None:
+        """REGRESSION (audit round 4): record()'s degraded-mode fallback
+        itself called str(source) — an object with a broken __str__ as BOTH
+        source and message escaped the 'never raises' contract."""
+        class Hostile:
+            def __str__(self) -> str:
+                raise RuntimeError("unprintable")
+
+        service = LogService()
+        out = service.record(Hostile(), Hostile(), Hostile())
+        self.assertEqual(out["severity"], "INFO")
+        self.assertEqual(out["source"], "<unloggable source>")
+        self.assertEqual(out["message"], "<unloggable message>")
+
     def test_ring_eviction_and_volume(self) -> None:
         service = LogService(capacity=100)
         for i in range(250):

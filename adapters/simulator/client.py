@@ -139,10 +139,10 @@ class SimClient:
     async def send_dm(self, user_id: int, content: str) -> DiscordMessage:
         """Deliver a DM to a user through the world's deterministic DM channel."""
         channel_id = self._world.dm_channel_for(self.user_id, user_id)
+        self._guard_channel(channel_id)
         limit = self._guard_send(channel_id)
         if limit is not None:
             raise limit
-        self._guard_channel(channel_id)
         sent = self._world.deliver(channel_id, self.user_id, content, dm=True)
         return self._as_discord_message(sent, dm=True)
 

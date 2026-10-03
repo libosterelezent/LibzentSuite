@@ -32,12 +32,6 @@ class AccountRecord:
     profiles: List[str] = field(default_factory=list)        # assigned profiles
     created_at: float = field(default_factory=time.time)
 
-    def effective_token_ref(self) -> str:
-        """DEPRECATED: legacy .env key convention. Kept for migration
-        tooling only — runtime credential resolution NEVER uses this
-        (the encrypted credentials table is the sole source)."""
-        return self.token_ref or f"DISCORD_TOKEN_{self.name.upper()}"
-
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id, "name": self.name, "token_ref": self.token_ref,

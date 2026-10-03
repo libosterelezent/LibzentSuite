@@ -409,8 +409,9 @@ latency_ms/user_id/on_message/on_disconnect), `ClientFactory` protocol
 
 ### interfaces/dashboard (A8)
 - `interfaces/dashboard/server.py`: stdlib `ThreadingHTTPServer` +
-  `DashboardServer(api, token=None, host="127.0.0.1", port=8070)` with
-  `.start()/.stop()/.attach_logs(log_service)`, JSON REST mapping 1:1 to
+  `DashboardServer(api, token=None, host="127.0.0.1", port=8070, bus=None,
+  exit_signal=False)` with `.start()/.stop()/.attach_logs(log_service)/
+  .attach_audit(recorder)`, JSON REST mapping 1:1 to
   CoreAPI (`/api/status`, `/api/accounts`, `/api/accounts/add|remove|info|
   enable|start|stop|emergency-stop`, `/api/plugins`, `/api/plugins/state|
   set-enabled|settings|set-setting`, `/api/profiles`, `/api/profiles/create|
@@ -461,7 +462,8 @@ Task.content with Task.message_id as target; audit notes carry counts only.
 ## Database (A2 implements; models+schema in spine)
 
 `database/db.py`: `Database(path="state/slaughter.db", *, audit_keep=10000,
-log_keep=10000)` — thread-safe (RLock), 0600 file perms, WAL, `.migrate()`
+log_keep=10000)` — one background-thread aiosqlite connection (async API;
+ops never run on the event loop), 0600 file perms, WAL, `.migrate()`
 runs pending migrations from `database/schema.py:MIGRATIONS` using a
 `schema_migrations` table, `.close()`, and repository properties:
 `.accounts .account_settings .profiles .plugins .policies .audit .logs .tasks .kv`.

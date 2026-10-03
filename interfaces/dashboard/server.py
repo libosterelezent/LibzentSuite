@@ -147,12 +147,16 @@ CREDENTIAL_GATE_MESSAGE = "set DASHBOARD_TOKEN in .env to manage credentials"
 def _dumps(payload: Any) -> str:
     """NaN-safe JSON: a non-finite float must never emit the bare `NaN`
     token (invalid JSON — WS clients drop such frames SILENTLY, freezing
-    the live view with no error)."""
+    the live view with no error). Non-JSON-serializable values (datetime,
+    sets, exceptions) degrade the same way instead of raising."""
     try:
         return json.dumps(payload, allow_nan=False)
     except ValueError:
         return json.dumps({"type": "error",
                            "error": "payload contained a non-finite number"})
+    except TypeError:
+        return json.dumps({"type": "error",
+                           "error": "payload was not JSON-serializable"})
 
 
 def parse_json_bool(value: Any, field: str) -> bool:
@@ -283,7 +287,7 @@ def event_as_dict(event: Event) -> Dict[str, Any]:
     """JSON-safe dict of a bus event (dataclass fields; falls back to vars)."""
     if is_dataclass(event):
         return dict(asdict(event))
-    return {k: v for k, v in vars(getattr(event, "__dict__", {})).items()
+    return {k: v for k, v in getattr(event, "__dict__", {}).items()
             if isinstance(v, (str, int, float, bool, type(None)))}
 
 
@@ -347,6 +351,12 @@ class WebSocketClient:
                             return
                         self._sendq.put(("raw", wsproto.encode_pong(payload)))
                     elif opcode == wsproto.OP_TEXT:
+                        if not fin:  # fragmentation is never reassembled —
+                            # a partial message must not look like data
+                            LOG.warning("websocket: fragmented text frame")
+                            self._sendq.put(("raw", wsproto.encode_close_frame()))
+                            self._drain()
+                            return
                         try:
                             text = payload.decode("utf-8")
                         except UnicodeDecodeError:
@@ -527,6 +537,9 @@ class DashboardServer:
             self._httpd.shutdown()
             self._httpd.server_close()  # AUDIT FIX: release the listening socket
             self._httpd = None
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)  # shutdown() already signalled it
+            self._thread = None
 
     def attach_logs(self, log_service: Any) -> "DashboardServer":
         """Stream every new log entry from a LogService to WS clients.
@@ -664,7 +677,7 @@ class DashboardServer:
                 except Exception as exc:
                     LOG.warning("broadcast snapshot failed: %s", exc)
                     continue
-                payload = json.dumps({"type": "stats", **status})
+                payload = _dumps({"type": "stats", **status})
                 for client in list(self._clients):
                     client.push_text(payload)
         except asyncio.CancelledError:
@@ -1102,12 +1115,19 @@ def _make_handler(server: "DashboardServer") -> type:
         ) -> None:
             if content_type == "application/json":
                 # allow_nan=False: a stored NaN must not serialize to the
-                # bare `NaN` token (invalid JSON — breaks every JSON client)
+                # bare `NaN` token (invalid JSON — breaks every JSON client).
+                # TypeError (datetime/set/exception in the payload) must
+                # answer with JSON, not crash the handler thread and drop
+                # the connection mid-response.
                 try:
                     data = json.dumps(payload, allow_nan=False).encode("utf-8")
                 except ValueError:
                     data = json.dumps(
                         {"ok": False, "error": "response contained a non-finite number"}
+                    ).encode("utf-8")
+                except TypeError:
+                    data = json.dumps(
+                        {"ok": False, "error": "response was not JSON-serializable"}
                     ).encode("utf-8")
             else:
                 data = payload if isinstance(payload, bytes) else str(payload).encode("utf-8")
@@ -1115,7 +1135,9 @@ def _make_handler(server: "DashboardServer") -> type:
             self.send_header("Content-Type", content_type)
             for header, value in SECURITY_HEADERS:
                 self.send_header(header, value)
-            if close:
+            if close or self.close_connection:
+                # tell the client the socket will not be reused (a drained
+                # GET body / rejected request leaves no parseable stream)
                 self.send_header("Connection", "close")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
@@ -1142,6 +1164,27 @@ def _make_handler(server: "DashboardServer") -> type:
             if not self._origin_allowed():
                 self._reject(403, {"ok": False, "error": "cross-site request refused"})
                 return
+            if method != "POST":
+                # a non-POST body is never consumed by any handler; drain it
+                # bounded (and refuse the connection reuse) so unread bytes
+                # cannot be parsed as the NEXT request line on the keep-alive
+                # stream (an upgrade request carrying a body would likewise
+                # corrupt the websocket frame stream)
+                if self.headers.get("Transfer-Encoding"):
+                    self.close_connection = True
+                else:
+                    try:
+                        extra = int(self.headers.get("Content-Length") or 0)
+                    except ValueError:
+                        extra = -1
+                    if extra:
+                        remaining = extra
+                        while remaining > 0 and remaining <= 16 * MAX_BODY_BYTES:
+                            chunk = self.rfile.read(min(remaining, 65536))
+                            if not chunk:
+                                break
+                            remaining -= len(chunk)
+                        self.close_connection = True
             parsed = urlparse(self.path)
             path, query = parsed.path, parse_qs(parsed.query)
             if path == "/ws":
@@ -1242,6 +1285,11 @@ def _make_handler(server: "DashboardServer") -> type:
             if not key:
                 self._respond(400, {"ok": False, "error": "missing Sec-WebSocket-Key"})
                 return
+            try:
+                handshake = wsproto.handshake_response(key)
+            except ValueError:  # incl. non-ASCII keys (UnicodeEncodeError)
+                self._respond(400, {"ok": False, "error": "malformed Sec-WebSocket-Key"})
+                return
             if not self._authorized(
                 (query.get("token") or [None])[0] or self.headers.get("X-Dashboard-Token")
             ):
@@ -1255,7 +1303,7 @@ def _make_handler(server: "DashboardServer") -> type:
             # request from the detached file object after serve() returns
             self.close_connection = True
             try:
-                self.connection.sendall(wsproto.handshake_response(key))
+                self.connection.sendall(handshake)
             except OSError:
                 return  # peer vanished before the 101 — nothing to serve
             fd = self.connection.detach()  # we own the socket now

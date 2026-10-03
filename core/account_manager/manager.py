@@ -63,6 +63,7 @@ name. This matches the A6 hand-off contract and should be reconciled with A3.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
 import time
@@ -415,13 +416,17 @@ class AccountManager:
             try:  # drop queued/parked tasks so nothing fires against a
                 # re-created same-named account later
                 self._scheduler.cancel_matching(account=name)
-                cleanup = getattr(self._scheduler, "cleanup_account", None)
-                if callable(cleanup):
+            except Exception:
+                self._logger.exception("task cancel failed for %s", name)
+            cleanup = getattr(self._scheduler, "cleanup_account", None)
+            if callable(cleanup):
+                try:
                     resolved = cleanup(name)  # K1: real method now exists;
                     if asyncio.iscoroutine(resolved):  # tolerant of sync fakes
                         await resolved
-            except Exception:
-                self._logger.exception("task cancel failed for %s", name)
+                except Exception:
+                    self._logger.exception(
+                        "lane cleanup failed for %s", name)
         stale_client = rt.client
         rt.client = None
         if stale_client is not None:  # FAILED account never stopped: no leak
@@ -429,12 +434,6 @@ class AccountManager:
                 await stale_client.disconnect()
             except Exception:
                 self._logger.warning("stale client close failed for %s", name)
-        try:  # a FAILED account's plugins may still be ACTIVE (a drop with
-            outcome = self._plugin_manager.deactivate_account(name)  # no
-            if asyncio.iscoroutine(outcome):  # supervisor never ran the
-                await outcome  # stop path) — fire on_disable/on_unload too
-        except Exception:
-            self._logger.exception("plugin deactivation failed for %s", name)
         try:
             # K6 (S1-C7/S5-C3/S10-C3): a FAILED account was never stop()ed,
             # so its plugins may still be ACTIVE (roll's recovery loop,
@@ -615,6 +614,13 @@ class AccountManager:
         if rt.stop_requested:  # stop() raced the post-connect section: do
             rt.status = AccountStatus.STOPPED  # not publish/activate past it
             self._discard_half_built_client(name, rt)
+            try:
+                # the activation above may have raced past stop()'s teardown
+                outcome = self._plugin_manager.deactivate_account(name)
+                if asyncio.iscoroutine(outcome):
+                    await outcome
+            except Exception:
+                self._logger.exception("plugin deactivation failed for %s", name)
             self._logger.info("account %s start aborted by concurrent stop", name)
             return account.status_dict()
         self._bus.publish_nowait(AccountConnected(account=name))
@@ -703,6 +709,11 @@ class AccountManager:
                 except asyncio.CancelledError:
                     supervisor.cancel()  # caller cancelled us — don't leak the task
                     raise
+                except Exception:
+                    # a CRASHED supervisor must not abort the teardown —
+                    # stop() still has to reach its STOPPED terminal state
+                    self._logger.exception(
+                        "supervisor of %s crashed during reap", name)
             rt.status = AccountStatus.STOPPED
             rt.lost.clear()
             self._drop_services(name)
@@ -1217,7 +1228,12 @@ class AccountManager:
             # fetch — the only fetch this action performs)
             rt.cache.validate_channel(int(task.channel_id))
             channel_id = int(task.channel_id)
-            await client.click_button(channel_id, int(task.message_id), task.content)
+            try:
+                await client.click_button(channel_id, int(task.message_id), task.content)
+            except Exception as exc:
+                if type(exc).__name__ == "TargetGone":
+                    rt.cache.invalidate_channel(channel_id, str(exc) or "button failed")
+                raise
             return None
         else:
             raise SchedulerError(
@@ -1419,24 +1435,6 @@ class AccountManager:
                 await outcome
         except Exception:
             self._logger.exception("plugin attach failed for %s", name)
-
-    def _spawn_maybe_async(self, outcome: Any, label: str) -> None:
-        """Run a collaborator's coroutine result in the background (strong ref).
-
-        Retained for duck-typed collaborators whose hooks are still sync
-        fire-and-forget; the pinned collaborators are awaited inline now.
-        """
-        if not asyncio.iscoroutine(outcome):
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:  # no loop (e.g. sync boot) — drop, don't leak
-            outcome.close()
-            self._logger.warning("no event loop for %s; call dropped", label)
-            return
-        task = loop.create_task(outcome, name=f"acct-{label}")
-        self._background.add(task)
-        task.add_done_callback(self._background.discard)
 
     def _allowed_plugins(self, name: str) -> Optional[set]:
         """Profile-derived plugin grant (None = unrestricted)."""

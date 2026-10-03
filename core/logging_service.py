@@ -207,7 +207,11 @@ class LogService:
             severity = str(severity or "INFO").upper()
             message = str(message)
         except Exception:
-            return {"ts": time.time(), "severity": "INFO", "source": str(source),
+            try:
+                source_text = str(source)
+            except Exception:
+                source_text = "<unloggable source>"
+            return {"ts": time.time(), "severity": "INFO", "source": source_text,
                     "message": "<unloggable message>", "account": account,
                     "plugin": plugin, "task_id": task_id, "event": event}
         if severity not in SEVERITIES:
@@ -240,7 +244,8 @@ class LogService:
                 try:
                     callback(entry)
                 except Exception:
-                    self._subscriber_failures += 1  # observable, never recursive
+                    with self._lock:  # record() runs on many threads
+                        self._subscriber_failures += 1  # observable, never recursive
         return payload
 
     def info(self, source: str, message: str, **ctx: Any) -> Dict[str, Any]:

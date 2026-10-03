@@ -102,7 +102,7 @@ class RollServices:
 
 
 async def flow(content, author=OWNER_ID, overrides=None, responses=None,
-              wait=0.3):
+              wait=0.3, channel=CHANNEL):
     """Trigger the plugin and let it run for `wait` seconds."""
     bus = EventBus()
     manager = PluginManager(
@@ -116,7 +116,7 @@ async def flow(content, author=OWNER_ID, overrides=None, responses=None,
     services = RollServices(responses)
     await manager.activate_account("alpha", services)
     bus.publish_nowait(MessageReceived(
-        account="alpha", message_id=1, channel_id=CHANNEL,
+        account="alpha", message_id=1, channel_id=channel,
         author_id=author, content=content,
     ))
     await asyncio.sleep(wait)
@@ -151,6 +151,15 @@ class TestRollTriggers(unittest.IsolatedAsyncioTestCase):
         services, _ = await flow("roll", overrides={"command": "$wg"}, wait=0.2)
         self.assertTrue(any(cmd == "$wg" for _, cmd, _ in services.sent))
 
+    async def test_target_gone_aborts_clean(self) -> None:
+        """A trigger in a vanished channel aborts with ONE clean line —
+        never as a plugin crash (error counter must stay at zero)."""
+        services, manager = await flow("roll", channel=987, wait=0.2)
+        self.assertEqual(services.sent, [])
+        state = {s["name"]: s for s in manager.states("alpha")}["roll"]
+        self.assertEqual(state["error_count"], 0)
+        self.assertIsNone(state["last_error"])
+
 
 class TestCooldownParsing(unittest.IsolatedAsyncioTestCase):
     async def test_roulette_limited_sets_cooldown(self) -> None:
@@ -175,6 +184,27 @@ class TestCooldownParsing(unittest.IsolatedAsyncioTestCase):
         commands = [cmd for _, cmd, _ in services.sent]
         self.assertTrue(any("$us" in c or "$ru" in c for c in commands),
                         f"no userstack/key command sent: {commands}")
+
+    async def test_userstack_disable_takes_effect_immediately(self) -> None:
+        """After Mudae refuses $us once, later low-rolls responses must NOT
+        re-send $us in the same session (live setting flips with the
+        persisted state)."""
+        low = {"content": "", "message": NS(
+            embeds=[NS(description="Some character",
+                       footer_text="alpha · 2 ROLLS LEFT")], content="")}
+        responses = [
+            low,                                            # roll 1 response
+            {"content": "You don't have enough rolls stacked!"},  # $us reply
+            low,                                            # roll 2 response
+        ]
+        services, manager = await flow(
+            "roll", responses=responses,
+            overrides={"roll_interval": 1.5, "response_timeout": 2.0},
+            wait=3.0,
+        )
+        self.assertEqual(sum(1 for _, c, _ in services.sent if c == "$us 20"), 1)
+        self.assertFalse(services._state["userstack_available"])
+        self.assertIs(manager.live_settings("alpha", "roll")["userstack"], False)
 
 
 class TestStopTrigger(unittest.IsolatedAsyncioTestCase):

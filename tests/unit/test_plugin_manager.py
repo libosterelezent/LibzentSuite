@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tempfile
 import unittest
 from pathlib import Path
 
-from core.event_bus import EventBus, MessageReceived
+from core.event_bus import EventBus, MessageReceived, PluginEnabledChanged
 from core.errors import PluginError, SettingsValidationError
 from core.plugin_manager import PluginLoader, PluginManager
 from core.settings_manager import SettingsManager
@@ -101,12 +102,12 @@ class FakeServices:
         return {}
 
 
-def make_manager(repo=None, global_layer=None) -> tuple:
+def make_manager(repo=None, global_layer=None, plugin_dir=None) -> tuple:
     bus = EventBus()
     settings = SettingsManager(bus, logging.getLogger("t"), global_layer=global_layer)
     manager = PluginManager(
         bus, logging.getLogger("t"), settings, plugin_repo=repo,
-        plugin_dir=str(FIXTURES),
+        plugin_dir=str(plugin_dir if plugin_dir is not None else FIXTURES),
     )
     return manager, bus, settings
 
@@ -203,6 +204,75 @@ class TestLifecycle(unittest.IsolatedAsyncioTestCase):
             await manager.set_setting("alpha", "spy", "count", 99)  # > max 10
         with self.assertRaises(SettingsValidationError):
             await manager.set_setting("alpha", "spy", "unknown_key", 1)
+
+    async def test_set_enabled_publishes_final_state(self) -> None:
+        """When on_enable crashes, the runtime ends disabled — the event
+        must report that final state, not the requested one."""
+        manager, bus, _ = make_manager()
+        await manager.attach_account("alpha")
+        await manager.activate_account("alpha", FakeServices("alpha"))
+        events: list = []
+        bus.subscribe(PluginEnabledChanged, events.append)
+        spy = manager._accounts["alpha"]["spy"]
+
+        async def _boom(ctx):
+            raise RuntimeError("enable explodes")
+
+        spy.instance.on_enable = _boom
+        await manager.set_enabled("alpha", "spy", False)
+        await manager.set_enabled("alpha", "spy", True)
+        await asyncio.sleep(0.05)  # publish_nowait dispatch tick
+        self.assertFalse(spy.enabled)  # activation failed -> disabled
+        self.assertEqual(
+            [(e.plugin, e.enabled) for e in events],
+            [("spy", False), ("spy", False)],
+        )
+
+
+class TestConstructorIsolation(unittest.IsolatedAsyncioTestCase):
+    """A plugin whose __init__ explodes must not break the account."""
+
+    async def test_broken_constructor_skips_plugin_not_account(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            boom = Path(tmp) / "boom"
+            boom.mkdir()
+            (boom / "__init__.py").write_text(
+                "from core.plugin_base import PluginBase\n"
+                "class BoomPlugin(PluginBase):\n"
+                "    name = 'boom'\n"
+                "    def __init__(self):\n"
+                "        raise RuntimeError('constructor explodes')\n"
+            )
+            ok = Path(tmp) / "ok"
+            ok.mkdir()
+            (ok / "__init__.py").write_text(
+                "from core.plugin_base import PluginBase\n"
+                "class OkPlugin(PluginBase):\n"
+                "    name = 'ok'\n"
+                "    def __init__(self):\n"
+                "        self.seen = []\n"
+                "    async def handle_event(self, ctx, event):\n"
+                "        self.seen.append(event)\n"
+            )
+            manager, bus, _ = make_manager(plugin_dir=Path(tmp))
+            await manager.attach_account("alpha")
+            self.assertEqual(manager.allowed_names("alpha"), ["boom", "ok"])
+            await manager.activate_account("alpha", FakeServices("alpha"))
+            self.assertTrue(manager._accounts["alpha"]["ok"].active)
+            boom_rt = manager._accounts["alpha"]["boom"]
+            self.assertFalse(boom_rt.enabled)
+            self.assertFalse(boom_rt.active)
+            self.assertIn("constructor explodes", boom_rt.last_error)
+            state = {s["name"]: s for s in manager.states("alpha")}["boom"]
+            self.assertEqual(state["error_count"], 1)
+            # dispatch to the healthy plugin still works
+            ok_inst = manager._accounts["alpha"]["ok"].instance
+            bus.publish_nowait(MessageReceived(
+                account="alpha", message_id=1, channel_id=5, author_id=9,
+                content="hi",
+            ))
+            await asyncio.sleep(0.05)
+            self.assertEqual(len(ok_inst.seen), 1)
 
 
 class TestDispatch(unittest.IsolatedAsyncioTestCase):

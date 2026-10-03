@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import signal
 import sys
 
@@ -40,7 +39,7 @@ async def run_sim(name: str | None, list_only: bool) -> int:
     except Exception as exc:
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps(report["summary"], default=str) if False else report["summary"])
+    print(report["summary"])
     for line in report["log_lines"]:
         print(f"  | {line}")
     for failure in report["failures"]:
@@ -87,18 +86,22 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
         else:
             from interfaces.cli import Repl
 
-            repl = Repl(api)
             stop = asyncio.Event()
+            repl = Repl(api, stop_event=stop)
 
-            def _sig_exit() -> None:  # SIGTERM/SIGINT end the REPL cleanly
-                stop.set()  # (a service manager's stop is SIGTERM — the
-                repl.running = False  # default disposition would kill the
+            def _sig_exit(code: int) -> None:
+                # SIGTERM/SIGINT end the REPL cleanly (a service manager's
+                # stop is SIGTERM — the default disposition would kill the
                 # process with NO teardown: queues dropped, DB unclosed)
+                nonlocal exit_code
+                exit_code = code
+                stop.set()
+                repl.running = False
 
             loop = asyncio.get_running_loop()
-            for sig in (signal.SIGTERM, signal.SIGINT):
+            for sig, code in ((signal.SIGTERM, 0), (signal.SIGINT, 130)):
                 try:
-                    loop.add_signal_handler(sig, _sig_exit)
+                    loop.add_signal_handler(sig, _sig_exit, code)
                 except (NotImplementedError, RuntimeError, ValueError):
                     pass
             try:
@@ -174,7 +177,10 @@ def main() -> int:
     args, extra = parser.parse_known_args()
 
     if args.sim is not None or args.sim_list:
-        return asyncio.run(run_sim(args.sim or None, args.sim_list))
+        try:
+            return asyncio.run(run_sim(args.sim or None, args.sim_list))
+        except KeyboardInterrupt:
+            return 130
     try:
         return asyncio.run(run_app(args, extra))
     except KeyboardInterrupt:

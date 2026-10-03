@@ -316,26 +316,29 @@ class TaskScheduler:
         """
         if self._stopped:
             return
-        if self._stop_latch is not None and not (
-            self._stop_latch.done() and self._stop_latch.exception() is not None
-        ):
-            # a stop is already in flight: join it (shielded — cancelling
-            # THIS caller must never cancel the underlying teardown). A
-            # FAILED latch (owner was cancelled) falls through so this call
-            # retries the teardown instead of re-raising the old failure.
-            in_flight = self._stop_latch  # local ref: the owner nulls the
-            _, pending = await asyncio.wait([asyncio.shield(in_flight)], timeout=30.0)  # field
-            if pending:
-                # 30s join budget exhausted while the owner still drains:
-                # returning "success" here would let the caller close the
-                # database under a live teardown — fail loudly instead
-                raise SchedulerError(
-                    "scheduler stop still in flight after 30s join budget"
-                )
-            failure = in_flight.exception()
-            if failure is not None:
-                raise failure
-            return
+        if self._stop_latch is not None:
+            failed = (
+                self._stop_latch.done() and self._stop_latch.exception() is not None
+            )
+            if not failed:
+                # a stop is already in flight: join it (shielded — cancelling
+                # THIS caller must never cancel the underlying teardown). A
+                # FAILED latch (owner was cancelled) falls through so this call
+                # retries the teardown instead of re-raising the old failure.
+                in_flight = self._stop_latch  # local ref: the owner nulls the
+                _, pending = await asyncio.wait([asyncio.shield(in_flight)], timeout=30.0)  # field
+                if pending:
+                    # 30s join budget exhausted while the owner still drains:
+                    # returning "success" here would let the caller close the
+                    # database under a live teardown — fail loudly instead
+                    raise SchedulerError(
+                        "scheduler stop still in flight after 30s join budget"
+                    )
+                failure = in_flight.exception()
+                if failure is not None:
+                    raise failure
+                return
+            self._stop_latch.exception()  # mark retrieved: replaced below
         latch = asyncio.get_running_loop().create_future()
         self._stop_latch = latch
         self._stopping = True
@@ -384,24 +387,19 @@ class TaskScheduler:
             # the owner was cancelled mid-teardown: still tear the lanes down
             # (bounded, shielded) so nothing keeps sending, but do NOT mark
             # the scheduler stopped — a later stop() must be able to retry
-            for lane in list(self._lanes.values()):
-                if not lane.done():
-                    lane.cancel()
-            try:
-                if self._lanes:
-                    await asyncio.wait(
-                        [asyncio.shield(t) for t in list(self._lanes.values())
-                         if not t.done()],
-                        timeout=2.0,
-                    )
-            except Exception:
-                pass
             if not latch.done():
                 latch.set_exception(
                     SchedulerError("scheduler stop was cancelled mid-teardown")
                 )
-            self._sweeping = False
-            self._stopping = False
+            await self._abort_stop()
+            raise
+        except BaseException as exc:
+            # an unexpected owner failure must not strand a PENDING latch:
+            # joiners would park on it for their whole 30s budget while the
+            # teardown is dead. Fail the latch so the next stop() retries.
+            if not latch.done():
+                latch.set_exception(exc)
+            await self._abort_stop()
             raise
         finally:
             self._sweeping = False
@@ -412,6 +410,21 @@ class TaskScheduler:
             self._stop_latch = None if completed else latch
             if completed and not latch.done():
                 latch.set_result(None)
+
+    async def _abort_stop(self) -> None:
+        """Bounded lane teardown for a stop() owner that died mid-way."""
+        for lane in list(self._lanes.values()):
+            if not lane.done():
+                lane.cancel()
+        try:
+            if self._lanes:
+                await asyncio.wait(
+                    [asyncio.shield(t) for t in list(self._lanes.values())
+                     if not t.done()],
+                    timeout=2.0,
+                )
+        except Exception:
+            pass
 
     async def cleanup_account(self, account: str) -> None:
         """Tear down ONE account's lane bookkeeping (called on removal).

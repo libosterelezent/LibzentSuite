@@ -201,6 +201,19 @@ class TestLaneRobustness(unittest.IsolatedAsyncioTestCase):
         manager.set_lane_prefixrate(0)  # pause is legal
         self.assertEqual(manager.lane_status()["prefixrate"], 0.0)
 
+    async def test_constructor_falls_back_on_bad_prefixrate(self) -> None:
+        """A malformed config value must never crash the constructor: the
+        lane falls back to 1.5s AND the boot baseline is the sanitized
+        value (the raw one used to survive into _lane_defaults)."""
+        from tests.unit.test_rate_engine import StubLogger as _StubLogger
+
+        for bad in ("abc", None, float("nan"), -3.0, 10**12):
+            manager = RateLimitManager(
+                EventBus(), _StubLogger(), None, lane_prefixrate=bad,
+            )
+            self.assertEqual(manager.lane_status()["prefixrate"], 1.5)
+            self.assertEqual(manager._lane_defaults, (False, 1.5))
+
 
 class TestLaneInGrant(unittest.IsolatedAsyncioTestCase):
     async def test_reason_and_wait_accounting(self) -> None:

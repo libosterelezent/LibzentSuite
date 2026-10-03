@@ -77,11 +77,19 @@ class Repl:
         api: Any,
         stdin: Optional[TextIO] = None,
         stdout: Optional[TextIO] = None,
+        stop_event: Optional[asyncio.Event] = None,
     ) -> None:
-        """Wire the facade plus the (injectable) standard streams."""
+        """Wire the facade plus the (injectable) standard streams.
+
+        ``stop_event`` (optional) ends the loop promptly when set — the
+        host surface (main.py's SIGINT/SIGTERM handlers) sets it because
+        ``loop.add_signal_handler`` suppresses the KeyboardInterrupt the
+        old cancellation path relied on.
+        """
         self.api = api
         self._in = stdin or sys.stdin
         self._out = stdout or sys.stdout
+        self._stop_event = stop_event
         self.running = False
 
     async def run(self) -> None:
@@ -91,22 +99,28 @@ class Repl:
         a synchronous readline() on the loop thread would freeze the entire
         event loop at the prompt (dashboard 504s, WS stalls, gateway
         heartbeats starve) — the exact failure the queue hop prevents.
-        Ctrl-C still works: SIGINT is delivered to the MAIN thread, which
-        is parked in ``await queue.get()`` and unwinds through the runner's
-        cancellation/KeyboardInterrupt path.
+        Ctrl-C still works two ways: when the host installed a signal
+        handler it passes the stop event in here (the loop wakes on it),
+        and without one SIGINT raises KeyboardInterrupt in the main thread,
+        which is parked in ``await`` and unwinds through the cancellation
+        path below.
         """
         self.running = True
         self._write(BANNER)
         loop = asyncio.get_running_loop()
         lines: "asyncio.Queue[str]" = asyncio.Queue()
         reader_done = loop.create_future()
+        stop_wait = (
+            asyncio.ensure_future(self._stop_event.wait())
+            if self._stop_event is not None else None
+        )
 
         def _reader() -> None:
             try:
                 while True:
                     try:
                         line = self._in.readline()
-                    except (EOFError, KeyboardInterrupt):
+                    except (EOFError, KeyboardInterrupt, UnicodeError):
                         line = ""
                     try:
                         loop.call_soon_threadsafe(lines.put_nowait, line)
@@ -131,9 +145,15 @@ class Repl:
             while self.running:
                 self._write(PROMPT, end="")
                 get = asyncio.ensure_future(lines.get())
+                watched = {get, reader_done}
+                if stop_wait is not None:
+                    watched.add(stop_wait)
                 done, _ = await asyncio.wait(
-                    {get, reader_done}, return_when=asyncio.FIRST_COMPLETED
+                    watched, return_when=asyncio.FIRST_COMPLETED
                 )
+                if stop_wait is not None and stop_wait in done:
+                    get.cancel()  # host signalled exit (SIGINT/SIGTERM)
+                    break
                 if get not in done:
                     get.cancel()  # reader died (EOF seen): nothing more
                     break
@@ -145,6 +165,8 @@ class Repl:
         except KeyboardInterrupt:
             pass  # Ctrl-C anywhere ends the session cleanly
         finally:
+            if stop_wait is not None and not stop_wait.done():
+                stop_wait.cancel()
             try:
                 await self.api.shutdown()
             except Exception:

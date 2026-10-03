@@ -103,7 +103,11 @@ class RemoteControl:
         line = self._extract_command(event)
         if line is None:
             return
-        if event.author_id not in self._credentials.owner_user_ids:
+        try:
+            owners = self._credentials.owner_user_ids
+        except CredentialsError:
+            return
+        if event.author_id not in owners:
             return  # non-owner mentions are simply ignored (no reply at all)
         task = asyncio.get_running_loop().create_task(self._handle(event, line))
         self._pending.add(task)
@@ -113,8 +117,13 @@ class RemoteControl:
         """'<@uid> status accounts' -> 'status accounts' when the mention is
         THIS account's own. Returns '' for a BARE mention (owner invoked us
         without a command -> help), None when the message is not ours."""
-        account = self._accounts.get(event.account) if hasattr(
-            self._accounts, "get") else None
+        getter = getattr(self._accounts, "get", None)
+        if getter is None:
+            return None
+        try:
+            account = getter(event.account)
+        except Exception:
+            return None
         if account is None:
             return None
         user_id = getattr(account.runtime, "user_id", None)

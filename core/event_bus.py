@@ -9,6 +9,7 @@ Guarantees (ported from the audited original):
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from dataclasses import dataclass, field
@@ -278,7 +279,7 @@ class EventBus:
             for handler in list(handlers):
                 try:
                     outcome = handler(event)
-                    if asyncio.iscoroutine(outcome):
+                    if inspect.iscoroutine(outcome):
                         outcome = await outcome
                     results.append(outcome)
                 except asyncio.CancelledError:
@@ -291,19 +292,14 @@ class EventBus:
                         "event handler %r cancelled internally for %s", handler, type(event).__name__
                     )
                     results.append(asyncio.CancelledError("handler cancelled"))
-                except (KeyboardInterrupt, SystemExit):
+                except (KeyboardInterrupt, SystemExit, GeneratorExit):
+                    # process-level signals / a close() aimed at THIS
+                    # coroutine must not be swallowed as handler failures
                     raise
-                except Exception as exc:  # isolation by design
+                except BaseException as exc:  # isolation by design
                     LOG.exception("event handler %r failed for %s", handler, type(event).__name__)
                     results.append(exc)
         return results
-
-    def subscriber_count(self, event_type: Optional[Type[Event]] = None) -> int:
-        """Number of subscriptions, optionally filtered to one event type."""
-        if event_type is not None:
-            return len(self._subs.get(event_type, []))
-        return sum(len(handlers) for handlers in self._subs.values())
-
 
 __all__ = [
     "EventBus", "Event", "AccountConnected", "AccountDisconnected", "AccountFailed",

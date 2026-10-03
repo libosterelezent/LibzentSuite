@@ -12,6 +12,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from database.connection import DatabaseError as ConnectionDatabaseError
 from core.errors import DatabaseError as CoreDatabaseError
@@ -71,6 +72,18 @@ class TestMigrations(AsyncDatabaseTestCase):
         db = Database(Path(self.tmp.name) / "unconnected.db")
         with self.assertRaises(DatabaseError):
             await db.kv.set("x", "1")
+
+    async def test_misordered_migrations_rejected(self) -> None:
+        bad = ((2, "later", ""), (1, "earlier", ""))
+        with mock.patch("database.db.MIGRATIONS", bad):
+            with self.assertRaises(ANY_DB_ERROR):
+                await self.db.migrate()
+
+    async def test_duplicate_migration_versions_rejected(self) -> None:
+        bad = ((1, "first", ""), (1, "second", ""))
+        with mock.patch("database.db.MIGRATIONS", bad):
+            with self.assertRaises(ANY_DB_ERROR):
+                await self.db.migrate()
 
 
 class TestAccounts(AsyncDatabaseTestCase):
@@ -225,6 +238,15 @@ class TestRatePolicies(AsyncDatabaseTestCase):
         with self.assertRaises(ANY_DB_ERROR):  # jitter order violated
             await self.db.policies.set("global", "", "dm", 2.0, 0.5, 0.1)
 
+    async def test_delete_account_escapes_like_wildcards(self) -> None:
+        await self.db.policies.set("account_plugin", "a_b/x", "dm", 2.0, 0.0, 0.0)
+        await self.db.policies.set("account_plugin", "axb/x", "dm", 3.0, 0.0, 0.0)
+        removed = await self.db.policies.delete_account("a_b")
+        self.assertEqual(removed, 1)  # '_' must NOT match the 'axb' row
+        self.assertIsNone(await self.db.policies.get("account_plugin", "a_b/x", "dm"))
+        self.assertIsNotNone(
+            await self.db.policies.get("account_plugin", "axb/x", "dm"))
+
 
 class TestAuditAndLogs(AsyncDatabaseTestCase):
     async def test_audit_recent_oldest_first_and_prune(self) -> None:
@@ -249,6 +271,12 @@ class TestAuditAndLogs(AsyncDatabaseTestCase):
                                  "action": "message", "content": "x" * 900})
         rows = await self.db.audit.recent(1)
         self.assertEqual(len(rows[0]["content"]), 500)
+
+    async def test_audit_non_string_content_coerced(self) -> None:
+        await self.db.audit.add({"ts": 1.0, "account": "a", "direction": "out",
+                                 "action": "message", "content": 12345})
+        rows = await self.db.audit.recent(1)
+        self.assertEqual(rows[0]["content"], "12345")
 
     async def test_logs_filters_and_prune(self) -> None:
         db = Database(self.path, log_keep=4)

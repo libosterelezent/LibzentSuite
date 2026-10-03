@@ -572,6 +572,47 @@ class TestDashboardHTTP(unittest.IsolatedAsyncioTestCase):
         # keep-alive safety: a partially-drained body must close the stream
         self.assertEqual(headers.get("Connection", "").lower(), "close")
 
+    async def test_get_with_body_closes_connection(self) -> None:
+        # keep-alive safety: an unread non-POST body would be parsed as the
+        # NEXT request line — the server must drain it and refuse reuse
+        import http.client
+        from urllib.parse import urlparse
+
+        def _attempt() -> tuple[int, str, str]:
+            parsed = urlparse(self.url("/api/status"))
+            conn = http.client.HTTPConnection(parsed.hostname, parsed.port,
+                                              timeout=10)
+            headers = {"X-Dashboard-Token": TOKEN,
+                       "Content-Length": "9"}
+            try:
+                conn.request("GET", parsed.path, body=b"JUNKJUNK!",
+                             headers=headers)
+                resp = conn.getresponse()
+                return (resp.status, resp.read().decode("utf-8"),
+                        resp.getheader("Connection") or "")
+            finally:
+                conn.close()
+
+        status, body, conn_header = await asyncio.to_thread(_attempt)
+        self.assertEqual(status, 200)
+        self.assertTrue(get_json(body)["ok"])
+        self.assertEqual(conn_header.lower(), "close")
+
+    async def test_non_serializable_payload_answers_json(self) -> None:
+        # a datetime (or set/exception) in the payload must not crash the
+        # handler thread and drop the connection — it answers honest JSON
+        from datetime import datetime
+
+        async def _broken_status():
+            return {"accounts": [], "when": datetime(2024, 1, 1)}
+
+        self.fake.status = _broken_status
+        status, body = await asyncio.to_thread(http_get, self.url("/api/status"))
+        self.assertEqual(status, 200)
+        payload = get_json(body)
+        self.assertFalse(payload["ok"])
+        self.assertIn("serializable", payload["error"])
+
     # ------------------------------------------------------------------ system
     async def test_status(self) -> None:
         status, body = await asyncio.to_thread(http_get, self.url("/api/status"))

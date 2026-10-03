@@ -169,6 +169,30 @@ class TestFrames(unittest.TestCase):
         self.assertEqual(len(frame), 2)
 
 
+class TestEventAsDict(unittest.TestCase):
+    def test_dataclass_event(self) -> None:
+        from interfaces.dashboard.server import event_as_dict
+
+        event = TaskStarted(account="alpha", task_id=7, action="message")
+        self.assertEqual(event_as_dict(event),
+                         {"account": "alpha", "ts": event.ts,
+                          "task_id": 7, "action": "message"})
+
+    def test_non_dataclass_fallback(self) -> None:
+        # plain objects (no @dataclass) must not raise — vars()-based
+        # fallback previously blew up with a TypeError
+        from interfaces.dashboard.server import event_as_dict
+
+        class PlainEvent:
+            def __init__(self) -> None:
+                self.account = "alpha"
+                self.task_id = 7
+                self.payload = object()  # non-JSON value: filtered out
+
+        self.assertEqual(event_as_dict(PlainEvent()),
+                         {"account": "alpha", "task_id": 7})
+
+
 # ---------------------------------------------------------------- live server
 def ws_request(port: int, key: str, path: str = "/ws", token: str | None = TOKEN,
                version: str = "13") -> str:
@@ -321,6 +345,67 @@ class TestDashboardWS(unittest.IsolatedAsyncioTestCase):
 
         opcode = await asyncio.to_thread(_run)
         self.assertEqual(opcode, wsproto.OP_CLOSE)
+
+    async def test_fragmented_text_frame_closes_connection(self) -> None:
+        # fragmentation is never reassembled: a fin=0 TEXT frame must not be
+        # delivered as a (truncated) complete message
+        def _run() -> int:
+            sock, _headers = self.connect()
+            try:
+                _first, leftover = read_json_frame(sock)
+                payload = mask(b"ref")
+                frame = bytes([0x01, 0x80 | len(payload)]) + b"\x01\x02\x03\x04" + payload
+                sock.sendall(frame)
+                opcode, _payload, _rest = read_server_frame(sock, leftover)
+                return opcode
+            finally:
+                sock.close()
+
+        opcode = await asyncio.to_thread(_run)
+        self.assertEqual(opcode, wsproto.OP_CLOSE)
+
+    async def test_malformed_websocket_key_rejected(self) -> None:
+        def _attempt() -> str:
+            sock = socket.create_connection((HOST, self.port), timeout=5)
+            try:
+                request = (
+                    f"GET /ws HTTP/1.1\r\nHost: {HOST}:{self.port}\r\n"
+                    "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                    "Sec-WebSocket-Version: 13\r\n"
+                    "Sec-WebSocket-Key: \xff\xfe\r\n"  # non-ASCII
+                    f"X-Dashboard-Token: {TOKEN}\r\n\r\n"
+                ).encode("latin-1")
+                sock.sendall(request)
+                headers, _ = read_http_headers(sock)
+                return headers
+            finally:
+                sock.close()
+
+        headers = await asyncio.to_thread(_attempt)
+        self.assertIn("400", headers.splitlines()[0])
+
+    async def test_broadcast_loop_survives_nan_stats(self) -> None:
+        # NaN in the snapshot must degrade to an error frame, never kill
+        # the 1-second broadcast loop (a dead loop froze the live view)
+        async def _nan_status():
+            return {"accounts": [], "ratelimit": float("nan"),
+                    "tasks": {}, "warnings": [], "uptime_s": 1.0}
+
+        self.fake.status = _nan_status
+
+        def _run() -> list[dict]:
+            sock, _headers = self.connect()
+            try:
+                first, leftover = read_json_frame(sock)
+                # the next broadcast tick must still arrive (~1s later)
+                second, _rest = read_json_frame(sock, leftover)
+                return [first, second]
+            finally:
+                sock.close()
+
+        messages = await asyncio.to_thread(_run)
+        self.assertEqual(messages[0]["type"], "error")
+        self.assertEqual(messages[1]["type"], "error")
 
     # --------------------------------------------------------------- live push
     async def test_log_push_reaches_client_after_attach_logs(self) -> None:

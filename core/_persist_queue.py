@@ -46,6 +46,7 @@ class PersistQueue:
         self._lock = threading.Lock()
         self._worker: Optional["asyncio.Task"] = None
         self._stopping = False
+        self._stopped = False
         self._draining: Optional["asyncio.Future[None]"] = None
         self._repo: Any = None
         self._batch = 50
@@ -64,6 +65,10 @@ class PersistQueue:
 
     def put(self, item: Dict[str, Any]) -> None:
         """Enqueue one dict (advisory cap: threads may overshoot by a hair)."""
+        if self._stopped:
+            with self._lock:  # post-stop arrivals can never drain: count them
+                self.dropped += 1
+            return
         if self._q.qsize() >= self._max:
             with self._lock:
                 self.dropped += 1
@@ -90,6 +95,7 @@ class PersistQueue:
             if draining is not None:
                 await asyncio.wait({asyncio.shield(draining)}, timeout=5.0)
             self._stopping = False
+        self._stopped = False
         self._repo = repo
         self._batch = max(1, int(batch))
         self._interval = max(0.05, float(interval))
@@ -129,6 +135,7 @@ class PersistQueue:
             if not self._draining.done():
                 self._draining.set_result(None)
             self._stopping = False
+            self._stopped = True
 
     async def _drain_inline(self, loop, deadline) -> None:
         while True:

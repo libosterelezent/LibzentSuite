@@ -7,7 +7,7 @@ import unittest
 from typing import List, Optional
 
 from core.credentials import Credentials
-from core.errors import FlowBlocked, TargetGone
+from core.errors import FlowBlocked, SchedulerError, TargetGone
 from core.event_bus import EventBus, Event, MessageReceived
 from core.plugin_manager import PluginManager
 from core.priority import Priority
@@ -215,6 +215,52 @@ class TestSoulcopyFlow(unittest.IsolatedAsyncioTestCase):
         ))
         await asyncio.sleep(0.1)
         self.assertEqual(services.sent, [])  # flow aborted, nothing sent
+
+    async def test_failed_export_cancels_collector(self) -> None:
+        """A failed export send must cancel the page collector immediately
+        (a lingering collector breaks the K16 single-flow invariant)."""
+
+        class CollectingServices(FakeServices):
+            def __init__(self, bus, pages, fail_export=False):
+                super().__init__(bus, pages)
+                self.collecting = 0
+                self.fail_export = fail_export
+
+            async def send_message(self, channel_id, content, *,
+                                   priority=Priority.LOW):
+                if self.fail_export and content == "$slud-s":
+                    raise SchedulerError("task 7 failed: boom")
+                return await super().send_message(
+                    channel_id, content, priority=priority)
+
+            async def collect_messages(self, check, idle_timeout):
+                self.collecting += 1
+                try:
+                    await asyncio.sleep(idle_timeout)  # real idle window
+                    return []
+                finally:
+                    self.collecting -= 1
+
+        bus = EventBus()
+        manager = PluginManager(
+            bus, logging.getLogger("t"),
+            SettingsManager(bus, logging.getLogger("t"),
+                            global_layer={"soulcopy": {"dm_read_timeout": 5.0}}),
+            plugin_dir="plugins",
+        )
+        manager.discover()
+        await manager.attach_account("alpha", allowed={"soulcopy"})
+        services = CollectingServices(bus, ["page"], fail_export=True)
+        await manager.activate_account("alpha", services)
+        bus.publish_nowait(MessageReceived(
+            account="alpha", message_id=2, channel_id=TRIGGER_CHANNEL,
+            author_id=OWNER_ID, content="slcopy",
+        ))
+        await asyncio.sleep(0.2)
+        self.assertEqual(services.sent, [])
+        self.assertEqual(services.collecting, 0)  # cancelled, not lingering
+        state = {s["name"]: s for s in manager.states("alpha")}["soulcopy"]
+        self.assertEqual(state["error_count"], 0)  # clean abort, not a crash
 
 
 if __name__ == "__main__":

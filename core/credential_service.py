@@ -153,9 +153,8 @@ class CredentialService:
         cached = self._memory.get(account)
         if cached is not None:
             return cached
-        if self._repo is not None and account not in self._db_accounts \
-                and not self._db_accounts:
-            await self.refresh()  # first resolution pays one list query
+        if self._repo is not None and account not in self._db_accounts:
+            await self.refresh()  # unknown name: one list query keeps status() truthful
         if self._repo is not None:
             ciphertext = await self._repo.load(account)
             if ciphertext is not None:

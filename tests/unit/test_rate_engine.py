@@ -249,6 +249,20 @@ class WaiterOrdering(unittest.IsolatedAsyncioTestCase):
         grant = await manager.acquire(ACTION, account="other")  # other key fine
         self.assertEqual(grant.account, "other")
 
+    async def test_pending_heaps_do_not_leak_empty_husks(self):
+        """A pacing key whose last waiter is gone is dropped from the
+        pending table instead of lingering as an empty list forever."""
+        manager = make_manager(interval=2.0)
+        await manager.acquire(ACTION, account="alpha")
+        await manager.acquire(ACTION, account="alpha")  # waits, then grants
+        self.assertEqual(manager._pending, {})
+        doomed = asyncio.ensure_future(manager.acquire(ACTION, account="alpha"))
+        await asyncio.sleep(0)
+        doomed.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await doomed
+        self.assertEqual(manager._pending, {})
+
 
 class ServerCooldowns(unittest.IsolatedAsyncioTestCase):
     """429 cooldowns: account-scoped + fleet-wide global, always respected."""
@@ -316,6 +330,18 @@ class ServerCooldowns(unittest.IsolatedAsyncioTestCase):
             manager.report_server_limit("alpha", ACTION, float("nan"))
         with self.assertRaises(RatePolicyError):
             manager.report_server_limit("alpha", ACTION, "soon")
+
+    async def test_expired_cooldown_entries_are_swept(self):
+        """Expired rows must not linger in the table for the process
+        lifetime — cooldown_remaining drops them as it walks."""
+        manager = make_manager()
+        manager.report_server_limit("alpha", ACTION, 1.0)
+        manager.report_server_limit("beta", "poke", 5.0)
+        manager._clock.advance(2.0)  # alpha's cooldown elapsed, beta's not
+        self.assertEqual(manager.cooldown_remaining(), 3.0)
+        self.assertNotIn(("alpha", ACTION), manager._account_cooldowns)
+        self.assertIn(("beta", "poke"), manager._account_cooldowns)
+        self.assertEqual(manager.cooldown_remaining("alpha", ACTION), 0.0)
 
     async def test_server_cooldown_waits_before_pacing(self):
         manager = make_manager(interval=2.0)
@@ -410,6 +436,30 @@ class FloorSemantics(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RatePolicyError):
             manager.set_floor(float("nan"))
         manager.set_floor(1.5)  # equal is fine (idempotent)
+
+    async def test_floor_capped_at_one_day(self):
+        """The floor is pacing-affecting: an absurd value (inf, 1e9) would
+        wedge every action forever, exactly like an uncapped policy."""
+        manager = make_manager()
+        with self.assertRaises(RatePolicyError):
+            manager.set_floor(float("inf"))
+        with self.assertRaises(RatePolicyError):
+            manager.set_floor(10**9)
+        manager.set_floor(86400.0)  # exactly at the cap is allowed
+        self.assertEqual(manager.floor_value, 86400.0)
+
+    async def test_persisted_floor_row_is_validated(self):
+        """A hand-edited kv floor row (inf / 1e999 / below 1.5) must never
+        wedge the fleet: it is ignored with a warning, never applied."""
+        from tests.unit.test_rate_lane import FakeKv
+
+        for bad in (float("inf"), 1e999, 0.5, "oops"):
+            kv = FakeKv()
+            kv.rows["ratelimit:floor"] = bad
+            manager = make_manager()
+            manager._kv = kv
+            await manager.load_persisted()
+            self.assertEqual(manager.floor_value, 1.5)
 
     async def test_raised_floor_rejects_new_policies(self):
         manager = make_manager()

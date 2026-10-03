@@ -124,10 +124,21 @@ class SoulcopyPlugin(PluginBase):
         # ask Mudae for the list (in the trigger channel), reading the DM
         # replies as they arrive — same gather structure as the original
         ctx.logger.info("requesting soulmate export from Mudae")
-        pages, _ = await asyncio.gather(
-            self._collect_pages(ctx, mudae_id, dm_channel),
-            _request_export(),
+        collect = asyncio.ensure_future(
+            self._collect_pages(ctx, mudae_id, dm_channel)
         )
+        try:
+            pages, _ = await asyncio.gather(collect, _request_export())
+        except BaseException:
+            # a failed export must not leave the collector subscribed for
+            # the rest of the idle window (it would cross-collect the pages
+            # of the NEXT flow — the K16 single-flow invariant)
+            collect.cancel()
+            try:
+                await collect
+            except (asyncio.CancelledError, Exception):
+                pass
+            raise
         ctx.logger.info("collected %d soulmate page(s)", len(pages))
 
         chunks = build_soulcopy_chunks(

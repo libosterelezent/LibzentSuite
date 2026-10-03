@@ -1,6 +1,7 @@
 """CLI command-engine + REPL tests (fake ControlAPI; no real managers)."""
 from __future__ import annotations
 
+import asyncio
 import io
 import unittest
 from typing import Any, List, Optional, Tuple
@@ -723,6 +724,55 @@ class TestRepl(unittest.IsolatedAsyncioTestCase):
         self.assertIn("error:", out.getvalue())
         code = await run_once(api, ["quit"], stdout=out)
         self.assertEqual(code, 0)
+
+    async def test_run_once_quotes_argv(self) -> None:
+        api = FakeApi()
+        code = await run_once(api, ["accounts", "add", "bob two"],
+                              stdout=io.StringIO())
+        self.assertEqual(code, 0)
+        args, _ = called(api, "accounts_add")
+        self.assertEqual(args[0], {"name": "bob two"})
+
+    async def test_stop_event_ends_repl_at_prompt(self) -> None:
+        import os
+
+        api = FakeApi()
+        out = io.StringIO()
+        read_fd, write_fd = os.pipe()  # never delivers a line: blocks
+        try:
+            stop = asyncio.Event()
+            repl = Repl(api, stdin=os.fdopen(read_fd, "r"), stdout=out,
+                        stop_event=stop)
+            asyncio.get_running_loop().call_later(0.1, stop.set)
+            await asyncio.wait_for(repl.run(), timeout=5)
+        finally:
+            os.close(write_fd)
+        self.assertTrue(called(api, "shutdown"))
+        self.assertIn("bye.", out.getvalue())
+        self.assertFalse(repl.running)
+
+    async def test_stop_event_set_before_run_exits_immediately(self) -> None:
+        api = FakeApi()
+        out = io.StringIO()
+        stop = asyncio.Event()
+        stop.set()
+        repl = Repl(api, stdin=io.StringIO(""), stdout=out, stop_event=stop)
+        await asyncio.wait_for(repl.run(), timeout=5)
+        self.assertTrue(called(api, "shutdown"))
+        self.assertIn("bye.", out.getvalue())
+
+    async def test_repl_survives_unicode_garbage(self) -> None:
+        api = FakeApi()
+        out = io.StringIO()
+
+        class BombsOnReadline(io.StringIO):
+            def readline(self):  # simulates undecodable input bytes
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+
+        repl = Repl(api, stdin=BombsOnReadline(), stdout=out)
+        await asyncio.wait_for(repl.run(), timeout=5)
+        self.assertIn("bye.", out.getvalue())
+        self.assertTrue(called(api, "shutdown"))
 
 
 if __name__ == "__main__":

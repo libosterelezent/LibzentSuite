@@ -25,8 +25,9 @@ from typing import Any, Dict, List, Optional, Set
 
 from ..errors import ProfileError
 
-#: profile names: lowercase identifier, may start with a digit (unlike the
-#: old role regex — profiles and accounts share one namespace style here)
+#: profile names: a lowercase letter first, then lowercase letters/digits/
+#: underscore/dash, at most 32 chars (leading digits rejected — pinned by
+#: tests; only ACCOUNT names may start with a digit)
 NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
