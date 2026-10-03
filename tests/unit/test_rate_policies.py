@@ -147,6 +147,20 @@ class TestRatePolicy(unittest.TestCase):
         self.assert_bad(jitter_min=float("nan"))
         self.assert_bad(jitter_max=float("nan"))
 
+    def test_nonfinite_and_bool_jitter_pairs_rejected(self):
+        """inf/-inf jitter bounds are rejected explicitly (NaN-poisoning
+        guard extended to every non-finite shape); bools are NOT numbers
+        here, even when they would coerce into range."""
+        self.assert_bad(jitter_min=float("inf"))
+        self.assert_bad(jitter_max=float("inf"))
+        self.assert_bad(jitter_min=float("-inf"), jitter_max=1.0)
+        self.assert_bad(jitter_min=True, jitter_max=2.0)   # bool, not number
+        self.assert_bad(jitter_max=False)                  # bool, not number
+        self.assert_bad(jitter_min=0.0, jitter_max=float("inf"))
+        # degenerate-but-finite pairs remain legal
+        RatePolicy("m", 2.0, 0.0, 0.0)
+        RatePolicy("m", 2.0, 0.5, 0.5)
+
     def test_jitter_caps_allowed_at_boundary(self):
         RatePolicy("m", 2.0, 0.0, 3600.0)
         RatePolicy("m", 2.0, 0.4, 0.4)  # min == max is a valid (degenerate) range
@@ -438,6 +452,75 @@ class TestEffectiveComposition(unittest.TestCase):
         eff = fresh.effective("message", account="alpha", plugin="soulcopy")
         self.assertEqual(eff["interval"], 1.5)
         self.assertEqual(eff["sources"], [])
+
+    def test_losing_level_jitter_cannot_speed_up_winner(self):
+        """MAX-across-levels: account_plugin LOSES to global on interval,
+        and its jitter only ever ADDS a pause on top of the winner — the
+        effective pacing can never get FASTER than global alone (interval
+        stays the max; jitter bounds only widen upward via max-of-maxes)."""
+        self.manager.set_policy_values("fast", 10.0, 0.0, 0.0)  # global wins
+        self.manager.set_policy_values(
+            "fast", 2.0, 1.0, 4.0, level="account_plugin", owner="a/p"
+        )
+        eff = self.manager.effective("fast", account="a", plugin="p")
+        self.assertEqual(eff["interval"], 10.0)
+        self.assertEqual(eff["jitter"], [1.0, 4.0])
+        # a sub-level with NO jitter cannot shrink the winner's jitter either
+        self.manager.set_policy_values(
+            "fast2", 10.0, 0.5, 2.0, level="global", owner=None
+        )
+        self.manager.set_policy_values(
+            "fast2", 3.0, level="account", owner="a"
+        )
+        eff2 = self.manager.effective("fast2", account="a")
+        self.assertEqual(eff2["interval"], 10.0)
+        self.assertEqual(eff2["jitter"], [0.5, 2.0])
+
+    def test_slash_owner_at_account_level_no_account_plugin_collision(self):
+        """An account literally named 'a/b' stores at the account level and
+        never collides with the account_plugin key 'a/b' (account 'a' +
+        plugin 'b'): distinct storage, precise matching."""
+        self.manager.set_policy_values("m", 2.0, level="account", owner="a/b")
+        self.manager.set_policy_values(
+            "m", 5.0, level="account_plugin", owner="a/b"
+        )
+        m_rows = [r for r in self.manager.policies() if r["action"] == "m"]
+        self.assertEqual(len(m_rows), 2)
+        self.assertEqual(
+            self.manager.effective("m", account="a", plugin="b")["interval"],
+            5.0,
+        )
+        self.assertEqual(
+            self.manager.effective("m", account="a/b")["interval"], 2.0
+        )
+        # "a/b" + plugin "b" would need owner "a/b/b" — no accidental match
+        self.assertEqual(
+            self.manager.effective("m", account="a/b", plugin="b")["sources"],
+            [{"level": "account", "owner": "a/b", "interval": 2.0}],
+        )
+
+
+class TestJitterNeverMovesPacingClock(unittest.IsolatedAsyncioTestCase):
+    """Jitter sleeps AFTER the grant: grant-to-grant gaps equal the interval
+    exactly, no matter the draws (a smaller second draw cannot shrink the
+    pacing gap — the fire-time shrink risk is pinned design, the GRANT gap
+    is the pacing invariant)."""
+
+    async def test_grant_gap_equals_interval_despite_jitter(self):
+        from tests.unit.test_rate_engine import make_manager
+
+        interval = 10.0
+        manager = make_manager(
+            interval=interval, jitter=(1.0, 4.0), jitter_seed=123
+        )
+        first = await manager.acquire("message")
+        grant1 = manager._clock.now() - first.jitter_s
+        second = await manager.acquire("message")
+        grant2 = manager._clock.now() - second.jitter_s
+        self.assertGreaterEqual(second.jitter_s, 1.0)
+        self.assertLessEqual(second.jitter_s, 4.0)
+        self.assertGreaterEqual(grant2 - grant1, interval - 1e-9)
+        self.assertLessEqual(grant2 - grant1, interval + 1e-9)
 
 
 if __name__ == "__main__":

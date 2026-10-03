@@ -104,6 +104,10 @@ def _install_headers_fetch_cache(discord: Any, ttl: float = _HEADERS_CACHE_TTL) 
         _headers_patch_installed = False
 
 
+_MESSAGE_DEDUP_WINDOW_S = 120.0
+_MESSAGE_DEDUP_MAX = 512
+
+
 def _header(headers: Any, name: str) -> Optional[str]:
     """Case-tolerant header lookup (library header dicts vary in casing)."""
     if not headers:
@@ -155,6 +159,31 @@ class RealDiscordClient:
         #: disconnect() — gateway drops do NOT flip it (the library
         #: auto-resumes and keeps accepting REST traffic)
         self.connected: bool = False
+        self._seen_messages: dict = {}
+
+    def _message_already_seen(self, message_id: Any) -> bool:
+        """True when this inbound id arrived recently (gateway RESUME replay).
+
+        The window is per client instance on purpose: the account manager
+        builds a FRESH client per reconnect (new IDENTIFY, new session —
+        no replay), while the library's own auto-resume happens inside ONE
+        client instance where Discord re-delivers unacked dispatches.
+        """
+        if message_id is None:
+            return False
+        now = asyncio.get_running_loop().time()
+        seen = self._seen_messages
+        if len(seen) >= _MESSAGE_DEDUP_MAX:
+            cutoff = now - _MESSAGE_DEDUP_WINDOW_S
+            for mid in [m for m, t in seen.items() if t < cutoff]:
+                del seen[mid]
+            if len(seen) >= _MESSAGE_DEDUP_MAX:
+                seen.clear()
+        if message_id in seen:
+            seen[message_id] = now
+            return True
+        seen[message_id] = now
+        return False
 
     # ------------------------------------------------------------ labelling
     @property
@@ -233,6 +262,8 @@ class RealDiscordClient:
         @self._client.event
         async def on_message(message: Any) -> None:
             if self.on_message is None or message.author.id == self.user_id:
+                return
+            if self._message_already_seen(message.id):
                 return
             # RICH BOUNDARY: capture everything the event already holds
             # (embeds/components/attachments/reactions/reference/author/
@@ -388,6 +419,11 @@ class RealDiscordClient:
     def _map_send_error(self, exc: Exception, channel_id: int) -> Optional[Exception]:
         """Translate one library send error into a domain error (or None).
 
+        * RateLimited     -> ServerRateLimit (fork errors.RateLimited is NOT
+          an HTTPException; carries retry_after from the exceeded
+          max_ratelimit_timeout path)
+        * CaptchaRequired -> AccessDenied (4xx captcha_key wall — an
+          auth-shaped refusal, never retried)
         * HTTPException 429 -> ServerRateLimit (Retry-After float-parsable
           header when present, else 1.0; global flag from X-RateLimit-Global)
         * Forbidden        -> AccessDenied(account, reason)
@@ -395,7 +431,21 @@ class RealDiscordClient:
         * 5xx/DiscordServerError -> ConnectionError (transient: the library
           already retried internally before surfacing DiscordServerError)
         """
-        if type(exc).__name__ == "DiscordServerError" or (
+        name = type(exc).__name__
+        if name == "RateLimited":
+            try:
+                retry_after = max(0.0, float(getattr(exc, "retry_after", 1.0)))
+            except (TypeError, ValueError):
+                retry_after = 1.0
+            if not math.isfinite(retry_after):
+                retry_after = 1.0
+            return ServerRateLimit(retry_after, False)
+        if name == "CaptchaRequired":
+            return AccessDenied(
+                self._account or "",
+                f"discord captcha challenge on channel {channel_id}: {exc}",
+            )
+        if name == "DiscordServerError" or (
             getattr(exc, "status", None) is not None
             and getattr(exc, "status", 0) >= 500
         ):
@@ -412,6 +462,8 @@ class RealDiscordClient:
             try:
                 retry_after = float(raw)
             except (TypeError, ValueError):
+                retry_after = 1.0
+            if not math.isfinite(retry_after):
                 retry_after = 1.0
             global_ = str(_header(headers, "X-RateLimit-Global") or "").lower() == "true"
             return ServerRateLimit(retry_after, global_)

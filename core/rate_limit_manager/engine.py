@@ -32,8 +32,9 @@ seam but returns EARLY when the shared wake event fires. The event is set
 whenever policies change (set/clear/floor) or a server cooldown lands, so
 sleeping waiters recompute their remaining wait instead of oversleeping.
 _grant_ready also wakes successors after any grant so the next waiter in
-priority order re-evaluates immediately. A bounded poll (0.25s) backstops
-non-head waiters against lost wakes — correctness never depends on the wake.
+priority order re-evaluates immediately. A bounded poll (POLL_INTERVAL)
+backstops non-head waiters against lost wakes — correctness never depends
+on the wake.
 
 Other documented decisions (INTEGRATION.md: pick the safest option):
 
@@ -318,15 +319,26 @@ class RateLimitManager:
                     # swallowed below, and silently reverted dashboard lane
                     # edits to the config-file defaults on every reboot.
                     data = raw if isinstance(raw, dict) else _json.loads(raw)
-                    enabled = bool(data.get("enabled", enabled))
+                    raw_enabled = data.get("enabled", enabled)
+                    if not isinstance(raw_enabled, bool):
+                        # a hand-edited truthy STRING ('false') must not
+                        # silently enable the lane — the whole row is corrupt
+                        raise ValueError(
+                            f"lane row 'enabled' must be true/false, got {raw_enabled!r}")
+                    enabled = raw_enabled
                     prefixrate = float(data.get("prefixrate", prefixrate))
             except Exception as exc:
                 self._log("warning", f"could not load lane config: {exc}")
         try:
             self._lane.set_prefixrate(prefixrate)
         except RatePolicyError:
+            # a rejected spacing makes the WHOLE row corrupt: fall back to
+            # the constructor defaults (both fields), exactly like an
+            # unparseable row — a half-applied row must never silently
+            # enable the lane nor discard a custom constructor rate
             self._log("warning", "stored lane config invalid; using defaults")
-            self._lane.set_prefixrate(1.5)
+            enabled, prefixrate = bool(default_enabled), float(default_prefixrate)
+            self._lane.set_prefixrate(prefixrate)
         self._lane.set_enabled(enabled)
         if self._kv is not None:
             try:  # persisted floor: a restart must not revert a raised floor

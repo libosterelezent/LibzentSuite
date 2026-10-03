@@ -97,6 +97,55 @@ class TestAsyncDatabase(AsyncTestCase):
         with self.assertRaises(DatabaseError):
             await db.kv.set("x", "1")
 
+    async def test_close_idempotent_and_double_close(self) -> None:
+        db = self.tmp_db()
+        await db.connect()
+        await asyncio.gather(db.close(), db.close())
+        await db.close()
+        self.assertFalse(db.connection.connected)
+
+    async def test_thread_bridge_via_run_coroutine_threadsafe(self) -> None:
+        """Ops submitted from a thread with NO running loop work when
+        routed to the owning loop (the supported bridge)."""
+        db = self.tmp_db()
+        await db.connect()
+        loop = asyncio.get_running_loop()
+        failures: list = []
+
+        def worker() -> None:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    db.kv.set("t", "bridge"), loop).result(5)
+                got = asyncio.run_coroutine_threadsafe(
+                    db.kv.get("t"), loop).result(5)
+                if got != "bridge":
+                    failures.append(f"readback {got!r}")
+            except BaseException as exc:
+                failures.append(exc)
+
+        await loop.run_in_executor(None, worker)
+        self.assertEqual(failures, [])
+        self.assertEqual(await db.kv.get("t"), "bridge")
+        await db.close()
+
+    async def test_same_database_on_second_event_loop_rejected(self) -> None:
+        """Two loops driving one connection corrupt the lock/sqlite
+        session; the guard must fail loud with a clean DatabaseError."""
+        from core.errors import DatabaseError
+        db = self.tmp_db()
+        await db.connect()
+        await db.kv.set("bind", "1")
+
+        def other_loop() -> None:
+            async def go() -> None:
+                await db.kv.set("x", "1")
+            asyncio.run(go())
+
+        with self.assertRaises(DatabaseError):
+            await asyncio.get_running_loop().run_in_executor(None, other_loop)
+        self.assertEqual(await db.kv.get("bind"), "1")
+        await db.close()
+
 
 class TestCredentialService(AsyncTestCase):
     async def test_encrypt_persist_restart_decrypt(self) -> None:

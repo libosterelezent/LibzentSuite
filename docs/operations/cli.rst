@@ -6,8 +6,10 @@ One command engine (``interfaces/cli/commands.py``) serves both the REPL
 Errors render as one ``error: <message>`` line; every exit path runs the
 graceful shutdown.
 
-Groups: ``status`` · ``accounts list|add|remove|info|enable|start|stop|estop``
-· ``plugins list|state|enable|disable|settings|set`` · ``profiles
+Groups: ``status`` · ``accounts
+list|add|remove|info|credential|enable|start|stop|estop`` · ``credentials
+status|import-env`` · ``cooldowns clear`` · ``plugins
+list|state|enable|disable|settings|set`` · ``profiles
 list|create|delete|assign|unassign`` · ``ratelimit show|set|clear|effective|
 warnings|floor|lane`` · ``tasks list|cancel|history|cancel-matching`` ·
 ``simulation list|run`` · ``logs`` · ``audit`` · ``estop [resume]`` ·

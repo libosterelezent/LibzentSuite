@@ -61,7 +61,8 @@ Policies live at four levels (global < account < plugin < account+plugin).
 Pacing engine: per-(account, action) minimum interval + uniform jitter,
 priority-ordered waiters, injectable clock; server 429s set account or
 fleet-wide cooldowns that every acquire respects. Hard floor 1.5s/action,
-raise-only; `warnings()` reviews aggressive/jitter-less configurations.
+raise-only, with intervals and floor capped at 86400s (1 day);
+`warnings()` reviews aggressive/jitter-less configurations.
 
 ## Task pipeline (spec §6)
 
@@ -76,7 +77,7 @@ with the reason), exactly-once terminal bookkeeping: history row, audit row
 `adapters/simulator` swaps the Discord boundary for an in-memory world; the
 simulation runner composes a complete ephemeral framework per scenario.
 `tests/unit` (per-module), `tests/integration` (production bootstrap over the
-simulator), `tests/simulation` (scenario suite). 705 tests, no network, no
+simulator), `tests/simulation` (scenario suite). 992 tests, no network, no
 tokens.
 
 ## Boot flow

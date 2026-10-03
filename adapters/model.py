@@ -163,11 +163,15 @@ class DiscordMessageReference:
 
     ``referenced`` is populated ONLY when the library already cached the
     referenced message — otherwise None (explicitly not fetched).
+    ``type_name`` is the stable projection of the library's
+    MessageReferenceType ("reply" | "forward"; the fork's "default"
+    aliases value 0 = reply).
     """
 
     message_id: Optional[int] = None
     channel_id: Optional[int] = None
     guild_id: Optional[int] = None
+    type_name: str = "reply"
     referenced: Optional["DiscordMessage"] = None
 
 
@@ -406,6 +410,19 @@ def convert_channel(channel: Any, *, dm: bool) -> DiscordChannel:
     )
 
 
+def _reference_type_name(reference: Any) -> str:
+    ref_type = getattr(reference, "type", None)
+    name = getattr(ref_type, "name", None)
+    if isinstance(name, str) and name:
+        return name if name == "forward" else "reply"
+    try:
+        if ref_type == 1:
+            return "forward"
+    except Exception:
+        pass
+    return "reply"
+
+
 def convert_message(
     message: Any, *, dm: bool, viewer_id: Optional[int] = None,
     _depth: int = 0,
@@ -456,6 +473,7 @@ def convert_message(
             or (_optional_int(getattr(referenced, "id", None)) if referenced else None),
             channel_id=ref_channel_id,
             guild_id=ref_guild_id or (_optional_int(getattr(guild, "id", None)) if guild else None),
+            type_name=_reference_type_name(reference),
             referenced=(
                 convert_message(referenced, dm=False, _depth=_depth + 1)
                 if referenced is not None else None

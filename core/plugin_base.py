@@ -162,6 +162,20 @@ class PluginServices(Protocol):
     async def open_dm(self, user_id: int) -> int:
         """Resolve (opening if needed) the DM channel id for a user."""
 
+    async def add_reaction(self, channel_id: int, message_id: int, emoji: str,
+                           *, priority: Priority = Priority.NORMAL) -> None:
+        """React to a message through the paced pipeline (kakerareact)."""
+
+    async def click_button(self, channel_id: int, message_id: int,
+                           custom_id: str, *,
+                           priority: Priority = Priority.NORMAL) -> None:
+        """Click a message component by custom_id (kakeraloot) — paced and
+        audited like a send."""
+
+    async def fetch_user(self, user_id: int) -> Any:
+        """Resolve a user (cached per account in the database); None when
+        the account's client cannot resolve them."""
+
     async def cooldown_set(self, key: str, duration_s: float, *,
                            source: str = "plugin", reason: str = "",
                            metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

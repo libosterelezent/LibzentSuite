@@ -1,3 +1,4 @@
-# Documentation tooling (dev-only; the runtime project is stdlib-only)
+# Documentation tooling (dev-only; runtime deps live in requirements.txt:
+# aiosqlite + cryptography, everything else stdlib)
 sphinx>=7
 myst-parser>=2

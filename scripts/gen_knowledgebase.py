@@ -476,8 +476,11 @@ def coverage(modules: List[Dict[str, Any]]) -> Dict[str, Any]:
 def drift_check(new_flat: List[Dict[str, Any]]) -> int:
     baseline_path = KB / "generated" / "drift_baseline.json"
     if not baseline_path.is_file():
-        print("no baseline present — regenerate first (this run creates it)")
-        return 1
+        # knowledgebase/ is generated AND gitignored — a fresh checkout has
+        # none. Degrade gracefully: nothing to compare is not an error.
+        print("no baseline present (knowledgebase/ is generated + gitignored) — "
+              "nothing to drift-check; run WITHOUT --check once to generate it")
+        return 0
     old = json.loads(baseline_path.read_text())
     new = {e["qualified"]: symbol_hash(e) for e in new_flat if e.get("qualified")}
     removed = sorted(set(old) - set(new))

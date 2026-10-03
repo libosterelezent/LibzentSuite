@@ -342,6 +342,41 @@ class TestSchedulerQueuedPersistence(unittest.IsolatedAsyncioTestCase):
         finally:
             await scheduler.stop(drain=False)
 
+    async def test_drain_timeout_stop_does_not_drop_inflight_tail(self) -> None:
+        """(round 2) A drain=True stop whose budget expires while a task's
+        finish tail (history write + audit) is still in flight must join the
+        tail barrier BEFORE cancelling lanes — the row and the audit record
+        may not be silently dropped by the timeout path."""
+        class SlowRepo:
+            def __init__(self) -> None:
+                self.adds: list = []
+
+            async def add(self, entry):
+                await asyncio.sleep(0.05)
+                self.adds.append(dict(entry))
+                return entry["id"]
+
+        audit = FakeAudit()
+        repo = SlowRepo()
+        scheduler = TaskScheduler(
+            EventBus(), FakeLogger(), FakeLimiter(), FakeSender(), audit,
+            history_repo=repo,
+        )
+        scheduler.start()
+        try:
+            task = scheduler.submit("alpha", "p", "message", channel_id=1)
+            for _ in range(200):
+                if task.status == "completed":
+                    break
+                await asyncio.sleep(0.005)
+            await asyncio.sleep(0.005)  # tail now awaiting the slow add
+            await scheduler.stop(drain=True, timeout=0.001)  # budget blows mid-write
+            self.assertEqual(task.status, "completed")
+            self.assertEqual(len(repo.adds), 1)  # history row NOT dropped
+            self.assertEqual(len(audit.calls), 1)  # audit row NOT dropped
+        finally:
+            await scheduler.stop(drain=False)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,8 +19,10 @@ stops while every other account keeps running.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
@@ -54,6 +56,13 @@ class DiscordCache:
         self.channels: Dict[int, ChannelInfo] = {}
         #: listeners notified on invalidations (manager logs / dashboard)
         self._on_invalidate: List[Callable[[str, int, str], None]] = []
+        #: single-flight lock serializing DM resolution + invalidation for
+        #: this account (shared by resolve_dm_channel/invalidate_dm_channel:
+        #: a plugin-side open_dm and a lane dm send must dedupe to ONE
+        #: client.open_dm, and an invalidation must never interleave INSIDE
+        #: a resolution — its db delete could land before the resolver's
+        #: write and resurrect the dead row)
+        self._dm_lock = asyncio.Lock()
         self.ready = False
 
     # ------------------------------------------------------------ ingestion
@@ -248,6 +257,13 @@ async def resolve_dm_channel(
     3. ``await client.open_dm(user_id)`` — then the result is recorded in
        BOTH caches so it is never fetched again.
 
+    The whole resolution runs under the cache's per-account DM lock:
+    concurrent callers (a plugin's open_dm racing a lane dm send) dedupe
+    to exactly ONE open_dm. A persistent row whose channel the memory
+    cache marked deleted THIS session is skipped — the row is stale (its
+    invalidation's db delete failed), and trusting it would resurrect a
+    proven-dead channel on every subsequent send.
+
     ``cache_repo`` is the (async) CacheRepository; every access is awaited
     and guarded — persistence must never break the send path.
 
@@ -255,32 +271,35 @@ async def resolve_dm_channel(
         AccountError: full miss and no live client available.
     """
     user_id = int(user_id)
-    if cache is not None:
-        cached = cache.dm_channel_for(user_id)
-        if cached is not None:
-            return cached
-    if cache_repo is not None:
-        try:
-            stored = await cache_repo.get(account, "dm", str(user_id))
-        except Exception:
-            stored = None
-        if isinstance(stored, int):
-            if cache is not None:  # promote the persistent row to memory
-                cache.record_dm(stored, user_id)
-            return stored
-    if client is None:
-        raise AccountError(
-            f"account {account!r} has no active client to open a DM with {user_id}"
-        )
-    channel_id = int(await client.open_dm(user_id))
-    if cache is not None:
-        cache.record_dm(channel_id, user_id)
-    if cache_repo is not None:
-        try:
-            await cache_repo.set(account, "dm", str(user_id), channel_id)
-        except Exception:
-            pass  # persistence must never break the send path
-    return channel_id
+    async with (cache._dm_lock if cache is not None else nullcontext()):
+        if cache is not None:
+            cached = cache.dm_channel_for(user_id)
+            if cached is not None:
+                return cached
+        if cache_repo is not None:
+            try:
+                stored = await cache_repo.get(account, "dm", str(user_id))
+            except Exception:
+                stored = None
+            if isinstance(stored, int) and not isinstance(stored, bool):
+                info = cache.channels.get(stored) if cache is not None else None
+                if info is None or not info.deleted:
+                    if cache is not None:  # promote the persistent row to memory
+                        cache.record_dm(stored, user_id)
+                    return stored
+        if client is None:
+            raise AccountError(
+                f"account {account!r} has no active client to open a DM with {user_id}"
+            )
+        channel_id = int(await client.open_dm(user_id))
+        if cache is not None:
+            cache.record_dm(channel_id, user_id)
+        if cache_repo is not None:
+            try:
+                await cache_repo.set(account, "dm", str(user_id), channel_id)
+            except Exception:
+                pass  # persistence must never break the send path
+        return channel_id
 
 
 async def invalidate_dm_channel(
@@ -291,17 +310,26 @@ async def invalidate_dm_channel(
     Called when Discord reports the target gone — the next resolution
     re-opens the DM instead of hammering a dead channel id. Async: the
     persistent row is deleted through the (aiosqlite) cache repository.
+
+    Runs under the cache's DM lock so it can never interleave inside a
+    concurrent resolution (its db delete would land before the resolver's
+    write and resurrect the dead row).
     """
     user_id = int(user_id)
-    if cache is not None:
-        cached = cache.dm_channel_for(user_id)
-        if cached is not None:
-            cache.invalidate_channel(cached, f"dm with {user_id} gone")
-    if cache_repo is not None:
-        try:
-            await cache_repo.delete(account, "dm", str(user_id))
-        except Exception:
-            pass
+    async with (cache._dm_lock if cache is not None else nullcontext()):
+        if cache is not None:
+            cached = cache.dm_channel_for(user_id)
+            if cached is not None:
+                cache.invalidate_channel(cached, f"dm with {user_id} gone")
+        if cache_repo is not None:
+            try:
+                await cache_repo.delete(account, "dm", str(user_id))
+            except Exception:
+                LOG.warning(
+                    "persistent dm row for account %s user %d survived "
+                    "invalidation (db delete failed); it is ignored until "
+                    "a fresh open succeeds", account, user_id,
+                )
 
 
 __all__ = ["ChannelInfo", "DiscordCache", "resolve_dm_channel", "invalidate_dm_channel"]

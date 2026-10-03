@@ -11,13 +11,19 @@ change, waiter cancellation, and input validation.
 from __future__ import annotations
 
 import asyncio
+import random
 import unittest
 
 from core.errors import RatePolicyError, UnsafePolicyError
 from core.event_bus import EventBus, RateLimitTriggered
 from core.priority import Priority
 from core.rate_limit_manager import Grant, RateLimitManager
-from core.rate_limit_manager.engine import GLOBAL_KEY, ManualClock
+from core.rate_limit_manager.engine import (
+    GLOBAL_KEY,
+    POLL_INTERVAL,
+    ManualClock,
+    _Entry,
+)
 
 ACTION = "message"
 
@@ -69,6 +75,23 @@ class GatedSleepManager(RateLimitManager):
         self.gates.append((seconds, event))
         await event.wait()
         self._clock.advance(seconds)
+
+
+class GrantRecorderManager(SleepAdvanceManager):
+    """Records the exact grant stamp of every pacing key (from _last_fire
+    diffs around _grant_ready) — used to assert wire-gap invariants without
+    task-resume scheduling slip."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.grant_log = []
+
+    def _grant_ready(self, only=None):
+        before = dict(self._last_fire)
+        super()._grant_ready(only)
+        for key, ts in self._last_fire.items():
+            if before.get(key) != ts:
+                self.grant_log.append((key, ts))
 
 
 def make_manager(manager_cls=SleepAdvanceManager, interval=None,
@@ -263,6 +286,49 @@ class WaiterOrdering(unittest.IsolatedAsyncioTestCase):
             await doomed
         self.assertEqual(manager._pending, {})
 
+    async def test_waiter_added_after_husk_pop_gets_fresh_heap(self):
+        """A waiter pushed after _prune popped the key's husk lands in a
+        FRESH list (setdefault) — the stale heap ref held by the dead
+        waiter's era never sees it, and pacing still holds for the fresh
+        waiter. Gated sleeps keep the clock frozen through the cancel so
+        the observation is deterministic."""
+        manager = make_manager(manager_cls=GatedSleepManager, interval=2.0)
+        await manager.acquire(ACTION, account="alpha")  # last fire at t=0
+        doomed = asyncio.ensure_future(manager.acquire(ACTION, account="alpha"))
+        for _ in range(50):
+            if manager.gates:
+                break
+            await asyncio.sleep(0)
+        stale_heap = manager._pending[("alpha", ACTION)]
+        doomed.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await doomed
+        self.assertEqual(manager._pending, {})  # husk popped
+        self.assertEqual(manager._clock.now(), 0.0)  # gated sleep never ran
+        fresh = asyncio.ensure_future(manager.acquire(ACTION, account="alpha"))
+        for _ in range(50):
+            if len(manager.gates) >= 2:
+                break
+            await asyncio.sleep(0)
+        self.assertIn(("alpha", ACTION), manager._pending)
+        self.assertIsNot(manager._pending[("alpha", ACTION)], stale_heap)
+        manager.gates[-1][1].set()  # release: clock -> 2.0, grant
+        grant = await fresh
+        self.assertAlmostEqual(grant.wait_s, 2.0, places=6)
+        self.assertEqual(manager._pending, {})
+
+    async def test_entry_wait_with_dead_key_returns_poll(self):
+        """_entry_wait against a key with no live heap (stale/empty ref)
+        degrades to the backstop poll instead of crashing."""
+        manager = make_manager()
+        entry = _Entry(
+            priority=1, seq=0, action=ACTION, account="ghost", plugin=None,
+            future=asyncio.get_running_loop().create_future(),
+        )
+        wait, server_blocks = manager._entry_wait(entry)
+        self.assertEqual(wait, POLL_INTERVAL)
+        self.assertFalse(server_blocks)
+
 
 class ServerCooldowns(unittest.IsolatedAsyncioTestCase):
     """429 cooldowns: account-scoped + fleet-wide global, always respected."""
@@ -342,6 +408,45 @@ class ServerCooldowns(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(("alpha", ACTION), manager._account_cooldowns)
         self.assertIn(("beta", "poke"), manager._account_cooldowns)
         self.assertEqual(manager.cooldown_remaining("alpha", ACTION), 0.0)
+
+    async def test_cooldown_swept_at_exact_boundary(self):
+        """until == now is expired: swept by cooldown_remaining AND no
+        longer blocks a waiter (the block uses strict now < until)."""
+        manager = make_manager()
+        manager.report_server_limit("alpha", ACTION, 1.0)  # until == 1.0
+        manager._clock.advance(1.0)                        # now == until
+        self.assertEqual(manager.cooldown_remaining("alpha", ACTION), 0.0)
+        self.assertNotIn(("alpha", ACTION), manager._account_cooldowns)
+        grant = await manager.acquire(ACTION, account="alpha")
+        self.assertEqual(grant.wait_s, 0.0)
+        self.assertEqual(grant.reason, "")
+
+    async def test_sweep_drops_only_expired_rows_and_stats_agree(self):
+        """The sweep walks a snapshot of the table (no RuntimeError under
+        mutation) and keeps live rows; stats() shows the same survivors."""
+        manager = make_manager()
+        manager.report_server_limit("a", "x", 1.0)
+        manager.report_server_limit("b", "y", 2.0)
+        manager.report_server_limit("c", "z", 3.0)
+        manager._clock.advance(2.0)
+        self.assertEqual(manager.cooldown_remaining(), 1.0)
+        self.assertEqual(set(manager._account_cooldowns), {("c", "z")})
+        stats = manager.stats()
+        self.assertEqual(stats["cooldowns"]["accounts"], {"c": {"z": 1.0}})
+        self.assertEqual(stats["cooldowns"]["global"], 0.0)
+
+    async def test_sweep_during_active_waiters_never_breaks_the_arm(self):
+        """Arming a cooldown mid-wait, then sweeping (via a stats poll)
+        while the waiter is still parked, extends — never truncates."""
+        manager = make_manager(interval=2.0)
+        await manager.acquire(ACTION, account="alpha")
+        task = asyncio.ensure_future(manager.acquire(ACTION, account="alpha"))
+        await asyncio.sleep(0)  # parked
+        manager.report_server_limit("alpha", ACTION, 5.0)
+        manager.cooldown_remaining()  # sweep pass while the waiter holds
+        grant = await task
+        self.assertGreaterEqual(grant.wait_s, 5.0)
+        self.assertEqual(grant.reason, "server")
 
     async def test_server_cooldown_waits_before_pacing(self):
         manager = make_manager(interval=2.0)
@@ -448,6 +553,34 @@ class FloorSemantics(unittest.IsolatedAsyncioTestCase):
         manager.set_floor(86400.0)  # exactly at the cap is allowed
         self.assertEqual(manager.floor_value, 86400.0)
 
+    async def test_set_floor_rejects_malformed_shapes(self):
+        """Every malformed shape is refused with the floor untouched — bools
+        coerce to 1.0/0.0 and fall below the hard minimum, containers raise
+        TypeError, non-numeric strings raise ValueError."""
+        manager = make_manager()
+        for bad in (float("inf"), float("nan"), float("-inf"), "x", None,
+                    True, False, [], {}, 86400.1, -1.0):
+            with self.assertRaises(RatePolicyError):
+                manager.set_floor(bad)
+        self.assertEqual(manager.floor_value, 1.5)  # nothing applied
+
+    async def test_set_floor_coerces_numeric_strings(self):
+        manager = make_manager()
+        self.assertEqual(manager.set_floor("2.5"), 2.5)  # float() coercion
+        self.assertEqual(manager.floor_value, 2.5)
+
+    async def test_floor_cap_interplays_with_policy_cap(self):
+        """floor == MAX_INTERVAL == 86400: a policy exactly at the cap is
+        still settable (not strictly below the floor); anything less is
+        rejected with the current floor named in the message."""
+        manager = make_manager()
+        manager.set_floor(86400.0)
+        self.assertEqual(manager.effective(ACTION)["interval"], 86400.0)
+        manager.set_policy_values(ACTION, 86400.0)  # at both caps: allowed
+        with self.assertRaises(UnsafePolicyError) as ctx:
+            manager.set_policy_values("poke", 86399.0)
+        self.assertIn("86400", str(ctx.exception))
+
     async def test_persisted_floor_row_is_validated(self):
         """A hand-edited kv floor row (inf / 1e999 / below 1.5) must never
         wedge the fleet: it is ignored with a warning, never applied."""
@@ -460,6 +593,39 @@ class FloorSemantics(unittest.IsolatedAsyncioTestCase):
             manager._kv = kv
             await manager.load_persisted()
             self.assertEqual(manager.floor_value, 1.5)
+
+    async def test_persisted_floor_row_shape_matrix(self):
+        """Every persisted shape either validates or is skipped — never a
+        crash, never a wedge. Validated numerics (incl. numeric strings and
+        the 86400 cap) apply; bools/containers/garbage are ignored; a valid
+        row can only ever RAISE the constructor floor."""
+        from tests.unit.test_rate_lane import FakeKv
+
+        for good, expected in ((2.5, 2.5), ("2.5", 2.5), ("86400", 86400.0),
+                               (86400.0, 86400.0)):
+            kv = FakeKv()
+            kv.rows["ratelimit:floor"] = good
+            manager = make_manager()
+            manager._kv = kv
+            await manager.load_persisted()
+            self.assertEqual(manager.floor_value, expected)
+        for bad in (float("nan"), -1.0, True, False, [], {}, "", "1e999",
+                    86400.5, [86400.0]):
+            kv = FakeKv()
+            kv.rows["ratelimit:floor"] = bad
+            manager = make_manager()
+            manager._kv = kv
+            await manager.load_persisted()
+            self.assertEqual(manager.floor_value, 1.5)
+        # a persisted floor below the constructor floor never lowers it
+        kv = FakeKv()
+        kv.rows["ratelimit:floor"] = 2.0
+        manager = SleepAdvanceManager(
+            EventBus(), StubLogger(), None, clock=ManualClock(0.0), floor=3.0
+        )
+        manager._kv = kv
+        await manager.load_persisted()
+        self.assertEqual(manager.floor_value, 3.0)
 
     async def test_raised_floor_rejects_new_policies(self):
         manager = make_manager()
@@ -548,6 +714,75 @@ class Validation(unittest.IsolatedAsyncioTestCase):
             manager.report_server_limit("", ACTION, 1.0)
         with self.assertRaises(RatePolicyError):
             manager.report_server_limit("alpha", "", 1.0)
+
+
+class StressRandomizedInterleavings(unittest.IsolatedAsyncioTestCase):
+    """Chaos rounds: random submit/cancel/cooldown/policy-churn orderings
+    across grouped and ungrouped keys. Invariants under attack:
+
+    * every pacing key's grant stamps stay >= interval apart (wire gaps);
+    * no task dies of anything but CancelledError;
+    * the loop never reports an orphaned 'exception was never retrieved'.
+    """
+
+    async def test_randomized_interleavings_preserve_wire_gaps(self):
+        rng = random.Random(0x0DDBA11)
+        handler_events = []
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(
+            lambda l, ctx, out=handler_events: out.append(ctx)
+        )
+        try:
+            for round_no in range(4):
+                interval = 1.5 + 0.5 * round_no
+                manager = GrantRecorderManager(
+                    EventBus(), StubLogger(), None,
+                    clock=ManualClock(0.0), jitter_seed=round_no,
+                )
+                manager.set_policy_values(ACTION, interval)
+                manager.set_account_group("alpha", "g")
+                manager.set_account_group("beta", "g")
+                accounts = ("alpha", "beta", "gamma", None)
+                tasks = []
+                for step in range(28):
+                    tasks.append(asyncio.ensure_future(
+                        manager.acquire(ACTION, account=accounts[step % 4])
+                    ))
+                    roll = rng.random()
+                    if roll < 0.30 and tasks:
+                        tasks[rng.randrange(len(tasks))].cancel()
+                    elif roll < 0.45:
+                        manager.report_server_limit(
+                            "alpha", ACTION, rng.uniform(0.05, 0.4)
+                        )
+                    elif roll < 0.55:
+                        manager.set_policy_values(ACTION, interval)  # wake path
+                    await asyncio.sleep(0)
+                    if rng.random() < 0.3:
+                        await asyncio.sleep(0)
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for result in results:
+                    self.assertTrue(
+                        isinstance(result, (Grant, asyncio.CancelledError)),
+                        result,
+                    )
+                self.assertTrue(any(isinstance(r, Grant) for r in results))
+                by_key = {}
+                for key, ts in manager.grant_log:
+                    by_key.setdefault(key, []).append(ts)
+                self.assertTrue(by_key)
+                for key, stamps in by_key.items():
+                    ordered = sorted(stamps)
+                    gaps = [b - a for a, b in zip(ordered, ordered[1:])]
+                    self.assertTrue(
+                        all(g >= interval - 1e-9 for g in gaps), (key, gaps)
+                    )
+        finally:
+            loop.set_exception_handler(None)
+        for ctx in handler_events:
+            self.assertNotIn(
+                "never retrieved", str(ctx.get("message", "")), ctx
+            )
 
 
 if __name__ == "__main__":

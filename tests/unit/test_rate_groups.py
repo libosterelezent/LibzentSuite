@@ -124,6 +124,78 @@ class TestGroupScope(unittest.IsolatedAsyncioTestCase):
         senders = {account for account, _ in grant_times}
         self.assertEqual(senders, {"alpha", "beta"})
 
+    async def test_cancelled_member_does_not_corrupt_group_clock(self) -> None:
+        """A member cancelled mid-wait leaves the shared stamp intact AND
+        consumes no virtual time (gated sleep never ran): the next member
+        still waits out the full interval from the LAST grant, never less."""
+        from core.rate_limit_manager.engine import ManualClock
+        from tests.unit.test_rate_engine import GatedSleepManager
+
+        manager = GatedSleepManager(
+            EventBus(), StubLogger(), None, clock=ManualClock(0.0),
+            jitter_seed=7,
+        )
+        manager.set_policy_values(ACTION, 2.0)
+        manager.set_account_group("alpha", "g")
+        manager.set_account_group("beta", "g")
+        await manager.acquire(ACTION, account="alpha")  # stamps both at t=0
+        doomed = asyncio.ensure_future(
+            manager.acquire(ACTION, account="beta")
+        )
+        for _ in range(50):
+            if manager.gates:
+                break
+            await asyncio.sleep(0)  # beta parked behind a gated 2s sleep
+        doomed.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await doomed
+        self.assertEqual(manager._clock.now(), 0.0)  # clock untouched
+        grant_task = asyncio.ensure_future(
+            manager.acquire(ACTION, account="alpha")
+        )
+        for _ in range(50):
+            if len(manager.gates) >= 2:
+                break
+            await asyncio.sleep(0)
+        manager.gates[-1][1].set()  # release alpha's pacing sleep -> t=2
+        grant = await grant_task
+        self.assertAlmostEqual(grant.wait_s, 2.0, places=6)
+
+    async def test_concurrent_members_with_cancellation_keep_group_gaps(self) -> None:
+        """Chaos variant: three members racing with one cancellation —
+        every shared-clock grant stamp stays >= interval apart (measured on
+        exact stamps, not task-resume times)."""
+        from tests.unit.test_rate_engine import GrantRecorderManager
+        from core.rate_limit_manager.engine import ManualClock
+
+        interval = 1.5
+        manager = GrantRecorderManager(
+            EventBus(), StubLogger(), None,
+            clock=ManualClock(0.0), jitter_seed=3,
+        )
+        manager.set_policy_values(ACTION, interval)
+        for account in ("alpha", "beta", "gamma"):
+            manager.set_account_group(account, "g")
+
+        async def worker(account):
+            await manager.acquire(ACTION, account=account)
+
+        tasks = [
+            asyncio.ensure_future(worker(a))
+            for a in ("alpha", "beta", "gamma", "alpha", "beta")
+        ]
+        await asyncio.sleep(0)
+        tasks[1].cancel()  # one member dies mid-wait
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            self.assertNotIsInstance(result, Exception)
+        group_stamps = sorted(
+            ts for key, ts in manager.grant_log if key == ("group:g", ACTION)
+        )
+        self.assertGreaterEqual(len(group_stamps), 4)
+        gaps = [b - a for a, b in zip(group_stamps, group_stamps[1:])]
+        self.assertTrue(all(g >= interval - 1e-9 for g in gaps), gaps)
+
 
 if __name__ == "__main__":
     unittest.main()

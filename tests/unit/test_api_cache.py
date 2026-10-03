@@ -7,6 +7,7 @@ every test awaits connect()/close() and the repository calls.
 """
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -122,6 +123,68 @@ class TestServicesFetchUserCached(AsyncDbTestCase):
         self.assertEqual(len(client.fetch_user_calls), 1)
         # rows are account-scoped
         self.assertIsNone(await self.db.cache.get("beta", "user", "999"))
+
+
+class TestDmResolutionHardening(AsyncDbTestCase):
+    """Round-2 audit: single-flight resolution + stale-row immunity."""
+
+    def _slow_client(self, delay: float = 0.05) -> FakeClient:
+        client = FakeClient()
+        original = client.open_dm
+
+        async def slow_open(user_id):
+            await asyncio.sleep(delay)
+            return await original(user_id)
+
+        client.open_dm = slow_open
+        return client
+
+    async def test_concurrent_resolves_open_dm_exactly_once(self):
+        cache = DiscordCache("alpha")
+        client = self._slow_client()
+        results = await asyncio.gather(*(
+            resolve_dm_channel(cache, client, 5, "alpha", self.db.cache)
+            for _ in range(3)
+        ))
+        self.assertEqual(len(set(results)), 1)
+        self.assertEqual(client.open_dm_calls, [5])
+
+    async def test_stale_db_row_never_resurrects_invalidated_channel(self):
+        """Invalidation whose db delete failed leaves the row behind; the
+        memory cache's deleted flag must WIN over the stale row (trusting
+        it re-marks a proven-dead channel usable on every subsequent send)."""
+        cache = DiscordCache("alpha")
+        client = FakeClient()
+        cid = await resolve_dm_channel(cache, client, 5, "alpha", self.db.cache)
+        # simulate the failed db delete: memory-only invalidation, row stays
+        cache.invalidate_channel(cid, "dm with 5 gone")
+        cid2 = await resolve_dm_channel(cache, client, 5, "alpha", self.db.cache)
+        self.assertEqual(cid2, cid)
+        self.assertEqual(client.open_dm_calls, [5, 5])  # re-opened, not trusted
+        self.assertFalse(cache.channels[cid].deleted)   # fresh open cleared it
+
+    async def test_bool_poisoned_row_not_treated_as_channel_id(self):
+        await self.db.cache.set("alpha", "dm", "7", True)  # isinstance(True, int)
+        cache = DiscordCache("alpha")
+        client = FakeClient()
+        cid = await resolve_dm_channel(cache, client, 7, "alpha", self.db.cache)
+        self.assertEqual(cid, 1_000_007)
+        self.assertEqual(client.open_dm_calls, [7])
+
+    async def test_invalidate_during_open_dm_cannot_resurrect_the_row(self):
+        """invalidate blocked on the resolve lock: by the time it runs, the
+        fresh channel AND its db row are both gone (no resurrect window)."""
+        cache = DiscordCache("alpha")
+        client = self._slow_client()
+        resolving = asyncio.create_task(
+            resolve_dm_channel(cache, client, 5, "alpha", self.db.cache))
+        await asyncio.sleep(0.01)
+        invalidated = asyncio.create_task(
+            invalidate_dm_channel(cache, self.db.cache, 5, "alpha"))
+        cid = await resolving
+        await invalidated
+        self.assertTrue(cache.channels[cid].deleted)
+        self.assertIsNone(await self.db.cache.get("alpha", "dm", "5"))
 
 
 if __name__ == "__main__":

@@ -97,6 +97,8 @@ async def _seed_config_defaults(limiter: RateLimitManager, config: ProjectConfig
     except Exception:
         pass  # DB read failure: apply config defaults as a safe fallback
     removed = getattr(limiter, "removed_default", None)
+    if not callable(removed):  # vintage manager shape (attr/property):
+        removed = None  # no tombstone knowledge -> seed normally
 
     def _seed(action, spec, level, owner, where):
         if (level, owner, action) in stored:

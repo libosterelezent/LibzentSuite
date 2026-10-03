@@ -254,6 +254,16 @@ class PluginManager:
 
     async def _activate_one(self, account: str, runtime: PluginRuntime) -> None:
         """Load + enable one runtime, isolating any hook failure."""
+        if runtime.instance is None:
+            # constructor failed at attach: nothing to drive. Disable (a
+            # later set_enabled(True) retry must not leave an "enabled but
+            # dead" runtime) and keep the original init error visible.
+            runtime.enabled = False
+            self._logger.error(
+                "plugin %s on %s has no instance (constructor failed); "
+                "cannot activate", runtime.name, account,
+            )
+            return
         services = self._services.get(account, lambda _n: None)(runtime.name)
         try:
             resolved = self._settings.resolve(
@@ -305,12 +315,21 @@ class PluginManager:
             task.cancel()
 
     async def deactivate_account(self, account: str) -> None:
-        """Fire on_disable + on_unload for the account's active plugins."""
+        """Fire on_disable + on_unload for the account's active plugins.
+
+        The services entry is popped BEFORE the hook loop (the factory is
+        captured locally): a ``set_enabled(account, ..., True)`` landing on
+        an await point mid-deactivate must see ``account not in
+        self._services`` and NOT fire activation hooks into an account that
+        is going down (otherwise a plugin could be left ``active`` on a
+        stopped account).
+        """
         runtimes = self._accounts.get(account)
         if runtimes is None:
             return
+        factory = self._services.pop(account, None)
         for runtime in runtimes.values():
-            services = self._services.get(account, lambda _n: None)(runtime.name)
+            services = factory(runtime.name) if factory is not None else None
             ctx = self._context(account, runtime, services)
             if runtime.active and runtime.enabled:
                 try:
@@ -325,7 +344,6 @@ class PluginManager:
                 runtime.loaded = False
                 self._bus.publish_nowait(PluginUnloaded(account=account, plugin=runtime.name))
             runtime.active = False
-        self._services.pop(account, None)
 
     # ------------------------------------------------------------- mutation
     async def set_enabled(self, account: str, plugin: str, enabled: bool) -> None:
@@ -410,7 +428,15 @@ class PluginManager:
         task.add_done_callback(self._pending.discard)
 
     async def _dispatch(self, event: MessageReceived, runtimes: Dict[str, PluginRuntime]) -> None:
-        """Await every enabled plugin's handle_event, isolated per plugin."""
+        """Await every enabled plugin's handle_event, isolated per plugin.
+
+        The ``runtimes`` dict is a snapshot taken at enqueue time; if the
+        account was detached (or re-attached with fresh runtimes) before
+        this task got scheduled, the snapshot is STALE and dispatching to
+        it would fire handlers on an account that no longer exists — skip.
+        """
+        if self._accounts.get(event.account) is not runtimes:
+            return
         for runtime in runtimes.values():
             if not runtime.enabled or not runtime.active:
                 continue

@@ -178,14 +178,16 @@ class AccountsRepository(BaseRepository):
         table), not this repository's.
         """
         async with self._tx(f"assign profile {profile!r} to account {name!r}") as conn:
-            # aiosqlite's execute() returns a Result wrapper: await it to the
-            # Cursor FIRST, then await the fetch (chained attribute access
-            # on the wrapper does not proxy cursor methods).
-            cursor = await conn.execute(
+            # the cursor MUST be closed (async with): an unreset SELECT keeps
+            # a read snapshot open on this connection, and the next BEGIN
+            # IMMEDIATE from here fails SQLITE_BUSY immediately once another
+            # connection commits in between (busy_timeout cannot retry a
+            # stale snapshot).
+            async with conn.execute(
                 "SELECT 1 FROM accounts WHERE name = ?", (name,)
-            )
-            if await cursor.fetchone() is None:
-                raise DatabaseError(f"unknown account: {name!r}")
+            ) as cursor:
+                if await cursor.fetchone() is None:
+                    raise DatabaseError(f"unknown account: {name!r}")
             await conn.execute(
                 "INSERT OR IGNORE INTO account_profiles (account, profile) VALUES (?, ?)",
                 (name, profile),

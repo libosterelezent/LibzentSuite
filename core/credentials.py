@@ -125,7 +125,11 @@ class Credentials:
         """Comma-separated OWNER_USER_IDS -> frozenset of ints (empty if unset).
 
         Parsed once and cached (this is read on EVERY inbound message by
-        the remote-control gate; the values are immutable after load).
+        the remote-control gate; the values are immutable after load). A
+        malformed value is cached as an EMPTY set: fail closed, cheap and
+        non-raising on every access — the boot path warns once and the
+        gate then quietly rejects every mention (never a per-message
+        raise, never a partially-armed owner set).
         """
         if self._owner_ids is not None:
             return self._owner_ids
@@ -137,10 +141,12 @@ class Credentials:
                 continue
             try:
                 ids.add(int(part))
-            except ValueError as exc:
-                raise CredentialsError(
-                    f"OWNER_USER_IDS contains a non-integer: {part!r}"
-                ) from exc
+            except ValueError:
+                LOG.warning(
+                    "OWNER_USER_IDS contains a non-integer: %r — remote "
+                    "control will reject every mention", part)
+                self._owner_ids = frozenset()
+                return self._owner_ids
         self._owner_ids = frozenset(ids)
         return self._owner_ids
 
