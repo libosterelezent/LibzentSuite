@@ -15,6 +15,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
+import os
 import signal
 import sys
 
@@ -50,6 +52,18 @@ async def run_sim(name: str | None, list_only: bool) -> int:
 
 async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
     """Boot the live stack and attach the requested surfaces."""
+    if getattr(args, "debug", False):
+        # DEBUGGING MODE: structured DEBUG records reach the bridge (the
+        # Logs page filters by severity client-side), the discord library's
+        # gateway lines surface at INFO (reconnect/close-code visibility —
+        # heartbeats would drown everything at DEBUG), and the DB worker
+        # telemetry runs live (also available via SM_DB_TELEMETRY=1 alone).
+        logging.getLogger("slaughtermudae").setLevel(logging.DEBUG)
+        logging.getLogger("discord").setLevel(logging.INFO)
+        os.environ.setdefault("SM_DB_TELEMETRY", "1")
+        logging.getLogger("slaughtermudae").info(
+            "DEBUG MODE: slaughtermudae tree at DEBUG, discord at INFO, "
+            "DB worker telemetry enabled")
     framework = await build(
         env_file=args.env,
         config_dir=args.config,
@@ -182,6 +196,12 @@ def main() -> int:
     parser.add_argument("--headless", action="store_true",
                         help="run forever with no terminal (use with --dashboard)")
     parser.add_argument("--port", type=int, default=8070, help="dashboard port (default 8070)")
+    parser.add_argument("--debug", action="store_true",
+                        help="debugging mode: DEBUG-level structured logs "
+                             "(dashboard Logs page), discord gateway INFO "
+                             "lines (reconnect/close-code visibility), DB "
+                             "worker telemetry, scheduler pressure in "
+                             "status")
     parser.add_argument("--db", default="state/slaughter.db", help="sqlite persistence file")
     args, extra = parser.parse_known_args()
 

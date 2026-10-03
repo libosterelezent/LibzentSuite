@@ -467,6 +467,7 @@ class DashboardServer:
         self._broadcaster: Optional[asyncio.Task] = None
         self._log_unsub: Optional[Any] = None
         self._audit_unsub: Optional[Any] = None
+        self._audit_recorder: Any = None  # idempotent attach_audit guard
         self._task_unsubs: List[Any] = []
         # ControlAPI has no bus accessor (documented gap) — accept one
         # explicitly or probe the usual attribute names, duck-typed.
@@ -536,6 +537,7 @@ class DashboardServer:
         if self._audit_unsub is not None:
             self._audit_unsub()
             self._audit_unsub = None
+        self._audit_recorder = None
         for unsub in self._task_unsubs:
             try:
                 unsub()
@@ -564,9 +566,25 @@ class DashboardServer:
         return self
 
     def attach_audit(self, recorder: Any) -> "DashboardServer":
-        """Stream every audited interaction to WS clients (manual form)."""
+        """Stream every audited interaction to WS clients (manual form).
+
+        IDEMPOTENT: ``start()`` auto-attaches the api's recorder, and
+        ``main.py``/callers attach it manually — a second call with the
+        SAME recorder is a no-op (the pre-fix double subscription
+        broadcast every audit entry twice, rendering duplicated lines on
+        the Audit page and leaking the first unsub handle).
+        """
         if self._loop is None:
             self._loop = asyncio.get_running_loop()
+        if self._audit_recorder is recorder and self._audit_unsub is not None:
+            return self  # already attached: never double-subscribe
+        if self._audit_unsub is not None:  # different recorder: swap cleanly
+            try:
+                self._audit_unsub()
+            except Exception:
+                pass
+            self._audit_unsub = None
+        self._audit_recorder = recorder
 
         def _on_entry(entry: Any) -> None:
             self._broadcast_payload({"type": "audit", **entry_as_dict(entry)})

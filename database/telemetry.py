@@ -49,6 +49,12 @@ class DbTelemetry:
 
     def __init__(self) -> None:
         self.enabled = False
+        # FINAL-PHASE (G1): SM_DB_TELEMETRY=1 enables live telemetry in
+        # ANY process (debugging mode sets it); benchmark enables it
+        # programmatically. Default remains OFF (zero overhead).
+        import os as _os
+        if _os.environ.get("SM_DB_TELEMETRY", "").lower() in ("1", "true"):
+            self.enabled = True
         self._lock = threading.Lock()
         self._counts: Dict[str, int] = {k: 0 for k in _KINDS}
         self._errors = {k: 0 for k in _KINDS}
