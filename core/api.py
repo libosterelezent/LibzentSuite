@@ -232,6 +232,11 @@ class ControlAPI:
         """
         out = await _resolved(self._accounts.remove_account(name))
         self._audit_mgmt(name, "mgmt:account.removed", surface)
+        # Backstop cascade (idempotent with manager.remove_account's own
+        # guarded cascade): covers stacks where the MANAGER is not wired
+        # with the credential service / cooldown service (direct
+        # ControlAPI use, partial test/sim stacks). Both deletes are
+        # no-ops when the manager cascade already ran.
         if self._credentials_svc is not None:
             try:
                 await self._credentials_svc.delete(name)

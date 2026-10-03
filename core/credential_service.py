@@ -54,6 +54,7 @@ class CredentialService:
         self._memory: dict = {}       # runtime cache: account -> plaintext (§14)
         self._runtime_sources: dict = {}  # account -> "db" | "env"
         self._db_accounts: set = set()  # accounts with a stored credential
+        self._delete_generation: int = 0  # PHASE-4 await-race guard (S5-L1)
 
     async def refresh(self) -> None:
         """Re-read the stored-credential account list (boot/status display)."""
@@ -157,6 +158,7 @@ class CredentialService:
                 and not self._db_accounts:
             await self.refresh()  # first resolution pays one list query
         if self._repo is not None:
+            del_gen = self._delete_generation
             ciphertext = await self._repo.load(account)
             if ciphertext is not None:
                 try:
@@ -166,6 +168,11 @@ class CredentialService:
                         f"stored credential for {account!r} cannot be "
                         "decrypted (master key changed? re-enter it)"
                     ) from exc
+                if self._delete_generation != del_gen:
+                    # PHASE-4 (S5-L1): the account's credential was DELETED
+                    # while we were parked on the repo load — do not
+                    # re-cache the plaintext for the rest of the process.
+                    return token
                 self._memory[account] = token
                 self._runtime_sources[account] = "db"
                 return token
@@ -180,6 +187,8 @@ class CredentialService:
         self._memory.pop(account, None)
         self._runtime_sources.pop(account, None)
         self._db_accounts.discard(account)
+        self._delete_generation += 1  # PHASE-4 (S5-L1): invalidate in-flight
+        # resolves so a parked repo load cannot re-cache the plaintext
         existed = await self._repo.delete(account) \
             if self._repo is not None else False
         return existed

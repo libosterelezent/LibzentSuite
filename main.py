@@ -160,6 +160,11 @@ def main() -> int:
     parser.add_argument("--sim", metavar="NAME", const="", default=None, nargs="?",
                         help="run a simulation scenario (no network); omit NAME to list")
     parser.add_argument("--sim-list", action="store_true", help="list scenarios")
+    parser.add_argument("--bench", metavar="SCENARIO", const="", default=None, nargs="?",
+                        help="run the framework benchmark (isolated temp "
+                             "state, fakes only); omit SCENARIO for all; "
+                             "pass '--bench --list' to list; extra flags "
+                             "pass through to the bench CLI")
     parser.add_argument("--config", default="config", help="config directory (default: ./config)")
     parser.add_argument("--plugins", default="plugins", help="plugin directory (default: ./plugins)")
     parser.add_argument("--env", default=".env", help="credentials file (default: ./.env)")
@@ -175,6 +180,23 @@ def main() -> int:
 
     if args.sim is not None or args.sim_list:
         return asyncio.run(run_sim(args.sim or None, args.sim_list))
+    if args.bench is not None:
+        # isolated benchmark process: never boots the live framework
+        from benchmark.cli import run_bench_cli
+
+        bench_argv: list[str] = []
+        if args.bench:
+            bench_argv.extend(["--scenario", args.bench])
+        # everything except the main parser's own flags passes through
+        # (values included — the bench parser validates the rest)
+        owned = {"--sim", "--sim-list", "--bench", "--config", "--plugins",
+                 "--env", "--start-all", "--dashboard", "--headless",
+                 "--port", "--db"}
+        # parse_known_args already consumed the main parser's flags; every
+        # remaining token belongs to the bench CLI — pass verbatim
+        bench_argv.extend(
+            tok for tok in extra if tok.split("=", 1)[0] not in owned)
+        return run_bench_cli(bench_argv)
     try:
         return asyncio.run(run_app(args, extra))
     except KeyboardInterrupt:

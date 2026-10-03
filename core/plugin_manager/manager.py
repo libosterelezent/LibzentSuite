@@ -54,6 +54,9 @@ class PluginRuntime:
     settings: Dict[str, Any] = field(default_factory=dict)
     last_error: Optional[str] = None
     error_count: int = 0
+    #: PHASE-4 (S7-L1): cached dispatch context (rebuilt whenever services
+    #: are unwired — deactivated/reattached — via the services-is-None check)
+    ctx: Any = None
 
 
 class PluginManager:
@@ -244,6 +247,7 @@ class PluginManager:
     async def _activate_one(self, account: str, runtime: PluginRuntime) -> None:
         """Load + enable one runtime, isolating any hook failure."""
         services = self._services.get(account, lambda _n: None)(runtime.name)
+        runtime.ctx = None  # PHASE-4 (S7-L1): new facade -> rebuild cache
         try:
             resolved = self._settings.resolve(
                 runtime.name, self._schema_for(runtime.name), account=account
@@ -301,6 +305,7 @@ class PluginManager:
         for runtime in runtimes.values():
             services = self._services.get(account, lambda _n: None)(runtime.name)
             ctx = self._context(account, runtime, services)
+            runtime.ctx = None  # PHASE-4 (S7-L1): services unwired below
             if runtime.active and runtime.enabled:
                 try:
                     await self._hook(account, runtime, runtime.instance.on_disable, ctx, "on_disable")
@@ -401,8 +406,16 @@ class PluginManager:
         for runtime in runtimes.values():
             if not runtime.enabled or not runtime.active:
                 continue
-            services = self._services.get(event.account, lambda _n: None)(runtime.name)
-            ctx = self._context(event.account, runtime, services)
+            # PHASE-4 (S7-L1): the context (logger lookup + dataclass) is
+            # cached per runtime — all its inputs are stable per activation
+            # (settings stays the LIVE dict, services the same facade), and
+            # rebuilding it per event × per plugin sat on the hottest path.
+            ctx = runtime.ctx
+            if ctx is None or ctx.services is None:
+                services = self._services.get(
+                    event.account, lambda _n: None)(runtime.name)
+                ctx = runtime.ctx = self._context(
+                    event.account, runtime, services)
             try:
                 await runtime.instance.handle_event(ctx, event)
             except asyncio.CancelledError:

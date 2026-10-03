@@ -213,14 +213,16 @@ class AuditRecorder:
         )
         with self._lock:
             self._ring.append(entry)
+        payload = entry.as_dict()  # built ONCE (was 2x per record — the
+        # exact bug already fixed in LogService; PHASE-4 S7-C5)
         if self._persist.active:
-            self._persist.put(entry.as_dict())
+            self._persist.put(payload)
         for callback in list(self._subscribers):
             try:
                 callback(entry)
             except Exception:
                 LOG.debug("audit subscriber failed", exc_info=True)
-        return entry.as_dict()
+        return payload
 
     def tail(self, n: int = 50, account: Optional[str] = None) -> List[Dict[str, Any]]:
         """Most recent entries as dicts (oldest first), optionally per account.

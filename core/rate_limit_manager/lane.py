@@ -58,7 +58,12 @@ from ..errors import RatePolicyError
 MAX_PREFIXRATE = 86400.0
 
 #: backstop poll for non-head lane waiters (correctness never relies on wakes)
-LANE_POLL_INTERVAL = 0.25
+#: non-head backstop poll. PHASE-4 (S7-C2): mirrors the engine's measured
+#: phase-3 fix (0.25 -> 2.0s, a 4-37x waiter-CPU reduction): wakes already
+#: cover grants/config changes; the poll exists only as a correctness
+#: backstop, so 2s bounds a lost-wake delay without burning CPU per
+#: non-head waiter at 4 Hz.
+LANE_POLL_INTERVAL = 2.0
 
 
 class _LaneEntry:
@@ -207,6 +212,11 @@ class GlobalSendLane:
         finally:
             entry.cancelled = True
             self._prune()
+            # PHASE-4 (S7-P2): a cancelled head must wake its successors —
+            # before the poll interval was raised, the 0.25s backstop masked
+            # this; with a 2s backstop the next waiter would otherwise sit
+            # parked for the full interval despite being grantable now.
+            self._wake()
 
     # ------------------------------------------------------------ internals
     def _entry_wait(self, entry: _LaneEntry) -> float:

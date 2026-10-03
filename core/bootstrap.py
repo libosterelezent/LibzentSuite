@@ -38,6 +38,7 @@ from .config import ProjectConfig, load_config
 from .cooldowns import CooldownService
 from .credential_service import CredentialService
 from .credentials import Credentials
+from .errors import UnsafePolicyError
 from .event_bus import EventBus
 from .logging_service import LogService, ServiceLogger, attach_stdlib_bridge, configure_stderr, detach_stdlib_bridge
 from .plugin_manager import PluginManager
@@ -47,17 +48,18 @@ from .rate_limit_manager import RateLimitManager
 from .settings_manager import SettingsManager
 from .task_scheduler import TaskScheduler
 from .account_manager import AccountManager
+from .account_manager.lifecycle import LifecycleGovernor, LifecyclePolicy
 
 ROOT_LOGGER = logging.getLogger("slaughtermudae")
 
 
 #: bus events worth a structured log line (MessageReceived is far too chatty)
-_LOGGED_EVENTS = (
+_LOGGED_EVENTS = frozenset((
     "AccountConnected", "AccountDisconnected", "AccountFailed",
     "PluginLoaded", "PluginUnloaded", "PluginEnabledChanged",
     "TaskCompleted", "TaskFailed", "TaskCancelled",
     "RateLimitTriggered", "ScenarioStarted", "ScenarioFinished",
-)
+))
 
 
 def _wire_event_logging(bus: EventBus, logs: LogService) -> None:
@@ -249,6 +251,7 @@ async def build(
     credentials: Optional[Credentials] = None,
     database: Any = None,
     quiet: bool = False,
+    credential_key_path: Optional[Path] = None,
 ) -> Framework:
     """Compose the live framework (the boot flow of ``main.py``).
 
@@ -276,7 +279,8 @@ async def build(
         return await _assemble(
             cleanups, _time, credentials, config, database,
             plugin_dir=plugin_dir, client_factory=client_factory,
-            simulation_runner=simulation_runner)
+            simulation_runner=simulation_runner,
+            credential_key_path=credential_key_path)
     except BaseException:
         for label, undo in reversed(cleanups):
             try:
@@ -306,13 +310,17 @@ async def _safe_close(database: Any) -> None:
 async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
                     config: ProjectConfig, database: Any, *, plugin_dir: str,
                     client_factory: Optional[Callable[[str, str], Any]],
-                    simulation_runner: Any) -> Framework:
+                    simulation_runner: Any,
+                    credential_key_path: Optional[Path] = None) -> Framework:
     """Wire every manager over an already-connected database."""
 
     # shared services over the database (credentials encrypted at rest,
     # persistent cooldowns, scoped plugin state)
     credential_service = CredentialService(
-        database.credentials, key_path=Path("state/credentials.key")
+        database.credentials,
+        # benchmark isolation: an explicit key path keeps a concurrent
+        # bench process from touching the live state/credentials.key
+        key_path=credential_key_path or Path("state/credentials.key"),
     )
     cooldowns = CooldownService(database.cooldowns)
     plugin_state = PluginStateService(database.kv)
@@ -396,6 +404,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         api_cache_repo=database.cache,
         credential_service=credential_service, cooldowns=cooldowns,
         plugin_state=plugin_state,
+        lifecycle=LifecycleGovernor(),  # PHASE-4 (S4): anti-thrash defaults
     )
     cleanups.append(("accounts", accounts.stop_all))
     await accounts.load()  # restore persisted accounts (attach their plugins)
@@ -459,6 +468,9 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
             bus, scheduler, accounts, lambda: api, credentials,
             ServiceLogger(logs, "remote-control"),
         ).start()
+        # PHASE-4 (S3-G2): let the account-removal cascade clear the
+        # remote-control reply-throttle stamp for the removed name.
+        accounts._remote_control = remote_control
         cleanups.append(("remote control", remote_control.stop))
     return Framework(
         api=api, bus=bus, logs=logs, limiter=limiter, scheduler=scheduler,

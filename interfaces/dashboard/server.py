@@ -299,9 +299,23 @@ class WebSocketClient:
         self._last_refresh = 0.0
 
     def push_text(self, text: str) -> None:
-        """Queue a text frame (thread-safe; sent by the owning reader loop)."""
-        if self.alive:
-            self._sendq.put(("text", wsproto.encode_text_frame(text)))
+        """Queue a text frame (thread-safe; sent by the owning reader loop).
+
+        PHASE-4 (S5-C3): the outbound queue is CAPPED — a client that
+        stops reading (zero-window TCP, backgrounded tab) must not grow
+        server memory forever. On overflow the client is marked dead and
+        closed; its reader loop already tolerates dead sockets.
+        """
+        if not self.alive:
+            return
+        if self._sendq.qsize() >= 256:
+            self.alive = False
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            return
+        self._sendq.put(("text", wsproto.encode_text_frame(text)))
 
     def push_json(self, payload: Dict[str, Any]) -> None:
         self.push_text(_dumps(payload))

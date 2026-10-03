@@ -214,13 +214,19 @@ class RealDiscordClient:
         @self._client.event
         async def on_disconnect() -> None:
             if self.on_disconnect is not None:
-                # M1 (observability): surface the gateway close code so
+                # M1/S2-M1 (observability): surface the gateway close code so
                 # "gateway closed" can be told apart (1000 = server-initiated
                 # close, 4007/4015-style = session limits, None = abnormal).
+                # discord.py-self only sets ws._close_code when IT closes;
+                # a remote CLOSE frame lands on the underlying socket —
+                # check that too or Discord-side culls show no code at all.
                 ws = getattr(self._client, "ws", None)
                 code = getattr(ws, "close_code", None)
                 if code is None:
                     code = getattr(ws, "_close_code", None)
+                if code is None:
+                    code = getattr(getattr(ws, "socket", None),
+                                   "close_code", None)
                 reason = ("gateway closed" if code is None
                           else f"gateway closed (code={code})")
                 self.on_disconnect(reason)
@@ -639,20 +645,39 @@ class IdentifyGate:
     (isolation audit K8 / S3-3.1, S7-A2).
     """
 
-    __slots__ = ("interval", "_lock", "_last")
+    __slots__ = ("interval", "max_wait", "_lock", "_last")
 
-    def __init__(self, interval: float = 5.0) -> None:
+    def __init__(self, interval: float = 5.0,
+                 max_wait: float = 45.0) -> None:
         self.interval = float(interval)
+        #: fast-fail bound: 45s >= 8 accounts' worth of queue at 5s spacing
+        self.max_wait = float(max_wait)
         self._lock: Optional[asyncio.Lock] = None  # bound lazily to the loop
         self._last: float = float("-inf")
 
-    async def acquire(self, *, initial: bool = False) -> None:
-        """Space consecutive IDENTIFYs by ``interval`` seconds."""
+    async def acquire(self, shard_id=None, *, initial: bool = False) -> None:
+        """Space consecutive IDENTIFYs by ``interval`` seconds.
+
+        The leading ``shard_id`` positional is tolerated (never used —
+        user accounts are unsharded — but discord.py lineage hooks are
+        invoked with it positionally, and library drift must not turn
+        the gate into a TypeError). Fast-fails with a retryable
+        ConnectionError when the projected queue wait exceeds
+        ``max_wait`` (PHASE-4 S2 #8): at fleet sizes where the tail would
+        sit in the gate longer than a connect budget anyway, burning the
+        login + client build + 90s park is strictly worse than failing
+        fast into the reconnect backoff.
+        """
         if self._lock is None:
             self._lock = asyncio.Lock()
         async with self._lock:  # FIFO: hold while sleeping so waiters queue
             now = asyncio.get_running_loop().time()
             wait = self._last + self.interval - now
+            if wait > self.max_wait:
+                raise ConnectionError(
+                    f"identify gate saturated: projected wait {wait:.0f}s "
+                    f"exceeds {self.max_wait:.0f}s — retrying with backoff "
+                    "is cheaper than parking a built client")
             if wait > 0:
                 await asyncio.sleep(wait)
                 now = asyncio.get_running_loop().time()

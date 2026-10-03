@@ -132,6 +132,23 @@ class AccountStatus(str, Enum):
     INVALID_CREDENTIAL = "invalid_credential"
 
 
+class _StaleGeneration(Exception):
+    """PHASE-4: a lifecycle operation resumed after ownership changed.
+
+    Raised by ``_connect_client`` (and honored by start/reconnect callers)
+    when ``rt.generation`` moved on while the operation was suspended. The
+    message deliberately avoids auth-shaped words so ``_looks_like_auth_error``
+    text matching can never classify it as a credential failure.
+    """
+
+    def __init__(self, name: str, generation: int) -> None:
+        super().__init__(
+            f"lifecycle generation changed for account {name!r} "
+            f"(captured {generation})")
+        self.account = name
+        self.generation = generation
+
+
 @dataclass
 class AccountRuntime:
     """RUNTIME state of one account (never persisted).
@@ -158,6 +175,16 @@ class AccountRuntime:
     # and the loop would hammer IDENTIFYs forever at minimum backoff.
     session_started: float = 0.0
     flaps: List[float] = field(default_factory=list)
+    # PHASE-4 (S1/S2 hardening): monotonic lifecycle generation. Bumped at
+    # every ownership change (start entry, stop inside the lock, remove,
+    # estop). Every async lifecycle path captures it BEFORE an await and
+    # validates AFTER: a stale operation aborts and cleans up what it
+    # created instead of becoming authoritative over a newer generation.
+    # This expresses what stop_requested cannot: an old start must never
+    # resurrect a stopped account, an old stop must never clobber a newer
+    # start's terminal state, and a stale supervisor must never reconnect
+    # a newer generation's client.
+    generation: int = 0
 
 
 @dataclass
@@ -231,6 +258,7 @@ class AccountManager:
         credential_service: Any = None,
         cooldowns: Any = None,
         plugin_state: Any = None,
+        lifecycle: Any = None,
     ) -> None:
         """``limiter`` (optional) enriches details() with effective rate data;
         ``supervisor_tick`` is the supervisor's poll granularity in seconds;
@@ -240,7 +268,10 @@ class AccountManager:
         DB-first with the legacy .env as fallback and reports the
         db/env/missing source for status pages; ``cooldowns`` (optional
         CooldownService) and ``plugin_state`` (optional PluginStateService)
-        are handed to the per-plugin services facades (plugin API).
+        are handed to the per-plugin services facades (plugin API);
+        ``lifecycle`` (optional LifecycleGovernor, PHASE-4) rate-limits
+        start/stop thrashing per account and fleet-wide — None disables
+        limiting (tests/simulators construct managers without it).
 
         The constructor does NO repository I/O — persisted accounts are
         restored by awaiting :meth:`load` (the bootstrap does, right after
@@ -274,6 +305,11 @@ class AccountManager:
         self._services: Dict[tuple, AccountPluginServices] = {}
         #: strong refs for fire-and-forget tasks (documented create_task hazard)
         self._background: set = set()
+        # PHASE-4 (S2 #5): cancelled-but-still-unwinding supervisors —
+        # strong refs so they can never be GC'd mid-teardown
+        self._dying_supervisors: set = set()
+        # PHASE-4 (S4): lifecycle rate governor (None = unlimited)
+        self._lifecycle = lifecycle
 
         # inbound audit trail (spec §10): every message seen by any account
         bus.subscribe(MessageReceived, self._audit_inbound)
@@ -397,6 +433,7 @@ class AccountManager:
         except KeyError:
             raise AccountError(f"unknown account {name!r}") from None
         rt = account.runtime
+        rt.generation += 1  # PHASE-4: this removal invalidates all older ops
         if rt.status in (
             AccountStatus.RUNNING, AccountStatus.RECONNECTING, AccountStatus.CONNECTING,
         ):
@@ -429,17 +466,13 @@ class AccountManager:
                 await stale_client.disconnect()
             except Exception:
                 self._logger.warning("stale client close failed for %s", name)
-        try:  # a FAILED account's plugins may still be ACTIVE (a drop with
-            outcome = self._plugin_manager.deactivate_account(name)  # no
-            if asyncio.iscoroutine(outcome):  # supervisor never ran the
-                await outcome  # stop path) — fire on_disable/on_unload too
-        except Exception:
-            self._logger.exception("plugin deactivation failed for %s", name)
         try:
             # K6 (S1-C7/S5-C3/S10-C3): a FAILED account was never stop()ed,
             # so its plugins may still be ACTIVE (roll's recovery loop,
             # on_load resources). detach fires no lifecycle hooks —
             # deactivate first or they outlive the account's removal.
+            # (Single call — the pre-phase-4 code had this block duplicated
+            # back-to-back, a merge artifact from the isolation audit.)
             outcome = self._plugin_manager.deactivate_account(name)
             if asyncio.iscoroutine(outcome):  # tolerant: sync pinned, async OK
                 await outcome
@@ -452,6 +485,20 @@ class AccountManager:
                 await outcome
         except Exception:
             self._logger.exception("plugin detach failed for %s", name)
+        # PHASE-4 (S1-F3): the cascade above has multiple awaits — a
+        # same-named account may have been RE-ADDED while we were parked,
+        # and the destructive steps below (credential delete, cooldowns,
+        # plugin state, mirrors, the repo row itself) would destroy the
+        # NEW account's data. Re-verify registry identity before every
+        # destructive write; abort the remainder on mismatch. (The name is
+        # normally ABSENT here — we popped it — so only a genuinely
+        # different Account object re-occupying the name trips this.)
+        current = self._accounts.get(name)
+        if current is not None and current is not account:
+            self._logger.error(
+                "removal of %s aborted: account re-created mid-cascade — "
+                "preserving the new account's state", name)
+            return {"removed": False, "name": name, "recreated": True}
         if self._api_cache is not None:
             try:  # persisted DM/user rows are keyed by NAME: a re-created
                 await self._api_cache.drop_account(name)  # account must not
@@ -498,6 +545,27 @@ class AccountManager:
                     await resolved
             except Exception:
                 self._logger.exception("rate-engine residue cascade failed for %s", name)
+        remote = getattr(self, "_remote_control", None)
+        if hasattr(remote, "forget_account"):  # PHASE-4 (S3-G2), tolerant
+            try:
+                remote.forget_account(name)
+            except Exception:
+                self._logger.exception(
+                    "remote-control throttle cascade failed for %s", name)
+        if self._lifecycle is not None:  # PHASE-4 (S4): pacer cleanup
+            try:
+                self._lifecycle.forget(name)
+            except Exception:
+                self._logger.exception(
+                    "lifecycle pacer cascade failed for %s", name)
+        # PHASE-4 (S1-F3): final identity check before the irreversible DB
+        # row delete — the cascade has had many await windows above.
+        current = self._accounts.get(name)
+        if current is not None and current is not account:
+            self._logger.error(
+                "removal of %s aborted before DB delete: account re-created "
+                "mid-cascade", name)
+            return {"removed": False, "name": name, "recreated": True}
         existed = bool(await self._accounts_repo.delete(name))
         self._logger.info("account %s removed (existed=%s)", name, existed)
         return {"removed": name, "existed": existed}
@@ -544,14 +612,18 @@ class AccountManager:
             AccountStatus.RUNNING, AccountStatus.CONNECTING, AccountStatus.RECONNECTING,
         ):
             raise AccountError(f"account {name!r} is already {rt.status.value}")
+        self._lifecycle_gate("start", name, rt.status)
         rt.stop_requested = False
         rt.lost.clear()
         rt.last_error = None
+        rt.generation += 1  # PHASE-4: this start invalidates all older ops
+        gen = rt.generation
         rt.status = AccountStatus.CONNECTING
         try:
             await self._connect_client(name, rt)
         except asyncio.CancelledError:
-            if rt.stop_requested:  # a stop() raced the start: not a failure
+            if rt.stop_requested or rt.generation != gen:
+                # a stop()/restart raced the start: not a failure
                 rt.status = AccountStatus.STOPPED
                 self._discard_half_built_client(name, rt)
                 raise
@@ -560,8 +632,16 @@ class AccountManager:
             raise
         except (KeyboardInterrupt, SystemExit):
             raise  # process-level signals are never swallowed here
+        except _StaleGeneration:
+            # A newer lifecycle operation owns this account now (stop,
+            # restart, remove). Abort quietly: no status write, no
+            # AccountFailed, no classification — never fight the owner.
+            self._discard_half_built_client(name, rt)
+            self._logger.info(
+                "start of %s superseded by newer lifecycle operation", name)
+            return account.status_dict()
         except Exception as exc:
-            if rt.stop_requested:
+            if rt.stop_requested or rt.generation != gen:
                 # stop() completed while connect() was parked: its teardown
                 # already ran (rt.client was None then). This is a benign
                 # race — NOT an account failure: leave STOPPED and never
@@ -576,7 +656,7 @@ class AccountManager:
             raise AccountError(
                 f"account {name!r} failed to connect: {exc}"
             ) from exc
-        if rt.stop_requested:  # a stop() raced us mid-connect — honour it
+        if rt.stop_requested or rt.generation != gen:
             # K2 (S1-C1/S10-C1): the racing stop() may have completed BEFORE
             # rt.client was assigned (e.g. while we awaited token resolution),
             # so its disconnect never saw this client. Disconnect HERE or the
@@ -602,6 +682,11 @@ class AccountManager:
         # plugins: re-attach with the CURRENT profile grants (assignments
         # take effect on the next start — ported semantics), then activate
         await self._attach_plugins(name)
+        if rt.stop_requested or rt.generation != gen:
+            # PHASE-4 (S1-F1): stop landed during the attach await — the
+            # NEW runtimes must not be activated on a stopped account.
+            self._abort_stale_start(name, rt)
+            return account.status_dict()
         try:
             outcome = self._plugin_manager.activate_account(
                 name, self._services_factory(name)
@@ -612,12 +697,20 @@ class AccountManager:
             self._logger.exception(
                 "plugin activation failed for %s (account keeps running)", name
             )
-        if rt.stop_requested:  # stop() raced the post-connect section: do
-            rt.status = AccountStatus.STOPPED  # not publish/activate past it
-            self._discard_half_built_client(name, rt)
-            self._logger.info("account %s start aborted by concurrent stop", name)
+        if rt.stop_requested or rt.generation != gen:
+            # PHASE-4 (S1-F1): stop() raced the ACTIVATION await. Without
+            # this, freshly activated plugins (roll's loop!) keep running
+            # on a stopped, supervisor-less account. Clean up everything
+            # this start created: hooks, services, client.
+            self._abort_stale_start(name, rt)
             return account.status_dict()
         self._bus.publish_nowait(AccountConnected(account=name))
+        self._lifecycle_commit("start", name, ok=True)
+        if rt.generation != gen:
+            # ownership changed between the publish and the spawn: the
+            # newer owner spawns its own supervisor — never spawn a second
+            self._abort_stale_start(name, rt)
+            return account.status_dict()
         if self._reconnect_settings(name)["enabled"]:
             # K5 (S1-C4): a stand-down (FAILED) or interrupted reconnect
             # leaves the OLD supervisor alive and polling `lost`; spawning
@@ -627,9 +720,95 @@ class AccountManager:
             if old is not None and not old.done():
                 old.cancel()
             rt.supervisor = asyncio.create_task(
-                self._supervise(name, rt), name=f"supervise-{name}"
+                self._supervise(name, rt),
+                name=f"supervise-{name}#g{gen}",
             )
+            # PHASE-4 (S2 #4): an unexpected supervisor death must never
+            # wedge the account in RECONNECTING forever — log it and settle
+            # FAILED so automation/start() can recover.
+            rt.supervisor.add_done_callback(
+                lambda task, _name=name, _rt=rt:
+                    self._supervisor_done(_name, _rt, task))
         return account.status_dict()
+
+    def _supervisor_done(self, name: str, rt: AccountRuntime,
+                         task: "asyncio.Task[None]") -> None:
+        """Done-callback for supervisor tasks: surface unexpected deaths."""
+        if task.cancelled():
+            return  # deliberate stop/removal — the normal path
+        exc = task.exception()
+        if exc is None:
+            return  # clean stand-down
+        self._logger.error("supervisor for %s died unexpectedly: %r", name, exc)
+        if rt.supervisor is task and not rt.stop_requested:
+            rt.status = AccountStatus.FAILED
+            rt.last_error = f"supervisor died: {exc!r}"
+            rt.lost.clear()
+            if rt.supervisor is task:
+                rt.supervisor = None
+
+    # ------------------------------------------------- lifecycle governor
+    def _lifecycle_gate(self, op: str, name: str, status: AccountStatus) -> None:
+        """PHASE-4 (S4): consult the lifecycle governor; raise when refused.
+
+        Called only AFTER the state gates — state-illegal operations never
+        reach the governor and never consume lifecycle capacity.
+        """
+        governor = self._lifecycle
+        if governor is None:
+            return
+        try:
+            decision = governor.precheck(name, op, status=status)
+        except Exception:
+            self._logger.exception("lifecycle precheck failed for %s", name)
+            return  # the limiter must never break the operation
+        if decision.allowed:
+            return
+        self._logger.warning(
+            "account %s %s refused by lifecycle governor (%s): retry in "
+            "%.1fs", name, op, decision.reason, decision.retry_after_s)
+        raise AccountError(
+            f"account {name!r} {op} rate-limited ({decision.reason}): "
+            f"retry in {decision.retry_after_s:.1f}s")
+
+    def _lifecycle_commit(self, op: str, name: str, *, ok: bool,
+                          invalid_credential: bool = False) -> None:
+        governor = self._lifecycle
+        if governor is None:
+            return
+        try:
+            governor.commit(name, op, ok=ok,
+                            invalid_credential=invalid_credential)
+        except Exception:
+            self._logger.exception("lifecycle commit failed for %s", name)
+
+    def lifecycle_stats(self) -> Dict[str, Any]:
+        """Governor stats for status surfaces ({} when unlimited)."""
+        return self._lifecycle.stats() if self._lifecycle is not None else {}
+
+    def _abort_stale_start(self, name: str, rt: AccountRuntime) -> None:
+        """PHASE-4 cleanup for a start() that lost ownership mid-flight.
+
+        Deactivates any plugins the stale start activated (S1-F1: they
+        would otherwise run invisible to lifecycle control), drops the
+        services facades it created, discards its client, and settles
+        STOPPED — without publishing lifecycle events a second time.
+        """
+        rt.status = AccountStatus.STOPPED
+        try:
+            outcome = self._plugin_manager.deactivate_account(name)
+            if asyncio.iscoroutine(outcome):
+                task = asyncio.get_running_loop().create_task(
+                    outcome, name=f"stale-start-deactivate-{name}")
+                self._background.add(task)
+                task.add_done_callback(self._background.discard)
+        except Exception:
+            self._logger.exception(
+                "stale-start plugin cleanup failed for %s", name)
+        self._drop_services(name)
+        self._discard_half_built_client(name, rt)
+        self._logger.info(
+            "account %s start aborted by concurrent lifecycle change", name)
 
     def _discard_half_built_client(self, name: str, rt: AccountRuntime) -> None:
         """Drop a client a concurrent stop() never saw (start-race cleanup).
@@ -653,7 +832,8 @@ class AccountManager:
         except Exception:
             self._logger.warning("half-built client cleanup failed for %s", name)
 
-    async def stop(self, name: str) -> Dict[str, Any]:
+    async def stop(self, name: str, *,
+                   _bypass_lifecycle: bool = False) -> Dict[str, Any]:
         """Stop one account (idempotent; plugins deactivated first).
 
         Order (pinned): stop_requested=True, deactivate plugins (hooks run
@@ -674,10 +854,14 @@ class AccountManager:
                 return account.status_dict()  # idempotent: nothing re-fires
             # STOPPED with a lingering client/supervisor (a start-race
             # survivor) falls THROUGH to the full teardown below
+            if not _bypass_lifecycle:
+                self._lifecycle_gate("stop", name, rt.status)
             was_live = rt.status in (
                 AccountStatus.RUNNING, AccountStatus.RECONNECTING, AccountStatus.CONNECTING,
             ) or rt.client is not None
             rt.stop_requested = True
+            rt.generation += 1  # PHASE-4: this stop invalidates older ops
+            gen = rt.generation
             rt.lost.set()  # wake the supervisor so it sees stop_requested NOW
             try:
                 outcome = self._plugin_manager.deactivate_account(name)
@@ -700,12 +884,39 @@ class AccountManager:
                 except asyncio.TimeoutError:
                     supervisor.cancel()
                     await asyncio.wait({supervisor}, timeout=1.0)  # bounded reap
+                    if not supervisor.done():
+                        # PHASE-4 (S2 #5): the cancelled supervisor is still
+                        # unwinding (e.g. a library close that swallows
+                        # cancellation). Keep a strong reference so it can
+                        # never be GC'd mid-unwind and stays observable.
+                        self._dying_supervisors.add(supervisor)
+                        supervisor.add_done_callback(
+                            self._dying_supervisors.discard)
+                        self._logger.warning(
+                            "supervisor for %s still unwinding after cancel "
+                            "(tracked: %s)", name, supervisor.get_name())
                 except asyncio.CancelledError:
                     supervisor.cancel()  # caller cancelled us — don't leak the task
                     raise
+            if rt.generation != gen:
+                # PHASE-4 (S1-F6): a NEWER start() took ownership while this
+                # stop was parked in an await. Its CONNECTING/RUNNING state
+                # is authoritative — never clobber it with our terminal
+                # writes. The teardown above (client disconnect, supervisor
+                # reap, plugin deactivation) still ran for THIS generation's
+                # resources, which is exactly what we owed it.
+                self._logger.info(
+                    "stop of %s superseded by a newer start; leaving its "
+                    "state untouched", name)
+                return account.status_dict()
             rt.status = AccountStatus.STOPPED
             rt.lost.clear()
             self._drop_services(name)
+            if not _bypass_lifecycle:
+                # estop/teardown stops don't stamp the cooldown clock:
+                # restarting right after an emergency stop is the RECOVERY
+                # flow, not operator churn (PHASE-4 S4 hardening).
+                self._lifecycle_commit("stop", name, ok=True)
             if was_live:
                 self._bus.publish_nowait(AccountDisconnected(account=name, reason="stopped"))
             self._logger.info("account %s stopped", name)
@@ -755,7 +966,8 @@ class AccountManager:
 
         async def _stop_one(name: str) -> None:
             try:
-                await self.stop(name)
+                await self.stop(name, _bypass_lifecycle=True)  # PHASE-4:
+                # fleet teardown must never be blocked by the governor
                 stopped.append(name)
             except Exception as exc:
                 failed[name] = f"{type(exc).__name__}: {exc}"
@@ -790,6 +1002,7 @@ class AccountManager:
         account = self._get(name)
         rt = account.runtime
         rt.stop_requested = True  # immediate: blocks any reconnect flip
+        rt.generation += 1        # PHASE-4: estop invalidates older ops
         rt.lost.set()             # wake the supervisor NOW
         cancelled = 0
         try:
@@ -805,7 +1018,8 @@ class AccountManager:
                 "emergency_stop(...) needs a running event loop "
                 "(call it from async context)"
             ) from exc
-        task = loop.create_task(self.stop(name), name=f"estop-{name}")
+        task = loop.create_task(
+            self.stop(name, _bypass_lifecycle=True), name=f"estop-{name}")
         self._background.add(task)
         task.add_done_callback(self._background.discard)
         self._logger.error(
@@ -821,27 +1035,41 @@ class AccountManager:
         (ported cadence). Deliberate stops set ``stop_requested`` and the
         supervisor stands down without reconnecting. Cancellation (stop with
         a stuck backoff sleep) propagates — the reaper in stop() handles it.
+
+        PHASE-4 ownership: the supervisor captures its lifecycle generation
+        AND its own task identity at entry. A restart bumps the generation
+        (and reassigns ``rt.supervisor``), so an old supervisor that wakes
+        late exits instead of reconnecting a newer generation's account —
+        the dual-supervisor client ping-pong class is closed by identity,
+        not just by the K5 cancel.
         """
+        gen = rt.generation
+        me = asyncio.current_task()
         try:
-            while not rt.stop_requested:
+            while not rt.stop_requested and rt.generation == gen:
                 if name not in self._accounts:  # removed mid-flight
                     return
+                if rt.supervisor is not me:
+                    return  # a newer owner spawned its own supervisor
                 await asyncio.sleep(0)  # always yield: the reconnect-disabled
                 # path below can return without awaiting, and a fully
                 # synchronous while body would starve the entire event loop
                 if rt.status == AccountStatus.RECONNECTING or rt.lost.is_set():
-                    await self._reconnect_loop(name, rt)
+                    await self._reconnect_loop(name, rt, gen=gen)
                     continue
+                # PHASE-4 (S7-C8): event-driven wait with a long backstop —
+                # the 0.2s poll was 5 timer+task wakeups/s per idle account.
+                # Every real trigger sets ``lost`` (drop, stop, estop); the
+                # 60s backstop only covers pathological lost-wake cases.
                 try:
-                    await asyncio.wait_for(
-                        rt.lost.wait(), timeout=self._supervisor_tick
-                    )
+                    await asyncio.wait_for(rt.lost.wait(), timeout=60.0)
                 except asyncio.TimeoutError:
                     pass
         except asyncio.CancelledError:
             raise  # deliberate stop/removal — stand down, never swallow
 
-    async def _reconnect_loop(self, name: str, rt: AccountRuntime) -> None:
+    async def _reconnect_loop(self, name: str, rt: AccountRuntime,
+                              *, gen: Optional[int] = None) -> None:
         """Retry connecting a dropped account with exponential backoff.
 
         A FRESH client is built per attempt (factory + callback rewiring).
@@ -850,10 +1078,15 @@ class AccountManager:
         reconnecting — they must never kill the process (ported from the
         audited ``_reconnect_loop``).
         """
+        if gen is None:
+            gen = rt.generation
+        me = asyncio.current_task()
         attempt = 0
-        while not rt.stop_requested:
+        while not rt.stop_requested and rt.generation == gen:
             if name not in self._accounts:
                 return
+            if rt.supervisor is not me:
+                return  # stale supervisor: a newer owner exists
             cfg = self._reconnect_settings(name)
             if not cfg["enabled"]:
                 # stand down WITHOUT leaving the re-entry conditions set:
@@ -867,23 +1100,25 @@ class AccountManager:
                     name, rt.status.value,
                 )
                 return
-            # M2 (flap breaker): if this account's sessions keep dying
-            # young, every reconnect SUCCEEDS and resets `attempt` to 0 —
-            # the loop would hammer IDENTIFYs forever at minimum backoff
-            # (and eventually trip the login endpoint's throttle, which
-            # surfaces as a false "bad token"). Escalate the attempt floor
-            # by the recent short-lived-session count instead. Recovery is
-            # never blocked — a session that survives 90s clears the
-            # history and the backoff decays with it.
+            # M2/S2-hardening: escalate SMOOTHLY per short-lived session
+            # (the previous >=4-threshold cliff let an account hammer at
+            # minimum backoff for three full session-cycles, then jumped
+            # 16x). The floor IS the stable-window reset: a session that
+            # survives >= 90s clears rt.flaps (see _on_disconnect), so
+            # backoff resets only after a meaningful stable connection.
             now = time.monotonic()
             rt.flaps = [t for t in rt.flaps if now - t < 300.0]
-            if len(rt.flaps) >= 4 and attempt < len(rt.flaps):
+            if attempt < len(rt.flaps):
                 attempt = len(rt.flaps)
-                self._logger.warning(
-                    "account %s: %d short-lived sessions in the last 5 min —"
-                    " Discord is closing this account's sessions shortly"
-                    " after connect (young/flagged account?); escalating"
-                    " reconnect backoff", name, len(rt.flaps))
+                if attempt >= 3:
+                    self._logger.warning(
+                        "account %s: %d short-lived sessions in the last"
+                        " 5 min — Discord is closing this account's"
+                        " sessions shortly after connect (young/flagged"
+                        " account?); reconnect backoff escalated",
+                        name, len(rt.flaps))
+            attempt = min(attempt, 16)  # clamp the exponent: multiplier**N
+            # would OverflowError after ~17h of failures (S2 audit #6)
             delay = min(
                 cfg["initial"] * (cfg["multiplier"] ** attempt), cfg["max"]
             )
@@ -896,21 +1131,23 @@ class AccountManager:
                 "account %s reconnect attempt %d in %.2fs", name, attempt + 1, delay
             )
             await asyncio.sleep(delay)
-            if rt.stop_requested:
+            if rt.stop_requested or rt.generation != gen:
                 return
             try:
                 await self._connect_client(name, rt)
             except asyncio.CancelledError:
                 raise
+            except _StaleGeneration:
+                return  # a newer lifecycle operation owns this account
             except (KeyboardInterrupt, SystemExit) as exc:
-                if rt.stop_requested:
+                if rt.stop_requested or rt.generation != gen:
                     return
                 rt.status = AccountStatus.FAILED
                 rt.last_error = f"reconnect interrupted: {exc}"
                 self._logger.error("reconnect for %s interrupted: %r", name, exc)
                 return
             except Exception as exc:
-                if rt.stop_requested:
+                if rt.stop_requested or rt.generation != gen:
                     # stop() won the race: its teardown already ran. Never
                     # resurrect status/publish past a completed stop.
                     return
@@ -923,7 +1160,7 @@ class AccountManager:
                     "reconnect attempt failed for %s: %s", name, rt.last_error
                 )
                 continue
-            if rt.stop_requested:
+            if rt.stop_requested or rt.generation != gen:
                 # K3 (S1-C2): a stop() completed WHILE we were inside
                 # connect() — its disconnect may have raced past this fresh
                 # client. Do not resurrect the account: tear the client down
@@ -953,11 +1190,17 @@ class AccountManager:
         AND the legacy .env key absent when a credential service is wired;
         missing .env key otherwise), whatever the factory raises, or
         AccountError when connect() fails — ``start``/reconnect translate.
+        PHASE-4: raises ``_StaleGeneration`` when a newer lifecycle
+        operation took ownership mid-connect; callers treat it as a quiet
+        abort, never as a failure.
         """
+        gen = rt.generation
         account = self._accounts.get(name)
         if account is None:
             raise AccountError(f"unknown account {name!r}")
         token = await self._resolve_token(account.record)
+        if rt.generation != gen:
+            raise _StaleGeneration(name, gen)
         client = self._client_factory(name, token)
         old = rt.client
         if old is not None and old is not client:
@@ -971,10 +1214,28 @@ class AccountManager:
                 self._logger.warning(
                     "stale client teardown for %s raised %s", name, exc
                 )
+        if rt.generation != gen:
+            # ownership changed during the old-client teardown: disconnect
+            # the freshly built one too — never install it
+            try:
+                d = client.disconnect()
+                if asyncio.iscoroutine(d):
+                    await d
+            except Exception:
+                pass
+            raise _StaleGeneration(name, gen)
         self._wire_client(name, rt, client)
         rt.client = client
         rt.status = AccountStatus.CONNECTING
         await client.connect()
+        if rt.generation != gen:
+            # a stop() completed while connect() was parked: tear the fresh
+            # client down rather than letting the caller install state
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            raise _StaleGeneration(name, gen)
         if getattr(client, "connected", None) is False:  # protocol extra, tolerant
             raise AccountError(f"client for account {name!r} did not connect")
         rt.user_id = getattr(client, "user_id", None)
@@ -1073,9 +1334,12 @@ class AccountManager:
                     rt.flaps.clear()
                 elif rt.session_started:
                     rt.flaps.append(now)
-                if rt.supervisor is None:
+                if rt.supervisor is None or rt.supervisor.done():
                     # nobody will act on RECONNECTING (no supervisor was
-                    # spawned): FAILED keeps start() usable for automation,
+                    # spawned, or it DIED of an unexpected exception —
+                    # PHASE-4 S2 #6: a dead supervisor must not wedge the
+                    # account in RECONNECTING forever): FAILED keeps
+                    # start() usable for automation,
                     # and `lost` stays clear (nothing waits on it)
                     rt.status = AccountStatus.FAILED
                 else:
@@ -1120,6 +1384,9 @@ class AccountManager:
         else:
             rt.status = AccountStatus.FAILED
         rt.last_error = str(exc) or f"{type(exc).__name__}: {exc!r}"
+        self._lifecycle_commit(
+            "start", name, ok=False,
+            invalid_credential=rt.status == AccountStatus.INVALID_CREDENTIAL)
         self._logger.error("account %s failed to start: %s", name, rt.last_error)
         self._bus.publish_nowait(AccountFailed(account=name, error=rt.last_error))
 

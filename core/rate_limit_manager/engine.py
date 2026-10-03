@@ -539,6 +539,8 @@ class RateLimitManager:
             del self._last_fire[key]
         for key in [k for k in self._account_cooldowns if k[0] == account]:
             del self._account_cooldowns[key]
+        for key in [k for k in self._pending if k[0] == account]:
+            del self._pending[key]  # PHASE-4 (S3-G1): waiter-heap husks
         prefix = f"{account}/"
         for key in [k for k in self._policies
                     if k[0] in ("account", "account_plugin")
@@ -816,11 +818,20 @@ class RateLimitManager:
             self._wake_waiters()
 
     def _prune(self, key: Tuple[str, str]) -> None:
-        """Drop dead waiters from one key's heap (ported from the old limiter)."""
+        """Drop dead waiters from one key's heap (ported from the old limiter).
+
+        PHASE-4 (S3-G1): an emptied heap's dict key is popped too — a
+        removed account would otherwise leave a permanent empty-list husk
+        per (account, action) pair.
+        """
         heap = self._pending.get(key)
         if not heap:
+            self._pending.pop(key, None)  # husk left by an earlier prune
             return
         heap[:] = [e for e in heap if not e.cancelled and not e.future.done()]
+        if not heap:
+            self._pending.pop(key, None)
+            return
         heapq.heapify(heap)
 
     def _wake_event(self) -> asyncio.Event:

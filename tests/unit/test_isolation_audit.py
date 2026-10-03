@@ -94,8 +94,10 @@ class SchedulerCleanupAccountTests(unittest.IsolatedAsyncioTestCase):
 # ------------------------------------------------------------ K2 / K3 / K4
 class StopDuringStartTests(unittest.IsolatedAsyncioTestCase):
     async def test_stop_before_client_assignment_disconnects_zombie(self) -> None:
-        """K2: stop() completes while start() is parked in token resolution —
-        the freshly connected client must be DISCONNECTED, not left live."""
+        """K2 + PHASE-4 generation: stop() completes while start() is parked
+        in token resolution — the stale start must NEVER become the owner.
+        With generation checks it aborts before even building the client
+        (strictly better than the K2-era build-then-disconnect)."""
         h = make_manager()
         await h.manager.add_account("alpha")
         gate = asyncio.Event()
@@ -109,14 +111,60 @@ class StopDuringStartTests(unittest.IsolatedAsyncioTestCase):
         start_task = asyncio.create_task(h.manager.start("alpha"))
         await asyncio.sleep(0.05)          # start() is parked pre-assignment
         await h.manager.stop("alpha")      # completes: rt.client was None
-        gate.set()                         # start() resumes and CONNECTS
+        gate.set()                         # start() resumes
         out = await start_task
 
         rt = h.manager.get("alpha").runtime
         self.assertEqual(out["status"], "stopped")
         self.assertEqual(rt.status, AccountStatus.STOPPED)
-        self.assertIsNone(rt.client)                      # no zombie reference
+        self.assertIsNone(rt.client)
+        self.assertEqual(h.factory.clients, [])  # stale start built NOTHING
+        self.assertEqual(h.collector.of(AccountFailed), [])
+
+    async def test_stop_during_connect_tears_down_fresh_client(self) -> None:
+        """K2 window 2: stop() completes while start() is parked INSIDE
+        connect() — the freshly connected client must be disconnected."""
+        h = make_manager()
+        await h.manager.add_account("alpha")
+        gate = asyncio.Event()
+        original_connect = h.factory.clients  # placeholder, real hook below
+
+        class ParkingFactory(h.factory.__class__):
+            def __init__(self, inner, park):
+                self._inner = inner
+                self._park = park
+                self.clients = inner.clients
+
+            def __call__(self, name, token):
+                client = self._inner(name, token)
+                orig_disconnect = client.disconnect
+
+                async def parking_disconnect():
+                    await self._park.wait()  # park the OLD-client teardown?
+                    await orig_disconnect()
+
+                # park INSIDE connect instead: wrap connect
+                orig_connect = client.connect
+
+                async def parked_connect():
+                    await orig_connect()
+                    await self._park.wait()  # hold start() post-READY
+
+                client.connect = parked_connect
+                return client
+
+        h.manager._client_factory = ParkingFactory(h.factory, gate)
+        start_task = asyncio.create_task(h.manager.start("alpha"))
+        await asyncio.sleep(0.05)          # start() parked post-READY
+        await h.manager.stop("alpha")      # completes (rt.client was SET —
+        gate.set()                         # its disconnect aborts us anyway)
+        try:
+            await start_task
+        except Exception:
+            pass  # AccountError("start cancelled by stop") is expected
+        rt = h.manager.get("alpha").runtime
         self.assertFalse(h.factory.clients[0].connected)  # gateway closed
+        self.assertEqual(rt.status, AccountStatus.STOPPED)
 
     async def test_aborted_start_never_publishes_account_failed(self) -> None:
         """K4: an intentional abort must not classify as a credential failure."""

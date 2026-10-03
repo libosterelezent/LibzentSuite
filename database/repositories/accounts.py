@@ -35,6 +35,10 @@ _INSERT = """
 _DEPENDENT_TABLES = ("account_settings", "plugin_settings", "plugin_states",
                      "account_profiles", "api_cache", "credentials",
                      "cooldowns")
+#: kv rows keyed by PREFIX (PHASE-4 S3-G5 defense-in-depth): plugin state
+#: lives in kv under these prefixes; the service-level cascade is primary,
+#: the repo-level sweep is the backstop for unwired/limited services.
+_KV_PREFIX_SWEEPS = ("pstate:account:{name}:", "pstate:account_plugin:{name}/")
 
 
 class AccountsRepository(BaseRepository):
@@ -167,6 +171,12 @@ class AccountsRepository(BaseRepository):
             if existed:
                 for table in _DEPENDENT_TABLES:
                     await conn.execute(f"DELETE FROM {table} WHERE account = ?", (name,))
+                # PHASE-4 (S3-G5): kv plugin-state prefix sweep (backstop —
+                # the PluginStateService cascade is the primary path)
+                for prefix in _KV_PREFIX_SWEEPS:
+                    await conn.execute(
+                        "DELETE FROM kv WHERE key LIKE ?",
+                        (prefix.format(name=name) + "%",))
         return existed
 
     # -------------------------------------------------------------- profiles

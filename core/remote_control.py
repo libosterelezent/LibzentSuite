@@ -95,6 +95,15 @@ class RemoteControl:
             self._unsub()
             self._unsub = None
 
+    def forget_account(self, account: str) -> None:
+        """Drop an account's reply-throttle stamp (removal cascade).
+
+        PHASE-4 (S3-G2): without this, a removed + re-created same-named
+        account inherits the predecessor's throttle window (letter-level
+        violation of the delete-A/recreate-A-no-inheritance invariant).
+        """
+        self._last_reply_at.pop(account, None)
+
     # -------------------------------------------------------------- inbound
     def _on_message(self, event: Event) -> None:
         """Bus handler (sync): filter hard, then run the command as a task."""
