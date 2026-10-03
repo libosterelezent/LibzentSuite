@@ -36,7 +36,7 @@ from core.profile_manager.manager import ProfileManager
 from core.rate_limit_manager.engine import RateLimitManager
 from core.task_scheduler import TaskScheduler
 
-from tests.unit.helpers import make_manager
+from tests.unit.helpers import make_manager, make_task
 from tests.unit.test_account_manager import _fast_reconnect_settings
 from tests.unit.test_rate_engine import StubLogger
 from tests.unit.test_rate_lane import FakeKv
@@ -583,6 +583,87 @@ class HeadersCacheTests(unittest.IsolatedAsyncioTestCase):
         await _CountingHeaders.get_api_properties(None, "web")
         self.assertEqual(_CountingHeaders.calls, 2)  # expired -> refetched
         adapter_mod._headers_patch_installed = False
+
+
+# -------------------------------------------------- round-2 audit findings
+class RemoveDuringStartTests(unittest.IsolatedAsyncioTestCase):
+    async def test_remove_while_connecting_refused_and_registry_intact(self):
+        """remove_account racing a start parked BEFORE the status guard's
+        sync section: CONNECTING is set without an await, so the refusal
+        must fire and put the account back untouched."""
+        h = make_manager()
+        await h.manager.add_account("alpha")
+        gate = asyncio.Event()
+        original = h.manager._resolve_token
+
+        async def parked_resolve(record):
+            await gate.wait()
+            return await original(record)
+
+        h.manager._resolve_token = parked_resolve
+        start_task = asyncio.create_task(h.manager.start("alpha"))
+        await asyncio.sleep(0.02)
+        with self.assertRaises(AccountError):
+            await h.manager.remove_account("alpha")
+        self.assertEqual(h.manager.names(), ["alpha"])
+        gate.set()
+        out = await start_task
+        self.assertEqual(out["status"], "running")
+        await h.manager.stop("alpha")
+
+
+class OpenDmSingleFlightTests(unittest.IsolatedAsyncioTestCase):
+    async def test_plugin_open_dm_and_lane_dm_send_share_one_open(self):
+        """services.open_dm runs OUTSIDE the scheduler lane: without the
+        per-account resolve lock it double-fetches the same DM (two REST
+        opens) against a concurrent lane dm send."""
+        h = make_manager()
+        await h.manager.add_account("alpha")
+        await h.manager.start("alpha")
+        client = h.manager.get("alpha").runtime.client
+        original = client.open_dm
+
+        async def slow_open(user_id):
+            await asyncio.sleep(0.05)
+            return await original(user_id)
+
+        client.open_dm = slow_open
+        services = h.manager.services_for("alpha", "soulcopy")
+        resolved, _message = await asyncio.gather(
+            services.open_dm(888),
+            h.manager.send_hook(make_task(action="dm", user_id=888, content="hi")),
+        )
+        self.assertEqual(resolved, 9888)
+        self.assertEqual(client.open_dm_calls, [888])  # exactly ONE open
+        await h.manager.stop("alpha")
+
+
+class BackgroundTaskReaperTests(unittest.IsolatedAsyncioTestCase):
+    async def test_estop_task_death_after_removal_is_logged_not_silent(self):
+        """The estop background stop task dies when its account is removed
+        before it runs — the failure must be logged (and retrieved), never
+        a GC-time 'exception was never retrieved' surprise."""
+        h = make_manager()
+        await h.manager.add_account("alpha")
+        await h.manager.start("alpha")
+        captured: list = []
+
+        class SpyLogger:
+            def error(self, *args):
+                captured.append(args)
+
+            def __getattr__(self, name):
+                return lambda *a, **k: None
+
+        h.manager._logger = SpyLogger()
+        rt = h.manager.get("alpha").runtime
+        rt.status = AccountStatus.STOPPED  # quiescent-looking survivor
+        h.manager.emergency_stop("alpha")
+        await h.manager.remove_account("alpha")
+        await asyncio.sleep(0.1)
+        self.assertEqual(h.manager._background, set())
+        flat = [str(a) for args in captured for a in args]
+        self.assertTrue(any("estop-alpha" in part for part in flat), flat)
 
 
 if __name__ == "__main__":

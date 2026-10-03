@@ -154,7 +154,10 @@ class CredentialService:
         if cached is not None:
             return cached
         if self._repo is not None and account not in self._db_accounts:
-            await self.refresh()  # unknown name: one list query keeps status() truthful
+            try:  # unknown name: one list query keeps status() truthful —
+                await self.refresh()  # a nicety that must not fail resolution
+            except Exception:
+                pass
         if self._repo is not None:
             ciphertext = await self._repo.load(account)
             if ciphertext is not None:

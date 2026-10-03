@@ -214,7 +214,8 @@ async def main_async(records: int, repeat: int) -> int:
     print(render_table(all_results))
     print(
         "\nnotes: single-writer SQLite remains — the queued harness removes the\n"
-        "EVENT-LOOP stall, not write serialization (see knowledgebase/DATABASE.md).\n"
+        "EVENT-LOOP stall, not write serialization (see database/repository\n"
+        "docstrings and docs/api/database.rst).\n"
         "Numbers vary by machine/disk/load; compare medians across several runs."
     )
     # surface drain failures loudly (a silent bench is a wrong bench)

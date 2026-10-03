@@ -118,7 +118,7 @@ class RollPlugin(PluginBase):
             return
         if event.author_id not in ctx.services.credentials.owner_user_ids:
             return
-        text = event.content.strip()
+        text = (event.content or "").strip()
 
         if text == ctx.settings["stop_trigger"]:
             await self._stop(ctx, event.account)
@@ -277,7 +277,7 @@ class RollPlugin(PluginBase):
         # ── "the roulette is limited to **N** min" → cooldown ──
         if "the roulette is limited to" in content:
             minutes = parse_pause_minutes(content)
-            if minutes:
+            if minutes is not None:
                 await ctx.services.cooldown_set(
                     COOLDOWN_KEY, minutes * 60,
                     source="mudae:roulette_limited",
@@ -293,12 +293,16 @@ class RollPlugin(PluginBase):
 
         # ── embed responses (character rolls) ──
         rich = getattr(response, "message", None)
-        if rich is None or not rich.embeds:
+        embeds = getattr(rich, "embeds", None) or ()
+        if not embeds:
             return
 
-        embed = rich.embeds[0]
-        footer_text = embed.footer_text or ""
-        description = embed.description or ""
+        try:
+            embed = embeds[0]
+        except (TypeError, IndexError):
+            return
+        footer_text = getattr(embed, "footer_text", None) or ""
+        description = getattr(embed, "description", None) or ""
 
         # ── "2 ROLLS LEFT" in footer + userstack → $us 20 ──
         if _LOW_ROLLS_MARKER in footer_text and ctx.settings["userstack"]:

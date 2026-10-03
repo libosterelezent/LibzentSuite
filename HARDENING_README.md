@@ -2,7 +2,9 @@
 
 Scope of Phase 1: **database layer, logging/audit persistence, boot &
 shutdown, credentials/config, event-bus + scheduler cancellation, adapter
-task hygiene.** Phase 2 (below) is complete; see 'Post-rebase fixes' for the upstream-sync addendum.
+task hygiene.** Phase 2 (below) is complete; see 'Post-rebase fixes' for
+the upstream-sync addendum and 'Audit rounds 1–2' at the bottom for the
+two post-Phase-3 sweeps.
 
 ## Phase 1 verification update (post-recovery)
 * Recovered zip was validated on **real aiosqlite** (the original run used a
@@ -287,3 +289,48 @@ cross-cutting invariants) → ~90 findings fixed. **708 tests pass**
 * Docs: credentials story (DB-encrypted, not .env), dependency list,
   705→708 counts, SM_MASTER_KEY documented, first-boot policy semantics,
   dashboard resume note — see README / docs/ diffs.
+
+# Audit rounds 1–2 (post-Phase-3 sweeps)
+
+**Round 1** (commit `cb082b0`, "10-agent sweep + coordinator fixes",
+738 → 784 tests):
+
+* Critical: account start/stop race left plugins active on stopped
+  accounts; bootstrap policy-clamp crashed on an unimported name +
+  property-as-call; deleted-reply sentinel + unbounded reply-chain
+  recursion in the rich model.
+* Major: scheduler `stop()` latch stranding (30s hangs); unvalidated
+  persisted rate floor; LIKE-wildcard policy cascade deleting OTHER
+  accounts' rows; dashboard broadcast/handler serialization crashes;
+  simulator one-shot 429 consumed by TargetGone, subscriber isolation,
+  scenario timeout, assembly teardown; REPL Ctrl-C hang; roll live-state
+  flip; soulcopy zombie collector; live-client post-disconnect mapping.
+* Coordinator: lane-prefixrate + str-bool parsing in bootstrap, post-stop
+  persist-queue drops counted, credential `resolve()` cross-process
+  refresh, 8 dead symbols removed,
+  `asyncio.iscoroutine` → `inspect.iscoroutine`, INTEGRATION.md contract
+  fixes.
+
+**Round 2** (working tree, specialist + coordinator pass, 784 → **992
+tests**):
+
+* Dashboard/WS hardening: stats serialization moved inside the failure
+  guard (a hostile snapshot no longer kills the broadcast loop), NaN-safe
+  WS serialization, stalled-client write handling, header-flush and lying
+  `Content-Length` edge cases; new SPA regression suite
+  (`tests/unit/test_dashboard_spa.py`).
+* `PluginServices` protocol completed: framework-managed cooldowns
+  (`cooldown_set/remaining/active/clear/list`) and persistent per-plugin
+  state (`state_get/set/delete`) on the protocol AND the
+  `AccountPluginServices` implementation; matching `cooldowns` CLI group.
+* Rate safety: `MAX_INTERVAL = 86400.0` cap — intervals AND the floor are
+  validated against it (below-floor config defaults still clamp).
+* Dead public symbols removed (`credentials_summary`, `setting_defaults`,
+  `effective_token_ref`, `deliveries_since`, `delete_global`,
+  `delete_plugin`, `subscriber_count`, `_spawn_maybe_async`, …).
+* Documentation re-synced against HEAD (test counts, CLI surface,
+  knowledgebase provenance, INTEGRATION signatures); scripts made
+  venv-aware (`run_tests.sh`) and drift-check tolerant
+  (`gen_knowledgebase.py --check` degrades gracefully when the gitignored
+  `knowledgebase/` is absent); hot-path micro-benchmark harness added
+  (`scripts/bench_hot.py`).

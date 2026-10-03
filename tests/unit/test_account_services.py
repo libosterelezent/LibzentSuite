@@ -127,6 +127,39 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
             await services.send_message(100, "hi")
         self.assertEqual(services._acks.pending(), [])
 
+    async def test_duplicate_live_wait_for_same_task_rejected(self) -> None:
+        """Round-2 audit: overwriting a live waiter's future would orphan it
+        (full-timeout hang + a spurious cancel of the shared task)."""
+        bus = EventBus()
+        registry = TaskAckRegistry(bus)
+        first = asyncio.create_task(registry.wait_for_task(9, timeout=1.0))
+        await asyncio.sleep(0.02)
+        with self.assertRaises(SchedulerError) as ctx:
+            await registry.wait_for_task(9, timeout=1.0)
+        self.assertIn("already being awaited", str(ctx.exception))
+        await bus.publish(TaskCompleted(
+            account="alpha", task_id=9, summary="ok"))
+        self.assertEqual(await asyncio.wait_for(first, 1.0), "ok")
+        self.assertEqual(registry.pending(), [])
+
+    async def test_rewait_after_timeout_is_allowed(self) -> None:
+        """A timed-out wait pops its future: a fresh wait on the same id
+        must register cleanly (the guard only rejects LIVE duplicates)."""
+        bus = EventBus()
+        registry = TaskAckRegistry(bus)
+
+        async def never_finishes():
+            await asyncio.sleep(10)
+
+        _ = asyncio.create_task(never_finishes())
+        with self.assertRaises(SchedulerError):
+            await registry.wait_for_task(4, timeout=0.02)
+        self.assertEqual(registry.pending(), [])
+        second = asyncio.create_task(registry.wait_for_task(4, timeout=1.0))
+        await asyncio.sleep(0.02)
+        await bus.publish(TaskCompleted(account="alpha", task_id=4, summary="ok"))
+        self.assertEqual(await asyncio.wait_for(second, 1.0), "ok")
+
     async def test_shared_registry_serves_many_services(self) -> None:
         bus, scheduler = EventBus(), FakeScheduler()
         registry = TaskAckRegistry(bus)

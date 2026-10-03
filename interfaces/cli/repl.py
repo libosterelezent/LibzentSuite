@@ -143,6 +143,8 @@ class Repl:
         ).start()
         try:
             while self.running:
+                if stop_wait is not None and stop_wait.done():
+                    break
                 self._write(PROMPT, end="")
                 get = asyncio.ensure_future(lines.get())
                 watched = {get, reader_done}

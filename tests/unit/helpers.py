@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 from adapters.base import DiscordMessage
 from core.account_manager import AccountManager
 from core.credentials import Credentials
-from core.errors import SchedulerError
+from core.errors import DatabaseError, SchedulerError
 from core.event_bus import EventBus
 from core.profile_manager import ProfileManager
 from database.models import AccountRecord, ProfileRecord
@@ -32,12 +32,21 @@ LOG = logging.getLogger("tests.helpers")
 
 # ------------------------------------------------------------ repositories
 class FakeProfilesRepo:
-    """Dict-backed ProfilesRepository (async methods, like the real one)."""
+    """Dict-backed ProfilesRepository (async methods, like the real one).
 
-    def __init__(self) -> None:
+    ``accounts`` (optional FakeAccountsRepo) enables the delete cascade the
+    real repository performs: deleting a profile also drops its account
+    assignments (database/repositories/profiles.py delete()).
+    """
+
+    def __init__(self, accounts: Optional["FakeAccountsRepo"] = None) -> None:
         self.data: Dict[str, ProfileRecord] = {}
+        self._accounts = accounts
 
     async def upsert(self, name, plugins, description="") -> None:
+        if not isinstance(name, str) or not name.strip():
+            raise DatabaseError("profile name must be a non-empty string")
+        name = name.strip()
         self.data[name] = ProfileRecord(
             name=name, plugins=sorted(set(plugins)), description=description
         )
@@ -45,6 +54,10 @@ class FakeProfilesRepo:
     async def delete(self, name) -> bool:
         existed = name in self.data
         self.data.pop(name, None)
+        if existed and self._accounts is not None:
+            for record in self._accounts.records.values():
+                if name in record.profiles:
+                    record.profiles.remove(name)
         return existed
 
     async def get(self, name) -> Optional[ProfileRecord]:
@@ -426,7 +439,7 @@ def make_manager(
     """Build an AccountManager wired to fakes (fresh bus/repos per call)."""
     bus = EventBus()
     repo = FakeAccountsRepo()
-    profiles_repo = FakeProfilesRepo()
+    profiles_repo = FakeProfilesRepo(accounts=repo)
     profile_manager = ProfileManager(profiles_repo, LOG, repo)
     plugins = FakePluginManager()
     scheduler = FakeScheduler()

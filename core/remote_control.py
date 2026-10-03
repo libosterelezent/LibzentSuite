@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -103,10 +104,7 @@ class RemoteControl:
         line = self._extract_command(event)
         if line is None:
             return
-        try:
-            owners = self._credentials.owner_user_ids
-        except CredentialsError:
-            return
+        owners = self._credentials.owner_user_ids
         if event.author_id not in owners:
             return  # non-owner mentions are simply ignored (no reply at all)
         task = asyncio.get_running_loop().create_task(self._handle(event, line))
@@ -180,7 +178,10 @@ class RemoteControl:
     async def _execute(self, line: str) -> str:
         """Allowlisted dispatch to the ControlAPI; 'help' lists everything."""
         api = self._api_provider()
-        parts = line.split()
+        try:  # posix quoting so `plugins <acct> "two words" off` survives
+            parts = shlex.split(line)
+        except ValueError:
+            parts = line.split()
         if not parts:
             return await self._help()
         cmd, args = parts[0].lower(), parts[1:]

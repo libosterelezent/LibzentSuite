@@ -89,6 +89,16 @@ _FALLBACK_FLOOR = 1.5
 #: becomes a failed report instead of a run that never returns
 _SCENARIO_TIMEOUT_S = 180.0
 
+#: grace for a cancelled scenario task to actually stop before the runner
+#: abandons it (the 180s cap + this grace is the absolute worst case)
+_CANCEL_GRACE_S = 5.0
+
+
+def _reap_scenario_task(task: "asyncio.Task[None]") -> None:
+    """Retrieve an abandoned scenario task's outcome (no GC warning)."""
+    if not task.cancelled():
+        task.exception()
+
 
 
 def _entry_dict(entry: Any) -> dict:
@@ -324,10 +334,13 @@ class SimulationRunner:
             )
             from core.remote_control import RemoteControl
 
-            remote = RemoteControl(
-                bus, scheduler, accounts, lambda: api, credentials,
-                ServiceLogger(logger, "remote-control"),
-            ).start()
+            if not getattr(credentials, "remote_control_enabled", True):
+                remote = None  # REMOTE_CONTROL=0: opt out here too, not
+            else:  # just in production — parity with bootstrap wiring
+                remote = RemoteControl(
+                    bus, scheduler, accounts, lambda: api, credentials,
+                    ServiceLogger(logger, "remote-control"),
+                ).start()
         except BaseException as exc:
             await db.close()
             if isinstance(
@@ -440,17 +453,48 @@ class SimulationRunner:
                     )
                     failures.extend(scenario.checks(list(interactions), world))
 
+                # NOT wait_for: a script that swallows CancelledError once
+                # makes wait_for return SUCCESS after the budget expired —
+                # a hung scenario would report passed. A task + bounded wait
+                # makes the deadline authoritative whatever the script does.
+                scenario_task = asyncio.get_running_loop().create_task(
+                    _scenario_phase()
+                )
                 try:
-                    await asyncio.wait_for(
-                        _scenario_phase(), timeout=_SCENARIO_TIMEOUT_S
+                    await asyncio.wait(
+                        {scenario_task}, timeout=_SCENARIO_TIMEOUT_S
                     )
-                except asyncio.TimeoutError:
-                    failures.append(
-                        f"scenario timed out after {_SCENARIO_TIMEOUT_S:.0f}s "
-                        f"(hung script or unsettled world)"
-                    )
-                except Exception as exc:  # a scenario crash is a failed report
-                    failures.append(f"scenario crashed: {type(exc).__name__}: {exc}")
+                    overrun = not scenario_task.done()
+                    if overrun:
+                        scenario_task.cancel()
+                        await asyncio.wait(
+                            {scenario_task}, timeout=_CANCEL_GRACE_S
+                        )
+                    if overrun or scenario_task.cancelled():
+                        failures.append(
+                            f"scenario timed out after {_SCENARIO_TIMEOUT_S:.0f}s "
+                            f"(hung script or unsettled world)"
+                        )
+                        if not scenario_task.done():
+                            failures.append(
+                                "scenario task ignored cancellation - "
+                                "abandoned mid-flight"
+                            )
+                            scenario_task.add_done_callback(_reap_scenario_task)
+                    else:
+                        crash = scenario_task.exception()
+                        if crash is not None:
+                            if isinstance(crash, Exception):
+                                failures.append(
+                                    f"scenario crashed: "
+                                    f"{type(crash).__name__}: {crash}"
+                                )
+                            else:
+                                raise crash
+                except BaseException:
+                    if not scenario_task.done():
+                        scenario_task.cancel()
+                    raise
 
         finally:
             world.cancel_pending_replies()

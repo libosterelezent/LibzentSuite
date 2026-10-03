@@ -214,6 +214,50 @@ class TestLaneRobustness(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(manager.lane_status()["prefixrate"], 1.5)
             self.assertEqual(manager._lane_defaults, (False, 1.5))
 
+    async def test_constructor_sanitizes_every_malformed_shape(self) -> None:
+        """True/False/'1.5'/[]/{} never crash; float()-coercible shapes land
+        as their numeric value (bools become 1.0/0.0 — 0.0 only ever PAUSES,
+        and paused() requires the lane enabled), everything else falls back
+        to 1.5. _lane_defaults always mirrors the SANITIZED state."""
+        cases = [
+            (True, 1.0), (False, 0.0), ("1.5", 1.5), ("nan", 1.5),
+            ("abc", 1.5), (None, 1.5), (-3.0, 1.5), (10**12, 1.5),
+            ([], 1.5), ({}, 1.5), ([1.5], 1.5), ({"rate": 2.0}, 1.5),
+        ]
+        for raw, expected in cases:
+            manager = RateLimitManager(
+                EventBus(), StubLogger(), None, lane_prefixrate=raw
+            )
+            self.assertEqual(manager.lane_status()["prefixrate"], expected)
+            self.assertEqual(manager._lane_defaults, (False, expected))
+
+    async def test_load_persisted_never_resurrects_a_bad_ctor_value(self) -> None:
+        """No kv row -> the boot baseline is the SANITIZED constructor
+        state; the raw malformed value can never come back at boot."""
+        kv = FakeKv()
+        manager = RateLimitManager(
+            EventBus(), StubLogger(), None, kv_repo=kv, lane_prefixrate="abc"
+        )
+        await manager.load_persisted()
+        self.assertEqual(manager.lane_status()["prefixrate"], 1.5)
+        self.assertEqual(manager._lane_defaults, (False, 1.5))
+
+    async def test_row_with_invalid_prefixrate_falls_back_whole(self) -> None:
+        """A PARSEABLE row whose prefixrate is rejected (over the one-day
+        cap) is corrupt as a unit: the constructor defaults apply for BOTH
+        fields — the row's `enabled` must not be half-applied and the
+        constructor's custom rate must not be silently replaced by 1.5."""
+        kv = FakeKv()
+        kv.rows["ratelimit:lane"] = {"enabled": True, "prefixrate": 1e9}
+        manager = RateLimitManager(
+            EventBus(), StubLogger(), None, clock=ManualClock(0.0),
+            kv_repo=kv, lane_enabled=False, lane_prefixrate=0.75,
+        )
+        await manager.load_persisted()
+        status = manager.lane_status()
+        self.assertFalse(status["enabled"])
+        self.assertEqual(status["prefixrate"], 0.75)
+
 
 class TestLaneInGrant(unittest.IsolatedAsyncioTestCase):
     async def test_reason_and_wait_accounting(self) -> None:
@@ -308,6 +352,154 @@ class TestLanePersistence(unittest.IsolatedAsyncioTestCase):
         await manager.load_persisted()
         self.assertFalse(manager.lane_status()["enabled"])  # still safe
         self.assertEqual(manager.lane_status()["prefixrate"], 1.5)
+
+
+class TestLaneGrantIntegrity(unittest.IsolatedAsyncioTestCase):
+    """A waiter cancelled BETWEEN its gate grant and the user code must not
+    leak its spacing slot: the stamp was taken at grant time, so the next
+    waiter still gets spaced admission."""
+
+    async def test_cancel_after_grant_still_spaces_successor(self) -> None:
+        async def instant_wait(seconds: float) -> None:
+            await asyncio.sleep(0)
+
+        lane = GlobalSendLane(
+            clock=ManualClock(0.0),
+            wait_either=instant_wait,
+            on_change=lambda: None,
+            log=lambda level, message: None,
+        )
+        lane.set_enabled(True)
+        lane.set_prefixrate(1.0)
+        await lane.enter(1)  # prime: stamps _last_grant at t=0
+        first = asyncio.create_task(lane.enter(1))
+        for _ in range(10):
+            await asyncio.sleep(0)  # parks behind the 1.0 spacing window
+        self.assertFalse(first.done())
+        # grant the head from OUTSIDE while `first` is suspended, then
+        # cancel it BEFORE it resumes — all in one synchronous section
+        lane._clock.advance(1.0)
+        lane._grant_ready()
+        stamp = lane._last_grant
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+        second = asyncio.create_task(lane.enter(1))
+        ticks = 0
+        while not second.done() and ticks < 200:
+            lane._clock.advance(0.1)
+            await asyncio.sleep(0)
+            ticks += 1
+        await second
+        self.assertGreaterEqual(lane._clock.now(), stamp + 1.0)
+        self.assertGreaterEqual(lane.grants, 3)
+
+
+class TestLanePauseStampede(unittest.TestCase):
+    """prefixrate=0 with a pile of waiters, then resume: no starvation
+    (everyone completes), no stampede (grants stay >= prefixrate apart).
+
+    Plain TestCase + asyncio.run: 50 waiters x ~25 parks each is ~100x
+    slower under IsolatedAsyncioTestCase's asyncio debug mode, and this
+    scenario needs none of its machinery.
+    """
+
+    def test_fifty_waiters_pause_resume(self) -> None:
+        asyncio.run(self._scenario())
+
+    async def _scenario(self) -> None:
+        manager = make_lane_manager(prefixrate=0.0)  # paused from boot
+        lane = manager._lane
+        stamps: list = []
+        original = lane._grant_ready
+
+        def recording_ready():
+            before = lane._last_grant
+            original()
+            if lane._last_grant is not None and lane._last_grant != before:
+                stamps.append(lane._last_grant)
+
+        lane._grant_ready = recording_ready
+        done = []
+
+        async def worker(i: int) -> None:
+            await manager.acquire(ACTION, account=f"acct{i}")
+            done.append(i)
+
+        tasks = [asyncio.create_task(worker(i)) for i in range(50)]
+        for _ in range(20):
+            await asyncio.sleep(0)
+        self.assertEqual(done, [])  # all 50 hold while paused
+
+        manager.set_lane_prefixrate(0.02)  # resume
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=30)
+        self.assertEqual(sorted(done), list(range(50)))  # no starvation
+        self.assertEqual(len(stamps), 50)
+        ordered = sorted(stamps)
+        gaps = [b - a for a, b in zip(ordered, ordered[1:])]
+        self.assertTrue(all(g >= 0.02 - 1e-9 for g in gaps), gaps[:5])
+
+
+class TestLaneChaos(unittest.IsolatedAsyncioTestCase):
+    """Randomized submit/cancel/pause/resume orderings: consecutive lane
+    grant stamps stay >= prefixrate apart, nobody starves, nothing leaks
+    exception warnings into the loop."""
+
+    async def test_randomized_lane_chaos_keeps_spacing(self) -> None:
+        import random
+
+        rng = random.Random(42)
+        rate = 0.05
+        manager = make_lane_manager(prefixrate=rate)
+        lane = manager._lane
+        stamps: list = []
+        original = lane._grant_ready
+
+        def recording_ready():
+            before = lane._last_grant
+            original()
+            if lane._last_grant is not None and lane._last_grant != before:
+                stamps.append(lane._last_grant)
+
+        lane._grant_ready = recording_ready
+        handler_events = []
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(
+            lambda l, ctx, out=handler_events: out.append(ctx)
+        )
+        try:
+            tasks = []
+            for step in range(30):
+                tasks.append(asyncio.create_task(
+                    manager.acquire(ACTION, account=f"a{step % 5}")
+                ))
+                roll = rng.random()
+                if roll < 0.25 and tasks:
+                    tasks[rng.randrange(len(tasks))].cancel()
+                elif roll < 0.35:
+                    manager.set_lane_prefixrate(0.0)  # pause mid-flight
+                elif roll < 0.50:
+                    manager.set_lane_prefixrate(rate)  # resume
+                await asyncio.sleep(0)
+            manager.set_lane_prefixrate(rate)  # never leave it paused
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True), timeout=30
+            )
+        finally:
+            loop.set_exception_handler(None)
+        from core.rate_limit_manager import Grant
+
+        for result in results:
+            self.assertTrue(
+                isinstance(result, (Grant, asyncio.CancelledError)), result
+            )
+        self.assertTrue(any(isinstance(r, Grant) for r in results))
+        ordered = sorted(stamps)
+        self.assertGreater(len(ordered), 1)
+        gaps = [b - a for a, b in zip(ordered, ordered[1:])]
+        self.assertTrue(all(g >= rate - 1e-9 for g in gaps), gaps[:5])
+        for ctx in handler_events:
+            self.assertNotIn("never retrieved", str(ctx.get("message", "")), ctx)
 
 
 if __name__ == "__main__":

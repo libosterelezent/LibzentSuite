@@ -213,7 +213,11 @@ class AuditRecorder:
         )
         with self._lock:
             self._ring.append(entry)
-        if self._persist.active:
+        if self._persist.active or self._persist.stopped:
+            # active: enqueue for the worker. stopped (was started, then
+            # stopped): still put — the queue counts the drop so post-stop
+            # losses are visible in stats, not silent. A never-started sink
+            # stays fully inert (sim/headless boots).
             self._persist.put(entry.as_dict())
         for callback in list(self._subscribers):
             try:

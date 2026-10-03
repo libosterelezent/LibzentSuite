@@ -144,10 +144,21 @@ class SimWorld:
         """
         if channel_id not in self.channels:
             return False
+        was_dm = self.dm_channels.get(channel_id, False)
         self.channels.pop(channel_id, None)
         self.dm_channels.pop(channel_id, None)
         self.history.pop(channel_id, None)
         self.gone_channels[channel_id] = time.time()
+        if was_dm:
+            # deliberate divergence from live Discord: the pair->channel
+            # mapping is RETAINED, so this DM stays unsendable forever
+            # (dm_channel_for keeps returning the dead id). Loud on purpose.
+            LOG.warning(
+                "dm channel %s deleted: pair mapping retained - DMs between "
+                "this pair stay unsendable (deliberate sim divergence from "
+                "live Discord, where DM channels resurrect)",
+                channel_id,
+            )
         return True
 
     def dm_channel_for(self, user_a: int, user_b: int) -> int:

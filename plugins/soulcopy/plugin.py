@@ -73,7 +73,7 @@ class SoulcopyPlugin(PluginBase):
         """React to the trigger message; ignore everything else fast."""
         if not isinstance(event, MessageReceived):
             return
-        if event.content.strip() != ctx.settings["trigger"]:
+        if (event.content or "").strip() != ctx.settings["trigger"]:
             return
         if event.author_id not in ctx.services.credentials.owner_user_ids:
             ctx.logger.warning(

@@ -49,12 +49,18 @@ async def run_sim(name: str | None, list_only: bool) -> int:
 
 async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
     """Boot the live stack and attach the requested surfaces."""
-    framework = await build(
-        env_file=args.env,
-        config_dir=args.config,
-        db_path=args.db,
-        plugin_dir=args.plugins,
-    )
+    try:
+        framework = await build(
+            env_file=args.env,
+            config_dir=args.config,
+            db_path=args.db,
+            plugin_dir=args.plugins,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        # boot-time USER errors (unwritable --db path, malformed config,
+        # failed migration): one clean line + exit 2, never a raw traceback
+        print(f"error: cannot boot: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     api = framework.api
     dashboard = None
     exit_code = 0
@@ -69,11 +75,19 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
         if args.dashboard:
             from interfaces.dashboard import DashboardServer
 
-            dashboard = DashboardServer(api, token=api.dashboard_token, port=args.port,
-                                         bus=framework.bus, exit_signal=True)
-            dashboard.start().attach_logs(api.logs_service())
-            if api.audit_recorder() is not None:
-                dashboard.attach_audit(api.audit_recorder())
+            try:
+                dashboard = DashboardServer(
+                    api, token=api.dashboard_token, port=args.port,
+                    bus=framework.bus, exit_signal=True)
+                dashboard.start().attach_logs(api.logs_service())
+                if api.audit_recorder() is not None:
+                    dashboard.attach_audit(api.audit_recorder())
+            except (OSError, OverflowError, ValueError) as exc:
+                # bind failures: port in use / out of range (0-65535) —
+                # a clean line + exit 2, never a raw bind traceback
+                print(f"error: cannot start dashboard on port {args.port}: "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                return 2
             print(f"dashboard: {dashboard.url}")
 
         if argv:  # one-shot command mode
