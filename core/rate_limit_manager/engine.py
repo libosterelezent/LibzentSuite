@@ -71,6 +71,16 @@ from .warnings import evaluate_policies
 #: pacing key owner used when acquire() carries no account
 GLOBAL_KEY = "__global__"
 
+#: FINAL-PHASE (F2): level-rank built ONCE (was a per-call comprehension
+#: in both effective() and policies())
+_LEVEL_RANK: Dict[str, int] = {name: i for i, name in enumerate(POLICY_LEVELS)}
+
+#: FINAL-PHASE (F2): hard bound on the effective-config memo. The natural
+#: key space is actions × (accounts+1) × (plugins+1) — a few hundred even
+#: at fleet scale; 4096 leaves huge headroom while keeping memory O(1)
+#: against caller-supplied action/account/plugin strings.
+_EFFECTIVE_CACHE_CAP = 4096
+
 #: backstop poll for waiters that are not the head of their key's heap
 #: non-head backstop poll (lost-wake insurance ONLY — heads compute their
 #: exact remaining block and every grant/policy/cooldown change wakes all
@@ -180,6 +190,13 @@ class RateLimitManager:
         self._kv = kv_repo
         self._floor = self._validated_floor(floor)
         self._removed_defaults: set = set()  # 'level|owner|action' cleared by the user
+        # FINAL-PHASE (F2): effective-config memoization state
+        self._config_version: int = 0
+        self._effective_cache: Dict[
+            Tuple[str, Optional[str], Optional[str]],
+            Tuple[int, Tuple[float, float, float,
+                             Tuple[Tuple[str, Optional[str], float], ...]]],
+        ] = {}
         self._clock = clock if clock is not None else SystemClock()
         self._jitter_rng = random.Random(jitter_seed)
         #: (level, owner, action) -> RatePolicy — the live policy table
@@ -272,6 +289,7 @@ class RateLimitManager:
                     )
                     continue
                 self._policies[(level, owner, policy.action)] = policy
+                self._invalidate_effective_cache()  # F2: boot load mutates
                 if policy.interval < self._floor:
                     scope = f"{level}/{owner}" if owner else level
                     self._log(
@@ -320,6 +338,7 @@ class RateLimitManager:
                 stored_floor = await self._kv.get("ratelimit:floor")
                 if stored_floor is not None:
                     self._floor = max(self._floor, float(stored_floor))
+                    self._invalidate_effective_cache()  # F2: floor raised at boot
             except Exception as exc:
                 self._log("warning", f"could not load persisted floor: {exc}")
             try:  # cleared-policy tombstones: seeding must skip these keys
@@ -388,6 +407,7 @@ class RateLimitManager:
                 f"{self._floor:g}s + jitter 0.50..2.00s."
             )
         self._policies[(level, owner, policy.action)] = policy
+        self._invalidate_effective_cache()  # F2: policy mutation
         scope = f"{level}/{owner}" if owner else level
         self._log(
             "info", f"rate policy set: {policy.action}={policy} at {scope}"
@@ -409,6 +429,7 @@ class RateLimitManager:
         action = action.strip()
         existed = self._policies.pop((level, owner, action), None) is not None
         if existed:
+            self._invalidate_effective_cache()  # F2: policy removed
             scope = f"{level}/{owner}" if owner else level
             self._log(
                 "info", f"rate policy cleared: {action!r} at {scope}"
@@ -419,7 +440,7 @@ class RateLimitManager:
     def policies(self) -> List[dict]:
         """Every stored policy as ``{level, owner, action, interval, jitter}``,
         sorted by (action, level, owner) — deterministic for CLI/UI."""
-        level_rank = {name: i for i, name in enumerate(POLICY_LEVELS)}
+        level_rank = _LEVEL_RANK
         rows = [
             {
                 "level": level,
@@ -450,7 +471,60 @@ class RateLimitManager:
         after set_floor() raised it), jitter is (max of mins, max of maxes),
         and sources lists every applicable policy. With no policy at all the
         result is the floor with empty sources — still safe.
+
+        FINAL-PHASE (F2): results are memoized per (action, account,
+        plugin) under a config generation counter — the composition is a
+        pure sync function of ``self._policies`` + ``self._floor``
+        (verified: nothing else is read), it ran ≥2x per uncontended
+        acquire and ≈N+1 per grant with N parked co-waiters, and every
+        mutation bumps the generation so a stale hit is structurally
+        impossible. The public dict shape (fresh objects per call) is
+        unchanged — callers may mutate their dict freely.
         """
+        interval, jmin, jmax, sources = self._effective_payload(
+            action, account, plugin)
+        return {
+            "action": action,
+            "interval": interval,
+            "jitter": [jmin, jmax],
+            "sources": [
+                {"level": level, "owner": owner, "interval": pol_interval}
+                for level, owner, pol_interval in sources
+            ],
+        }
+
+    def _effective_payload(
+        self, action: str, account: Optional[str], plugin: Optional[str]
+    ) -> Tuple[float, float, float, Tuple[Tuple[str, Optional[str], float], ...]]:
+        """Cached composition as an immutable tuple; never raises.
+
+        Failure-harmless by construction: any cache error bypasses to the
+        direct computation, and any fill error is swallowed — the cache
+        can never become a correctness dependency.
+        """
+        key = (action, account, plugin)
+        try:
+            hit = self._effective_cache.get(key)
+            if hit is not None and hit[0] == self._config_version:
+                return hit[1]
+        except Exception:
+            return self._compute_effective(action, account, plugin)
+        payload = self._compute_effective(action, account, plugin)
+        try:
+            if len(self._effective_cache) >= _EFFECTIVE_CACHE_CAP:
+                # bounded: full flush (version makes post-flush reads
+                # correct); natural key space is actions × accounts ×
+                # plugins — far below the cap for any sane fleet
+                self._effective_cache.clear()
+            self._effective_cache[key] = (self._config_version, payload)
+        except Exception:
+            pass
+        return payload
+
+    def _compute_effective(
+        self, action: str, account: Optional[str], plugin: Optional[str]
+    ) -> Tuple[float, float, float, Tuple[Tuple[str, Optional[str], float], ...]]:
+        """The (uncached) composition — the pre-F2 effective() body."""
 
         def _applies(level: str, owner: Optional[str]) -> bool:
             if level == "global":
@@ -465,34 +539,39 @@ class RateLimitManager:
                 and owner == f"{account}/{plugin}"
             )
 
-        level_rank = {name: i for i, name in enumerate(POLICY_LEVELS)}
         applicable = [
             (level, owner, policy)
             for (level, owner, act), policy in self._policies.items()
             if act == action and _applies(level, owner)
         ]
         applicable.sort(
-            key=lambda item: (level_rank.get(item[0], 99), item[1] or "")
+            key=lambda item: (_LEVEL_RANK.get(item[0], 99), item[1] or "")
         )
         interval = max(
             [self._floor] + [p.interval for _, _, p in applicable]
         )
         if applicable:
-            jitter = [
-                max(p.jitter_min for _, _, p in applicable),
-                max(p.jitter_max for _, _, p in applicable),
-            ]
+            jmin = max(p.jitter_min for _, _, p in applicable)
+            jmax = max(p.jitter_max for _, _, p in applicable)
         else:
-            jitter = [0.0, 0.0]
-        return {
-            "action": action,
-            "interval": interval,
-            "jitter": jitter,
-            "sources": [
-                {"level": level, "owner": owner, "interval": policy.interval}
-                for level, owner, policy in applicable
-            ],
-        }
+            jmin, jmax = 0.0, 0.0
+        return (
+            interval, jmin, jmax,
+            tuple((level, owner, policy.interval)
+                  for level, owner, policy in applicable),
+        )
+
+    def _invalidate_effective_cache(self) -> None:
+        """Bump the config generation AND drop the entries.
+
+        Belt and braces: the version check alone is correct (any entry
+        from an older generation misses); the clear alone is correct; a
+        future code path that mutates ``_policies`` without this helper
+        would need BOTH missed to serve stale config — the safety
+        direction (a stricter policy under-applied) stays impossible.
+        """
+        self._config_version += 1
+        self._effective_cache.clear()
 
     @property
     def floor_value(self) -> float:
@@ -521,6 +600,7 @@ class RateLimitManager:
                 f"requested {candidate:g}s)"
             )
         self._floor = candidate
+        self._invalidate_effective_cache()  # F2: floor feeds the composition
         self._wake_waiters()  # waiters recompute against the new floor
         self._log("info", f"rate-limit safety floor raised to {candidate:g}s")
         return self._floor
@@ -548,6 +628,10 @@ class RateLimitManager:
                          or (k[0] == "account_plugin"
                              and str(k[1]).startswith(prefix)))]:
             del self._policies[key]
+        # FINAL-PHASE (F2): always invalidate — the cache may hold entries
+        # for this account even when no policy rows were (the table can be
+        # empty while cached compositions from earlier still exist).
+        self._invalidate_effective_cache()
         if self._repo is not None:
             try:
                 await self._repo.delete_account(account)
@@ -696,7 +780,8 @@ class RateLimitManager:
             )
         # stage 3: human-like jitter pause AFTER the grant (never moves pacing)
         jitter_s = 0.0
-        jitter_min, jitter_max = self.effective(action, account, plugin)["jitter"]
+        jitter_min, jitter_max = self._effective_payload(
+            action, account, plugin)[1:3]
         if jitter_max > 0:
             jitter_s = self._jitter_rng.uniform(jitter_min, jitter_max)
             if jitter_s > 0:
@@ -770,7 +855,8 @@ class RateLimitManager:
             if until is not None and now < until:
                 server_waits.append(until - now)
         server_wait = max(server_waits)
-        interval = self.effective(entry.action, entry.account, entry.plugin)["interval"]
+        interval = self._effective_payload(
+            entry.action, entry.account, entry.plugin)[0]
         # BOTH scopes compose (max): per-task (the account's own clock) and,
         # when grouped, the shared group clock stamped by every member
         pacing_wait = 0.0
@@ -891,6 +977,13 @@ class RateLimitManager:
         wait = max(0.0, wait)
         account, action = self._validate_acquire_args(account, action, None)[:2]
         now = self._clock.now()
+        # FINAL-PHASE (F8 gap 2): sweep expired tombstones for this account
+        # while we write — expired (account, action) rows were retained
+        # forever (only account removal pruned them), and plugin-supplied
+        # action strings made that an unbounded distinct-key family.
+        for key in [k for k, until in self._account_cooldowns.items()
+                    if k[0] == account and until <= now]:
+            del self._account_cooldowns[key]
         self._account_cooldowns[(account, action)] = max(
             self._account_cooldowns.get((account, action), 0.0), now + wait
         )

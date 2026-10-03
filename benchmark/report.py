@@ -65,10 +65,16 @@ def compare(before: Dict[str, Any], after: Dict[str, Any]) -> str:
     overall_regressed = False
     for scen in after.get("scenarios", []):
         name = scen.get("name", "?")
+        if scen.get("profiled"):
+            lines.append(f"{name}: profiled run — excluded from compare")
+            continue
         prev = next((s for s in before.get("scenarios", [])
                      if s.get("name") == name), None)
         if prev is None:
             lines.append(f"{name}: (no baseline)")
+            continue
+        if prev.get("profiled"):
+            lines.append(f"{name}: baseline was a profiled run — skipped")
             continue
         lines.append(f"{name}:")
         b_flat, a_flat = _flat_metrics(prev), _flat_metrics(scen)

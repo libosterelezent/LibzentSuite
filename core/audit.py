@@ -39,6 +39,11 @@ from ._persist_queue import PersistQueue
 
 LOG = logging.getLogger("slaughtermudae.audit")
 
+#: FINAL-PHASE (F8 gap 3): per-entry content cap (manager paths truncate
+#: to 80 chars; the scheduler's task content was landing untruncated —
+#: Discord caps messages at 2000, plugins may not)
+_CONTENT_CAP = 2000
+
 #: content previews are truncated to this length in format_audit lines
 _PREVIEW_LIMIT = 60
 
@@ -200,13 +205,19 @@ class AuditRecorder:
                 channel_id = int(channel_id)
             except (TypeError, ValueError):
                 channel_id = None
+        content = str(content or "")
+        if len(content) > _CONTENT_CAP:  # FINAL-PHASE (F8 gap 3): LogService
+            # caps entries at 16k — audit didn't, and the scheduler writes
+            # task.content untruncated at terminal; a buggy plugin could
+            # land full-size rows in the ring AND the DB.
+            content = content[:_CONTENT_CAP] + "…[truncated]"
         entry = AuditEntry(
             ts=time.time(),
             account=str(account),
             direction=str(direction),
             action=str(action),
             channel_id=channel_id,
-            content=str(content or ""),
+            content=content,
             wait_ms=_as_float(wait_ms),
             jitter_ms=_as_float(jitter_ms),
             note=str(note or ""),

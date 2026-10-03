@@ -101,6 +101,7 @@ class ControlAPI:
         credentials_svc: Optional["CredentialService"] = None,
         cooldowns: Optional["CooldownService"] = None,
         started_at: float = 0.0,
+        reconcile_interval_s: float = 30.0,
     ) -> None:
         self._accounts = accounts
         self._plugins = plugins
@@ -117,6 +118,10 @@ class ControlAPI:
         self._cooldowns = cooldowns
         self._started_at = started_at
         self._booted_at = _time.time()
+        # FINAL-PHASE (F3): authoritative reconciliation cadence (bounds
+        # externally-edited state; 0 disables — tests/sims want determinism)
+        self._reconcile_interval_s = float(reconcile_interval_s)
+        self._last_reconcile = -1e9  # first status() call reconciles
 
     # ---------------------------------------------------------------- status
     async def status(self) -> Dict[str, Any]:
@@ -127,6 +132,7 @@ class ControlAPI:
         both filled in ONLY when the manager snapshot lacks them, so a
         manager that already knows never gets second-guessed.
         """
+        await self._maybe_reconcile()  # FINAL-PHASE (F3): bounded staleness
         return {
             "accounts": await self._enrich_accounts(await self._accounts.accounts()),
             "ratelimit": self._limiter.stats(),
@@ -134,6 +140,29 @@ class ControlAPI:
             "warnings": self._limiter.warnings(),
             "uptime_s": round(_time.time() - self._booted_at, 1),
         }
+
+    async def _maybe_reconcile(self) -> None:
+        """FINAL-PHASE (F3): periodic authoritative reconciliation.
+
+        In-process mutations are memory-immediate; this 30s pass bounds
+        divergence from OUT-of-band DB edits (a second process, manual
+        sqlite) so the memory-first status poll stays honest without
+        polling SQLite per second.
+        """
+        now = _time.monotonic()
+        if now - self._last_reconcile < self._reconcile_interval_s:
+            return
+        self._last_reconcile = now
+        try:
+            reconcile = getattr(self._accounts, "reconcile_records", None)
+            if callable(reconcile):
+                await reconcile()
+            if self._cooldowns is not None:
+                resync = getattr(self._cooldowns, "resync", None)
+                if callable(resync):
+                    await resync()
+        except Exception:
+            LOG.debug("status reconciliation failed", exc_info=True)
 
     async def _enrich_accounts(
         self, accounts: List[Dict[str, Any]]
@@ -149,7 +178,10 @@ class ControlAPI:
                 account["credential"] = self._credential_state(name)
             if "cooldowns" not in account and self._cooldowns is not None:
                 try:
-                    account["cooldowns"] = len(await self._cooldowns.active_for(name))
+                    # FINAL-PHASE (F3): memory-only count (the mirror is
+                    # boot-restored + mutation-written; resync absorbs
+                    # external edits) — no per-second DB scan per account
+                    account["cooldowns"] = self._cooldowns.active_count_for(name)
                 except Exception:
                     account["cooldowns"] = 0
         return accounts
@@ -506,10 +538,32 @@ class ControlAPI:
 
     async def profiles_assign(self, account: str, profile: str) -> Dict[str, Any]:
         """Grant a profile (applies on the account's next start)."""
-        return await _resolved(self._profiles.assign(account, profile))
+        out = await _resolved(self._profiles.assign(account, profile))
+        self._refresh_account_profiles(account)  # FINAL-PHASE (F3)
+        return out
 
     async def profiles_unassign(self, account: str, profile: str) -> Dict[str, Any]:
-        return await _resolved(self._profiles.unassign(account, profile))
+        out = await _resolved(self._profiles.unassign(account, profile))
+        self._refresh_account_profiles(account)  # FINAL-PHASE (F3)
+        return out
+
+    def _refresh_account_profiles(self, account: str) -> None:
+        """Propagate a profile-assignment change into the manager's memory
+        record (FINAL-PHASE F3): ProfileManager owns its cache but never
+        touched AccountManager.record.profiles — the memory-first status
+        poll must not go stale the moment profiles change."""
+        try:
+            manager = self._accounts
+            account_obj = getattr(manager, "_accounts", {}).get(account)
+            if account_obj is None:
+                return
+            cache = getattr(manager._profile_manager, "_assignment_cache", None)
+            if isinstance(cache, dict):
+                account_obj.record.profiles = sorted(
+                    cache.get(account, []))
+        except Exception:
+            LOG.debug("profile memory refresh failed for %r", account,
+                      exc_info=True)
 
     # ------------------------------------------------------------- rate limits
     async def ratelimit_policies(self) -> List[Dict[str, Any]]:

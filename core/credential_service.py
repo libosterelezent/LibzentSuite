@@ -100,7 +100,12 @@ class CredentialService:
         return key
 
     def _read_key_file(self) -> Optional[bytes]:
-        """The stored key (stripped) or None when absent/blank."""
+        """The stored key (stripped) or None when absent/blank.
+
+        FINAL-PHASE (F7): a pre-existing key with loose permissions is
+        tightened to 0600 on read (mirrors what Database.connect does for
+        the DB file — creation was already 0600 via O_EXCL).
+        """
         if not self._key_path.is_file():
             return None
         try:
@@ -109,7 +114,34 @@ class CredentialService:
             raise CredentialsError(
                 f"credential key file {self._key_path} is unreadable: {exc}"
             ) from exc
+        try:  # POSIX-only hardening, silently skipped elsewhere
+            os.chmod(self._key_path, 0o600)
+        except (OSError, NotImplementedError):
+            pass
         return text.encode() if text else None
+
+    async def _probe_decrypt(self) -> None:
+        """FINAL-PHASE (F7): boot canary — decrypt ONE stored ciphertext.
+
+        Converts the silent-at-boot / late-per-account failure mode (key
+        lost/replaced, every account failing at first resolve) into one
+        explicit boot warning. Never raises; touches nothing on success.
+        """
+        if self._repo is None or not self._db_accounts:
+            return
+        try:
+            account = sorted(self._db_accounts)[0]
+            ciphertext = await self._repo.load(account)
+            if ciphertext is None:
+                return
+            self.fernet.decrypt(ciphertext)  # raises InvalidToken on mismatch
+        except Exception as exc:
+            if type(exc).__name__ in ("InvalidToken", "InvalidSignature"):
+                LOG.warning(
+                    "master key does not decrypt the stored credentials "
+                    "(%d account(s)) — they were stored under a different "
+                    "key; re-enter them via the dashboard/CLI",
+                    len(self._db_accounts))
 
     @property
     def fernet(self) -> Fernet:

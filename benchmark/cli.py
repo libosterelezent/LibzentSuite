@@ -51,6 +51,21 @@ def build_parser() -> argparse.ArgumentParser:
                         help="also store the report as the compare baseline")
     parser.add_argument("--compare", default=None,
                         help="compare against a previous JSON report")
+    # FINAL-PHASE (F6): profiling modes (mutually exclusive — one
+    # perturbation at a time; NOT comparable to normal numbers)
+    parser.add_argument("--profile", action="store_true",
+                        help="cProfile each scenario (excluded from compare)")
+    parser.add_argument("--profile-dir", default=None,
+                        help="directory for .pstats dumps "
+                             "(default: state/benchmarks/profiles)")
+    parser.add_argument("--profile-top", type=int, default=15,
+                        help="top-N functions printed/embedded per scenario")
+    parser.add_argument("--tracemalloc", action="store_true",
+                        help="trace allocation sites per scenario boundary")
+    parser.add_argument("--trace-depth", type=int, default=1,
+                        help="tracemalloc frame depth (default 1)")
+    parser.add_argument("--trace-top", type=int, default=10,
+                        help="top-N allocation sites per boundary")
     parser.add_argument("--quiet", action="store_true")
     return parser
 
@@ -95,21 +110,76 @@ async def run_suite(args: NS) -> Dict[str, Any]:
             sampling_ms=args.sampling_ms,
             loop_interval_ms=args.loop_interval_ms,
             task_interval_ms=args.task_interval_ms)
-        perf = PerfCollector()
+        # FINAL-PHASE (F6): per-mode wrapping. Profiled runs are marked
+        # and excluded from compare verdicts (profiler overhead makes
+        # their numbers non-comparable — documented in the README).
+        alloc_hook = None
+        stage_allocs: dict = {}
+        if getattr(args, "tracemalloc", False):
+            from benchmark.profiling import make_alloc_hook
+            alloc_hook, stage_allocs = make_alloc_hook(args.trace_top)
+        perf = PerfCollector(alloc_hook=alloc_hook)
         # reset the per-run leak trackers (module-level series)
         scenario.run._rss_series = []
         scenario.run._task_series = []
-        result = await scenario.run(
-            session, perf, accounts=args.accounts, duration=args.duration,
-            cycles=cycles, records=args.records, messages=args.messages,
-            burst=args.burst, ops=args.ops, keys=args.keys,
-            waiters=args.waiters, severity=args.severity)
+        if getattr(args, "tracemalloc", False):
+            from benchmark.profiling import trace_reset
+            trace_reset()
+            import tracemalloc as _tm
+            start_snap = _tm.take_snapshot()
+
+        async def _run_scenario():
+            return await scenario.run(
+                session, perf, accounts=args.accounts,
+                duration=args.duration, cycles=cycles,
+                records=args.records, messages=args.messages,
+                burst=args.burst, ops=args.ops, keys=args.keys,
+                waiters=args.waiters, severity=args.severity)
+
+        if getattr(args, "profile", False):
+            from benchmark.profiling import cprofile_scope, pstats_top
+            profile_dir = args.profile_dir or "state/benchmarks/profiles"
+            dump_path = os.path.join(profile_dir, f"{name}.pstats")
+            with cprofile_scope(dump_path) as prof:
+                result = await _run_scenario()
+            result["profiled"] = True
+            result["profile"] = {
+                "mode": "cprofile", "pstats": dump_path,
+                **pstats_top(prof, args.profile_top)}
+        else:
+            result = await _run_scenario()
+
+        if getattr(args, "tracemalloc", False):
+            import tracemalloc as _tm
+            end_snap = _tm.take_snapshot()
+            current, peak = _tm.get_traced_memory()
+            result["profiled"] = True
+            result.setdefault("profile", {"mode": "tracemalloc"})
+            result.setdefault("custom", {})
+            result["custom"]["allocations"] = {
+                "total": top_sites_safe(end_snap, start_snap,
+                                        args.trace_top),
+                "stages": stage_allocs,
+                "peak_traced_kb": round(peak / 1024.0, 1),
+                "traced_end_kb": round(current / 1024.0, 1),
+            }
         result["name"] = name
         result["cycles"] = cycles
         result.setdefault("mode", "production-boot")
         report["scenarios"].append(result)
     report["meta"]["duration_s"] = round(time.perf_counter() - started, 2)
+    if getattr(args, "tracemalloc", False):
+        import tracemalloc as _tm
+        _tm.stop()  # restore zero overhead after the suite
     return report
+
+
+def top_sites_safe(end_snap: Any, start_snap: Any, n: int) -> List[dict]:
+    from benchmark.profiling import top_sites
+    try:
+        return top_sites(end_snap.compare_to(start_snap, "lineno"), n)
+    except Exception:
+        return []
 
 
 def run_bench_cli(argv: List[str] | None = None) -> int:
@@ -117,6 +187,16 @@ def run_bench_cli(argv: List[str] | None = None) -> int:
     if args.list:
         print(_list_scenarios())
         return 0
+    if args.profile and args.tracemalloc:
+        raise SystemExit(
+            "--profile and --tracemalloc are mutually exclusive "
+            "(pick one perturbation)")
+    if args.profile and args.save_baseline:
+        raise SystemExit(
+            "refusing --save-baseline: profiled numbers are not comparable")
+    if args.tracemalloc:
+        import tracemalloc as _tm
+        _tm.start(args.trace_depth)
     report = asyncio.run(run_suite(args))
     print(render_table(report))
     json_path = args.json

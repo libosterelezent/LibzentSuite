@@ -70,6 +70,13 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
         if args.dashboard:
             from interfaces.dashboard import DashboardServer
 
+            if api.dashboard_token is None:
+                # FINAL-PHASE (F7): the dashboard would run WITHOUT auth
+                # (loopback + credential routes stay locked, but start/
+                # stop/estop are drivable by any local process).
+                print("WARNING: dashboard starting WITHOUT auth on "
+                      "127.0.0.1 — set DASHBOARD_TOKEN in .env; "
+                      "credential management stays locked", flush=True)
             dashboard = DashboardServer(api, token=api.dashboard_token, port=args.port,
                                          bus=framework.bus, exit_signal=True)
             dashboard.start().attach_logs(api.logs_service())

@@ -93,6 +93,15 @@ class DiscordCache:
                 existing.recipient = recipient  # deleted flag (the snapshot
                 existing.deleted = False  # just proved the channel exists)
                 existing.gone_since = None
+        # FINAL-PHASE (F8 gap 4): sweep stale channel tombstones — a
+        # deleted=True entry was retained forever (gone_since existed
+        # precisely for this sweep); a fresh READY is the truth point.
+        cutoff = time.time() - 86400.0  # gone >24h: not coming back quietly
+        stale = [cid for cid, info in self.channels.items()
+                 if info.deleted and info.gone_since is not None
+                 and info.gone_since < cutoff]
+        for cid in stale:
+            del self.channels[cid]
         self.ready = True
 
     # ------------------------------------------------------------ DM helper

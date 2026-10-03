@@ -80,6 +80,14 @@ class Database:
                 os.chmod(self._path, 0o600)
             except OSError:
                 pass
+            # FINAL-PHASE (F7): tighten the WAL/-shm sidecars too — SQLite
+            # creates them with umask-default perms (typically 0644) and
+            # they carry the same pages. Restart case: they exist by now.
+            for suffix in ("-wal", "-shm"):
+                try:
+                    os.chmod(self._path + suffix, 0o600)
+                except OSError:
+                    pass
         try:
             return await self.migrate()
         except BaseException:

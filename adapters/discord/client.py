@@ -79,24 +79,39 @@ def _install_headers_fetch_cache(discord: Any, ttl: float = _HEADERS_CACHE_TTL) 
         original = headers_cls.get_api_properties  # bound classmethod
     except AttributeError:
         return
+    # FINAL-PHASE fix: never WRAP OUR OWN WRAPPER — a second install (a
+    # re-import, a test re-run in-process) capturing the cached method as
+    # "original" self-deadlocks on the non-reentrant lock. Unwrap to the
+    # true original via the marker attribute instead.
+    original = getattr(original, "_sm_original", original)
     _headers_patch_installed = True
-    _headers_cache_lock = asyncio.Lock()
+    if _headers_cache_lock is None:
+        _headers_cache_lock = asyncio.Lock()
 
     async def cached_get_api_properties(cls, session, type_, *, proxy=None,
                                          proxy_auth=None):
         key = (proxy, proxy_auth)
         loop = asyncio.get_running_loop()
         if _headers_cache_lock is not None:
+            # FINAL-PHASE (F8 gap 5): SINGLE-FLIGHT — the fetch runs INSIDE
+            # the lock (it previously ran between the read and write
+            # windows, so a reconnect storm / cold fleet boot fired up to N
+            # concurrent cordapi fetches — exactly the hammering the cache
+            # exists to prevent). Waiters already queue on the IdentifyGate,
+            # so serializing behind one ~3s fetch is harmless.
             async with _headers_cache_lock:
                 hit = _headers_cache.get(key)
                 if hit is not None and loop.time() - hit[0] < ttl:
                     return hit[1]
+                result = await original(session, type_, proxy=proxy,
+                                        proxy_auth=proxy_auth)
+                _headers_cache[key] = (loop.time(), result)
+                return result
         result = await original(session, type_, proxy=proxy,
                                 proxy_auth=proxy_auth)
-        if _headers_cache_lock is not None:
-            async with _headers_cache_lock:
-                _headers_cache[key] = (loop.time(), result)
         return result
+
+    cached_get_api_properties._sm_original = original  # unwrap marker
 
     try:
         headers_cls.get_api_properties = classmethod(cached_get_api_properties)
@@ -119,6 +134,14 @@ def _header(headers: Any, name: str) -> Optional[str]:
 
 class RealDiscordClient:
     """DiscordClient protocol implementation over a lazily imported library."""
+
+    def __repr__(self) -> str:  # FINAL-PHASE (F7): explicit redacting repr —
+        # the token lives in self._token; the default object repr is safe
+        # today, but a dataclass refactor or vars()-style debugging would
+        # leak it into tracebacks/benchmark output.
+        return (f"<RealDiscordClient account={self._account!r}"
+                f" user_id={self.user_id!r} connected="
+                f"{bool(getattr(self._client, 'ws', None))}>")
 
     def __init__(
         self,
@@ -645,7 +668,7 @@ class IdentifyGate:
     (isolation audit K8 / S3-3.1, S7-A2).
     """
 
-    __slots__ = ("interval", "max_wait", "_lock", "_last")
+    __slots__ = ("interval", "max_wait", "_lock", "_last", "_depth")
 
     def __init__(self, interval: float = 5.0,
                  max_wait: float = 45.0) -> None:
@@ -654,6 +677,7 @@ class IdentifyGate:
         self.max_wait = float(max_wait)
         self._lock: Optional[asyncio.Lock] = None  # bound lazily to the loop
         self._last: float = float("-inf")
+        self._depth: int = 0  # FINAL-PHASE (F4): FIFO waiters ahead-of-lock
 
     async def acquire(self, shard_id=None, *, initial: bool = False) -> None:
         """Space consecutive IDENTIFYs by ``interval`` seconds.
@@ -662,26 +686,37 @@ class IdentifyGate:
         user accounts are unsharded — but discord.py lineage hooks are
         invoked with it positionally, and library drift must not turn
         the gate into a TypeError). Fast-fails with a retryable
-        ConnectionError when the projected queue wait exceeds
-        ``max_wait`` (PHASE-4 S2 #8): at fleet sizes where the tail would
-        sit in the gate longer than a connect budget anyway, burning the
-        login + client build + 90s park is strictly worse than failing
-        fast into the reconnect backoff.
+        ConnectionError when the PROJECTED total wait (residual spacing
+        + waiters already queued ahead × interval) exceeds ``max_wait``
+        (FINAL-PHASE F4: the phase-4 fast-fail checked the residual only
+        AFTER lock acquisition — where it always equals ≤ interval — so
+        it could never fire; queue depth tracking makes the projection
+        real). Failing fast into the reconnect backoff is strictly
+        cheaper than parking a built client for 90s only to time out.
         """
         if self._lock is None:
             self._lock = asyncio.Lock()
-        async with self._lock:  # FIFO: hold while sleeping so waiters queue
-            now = asyncio.get_running_loop().time()
-            wait = self._last + self.interval - now
-            if wait > self.max_wait:
-                raise ConnectionError(
-                    f"identify gate saturated: projected wait {wait:.0f}s "
-                    f"exceeds {self.max_wait:.0f}s — retrying with backoff "
-                    "is cheaper than parking a built client")
-            if wait > 0:
-                await asyncio.sleep(wait)
-                now = asyncio.get_running_loop().time()
-            self._last = now
+        # projected wait BEFORE queueing: residual + the queue depth ahead
+        # of us each costs a full interval (FIFO under the held lock)
+        loop = asyncio.get_running_loop()
+        projected = (self._last + self.interval * (self._depth + 1)
+                     - loop.time()) if self._last != float("-inf") else 0.0
+        if projected > self.max_wait:
+            raise ConnectionError(
+                f"identify gate saturated: projected wait {projected:.0f}s "
+                f"exceeds {self.max_wait:.0f}s ({self._depth} queued) — "
+                "retrying with backoff is cheaper than parking a built client")
+        self._depth += 1
+        try:
+            async with self._lock:  # FIFO: hold while sleeping so waiters queue
+                now = loop.time()
+                wait = self._last + self.interval - now
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                    now = loop.time()
+                self._last = now
+        finally:
+            self._depth -= 1
 
 
 class RealClientFactory:

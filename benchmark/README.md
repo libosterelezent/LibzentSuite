@@ -57,8 +57,22 @@ medians** before believing it — wall times on a shared machine are noisy.
 
 - **normal** — the `benchmark` package is never imported; zero overhead.
 - **benchmark** — samplers + stage timers (this mode; <1% CPU).
-- Planned: `--profile` (cProfile per scenario) and `--tracemalloc`
-  (allocation sites); their numbers are NOT comparable to benchmark mode.
+- **`--profile`** — cProfile per scenario: `.pstats` dump under
+  `state/benchmarks/profiles/` (or `--profile-dir`) + top-N cumulative/
+  tottime embedded in the JSON. Main-thread profiler (the aiosqlite
+  worker thread's cost shows in cpu_sys_s but not function attribution).
+- **`--tracemalloc`** — allocation sites per scenario boundary
+  (`--trace-depth`, `--trace-top`); per-stage diffs via the existing
+  `perf.stage()` seams; `clear_traces` + `reset_peak` between scenarios
+  keep attribution honest.
+
+Profiled runs carry `profiled: true` and are **excluded from compare
+verdicts** (profiler overhead makes their wall/CPU numbers
+non-comparable — ~2-5x inflation for cProfile, ~2x for tracemalloc);
+`--save-baseline` is refused under `--profile`, and the two modes are
+mutually exclusive. Output surfaces are value-free by construction
+(pstats records filenames/line numbers/counts; tracemalloc records
+file:lineno + byte counts — neither captures argument or object values).
 
 ## Design notes
 

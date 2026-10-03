@@ -122,6 +122,11 @@ class CooldownService:
                     LOG.debug("lazy cooldown clear failed", exc_info=True)
             else:
                 await self.clear(account, plugin, cooldown_key)
+            # FINAL-PHASE (F8 gap 1): drop the expired tombstone — it
+            # occupied a slot forever and every get() re-attempted the
+            # DELETE. The repo fallback below re-reads on the next access
+            # (correct for the multi-process extension case).
+            self._active.pop(key, None)
             return None
         if self._repo is not None:
             fresh = await self._repo.get(account, plugin, cooldown_key,
@@ -153,7 +158,13 @@ class CooldownService:
 
     async def active_for(self, account: str,
                          plugin: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Every active cooldown of one account (optionally one plugin)."""
+        """Every active cooldown of one account (optionally one plugin).
+
+        AUTHORITATIVE view (repo merge) — used by the cooldowns panel and
+        clears. The 1 Hz status poll uses :meth:`active_count_for`
+        (memory-only) instead; external edits are absorbed by the
+        periodic :meth:`resync`.
+        """
         now = self._now()
         rows = [dict(r) for r in self._active.values()
                 if r["account"] == account and r["expires_at"] > now
@@ -166,6 +177,34 @@ class CooldownService:
                     rows.append(row)
         rows.sort(key=lambda r: r["expires_at"])
         return rows
+
+    def active_count_for(self, account: str) -> int:
+        """Memory-only active count (FINAL-PHASE F3: status-poll path).
+
+        The mirror is boot-restored and written on every set/clear, so
+        in-process truth is immediate; external edits are picked up by
+        the periodic resync instead of a per-second DB scan.
+        """
+        now = self._now()
+        return sum(1 for r in self._active.values()
+                   if r["account"] == account and r["expires_at"] > now)
+
+    async def resync(self) -> int:
+        """Rebuild the memory mirror from the repository (DB wins per key).
+
+        FINAL-PHASE (F3): bounds ALL external-edit divergence (a second
+        process adding, extending, or clearing rows) to one resync
+        period — the old per-second active_for() merge only ever caught
+        NEW keys, never extensions/clears of mirrored keys. Also purges
+        expired tombstones (F8 gap 1: rows were retained forever).
+        """
+        if self._repo is None:
+            return 0
+        rows = await self._repo.active_all(now=self._now())
+        fresh = {(r["account"], r["plugin"], r["cooldown_key"]): r
+                 for r in rows}
+        self._active = fresh
+        return len(fresh)
 
     async def delete_account(self, account: str) -> int:
         """Cascade on account deletion (spec §32)."""

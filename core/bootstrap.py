@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import stat
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -240,6 +242,44 @@ class Framework:
         detach_stdlib_bridge()  # then stop ingesting stdlib
 
 
+async def _security_audit(database: Any, credential_service: Any,
+                          env_file: str) -> None:
+    """FINAL-PHASE (F7): boot-time setup security pass (warn-only).
+
+    1. Permission audit: the DB, its WAL sidecar, the credential key and
+       the .env must not be group/world-readable (POSIX only — different
+       platforms genuinely have different permission semantics; we warn,
+       never fail boot, and never claim parity).
+    2. Key/DB mismatch canary: try to decrypt ONE stored ciphertext — a
+       wrong/restored-from-backup master key surfaces HERE as one clear
+       warning instead of per-account decrypt errors at first use.
+    """
+    if os.name == "posix":
+        for label, path in (
+            ("database", getattr(database, "_path", None)),
+            ("credential key",
+             str(getattr(credential_service, "_key_path", "") or "")),
+            ("env file", env_file),
+        ):
+            if not path or path == ":memory:":
+                continue
+            try:
+                mode = stat.S_IMODE(os.stat(path).st_mode)
+                if mode & 0o077:
+                    ROOT_LOGGER.warning(
+                        "insecure permissions %04o on %s (%s) — "
+                        "chmod 600 recommended", mode, path, label)
+            except OSError:
+                continue
+    # mismatch canary: one decrypt probe over the stored accounts
+    probe = getattr(credential_service, "_probe_decrypt", None)
+    if callable(probe):
+        try:
+            await probe()
+        except Exception:
+            pass  # the probe warns internally; boot never fails on it
+
+
 async def build(
     *,
     env_file: str = ".env",
@@ -280,7 +320,8 @@ async def build(
             cleanups, _time, credentials, config, database,
             plugin_dir=plugin_dir, client_factory=client_factory,
             simulation_runner=simulation_runner,
-            credential_key_path=credential_key_path)
+            credential_key_path=credential_key_path,
+            env_file=env_file)
     except BaseException:
         for label, undo in reversed(cleanups):
             try:
@@ -311,7 +352,8 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
                     config: ProjectConfig, database: Any, *, plugin_dir: str,
                     client_factory: Optional[Callable[[str, str], Any]],
                     simulation_runner: Any,
-                    credential_key_path: Optional[Path] = None) -> Framework:
+                    credential_key_path: Optional[Path] = None,
+                    env_file: str = ".env") -> Framework:
     """Wire every manager over an already-connected database."""
 
     # shared services over the database (credentials encrypted at rest,
@@ -415,6 +457,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         await credential_service.refresh()  # status pages know 'db' sources
     except Exception:
         pass
+    await _security_audit(database, credential_service, env_file)
     await cooldowns.restore()
 
     # config-dir account files (DB rows were restored by accounts.load())

@@ -162,6 +162,65 @@ class TaskAckRegistry:
         return sorted(self._futures)
 
 
+class MessageWaiterRegistry:
+    """Per-account waiter index (FINAL-PHASE F1-b′).
+
+    Replaces the old unfiltered per-waiter bus subscriptions — where M
+    concurrent waiters each evaluated EVERY message on EVERY account
+    (M×E handler invocations, measured 75% waste at 4 accounts) — with
+    ONE broadcast subscription dispatching only to the owning account's
+    waiters. A waiter for account A structurally never runs for B's
+    events (the account key IS the routing), preserving the isolation
+    invariant while cutting waiter fan-out from M to M/A per event.
+
+    One instance per AccountManager (mirroring TaskAckRegistry); the
+    per-plugin facades receive it and route their wait_for_message /
+    collect_messages handlers through it. Handlers are invoked sync, in
+    registration order, each isolated (a raising waiter sets its own
+    future's exception; the registry never propagates).
+    """
+
+    def __init__(self, bus: EventBus) -> None:
+        self._by_account: Dict[str, List[Callable[[MessageReceived], None]]] = {}
+        self._unsub = bus.subscribe(MessageReceived, self._on_message)
+
+    def _on_message(self, event: Event) -> None:
+        if not isinstance(event, MessageReceived):
+            return
+        handlers = self._by_account.get(event.account)
+        if not handlers:
+            return
+        for handler in list(handlers):
+            try:
+                handler(event)
+            except Exception:  # isolation: the waiter owns its failure
+                pass
+
+    def add(self, account: str,
+            handler: Callable[[MessageReceived], None]) -> Callable[[], None]:
+        """Register one waiter; returns the idempotent unsubscribe."""
+        self._by_account.setdefault(account, []).append(handler)
+
+        def _remove() -> None:
+            try:
+                self._by_account.get(account, []).remove(handler)
+            except ValueError:
+                pass
+        return _remove
+
+    def forget_account(self, account: str) -> None:
+        """Removal cascade: a re-created same-named account starts clean."""
+        self._by_account.pop(account, None)
+
+    def close(self) -> None:
+        if self._unsub is not None:
+            self._unsub()
+            self._unsub = None
+
+    def pending(self) -> Dict[str, int]:
+        return {name: len(hs) for name, hs in self._by_account.items()}
+
+
 class AccountPluginServices:
     """Per-(account, plugin) facade implementing the PluginServices protocol.
 
@@ -190,6 +249,7 @@ class AccountPluginServices:
         cache: DiscordCache,
         settings_dict: Optional[Dict[str, Any]] = None,
         ack_registry: Optional[TaskAckRegistry] = None,
+        waiter_registry: Optional[MessageWaiterRegistry] = None,
         client_getter: Optional[Callable[[], Any]] = None,
         api_cache_repo: Any = None,
         cooldowns: Any = None,
@@ -206,6 +266,7 @@ class AccountPluginServices:
             settings_dict if isinstance(settings_dict, dict) else {}
         )
         self._ack_registry = ack_registry
+        self._waiter_registry = waiter_registry
         self._client_getter = client_getter
         #: per-account persistent entity cache (database.cache repository)
         self._api_cache = api_cache_repo
@@ -439,7 +500,14 @@ class AccountPluginServices:
             if match and not future.done():
                 future.set_result(event)
 
-        unsubscribe = self._bus.subscribe(MessageReceived, _handler)
+        # FINAL-PHASE F1-b′: through the shared per-account waiter index
+        # when wired (one broadcast subscription at the manager; waiters
+        # are invoked only for their own account's events), else the
+        # legacy unfiltered bus subscription (direct-construction tests).
+        if self._waiter_registry is not None:
+            unsubscribe = self._waiter_registry.add(self._account, _handler)
+        else:
+            unsubscribe = self._bus.subscribe(MessageReceived, _handler)
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
@@ -477,7 +545,10 @@ class AccountPluginServices:
             if match:
                 queue.put_nowait(event)
 
-        unsubscribe = self._bus.subscribe(MessageReceived, _handler)
+        if self._waiter_registry is not None:
+            unsubscribe = self._waiter_registry.add(self._account, _handler)
+        else:
+            unsubscribe = self._bus.subscribe(MessageReceived, _handler)
         collected: List[MessageReceived] = []
         try:
             while True:

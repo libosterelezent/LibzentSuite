@@ -83,13 +83,19 @@ from ..settings_manager import SettingsManager
 from adapters.base import DiscordMessage
 from database.models import AccountRecord
 from .cache import DiscordCache, invalidate_dm_channel, resolve_dm_channel
-from .services import AccountPluginServices, TaskAckRegistry
+from .services import AccountPluginServices, MessageWaiterRegistry, TaskAckRegistry
 
 #: account names share the profile namespace style (may start with a digit)
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 #: fallback reconnect policy when the settings manager is unavailable/blank
 _DEFAULT_RECONNECT = {"initial": 1.0, "max": 60.0, "multiplier": 2.0}
+
+#: FINAL-PHASE (F4): start_all concurrency width. The IdentifyGate is the
+#: true serializer (1 IDENTIFY / interval regardless of width), so this
+#: only bounds how many clients are built-and-parked concurrently: 4
+#: lanes + ~5 storm-reconnect waiters stays under the gate's max_wait.
+_START_ALL_WIDTH = 4
 
 #: login-failure text markers used to classify INVALID_CREDENTIAL (the live
 #: client surfaces library LoginFailures as plain AccountError strings, so
@@ -301,10 +307,17 @@ class AccountManager:
         self._accounts: Dict[str, Account] = {}
         #: ONE task-ack registry per manager (single bus subscription set)
         self._ack_registry = TaskAckRegistry(bus)
+        # FINAL-PHASE (F1-b′): one per-account waiter index per manager —
+        # wait_for_message/collect_messages route through it so waiter
+        # fan-out is per-account (M/A), not fleet-wide (M×E).
+        self._waiter_registry = MessageWaiterRegistry(bus)
         #: (account, plugin) -> services; rebuilt on each activation
         self._services: Dict[tuple, AccountPluginServices] = {}
         #: strong refs for fire-and-forget tasks (documented create_task hazard)
         self._background: set = set()
+        # FINAL-PHASE (F4): single-flight bulk start (a second start_all
+        # joins the running sweep) + the sweep's concurrency width
+        self._start_all_flight: Optional["asyncio.Future"] = None
         # PHASE-4 (S2 #5): cancelled-but-still-unwinding supervisors —
         # strong refs so they can never be GC'd mid-teardown
         self._dying_supervisors: set = set()
@@ -558,6 +571,12 @@ class AccountManager:
             except Exception:
                 self._logger.exception(
                     "lifecycle pacer cascade failed for %s", name)
+        if self._waiter_registry is not None:  # FINAL-PHASE (F1): waiters
+            try:
+                self._waiter_registry.forget_account(name)
+            except Exception:
+                self._logger.exception(
+                    "waiter registry cascade failed for %s", name)
         # PHASE-4 (S1-F3): final identity check before the irreversible DB
         # row delete — the cascade has had many await windows above.
         current = self._accounts.get(name)
@@ -578,16 +597,41 @@ class AccountManager:
         """Sorted account names."""
         return sorted(self._accounts)
 
-    async def accounts(self) -> List[Dict[str, Any]]:
-        """Status dicts of every account, sorted by name (records refreshed)."""
+    async def accounts(self, *, refresh_records: bool = False
+                       ) -> List[Dict[str, Any]]:
+        """Status dicts of every account, sorted by name.
+
+        FINAL-PHASE (F3): memory-first by default — the runtime record,
+        plugin view and credential source are all written at mutation
+        time, so the 1 Hz dashboard poll no longer performs 2 DB reads
+        per account per second. ``refresh_records=True`` (or the 30 s
+        :meth:`reconcile_records` pass) re-reads the authoritative rows,
+        bounding externally-edited state (a second process, manual
+        sqlite) instead of polling for it.
+        """
         out: List[Dict[str, Any]] = []
         for name in sorted(self._accounts):
             account = self._accounts[name]
-            await self._refresh_record(account)
+            if refresh_records:
+                await self._refresh_record(account)
             self._refresh_plugins(account)
             self._refresh_credential_source(account)
             out.append(account.status_dict())
         return out
+
+    async def reconcile_records(self) -> None:
+        """Low-frequency authoritative re-read of every account row.
+
+        Bounded staleness for out-of-band DB edits (external writers);
+        in-process mutations never need this — they update the memory
+        record at write time.
+        """
+        for account in list(self._accounts.values()):
+            try:
+                await self._refresh_record(account)
+            except Exception:
+                self._logger.exception(
+                    "record reconciliation failed for %s", account.record.name)
 
     async def set_enabled(self, name: str, enabled: bool) -> Dict[str, Any]:
         """Flip the persisted enabled flag (False = skipped by start_all)."""
@@ -866,14 +910,33 @@ class AccountManager:
             try:
                 outcome = self._plugin_manager.deactivate_account(name)
                 if asyncio.iscoroutine(outcome):  # pinned sync; async tolerated
-                    await outcome
+                    # FINAL-PHASE (F4): a hung plugin hook must not wedge a
+                    # fleet halt — bounded, then continue the teardown.
+                    await asyncio.wait_for(asyncio.shield(outcome), timeout=5.0)
+            except asyncio.TimeoutError:
+                self._logger.error(
+                    "plugin deactivation timed out for %s (continuing "
+                    "teardown)", name)
             except Exception:
                 self._logger.exception("plugin deactivation failed for %s", name)
             client = rt.client
             rt.client = None  # callbacks go stale from here on (see _wire_client)
             if client is not None:
                 try:
-                    await client.disconnect()
+                    # FINAL-PHASE (F4): bounded disconnect — a hung library
+                    # close must not hold a stop_all semaphore slot forever.
+                    await asyncio.wait_for(
+                        asyncio.shield(client.disconnect()), timeout=10.0)
+                except asyncio.TimeoutError:
+                    self._logger.error(
+                        "client disconnect timed out for %s (force-reaping)",
+                        name)
+                    force = getattr(client, "_cancel_run_task", None)
+                    if callable(force):
+                        try:
+                            await force()
+                        except Exception:
+                            pass
                 except Exception:
                     self._logger.exception("client disconnect failed for %s", name)
             supervisor = rt.supervisor
@@ -923,36 +986,86 @@ class AccountManager:
             return account.status_dict()
 
     async def start_all(self, *, stagger: float = 5.0) -> Dict[str, Any]:
-        """Start every ENABLED account; logs and continues per account.
+        """Start every ENABLED account through the bounded lifecycle scheduler.
 
-        Staggers each start by `stagger` seconds so multiple IDENTIFYs
-        from the same IP don't hit Discord's gateway connection rate
-        limit (which manifests as `Connection reset by peer` when all
-        accounts connect simultaneously). Set stagger=0 to disable.
+        FINAL-PHASE (F4) semantics:
+        * BOUNDED CONCURRENCY (``_START_ALL_WIDTH`` lanes): one hung
+          connect (90s worst case) delays only its own lane — the fleet
+          keeps progressing (the old sequential sweep blocked on every
+          straggler).
+        * ADMISSION PACING: one start admitted per ``stagger`` seconds
+          (monotonic admission clock, no per-account sleep) — the 5s
+          default equals the IdentifyGate interval, so the global
+          lifecycle bucket never refuses a paced sweep.
+        * OVERTAKING: a newer stop/estop/remove (generation bump) on an
+          account whose start has not yet been admitted CANCELS that
+          pending start — the operator's decision always wins.
+        * SINGLE-FLIGHT: a second concurrent start_all JOINS the running
+          sweep and returns its report with ``"joined": true``.
+        * Failures are recorded per account and never abort the sweep.
         """
+        if self._start_all_flight is not None:
+            report = await asyncio.shield(self._start_all_flight)
+            report = dict(report)
+            report["joined"] = True
+            return report
+        flight = asyncio.get_running_loop().create_future()
+        self._start_all_flight = flight
         started: List[str] = []
         failed: Dict[str, str] = {}
         skipped: List[str] = []
-        first = True
-        for name in sorted(self._accounts):
-            account = self._accounts[name]
-            if not account.record.enabled:
-                skipped.append(name)
-                self._logger.info("skipping disabled account %s", name)
-                continue
-            if not first and stagger > 0:
-                self._logger.info(
-                    "staggering %s start by %.0fs (gateway rate-limit safety)",
-                    name, stagger)
-                await asyncio.sleep(stagger)
-            first = False
-            try:
-                await self.start(name)
-                started.append(name)
-            except Exception as exc:
-                failed[name] = f"{type(exc).__name__}: {exc}"
-                self._logger.exception("failed to start account %s", name)
-        return {"started": started, "failed": failed, "skipped": skipped}
+        overtaken: List[str] = []
+        try:
+            # deterministic snapshot with each account's generation: a
+            # queued start whose generation moves (stop/estop/remove) is
+            # cancelled instead of executed
+            pending = []
+            for name in sorted(self._accounts):
+                account = self._accounts[name]
+                if not account.record.enabled:
+                    skipped.append(name)
+                    self._logger.info("skipping disabled account %s", name)
+                    continue
+                pending.append((name, account.runtime.generation))
+            semaphore = asyncio.Semaphore(_START_ALL_WIDTH)
+            admission = [0.0]  # next-admit monotonic; list = closure cell
+
+            async def _start_one(name: str, snap_gen: int) -> None:
+                account = self._accounts.get(name)
+                if account is None or account.runtime.generation != snap_gen:
+                    overtaken.append(name)  # stop/estop/remove won the race
+                    return
+                # admission pacing (no per-account sleep): wait until the
+                # next slot, then push it one stagger into the future
+                now = time.monotonic()
+                if now < admission[0]:
+                    await asyncio.sleep(admission[0] - now)
+                admission[0] = max(admission[0], time.monotonic()) + (
+                    stagger if stagger > 0 else 0.0)
+                account = self._accounts.get(name)
+                if account is None or account.runtime.generation != snap_gen:
+                    overtaken.append(name)  # a stop landed during the wait
+                    return
+                async with semaphore:
+                    try:
+                        await self.start(name)
+                        started.append(name)
+                    except Exception as exc:
+                        failed[name] = f"{type(exc).__name__}: {exc}"
+                        self._logger.exception(
+                            "failed to start account %s", name)
+
+            if pending:
+                await asyncio.gather(
+                    *[asyncio.create_task(_start_one(n, g))
+                      for n, g in pending])
+            report = {"started": sorted(started), "failed": failed,
+                      "skipped": skipped, "overtaken": sorted(overtaken)}
+            if not flight.done():
+                flight.set_result(report)
+            return report
+        finally:
+            self._start_all_flight = None
 
     async def stop_all(self) -> Dict[str, Any]:
         """Graceful shutdown of every account; logs and continues per account.
@@ -1652,6 +1765,7 @@ class AccountManager:
             cache=cache,
             settings_dict=settings_dict,
             ack_registry=self._ack_registry,
+            waiter_registry=self._waiter_registry,
             client_getter=lambda: self._client_of(account_name),
             api_cache_repo=self._api_cache,
             cooldowns=self._cooldowns,

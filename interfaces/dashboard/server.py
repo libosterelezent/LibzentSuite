@@ -68,6 +68,7 @@ import queue as thread_queue
 import signal
 import socket
 import threading
+import time as _time
 from dataclasses import asdict, is_dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -458,6 +459,10 @@ class DashboardServer:
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._clients: List[WebSocketClient] = []
+        # FINAL-PHASE (F3): shared per-tick stats snapshot (one API build
+        # per broadcast second, reused by per-client refreshes)
+        self._stats_snapshot: Optional[str] = None
+        self._stats_ts: float = 0.0
         self._clients_closed = False
         self._broadcaster: Optional[asyncio.Task] = None
         self._log_unsub: Optional[Any] = None
@@ -641,18 +646,28 @@ class DashboardServer:
 
     # ------------------------------------------------------------ broadcast
     def push_stats_to(self, client: WebSocketClient) -> Optional["concurrent.futures.Future[None]"]:
-        """Queue a fresh stats snapshot for one client (async fetch, thread-safe).
+        """Queue a stats snapshot for one client (async fetch, thread-safe).
 
         Returns the completion future (None when no loop is available) so
         callers can debounce on actual completion.
+
+        FINAL-PHASE (F3): reuses the shared per-tick snapshot when it is
+        fresh (<0.9s old — built by the broadcast loop) instead of
+        building a per-client status: a refresh-storming client costs
+        zero extra API builds within a tick.
         """
         if self._loop is None or self._loop.is_closed():
             return None
 
         async def _fetch_and_push() -> None:
             try:
-                status = await self._api.status()
-                client.push_json({"type": "stats", **status})
+                snapshot = self._stats_snapshot
+                if snapshot is None or _time.monotonic() - self._stats_ts >= 0.9:
+                    status = await self._api.status()
+                    snapshot = _dumps({"type": "stats", **status})
+                    self._stats_snapshot = snapshot
+                    self._stats_ts = _time.monotonic()
+                client.push_text(snapshot)
             except Exception as exc:  # never kill anything downstream
                 client.push_json({"type": "error", "error": str(exc)})
 
@@ -665,6 +680,8 @@ class DashboardServer:
         """Push a stats snapshot to every connected client once per second.
 
         AUDIT FIX: one API failure no longer permanently kills the loop.
+        FINAL-PHASE (F3): the payload is stored as the shared snapshot —
+        per-client refreshes within the tick reuse it (one build/tick).
         """
         try:
             while True:
@@ -678,7 +695,9 @@ class DashboardServer:
                 except Exception as exc:
                     LOG.warning("broadcast snapshot failed: %s", exc)
                     continue
-                payload = json.dumps({"type": "stats", **status})
+                payload = _dumps({"type": "stats", **status})
+                self._stats_snapshot = payload
+                self._stats_ts = _time.monotonic()
                 for client in list(self._clients):
                     client.push_text(payload)
         except asyncio.CancelledError:

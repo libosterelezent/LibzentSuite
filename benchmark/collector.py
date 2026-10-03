@@ -14,13 +14,20 @@ class PerfCollector:
     paths imports or consults it (profiling is opt-in by construction).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, alloc_hook: Any = None) -> None:
         self._records: Dict[str, List[float]] = {}
         self._errors: Dict[str, int] = {}
         self._counts: Dict[str, int] = {}
+        # FINAL-PHASE (F6): optional stage-exit allocation hook (the
+        # tracemalloc bench mode); None = zero overhead when unused.
+        self._alloc_hook = alloc_hook
 
     @contextmanager
     def stage(self, label: str) -> Iterator["PerfCollector"]:
+        import tracemalloc
+        enter_snap = (tracemalloc.take_snapshot()
+                      if self._alloc_hook is not None
+                      and tracemalloc.is_tracing() else None)
         start = time.perf_counter()
         try:
             yield self
@@ -29,6 +36,12 @@ class PerfCollector:
             raise
         finally:
             self.record_call(label, time.perf_counter() - start)
+            if enter_snap is not None and self._alloc_hook is not None:
+                try:  # snapshot AFTER the timer stops: hook cost stays out
+                    self._alloc_hook(label, enter_snap,
+                                     tracemalloc.take_snapshot())
+                except Exception:
+                    pass
 
     def timed(self, label: str) -> Callable:
         """Decorator for sync AND async functions."""

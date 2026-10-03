@@ -9,6 +9,7 @@ Guarantees (ported from the audited original):
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import time
 from dataclasses import dataclass, field
@@ -223,12 +224,38 @@ class ScenarioFinished(Event):
 
 
 class EventBus:
-    """Minimal async pub/sub with subclass-aware dispatch and error isolation."""
+    """Minimal async pub/sub with subclass-aware dispatch and error isolation.
+
+    FINAL-PHASE (F5-c): ``publish_nowait`` no longer creates one Task per
+    event (measured ~49µs/event of pure task machinery on the reference
+    box — 65% of the lean dispatch path, and the source of the ~22ms
+    burst-callback lag ceiling). Events append to a bounded FIFO drained
+    by ONE pending dispatcher task that yields every ``_slice_events``
+    events (or ``_slice_budget_s``), so a burst occupies the loop in
+    bounded slices instead of one long callback. Overflow drops the
+    NEWEST event (delivered sequences stay FIFO), counts it, and logs
+    burst-limited — today's unbounded ``_background`` growth under a
+    message flood becomes a bounded, observable degradation.
+    """
+
+    #: queue bound — headroom above the 10k PersistQueue cap (messages are
+    #: the flood class); at ~150µs/event fully-loaded this is ~1.5s of
+    #: sustained maximal burst before drops begin.
+    MAX_QUEUE = 20_000
+    #: dispatch slice: events per loop turn before yielding
+    SLICE_EVENTS = 128
+    #: dispatch slice: wall-seconds per loop turn before yielding
+    SLICE_BUDGET_S = 0.004
 
     def __init__(self) -> None:
         self._subs: Dict[Type[Event], List[Handler]] = {}
         # strong refs for fire-and-forget tasks (documented create_task hazard)
         self._background: set = set()
+        self._queue: "collections.deque[Event]" = collections.deque()
+        self._dispatcher: Optional["asyncio.Task[None]"] = None
+        self._dropped = 0
+        self._dispatched = 0
+        self._drop_log_gate = 0.0
 
     def subscribe(self, event_type: Type[Event], handler: Handler) -> Callable[[], None]:
         """Register handler for event_type (and its subclasses).
@@ -248,20 +275,82 @@ class EventBus:
     async def drain(self, timeout: float = 2.0) -> None:
         """Await the fire-and-forget dispatch backlog (shutdown tail).
 
-        publish_nowait defers dispatch to loop tasks; at shutdown those
-        orphans would be cancelled by loop close — this makes tail-event
-        delivery (AccountDisconnected etc.) contractual, not lucky.
+        publish_nowait defers dispatch to the coalesced dispatcher; at
+        shutdown those orphans would be cancelled by loop close — this
+        makes tail-event delivery (AccountDisconnected etc.) contractual,
+        not lucky. Re-checks the queue until stable (a handler publishing
+        during the drain is flushed by the same call).
         """
-        pending = [t for t in list(self._background) if not t.done()]
-        if pending:
-            await asyncio.wait(pending, timeout=timeout)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            pending = [t for t in list(self._background) if not t.done()]
+            if self._dispatcher is not None and not self._dispatcher.done():
+                pending.append(self._dispatcher)
+            if not pending and not self._queue:
+                return
+            if pending:
+                await asyncio.wait(pending,
+                                   timeout=max(0.0, deadline - loop.time()))
+            else:
+                await asyncio.sleep(0)
+            if loop.time() >= deadline:
+                if self._queue:
+                    LOG.warning(
+                        "bus drain timeout: %d events undelivered, "
+                        "%d dropped-total", len(self._queue), self._dropped)
+                return
 
-    def publish_nowait(self, event: Event) -> "asyncio.Task[List[Any]]":
-        """Fire-and-forget publish; safe from sync callbacks inside a loop."""
-        task = asyncio.get_running_loop().create_task(self.publish(event))
-        self._background.add(task)
-        task.add_done_callback(self._background.discard)
-        return task
+    def publish_nowait(self, event: Event) -> Optional["asyncio.Task[None]"]:
+        """Fire-and-forget publish; safe from sync callbacks inside a loop.
+
+        Returns the shared dispatcher task (or None on drop). No caller
+        consumes the return value (verified); the annotation change from
+        Task[List[Any]] is interface-level only.
+        """
+        if len(self._queue) >= self.MAX_QUEUE:
+            self._dropped += 1
+            now = time.monotonic()
+            if now - self._drop_log_gate > 1.0:  # burst-limited logging
+                self._drop_log_gate = now
+                LOG.error(
+                    "event bus overflow: dropped %s (queued=%d, "
+                    "dropped_total=%d)", type(event).__name__,
+                    len(self._queue), self._dropped)
+            return self._dispatcher
+        self._queue.append(event)
+        if self._dispatcher is None or self._dispatcher.done():
+            self._dispatcher = asyncio.get_running_loop().create_task(
+                self._drain_queue(), name="eventbus-dispatch")
+        return self._dispatcher
+
+    async def _drain_queue(self) -> None:
+        """Drain the FIFO in bounded slices (the burst-lag fix)."""
+        slice_start = time.monotonic()
+        count_in_slice = 0
+        while self._queue:
+            # empty-check and exit happen in the SAME step (no await between)
+            # so a publish racing the exit cannot lose its wakeup
+            event = self._queue.popleft()
+            self._dispatched += 1
+            try:
+                await self.publish(event)
+            except asyncio.CancelledError:
+                if outer_cancel_pending(unknown=True):
+                    self._queue.appendleft(event)  # put it back; we're dying
+                    raise
+                continue  # internal handler cancel: already isolated+logged
+            count_in_slice += 1
+            if (count_in_slice >= self.SLICE_EVENTS
+                    or time.monotonic() - slice_start >= self.SLICE_BUDGET_S):
+                count_in_slice = 0
+                slice_start = time.monotonic()
+                await asyncio.sleep(0)  # yield the loop: bounded occupancy
+
+    def stats(self) -> Dict[str, int]:
+        """Queue depth + counters (dashboard/observability)."""
+        return {"queued": len(self._queue), "dispatched": self._dispatched,
+                "dropped": self._dropped}
 
     async def publish(self, event: Event) -> List[Any]:
         """Invoke all matching handlers (sync or async), isolated per handler.
