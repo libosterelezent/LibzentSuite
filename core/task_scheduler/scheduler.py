@@ -230,6 +230,13 @@ class TaskScheduler:
         self._gate = _GrantGate()
         self._started = False
         self._stopping = False
+        # FINAL-PHASE (G2/R3): submit-depth observability + soft pressure
+        # (NO cap — admission control was evidence-rejected: every producer
+        # is an ack-awaiting sequential loop, structurally bounded by the
+        # 30s task-ack timeout cancel).
+        self._depth_hwm = 0
+        self._wait_samples: Deque[float] = deque(maxlen=_FINISHED_KEEP)
+        self._last_pressure_warn = 0.0
         self._stopped = False
         self._stop_latch: Optional["asyncio.Future[None]"] = None  # single-flight stop
         self._sweeping = False  # estop barrier: lanes must not start new sends
@@ -637,15 +644,39 @@ class TaskScheduler:
         return rows[-limit:] if limit > 0 else []
 
     def stats(self) -> dict:
-        """Scheduler counters from in-memory tallies (UI Overview page)."""
+        """Scheduler counters from in-memory tallies (UI Overview page).
+
+        FINAL-PHASE (G2): adds depth/HWM, oldest-queued age, per-priority
+        and per-account QUEUED breakdowns, queue-wait percentiles, and the
+        soft ``pressure`` signal (NORMAL/ELEVATED/PRESSURED/CRITICAL,
+        derived from depth-vs-accounts and age — thresholds grounded in
+        the pacing floor and the 30s task-ack budget; see pressure()).
+        Purely observational: calling stats() never mutates tasks. At
+        >=PRESSURED a rate-limited WARNING is logged (max 1/min) — tasks
+        are NEVER expired or rejected by telemetry.
+        """
         live = list(self._tasks.values())
         durations = [
             float(r.get("duration_s") or 0.0)
             for r in self._finished_rows
             if r.get("status") == STATUS_COMPLETED
         ]
+        queued = [t for t in live if t.status == STATUS_QUEUED]
+        pressure = self.pressure()
+        rank = {"PRESSURED": 2, "CRITICAL": 3}
+        if (rank.get(pressure["level"], 0) >= 2
+                and time.monotonic() - self._last_pressure_warn >= 60.0):
+            self._last_pressure_warn = time.monotonic()
+            self._log(
+                "warning",
+                f"scheduler pressure {pressure['level']}: depth="
+                f"{pressure['depth']} accounts={pressure['accounts']} "
+                f"oldest={pressure['oldest_queued_age_s']:.1f}s "
+                f"max_lane={pressure['max_lane_depth']} — watch for "
+                "producer backpressure (telemetry only; nothing dropped)")
+        waits = sorted(self._wait_samples)
         return {
-            "queued": sum(1 for t in live if t.status == STATUS_QUEUED),
+            "queued": len(queued),
             "running": sum(1 for t in live if t.status == STATUS_RUNNING),
             "completed": self._counts[STATUS_COMPLETED],
             "failed": self._counts[STATUS_FAILED],
@@ -653,7 +684,60 @@ class TaskScheduler:
             "timed_out": self._counts[STATUS_TIMED_OUT],
             "avg_duration_s": round(sum(durations) / len(durations), 3) if durations else 0.0,
             "workers": sum(1 for t in self._lanes.values() if not t.done()),
+            # G2 additions
+            "queued_depth_hwm": self._depth_hwm,
+            "oldest_queued_age_s": round(pressure["oldest_queued_age_s"], 3),
+            "queued_by_priority": {
+                p.name: sum(1 for t in queued if t.priority == p.value)
+                for p in Priority},
+            "queued_by_account": pressure["queued_by_account"],
+            "wait_p50_s": round(waits[len(waits) // 2], 4) if waits else 0.0,
+            "wait_p95_s": round(waits[int(len(waits) * 0.95)], 4)
+            if waits else 0.0,
+            "wait_p99_s": round(waits[min(len(waits) - 1,
+                                          int(len(waits) * 0.99))], 4)
+            if waits else 0.0,
+            "pressure": pressure["level"],
         }
+
+    def pressure(self) -> dict:
+        """Soft pressure signal (FINAL-PHASE G2; pure, no mutation).
+
+        Threshold grounding: steady-state queued depth ≈ 1 per producing
+        (account, plugin) pair ≈ accounts, so 2×/4×/8× the account count
+        marks departure/backup/pathological. Age thresholds anchor to the
+        30s task-ack budget: 5s ≈ 3 pacing-floor slots, 12s ≈ 40% of the
+        budget, 20s ≈ 2/3 (first producer ack-timeout ~10s away). Per-lane
+        bounds catch one hot account hiding in benign fleet totals.
+        """
+        now = time.time()
+        queued = [t for t in self._tasks.values() if t.status == STATUS_QUEUED]
+        depth = len(queued)
+        self._depth_hwm = max(self._depth_hwm, depth)
+        n = max(1, len(self._queues))
+        try:
+            floor = float(getattr(self._limiter, "floor_value",
+                                  lambda: 1.5)())
+        except Exception:
+            floor = 1.5
+        oldest = max((now - t.submitted_at for t in queued
+                      if t.submitted_at), default=0.0)
+        per_account: Dict[str, int] = {}
+        for t in queued:
+            per_account[t.account] = per_account.get(t.account, 0) + 1
+        max_lane = max(per_account.values(), default=0)
+        level = "NORMAL"
+        if depth > 2 * n or oldest > max(5.0, 3 * floor) or max_lane > 4:
+            level = "ELEVATED"
+        if depth > 4 * n or oldest > max(12.0, 8 * floor) or max_lane > 8:
+            level = "PRESSURED"
+        if depth > 8 * n or oldest > max(20.0, 12 * floor) or max_lane > 12:
+            level = "CRITICAL"
+        return {"level": level, "depth": depth, "accounts": n,
+                "pacing_floor_s": floor,
+                "oldest_queued_age_s": oldest,
+                "max_lane_depth": max_lane,
+                "queued_by_account": per_account}
 
     # ---------------------------------------------------- worker machinery
     async def _lane(self, account: str) -> None:
@@ -776,6 +860,10 @@ class TaskScheduler:
                 if task.status == STATUS_QUEUED:  # first attempt: queued -> running
                     task.status = STATUS_RUNNING
                     task.started_at = time.time()
+                    # G2: queue-wait sample (both wall-clock stamps on Task)
+                    self._wait_samples.append(
+                        max(0.0, task.started_at - (task.submitted_at
+                                                    or task.started_at)))
                     started_mono = time.monotonic()
                     self._emit(TaskStarted(account=task.account, task_id=task.id, action=task.action))
 

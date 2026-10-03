@@ -440,8 +440,16 @@ class StdlibBridge(logging.Handler):
             # INBOUND path: suppress the outbound mirror for this record on
             # this thread (its stderr print already happened at the original
             # stdlib call; re-mirroring double-prints and re-enters the tree)
+            # FINAL-PHASE (G3): structured context passthrough — extra=
+            # account/plugin fields ride the LogRecord; today no bridge
+            # caller sets them (attribution flows via the logger NAME),
+            # but future context-based loggers get correct entry fields
+            # without another bridge change.
             with self._service.ingest_context():
-                self._service.record(severity, source, record.getMessage())
+                self._service.record(
+                    severity, source, record.getMessage(),
+                    account=getattr(record, "account", None),
+                    plugin=getattr(record, "plugin", None))
         except Exception:  # a logging bridge must never raise
             pass
 

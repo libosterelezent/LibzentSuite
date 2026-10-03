@@ -274,9 +274,13 @@ class FakeClient:
     """In-memory DiscordClient: connect/send/open_dm/drop/receive."""
 
     def __init__(self, *, fail_connect: bool = False, snapshot=None,
-                 user_id: int = 555, latency_ms: float = 42.0) -> None:
+                 user_id: int = 555, latency_ms: float = 42.0,
+                 fail_message: str = "login failed: invalid token") -> None:
         self.connected = False
         self.fail_connect = fail_connect
+        self.fail_message = fail_message  # G8: default matches NONE of the
+        # auth markers; pass an auth-shaped message to exercise the
+        # INVALID_CREDENTIAL classification (see _AUTH_ERROR_MARKERS)
         self.user_id: Optional[int] = None
         self._user_id = user_id
         self.latency_ms = latency_ms
@@ -290,7 +294,7 @@ class FakeClient:
 
     async def connect(self) -> None:
         if self.fail_connect:
-            raise ConnectionError("login failed: invalid token")
+            raise ConnectionError(self.fail_message)
         self.connected = True
         self.user_id = self._user_id
 

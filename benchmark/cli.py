@@ -15,7 +15,7 @@ from typing import Any, Dict, List
 from benchmark import SCHEMA
 from benchmark.collector import PerfCollector
 from benchmark.report import compare, load_json, render_table, to_json
-from benchmark.sampler import SamplerSession
+from benchmark.sampler import SamplerSession, SpikeCapture
 
 from benchmark.scenarios import BENCH_SCENARIOS
 
@@ -66,6 +66,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="tracemalloc frame depth (default 1)")
     parser.add_argument("--trace-top", type=int, default=10,
                         help="top-N allocation sites per boundary")
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="re-run each scenario N times; report "
+                             "median/min/max per metric (refused with "
+                             "--profile/--tracemalloc)")
+    parser.add_argument("--capture-spikes", action="store_true",
+                        help="capture diagnostic snapshots on loop-lag/RSS "
+                             "spikes (DEEP_DIAGNOSTIC mode, excluded from "
+                             "compare; combinable with --tracemalloc)")
     parser.add_argument("--quiet", action="store_true")
     return parser
 
@@ -100,78 +108,121 @@ async def run_suite(args: NS) -> Dict[str, Any]:
         },
         "scenarios": [],
     }
+    # FINAL-PHASE (G1/R1): enable DB worker telemetry for the bench process
+    # only (production keeps the zero-overhead default). Telemetry overhead
+    # is <0.5%/op so benchmark-mode numbers STAY comparable — unlike
+    # --profile runs, which remain compare-excluded.
+    from database.telemetry import TELEMETRY
+    TELEMETRY.enabled = True
+    run_mode = _run_mode(args)
+    report["meta"]["run_mode"] = run_mode
     started = time.perf_counter()
-    for name in names:
-        scenario = BENCH_SCENARIOS[name]
-        cycles = args.cycles if args.cycles is not None else scenario.default_cycles
-        if not args.quiet:
-            print(f"== running {name} (cycles={cycles}) ...", flush=True)
-        session = SamplerSession(
-            sampling_ms=args.sampling_ms,
-            loop_interval_ms=args.loop_interval_ms,
-            task_interval_ms=args.task_interval_ms)
-        # FINAL-PHASE (F6): per-mode wrapping. Profiled runs are marked
-        # and excluded from compare verdicts (profiler overhead makes
-        # their numbers non-comparable — documented in the README).
-        alloc_hook = None
-        stage_allocs: dict = {}
-        if getattr(args, "tracemalloc", False):
-            from benchmark.profiling import make_alloc_hook
-            alloc_hook, stage_allocs = make_alloc_hook(args.trace_top)
-        perf = PerfCollector(alloc_hook=alloc_hook)
-        # reset the per-run leak trackers (module-level series)
-        scenario.run._rss_series = []
-        scenario.run._task_series = []
-        if getattr(args, "tracemalloc", False):
-            from benchmark.profiling import trace_reset
-            trace_reset()
-            import tracemalloc as _tm
-            start_snap = _tm.take_snapshot()
+    try:
+        for name in names:
+            scenario = BENCH_SCENARIOS[name]
+            cycles = (args.cycles if args.cycles is not None
+                      else scenario.default_cycles)
+            if not args.quiet:
+                print(f"== running {name} (cycles={cycles}) ...", flush=True)
+            TELEMETRY.reset()
+            repeats = max(1, int(getattr(args, "repeat", 1)))
+            run_results: List[Dict[str, Any]] = []
+            all_spikes: List[dict] = []
+            for _rep in range(repeats):
+                session = SamplerSession(
+                    sampling_ms=args.sampling_ms,
+                    loop_interval_ms=args.loop_interval_ms,
+                    task_interval_ms=args.task_interval_ms,
+                    spike_capture=(SpikeCapture()
+                                   if getattr(args, "capture_spikes", False)
+                                   else None))
+                # FINAL-PHASE (F6): per-mode wrapping. Profiled runs are marked
+                # and excluded from compare verdicts (profiler overhead makes
+                # their numbers non-comparable — documented in the README).
+                alloc_hook = None
+                stage_allocs: dict = {}
+                if getattr(args, "tracemalloc", False):
+                    from benchmark.profiling import make_alloc_hook
+                    alloc_hook, stage_allocs = make_alloc_hook(args.trace_top)
+                perf = PerfCollector(alloc_hook=alloc_hook)
+                # reset the per-run leak trackers (module-level series)
+                scenario.run._rss_series = []
+                scenario.run._task_series = []
+                if getattr(args, "tracemalloc", False):
+                    from benchmark.profiling import trace_reset
+                    trace_reset()
+                    import tracemalloc as _tm
+                    start_snap = _tm.take_snapshot()
 
-        async def _run_scenario():
-            return await scenario.run(
-                session, perf, accounts=args.accounts,
-                duration=args.duration, cycles=cycles,
-                records=args.records, messages=args.messages,
-                burst=args.burst, ops=args.ops, keys=args.keys,
-                waiters=args.waiters, severity=args.severity)
+                async def _run_scenario():
+                    return await scenario.run(
+                        session, perf, accounts=args.accounts,
+                        duration=args.duration, cycles=cycles,
+                        records=args.records, messages=args.messages,
+                        burst=args.burst, ops=args.ops, keys=args.keys,
+                        waiters=args.waiters, severity=args.severity)
 
-        if getattr(args, "profile", False):
-            from benchmark.profiling import cprofile_scope, pstats_top
-            profile_dir = args.profile_dir or "state/benchmarks/profiles"
-            dump_path = os.path.join(profile_dir, f"{name}.pstats")
-            with cprofile_scope(dump_path) as prof:
-                result = await _run_scenario()
-            result["profiled"] = True
-            result["profile"] = {
-                "mode": "cprofile", "pstats": dump_path,
-                **pstats_top(prof, args.profile_top)}
-        else:
-            result = await _run_scenario()
+                if getattr(args, "profile", False):
+                    from benchmark.profiling import cprofile_scope, pstats_top
+                    profile_dir = args.profile_dir or "state/benchmarks/profiles"
+                    dump_path = os.path.join(profile_dir, f"{name}.pstats")
+                    with cprofile_scope(dump_path) as prof:
+                        result = await _run_scenario()
+                    result["profiled"] = True
+                    result["profile"] = {
+                        "mode": "cprofile", "pstats": dump_path,
+                        **pstats_top(prof, args.profile_top)}
+                else:
+                    result = await _run_scenario()
 
-        if getattr(args, "tracemalloc", False):
-            import tracemalloc as _tm
-            end_snap = _tm.take_snapshot()
-            current, peak = _tm.get_traced_memory()
-            result["profiled"] = True
-            result.setdefault("profile", {"mode": "tracemalloc"})
-            result.setdefault("custom", {})
-            result["custom"]["allocations"] = {
-                "total": top_sites_safe(end_snap, start_snap,
-                                        args.trace_top),
-                "stages": stage_allocs,
-                "peak_traced_kb": round(peak / 1024.0, 1),
-                "traced_end_kb": round(current / 1024.0, 1),
-            }
+                if getattr(args, "tracemalloc", False):
+                    import tracemalloc as _tm
+                    end_snap = _tm.take_snapshot()
+                    current, peak = _tm.get_traced_memory()
+                    result["profiled"] = True
+                    result.setdefault("profile", {"mode": "tracemalloc"})
+                    result.setdefault("custom", {})
+                    result["custom"]["allocations"] = {
+                        "total": top_sites_safe(end_snap, start_snap,
+                                                args.trace_top),
+                        "stages": stage_allocs,
+                        "peak_traced_kb": round(peak / 1024.0, 1),
+                        "traced_end_kb": round(current / 1024.0, 1),
+                    }
+                # G1: worker telemetry block (own label — never conflated with
+                # MAIN_THREAD_FUNCTION_PROFILE data)
+                result["worker_telemetry"] = TELEMETRY.snapshot()
+                if session.spike_capture is not None:
+                    all_spikes.extend(session.spike_capture.captures)
+                run_results.append(result)
+            # per-run trackers reset for the next repeat
+            scenario.run._rss_series = getattr(
+                scenario.run, "_rss_series", []) and []
+        result = run_results[0]
+        if repeats > 1:
+            from benchmark.report import aggregate_repeats
+            result["repeat"] = aggregate_repeats(run_results)
+            result["passed"] = all(r.get("passed") for r in run_results)
+        if all_spikes:
+            result["spikes"] = all_spikes[:20]
+            result["spikes_truncated"] = len(all_spikes) > 20
+        if getattr(args, "capture_spikes", False):
+            result["profiled"] = True  # DEEP_DIAGNOSTIC: compare-excluded
         result["name"] = name
         result["cycles"] = cycles
-        result.setdefault("mode", "production-boot")
+        result.setdefault("mode", run_mode)
         report["scenarios"].append(result)
-    report["meta"]["duration_s"] = round(time.perf_counter() - started, 2)
-    if getattr(args, "tracemalloc", False):
-        import tracemalloc as _tm
-        _tm.stop()  # restore zero overhead after the suite
-    return report
+        report["meta"]["duration_s"] = round(time.perf_counter() - started, 2)
+        return report
+    finally:
+        # FINAL-PHASE (G8 fix #1): hooks ALWAYS restore — a raising scenario
+        # must not leave tracemalloc tracing (2x dealloc overhead) in a
+        # still-running process.
+        if getattr(args, "tracemalloc", False):
+            import tracemalloc as _tm
+            if _tm.is_tracing():
+                _tm.stop()
+        TELEMETRY.enabled = False
 
 
 def top_sites_safe(end_snap: Any, start_snap: Any, n: int) -> List[dict]:
@@ -180,6 +231,18 @@ def top_sites_safe(end_snap: Any, start_snap: Any, n: int) -> List[dict]:
         return top_sites(end_snap.compare_to(start_snap, "lineno"), n)
     except Exception:
         return []
+
+
+def _run_mode(args: NS) -> str:
+    """G5: run-mode label — one of BASELINE / PROFILED / MEMORY_PROFILED /
+    DEEP_DIAGNOSTIC. Profiled and diagnostic runs are compare-excluded."""
+    if getattr(args, "capture_spikes", False):
+        return "DEEP_DIAGNOSTIC"
+    if getattr(args, "tracemalloc", False):
+        return "MEMORY_PROFILED"
+    if getattr(args, "profile", False):
+        return "PROFILED"
+    return "BASELINE"
 
 
 def run_bench_cli(argv: List[str] | None = None) -> int:
@@ -194,6 +257,18 @@ def run_bench_cli(argv: List[str] | None = None) -> int:
     if args.profile and args.save_baseline:
         raise SystemExit(
             "refusing --save-baseline: profiled numbers are not comparable")
+    if args.repeat > 1 and (args.profile or args.tracemalloc):
+        raise SystemExit(
+            "--repeat requires an unprofiled run (profiler overhead/"
+            "attribution makes repeats meaningless)")
+    if args.capture_spikes and args.profile:
+        raise SystemExit(
+            "--capture-spikes with --profile would self-observe profiler "
+            "overhead as spikes")
+    if args.capture_spikes and args.save_baseline:
+        raise SystemExit(
+            "refusing --save-baseline: DEEP_DIAGNOSTIC runs are not "
+            "comparable")
     if args.tracemalloc:
         import tracemalloc as _tm
         _tm.start(args.trace_depth)

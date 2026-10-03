@@ -51,6 +51,7 @@ class ProcessSampler:
         self._ru0: Tuple[float, float] = (0.0, 0.0)
         self._t0: float = 0.0
         self._linux = os.path.isdir("/proc/self")
+        self._on_rss: Optional[Any] = None  # G5 spike hook (session-set)
 
     # ------------------------------------------------------------ lifecycle
     def start(self) -> None:
@@ -102,6 +103,11 @@ class ProcessSampler:
     def _sample(self) -> None:
         rss = self._rss_kb()
         if rss is not None:
+            if self._on_rss is not None and len(self._rss) >= 1:  # G5 hook
+                try:
+                    self._on_rss(self._rss[-1], rss)
+                except Exception:
+                    pass
             self._rss.append(rss)
         self._fds.append(self._fd_count())
 
@@ -133,6 +139,7 @@ class LoopLagMonitor:
         self._hist: List[int] = [0] * len(self.EDGES_MS)
         self._count = 0
         self._max_s = 0.0
+        self._on_lag: Optional[Any] = None  # G5 spike hook (session-set)
 
     def start(self) -> None:
         self._task = asyncio.get_running_loop().create_task(self._run())
@@ -161,6 +168,11 @@ class LoopLagMonitor:
         if lag_s > self._max_s:
             self._max_s = lag_s
         self._hist[bisect_left(self.EDGES_MS, lag_s * 1000.0)] += 1
+        if self._on_lag is not None:  # G5 spike hook
+            try:
+                self._on_lag(lag_s)
+            except Exception:
+                pass
 
     def _percentile_ms(self, q: float) -> float:
         if not self._count:
@@ -238,14 +250,88 @@ class TaskSampler:
         }
 
 
+class SpikeCapture:
+    """G5: debounced diagnostic snapshot on loop-lag / RSS spikes.
+
+    Self-relative thresholds (no stored baseline at runtime): a lag sample
+    > K× the run's own p50 (with a floor for stall-hunt mode) or an RSS
+    jump > 32 MB between samples triggers ONE capture per 2s window, capped
+    at 20. Snapshot content: trigger detail + any registered provider's
+    stats() (scheduler/bus/logs) — sync-only, µs-ms, value-free. Spikes
+    NEVER enter compare metrics (diagnostic only). Runs under
+    --capture-spikes are labeled DEEP_DIAGNOSTIC and compare-excluded.
+    """
+
+    def __init__(self, *, k_lag: float = 10.0, floor_ms: float = 25.0,
+                 rss_jump_mb: float = 32.0, debounce_s: float = 2.0,
+                 cap: int = 20) -> None:
+        self.k_lag = float(k_lag)
+        self.floor_ms = float(floor_ms)
+        self.rss_jump_mb = float(rss_jump_mb)
+        self.debounce_s = float(debounce_s)
+        self.cap = int(cap)
+        self.captures: List[dict] = []
+        self.capture_ctx: Dict[str, Any] = {}  # providers (scenario-set)
+        self._last_capture = 0.0
+        import time as _time
+        self._now = _time.monotonic
+
+    # ------------------------------------------------------------ triggers
+    def on_lag(self, monitor: "LoopLagMonitor", lag_s: float) -> None:
+        lag_ms = lag_s * 1000.0
+        p50 = monitor._percentile_ms(0.50)
+        if lag_ms <= max(self.k_lag * p50, self.floor_ms):
+            return
+        self._fire({"kind": "lag", "lag_ms": round(lag_ms, 2),
+                    "p50_ms": round(p50, 2)})
+
+    def on_rss(self, prev_kb: int, now_kb: int) -> None:
+        if (now_kb - prev_kb) / 1024.0 <= self.rss_jump_mb:
+            return
+        self._fire({"kind": "rss", "jump_mb": round(
+            (now_kb - prev_kb) / 1024.0, 1)})
+
+    def _fire(self, trigger: dict) -> None:
+        now = self._now()
+        if now - self._last_capture < self.debounce_s:
+            return
+        if len(self.captures) >= self.cap:
+            return
+        self._last_capture = now
+        capture: Dict[str, Any] = {"t_s": round(now, 3), "trigger": trigger}
+        for label, provider in self.capture_ctx.items():
+            stats = getattr(provider, "stats", None)
+            if callable(stats):
+                try:
+                    capture[label] = stats()
+                except Exception:
+                    pass
+        self.captures.append(capture)
+
+
 class SamplerSession:
     """One facade per scenario: owns all samplers + leak-snapshot helper."""
 
     def __init__(self, *, sampling_ms: int = 100, loop_interval_ms: int = 5,
-                 task_interval_ms: int = 1000) -> None:
+                 task_interval_ms: int = 1000,
+                 spike_capture: Optional[SpikeCapture] = None) -> None:
         self.process = ProcessSampler(sampling_ms / 1000.0)
         self.lag = LoopLagMonitor(loop_interval_ms / 1000.0)
         self.tasks = TaskSampler(task_interval_ms / 1000.0)
+        self.spike_capture = spike_capture
+        if spike_capture is not None:
+            capture = spike_capture
+            monitor = self.lag
+            sampler = self.process
+
+            def _on_lag(lag_s: float) -> None:
+                capture.on_lag(monitor, lag_s)
+
+            def _on_rss(prev_kb: int, now_kb: int) -> None:
+                capture.on_rss(prev_kb, now_kb)
+
+            self.lag._on_lag = _on_lag          # type: ignore[attr-defined]
+            self.process._on_rss = _on_rss      # type: ignore[attr-defined]
 
     def start(self) -> None:
         gc.collect()

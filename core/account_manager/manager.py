@@ -88,6 +88,42 @@ from .services import AccountPluginServices, MessageWaiterRegistry, TaskAckRegis
 #: account names share the profile namespace style (may start with a digit)
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
+
+def _forget_account_loggers(name: str) -> None:
+    """FINAL-PHASE (G3/R4): prune a removed account's loggerDict subtree.
+
+    Per-account logger NAMES were kept deliberately (attribution is
+    name-derived end-to-end: bridge name→source, dashboard display, CLI,
+    DB rows — migrating to structured context would orphan it), but
+    stdlib never frees them, so distinct-name churn grew loggerDict
+    forever (+~3 entries per account ever seen). Pruning OUR OWN
+    ``slaughtermudae.<name>*`` subtree in the removal cascade bounds
+    retention to LIVE accounts — the same forget-idiom as every other
+    mirror (K14/K15/F1).
+
+    Safety (constraint: never blind-manipulate loggerDict): we delete
+    only names we created, under our own namespace, with the exact
+    shapes the two creation sites emit; ``_clear_cache()`` (3.11+) then
+    invalidates stdlib's cached placeHolder/parent lookups. A
+    still-referenced Logger object keeps working (propagation follows
+    the OBJECT graph); only the dict entry is dropped, so a later
+    getLogger of the same name re-creates it cleanly.
+    """
+    try:
+        manager = logging.Logger.manager
+        prefix = f"slaughtermudae.{name}"
+        doomed = [key for key in manager.loggerDict
+                  if key == prefix or key.startswith(prefix + ".")
+                  or key == f"slaughtermudae.adapter.{name}"]
+        for key in doomed:
+            manager.loggerDict.pop(key, None)
+        if doomed:
+            clear = getattr(manager, "_clear_cache", None)
+            if callable(clear):
+                clear()
+    except Exception:  # logging internals drift: never break removal
+        pass
+
 #: fallback reconnect policy when the settings manager is unavailable/blank
 _DEFAULT_RECONNECT = {"initial": 1.0, "max": 60.0, "multiplier": 2.0}
 
@@ -577,6 +613,7 @@ class AccountManager:
             except Exception:
                 self._logger.exception(
                     "waiter registry cascade failed for %s", name)
+        _forget_account_loggers(name)  # FINAL-PHASE (G3/R4): loggerDict
         # PHASE-4 (S1-F3): final identity check before the irreversible DB
         # row delete — the cascade has had many await windows above.
         current = self._accounts.get(name)

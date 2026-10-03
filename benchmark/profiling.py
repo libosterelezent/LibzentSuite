@@ -31,6 +31,8 @@ def cprofile_scope(dump_path: str) -> Iterator[cProfile.Profile]:
         try:
             os.makedirs(os.path.dirname(dump_path) or ".", exist_ok=True)
             prof.dump_stats(dump_path)
+            if os.name == "posix":  # G7: diagnostics stay private
+                os.chmod(dump_path, 0o600)
         except OSError:
             pass
 

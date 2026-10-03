@@ -37,7 +37,10 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from time import perf_counter
 from typing import Any, AsyncIterator, List, Optional, Sequence
+
+from .telemetry import TELEMETRY
 
 import aiosqlite
 
@@ -149,6 +152,7 @@ class DatabaseConnection:
                 pass
             raise
         self._conn = conn
+        TELEMETRY.set_worker_thread(conn)  # G1: worker TID for thread CPU
 
     async def close(self, timeout: float = CLOSE_TIMEOUT_S) -> None:
         """Close the connection (idempotent; safe during shutdown).
@@ -187,6 +191,20 @@ class DatabaseConnection:
         """
         async with self._guard.hold() as outer:
             conn = self._require()
+            if TELEMETRY.enabled:
+                _t0 = perf_counter()
+                _ok = True
+                try:
+                    await conn.execute(sql, tuple(params))
+                    if outer:
+                        await conn.commit()
+                except BaseException:
+                    _ok = False
+                    raise
+                finally:
+                    TELEMETRY.record("write_stmt", perf_counter() - _t0,
+                                     ok=_ok)
+                return
             await conn.execute(sql, tuple(params))
             if outer:
                 await conn.commit()
@@ -195,6 +213,13 @@ class DatabaseConnection:
                         params: Sequence[Any] = ()) -> List[aiosqlite.Row]:
         async with self._guard.hold():
             conn = self._require()
+            if TELEMETRY.enabled:
+                _t0 = perf_counter()
+                try:
+                    async with conn.execute(sql, tuple(params)) as cursor:
+                        return list(await cursor.fetchall())
+                finally:
+                    TELEMETRY.record("read", perf_counter() - _t0)
             async with conn.execute(sql, tuple(params)) as cursor:
                 return list(await cursor.fetchall())
 
@@ -202,6 +227,13 @@ class DatabaseConnection:
                         params: Sequence[Any] = ()) -> Optional[aiosqlite.Row]:
         async with self._guard.hold():
             conn = self._require()
+            if TELEMETRY.enabled:
+                _t0 = perf_counter()
+                try:
+                    async with conn.execute(sql, tuple(params)) as cursor:
+                        return await cursor.fetchone()
+                finally:
+                    TELEMETRY.record("read", perf_counter() - _t0)
             async with conn.execute(sql, tuple(params)) as cursor:
                 return await cursor.fetchone()
 
@@ -217,6 +249,25 @@ class DatabaseConnection:
             conn = self._require()
             if not outer:
                 yield conn
+                return
+            if TELEMETRY.enabled:
+                _t0 = perf_counter()
+                _ok = True
+                try:
+                    yield conn
+                    _tc = perf_counter()
+                    await conn.commit()
+                    TELEMETRY.record("commit", perf_counter() - _tc)
+                except BaseException:
+                    _ok = False
+                    try:
+                        await conn.rollback()
+                    except Exception:
+                        LOG.debug("rollback failed", exc_info=True)
+                    raise
+                finally:
+                    TELEMETRY.record("transaction", perf_counter() - _t0,
+                                     ok=_ok)
                 return
             try:
                 yield conn

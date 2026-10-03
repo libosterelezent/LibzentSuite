@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import statistics
 from typing import Any, Dict, List, Optional
 
 SCHEMA = "sm-bench/1"
@@ -44,7 +46,45 @@ def _flat_metrics(report: Dict[str, Any]) -> Dict[str, float]:
     for k, v in custom.items():
         if isinstance(v, (int, float)):
             out[f"custom.{k}"] = float(v)
+    # G5: with --repeat, the MEDIAN across runs is the authoritative value
+    # (mechanizes the README's manual median rule); spikes are diagnostic
+    # only and never enter compare metrics.
+    rep = report.get("repeat")
+    if rep:
+        for metric, agg in rep.get("metrics", {}).items():
+            med = agg.get("median")
+            if med is not None:
+                out[metric] = float(med)
     return out
+
+
+def aggregate_repeats(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """G5: median/min/max per flat metric across N repeat runs."""
+    flats = [_flat_metrics(r) for r in results]
+    keys: List[str] = []
+    for flat in flats:
+        for k in flat:
+            if k not in keys:
+                keys.append(k)
+    metrics: Dict[str, Any] = {}
+    for key in keys:
+        samples = [f[key] for f in flats if key in f]
+        if not samples:
+            continue
+        entry: Dict[str, Any] = {
+            "median": round(statistics.median(samples), 4),
+            "min": round(min(samples), 4),
+            "max": round(max(samples), 4),
+            "samples": samples,
+        }
+        if len(samples) >= 5:
+            ordered = sorted(samples)
+            entry["p95"] = round(ordered[min(len(ordered) - 1,
+                                             int(len(ordered) * 0.95))], 4)
+        metrics[key] = entry
+    return {"n": len(results), "metrics": metrics,
+            "leak_verdicts": [r.get("leak", {}).get("verdict")
+                              for r in results]}
 
 
 def _verdict(metric: str, before: float, after: float) -> str:
@@ -133,7 +173,17 @@ def render_table(report: Dict[str, Any]) -> str:
 
 
 def to_json(report: Dict[str, Any], path: str) -> None:
-    with open(path, "w", encoding="utf-8") as fh:
+    """Write the report JSON 0600 on POSIX (G7: diagnostics artifacts carry
+    operational metadata — machine paths, argv — keep them private)."""
+    fd = None
+    if os.name == "posix":
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        except OSError:
+            fd = None
+    fh = os.fdopen(fd, "w", encoding="utf-8") if fd is not None \
+        else open(path, "w", encoding="utf-8")
+    with fh:
         json.dump(report, fh, indent=1, sort_keys=True)
 
 
