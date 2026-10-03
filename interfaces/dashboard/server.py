@@ -357,6 +357,8 @@ class WebSocketClient:
                             self._drain()
                             return
                         self._handle_text(text)
+                    elif opcode == wsproto.OP_PONG:
+                        pass  # unsolicited pongs are legal (RFC 6455 §5.5.3)
                     elif opcode in (wsproto.OP_CONT, wsproto.OP_BINARY):
                         # one-word app protocol: fragmentation and binary
                         # frames are protocol violations, not data

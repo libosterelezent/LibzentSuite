@@ -452,13 +452,6 @@ class AccountManager:
                 await outcome
         except Exception:
             self._logger.exception("plugin detach failed for %s", name)
-        if self._settings is not None:
-            try:  # in-memory settings layers must not survive removal — a
-                forget = getattr(self._settings, "forget_account", None)
-                if forget is not None:  # re-created same-named account would
-                    forget(name)  # inherit the old account's plugin settings
-            except Exception:
-                self._logger.exception("settings forget failed for %s", name)
         if self._api_cache is not None:
             try:  # persisted DM/user rows are keyed by NAME: a re-created
                 await self._api_cache.drop_account(name)  # account must not

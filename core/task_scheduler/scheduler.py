@@ -569,23 +569,9 @@ class TaskScheduler:
         return False
 
     async def forget_account(self, account: str) -> int:
-        """Drop a REMOVED account's parked lane, queue and event (cleanup).
-
-        Cancels the account's tasks first (same as cancel_matching), then
-        tears the idle lane down so long-running processes don't accumulate
-        one parked coroutine + heap + event per removed account name.
-        Returns tasks cancelled. No-op for unknown accounts.
-        """
-        count = self.cancel_matching(account=account)
-        lane = self._lanes.pop(account, None)
-        event = self._lane_events.pop(account, None)
-        self._queues.pop(account, None)
-        if event is not None:
-            event.set()  # un-park the lane so it can observe cancellation
-        if lane is not None and not lane.done():
-            lane.cancel()
-            await asyncio.gather(lane, return_exceptions=True)
-        return count
+        """Compat alias for cleanup_account (phase-3 name). See K1."""
+        await self.cleanup_account(account)
+        return 0
 
     def cancel_matching(
         self, *, account: Optional[str] = None, plugin: Optional[str] = None, action: Optional[str] = None

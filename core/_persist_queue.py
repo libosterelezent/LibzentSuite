@@ -46,6 +46,7 @@ class PersistQueue:
         self._lock = threading.Lock()
         self._worker: Optional["asyncio.Task"] = None
         self._stopping = False
+        self._draining: Optional["asyncio.Future[None]"] = None
         self._repo: Any = None
         self._batch = 50
         self._interval = 0.25  # floor below: 0 would busy-spin the loop
@@ -81,10 +82,17 @@ class PersistQueue:
             return self._worker
         if self.active:
             return self._worker
+        if self._stopping:
+            # a stop is still draining: wait it out, else clearing _stopping
+            # here would RESURRECT the old worker's loop and two workers
+            # would share the queue/_carry (order + duplication bugs)
+            draining = self._draining
+            if draining is not None:
+                await asyncio.wait({asyncio.shield(draining)}, timeout=5.0)
+            self._stopping = False
         self._repo = repo
         self._batch = max(1, int(batch))
         self._interval = max(0.05, float(interval))
-        self._stopping = False
         self._worker = asyncio.get_running_loop().create_task(
             self._run(), name=f"{self._label}-persistence")
         return self._worker
