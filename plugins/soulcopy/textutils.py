@@ -19,10 +19,10 @@ HEADER_MARKER = "Soulmates"
 
 def strip_page_header(page: str) -> List[str]:
     """One DM page -> its lines, minus the 'Soulmates' header block when present."""
-    lines = page.split("\n")
+    lines = (page or "").split("\n")
     if lines and HEADER_MARKER in lines[0]:
         lines = lines[2:]
-    return [line for line in lines if line != ""]
+    return [line for line in lines if line.strip()]
 
 
 def collapse_pages(pages: Iterable[str]) -> str:

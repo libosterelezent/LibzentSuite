@@ -119,6 +119,10 @@ def _install_headers_fetch_cache(discord: Any, ttl: float = _HEADERS_CACHE_TTL) 
         _headers_patch_installed = False
 
 
+_MESSAGE_DEDUP_WINDOW_S = 120.0
+_MESSAGE_DEDUP_MAX = 512
+
+
 def _header(headers: Any, name: str) -> Optional[str]:
     """Case-tolerant header lookup (library header dicts vary in casing)."""
     if not headers:
@@ -173,6 +177,36 @@ class RealDiscordClient:
         self.on_message_delete: Optional[Callable[..., None]] = None
         self.on_reaction: Optional[Callable[..., None]] = None
         self.user_id: Optional[int] = None
+        #: session liveness (SimClient parity): True only between a
+        #: successful connect() and the terminal exit of the client run /
+        #: disconnect() — gateway drops do NOT flip it (the library
+        #: auto-resumes and keeps accepting REST traffic)
+        self.connected: bool = False
+        self._seen_messages: dict = {}
+
+    def _message_already_seen(self, message_id: Any) -> bool:
+        """True when this inbound id arrived recently (gateway RESUME replay).
+
+        The window is per client instance on purpose: the account manager
+        builds a FRESH client per reconnect (new IDENTIFY, new session —
+        no replay), while the library's own auto-resume happens inside ONE
+        client instance where Discord re-delivers unacked dispatches.
+        """
+        if message_id is None:
+            return False
+        now = asyncio.get_running_loop().time()
+        seen = self._seen_messages
+        if len(seen) >= _MESSAGE_DEDUP_MAX:
+            cutoff = now - _MESSAGE_DEDUP_WINDOW_S
+            for mid in [m for m, t in seen.items() if t < cutoff]:
+                del seen[mid]
+            if len(seen) >= _MESSAGE_DEDUP_MAX:
+                seen.clear()
+        if message_id in seen:
+            seen[message_id] = now
+            return True
+        seen[message_id] = now
+        return False
 
     # ------------------------------------------------------------ labelling
     @property
@@ -257,6 +291,8 @@ class RealDiscordClient:
         @self._client.event
         async def on_message(message: Any) -> None:
             if self.on_message is None or message.author.id == self.user_id:
+                return
+            if self._message_already_seen(message.id):
                 return
             # RICH BOUNDARY: capture everything the event already holds
             # (embeds/components/attachments/reactions/reference/author/
@@ -348,6 +384,7 @@ class RealDiscordClient:
             await self._close_library_client()  # aiohttp/curl session leak
             raise
         self._connect_aborted = False
+        self.connected = True
         self._logger.info("live client connected as user %s", self.user_id)
 
     async def _close_library_client(self) -> None:
@@ -370,6 +407,7 @@ class RealDiscordClient:
             self._logger.error("live client terminated: %s", exc)
             self._startup_error = exc
         finally:
+            self.connected = False  # start() returned: the session is over
             self._ready.set()
 
     async def _cancel_run_task(self) -> None:
@@ -397,30 +435,50 @@ class RealDiscordClient:
                 await self._client.close()
             except Exception as exc:  # closing a half-open client can throw
                 self._logger.warning("live client close raised %s", exc)
+        self.connected = False
         await self._cancel_run_task()
 
     # ------------------------------------------------------------- messaging
     def _require_client(self) -> Any:
-        """The live client, or ConnectionError when never connected."""
-        if self._client is None:
+        """The live client, or ConnectionError when not connected."""
+        if self._client is None or not self.connected:
             raise ConnectionError("live client is not connected")
         return self._client
 
     def _map_send_error(self, exc: Exception, channel_id: int) -> Optional[Exception]:
-        # transient server faults retry like network errors: the library
-        # already retried internally before surfacing DiscordServerError
-        if type(exc).__name__ == "DiscordServerError" or (
-            getattr(exc, "status", None) is not None
-            and getattr(exc, "status", 0) >= 500
-        ):
-            return ConnectionError(f"discord server error ({exc})")
         """Translate one library send error into a domain error (or None).
 
+        * RateLimited     -> ServerRateLimit (fork errors.RateLimited is NOT
+          an HTTPException; carries retry_after from the exceeded
+          max_ratelimit_timeout path)
+        * CaptchaRequired -> AccessDenied (4xx captcha_key wall — an
+          auth-shaped refusal, never retried)
         * HTTPException 429 -> ServerRateLimit (Retry-After float-parsable
           header when present, else 1.0; global flag from X-RateLimit-Global)
         * Forbidden        -> AccessDenied(account, reason)
         * NotFound         -> TargetGone("", reason)
+        * 5xx/DiscordServerError -> ConnectionError (transient: the library
+          already retried internally before surfacing DiscordServerError)
         """
+        name = type(exc).__name__
+        if name == "RateLimited":
+            try:
+                retry_after = max(0.0, float(getattr(exc, "retry_after", 1.0)))
+            except (TypeError, ValueError):
+                retry_after = 1.0
+            if not math.isfinite(retry_after):
+                retry_after = 1.0
+            return ServerRateLimit(retry_after, False)
+        if name == "CaptchaRequired":
+            return AccessDenied(
+                self._account or "",
+                f"discord captcha challenge on channel {channel_id}: {exc}",
+            )
+        if name == "DiscordServerError" or (
+            getattr(exc, "status", None) is not None
+            and getattr(exc, "status", 0) >= 500
+        ):
+            return ConnectionError(f"discord server error ({exc})")
         discord = self._discord
         if discord is None or not isinstance(exc, discord.HTTPException):
             return None
@@ -433,6 +491,8 @@ class RealDiscordClient:
             try:
                 retry_after = float(raw)
             except (TypeError, ValueError):
+                retry_after = 1.0
+            if not math.isfinite(retry_after):
                 retry_after = 1.0
             global_ = str(_header(headers, "X-RateLimit-Global") or "").lower() == "true"
             return ServerRateLimit(retry_after, global_)
@@ -586,19 +646,24 @@ class RealDiscordClient:
         """Fetch a user object; None when the user is gone (NotFound).
 
         The services seam (resolve_user) documents None-on-unresolvable —
-        letting NotFound propagate violated that contract live.
+        letting NotFound propagate violated that contract live. Discord
+        ALSO answers 403 "Unknown User" (code 10013) for missing users on
+        the user endpoint, so that Forbidden is a gone-signal too.
         """
         try:
             return await self._require_client().fetch_user(user_id)
         except Exception as exc:
             if type(exc).__name__ == "NotFound":
                 return None
+            if (type(exc).__name__ == "Forbidden"
+                    and "unknown user" in str(exc).lower()):
+                return None
             raise
 
     # ---------------------------------------------------------- observability
     @property
     def latency_ms(self) -> Optional[float]:
-        """Gateway heartbeat latency in ms (None before READY / when NaN)."""
+        """Gateway heartbeat latency in ms (None before READY / when NaN/inf)."""
         client = self._client
         if client is None:
             return None
@@ -612,7 +677,7 @@ class RealDiscordClient:
             latency = float(latency)
         except (TypeError, ValueError):
             return None
-        if math.isnan(latency) or latency < 0:
+        if math.isnan(latency) or math.isinf(latency) or latency < 0:
             return None
         return latency * 1000.0
 
@@ -624,7 +689,7 @@ class RealDiscordClient:
         and the heartbeat latency. ``{"available": False}`` before connect.
         """
         client = self._client
-        if client is None or self.user_id is None:
+        if client is None or self.user_id is None or not self.connected:
             return {"available": False}
         user = client.user
         guilds = [

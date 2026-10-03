@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
@@ -77,6 +78,11 @@ def load_config(config_dir: str | Path) -> ProjectConfig:
             "config/rate_limits.json: 'lane' must be a JSON object "
             f"(got {type(lane).__name__})")
     if "global" in raw_policies or "accounts" in raw_policies:
+        for key in raw_policies:
+            if key not in ("global", "accounts", "lane"):
+                LOG.warning(
+                    "rate_limits.json: ignoring unknown top-level key %r "
+                    "(expected 'global', 'accounts' or 'lane')", key)
         glob = raw_policies.get("global") or {}
         accts = raw_policies.get("accounts") or {}
         if not isinstance(glob, dict) or not isinstance(accts, dict):
@@ -94,14 +100,32 @@ def load_config(config_dir: str | Path) -> ProjectConfig:
     if isinstance(lane, dict) and lane:
         # server-wide sequential send lane config (kv runtime state wins on
         # later boots; this is the first-boot baseline)
-        try:
-            prefixrate = float(lane.get("prefixrate", 1.5))
-        except (TypeError, ValueError) as exc:
+        enabled = lane.get("enabled", False)
+        if enabled is None:
+            enabled = False
+        if not isinstance(enabled, bool):
+            # bool("false") is True: a string here would silently ARM the
+            # fleet-serializing lane against the writer's intent
+            raise ValueError(
+                "rate_limits.json: lane.enabled must be true or false, "
+                f"got {enabled!r}")
+        raw_rate = lane.get("prefixrate", 1.5)
+        if isinstance(raw_rate, bool) or not isinstance(raw_rate, (int, float)):
             raise ValueError(
                 f"rate_limits.json: lane.prefixrate must be a number, "
-                f"got {lane.get('prefixrate')!r}") from exc
+                f"got {raw_rate!r}")
+        try:
+            prefixrate = float(raw_rate)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"rate_limits.json: lane.prefixrate must be a number, "
+                f"got {raw_rate!r}") from exc
+        if not math.isfinite(prefixrate) or prefixrate < 0:
+            raise ValueError(
+                "rate_limits.json: lane.prefixrate must be a finite number "
+                f">= 0 (0 pauses the lane), got {raw_rate!r}")
         policies["lane"] = {
-            "enabled": bool(lane.get("enabled", False)),
+            "enabled": enabled,
             "prefixrate": prefixrate,
         }
 

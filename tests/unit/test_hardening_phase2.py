@@ -369,10 +369,6 @@ class CliEmptyName(unittest.IsolatedAsyncioTestCase):
             await run_command(SimpleNamespace(), 'accounts stop ""')
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class LaneConfigPersistence(_TmpCase):
     async def test_persisted_lane_loads_through_real_kv(self) -> None:
         """The lane kv round-trip: kv.set() JSON-ENCODES and kv.get()
@@ -428,3 +424,7 @@ class GhostRegisterGuard(unittest.IsolatedAsyncioTestCase):
         dead = SimpleNamespace(alive=False)
         await server._register(dead)  # noqa: SLF001 — direct guard test
         self.assertEqual(server._clients, [])  # noqa: SLF001
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

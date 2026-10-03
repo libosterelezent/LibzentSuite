@@ -154,6 +154,10 @@ class RatePolicyRepository(BaseRepository):
         the number of rows removed.
         """
         removed = 0
+        pattern = (
+            account.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            + "/%"
+        )
         async with self._tx(f"delete policies for account {account!r}") as conn:
             cur = await conn.execute(
                 "DELETE FROM rate_limit_policies WHERE level = ? AND owner = ?",
@@ -161,8 +165,9 @@ class RatePolicyRepository(BaseRepository):
             )
             removed += cur.rowcount
             cur = await conn.execute(
-                "DELETE FROM rate_limit_policies WHERE level = ? AND owner LIKE ?",
-                ("account_plugin", account + "/%"),
+                "DELETE FROM rate_limit_policies WHERE level = ? "
+                "AND owner LIKE ? ESCAPE '\\'",
+                ("account_plugin", pattern),
             )
             removed += cur.rowcount
         return removed

@@ -431,5 +431,41 @@ class TestNoSecretLeak(_ServerTestCase):
             self.assertNotIn(SECRET, body, path)
 
 
+class TestCredentialTokenSlots(_ServerTestCase):
+    """Round-2: conflicting token slots on credential routes fail closed."""
+
+    async def asyncSetUp(self, token: str | None = TOKEN) -> None:
+        await super().asyncSetUp(token)
+
+    async def test_wrong_header_beats_right_query_token_401(self) -> None:
+        # token supplied in TWO places (header + query) with the header
+        # WRONG: the header slot wins the comparison and the request is
+        # refused — no bypass, no credential stored
+        url = self.url(f"/api/accounts/credential?token={TOKEN}")
+        data = json.dumps({"name": "alpha", "credential": SECRET}).encode()
+        request = urllib.request.Request(url, data=data, method="POST")
+        request.add_header("Content-Type", "application/json")
+        request.add_header("X-Dashboard-Token", "totally-wrong")
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                status, body = response.status, response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            status, body = exc.code, exc.read().decode("utf-8")
+        self.assertEqual(status, 401)
+        self.assertIn("token", get_json(body)["error"])
+        self.assertNotIn(SECRET, body)
+        self.assertNotIn("alpha", self.fake.stored_credentials)
+
+    async def test_gate_ordering_401_before_403(self) -> None:
+        # with a token CONFIGURED, a bad credential must answer 401 (auth)
+        # — never the 403 gate (which only applies with auth disabled)
+        for provided in (None, "wrong"):
+            status, body = await asyncio.to_thread(
+                http_post, self.url("/api/credentials/import-env"),
+                {"overwrite": False}, provided)
+            self.assertEqual(status, 401, provided)
+            self.assertIn("token", get_json(body)["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

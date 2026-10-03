@@ -223,6 +223,7 @@ class TaskScheduler:
         }
         self._queues: Dict[str, list] = {}  # account -> heap of (prio, id, task)
         self._lane_events: Dict[str, asyncio.Event] = {}
+        self._backoff_wakers: Dict[str, asyncio.Event] = {}  # cancel->wake retry sleeps
         self._lanes: Dict[str, asyncio.Task] = {}
         self._worker_refs: set = set()  # strong refs to spawned lane tasks
         self._tail_refs: set = set()  # strong refs to scheduled finish tails
@@ -323,26 +324,32 @@ class TaskScheduler:
         """
         if self._stopped:
             return
-        if self._stop_latch is not None and not (
-            self._stop_latch.done() and self._stop_latch.exception() is not None
-        ):
-            # a stop is already in flight: join it (shielded — cancelling
-            # THIS caller must never cancel the underlying teardown). A
-            # FAILED latch (owner was cancelled) falls through so this call
-            # retries the teardown instead of re-raising the old failure.
-            in_flight = self._stop_latch  # local ref: the owner nulls the
-            _, pending = await asyncio.wait([asyncio.shield(in_flight)], timeout=30.0)  # field
-            if pending:
-                # 30s join budget exhausted while the owner still drains:
-                # returning "success" here would let the caller close the
-                # database under a live teardown — fail loudly instead
-                raise SchedulerError(
-                    "scheduler stop still in flight after 30s join budget"
-                )
-            failure = in_flight.exception()
-            if failure is not None:
-                raise failure
-            return
+        if self._stop_latch is not None:
+            failed = (
+                self._stop_latch.done() and self._stop_latch.exception() is not None
+            )
+            if not failed:
+                # a stop is already in flight: join it (shielded — cancelling
+                # THIS caller must never cancel the underlying teardown). A
+                # FAILED latch (owner was cancelled) falls through so this call
+                # retries the teardown instead of re-raising the old failure.
+                in_flight = self._stop_latch  # local ref: the owner nulls the
+                try:  # field
+                    # wait_for (not bare wait) so the shield wrapper itself is
+                    # awaited: an owner failure surfaces HERE and its exception
+                    # is retrieved, never leaked to the gc warning hook
+                    await asyncio.wait_for(
+                        asyncio.shield(in_flight), timeout=30.0
+                    )
+                except asyncio.TimeoutError:
+                    # 30s join budget exhausted while the owner still drains:
+                    # returning "success" here would let the caller close the
+                    # database under a live teardown — fail loudly instead
+                    raise SchedulerError(
+                        "scheduler stop still in flight after 30s join budget"
+                    ) from None
+                return
+            self._stop_latch.exception()  # mark retrieved: replaced below
         latch = asyncio.get_running_loop().create_future()
         self._stop_latch = latch
         self._stopping = True
@@ -366,13 +373,15 @@ class TaskScheduler:
             # and drive it through gate/acquire/sender DURING the sweep —
             # outbound traffic after "halted" was reported.
             self._sweeping = True
-            # join in-flight finish tails (estop/drain-timeout path): a lane
-            # cancelled while its task's history write is awaited would
-            # silently drop the row AND the terminal event
-            if not drain:
-                barrier = time.monotonic() + 1.0
-                while self._inflight_tails and time.monotonic() < barrier:
-                    await asyncio.sleep(0)
+            # join in-flight finish tails (estop AND drain-timeout path): a
+            # lane cancelled while its task's history write is awaited would
+            # silently drop the row AND the terminal event. On a clean drain
+            # this is a no-op (the drain loop above already waited for
+            # _inflight_tails); only a drain that hit its timeout arrives
+            # here with tails still in flight.
+            barrier = time.monotonic() + 1.0
+            while self._inflight_tails and time.monotonic() < barrier:
+                await asyncio.sleep(0.005)
             for task in list(self._tasks.values()):
                 await self._finish(task, STATUS_CANCELLED)
             for lane in list(self._lanes.values()):
@@ -391,24 +400,19 @@ class TaskScheduler:
             # the owner was cancelled mid-teardown: still tear the lanes down
             # (bounded, shielded) so nothing keeps sending, but do NOT mark
             # the scheduler stopped — a later stop() must be able to retry
-            for lane in list(self._lanes.values()):
-                if not lane.done():
-                    lane.cancel()
-            try:
-                if self._lanes:
-                    await asyncio.wait(
-                        [asyncio.shield(t) for t in list(self._lanes.values())
-                         if not t.done()],
-                        timeout=2.0,
-                    )
-            except Exception:
-                pass
             if not latch.done():
                 latch.set_exception(
                     SchedulerError("scheduler stop was cancelled mid-teardown")
                 )
-            self._sweeping = False
-            self._stopping = False
+            await self._abort_stop()
+            raise
+        except BaseException as exc:
+            # an unexpected owner failure must not strand a PENDING latch:
+            # joiners would park on it for their whole 30s budget while the
+            # teardown is dead. Fail the latch so the next stop() retries.
+            if not latch.done():
+                latch.set_exception(exc)
+            await self._abort_stop()
             raise
         finally:
             self._sweeping = False
@@ -419,6 +423,21 @@ class TaskScheduler:
             self._stop_latch = None if completed else latch
             if completed and not latch.done():
                 latch.set_result(None)
+
+    async def _abort_stop(self) -> None:
+        """Bounded lane teardown for a stop() owner that died mid-way."""
+        for lane in list(self._lanes.values()):
+            if not lane.done():
+                lane.cancel()
+        try:
+            if self._lanes:
+                await asyncio.wait(
+                    [asyncio.shield(t) for t in list(self._lanes.values())
+                     if not t.done()],
+                    timeout=2.0,
+                )
+        except Exception:
+            pass
 
     async def cleanup_account(self, account: str) -> None:
         """Tear down ONE account's lane bookkeeping (called on removal).
@@ -438,6 +457,7 @@ class TaskScheduler:
         """
         lane = self._lanes.pop(account, None)
         self._lane_events.pop(account, None)
+        self._backoff_wakers.pop(account, None)
         self._queues.pop(account, None)
         if lane is None or lane.done():
             return
@@ -539,6 +559,8 @@ class TaskScheduler:
         if event is None:
             event = asyncio.Event()
             self._lane_events[account] = event
+        if account not in self._backoff_wakers:
+            self._backoff_wakers[account] = asyncio.Event()
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError as exc:  # pragma: no cover - sync-context misuse
@@ -553,6 +575,15 @@ class TaskScheduler:
         event.set()  # there is work by construction
 
     # ------------------------------------------------------------- cancel
+    def _wake_backoff(self, task: Task) -> None:
+        """Interrupt the task's retry backoff (if it is sleeping) so a
+        cooperative cancel lands at the next checkpoint NOW, not after the
+        remaining backoff delay. No-op when the account is not mid-backoff
+        (sticky Event state is cleared before each sleep)."""
+        waker = self._backoff_wakers.get(task.account)
+        if waker is not None:
+            waker.set()
+
     def cancel(self, task_id: int) -> bool:
         """Cancel one task by id.
 
@@ -572,6 +603,7 @@ class TaskScheduler:
             return True
         if task.status == STATUS_RUNNING:
             task.cancelled = True
+            self._wake_backoff(task)
             return True
         return False
 
@@ -600,6 +632,7 @@ class TaskScheduler:
                 self._finish_sync(task, STATUS_CANCELLED)
             elif task.status == STATUS_RUNNING:
                 task.cancelled = True
+                self._wake_backoff(task)
             else:
                 continue
             count += 1
@@ -774,6 +807,37 @@ class TaskScheduler:
         """Retry-backoff seam (patched to instant in unit tests)."""
         await asyncio.sleep(seconds)
 
+    async def _sleep_backoff(self, task: Task, delay: float) -> None:
+        """Retry backoff, interruptible by a cooperative cancel of this task.
+
+        Races the ``_sleep`` seam against the account's wake event: a
+        cancel()/cancel_matching() that flags the task mid-backoff wakes the
+        sleeper early (the retry loop's next checkpoint then drives the
+        terminal transition), instead of the cancel landing only after the
+        whole backoff delay. The event is cleared BEFORE the cancelled-flag
+        check and cancel() sets the flag BEFORE the event, so every
+        interleaving is caught either by the flag re-check or by a set event
+        (a lane runs one task at a time, so the waker is unambiguous).
+        """
+        waker = self._backoff_wakers.get(task.account)
+        if waker is None:
+            await self._sleep(delay)  # no lane bookkeeping (defensive)
+            return
+        waker.clear()  # drop stale wakes from earlier cancels on this account
+        if task.cancelled or self._sweeping:
+            return
+        sleep_task = asyncio.ensure_future(self._sleep(delay))
+        wake_task = asyncio.ensure_future(waker.wait())
+        try:
+            await asyncio.wait(
+                {sleep_task, wake_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            for fut in (sleep_task, wake_task):
+                if not fut.done():
+                    fut.cancel()
+            await asyncio.gather(sleep_task, wake_task, return_exceptions=True)
+
     def _outer_cancelled(self) -> bool:
         """Distinguish worker cancellation from sender-internal cancellation.
 
@@ -942,7 +1006,7 @@ class TaskScheduler:
                     task.attempts += 1  # retries used (drives note + backoff)
                     delay = min(self._retry_backoff * (2 ** (task.attempts - 1)), self._max_backoff)
                     try:
-                        await self._sleep(delay)
+                        await self._sleep_backoff(task, delay)
                     except asyncio.CancelledError:
                         if self._outer_cancelled():
                             raise

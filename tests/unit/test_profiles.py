@@ -50,6 +50,19 @@ class SetProfileTests(ProfileManagerTestBase):
             with self.assertRaises(ProfileError):
                 await self.manager.set_profile(bad, ["soulcopy"])
 
+    async def test_separator_and_newline_names_rejected(self) -> None:
+        """Round-2: ``$``-anchored regex let a trailing newline through;
+        ':'/'.' separators must never enter the profile key-space."""
+        for bad in ("basic\n", "basic\n ", "group:xyz", "a.b", ".hidden"):
+            with self.assertRaises(ProfileError):
+                await self.manager.set_profile(bad, ["soulcopy"])
+        self.assertIsNone(self.profiles_repo.data.get("basic\n"))
+
+    async def test_boundary_name_lengths(self) -> None:
+        await self.manager.set_profile("a" * 32, ["soulcopy"])  # exactly max
+        with self.assertRaises(ProfileError):
+            await self.manager.set_profile("a" * 33, ["soulcopy"])
+
     async def test_digit_leading_name_rejected(self) -> None:
         # profile names must START with a lowercase letter (pinned regex);
         # only ACCOUNT names may start with a digit
@@ -193,6 +206,46 @@ class AllowedPluginsTests(ProfileManagerTestBase):
         self.assertEqual(self.manager.allowed_plugins("alpha"), {"soulcopy"})
         await self.manager.delete_profile("p1")
         self.assertIsNone(self.manager.allowed_plugins("alpha"))
+
+    async def test_delete_profile_cascades_every_holder(self) -> None:
+        """Round-2: two accounts hold the deleted profile — BOTH assignment
+        caches are cleaned; a remaining profile still grants its plugins.
+
+        Uses a locally cascading profiles fake because the shared
+        FakeProfilesRepo in helpers.py does not emulate the real
+        repository's assignment cascade (reported as a finding).
+        """
+
+        class CascadingProfilesRepo(FakeProfilesRepo):
+            async def delete(self, name):
+                existed = await super().delete(name)
+                for acct in list(self.accounts_repo.records):
+                    await self.accounts_repo.unassign_profile(acct, name)
+                return existed
+
+        repo = CascadingProfilesRepo()
+        repo.accounts_repo = self.accounts_repo
+        manager = ProfileManager(repo, LOG, self.accounts_repo)
+        await manager.set_profile("gone", ["soulcopy"])
+        await manager.set_profile("kept", ["roll"])
+        await manager.assign("alpha", "gone")
+        await manager.assign("alpha", "kept")
+        await manager.assign("beta", "gone")
+        await manager.delete_profile("gone")
+        self.assertEqual(await self.accounts_repo.profiles_of("alpha"), ["kept"])
+        self.assertEqual(await self.accounts_repo.profiles_of("beta"), [])
+        self.assertEqual(manager.allowed_plugins("alpha"), {"roll"})
+        # beta now holds NO known profile -> unrestricted (documented
+        # ported semantics; see manager docstring)
+        self.assertIsNone(manager.allowed_plugins("beta"))
+
+    async def test_unknown_plugin_names_allowed_in_profiles(self) -> None:
+        """Profiles may reference not-yet-installed plugins; the plugin
+        manager's attach filter drops the unknown names (verified in
+        test_plugin_manager)."""
+        out = await self.manager.set_profile("future", ["soulcopy", "not-yet"])
+        self.assertEqual(out["plugins"], ["not-yet", "soulcopy"])
+        self.assertEqual(self.manager.allowed_plugins("alpha"), None)
 
 
 if __name__ == "__main__":  # pragma: no cover

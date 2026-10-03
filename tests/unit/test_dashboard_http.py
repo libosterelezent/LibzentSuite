@@ -7,12 +7,16 @@ docstrings + INTEGRATION.md) — no real managers are constructed.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
+import socket
 import time
 import unittest
 import urllib.error
 import urllib.request
 
+import interfaces.dashboard.server as server_module
 from interfaces.dashboard.server import DashboardServer
 
 TOKEN = "s3cret-token"
@@ -508,6 +512,35 @@ def get_json(text: str) -> dict:
     return json.loads(text)
 
 
+def read_http_response(sock: socket.socket) -> tuple[str, bytes]:
+    """Read ONE full HTTP response (headers + Content-Length body) from a
+    raw socket; returns (header_text, body)."""
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise ConnectionError("closed before headers finished")
+        data += chunk
+    head, _, rest = data.partition(b"\r\n\r\n")
+    length = 0
+    for line in head.decode("latin-1").splitlines():
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":", 1)[1].strip())
+    while len(rest) < length:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        rest += chunk
+    return head.decode("latin-1"), rest[:length]
+
+
+def header_value(head: str, name: str) -> str:
+    for line in head.splitlines():
+        if line.lower().startswith(name.lower() + ":"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
 class TestDashboardHTTP(unittest.IsolatedAsyncioTestCase):
     """REST surface over a real ThreadingHTTPServer on an ephemeral port."""
 
@@ -571,6 +604,47 @@ class TestDashboardHTTP(unittest.IsolatedAsyncioTestCase):
         self.assertIn("too large", get_json(body)["error"])
         # keep-alive safety: a partially-drained body must close the stream
         self.assertEqual(headers.get("Connection", "").lower(), "close")
+
+    async def test_get_with_body_closes_connection(self) -> None:
+        # keep-alive safety: an unread non-POST body would be parsed as the
+        # NEXT request line — the server must drain it and refuse reuse
+        import http.client
+        from urllib.parse import urlparse
+
+        def _attempt() -> tuple[int, str, str]:
+            parsed = urlparse(self.url("/api/status"))
+            conn = http.client.HTTPConnection(parsed.hostname, parsed.port,
+                                              timeout=10)
+            headers = {"X-Dashboard-Token": TOKEN,
+                       "Content-Length": "9"}
+            try:
+                conn.request("GET", parsed.path, body=b"JUNKJUNK!",
+                             headers=headers)
+                resp = conn.getresponse()
+                return (resp.status, resp.read().decode("utf-8"),
+                        resp.getheader("Connection") or "")
+            finally:
+                conn.close()
+
+        status, body, conn_header = await asyncio.to_thread(_attempt)
+        self.assertEqual(status, 200)
+        self.assertTrue(get_json(body)["ok"])
+        self.assertEqual(conn_header.lower(), "close")
+
+    async def test_non_serializable_payload_answers_json(self) -> None:
+        # a datetime (or set/exception) in the payload must not crash the
+        # handler thread and drop the connection — it answers honest JSON
+        from datetime import datetime
+
+        async def _broken_status():
+            return {"accounts": [], "when": datetime(2024, 1, 1)}
+
+        self.fake.status = _broken_status
+        status, body = await asyncio.to_thread(http_get, self.url("/api/status"))
+        self.assertEqual(status, 200)
+        payload = get_json(body)
+        self.assertFalse(payload["ok"])
+        self.assertIn("serializable", payload["error"])
 
     # ------------------------------------------------------------------ system
     async def test_status(self) -> None:
@@ -914,6 +988,193 @@ class TestDashboardHTTP(unittest.IsolatedAsyncioTestCase):
         error = get_json(body)["error"]
         self.assertIn("'name'", error)
         self.assertIn("/api/accounts/remove", error)
+
+    # ------------------------------------------- round-2: token slot precedence
+    async def test_rest_token_header_precedence_over_query(self) -> None:
+        # conflicting tokens in TWO places: the header slot wins and a WRONG
+        # header must fail closed even when the query token is correct
+        status, _ = await asyncio.to_thread(
+            http_get, self.url(f"/api/status?token={TOKEN}"), "wrong")
+        self.assertEqual(status, 401)
+        status, body = await asyncio.to_thread(
+            http_get, self.url("/api/status?token=wrong"), TOKEN)
+        self.assertEqual(status, 200)
+        self.assertTrue(get_json(body)["ok"])
+
+    # ------------------------------------- round-2: peer abort mid-response
+    async def test_peer_close_before_response_no_traceback(self) -> None:
+        def _slam() -> None:
+            for _ in range(3):
+                sock = socket.create_connection(("127.0.0.1", self.port),
+                                                 timeout=5)
+                try:
+                    sock.sendall(
+                        f"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                        f"X-Dashboard-Token: {TOKEN}\r\n\r\n".encode()
+                    )
+                finally:
+                    sock.close()  # vanish before reading the response
+            time.sleep(0.3)  # let the handler threads hit the dead socket
+
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            await asyncio.to_thread(_slam)
+        self.assertNotIn("Traceback", captured.getvalue())
+        self.assertNotIn("Exception occurred", captured.getvalue())
+        # and the server is unharmed
+        status, _ = await asyncio.to_thread(http_get, self.url("/api/status"))
+        self.assertEqual(status, 200)
+
+    # ------------------------------------- round-2: stop() + restart on port
+    async def test_concurrent_double_stop_and_restart_same_port(self) -> None:
+        port = self.server.bound_port
+        await asyncio.gather(*[
+            asyncio.to_thread(self.server.stop) for _ in range(4)
+        ])
+        self.server.stop()  # idempotent second stop (teardown stops a 3rd time)
+        replacement = DashboardServer(self.fake, token=TOKEN, port=port)
+        replacement.start()
+        try:
+            self.assertEqual(replacement.bound_port, port)  # SO_REUSEADDR bind
+            status, body = await asyncio.to_thread(
+                http_get, f"http://127.0.0.1:{port}/api/status")
+            self.assertEqual(status, 200)
+            self.assertTrue(get_json(body)["ok"])
+        finally:
+            replacement.stop()
+
+
+class TestRound2BodyHardening(unittest.IsolatedAsyncioTestCase):
+    """Round-2 network-attacker cases: lying/ambiguous Content-Length,
+    chunked bodies, HTTP/1.0 close semantics, pipelining after drain."""
+
+    async def asyncSetUp(self) -> None:
+        self._saved_timeout = server_module.HTTP_SOCKET_TIMEOUT_S
+        server_module.HTTP_SOCKET_TIMEOUT_S = 1.0  # fast stall detection
+        self.fake = FakeControlAPI()
+        self.server = DashboardServer(self.fake, token=None, port=0)
+        self.server.start()
+        self.port = self.server.bound_port
+
+    async def asyncTearDown(self) -> None:
+        self.server.stop()
+        server_module.HTTP_SOCKET_TIMEOUT_S = self._saved_timeout
+
+    def _open(self) -> socket.socket:
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+        sock.settimeout(8)
+        return sock
+
+    async def test_content_length_mismatch_times_out_to_408(self) -> None:
+        # claim 5 bytes, send 3, HOLD the socket open: the handler must not
+        # hang for the full socket timeout and dump a traceback — it answers
+        # a clean 408 and closes
+        def _attack() -> tuple[str, bytes]:
+            sock = self._open()
+            try:
+                sock.sendall(
+                    b"POST /api/accounts/remove HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    b"Content-Length: 5\r\n\r\nabc")
+                return read_http_response(sock)
+            finally:
+                sock.close()
+
+        head, body = await asyncio.to_thread(_attack)
+        self.assertIn("408", head.splitlines()[0])
+        self.assertIn("incomplete", get_json(body)["error"])
+        self.assertEqual(header_value(head, "Connection").lower(), "close")
+
+    async def test_content_length_mismatch_eof_answers_400(self) -> None:
+        # claim 5, send 3, then half-close: read() returns the short body at
+        # EOF and JSON parsing rejects it — a 400, never a hang
+        def _attack() -> tuple[str, bytes]:
+            sock = self._open()
+            try:
+                sock.sendall(
+                    b"POST /api/accounts/remove HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    b"Content-Length: 5\r\n\r\nabc")
+                sock.shutdown(socket.SHUT_WR)
+                return read_http_response(sock)
+            finally:
+                sock.close()
+
+        head, body = await asyncio.to_thread(_attack)
+        self.assertIn("400", head.splitlines()[0])
+        self.assertIn("invalid JSON", get_json(body)["error"])
+
+    async def test_lying_huge_content_length_refused_without_drain(self) -> None:
+        # a 17MB claim exceeds the 16MB drain bound: reject IMMEDIATELY —
+        # the drain loop must not even start (and not wait on the timeout)
+        def _attack() -> tuple[str, bytes, float]:
+            sock = self._open()
+            try:
+                started = time.monotonic()
+                sock.sendall(
+                    b"POST /api/accounts/remove HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    b"Content-Length: 17000000\r\n\r\n")
+                head, body = read_http_response(sock)
+                return head, body, time.monotonic() - started
+            finally:
+                sock.close()
+
+        head, body, elapsed = await asyncio.to_thread(_attack)
+        self.assertIn("413", head.splitlines()[0])
+        self.assertIn("too large", get_json(body)["error"])
+        self.assertLess(elapsed, 0.8)  # far under the 1s stall timeout
+
+    async def test_chunked_post_rejected_411(self) -> None:
+        def _attack() -> tuple[str, bytes]:
+            sock = self._open()
+            try:
+                sock.sendall(
+                    b"POST /api/accounts/remove HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    b"Transfer-Encoding: chunked\r\n\r\n")
+                return read_http_response(sock)
+            finally:
+                sock.close()
+
+        head, body = await asyncio.to_thread(_attack)
+        self.assertIn("411", head.splitlines()[0])
+        self.assertIn("Content-Length", get_json(body)["error"])
+        self.assertEqual(header_value(head, "Connection").lower(), "close")
+
+    async def test_http10_client_answered_and_closed(self) -> None:
+        def _attempt() -> tuple[str, bytes, bytes]:
+            sock = self._open()
+            try:
+                sock.sendall(
+                    b"GET /api/status HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+                head, body = read_http_response(sock)
+                return head, body, sock.recv(4096)  # EOF expected next
+            finally:
+                sock.close()
+
+        head, body, tail = await asyncio.to_thread(_attempt)
+        self.assertIn("200", head.splitlines()[0])
+        self.assertTrue(get_json(body)["ok"])
+        self.assertEqual(header_value(head, "Connection").lower(), "close")
+        self.assertEqual(tail, b"")  # HTTP/1.0: connection closed after reply
+
+    async def test_pipelined_request_after_drain_refusal_not_parsed(self) -> None:
+        # GET-with-body forces a bounded drain + Connection: close; a request
+        # pipelined behind it must NEVER be parsed as the next stream bytes
+        def _attempt() -> tuple[str, bytes, bytes]:
+            sock = self._open()
+            try:
+                sock.sendall(
+                    b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    b"Content-Length: 9\r\n\r\nJUNKJUNK!"
+                    b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                head, body = read_http_response(sock)
+                return head, body, sock.recv(4096)
+            finally:
+                sock.close()
+
+        head, body, tail = await asyncio.to_thread(_attempt)
+        self.assertIn("200", head.splitlines()[0])
+        self.assertTrue(get_json(body)["ok"])
+        self.assertEqual(header_value(head, "Connection").lower(), "close")
+        self.assertEqual(tail, b"")  # socket closed; second request unanswered
 
 
 if __name__ == "__main__":

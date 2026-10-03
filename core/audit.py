@@ -226,7 +226,11 @@ class AuditRecorder:
             self._ring.append(entry)
         payload = entry.as_dict()  # built ONCE (was 2x per record — the
         # exact bug already fixed in LogService; PHASE-4 S7-C5)
-        if self._persist.active:
+        if self._persist.active or self._persist.stopped:
+            # active: enqueue for the worker. stopped (was started, then
+            # stopped): still put — the queue counts the drop so post-stop
+            # losses are visible in stats, not silent. A never-started sink
+            # stays fully inert (sim/headless boots).
             self._persist.put(payload)
         for callback in list(self._subscribers):
             try:

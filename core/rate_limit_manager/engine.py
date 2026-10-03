@@ -32,8 +32,9 @@ seam but returns EARLY when the shared wake event fires. The event is set
 whenever policies change (set/clear/floor) or a server cooldown lands, so
 sleeping waiters recompute their remaining wait instead of oversleeping.
 _grant_ready also wakes successors after any grant so the next waiter in
-priority order re-evaluates immediately. A bounded poll (0.25s) backstops
-non-head waiters against lost wakes — correctness never depends on the wake.
+priority order re-evaluates immediately. A bounded poll (POLL_INTERVAL)
+backstops non-head waiters against lost wakes — correctness never depends
+on the wake.
 
 Other documented decisions (INTEGRATION.md: pick the safest option):
 
@@ -65,7 +66,13 @@ from ..event_bus import EventBus, RateLimitTriggered
 from ..priority import Priority
 from database.models import POLICY_LEVELS
 from .lane import GlobalSendLane
-from .policies import MIN_ACTION_INTERVAL, RatePolicy, parse_scope, policy_from_row
+from .policies import (
+    MAX_INTERVAL,
+    MIN_ACTION_INTERVAL,
+    RatePolicy,
+    parse_scope,
+    policy_from_row,
+)
 from .warnings import evaluate_policies
 
 #: pacing key owner used when acquire() carries no account
@@ -234,12 +241,14 @@ class RateLimitManager:
         )
         self._lane.set_enabled(bool(lane_enabled))
         try:
-            self._lane.set_prefixrate(float(lane_prefixrate))
+            self._lane.set_prefixrate(lane_prefixrate)
         except RatePolicyError:
             self._lane.set_prefixrate(1.5)
         #: constructor defaults — the baseline :meth:`load_persisted` falls
-        #: back to when the kv has no persisted lane row
-        self._lane_defaults = (bool(lane_enabled), float(lane_prefixrate))
+        # back to when the kv has no persisted lane row. Built from the
+        # SANITIZED lane state: a non-numeric/absurd constructor value must
+        # not crash the process nor survive into the boot baseline.
+        self._lane_defaults = (bool(lane_enabled), float(self._lane.prefixrate))
 
     # ------------------------------------------------------------ validation
     @staticmethod
@@ -257,6 +266,11 @@ class RateLimitManager:
             raise RatePolicyError(
                 f"safety floor {value:g}s is below the hard minimum "
                 f"{MIN_ACTION_INTERVAL:g}s per action"
+            )
+        if value > MAX_INTERVAL:
+            raise RatePolicyError(
+                f"safety floor {value:g}s exceeds the {MAX_INTERVAL:g}s cap — "
+                f"it would wedge every action forever"
             )
         return value
 
@@ -323,21 +337,37 @@ class RateLimitManager:
                     # swallowed below, and silently reverted dashboard lane
                     # edits to the config-file defaults on every reboot.
                     data = raw if isinstance(raw, dict) else _json.loads(raw)
-                    enabled = bool(data.get("enabled", enabled))
+                    raw_enabled = data.get("enabled", enabled)
+                    if not isinstance(raw_enabled, bool):
+                        # a hand-edited truthy STRING ('false') must not
+                        # silently enable the lane — the whole row is corrupt
+                        raise ValueError(
+                            f"lane row 'enabled' must be true/false, got {raw_enabled!r}")
+                    enabled = raw_enabled
                     prefixrate = float(data.get("prefixrate", prefixrate))
             except Exception as exc:
                 self._log("warning", f"could not load lane config: {exc}")
         try:
             self._lane.set_prefixrate(prefixrate)
         except RatePolicyError:
+            # a rejected spacing makes the WHOLE row corrupt: fall back to
+            # the constructor defaults (both fields), exactly like an
+            # unparseable row — a half-applied row must never silently
+            # enable the lane nor discard a custom constructor rate
             self._log("warning", "stored lane config invalid; using defaults")
-            self._lane.set_prefixrate(1.5)
+            enabled, prefixrate = bool(default_enabled), float(default_prefixrate)
+            self._lane.set_prefixrate(prefixrate)
         self._lane.set_enabled(enabled)
         if self._kv is not None:
             try:  # persisted floor: a restart must not revert a raised floor
                 stored_floor = await self._kv.get("ratelimit:floor")
                 if stored_floor is not None:
-                    self._floor = max(self._floor, float(stored_floor))
+                    # validated: a hand-edited row (inf, 1e999, below 1.5)
+                    # must never wedge the fleet — pacing safety never
+                    # depends on the database
+                    self._floor = max(
+                        self._floor, self._validated_floor(float(stored_floor))
+                    )
                     self._invalidate_effective_cache()  # F2: floor raised at boot
             except Exception as exc:
                 self._log("warning", f"could not load persisted floor: {exc}")
@@ -591,7 +621,8 @@ class RateLimitManager:
 
         Raises:
             RatePolicyError: when seconds would LOWER the floor, is below the
-                hard minimum, or is not a finite number.
+                hard minimum, is not a finite number, or exceeds the
+                one-day cap (it would wedge every action forever).
         """
         candidate = self._validated_floor(seconds)
         if candidate < self._floor:
@@ -1008,6 +1039,12 @@ class RateLimitManager:
         action; the fleet-wide global cooldown is ALWAYS considered.
         """
         now = self._clock.now()
+        # opportunistic expiry sweep: this call already walks every entry,
+        # so dead cooldown rows are dropped here instead of lingering for
+        # the process lifetime (only prune_account removed them before)
+        for key in [k for k, until in self._account_cooldowns.items()
+                    if until <= now]:
+            del self._account_cooldowns[key]
         remaining = [max(0.0, self._global_until - now)]
         for (acct, act), until in self._account_cooldowns.items():
             if account is not None and acct != account:

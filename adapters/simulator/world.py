@@ -24,12 +24,15 @@ The world owns:
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.errors import ServerRateLimit
+
+LOG = logging.getLogger("slaughtermudae.simulator")
 
 # --- synthetic fixture ids (NOT real Discord ids; real ones live in .env) ---
 SYNTHETIC_OWNER_ID = 1001
@@ -141,10 +144,21 @@ class SimWorld:
         """
         if channel_id not in self.channels:
             return False
+        was_dm = self.dm_channels.get(channel_id, False)
         self.channels.pop(channel_id, None)
         self.dm_channels.pop(channel_id, None)
         self.history.pop(channel_id, None)
         self.gone_channels[channel_id] = time.time()
+        if was_dm:
+            # deliberate divergence from live Discord: the pair->channel
+            # mapping is RETAINED, so this DM stays unsendable forever
+            # (dm_channel_for keeps returning the dead id). Loud on purpose.
+            LOG.warning(
+                "dm channel %s deleted: pair mapping retained - DMs between "
+                "this pair stay unsendable (deliberate sim divergence from "
+                "live Discord, where DM channels resurrect)",
+                channel_id,
+            )
         return True
 
     def dm_channel_for(self, user_a: int, user_b: int) -> int:
@@ -259,7 +273,11 @@ class SimWorld:
         self.history[channel_id].append(message)
         self.journal.append(message)
         for client in list(self.subscribers):
-            client.receive(message)
+            try:
+                client.receive(message)
+            except Exception:
+                LOG.exception(
+                    "world subscriber %r failed on message %s", client, message.id)
         self._maybe_auto_respond(message)
         return message
 
@@ -290,10 +308,15 @@ class SimWorld:
                                 DiscordReaction(emoji=emoji, name=emoji, count=1),)
                     for client in list(self.subscribers):
                         if client.user_id != user_id and client.on_reaction is not None:
-                            client.on_reaction(
-                                kind, message_id, channel_id, message.guild_id,
-                                user_id, emoji, None,
-                            )
+                            try:
+                                client.on_reaction(
+                                    kind, message_id, channel_id, message.guild_id,
+                                    user_id, emoji, None,
+                                )
+                            except Exception:
+                                LOG.exception(
+                                    "world subscriber %r failed on reaction %s",
+                                    client, message_id)
                     return
         raise KeyError(f"unknown message {message_id}")
 
@@ -308,7 +331,12 @@ class SimWorld:
                         # self-filter: live adapters never echo your own
                         # edits/deletes back as events (fidelity parity)
                         if client.user_id != message.author_id and client.on_message_edit is not None:
-                            client.on_message_edit(dto)
+                            try:
+                                client.on_message_edit(dto)
+                            except Exception:
+                                LOG.exception(
+                                    "world subscriber %r failed on edit %s",
+                                    client, message_id)
                     return message
         raise KeyError(f"unknown message {message_id}")
 
@@ -330,8 +358,13 @@ class SimWorld:
                     messages.pop(index)
                     for client in list(self.subscribers):
                         if client.user_id != message.author_id and client.on_message_delete is not None:
-                            client.on_message_delete(
-                                message_id, channel_id, message.guild_id, message)
+                            try:
+                                client.on_message_delete(
+                                    message_id, channel_id, message.guild_id, message)
+                            except Exception:
+                                LOG.exception(
+                                    "world subscriber %r failed on delete %s",
+                                    client, message_id)
                     return message
         raise KeyError(f"unknown message {message_id}")
 
@@ -369,14 +402,15 @@ class SimWorld:
                 return
             self.deliver(channel_id, responder, page, dm=True)
 
+    def cancel_pending_replies(self) -> None:
+        """Cancel scripted-responder tasks still in flight (run teardown)."""
+        for task in list(self._responder_tasks):
+            task.cancel()
+
     # ---------------------------------------------------------------- queries
     def messages_of(self, channel_id: int) -> List[str]:
         """Contents of one channel's history (empty once the channel is gone)."""
         return [m.content for m in self.history.get(channel_id, [])]
-
-    def deliveries_since(self, ts: float) -> List[WorldMessage]:
-        """Every message delivered at/after a timestamp (journal-backed)."""
-        return [m for m in self.journal if m.ts >= ts]
 
     def find_delivery(self, *, author_id: int, content: str) -> Optional[WorldMessage]:
         """First delivered message with exactly this author and content."""

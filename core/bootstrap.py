@@ -28,6 +28,7 @@ tests, `main.py --sim` and the dashboard's Simulation page.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import stat
@@ -99,6 +100,8 @@ async def _seed_config_defaults(limiter: RateLimitManager, config: ProjectConfig
     except Exception:
         pass  # DB read failure: apply config defaults as a safe fallback
     removed = getattr(limiter, "removed_default", None)
+    if not callable(removed):  # vintage manager shape (attr/property):
+        removed = None  # no tombstone knowledge -> seed normally
 
     def _seed(action, spec, level, owner, where):
         if (level, owner, action) in stored:
@@ -114,9 +117,11 @@ async def _seed_config_defaults(limiter: RateLimitManager, config: ProjectConfig
             ROOT_LOGGER.warning(
                 "config default for %s %s clamped to the safety floor (%s)",
                 where, action, exc)
-            floor = getattr(limiter, "floor_value", lambda: 1.5)()
-            limiter.set_policy_values(action, max(interval, floor), jmin, jmax,
-                                      level, owner)
+            floor = getattr(limiter, "floor_value", 1.5)
+            if callable(floor):  # property vs method across manager vintages
+                floor = floor()
+            limiter.set_policy_values(action, max(interval, float(floor)),
+                                      jmin, jmax, level, owner)
 
     for action, spec in (config.policies.get("global") or {}).items():
         _seed(action, spec, "global", None, "global")
@@ -208,7 +213,7 @@ class Framework:
         for label, step in steps:
             try:
                 outcome = step()
-                if asyncio.iscoroutine(outcome):
+                if inspect.iscoroutine(outcome):
                     await outcome
             except asyncio.CancelledError as exc:
                 if interrupted is None:
@@ -326,7 +331,7 @@ async def build(
         for label, undo in reversed(cleanups):
             try:
                 outcome = undo()
-                if asyncio.iscoroutine(outcome):
+                if inspect.iscoroutine(outcome):
                     await outcome
             except asyncio.CancelledError:
                 ROOT_LOGGER.warning(
@@ -383,7 +388,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         bus, ServiceLogger(logs, "ratelimit"), database.policies,
         kv_repo=database.kv,
         lane_enabled=bool((config.policies.get("lane") or {}).get("enabled", False)),
-        lane_prefixrate=float((config.policies.get("lane") or {}).get("prefixrate", 1.5)),
+        lane_prefixrate=(config.policies.get("lane") or {}).get("prefixrate", 1.5),
     )
     await limiter.load_persisted()  # stored policies + lane config -> memory
     # Config-file policies are FIRST-BOOT DEFAULTS only: they apply solely
@@ -463,10 +468,13 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     # config-dir account files (DB rows were restored by accounts.load())
     for payload in config.accounts:
         try:
+            raw_enabled = payload.get("enabled", True)
+            if isinstance(raw_enabled, str):
+                raw_enabled = raw_enabled.strip().lower() in ("true", "1", "yes", "on")
             await accounts.add_account(
                 payload["name"],
                 token_ref=payload.get("token_ref"),
-                enabled=bool(payload.get("enabled", True)),
+                enabled=bool(raw_enabled),
                 sync_group=payload.get("sync_group"),
                 profiles=payload.get("profiles") or None,
             )

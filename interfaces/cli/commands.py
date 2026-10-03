@@ -35,6 +35,7 @@ Decisions for things INTEGRATION.md left open (documented per the contract):
 """
 from __future__ import annotations
 
+import math
 import shlex
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -61,7 +62,7 @@ class UsageError(ValueError):
 #: command -> (usage signature, description); the single registry both
 #: help_text() and the contextual usage errors are built from.
 HELP: Dict[str, Tuple[str, str]] = {
-    "help": ("", "show this help"),
+    "help": ("[command]", "show this help (or help for one command)"),
     "status": ("", "overview: accounts, tasks, rate limits, warnings"),
     "accounts": (
         "list|add <name> [profile ...]|remove <name>|info <name>"
@@ -91,7 +92,7 @@ HELP: Dict[str, Tuple[str, str]] = {
         "capability profiles",
     ),
     "ratelimit": (
-        "show|set <action> <interval> [jitter_min jitter_max] [level owner]"
+        "show|stats|set <action> <interval> [jitter_min jitter_max] [level owner]"
         "|clear <level> <owner> <action>|effective <action> [account] [plugin]"
         "|warnings|floor <seconds>|lane [on [rate]|off|rate <s>]",
         "rate policies (safety floor: 1.5s/action; lane: server-wide sequential sends)",
@@ -102,7 +103,7 @@ HELP: Dict[str, Tuple[str, str]] = {
         "task queue + history",
     ),
     "simulation": ("list|run [name]", "offline scenario runs"),
-    "logs": ("[n] [account]", "structured log tail (default: last 20)"),
+    "logs": ("[n] [account] [severity]", "structured log tail (default: last 20)"),
     "audit": ("[n] [account]", "interaction audit trail (default: last 20)"),
     "estop": ("[resume]", "GLOBAL emergency stop; 'estop resume' re-arms after one"),
     "quit": ("", "graceful shutdown, then exit (alias: exit)"),
@@ -137,7 +138,8 @@ async def run_command(api: Any, line: str) -> Optional[str]:
     Raises:
         QuitRequested: for quit/exit.
         UsageError: for unparseable input, wrong argument counts, bad numbers,
-            bad booleans or unknown rate-policy levels.
+            bad booleans, unknown rate-policy levels, unknown commands and
+            bad 'help' arguments.
         Anything the facade raises (AccountError, UnsafePolicyError, ...):
         bubbles up unchanged for the caller's error renderer.
     """
@@ -153,8 +155,24 @@ async def run_command(api: Any, line: str) -> Optional[str]:
     if cmd in ("quit", "exit"):
         raise QuitRequested()
     if cmd == "help":
-        return help_text()
+        if len(args) > 1:
+            raise UsageError("usage: help [command]")
+        if not args:
+            return help_text()
+        name = args[0].lower()
+        if name == "exit":
+            name = "quit"
+        if name not in HELP:
+            raise UsageError(
+                f"help: unknown command {args[0]!r} — try 'help' alone"
+            )
+        sig, desc = HELP[name]
+        focused = [f"{name}: {desc}"]
+        if sig:
+            focused.append(f"usage: {name} {sig}")
+        return "\n".join(focused)
     if cmd == "status":
+        _exact(args, 0, "status")
         return format_status(await api.status())
     if cmd == "accounts":
         return await _accounts_group(api, args)
@@ -173,19 +191,27 @@ async def run_command(api: Any, line: str) -> Optional[str]:
     if cmd == "simulation":
         return await _simulation_group(api, args)
     if cmd == "logs":
-        limit, account = _tail_args(cmd, args)
-        return format_logs(await api.logs_tail(limit, account=account))
+        rest = list(args)
+        severity = None
+        if len(rest) >= 2 and rest[-1].upper() in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            severity = rest.pop(-1).upper()
+        limit, account = _tail_args(cmd, rest)
+        return format_logs(
+            await api.logs_tail(limit, account=account, severity=severity)
+        )
     if cmd == "audit":
         limit, account = _tail_args(cmd, args)
         return format_audit(await api.audit_tail(limit, account=account))
     if cmd == "estop":
         if args and args[0].lower() in ("resume", "unhalt"):
+            if len(args) > 1:
+                raise UsageError("usage: estop [resume]")
             return _result(await api.system_resume(), verb="resume")
         if args:
             raise UsageError("usage: estop [resume]")
         return _result(await api.emergency_stop_all(surface="cli"),
                        verb="EMERGENCY STOP")
-    return f"unknown command {cmd!r} — try 'help'"
+    raise UsageError(f"unknown command {cmd!r} — try 'help'")
 
 
 # ------------------------------------------------------------- sub-usages
@@ -224,6 +250,7 @@ _PROFILES_USAGE = {
 }
 _RATELIMIT_USAGE = {
     "show": "ratelimit show",
+    "stats": "ratelimit stats",
     "set": "ratelimit set <action> <interval> [jitter_min jitter_max] [level owner]",
     "clear": "ratelimit clear <level> <owner> <action>",
     "effective": "ratelimit effective <action> [account] [plugin]",
@@ -279,7 +306,7 @@ def _usage_for(ctx: str) -> str:
 def _number(token: str, ctx: str, label: str) -> float:
     """Parse a float with a helpful message on failure."""
     try:
-        return float(token)
+        value = float(token)
     except ValueError as exc:
         # raw float() messages have zero context — give the user the input,
         # what it was for, and how to use the command
@@ -287,6 +314,13 @@ def _number(token: str, ctx: str, label: str) -> float:
         raise UsageError(
             f"{ctx}: {label} {token!r} is not a number — usage: {usage}"
         ) from exc
+    if not math.isfinite(value):
+        usage = _usage_for(ctx) or f"{ctx}"
+        raise UsageError(
+            f"{ctx}: {label} must be a finite number, got {token!r}"
+            f" — usage: {usage}"
+        )
+    return value
 
 
 def _integer(token: str, ctx: str, label: str, *, negative_ok: bool = False) -> int:
@@ -354,6 +388,10 @@ async def _accounts_group(api: Any, args: List[str]) -> str:
     if sub == "add":
         if not rest:
             raise UsageError(f"usage: {_ACCOUNTS_USAGE['add']}")
+        if not rest[0]:
+            raise UsageError(
+                f"account name cannot be empty — usage: {_ACCOUNTS_USAGE['add']}"
+            )
         payload: Dict[str, Any] = {"name": rest[0]}
         if rest[1:]:
             payload["profiles"] = rest[1:]
@@ -438,6 +476,10 @@ async def _cooldowns_group(api: Any, args: List[str]) -> str:
     if len(args) > 1:
         raise UsageError(f"usage: cooldowns {HELP['cooldowns'][0]}")
     account = args[0] if args else None
+    if account == "":
+        raise UsageError(
+            "account name cannot be empty — usage: cooldowns [account]"
+        )
     return format_cooldowns(await api.cooldowns_list(account))
 
 
@@ -498,6 +540,19 @@ async def _ratelimit_group(api: Any, args: List[str]) -> str:
     if sub == "show":
         _exact(rest, 0, ctx)
         return format_policies(await api.ratelimit_policies())
+    if sub == "stats":
+        _exact(rest, 0, ctx)
+        stats = await api.ratelimit_stats()
+        lines = []
+        for key, value in stats.items():
+            if isinstance(value, dict):
+                inner = " ".join(f"{k}={_fmt_val(v)}" for k, v in value.items())
+                lines.append(f"{key}: {inner or '-'}")
+            elif isinstance(value, list):
+                lines.append(f"{key}: {len(value)} entr{'y' if len(value) == 1 else 'ies'}")
+            else:
+                lines.append(f"{key}: {_fmt_val(value)}")
+        return "\n".join(lines) or "  (no stats)"
     if sub == "set":
         if len(rest) not in (2, 4, 6):
             raise UsageError(
@@ -555,6 +610,8 @@ async def _lane_subcommand(api: Any, rest: List[str], ctx: str) -> str:
         return format_lane(await api.ratelimit_lane())
     verb = rest[0].lower()
     if verb in ("on", "enable"):
+        if len(rest) > 2:
+            raise UsageError(f"usage: {_RATELIMIT_USAGE['lane']}")
         prefixrate = _number(rest[1], ctx, "rate") if len(rest) > 1 else None
         return format_lane(
             await api.ratelimit_set_lane(enabled=True, prefixrate=prefixrate)

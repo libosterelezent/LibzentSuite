@@ -12,6 +12,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .base import BaseRepository, loads_tolerant
+from ..connection import DatabaseError
 
 
 class CooldownRepository(BaseRepository):
@@ -21,8 +22,19 @@ class CooldownRepository(BaseRepository):
                      started_at: float, expires_at: float, source: str = "",
                      reason: str = "", metadata: Optional[Dict[str, Any]] = None
                      ) -> None:
-        """Insert or replace one cooldown (same identity = same row)."""
+        """Insert or replace one cooldown (same identity = same row).
+
+        Raises DatabaseError (never a raw TypeError) for non-serializable
+        metadata — checked BEFORE the transaction opens.
+        """
         now = time.time()
+        try:
+            meta_json = json.dumps(metadata or {})
+        except (TypeError, ValueError) as exc:
+            raise DatabaseError(
+                f"cooldown metadata for {account}/{plugin}/{cooldown_key} is "
+                f"not JSON-serializable: {exc}"
+            ) from exc
         async with self._tx(
                 f"upsert cooldown {account}/{plugin}/{cooldown_key}") as conn:
             await conn.execute(
@@ -37,8 +49,7 @@ class CooldownRepository(BaseRepository):
                      metadata_json=excluded.metadata_json,
                      updated_at=excluded.updated_at""",
                 (account, plugin, cooldown_key, float(started_at),
-                 float(expires_at), source, reason,
-                 json.dumps(metadata or {}), now, now),
+                 float(expires_at), source, reason, meta_json, now, now),
             )
 
     async def active_for(self, account: str, plugin: Optional[str] = None,

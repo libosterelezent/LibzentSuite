@@ -40,7 +40,7 @@ def _audit_row(entry: Dict[str, Any]) -> tuple:
         entry.get("direction", "out"),
         entry.get("action", "?"),
         entry.get("channel_id"),
-        (entry.get("content") or "")[:500],
+        str(entry.get("content") or "")[:500],
         entry.get("wait_ms", 0.0),
         entry.get("jitter_ms", 0.0),
         entry.get("note"),

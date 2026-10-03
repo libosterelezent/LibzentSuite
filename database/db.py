@@ -16,6 +16,7 @@ plaintext tokens.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -49,6 +50,7 @@ class Database:
         self._audit_keep = int(audit_keep)
         self._log_keep = int(log_keep)
         self.connection = DatabaseConnection(self._path)
+        self._migrate_lock = asyncio.Lock()  # concurrent connect() -> one migrate
         # stateless repositories, sharing the owned connection
         self.accounts = AccountsRepository(self)
         self.account_settings = AccountSettingsRepository(self)
@@ -89,13 +91,19 @@ class Database:
                 except OSError:
                     pass
         try:
-            return await self.migrate()
+            async with self._migrate_lock:
+                return await self.migrate()
         except BaseException:
             await self.connection.close()  # never leak the worker thread
             raise
 
     async def migrate(self) -> int:
         """Apply pending migrations in order (idempotent, recorded)."""
+        versions = [version for version, _, _ in MIGRATIONS]
+        if versions != sorted(versions) or len(set(versions)) != len(versions):
+            raise DatabaseError(
+                f"database.schema MIGRATIONS versions must be unique and "
+                f"strictly increasing, got {versions!r}")
         conn = self.connection
         await conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations ("
@@ -125,11 +133,17 @@ class Database:
         statement leaves NOTHING half-applied and no bookkeeping row.
         """
         safe_name = name.replace("'", "''")
+        # stamp only when absent: two Database objects first-booting the
+        # same file in parallel both reach here (each saw an empty
+        # schema_migrations); the loser's DDL no-ops (IF NOT EXISTS) and
+        # stamps nothing instead of failing the boot.
         script = (f"BEGIN IMMEDIATE;\n{sql}\n"
                   f"INSERT INTO schema_migrations (version, name, applied_at) "
-                  f"VALUES ({int(version)}, '{safe_name}', {time.time()!r});\n"
+                  f"SELECT {int(version)}, '{safe_name}', {time.time()!r} "
+                  f"WHERE NOT EXISTS (SELECT 1 FROM schema_migrations "
+                  f"WHERE version = {int(version)});\n"
                   f"COMMIT;")
-        async with self.connection.write() as db:
+        async with self.connection.serialized() as db:
             await db.rollback()  # no stray open transaction before BEGIN
             try:
                 await db.executescript(script)

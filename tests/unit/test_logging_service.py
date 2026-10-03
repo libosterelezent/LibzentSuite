@@ -239,6 +239,20 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
         self.assertEqual(entry["source"], "ext:discord.http")
         self.assertEqual(entry["severity"], "ERROR")
 
+    def test_hostile_payload_never_raises(self) -> None:
+        """REGRESSION (audit round 4): record()'s degraded-mode fallback
+        itself called str(source) — an object with a broken __str__ as BOTH
+        source and message escaped the 'never raises' contract."""
+        class Hostile:
+            def __str__(self) -> str:
+                raise RuntimeError("unprintable")
+
+        service = LogService()
+        out = service.record(Hostile(), Hostile(), Hostile())
+        self.assertEqual(out["severity"], "INFO")
+        self.assertEqual(out["source"], "<unloggable source>")
+        self.assertEqual(out["message"], "<unloggable message>")
+
     def test_ring_eviction_and_volume(self) -> None:
         service = LogService(capacity=100)
         for i in range(250):
@@ -311,6 +325,132 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
         service, repo = asyncio.run(scenario())
         self.assertEqual(len(repo.rows), 1)
         self.assertEqual(len(service.tail(10)), 2)  # ring unaffected
+
+
+class TestRound2Audit(unittest.TestCase):
+    """Round-2 hostile coverage: foreign-thread bridge attach/detach, ts
+    ordering under concurrent record(), hostile exc payloads, unknown-account
+    filters, ring bounds with a stalled consumer, post-stop drops."""
+
+    def setUp(self) -> None:
+        self.root = logging.getLogger("slaughtermudae")
+        self._saved_handlers = list(self.root.handlers)
+        self._saved_level = self.root.level
+        self._saved_propagate = self.root.propagate
+        self.root.handlers[:] = [
+            h for h in self._saved_handlers if not isinstance(h, StdlibBridge)
+        ]
+
+    def tearDown(self) -> None:
+        self.root.handlers[:] = self._saved_handlers
+        self.root.setLevel(self._saved_level)
+        self.root.propagate = self._saved_propagate
+
+    def test_bridge_attach_detach_from_foreign_thread(self) -> None:
+        service = LogService()
+
+        def foreign() -> None:
+            attach_stdlib_bridge(service)
+            logging.getLogger("slaughtermudae.foreign").info("from thread")
+
+        thread = threading.Thread(target=foreign)
+        thread.start()
+        thread.join()
+        self.assertEqual(len(service.tail(10)), 1)      # ingested
+
+        def foreign_detach() -> None:
+            detach_stdlib_bridge()
+
+        thread = threading.Thread(target=foreign_detach)
+        thread.start()
+        thread.join()
+        logging.getLogger("slaughtermudae.foreign").info("after detach")
+        self.assertEqual(len(service.tail(10)), 1)      # not ingested
+
+    def test_record_from_threads_ts_monotonic_in_ring(self) -> None:
+        """ts is captured under the ring lock: ring order and timestamp
+        order agree even under concurrent record() from many threads."""
+        service = LogService()
+        received: list = []
+        service.subscribe(received.append)
+
+        def burst(name: str) -> None:
+            for i in range(200):
+                service.record("INFO", name, f"m{i}")
+
+        threads = [threading.Thread(target=burst, args=(f"t{t}",))
+                   for t in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        tail = service.tail(10_000)
+        self.assertEqual(len(tail), 1600)
+        self.assertEqual(len(received), 1600)
+        timestamps = [e["ts"] for e in tail]
+        self.assertEqual(timestamps, sorted(timestamps))
+
+    def test_record_exc_instance_with_broken_str(self) -> None:
+        class Unprintable(Exception):
+            def __str__(self) -> str:
+                raise RuntimeError("no")
+
+        service = LogService()
+        out = service.record("ERROR", "sched", Unprintable())
+        self.assertEqual(out["severity"], "INFO")  # degraded path is INFO
+        self.assertEqual(out["message"], "<unloggable message>")
+        self.assertEqual(out["source"], "sched")
+        self.assertEqual(len(service.tail(5)), 0)  # degraded: not canonical
+
+    def test_unknown_account_plugin_and_severity_filters(self) -> None:
+        service = LogService()
+        service.record("INFO", "s", "a1", account="alpha")
+        service.record("ERROR", "s", "a2", account="alpha", plugin="roll")
+        self.assertEqual(service.tail(10, account="ghost"), [])
+        self.assertEqual(len(service.tail(10, account="alpha")), 2)
+        self.assertEqual(service.tail(10, plugin="ghost"), [])
+        self.assertEqual(service.tail(10, plugin="roll")[0]["message"], "a2")
+        self.assertEqual(service.tail(10, severity="error")[0]["message"], "a2")
+        self.assertEqual(service.tail(10, source="other"), [])
+        self.assertEqual(service.tail(0), [])
+
+    def test_ring_bound_holds_when_consumer_stalls(self) -> None:
+        """A slow CONSUMER (tail reader) cannot grow memory past the ring:
+        the oldest entries evict and subscribers are still notified."""
+        calls: list = []
+        service = LogService(capacity=50)
+        service.subscribe(calls.append)
+        for i in range(300):
+            service.record("INFO", "stall", f"m{i}")  # consumer never reads
+        tail = service.tail(1000)                      # late first read
+        self.assertEqual(len(tail), 50)
+        self.assertEqual(tail[-1]["message"], "m299")
+        self.assertEqual(tail[0]["message"], "m250")
+        self.assertEqual(len(calls), 300)              # live tail never starved
+
+    def test_post_stop_records_counted_dropped(self) -> None:
+        class CountingRepo:
+            def __init__(self) -> None:
+                self.rows: list = []
+
+            async def add(self, entry: dict) -> None:
+                self.rows.append(entry)
+
+        async def scenario() -> tuple:
+            service = LogService()
+            repo = CountingRepo()
+            await service.start_persistence(repo, interval=0.01)
+            service.record("INFO", "a", "kept")
+            await service.stop_persistence()
+            service.record("INFO", "a", "lost-1")
+            service.record("WARNING", "a", "lost-2")
+            return service, repo
+
+        service, repo = asyncio.run(scenario())
+        self.assertEqual(len(repo.rows), 1)
+        self.assertEqual(len(service.tail(10)), 3)         # ring unaffected
+        self.assertEqual(service.stats()["dropped"], 2)    # observable
+        self.assertEqual(service.stats()["entries"], 3)
 
 
 if __name__ == "__main__":

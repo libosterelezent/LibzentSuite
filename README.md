@@ -35,7 +35,7 @@ database/              SQLite: models, ordered migrations, repositories
 adapters/              Discord boundary: discord/ (live) + simulator/ (offline)
 interfaces/            cli/ (REPL + one-shot) + dashboard/ (SPA + REST + WS)
 plugins/               soulcopy (migrated) + roll (reference plugin)
-tests/unit|integration|simulation/   705-test offline suite
+tests/unit|integration|simulation/   992-test offline suite
 config/                global settings, rate policies, account files
 main.py                entrypoint
 ```
@@ -43,22 +43,23 @@ main.py                entrypoint
 ## Quickstart
 
 ```bash
-cp .env.example .env        # fill tokens + OWNER_USER_IDS (chmod 600 .env)
+cp .env.example .env        # fill IDs + OWNER_USER_IDS (chmod 600 .env)
 python3 main.py --sim-list             # available offline scenarios
 python3 main.py --sim soulcopy_basic   # full pipeline over the simulator
 python3 main.py                         # interactive REPL (live accounts)
 python3 main.py accounts list           # one-shot command mode
 python3 main.py --start-all --dashboard # live accounts + dashboard :8070
-bash scripts/run_tests.sh               # the whole 705-test suite
+bash scripts/run_tests.sh               # the whole 992-test suite (venv-aware)
 ```
 
 The dashboard serves a sidebar SPA (Overview, Accounts, Plugins, Profiles,
 Rate Limits, Tasks, Logs, Simulation, Advanced) on `http://127.0.0.1:8070`
 with live WebSocket push; set `DASHBOARD_TOKEN` in `.env` to require auth.
 
-Dependencies: Python ≥ 3.10 + `aiosqlite` + `cryptography` (see `requirements.txt`); live mode additionally needs `discord.py-self` (lazy import). Live mode additionally
-needs a user-account client fork (`pip install discord.py-self`), imported
-lazily — simulations/tests never require it.
+Dependencies: Python ≥ 3.10 + `aiosqlite` + `cryptography` (see
+`requirements.txt`). Live mode additionally needs the user-account client
+fork `discord.py-self` (`pip install discord.py-self`), imported lazily —
+simulations/tests never require it.
 
 ## Architecture: who calls what
 
@@ -160,7 +161,10 @@ flat field surface, future plugins (snipe/kakerareact/kakeraloot/soulmate
 farm) read rich data without re-fetching or core rewrites. Actions are
 capabilities on `PluginServices` (`send_message`, `send_dm`,
 `add_reaction`, `click_button`) flowing through the paced pipeline — event
-models carry data only, never rate limiting.
+models carry data only, never rate limiting. Plugins also get framework-
+managed cooldowns (`cooldown_set/remaining/active/clear/list`) and
+persistent per-plugin state (`state_get/set/delete`) through the same
+services object.
 
 ## Managing from Discord (mention prefix)
 
@@ -177,7 +181,8 @@ Four levels — `global`, `account`, `plugin`, `account_plugin` — each
 (account, plugin, action) is the MAX across every applicable level, so no
 level can ever make traffic FASTER than a stricter level demands. Policies
 below **1.5s/action** are rejected everywhere (`UnsafePolicyError`), the
-floor can only be raised, and `ratelimit warnings` reviews the configuration
+floor can only be raised, and intervals/floor are capped at 86400s (1
+day). `ratelimit warnings` reviews the configuration
 for aggressive intervals / missing or narrow jitter.
 
 ## Credentials & IDs
@@ -187,7 +192,8 @@ master key lives outside it (`state/credentials.key` 0600, or `SM_MASTER_KEY`
 in the process environment). Register the account, then store its token via
 the dashboard (Accounts → credential) or `python3 main.py accounts credential
 <name> <token>`. `.env` (gitignored, chmod 600) holds `MUDAE_BOT_ID`,
-`OWNER_USER_IDS` and optional `DASHBOARD_TOKEN` — legacy `DISCORD_TOKEN_*`
+`OWNER_USER_IDS`, optional `DASHBOARD_TOKEN` and optional `REMOTE_CONTROL` —
+legacy `DISCORD_TOKEN_*`
 entries are read only by the one-shot `credentials import-env` migration.
 
 ## Simulation system (spec §9)
@@ -218,18 +224,22 @@ construction, not by discipline.
 
 ## Documentation
 
-- `knowledgebase/` — the deep knowledge base: handwritten guides
-  (architecture, data flow, runtime lifecycle, per-subsystem references,
-  the formal plugin API with examples and anti-patterns, configuration,
-  CLI, dashboard, testing, security, glossary, changelog) +
-  `read_only/` generated symbol snapshot and `generated/` machine-readable
-  indexes (`symbol_index.json`, coverage, drift baseline). See
-  `knowledgebase/AGENT_GUIDE.md` and `knowledgebase/DISCREPANCIES.md`.
+- `knowledgebase/` — the deep knowledge base. **Local-only and gitignored**:
+  the generated parts (`read_only/` symbol snapshot, `generated/`
+  machine-readable indexes — `symbol_index.json`, coverage, drift baseline)
+  are (re)created by `python3 scripts/gen_knowledgebase.py [--check]`; the
+  handwritten guides (architecture, data flow, runtime lifecycle,
+  per-subsystem references, the formal plugin API, configuration, CLI,
+  dashboard, testing, security, glossary, changelog) are maintained
+  separately and are NOT shipped in this repository — a fresh clone has no
+  `knowledgebase/` until you generate one.
 - `docs/` — the Sphinx site (API reference from the real docstrings +
   architecture/operations digests): `pip install --user sphinx
   myst-parser` then `python3 -m sphinx -W -b html docs docs/_build/html`.
-- Regenerate the snapshot / detect drift:
-  `python3 scripts/gen_knowledgebase.py [--check]`.
+- Perf harnesses: `scripts/bench_db.py` (event-loop stall: inline vs queued
+  SQLite writes) and `scripts/bench_hot.py` (hot-path micro-benchmarks:
+  bus fanout, rate acquire, persist queue, dashboard serialization, rich
+  model conversion).
 
 Inter-module contracts are documented in `INTEGRATION.md`.
 

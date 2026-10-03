@@ -43,6 +43,25 @@ class PluginStateService:
         parts.append(key)
         return self.SCOPE_SEPARATOR.join(parts)
 
+    def _pair_owner(self, account: str, plugin: str) -> str:
+        """Validated pair-scope owner (``account/plugin``).
+
+        Each component is checked SEPARATELY: an unvalidated
+        ``"a/p" + "/" + plugin`` owner collides with the pair
+        ``("a", "p/x")`` in the flat kv key-space (e.g. both produce
+        ``pstate:account_plugin:a/p/x:<key>``). Legit components never
+        contain the separators (NAME_RE / plugin slugs forbid them).
+        """
+        for component in (account, plugin):
+            if not component or not isinstance(component, str) or any(
+                c in component for c in (self.SCOPE_SEPARATOR, "/", "\x00")
+            ):
+                raise PluginError(
+                    f"pair scope component {component!r} must be a non-empty "
+                    "string without ':' or '/'"
+                )
+        return f"{account}/{plugin}"
+
     def _global_key(self, key: str) -> str:
         return self._key("global", None, key)
 
@@ -53,7 +72,7 @@ class PluginStateService:
         return self._key("plugin", plugin, key)
 
     def _pair_key(self, account: str, plugin: str, key: str) -> str:
-        return self._key("account_plugin", f"{account}/{plugin}", key)
+        return self._key("account_plugin", self._pair_owner(account, plugin), key)
 
     # ------------------------------------------------------------- global
     async def get_global(self, key: str, default: Any = None) -> Any:
@@ -61,9 +80,6 @@ class PluginStateService:
 
     async def set_global(self, key: str, value: Any) -> None:
         await self._set(self._global_key(key), value)
-
-    async def delete_global(self, key: str) -> bool:
-        return await self._delete(self._global_key(key))
 
     # ------------------------------------------------------------- account
     async def get_account(self, account: str, key: str, default: Any = None) -> Any:
@@ -81,9 +97,6 @@ class PluginStateService:
 
     async def set_plugin(self, plugin: str, key: str, value: Any) -> None:
         await self._set(self._plugin_key(plugin, key), value)
-
-    async def delete_plugin(self, plugin: str, key: str) -> bool:
-        return await self._delete(self._plugin_key(plugin, key))
 
     # ------------------------------------------------------- account+plugin
     async def get_pair(self, account: str, plugin: str, key: str,
@@ -105,7 +118,9 @@ class PluginStateService:
         """
         if self._kv is None:
             return 0
-        if not account or any(c in account for c in (self.SCOPE_SEPARATOR, "\x00")):
+        if not account or any(c in account for c in (self.SCOPE_SEPARATOR, "/", "\x00")):
+            # '/' is rejected too: cascading "a/b" would delete the
+            # pair-scope rows of account "a", plugin "b"
             raise PluginError(f"invalid account scope {account!r}")
         delete_prefix = getattr(self._kv, "delete_prefix", None)
         if delete_prefix is None:

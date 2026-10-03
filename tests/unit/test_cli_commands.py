@@ -1,6 +1,7 @@
 """CLI command-engine + REPL tests (fake ControlAPI; no real managers)."""
 from __future__ import annotations
 
+import asyncio
 import io
 import unittest
 from typing import Any, List, Optional, Tuple
@@ -14,6 +15,7 @@ from interfaces.cli.commands import (
     format_audit,
     format_effective,
     format_history,
+    format_lane,
     format_logs,
     format_plugins,
     format_plugin_state,
@@ -294,8 +296,10 @@ class TestBasics(unittest.IsolatedAsyncioTestCase):
             await run_command(FakeApi(), "exit")
 
     async def test_unknown_command(self) -> None:
-        text = await run_command(FakeApi(), "frobnicate")
-        self.assertIn("unknown command", text)
+        with self.assertRaises(UsageError) as ctx:
+            await run_command(FakeApi(), "frobnicate")
+        self.assertIn("unknown command", str(ctx.exception))
+        self.assertIn("try 'help'", str(ctx.exception))
 
     async def test_unclosed_quotes(self) -> None:
         with self.assertRaises(UsageError):
@@ -723,6 +727,414 @@ class TestRepl(unittest.IsolatedAsyncioTestCase):
         self.assertIn("error:", out.getvalue())
         code = await run_once(api, ["quit"], stdout=out)
         self.assertEqual(code, 0)
+
+    async def test_run_once_quotes_argv(self) -> None:
+        api = FakeApi()
+        code = await run_once(api, ["accounts", "add", "bob two"],
+                              stdout=io.StringIO())
+        self.assertEqual(code, 0)
+        args, _ = called(api, "accounts_add")
+        self.assertEqual(args[0], {"name": "bob two"})
+
+    async def test_stop_event_ends_repl_at_prompt(self) -> None:
+        import os
+
+        api = FakeApi()
+        out = io.StringIO()
+        read_fd, write_fd = os.pipe()  # never delivers a line: blocks
+        try:
+            stop = asyncio.Event()
+            repl = Repl(api, stdin=os.fdopen(read_fd, "r"), stdout=out,
+                        stop_event=stop)
+            asyncio.get_running_loop().call_later(0.1, stop.set)
+            await asyncio.wait_for(repl.run(), timeout=5)
+        finally:
+            os.close(write_fd)
+        self.assertTrue(called(api, "shutdown"))
+        self.assertIn("bye.", out.getvalue())
+        self.assertFalse(repl.running)
+
+    async def test_stop_event_set_before_run_exits_immediately(self) -> None:
+        api = FakeApi()
+        out = io.StringIO()
+        stop = asyncio.Event()
+        stop.set()
+        repl = Repl(api, stdin=io.StringIO(""), stdout=out, stop_event=stop)
+        await asyncio.wait_for(repl.run(), timeout=5)
+        self.assertTrue(called(api, "shutdown"))
+        self.assertIn("bye.", out.getvalue())
+
+    async def test_repl_survives_unicode_garbage(self) -> None:
+        api = FakeApi()
+        out = io.StringIO()
+
+        class BombsOnReadline(io.StringIO):
+            def readline(self):  # simulates undecodable input bytes
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+
+        repl = Repl(api, stdin=BombsOnReadline(), stdout=out)
+        await asyncio.wait_for(repl.run(), timeout=5)
+        self.assertIn("bye.", out.getvalue())
+        self.assertTrue(called(api, "shutdown"))
+
+
+class TestHelpCommand(unittest.IsolatedAsyncioTestCase):
+    """'help <cmd>' focus, alias handling, and registry drift checks."""
+
+    async def test_help_bare_is_full_text(self) -> None:
+        text = await run_command(FakeApi(), "help")
+        self.assertIn("commands:", text)
+        self.assertIn("usage: accounts", text)
+
+    async def test_help_focus_for_every_command(self) -> None:
+        for name in sorted(HELP):
+            text = await run_command(FakeApi(), f"help {name}")
+            self.assertIn(name, text)
+            self.assertIn(HELP[name][1], text)
+
+    async def test_help_focus_shows_usage(self) -> None:
+        text = await run_command(FakeApi(), "help ratelimit")
+        self.assertIn("usage: ratelimit", text)
+        self.assertIn("floor", text)
+        with self.assertRaises(UsageError) as ctx:
+            await run_command(FakeApi(), "help tasks cancel")
+        self.assertIn("usage: help [command]", str(ctx.exception))
+
+    async def test_help_exit_alias(self) -> None:
+        text = await run_command(FakeApi(), "help exit")
+        self.assertIn("graceful shutdown", text)
+
+    async def test_help_unknown_and_extra(self) -> None:
+        with self.assertRaises(UsageError) as ctx:
+            await run_command(FakeApi(), "help frobnicate")
+        self.assertIn("unknown command", str(ctx.exception))
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "help accounts list")
+
+    def test_help_registry_no_drift(self) -> None:
+        self.assertEqual(
+            set(HELP),
+            {"help", "status", "accounts", "credentials", "cooldowns",
+             "plugins", "profiles", "ratelimit", "tasks", "simulation",
+             "logs", "audit", "estop", "quit"},
+        )
+        for name, (sig, desc) in HELP.items():
+            self.assertTrue(desc, f"HELP[{name!r}] has no description")
+            self.assertIsInstance(sig, str)
+
+
+class TestHostileParsing(unittest.IsolatedAsyncioTestCase):
+    """Fuzz: hostile argument shapes only ever produce text, None,
+    QuitRequested or UsageError — never another exception, never a
+    traceback at the REPL."""
+
+    HOSTILE: List[str] = [
+        "accounts add", "accounts add '' extra", 'accounts add "my acc"',
+        "accounts add 泥棒#42", "accounts add ' spaced '",
+        "accounts remove", "accounts info a b", "accounts credential a",
+        "accounts credential a b c", "accounts enable a",
+        "accounts enable a on extra", "accounts enable a maybe",
+        "accounts start a b", "accounts estop", "accounts frobnicate",
+        "ratelimit set message abc", "ratelimit set message 2.5 0.2",
+        "ratelimit set message nan", "ratelimit set message inf",
+        "ratelimit set message 1e999", "ratelimit set message -inf",
+        "ratelimit set message 2.5 nan nan", "ratelimit set message 2.5 0.2 0.8",
+        "ratelimit clear global", "ratelimit clear account - message",
+        "ratelimit clear weird x y", "ratelimit floor abc", "ratelimit floor nan",
+        "ratelimit floor", "ratelimit floor 1e999",
+        "ratelimit lane on 2.5 extra", "ratelimit lane off now",
+        "ratelimit lane rate", "ratelimit lane on x", "ratelimit lane sideways",
+        "ratelimit effective", "ratelimit effective a b c d",
+        "ratelimit warnings extra", "ratelimit show extra",
+        "tasks cancel notanumber", "tasks cancel 7 extra", "tasks cancel ''",
+        "tasks history -3", "tasks history abc", "tasks history 5 extra",
+        "tasks history 999999999999999999999",
+        "tasks list a b", "tasks cancel-matching a b c",
+        "logs -5", "logs --5", "logs 5 a b", "logs 0x10", "audit -1",
+        "plugins state", "plugins set a p k", "plugins enable a",
+        "profiles create", "profiles delete", "profiles assign a",
+        "credentials", "credentials import-env --force",
+        "credentials import-env --overwrite --overwrite",
+        "cooldowns a b", "cooldowns clear a", "cooldowns clear a b c d",
+        "cooldowns ''", "cooldowns clear '' roll",
+        "simulation run", "simulation run a b", "simulation list extra",
+        "estop resume now", "estop sideways", "status extra", "help a b",
+        "", "   ", "\t", "\x00", "\x01\x02", "accounts\x01add bob",
+        "'unclosed", '"unclosed', "HELP", "Accounts LIST", "frobnicate",
+        "ACCOUNTS ADD bob",
+    ]
+
+    async def test_hostile_lines_never_escape_the_contract(self) -> None:
+        api = FakeApi()
+        for line in self.HOSTILE:
+            with self.subTest(line=line):
+                try:
+                    result = await run_command(api, line)
+                except (QuitRequested, UsageError):
+                    continue
+                self.assertIsInstance(result, (str, type(None)))
+
+    async def test_hostile_lines_through_repl_no_traceback(self) -> None:
+        lines = [ln for ln in self.HOSTILE if ln.strip()] + [""]
+        out = io.StringIO()
+        repl = Repl(FakeApi(), stdin=io.StringIO("\n".join(lines) + "\n"),
+                    stdout=out)
+        await asyncio.wait_for(repl.run(), timeout=15)
+        text = out.getvalue()
+        self.assertNotIn("Traceback", text)
+        self.assertIn("bye.", text)
+        self.assertIn("error: unknown command 'frobnicate'", text)
+
+    async def test_quoting_round_trip(self) -> None:
+        api = FakeApi()
+        await run_command(api, 'accounts add "my acc" roller')
+        args, _ = called(api, "accounts_add")
+        self.assertEqual(args[0], {"name": "my acc", "profiles": ["roller"]})
+        await run_command(api, "accounts add 'bob two'")
+        args, _ = called(api, "accounts_add")
+        self.assertEqual(args[0], {"name": "bob two"})
+
+    async def test_unicode_account_name_round_trip(self) -> None:
+        api = FakeApi()
+        text = await run_command(api, "accounts info 泥棒")
+        args, _ = called(api, "accounts_info")
+        self.assertEqual(args, ("泥棒",))
+        self.assertIn("泥棒", text)
+
+    async def test_numbers_and_negatives(self) -> None:
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "logs -5")
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "audit -1")
+        with self.assertRaises(UsageError):
+            await run_command(FakeApi(), "tasks history -1")
+        api = FakeApi()
+        await run_command(api, "logs 0")
+        self.assertEqual(called(api, "logs_tail")[0], (0, None, None))
+
+
+class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):
+    """Round-2: the stop event vs long commands, EOF, and pending input."""
+
+    async def test_stop_event_during_long_command(self) -> None:
+        class SlowStatusApi(FakeApi):
+            async def status(self):
+                await asyncio.sleep(0.05)
+                return await super().status()
+
+        api = SlowStatusApi()
+        out = io.StringIO()
+        stop = asyncio.Event()
+        repl = Repl(api, stdin=io.StringIO("status\n"), stdout=out,
+                    stop_event=stop)
+        asyncio.get_running_loop().call_later(0.02, stop.set)
+        await asyncio.wait_for(repl.run(), timeout=5)
+        text = out.getvalue()
+        self.assertTrue(called(api, "status"))
+        self.assertTrue(called(api, "shutdown"))
+        self.assertIn("uptime:", text)
+        self.assertIn("bye.", text)
+        self.assertNotIn("sm> bye.", text)
+
+    async def test_stop_before_run_discards_pending_input(self) -> None:
+        api = FakeApi()
+        out = io.StringIO()
+        stop = asyncio.Event()
+        stop.set()
+        repl = Repl(api, stdin=io.StringIO("status\nhelp\n"), stdout=out,
+                    stop_event=stop)
+        await asyncio.wait_for(repl.run(), timeout=5)
+        text = out.getvalue()
+        self.assertFalse(called(api, "status"))
+        self.assertTrue(called(api, "shutdown"))
+        self.assertIn("bye.", text)
+        self.assertNotIn("uptime:", text)
+
+    async def test_eof_and_stop_same_tick(self) -> None:
+        class StopSignalApi(FakeApi):
+            def __init__(self) -> None:
+                super().__init__()
+                self.stop: Optional[asyncio.Event] = None
+
+            async def status(self):
+                result = await super().status()
+                if self.stop is not None:
+                    self.stop.set()
+                return result
+
+        api = StopSignalApi()
+        out = io.StringIO()
+        stop = asyncio.Event()
+        api.stop = stop
+        repl = Repl(api, stdin=io.StringIO("status\n"), stdout=out,
+                    stop_event=stop)
+        await asyncio.wait_for(repl.run(), timeout=5)
+        text = out.getvalue()
+        self.assertTrue(called(api, "shutdown"))
+        self.assertEqual(text.count("bye."), 1)
+        self.assertIn("uptime:", text)
+
+    async def test_keyboard_interrupt_mid_command_exits_cleanly(self) -> None:
+        class InterruptingApi(FakeApi):
+            async def status(self):
+                raise KeyboardInterrupt
+
+        api = InterruptingApi()
+        out = io.StringIO()
+        repl = Repl(api, stdin=io.StringIO("status\n"), stdout=out)
+        await asyncio.wait_for(repl.run(), timeout=5)
+        text = out.getvalue()
+        self.assertNotIn("Traceback", text)
+        self.assertIn("bye.", text)
+        self.assertTrue(called(api, "shutdown"))
+        self.assertFalse(repl.running)
+
+
+class TestRunOnceExitCodes(unittest.IsolatedAsyncioTestCase):
+    """Every failure mode maps to the right process exit code."""
+
+    async def test_success_and_estop_are_zero(self) -> None:
+        api = FakeApi()
+        out = io.StringIO()
+        self.assertEqual(await run_once(api, ["accounts", "list"], stdout=out), 0)
+        self.assertIn("alpha", out.getvalue())
+        self.assertEqual(await run_once(api, ["estop"], stdout=out), 0)
+        self.assertEqual(await run_once(api, [], stdout=io.StringIO()), 0)
+
+    async def test_bad_args_exit_one(self) -> None:
+        out = io.StringIO()
+        code = await run_once(FakeApi(), ["ratelimit", "set", "message", "abc"],
+                              stdout=out)
+        self.assertEqual(code, 1)
+        self.assertIn("error:", out.getvalue())
+
+    async def test_unknown_command_exit_one(self) -> None:
+        out = io.StringIO()
+        code = await run_once(FakeApi(), ["frobnicate"], stdout=out)
+        self.assertEqual(code, 1)
+        self.assertIn("unknown command", out.getvalue())
+
+    async def test_runtime_error_exit_one(self) -> None:
+        class BoomApi(FakeApi):
+            async def status(self):
+                raise RuntimeError("boom")
+
+        out = io.StringIO()
+        self.assertEqual(await run_once(BoomApi(), ["status"], stdout=out), 1)
+        self.assertIn("error: boom", out.getvalue())
+        self.assertNotIn("Traceback", out.getvalue())
+
+    async def test_failing_estop_exit_one(self) -> None:
+        from core.errors import AccountError
+
+        class HaltApi(FakeApi):
+            async def emergency_stop_all(self, surface="api"):
+                raise AccountError("already halted")
+
+        out = io.StringIO()
+        self.assertEqual(await run_once(HaltApi(), ["estop"], stdout=out), 1)
+        self.assertIn("error: already halted", out.getvalue())
+
+    async def test_flags_after_subcommand_pass_through(self) -> None:
+        api = FakeApi()
+        out = io.StringIO()
+        code = await run_once(
+            api, ["ratelimit", "set", "message", "2.5", "0.2", "0.8",
+                  "account", "alpha"],
+            stdout=out)
+        self.assertEqual(code, 0)
+        self.assertEqual(called(api, "ratelimit_set")[0],
+                         ("message", 2.5, 0.2, 0.8, "account", "alpha"))
+        code = await run_once(api, ["credentials", "import-env", "--overwrite"],
+                              stdout=out)
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            called(api, "credentials_import_env")[1].get("overwrite"), True)
+
+    async def test_shell_metachar_tokens_survive(self) -> None:
+        api = FakeApi()
+        code = await run_once(api, ["accounts", "add", "bob;rm -rf /"],
+                              stdout=io.StringIO())
+        self.assertEqual(code, 0)
+        args, _ = called(api, "accounts_add")
+        self.assertEqual(args[0], {"name": "bob;rm -rf /"})
+
+    async def test_output_is_deterministic_and_ansi_free(self) -> None:
+        outs = []
+        for _ in range(2):
+            out = io.StringIO()
+            await run_once(FakeApi(), ["status"], stdout=out)
+            outs.append(out.getvalue())
+        self.assertEqual(outs[0], outs[1])
+        self.assertNotIn("\x1b", outs[0])
+
+
+class TestOutputVolumeAndFormatting(unittest.TestCase):
+    """Huge payloads render bounded, deterministic, ANSI-free text."""
+
+    def _history_rows(self, count: int) -> List[dict]:
+        return [{"id": i, "status": "completed", "account": "alpha",
+                 "plugin": "soulcopy", "action": "message", "duration_s": 0.25}
+                for i in range(count)]
+
+    def test_format_history_ten_thousand_rows(self) -> None:
+        text = format_history(self._history_rows(10_000))
+        self.assertEqual(len(text.splitlines()), 10_000)
+
+    def test_pure_formatters_emit_no_ansi(self) -> None:
+        text = format_history(self._history_rows(3))
+        self.assertNotIn("\x1b", text)
+        text = format_logs([{"ts": 1700000000.5, "severity": "INFO",
+                             "source": "core", "message": "ready"}])
+        self.assertNotIn("\x1b", text)
+        text = format_audit([{
+            "ts": 1700000000.5, "account": "alpha", "direction": "out",
+            "action": "message", "channel_id": 5, "content": "$sl",
+            "wait_ms": 10.0, "jitter_ms": 20.0}])
+        self.assertNotIn("\x1b", text)
+
+    def test_format_lane_paused_and_caps(self) -> None:
+        paused = format_lane({"enabled": True, "paused": True,
+                              "prefixrate": 0.0, "waiting": 3, "grants": 1,
+                              "last_grant_age_s": None})
+        self.assertIn("PAUSED", paused)
+        self.assertIn("never", paused)
+        capped = format_lane({"enabled": True, "paused": False,
+                              "prefixrate": 86400.0, "waiting": 0,
+                              "grants": 2, "last_grant_age_s": 4.0})
+        self.assertIn("86400s", capped)
+        self.assertNotIn("86400.0s", capped)
+
+    def test_format_policies_jitter_rendering(self) -> None:
+        text = format_policies([{"level": "global", "owner": None,
+                                 "action": "message", "interval": 2.0,
+                                 "jitter": [0.1, 0.5]}])
+        self.assertIn("2.00s +0.10..0.50s", text)
+
+
+class TestFloorCapDisplay(unittest.IsolatedAsyncioTestCase):
+    """'ratelimit floor' round-1 cap (86400) renders correctly end to end."""
+
+    async def test_floor_at_cap_displays_bare(self) -> None:
+        from core.errors import RatePolicyError
+
+        class CappedFloorApi(FakeApi):
+            async def ratelimit_set_floor(self, seconds):
+                if seconds > 86400.0:
+                    raise RatePolicyError(
+                        "safety floor exceeds the one-day cap (86400s)")
+                return {"floor": min(float(seconds), 86400.0)}
+
+        api = CappedFloorApi()
+        text = await run_command(api, "ratelimit floor 86400")
+        self.assertIn("floor=86400", text)
+        self.assertNotIn("86400.0", text)
+        text = await run_command(api, "ratelimit floor 3600")
+        self.assertIn("floor=3600", text)
+        with self.assertRaises(RatePolicyError):
+            await run_command(api, "ratelimit floor 90000")
+        with self.assertRaises(UsageError):  # non-finite rejected at the CLI
+            await run_command(api, "ratelimit floor nan")
 
 
 if __name__ == "__main__":

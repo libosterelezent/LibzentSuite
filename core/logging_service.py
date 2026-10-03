@@ -207,18 +207,26 @@ class LogService:
             severity = str(severity or "INFO").upper()
             message = str(message)
         except Exception:
-            return {"ts": time.time(), "severity": "INFO", "source": str(source),
+            try:
+                source_text = str(source)
+            except Exception:
+                source_text = "<unloggable source>"
+            return {"ts": time.time(), "severity": "INFO", "source": source_text,
                     "message": "<unloggable message>", "account": account,
                     "plugin": plugin, "task_id": task_id, "event": event}
         if severity not in SEVERITIES:
             severity = "INFO"
         if len(message) > _MESSAGE_CAP:  # ring + DB rows bounded per entry
             message = message[:_MESSAGE_CAP] + f"…(+{len(message) - _MESSAGE_CAP} chars)"
-        entry = LogEntry(
-            ts=time.time(), severity=severity, source=source, message=message,
-            account=account, plugin=plugin, task_id=task_id, event=event,
-        )
         with self._lock:
+            # ts captured INSIDE the lock: ring position and timestamp are
+            # serialized together, so concurrent record() calls can never
+            # land out-of-order timestamps in the ring (dashboard tail order)
+            entry = LogEntry(
+                ts=time.time(), severity=severity, source=source,
+                message=message, account=account, plugin=plugin,
+                task_id=task_id, event=event,
+            )
             self._ring.append(entry)
             self._counts[severity] = self._counts.get(severity, 0) + 1
         # OUTBOUND mirror — only for records NOT ingested from stdlib on
@@ -233,14 +241,19 @@ class LogService:
                 extra={"_sm_from_service": True},
             )
         payload = entry.as_dict()  # built ONCE (was 2x per record)
-        if self._persist.active:
+        if self._persist.active or self._persist.stopped:
+            # active: enqueue for the worker. stopped (was started, then
+            # stopped): still put — the queue counts the drop so post-stop
+            # losses are visible in stats()['dropped'], not silent. A sink
+            # that was never started stays fully inert (sim/headless boots).
             self._persist.put(payload)
         if self._subscribers:  # no per-record copy when nobody listens
             for callback in list(self._subscribers):
                 try:
                     callback(entry)
                 except Exception:
-                    self._subscriber_failures += 1  # observable, never recursive
+                    with self._lock:  # record() runs on many threads
+                        self._subscriber_failures += 1  # observable, never recursive
         return payload
 
     def info(self, source: str, message: str, **ctx: Any) -> Dict[str, Any]:

@@ -63,6 +63,7 @@ name. This matches the A6 hand-off contract and should be reconciled with A3.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
 import time
@@ -86,7 +87,7 @@ from .cache import DiscordCache, invalidate_dm_channel, resolve_dm_channel
 from .services import AccountPluginServices, MessageWaiterRegistry, TaskAckRegistry
 
 #: account names share the profile namespace style (may start with a digit)
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 
 
 def _forget_account_loggers(name: str) -> None:
@@ -423,7 +424,7 @@ class AccountManager:
             # reserved by 'accounts start all': an account so named could
             # never be started/stopped/filtered individually from the CLI
             raise AccountError("account name 'all' is reserved")
-        if not isinstance(name, str) or not NAME_RE.match(name or ""):
+        if not isinstance(name, str) or not NAME_RE.fullmatch(name or ""):
             raise AccountError(
                 f"account name {name!r} must match {NAME_RE.pattern} "
                 "(lowercase letters/digits/_/-, at most 32 chars)"
@@ -482,16 +483,20 @@ class AccountManager:
         except KeyError:
             raise AccountError(f"unknown account {name!r}") from None
         rt = account.runtime
-        rt.generation += 1  # PHASE-4: this removal invalidates all older ops
         if rt.status in (
             AccountStatus.RUNNING, AccountStatus.RECONNECTING, AccountStatus.CONNECTING,
         ):
-            # put it back: refusal must not mutate the registry
+            # put it back: refusal must not mutate the registry — and must
+            # NOT bump the generation either (PHASE-4 fix: the bump used to
+            # happen before this check, so a REFUSED removal invalidated
+            # the in-flight start, which then stood down as stale and left
+            # the account stuck CONNECTING — a live client with no owner)
             self._accounts[name] = account
             raise AccountError(
                 f"stop account {name!r} before removing it "
                 f"(status: {rt.status.value})"
             )
+        rt.generation += 1  # PHASE-4: this removal invalidates all older ops
         rt.stop_requested = True
         supervisor = rt.supervisor
         rt.supervisor = None
@@ -501,13 +506,17 @@ class AccountManager:
             try:  # drop queued/parked tasks so nothing fires against a
                 # re-created same-named account later
                 self._scheduler.cancel_matching(account=name)
-                cleanup = getattr(self._scheduler, "cleanup_account", None)
-                if callable(cleanup):
-                    resolved = cleanup(name)  # K1: real method now exists;
-                    if asyncio.iscoroutine(resolved):  # tolerant of sync fakes
-                        await resolved
             except Exception:
                 self._logger.exception("task cancel failed for %s", name)
+            cleanup = getattr(self._scheduler, "cleanup_account", None)
+            if callable(cleanup):
+                try:
+                    resolved = cleanup(name)  # K1: real method now exists;
+                    if inspect.iscoroutine(resolved):  # tolerant of sync fakes
+                        await resolved
+                except Exception:
+                    self._logger.exception(
+                        "lane cleanup failed for %s", name)
         stale_client = rt.client
         rt.client = None
         if stale_client is not None:  # FAILED account never stopped: no leak
@@ -523,14 +532,14 @@ class AccountManager:
             # (Single call — the pre-phase-4 code had this block duplicated
             # back-to-back, a merge artifact from the isolation audit.)
             outcome = self._plugin_manager.deactivate_account(name)
-            if asyncio.iscoroutine(outcome):  # tolerant: sync pinned, async OK
+            if inspect.iscoroutine(outcome):  # tolerant: sync pinned, async OK
                 await outcome
         except Exception:
             self._logger.exception(
                 "plugin deactivation on remove failed for %s", name)
         try:
             outcome = self._plugin_manager.detach_account(name)
-            if asyncio.iscoroutine(outcome):  # tolerant: sync pinned, async OK
+            if inspect.iscoroutine(outcome):  # tolerant: sync pinned, async OK
                 await outcome
         except Exception:
             self._logger.exception("plugin detach failed for %s", name)
@@ -590,7 +599,7 @@ class AccountManager:
         if hasattr(limiter, "prune_account"):
             try:
                 resolved = limiter.prune_account(name)
-                if asyncio.iscoroutine(resolved):
+                if inspect.iscoroutine(resolved):
                     await resolved
             except Exception:
                 self._logger.exception("rate-engine residue cascade failed for %s", name)
@@ -772,7 +781,7 @@ class AccountManager:
             outcome = self._plugin_manager.activate_account(
                 name, self._services_factory(name)
             )
-            if asyncio.iscoroutine(outcome):  # pinned sync; async tolerated
+            if inspect.iscoroutine(outcome):  # pinned sync; async tolerated
                 await outcome
         except Exception:
             self._logger.exception(
@@ -904,14 +913,29 @@ class AccountManager:
             return
         try:
             outcome = client.disconnect()
-            if asyncio.iscoroutine(outcome):
+            if inspect.iscoroutine(outcome):
                 task = asyncio.get_running_loop().create_task(
                     outcome, name=f"discard-client-{name}"
                 )
                 self._background.add(task)
-                task.add_done_callback(self._background.discard)
+                task.add_done_callback(self._reap_background)
         except Exception:
             self._logger.warning("half-built client cleanup failed for %s", name)
+
+    def _reap_background(self, task: "asyncio.Task[Any]") -> None:
+        """Drop one finished fire-and-forget task; surface its failure.
+
+        Without the exception read here, a background task that dies (e.g.
+        an estop whose account was removed before the stop ran) vanishes
+        with nothing but a GC-time "exception was never retrieved" warning.
+        """
+        self._background.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            self._logger.error(
+                "background task %s failed: %s", task.get_name(), exc)
 
     async def stop(self, name: str, *,
                    _bypass_lifecycle: bool = False) -> Dict[str, Any]:
@@ -946,7 +970,7 @@ class AccountManager:
             rt.lost.set()  # wake the supervisor so it sees stop_requested NOW
             try:
                 outcome = self._plugin_manager.deactivate_account(name)
-                if asyncio.iscoroutine(outcome):  # pinned sync; async tolerated
+                if inspect.iscoroutine(outcome):  # pinned sync; async tolerated
                     # FINAL-PHASE (F4): a hung plugin hook must not wedge a
                     # fleet halt — bounded, then continue the teardown.
                     await asyncio.wait_for(asyncio.shield(outcome), timeout=5.0)
@@ -998,6 +1022,11 @@ class AccountManager:
                 except asyncio.CancelledError:
                     supervisor.cancel()  # caller cancelled us — don't leak the task
                     raise
+                except Exception:
+                    # a CRASHED supervisor must not abort the teardown —
+                    # stop() still has to reach its STOPPED terminal state
+                    self._logger.exception(
+                        "supervisor of %s crashed during reap", name)
             if rt.generation != gen:
                 # PHASE-4 (S1-F6): a NEWER start() took ownership while this
                 # stop was parked in an await. Its CONNECTING/RUNNING state
@@ -1171,7 +1200,7 @@ class AccountManager:
         task = loop.create_task(
             self.stop(name, _bypass_lifecycle=True), name=f"estop-{name}")
         self._background.add(task)
-        task.add_done_callback(self._background.discard)
+        task.add_done_callback(self._reap_background)
         self._logger.error(
             "EMERGENCY STOP %s: cancelled %d tasks, disconnecting", name, cancelled
         )
@@ -1408,7 +1437,7 @@ class AccountManager:
             """
             if rt.client is not client:
                 return
-            if rt.cache is not None:
+            if rt.cache is not None and (message.dm or message.guild_id is not None):
                 try:  # inbound traffic TEACHES the cache: channels created
                     rt.cache.learn_channel(  # after READY must not fail
                         int(message.channel_id),  # validate_channel forever
@@ -1634,7 +1663,12 @@ class AccountManager:
             # fetch — the only fetch this action performs)
             rt.cache.validate_channel(int(task.channel_id))
             channel_id = int(task.channel_id)
-            await client.click_button(channel_id, int(task.message_id), task.content)
+            try:
+                await client.click_button(channel_id, int(task.message_id), task.content)
+            except Exception as exc:
+                if type(exc).__name__ == "TargetGone":
+                    rt.cache.invalidate_channel(channel_id, str(exc) or "button failed")
+                raise
             return None
         else:
             raise SchedulerError(
@@ -1833,38 +1867,25 @@ class AccountManager:
             outcome = self._plugin_manager.attach_account(
                 name, self._allowed_plugins(name)
             )
-            if asyncio.iscoroutine(outcome):
+            if inspect.iscoroutine(outcome):
                 await outcome
         except Exception:
             self._logger.exception("plugin attach failed for %s", name)
 
-    def _spawn_maybe_async(self, outcome: Any, label: str) -> None:
-        """Run a collaborator's coroutine result in the background (strong ref).
-
-        Retained for duck-typed collaborators whose hooks are still sync
-        fire-and-forget; the pinned collaborators are awaited inline now.
-        """
-        if not asyncio.iscoroutine(outcome):
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:  # no loop (e.g. sync boot) — drop, don't leak
-            outcome.close()
-            self._logger.warning("no event loop for %s; call dropped", label)
-            return
-        task = loop.create_task(outcome, name=f"acct-{label}")
-        self._background.add(task)
-        task.add_done_callback(self._background.discard)
-
     def _allowed_plugins(self, name: str) -> Optional[set]:
-        """Profile-derived plugin grant (None = unrestricted)."""
+        """Profile-derived plugin grant (None = unrestricted).
+
+        FAIL-CLOSED: a profile-resolution error grants NOTHING (empty set)
+        rather than everything — an automation framework must not escalate
+        capabilities because a repository read hiccupped.
+        """
         try:
             return self._profile_manager.allowed_plugins(name)
         except Exception:
             self._logger.exception(
-                "could not resolve allowed plugins for %s (unrestricted)", name
+                "could not resolve allowed plugins for %s (no plugins granted)", name
             )
-            return None
+            return set()
 
     def _refresh_plugins(self, account: Account) -> None:
         """Refresh Account.plugins from plugin_manager.states (keep last known)."""

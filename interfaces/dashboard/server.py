@@ -108,6 +108,13 @@ SECURITY_HEADERS = (
 )
 #: how long a route coroutine may take on the main loop before we 504
 ROUTE_TIMEOUT_S = 10.0
+#: wall-clock budget for ONE partially-arrived websocket frame to complete
+#: (slow-dribble guard: a frame header that starts arriving must finish)
+WS_FRAME_DEADLINE_S = 30.0
+#: concurrent handler threads. ``ThreadingHTTPServer`` alone is unbounded —
+#: 500 opened sockets pin 500 threads; above the cap the connection is
+#: accepted and immediately closed instead (the accept loop never blocks)
+MAX_CONCURRENT_CONNECTIONS = 64
 
 
 def _split_host(value: str) -> str:
@@ -148,12 +155,28 @@ CREDENTIAL_GATE_MESSAGE = "set DASHBOARD_TOKEN in .env to manage credentials"
 def _dumps(payload: Any) -> str:
     """NaN-safe JSON: a non-finite float must never emit the bare `NaN`
     token (invalid JSON — WS clients drop such frames SILENTLY, freezing
-    the live view with no error)."""
+    the live view with no error). Non-JSON-serializable values (datetime,
+    sets, exceptions) degrade the same way instead of raising. Circular
+    references, pathologically deep nesting and payloads mutated by
+    another thread mid-serialization degrade too — the caller's loop must
+    NEVER die over one hostile snapshot."""
     try:
         return json.dumps(payload, allow_nan=False)
-    except ValueError:
+    except ValueError as exc:
+        if "circular" in str(exc).lower():
+            return json.dumps({"type": "error",
+                               "error": "payload contained a circular reference"})
         return json.dumps({"type": "error",
                            "error": "payload contained a non-finite number"})
+    except TypeError:
+        return json.dumps({"type": "error",
+                           "error": "payload was not JSON-serializable"})
+    except RecursionError:
+        return json.dumps({"type": "error",
+                           "error": "payload nesting exceeded the serializer limit"})
+    except RuntimeError:
+        return json.dumps({"type": "error",
+                           "error": "payload changed during serialization"})
 
 
 def parse_json_bool(value: Any, field: str) -> bool:
@@ -284,7 +307,7 @@ def event_as_dict(event: Event) -> Dict[str, Any]:
     """JSON-safe dict of a bus event (dataclass fields; falls back to vars)."""
     if is_dataclass(event):
         return dict(asdict(event))
-    return {k: v for k, v in vars(getattr(event, "__dict__", {})).items()
+    return {k: v for k, v in getattr(event, "__dict__", {}).items()
             if isinstance(v, (str, int, float, bool, type(None)))}
 
 
@@ -325,22 +348,38 @@ class WebSocketClient:
         """Reader loop (runs in the handler thread that did the upgrade)."""
         self._sock.settimeout(0.25)
         buffer = b""
+        partial_since: Optional[float] = None  # arrival clock of a partial frame
         try:
             while self.alive:
                 self._drain()
                 try:
                     chunk = self._sock.recv(4096)
                 except socket.timeout:
-                    continue
+                    chunk = None
                 except OSError:
                     break
-                if not chunk:
+                if chunk == b"":  # peer closed the connection
                     break
-                buffer += chunk
+                if chunk is None and not buffer:
+                    continue  # idle tick: no partial frame is pending
+                if chunk:
+                    buffer += chunk
+                stalled = False
                 while buffer:
                     try:
                         opcode, fin, payload, consumed = wsproto.decode_frame(buffer)
                     except wsproto.IncompleteFrame:
+                        # SLOW-DRIBBLE AUDIT: a frame header that has started
+                        # arriving must COMPLETE within WS_FRAME_DEADLINE_S —
+                        # otherwise a 3-bytes-of-16MB client pins this thread
+                        # (and its queue) forever. A PING interleaved after a
+                        # partial data frame stays queued behind it (stream
+                        # order) and does not reset the clock.
+                        now = _time.monotonic()
+                        if partial_since is None:
+                            partial_since = now
+                        elif now - partial_since > WS_FRAME_DEADLINE_S:
+                            stalled = True
                         break  # wait for more bytes
                     except wsproto.ProtocolViolation as exc:
                         # ERROR AUDIT: fail the connection instead of staying
@@ -362,6 +401,12 @@ class WebSocketClient:
                             return
                         self._sendq.put(("raw", wsproto.encode_pong(payload)))
                     elif opcode == wsproto.OP_TEXT:
+                        if not fin:  # fragmentation is never reassembled —
+                            # a partial message must not look like data
+                            LOG.warning("websocket: fragmented text frame")
+                            self._sendq.put(("raw", wsproto.encode_close_frame()))
+                            self._drain()
+                            return
                         try:
                             text = payload.decode("utf-8")
                         except UnicodeDecodeError:
@@ -388,6 +433,13 @@ class WebSocketClient:
                         self._sendq.put(("raw", wsproto.encode_close_frame()))
                         self._drain()
                         return
+                if stalled:
+                    LOG.warning("websocket: partial frame stalled; closing")
+                    self._sendq.put(("raw", wsproto.encode_close_frame()))
+                    self._drain()
+                    return
+                if not buffer:
+                    partial_since = None
         finally:
             self.alive = False
             self._server.unregister_threadsafe(self)
@@ -464,6 +516,7 @@ class DashboardServer:
         self._stats_snapshot: Optional[str] = None
         self._stats_ts: float = 0.0
         self._clients_closed = False
+        self._stop_lock = threading.Lock()  # stop() is idempotent + concurrent-safe
         self._broadcaster: Optional[asyncio.Task] = None
         self._log_unsub: Optional[Any] = None
         self._audit_unsub: Optional[Any] = None
@@ -495,7 +548,7 @@ class DashboardServer:
         """Start serving (call from inside the running asyncio loop)."""
         self._loop = asyncio.get_running_loop()
         handler = _make_handler(self)
-        self._httpd = ThreadingHTTPServer((self._host, self._port), handler)
+        self._httpd = _BoundedThreadingHTTPServer((self._host, self._port), handler)
         self._port = int(self._httpd.server_address[1])  # real port when port=0
         self._thread = threading.Thread(
             target=self._httpd.serve_forever, name="dashboard", daemon=True
@@ -516,18 +569,33 @@ class DashboardServer:
 
         Live websocket clients are torn down too: their handler threads
         would otherwise sit on open sockets until each PEER disconnects.
+
+        AUDIT FIX: concurrent/idempotent — two racing stop() calls (or a
+        second stop after the first) previously raced on ``self._httpd``
+        (None-check then use) and double-cancelled; all shared state is
+        now swapped out under a lock and torn down from locals.
         """
-        self._clients_closed = True  # a queued _register must not re-add
-        for client in list(self._clients):
-            client.alive = False
+        with self._stop_lock:
+            self._clients_closed = True  # a queued _register must not re-add
+            clients, self._clients = list(self._clients), []
+            for client in clients:
+                client.alive = False
+                try:
+                    client._sock.shutdown(socket.SHUT_RDWR)  # noqa: SLF001 — own class
+                except OSError:
+                    pass
+            broadcaster, self._broadcaster = self._broadcaster, None
+            log_unsub, self._log_unsub = self._log_unsub, None
+            audit_unsub, self._audit_unsub = self._audit_unsub, None
+            task_unsubs, self._task_unsubs = list(self._task_unsubs), []
+            httpd, self._httpd = self._httpd, None
+            thread, self._thread = self._thread, None
+        if broadcaster is not None:
             try:
-                client._sock.shutdown(socket.SHUT_RDWR)  # noqa: SLF001 — own class
-            except OSError:
-                pass
-        self._clients.clear()
-        if self._broadcaster is not None:
-            try:
-                self._broadcaster.cancel()
+                # ROUND-2 AUDIT: Task.cancel() is NOT thread-safe — a stop()
+                # from a non-loop thread could wedge the task in 'cancelling'
+                # forever and hang loop teardown. Hop through the loop.
+                broadcaster.get_loop().call_soon_threadsafe(broadcaster.cancel)
             except RuntimeError:  # ERROR AUDIT: loop already closed
                 pass
             self._broadcaster = None
@@ -543,11 +611,11 @@ class DashboardServer:
                 unsub()
             except Exception:
                 pass
-        self._task_unsubs = []
-        if self._httpd is not None:
-            self._httpd.shutdown()
-            self._httpd.server_close()  # AUDIT FIX: release the listening socket
-            self._httpd = None
+        if httpd is not None:
+            httpd.shutdown()
+            httpd.server_close()  # AUDIT FIX: release the listening socket
+        if thread is not None:
+            thread.join(timeout=2.0)  # shutdown() already signalled it
 
     def attach_logs(self, log_service: Any) -> "DashboardServer":
         """Stream every new log entry from a LogService to WS clients.
@@ -708,12 +776,19 @@ class DashboardServer:
                     continue
                 try:
                     status = await self._api.status()
+                    # ROUND-2 AUDIT: serialization happens INSIDE the guard —
+                    # a hostile snapshot (deep nesting / circular / mutated
+                    # live by another thread) raised RecursionError/RuntimeError
+                    # out of _dumps and KILLED this loop permanently, freezing
+                    # every connected client's live view
+                    payload = _dumps({"type": "stats", **status})
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     LOG.warning("broadcast snapshot failed: %s", exc)
                     continue
-                payload = _dumps({"type": "stats", **status})
+                # FINAL-PHASE (F3): shared per-tick snapshot — per-client
+                # refreshes within the tick reuse it (one build/tick)
                 self._stats_snapshot = payload
                 self._stats_ts = _time.monotonic()
                 for client in list(self._clients):
@@ -740,13 +815,20 @@ class DashboardServer:
         future = asyncio.run_coroutine_threadsafe(
             self._route(method, path, body, query or {}), self._loop
         )
+        # scenario runs outlive the generic route budget (the runner itself
+        # bounds them at ~185s incl. teardown) — a 10s 504 would drop the
+        # report while the run still completes server-side
+        timeout = (
+            200.0 if (method, path) == ("POST", "/api/simulation/run")
+            else ROUTE_TIMEOUT_S
+        )
         try:
-            return future.result(timeout=ROUTE_TIMEOUT_S)
+            return future.result(timeout=timeout)
         except (concurrent.futures.TimeoutError, asyncio.TimeoutError, TimeoutError):
             # all three spelled: they only alias each other on 3.11+
             return 504, {
                 "ok": False,
-                "error": f"{method} {path} timed out after {ROUTE_TIMEOUT_S:.0f}s (may still complete)",
+                "error": f"{method} {path} timed out after {timeout:.0f}s (may still complete)",
             }
         except Exception as exc:
             LOG.exception("dashboard API call failed: %s %s", method, path)
@@ -1094,6 +1176,43 @@ class DashboardServer:
             return 500, {"ok": False, "error": f"internal error: {exc}"}
 
 
+class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a concurrent-connection cap.
+
+    The stock server spawns one thread per accepted connection with NO
+    bound — 500 opened sockets (never mind requests) pin 500 threads.
+    Above MAX_CONCURRENT_CONNECTIONS live handlers the next connection is
+    accepted and immediately closed; the accept loop itself never blocks,
+    so a socket flood cannot wedge the healthy clients.
+    """
+
+    def __init__(self, address: Any, handler: type) -> None:
+        self._slots = threading.BoundedSemaphore(MAX_CONCURRENT_CONNECTIONS)
+        super().__init__(address, handler)
+
+    def process_request(self, request: socket.socket, client_address: Any) -> None:
+        if not self._slots.acquire(blocking=False):
+            LOG.warning("dashboard connection shed (over %d concurrent handlers)",
+                        MAX_CONCURRENT_CONNECTIONS)
+            try:
+                request.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            request.close()
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request: socket.socket, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 def _make_handler(server: "DashboardServer") -> type:
     """Build the request-handler class closing over the server instance."""
 
@@ -1153,12 +1272,25 @@ def _make_handler(server: "DashboardServer") -> type:
         ) -> None:
             if content_type == "application/json":
                 # allow_nan=False: a stored NaN must not serialize to the
-                # bare `NaN` token (invalid JSON — breaks every JSON client)
+                # bare `NaN` token (invalid JSON — breaks every JSON client).
+                # TypeError (datetime/set/exception in the payload) must
+                # answer with JSON, not crash the handler thread and drop
+                # the connection mid-response.
                 try:
                     data = json.dumps(payload, allow_nan=False).encode("utf-8")
                 except ValueError:
                     data = json.dumps(
                         {"ok": False, "error": "response contained a non-finite number"}
+                    ).encode("utf-8")
+                except TypeError:
+                    data = json.dumps(
+                        {"ok": False, "error": "response was not JSON-serializable"}
+                    ).encode("utf-8")
+                except RuntimeError:
+                    # ROUND-2 AUDIT: a stats dict mutated by another thread
+                    # mid-serialization must not kill the handler thread
+                    data = json.dumps(
+                        {"ok": False, "error": "response changed during serialization"}
                     ).encode("utf-8")
             else:
                 data = payload if isinstance(payload, bytes) else str(payload).encode("utf-8")
@@ -1166,11 +1298,16 @@ def _make_handler(server: "DashboardServer") -> type:
             self.send_header("Content-Type", content_type)
             for header, value in SECURITY_HEADERS:
                 self.send_header(header, value)
-            if close:
+            if close or self.close_connection:
+                # tell the client the socket will not be reused (a drained
+                # GET body / rejected request leaves no parseable stream)
                 self.send_header("Connection", "close")
             self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
             try:
+                # ROUND-2 AUDIT: the header flush is a socket write too — a
+                # peer that vanished before end_headers() raised out of
+                # _respond and dumped a traceback via socketserver
+                self.end_headers()
                 self.wfile.write(data)
             except OSError:
                 pass  # ERROR AUDIT: client aborted mid-response — not an error worth a traceback
@@ -1193,6 +1330,30 @@ def _make_handler(server: "DashboardServer") -> type:
             if not self._origin_allowed():
                 self._reject(403, {"ok": False, "error": "cross-site request refused"})
                 return
+            if method != "POST":
+                # a non-POST body is never consumed by any handler; drain it
+                # bounded (and refuse the connection reuse) so unread bytes
+                # cannot be parsed as the NEXT request line on the keep-alive
+                # stream (an upgrade request carrying a body would likewise
+                # corrupt the websocket frame stream)
+                if self.headers.get("Transfer-Encoding"):
+                    self.close_connection = True
+                else:
+                    try:
+                        extra = int(self.headers.get("Content-Length") or 0)
+                    except ValueError:
+                        extra = -1
+                    if extra:
+                        remaining = extra
+                        while remaining > 0 and remaining <= 16 * MAX_BODY_BYTES:
+                            try:
+                                chunk = self.rfile.read(min(remaining, 65536))
+                            except OSError:
+                                break  # ROUND-2 AUDIT: stalled/dead peer mid-drain
+                            if not chunk:
+                                break
+                            remaining -= len(chunk)
+                        self.close_connection = True
             parsed = urlparse(self.path)
             path, query = parsed.path, parse_qs(parsed.query)
             if path == "/ws":
@@ -1238,7 +1399,10 @@ def _make_handler(server: "DashboardServer") -> type:
                     # then reject (a bare early-close breaks the client's write)
                     remaining = length
                     while remaining > 0 and remaining <= 16 * MAX_BODY_BYTES:
-                        chunk = self.rfile.read(min(remaining, 65536))
+                        try:
+                            chunk = self.rfile.read(min(remaining, 65536))
+                        except OSError:
+                            break  # ROUND-2 AUDIT: stalled/dead peer mid-drain
                         if not chunk:
                             break
                         remaining -= len(chunk)
@@ -1249,7 +1413,19 @@ def _make_handler(server: "DashboardServer") -> type:
                     return
                 if length:
                     try:
-                        body = json.loads(self.rfile.read(length).decode("utf-8"))
+                        raw = self.rfile.read(length)
+                    except OSError:
+                        # ROUND-2 AUDIT: lying Content-Length (claim 5, send 3,
+                        # hold the socket) pinned this thread for the full
+                        # socket timeout and then crashed it with a traceback —
+                        # answer 408 and close instead
+                        self._reject(408, {
+                            "ok": False,
+                            "error": "request body incomplete (connection stalled)",
+                        })
+                        return
+                    try:
+                        body = json.loads(raw.decode("utf-8"))
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         self._respond(400, {"ok": False, "error": "invalid JSON body"})
                         return
@@ -1293,6 +1469,11 @@ def _make_handler(server: "DashboardServer") -> type:
             if not key:
                 self._respond(400, {"ok": False, "error": "missing Sec-WebSocket-Key"})
                 return
+            try:
+                handshake = wsproto.handshake_response(key)
+            except ValueError:  # incl. non-ASCII keys (UnicodeEncodeError)
+                self._respond(400, {"ok": False, "error": "malformed Sec-WebSocket-Key"})
+                return
             if not self._authorized(
                 (query.get("token") or [None])[0] or self.headers.get("X-Dashboard-Token")
             ):
@@ -1306,7 +1487,7 @@ def _make_handler(server: "DashboardServer") -> type:
             # request from the detached file object after serve() returns
             self.close_connection = True
             try:
-                self.connection.sendall(wsproto.handshake_response(key))
+                self.connection.sendall(handshake)
             except OSError:
                 return  # peer vanished before the 101 — nothing to serve
             fd = self.connection.detach()  # we own the socket now

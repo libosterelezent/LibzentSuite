@@ -127,7 +127,18 @@ class TaskAckRegistry:
 
     # --------------------------------------------------------------- await
     def register(self, task_id: int) -> "asyncio.Future[Any]":
-        """Create + register the future for ``task_id`` (loop-safe)."""
+        """Create + register the future for ``task_id`` (loop-safe).
+
+        Raises SchedulerError when a LIVE future already exists for the
+        id: silently replacing it would orphan the first waiter (it hangs
+        for its full timeout and then cancels a task another waiter is
+        consuming).
+        """
+        existing = self._futures.get(task_id)
+        if existing is not None and not existing.done():
+            raise SchedulerError(
+                f"task {task_id} is already being awaited"
+            )
         future: "asyncio.Future[Any]" = asyncio.get_running_loop().create_future()
         self._futures[task_id] = future
         return future

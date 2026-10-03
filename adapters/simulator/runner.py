@@ -53,6 +53,7 @@ ground rules; the lead reconciles at integration):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 import time
@@ -83,6 +84,20 @@ from core.settings_manager import SettingsManager
 
 #: safety floor fallback when the limiter module constant is unavailable
 _FALLBACK_FLOOR = 1.5
+
+#: hard cap for one scenario's script + settle + checks; a hung scenario
+#: becomes a failed report instead of a run that never returns
+_SCENARIO_TIMEOUT_S = 180.0
+
+#: grace for a cancelled scenario task to actually stop before the runner
+#: abandons it (the 180s cap + this grace is the absolute worst case)
+_CANCEL_GRACE_S = 5.0
+
+
+def _reap_scenario_task(task: "asyncio.Task[None]") -> None:
+    """Retrieve an abandoned scenario task's outcome (no GC warning)."""
+    if not task.cancelled():
+        task.exception()
 
 
 
@@ -230,102 +245,114 @@ class SimulationRunner:
             account_settings_repo=db.account_settings,
             global_layer=DEMO_PLUGIN_SETTINGS,
         )
+        remote = None
         try:  # assembly guard: a failure below must close the ephemeral DB
             await settings.load()
-        except BaseException:
-            await db.close()
-            raise
-        limiter = mods.RateLimitManager(bus, log_ratelimit, db.policies)
-        await limiter.load_persisted()
-        audit = mods.AuditRecorder(db.audit)
+            limiter = mods.RateLimitManager(bus, log_ratelimit, db.policies)
+            await limiter.load_persisted()
+            audit = mods.AuditRecorder(db.audit)
 
-        # LATE-BOUND SENDER SEAM — see module docstring
-        box: Dict[str, Callable[[Any], Any]] = {}
+            # LATE-BOUND SENDER SEAM — see module docstring
+            box: Dict[str, Callable[[Any], Any]] = {}
 
-        async def sender(task: Any) -> Any:
-            return await box["send"](task)
+            async def sender(task: Any) -> Any:
+                return await box["send"](task)
 
-        scheduler = mods.TaskScheduler(
-            bus, log_scheduler, limiter, sender,
-            audit=audit, history_repo=db.tasks,
-        )
+            scheduler = mods.TaskScheduler(
+                bus, log_scheduler, limiter, sender,
+                audit=audit, history_repo=db.tasks,
+            )
 
-        plugins_mgr = mods.PluginManager(
-            bus, log_plugins, settings, db.plugins, self._plugin_dir,
-            credential_service=credential_service, cooldowns=cooldowns,
-            plugin_state=plugin_state,
-        )
-        try:
-            plugins_mgr.discover()
-            await plugins_mgr.persist_metadata()
-        except Exception as exc:
-            await db.close()
-            raise SimulationError(
-                f"scenario {name!r}: plugin discovery failed in "
-                f"{self._plugin_dir!r}: {exc}"
-            ) from exc
+            plugins_mgr = mods.PluginManager(
+                bus, log_plugins, settings, db.plugins, self._plugin_dir,
+                credential_service=credential_service, cooldowns=cooldowns,
+                plugin_state=plugin_state,
+            )
+            try:
+                plugins_mgr.discover()
+                await plugins_mgr.persist_metadata()
+            except Exception as exc:
+                raise SimulationError(
+                    f"scenario {name!r}: plugin discovery failed in "
+                    f"{self._plugin_dir!r}: {exc}"
+                ) from exc
 
-        profiles = mods.ProfileManager(db.profiles, log_profiles, db.accounts)
-        await profiles.load()
-        await cooldowns.restore()
+            profiles = mods.ProfileManager(db.profiles, log_profiles, db.accounts)
+            await profiles.load()
+            await cooldowns.restore()
 
-        user_ids = {ACCOUNT_NAME: SYNTHETIC_ALPHA_ID}
+            user_ids = {ACCOUNT_NAME: SYNTHETIC_ALPHA_ID}
 
-        def client_factory(account_name: str, token: str) -> SimClient:
-            return SimClient(world, user_ids[account_name], seed=SYNTHETIC_ALPHA_ID)
+            def client_factory(account_name: str, token: str) -> SimClient:
+                return SimClient(world, user_ids[account_name], seed=SYNTHETIC_ALPHA_ID)
 
-        if self._credentials is not None:
-            # overlay the SYNTHETIC ids the scenarios script against: fleet
-            # credentials carry real OWNER/MUDAE ids, which would silently
-            # break owner-gating and Mudae-page matching in every scenario
-            merged = {
-                **self._credentials.snapshot(),
-                "MUDAE_BOT_ID": str(SYNTHETIC_MUDAE_ID),
-                "OWNER_USER_IDS": str(SYNTHETIC_OWNER_ID),
-                f"DISCORD_TOKEN_{ACCOUNT_NAME.upper()}": f"sim-token-{ACCOUNT_NAME}",
-            }
-            credentials = Credentials.from_values(merged)
-        else:
-            credentials = Credentials.from_values(
-                {
+            if self._credentials is not None:
+                # overlay the SYNTHETIC ids the scenarios script against: fleet
+                # credentials carry real OWNER/MUDAE ids, which would silently
+                # break owner-gating and Mudae-page matching in every scenario
+                merged = {
+                    **self._credentials.snapshot(),
                     "MUDAE_BOT_ID": str(SYNTHETIC_MUDAE_ID),
                     "OWNER_USER_IDS": str(SYNTHETIC_OWNER_ID),
                     f"DISCORD_TOKEN_{ACCOUNT_NAME.upper()}": f"sim-token-{ACCOUNT_NAME}",
                 }
+                credentials = Credentials.from_values(merged)
+            else:
+                credentials = Credentials.from_values(
+                    {
+                        "MUDAE_BOT_ID": str(SYNTHETIC_MUDAE_ID),
+                        "OWNER_USER_IDS": str(SYNTHETIC_OWNER_ID),
+                        f"DISCORD_TOKEN_{ACCOUNT_NAME.upper()}": f"sim-token-{ACCOUNT_NAME}",
+                    }
+                )
+            # import the account's synthetic token into the ephemeral credential
+            # store so the DB-first resolution path is the one scenarios exercise
+            try:
+                await credential_service.store(
+                    ACCOUNT_NAME, f"sim-token-{ACCOUNT_NAME}"
+                )
+            except Exception:
+                pass
+
+            accounts = self._build_account_manager(
+                mods, bus, log_accounts, db, plugins_mgr, profiles, scheduler,
+                settings, audit, client_factory, credentials, limiter,
+                credential_service=credential_service, cooldowns=cooldowns,
+                plugin_state=plugin_state,
             )
-        # import the account's synthetic token into the ephemeral credential
-        # store so the DB-first resolution path is the one scenarios exercise
-        try:
-            await credential_service.store(
-                ACCOUNT_NAME, f"sim-token-{ACCOUNT_NAME}"
+            await accounts.load()
+            box["send"] = accounts.send_hook  # fill the seam BEFORE start()
+
+            # a real ControlAPI + the mention-prefix bridge, so scenarios can
+            # exercise Discord-side management exactly like production
+            from core.api import ControlAPI
+
+            api = ControlAPI(
+                accounts=accounts, plugins=plugins_mgr, profiles=profiles,
+                settings=settings, limiter=limiter, scheduler=scheduler,
+                logs=logger, audit=audit, credentials=credentials,
             )
-        except Exception:
-            pass
+            from core.remote_control import RemoteControl
 
-        accounts = self._build_account_manager(
-            mods, bus, log_accounts, db, plugins_mgr, profiles, scheduler,
-            settings, audit, client_factory, credentials, limiter,
-            credential_service=credential_service, cooldowns=cooldowns,
-            plugin_state=plugin_state,
-        )
-        await accounts.load()
-        box["send"] = accounts.send_hook  # fill the seam BEFORE start()
-
-        # a real ControlAPI + the mention-prefix bridge, so scenarios can
-        # exercise Discord-side management exactly like production
-        from core.api import ControlAPI
-
-        api = ControlAPI(
-            accounts=accounts, plugins=plugins_mgr, profiles=profiles,
-            settings=settings, limiter=limiter, scheduler=scheduler,
-            logs=logger, audit=audit, credentials=credentials,
-        )
-        from core.remote_control import RemoteControl
-
-        remote = RemoteControl(
-            bus, scheduler, accounts, lambda: api, credentials,
-            ServiceLogger(logger, "remote-control"),
-        ).start()
+            if not getattr(credentials, "remote_control_enabled", True):
+                remote = None  # REMOTE_CONTROL=0: opt out here too, not
+            else:  # just in production — parity with bootstrap wiring
+                remote = RemoteControl(
+                    bus, scheduler, accounts, lambda: api, credentials,
+                    ServiceLogger(logger, "remote-control"),
+                ).start()
+        except BaseException as exc:
+            await db.close()
+            if isinstance(
+                exc,
+                (SimulationError, KeyboardInterrupt, SystemExit,
+                 asyncio.CancelledError),
+            ):
+                raise
+            raise SimulationError(
+                f"scenario {name!r}: stack assembly failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
         # --- observability subscriptions BEFORE any traffic can flow
         log_lines: List[str] = []
@@ -417,17 +444,60 @@ class SimulationRunner:
                     settings_overrides=DEMO_PLUGIN_SETTINGS,
                     remote=remote,
                 )
-                try:
+                async def _scenario_phase() -> None:
                     await scenario.script(facade)
                     # one extra quiet window for stragglers after the script
                     await world.wait_for_quiet(
-                        SYNTHETIC_GUILD_CHANNEL, quiet=quiet_window(), limit=90.0
+                        SYNTHETIC_GUILD_CHANNEL, quiet=quiet_window(),
+                        limit=90.0,
                     )
                     failures.extend(scenario.checks(list(interactions), world))
-                except Exception as exc:  # a scenario crash is a failed report
-                    failures.append(f"scenario crashed: {type(exc).__name__}: {exc}")
+
+                # NOT wait_for: a script that swallows CancelledError once
+                # makes wait_for return SUCCESS after the budget expired —
+                # a hung scenario would report passed. A task + bounded wait
+                # makes the deadline authoritative whatever the script does.
+                scenario_task = asyncio.get_running_loop().create_task(
+                    _scenario_phase()
+                )
+                try:
+                    await asyncio.wait(
+                        {scenario_task}, timeout=_SCENARIO_TIMEOUT_S
+                    )
+                    overrun = not scenario_task.done()
+                    if overrun:
+                        scenario_task.cancel()
+                        await asyncio.wait(
+                            {scenario_task}, timeout=_CANCEL_GRACE_S
+                        )
+                    if overrun or scenario_task.cancelled():
+                        failures.append(
+                            f"scenario timed out after {_SCENARIO_TIMEOUT_S:.0f}s "
+                            f"(hung script or unsettled world)"
+                        )
+                        if not scenario_task.done():
+                            failures.append(
+                                "scenario task ignored cancellation - "
+                                "abandoned mid-flight"
+                            )
+                            scenario_task.add_done_callback(_reap_scenario_task)
+                    else:
+                        crash = scenario_task.exception()
+                        if crash is not None:
+                            if isinstance(crash, Exception):
+                                failures.append(
+                                    f"scenario crashed: "
+                                    f"{type(crash).__name__}: {crash}"
+                                )
+                            else:
+                                raise crash
+                except BaseException:
+                    if not scenario_task.done():
+                        scenario_task.cancel()
+                    raise
 
         finally:
+            world.cancel_pending_replies()
             if account_started:
                 try:
                     await accounts.stop(ACCOUNT_NAME)
@@ -450,7 +520,8 @@ class SimulationRunner:
             except Exception:  # must not leak the process-global bridge
                 pass
             try:
-                remote.stop()
+                if remote is not None:
+                    remote.stop()
             except Exception:
                 pass
 

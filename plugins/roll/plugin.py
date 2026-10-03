@@ -23,9 +23,8 @@ state (userstack availability) across restarts.
 from __future__ import annotations
 
 import asyncio
-import logging
 import re
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 from core.errors import FlowBlocked
 from core.event_bus import Event, MessageReceived
@@ -119,7 +118,7 @@ class RollPlugin(PluginBase):
             return
         if event.author_id not in ctx.services.credentials.owner_user_ids:
             return
-        text = event.content.strip()
+        text = (event.content or "").strip()
 
         if text == ctx.settings["stop_trigger"]:
             await self._stop(ctx, event.account)
@@ -132,7 +131,11 @@ class RollPlugin(PluginBase):
             return
 
         # validate BEFORE acting (flow-abort contract)
-        ctx.services.validate_channel(event.channel_id)
+        try:
+            ctx.services.validate_channel(event.channel_id)
+        except FlowBlocked as exc:
+            ctx.logger.warning("flow aborted for %s: %s", ctx.account, exc.reason)
+            return
         self._start(ctx, event.account, event.channel_id)
 
     # ------------------------------------------------------------ rolling
@@ -274,7 +277,7 @@ class RollPlugin(PluginBase):
         # ── "the roulette is limited to **N** min" → cooldown ──
         if "the roulette is limited to" in content:
             minutes = parse_pause_minutes(content)
-            if minutes:
+            if minutes is not None:
                 await ctx.services.cooldown_set(
                     COOLDOWN_KEY, minutes * 60,
                     source="mudae:roulette_limited",
@@ -285,44 +288,26 @@ class RollPlugin(PluginBase):
 
         # ── "the roulette is limited" (no specific time) + userstack ──
         if "the roulette is limited" in content and ctx.settings["userstack"]:
-            await ctx.services.send_message(
-                channel_id, "$us 20", priority=Priority.NORMAL)
-            # check if userstack worked
-            us_reply = await ctx.services.wait_for_message(
-                check=lambda e: (e.author_id == mudae_id
-                                 and e.channel_id == channel_id),
-                timeout=5.0,
-            )
-            if us_reply and any(msg in (us_reply.content or "")
-                               for msg in _USERSTACK_FAIL):
-                ctx.logger.info("userstack unavailable — disabling")
-                await ctx.services.state_set("userstack_available", False)
+            await self._try_userstack(ctx, channel_id, mudae_id)
             return
 
         # ── embed responses (character rolls) ──
         rich = getattr(response, "message", None)
-        if rich is None or not rich.embeds:
+        embeds = getattr(rich, "embeds", None) or ()
+        if not embeds:
             return
 
-        embed = rich.embeds[0]
-        footer_text = embed.footer_text or ""
-        description = embed.description or ""
+        try:
+            embed = embeds[0]
+        except (TypeError, IndexError):
+            return
+        footer_text = getattr(embed, "footer_text", None) or ""
+        description = getattr(embed, "description", None) or ""
 
         # ── "2 ROLLS LEFT" in footer + userstack → $us 20 ──
         if _LOW_ROLLS_MARKER in footer_text and ctx.settings["userstack"]:
             ctx.logger.info("low rolls detected — sending $us 20")
-            await ctx.services.send_message(
-                channel_id, "$us 20", priority=Priority.NORMAL)
-            # check the response
-            us_reply = await ctx.services.wait_for_message(
-                check=lambda e: (e.author_id == mudae_id
-                                 and e.channel_id == channel_id),
-                timeout=5.0,
-            )
-            if us_reply and any(msg in (us_reply.content or "")
-                               for msg in _USERSTACK_FAIL):
-                ctx.logger.info("userstack unavailable — disabling")
-                await ctx.services.state_set("userstack_available", False)
+            await self._try_userstack(ctx, channel_id, mudae_id)
 
         # ── key limit reached → $ru + cooldown ──
         if (not ctx.settings["ignore_keys"]
@@ -345,6 +330,28 @@ class RollPlugin(PluginBase):
                         reason=f"key reset in {minutes} min",
                     )
                     ctx.logger.info("cooldown set from $ru: %d min", minutes)
+
+    async def _try_userstack(self, ctx: PluginContext, channel_id: int,
+                             mudae_id: int) -> None:
+        """Send '$us 20'; on Mudae's refusal disable userstack NOW.
+
+        The disable flips BOTH the persisted state (survives restarts via
+        on_load) and the live settings view — without the live flip every
+        later low-rolls response would repeat the doomed '$us 20' send
+        until the next restart.
+        """
+        await ctx.services.send_message(
+            channel_id, "$us 20", priority=Priority.NORMAL)
+        us_reply = await ctx.services.wait_for_message(
+            check=lambda e: (e.author_id == mudae_id
+                             and e.channel_id == channel_id),
+            timeout=5.0,
+        )
+        if us_reply and any(msg in (us_reply.content or "")
+                            for msg in _USERSTACK_FAIL):
+            ctx.logger.info("userstack unavailable — disabling")
+            ctx.settings["userstack"] = False
+            await ctx.services.state_set("userstack_available", False)
 
 
 __all__ = ["RollPlugin", "parse_pause_minutes", "VALID_ROULETTES"]

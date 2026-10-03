@@ -329,10 +329,9 @@ async def _script_control_mention(api: "ScenarioAPI") -> None:
     await api.world.wait_for_quiet(api.channel_id, quiet=0.6, limit=15.0)
     # non-owner mentions the same account: must be ignored completely
     stranger = 4242
-    if stranger not in (api.owner_id,):
-        api.world.add_user(stranger, "stranger")
-        api.owner_says(api.channel_id, f"{mention} estop", stranger)
-        await api.world.wait_for_quiet(api.channel_id, quiet=0.6, limit=15.0)
+    api.world.add_user(stranger, "stranger")
+    api.owner_says(api.channel_id, f"{mention} estop", stranger)
+    await api.world.wait_for_quiet(api.channel_id, quiet=0.6, limit=15.0)
 
 
 def _checks_control_mention(audit: List[dict], world: SimWorld) -> List[str]:
@@ -351,6 +350,26 @@ def _checks_control_mention(audit: List[dict], world: SimWorld) -> List[str]:
     estop_replies = [m for m in history if "EMERGENCY STOP" in m]
     if estop_replies:
         failures.append("non-owner mention was answered — owner gating broken")
+    stranger_msgs = [
+        m for m in world.journal
+        if m.channel_id == SYNTHETIC_GUILD_CHANNEL and m.content.endswith("estop")
+    ]
+    if not stranger_msgs:
+        failures.append(
+            "stranger mention never landed - owner-gating check is void"
+        )
+        return failures
+    stranger_ts = stranger_msgs[-1].ts
+    later = [
+        m for m in world.journal
+        if m.channel_id == SYNTHETIC_GUILD_CHANNEL
+        and m.author_id == SYNTHETIC_ALPHA_ID and m.ts > stranger_ts
+    ]
+    if later:
+        failures.append(
+            f"account replied after a non-owner mention "
+            f"({len(later)} message(s)) - owner gating broken"
+        )
     return failures
 
 

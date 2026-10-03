@@ -71,6 +71,29 @@ class PluginLoader:
         self._dir = Path(plugin_dir)
         self._records: Dict[str, PluginRecord] = {}
         self._discovered = False
+        #: synthetic parents THIS loader created (purged on rescan — see
+        #: ``_purge_stale_parents``; per-loader so parallel loaders on
+        #: other dirs never touch each other's modules)
+        self._parent_names: List[str] = []
+
+    def _purge_stale_parents(self) -> None:
+        """Drop THIS loader's previous synthetic parents from sys.modules.
+
+        Every discover() builds a fresh parent (unique via ``_PARENT_SEQ``);
+        without this cleanup each rescan left the whole previous generation
+        of plugin modules alive in sys.modules forever (unbounded growth in
+        long-lived processes that rescan). Classes/instances created from
+        those modules stay functional — only the import registry entry goes.
+        """
+        for parent in self._parent_names:
+            for modname in [
+                m for m in sys.modules
+                if m == parent
+                or m.startswith(parent + ".")
+                or m.startswith(parent + "_")
+            ]:
+                sys.modules.pop(modname, None)
+        self._parent_names = []
 
     @property
     def directory(self) -> Path:
@@ -85,12 +108,14 @@ class PluginLoader:
         be imported, or the tree is inconsistent (duplicate plugin name,
         duplicate setting key, invalid plugin name).
         """
+        self._purge_stale_parents()
         self._records = {}
         if not self._dir.is_dir():
             raise PluginError(f"plugin directory not found: {self._dir}")
         # synthetic parent package so '<dir>/<name>/__init__.py' plugins can
         # use relative imports ('from .plugin import X') without sys.path
         parent_name = f"_mudae_plugroot_{next(_PARENT_SEQ)}"
+        self._parent_names.append(parent_name)
         parent = types.ModuleType(parent_name)
         parent.__path__ = [str(self._dir)]
         sys.modules[parent_name] = parent
@@ -154,6 +179,7 @@ class PluginLoader:
         try:
             spec.loader.exec_module(module)
         except Exception as exc:
+            sys.modules.pop(modname, None)  # no half-executed module residue
             raise PluginError(f"error importing plugin {path}: {exc}") from exc
         return module
 

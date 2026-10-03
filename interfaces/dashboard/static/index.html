@@ -383,7 +383,8 @@
         <div class="section-err" id="panel-tasks-err"></div>
         <section class="card">
           <h4>Live task events</h4>
-          <div id="taskevents"></div>
+          <div id="taskevents"><span class="dim" data-ph="1">no task events yet —
+            live events stream in via WS</span></div>
         </section>
         <section class="card">
           <h4>Running + queued <button id="tasks-refresh" style="float:right">refresh</button></h4>
@@ -410,7 +411,8 @@
             <button id="log-backfill">load history</button>
             <span class="dim mono" id="logsync"></span>
           </div>
-          <div id="logbox"></div>
+          <div id="logbox"><span class="dim" data-ph="1">no log entries yet — live
+            entries stream in; "load history" backfills the persisted tail</span></div>
         </section>
         <section class="card">
           <h4>Audit trail — Discord interactions (live via WS)</h4>
@@ -418,7 +420,9 @@
             <select id="audit-acct"><option value="">all accounts</option></select>
             <button id="audit-backfill">load history</button>
           </div>
-          <div id="auditbox"></div>
+          <div id="auditbox"><span class="dim" data-ph="1">no audit entries yet —
+            live interactions stream in; "load history" backfills the
+            persisted trail</span></div>
         </section>
       </section>
 
@@ -545,7 +549,10 @@ let manifests = [];        // plugin manifests (settings schema source)
 let ws = null;
 
 // ---------------------------------------------------------------- helpers
-function esc(s) { const d = document.createElement("span"); d.textContent = String(s ?? ""); return d.innerHTML; }
+function esc(s) {
+  const d = document.createElement("span"); d.textContent = String(s ?? "");
+  return d.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
 function btn(label, onclick, cls) {
   const b = document.createElement("button");
   b.textContent = label; b.onclick = onclick;
@@ -600,9 +607,16 @@ function sectionErr(sectionId) {
 }
 function showErr(e, sectionId) {
   const box = sectionErr(sectionId);
-  box.textContent = "";
   const line = document.createElement("div");
   line.style.color = "var(--err)";
+  if (box === $("errbox")) {
+    line.textContent = new Date().toTimeString().slice(0, 8) + " " +
+      String(e && e.message || e);
+    box.appendChild(line);
+    while (box.childNodes.length > 8) box.removeChild(box.firstChild);
+    return;
+  }
+  box.textContent = "";
   line.textContent = String(e && e.message || e);
   box.appendChild(line);
   while (box.childNodes.length > 5) box.removeChild(box.firstChild);
@@ -869,11 +883,12 @@ async function openDetails(name) {
       api("/api/plugins/state?account=" + encodeURIComponent(name)).catch(() => []),
       api("/api/profiles").catch(() => []),
     ]);
-  } catch (e) { showErr(e); return; }
+  } catch (e) { showErr(e, "#panel-accounts"); return; }
   try {
     renderDetails(info, states, profiles);
   } catch (e) {
-    showErr(new Error("failed to render details for " + name + ": " + (e.message || e)));
+    showErr(new Error("failed to render details for " + name + ": " + (e.message || e)),
+            "#panel-accounts");
   }
 }
 
@@ -1088,7 +1103,7 @@ function loadManifests() {
     line.className = "dim";
     line.textContent = "plugins unavailable: " + (e.message || e);
     $("plugin-list").appendChild(line);
-    showErr(e);
+    showErr(e, "#panel-plugins");
   });
 }
 LOADERS.plugins = loadManifests;
@@ -1160,7 +1175,7 @@ function loadProfiles() {
     line.className = "dim";
     line.textContent = "profiles unavailable: " + (e.message || e);
     $("prof-list").appendChild(line);
-    showErr(e);
+    showErr(e, "#panel-profiles");
   });
 }
 LOADERS.profiles = async () => { await loadManifests(); await loadProfiles(); };
@@ -1214,7 +1229,9 @@ function renderPolicies(policies) {
 function renderRlStats(stats) {
   const root = $("rl-stats");
   root.innerHTML = "";
-  $("rl-floor").textContent = stats.floor + "s";
+  const floorS = Number(stats.floor) || 0;
+  $("rl-floor").textContent = floorS + "s" +
+    (floorS >= 60 ? " (" + fmtDur(floorS) + ")" : "");
   renderLane(stats.lane || {enabled: false});
 
   const cd = stats.cooldowns || {};
@@ -1400,7 +1417,11 @@ function renderTasks(tasks, history) {
   htable.innerHTML = "<tr><th>id</th><th>account</th><th>plugin</th><th>action</th><th>prio</th><th>status</th><th>duration</th></tr>";
   for (const t of history || []) {
     const tr = taskRow(t, false);
-    tr.children[5].innerHTML = '<span class="st-' + esc(t.status) + '">' + esc(t.status) + "</span>";
+    const badge = document.createElement("span");
+    badge.className = "st-" + (t.status || "");
+    badge.textContent = t.status || "";
+    tr.children[5].textContent = "";
+    tr.children[5].appendChild(badge);
     htable.appendChild(tr);
   }
   hroot.appendChild(htable);
@@ -1418,21 +1439,26 @@ function loadTasks() {
     line.className = "dim";
     line.textContent = "tasks unavailable: " + (e.message || e);
     $("tasks-live").appendChild(line);
-    showErr(e);
+    showErr(e, "#panel-tasks");
   });
 }
 LOADERS.tasks = loadTasks;
-$("tasks-refresh").onclick = () => loadTasks().then(() => showNote("tasks refreshed"));
+$("tasks-refresh").onclick = () => loadTasks().then(() => showNote("tasks refreshed", "#panel-tasks"));
 
 function appendTaskEvent(msg) {
   const box = $("taskevents");
+  const ph = box.querySelector("[data-ph]");
+  if (ph) ph.remove();
   const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
   const div = document.createElement("div");
   const clock = new Date().toTimeString().slice(0, 8);
   const bits = [msg.account || "-"];
   if (msg.task_id != null) bits.push("#" + msg.task_id);
   if (msg.action) bits.push(msg.action);
-  if (msg.duration_s != null) bits.push(msg.duration_s.toFixed(2) + "s");
+  if (msg.duration_s != null) {
+    const d = Number(msg.duration_s);
+    if (Number.isFinite(d)) bits.push(d.toFixed(2) + "s");
+  }
   if (msg.error) bits.push(msg.error);
   if (msg.summary) bits.push(msg.summary);
   div.textContent = clock + " " + msg.event + "  " + bits.join("  ");
@@ -1448,6 +1474,8 @@ function logLine(entry) {
   const sevFilter = $("log-sev").value;
   if (acctFilter && entry.account !== acctFilter) return;
   if (sevFilter && entry.severity !== sevFilter) return;
+  const ph = box.querySelector("[data-ph]");
+  if (ph) ph.remove();
   const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
   const div = document.createElement("div");
   div.className = "lg-" + (entry.severity || "INFO");
@@ -1463,6 +1491,8 @@ function auditLine(entry) {
   const box = $("auditbox");
   const filter = $("audit-acct").value;
   if (filter && entry.account !== filter) return;
+  const ph = box.querySelector("[data-ph]");
+  if (ph) ph.remove();
   const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
   const div = document.createElement("div");
   div.className = "audit-line " + (entry.direction === "out" ? "out" : "in");
@@ -1488,6 +1518,8 @@ function backfillLogs() {
   api("/api/logs?" + q).then((entries) => {
     $("logbox").innerHTML = "";
     for (const entry of entries) logLine(entry);
+    if (!entries.length)
+      $("logbox").innerHTML = '<span class="dim" data-ph="1">no log entries matched</span>';
     $("logsync").textContent = entries.length + " entries";
   }).catch(e => showErr(e, "#panel-logs"));
 }
@@ -1501,6 +1533,8 @@ function backfillAudit() {
   api("/api/audit?" + q).then((entries) => {
     $("auditbox").innerHTML = "";
     for (const entry of entries) auditLine(entry);
+    if (!entries.length)
+      $("auditbox").innerHTML = '<span class="dim" data-ph="1">no audit entries matched</span>';
   }).catch(e => showErr(e, "#panel-logs"));
 }
 $("audit-backfill").onclick = backfillAudit;
@@ -1508,9 +1542,12 @@ $("audit-acct").onchange = backfillAudit;
 LOADERS.logs = () => { backfillLogs(); backfillAudit(); };
 
 // ---------------------------------------------------------------- Simulation
+const SIM_LOG_LINE_CAP = 500;
+let simRunButtons = [];
 function renderScenarios(scenarios) {
   const root = $("sim-list");
   root.innerHTML = "";
+  simRunButtons = [];
   if (!scenarios.length) {
     root.innerHTML = '<span class="dim">no simulation scenarios configured</span>';
     return;
@@ -1520,6 +1557,7 @@ function renderScenarios(scenarios) {
     const row = document.createElement("div"); row.className = "row";
     row.innerHTML = '<span class="name mono">' + esc(s.name) + "</span>";
     const run = btn("run", () => runSimulation(s.name, run));
+    simRunButtons.push(run);
     row.appendChild(run);
     card.appendChild(row);
     const desc = document.createElement("div"); desc.className = "dim";
@@ -1530,15 +1568,17 @@ function renderScenarios(scenarios) {
 }
 
 function runSimulation(name, button) {
-  button.disabled = true;
   const old = button.textContent;
+  for (const b of simRunButtons) b.disabled = true;
   button.innerHTML = '<span class="spin">◌</span> running…';
   post("/api/simulation/run", { name }).then((report) => {
-    button.disabled = false; button.textContent = old;
+    button.textContent = old;
+    for (const b of simRunButtons) b.disabled = false;
     renderSimReport(report);
   }).catch((e) => {
-    button.disabled = false; button.textContent = old;
-    showErr(e);
+    button.textContent = old;
+    for (const b of simRunButtons) b.disabled = false;
+    showErr(e, "#panel-simulation");
   });
 }
 
@@ -1570,7 +1610,15 @@ function renderSimReport(report) {
   const logs = document.createElement("div"); logs.className = "card2";
   logs.innerHTML = "<div class='sub'>timed log lines</div>";
   const box = document.createElement("div"); box.id = "simlogs";
-  for (const line of report.log_lines || []) {
+  const lines = report.log_lines || [];
+  if (lines.length > SIM_LOG_LINE_CAP) {
+    const cut = document.createElement("div");
+    cut.className = "dim mono";
+    cut.textContent = "… " + (lines.length - SIM_LOG_LINE_CAP) +
+      " earlier log line(s) not shown";
+    box.appendChild(cut);
+  }
+  for (const line of lines.slice(-SIM_LOG_LINE_CAP)) {
     const div = document.createElement("div");
     div.textContent = line;
     box.appendChild(div);
@@ -1602,7 +1650,7 @@ function loadScenarios() {
     line.className = "dim";
     line.textContent = "simulation unavailable: " + (e.message || e);
     $("sim-list").appendChild(line);
-    showErr(e);
+    showErr(e, "#panel-simulation");
   });
 }
 LOADERS.simulation = loadScenarios;
@@ -1643,11 +1691,11 @@ function loadCooldowns() {
     line.className = "dim";
     line.textContent = "cooldowns unavailable: " + (e.message || e);
     $("cooldowns-list").appendChild(line);
-    showErr(e);
+    showErr(e, "#panel-cooldowns");
   });
 }
 LOADERS.cooldowns = loadCooldowns;
-$("cooldowns-refresh").onclick = () => loadCooldowns().then(() => showNote("cooldowns refreshed"));
+$("cooldowns-refresh").onclick = () => loadCooldowns().then(() => showNote("cooldowns refreshed", "#panel-cooldowns"));
 $("cd-acct").onchange = () => loadCooldowns();
 
 // ---------------------------------------------------------------- Advanced

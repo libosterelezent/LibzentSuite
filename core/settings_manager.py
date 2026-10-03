@@ -300,13 +300,17 @@ class SettingsManager:
         stored = self._account_framework.get(account, {})
         values = dict(defaults)
         for key, raw in stored.items():
-            if key in defs:
-                try:
-                    values[key] = defs[key].validate(raw)
-                except SettingsValidationError:
-                    self._logger.warning(
-                        "ignoring invalid account setting %s.%s=%r", account, key, raw
-                    )
+            if key not in defs:
+                self._logger.warning(
+                    "ignoring unknown account setting %s.%s=%r", account, key, raw
+                )
+                continue
+            try:
+                values[key] = defs[key].validate(raw)
+            except SettingsValidationError:
+                self._logger.warning(
+                    "ignoring invalid account setting %s.%s=%r", account, key, raw
+                )
         return values
 
     async def set_account_setting(self, account: str, key: str, value: Any) -> Any:

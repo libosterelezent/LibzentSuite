@@ -21,6 +21,7 @@ import time
 from typing import Any, Dict, Optional
 
 from .base import BaseRepository
+from ..connection import DatabaseError
 
 
 class CacheRepository(BaseRepository):
@@ -40,14 +41,25 @@ class CacheRepository(BaseRepository):
         return loads_tolerant(row["value_json"], None, f"api_cache:{account}/{kind}/{key}")
 
     async def set(self, account: str, kind: str, key: str, value: Any) -> None:
-        """Store one cached value (JSON-serialized; never raises on types)."""
+        """Store one cached value (JSON-serialized).
+
+        Raises DatabaseError (never a raw TypeError) when the value cannot
+        be serialized — checked BEFORE the transaction opens.
+        """
+        try:
+            payload = json.dumps(value)
+        except (TypeError, ValueError) as exc:
+            raise DatabaseError(
+                f"api cache value for {account}/{kind}/{key} is not "
+                f"JSON-serializable: {exc}"
+            ) from exc
         async with self._tx(f"api cache write {account}/{kind}/{key}") as conn:
             await conn.execute(
                 """INSERT INTO api_cache (account, kind, key, value_json, cached_at)
                    VALUES (?,?,?,?,?)
                    ON CONFLICT(account, kind, key) DO UPDATE SET
                      value_json=excluded.value_json, cached_at=excluded.cached_at""",
-                (account, kind, str(key), json.dumps(value), time.time()),
+                (account, kind, str(key), payload, time.time()),
             )
 
     async def delete(self, account: str, kind: str, key: str) -> bool:

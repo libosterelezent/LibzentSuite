@@ -25,9 +25,12 @@ from typing import Any, Dict, List, Optional, Set
 
 from ..errors import ProfileError
 
-#: profile names: lowercase identifier, may start with a digit (unlike the
-#: old role regex — profiles and accounts share one namespace style here)
-NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+#: profile names: a lowercase letter first, then lowercase letters/digits/
+#: underscore/dash, at most 32 chars (leading digits rejected — pinned by
+#: tests; only ACCOUNT names may start with a digit). fullmatch (NOT
+#: ``...$`` anchoring): ``$`` also matches before a trailing newline, which
+#: let names like ``"basic\n"`` through the old pattern.
+NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
 
 class ProfileManager:
@@ -95,7 +98,7 @@ class ProfileManager:
             ProfileError: bad name (must match ``^[a-z][a-z0-9_-]{0,31}``),
                 a non-list plugin argument, or an empty/dirty plugin list.
         """
-        if not isinstance(name, str) or not NAME_RE.match(name or ""):
+        if not isinstance(name, str) or not NAME_RE.fullmatch(name or ""):
             raise ProfileError(
                 f"profile name {name!r} must match {NAME_RE.pattern} "
                 "(lowercase letters/digits/_/-, at most 32 chars)"

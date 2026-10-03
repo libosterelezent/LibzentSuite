@@ -46,6 +46,7 @@ class PersistQueue:
         self._lock = threading.Lock()
         self._worker: Optional["asyncio.Task"] = None
         self._stopping = False
+        self._stopped = False
         self._draining: Optional["asyncio.Future[None]"] = None
         self._repo: Any = None
         self._batch = 50
@@ -62,13 +63,23 @@ class PersistQueue:
         worker = self._worker
         return worker is not None and not worker.done()
 
+    @property
+    def stopped(self) -> bool:
+        """True once a stop() completed: puts are counted dropped from then."""
+        return self._stopped
+
     def put(self, item: Dict[str, Any]) -> None:
-        """Enqueue one dict (advisory cap: threads may overshoot by a hair)."""
-        if self._q.qsize() >= self._max:
-            with self._lock:
+        """Enqueue one dict; check+put run under the lock so the cap and
+        the stop flag are exact, not advisory."""
+        with self._lock:  # stop() flips _stopped under this lock then sweeps
+            # the queue: every item either drains or is counted dropped
+            if self._stopped:
+                self.dropped += 1  # post-stop arrivals can never drain
+                return
+            if self._q.qsize() >= self._max:
                 self.dropped += 1
-            return
-        self._q.put(item)
+                return
+            self._q.put(item)
 
     def stats(self) -> Dict[str, int]:
         with self._lock:
@@ -85,11 +96,18 @@ class PersistQueue:
         if self._stopping:
             # a stop is still draining: wait it out, else clearing _stopping
             # here would RESURRECT the old worker's loop and two workers
-            # would share the queue/_carry (order + duplication bugs)
-            draining = self._draining
-            if draining is not None:
+            # would share the queue/_carry (order + duplication bugs).
+            # Loop until the teardown actually finished — bailing after one
+            # bounded join resurrected a second drainer whenever the drain
+            # outlived the join budget (stop() is itself budget-bounded, so
+            # this wait cannot hang on a sane repository).
+            while self._stopping:
+                draining = self._draining
+                if draining is None:
+                    break
                 await asyncio.wait({asyncio.shield(draining)}, timeout=5.0)
             self._stopping = False
+        self._stopped = False
         self._repo = repo
         self._batch = max(1, int(batch))
         self._interval = max(0.05, float(interval))
@@ -114,6 +132,16 @@ class PersistQueue:
             return
         worker = self._worker
         if worker is None:
+            # never started (or a previous stop already finished): still
+            # flip the flags and sweep, so post-stop puts are counted
+            # dropped instead of silently queueing forever
+            with self._lock:
+                self._stopped = True
+                leftover = self._q.qsize()
+                if leftover:
+                    self.dropped += leftover
+            if leftover:
+                self._drain_counted()
             return
         self._worker = None  # put() callers stop enqueueing from now on
         self._stopping = True
@@ -128,7 +156,16 @@ class PersistQueue:
         finally:
             if not self._draining.done():
                 self._draining.set_result(None)
-            self._stopping = False
+            with self._lock:
+                self._stopping = False
+                self._stopped = True
+                leftover = self._q.qsize()
+                if leftover:
+                    # stragglers that raced the inline drain can never be
+                    # written now: count them, never lose them silently
+                    self.dropped += leftover
+            if leftover:
+                self._drain_counted()
 
     async def _drain_inline(self, loop, deadline) -> None:
         while True:

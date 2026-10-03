@@ -39,8 +39,18 @@ class FakeAccounts:
         return self._accounts.get(name)
 
 
+class RaisingAccounts(FakeAccounts):
+    def get(self, name):
+        from core.errors import AccountError
+        raise AccountError(f"unknown account {name!r}")
+
+
 class FakeApi:
+    def __init__(self) -> None:
+        self.calls: list = []
+
     async def status(self):
+        self.calls.append("status")
         return {"uptime_s": 12.0, "tasks": {"queued": 0, "completed": 3},
                 "accounts": [{"name": "alpha", "status": "running",
                               "latency_ms": 83.0, "profiles": []}],
@@ -73,6 +83,7 @@ class FakeApi:
                  "action": "message", "status": "queued"}]
 
     async def emergency_stop_all(self):
+        self.calls.append("estop")
         return {"cancelled_tasks": 2}
 
     async def accounts_emergency_stop(self, name):
@@ -82,12 +93,12 @@ class FakeApi:
         return [{"name": "soulcopy_basic", "description": "d"}]
 
 
-def make_bridge(bus=None, cooldown=0.0):
+def make_bridge(bus=None, cooldown=0.0, owner=OWNER):
     bus = bus or EventBus()
     scheduler = FakeScheduler()
     accounts = FakeAccounts()
     api = FakeApi()
-    credentials = Credentials.from_values({"OWNER_USER_IDS": str(OWNER)})
+    credentials = Credentials.from_values({"OWNER_USER_IDS": str(owner)})
     bridge = RemoteControl(
         bus, scheduler, accounts, lambda: api, credentials,
         reply_cooldown_s=cooldown,
@@ -198,6 +209,120 @@ class TestRemoteControl(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         bridge.stop()
         self.assertIn("commands:", scheduler.submitted[0]["content"])
+
+    async def test_mention_for_removed_account_ignored(self) -> None:
+        bus = EventBus()
+        scheduler = FakeScheduler()
+        api = FakeApi()
+        credentials = Credentials.from_values({"OWNER_USER_IDS": str(OWNER)})
+        bridge = RemoteControl(
+            bus, scheduler, RaisingAccounts(), lambda: api, credentials,
+        ).start()
+        bus.publish_nowait(
+            mention_message(f"<@{ALPHA_ID}> status", account="ghost"))
+        await bus.drain(timeout=2)  # F5-c: dispatch completes on drain
+        bridge.stop()
+        self.assertEqual(scheduler.submitted, [])
+
+    async def test_partial_mention_id_not_matched(self) -> None:
+        bridge, bus, scheduler, _ = make_bridge()
+        bus.publish_nowait(mention_message("<@200> status"))
+        await asyncio.sleep(0.05)
+        bridge.stop()
+        self.assertEqual(scheduler.submitted, [])
+
+    async def test_malformed_owner_ids_rejected_quietly(self) -> None:
+        bus = EventBus()
+        scheduler = FakeScheduler()
+        api = FakeApi()
+        credentials = Credentials.from_values({"OWNER_USER_IDS": "abc,def"})
+        bridge = RemoteControl(
+            bus, scheduler, FakeAccounts(), lambda: api, credentials,
+        ).start()
+        bus.publish_nowait(mention_message(f"<@{ALPHA_ID}> status"))
+        await bus.drain(timeout=2)
+        bridge.stop()
+        self.assertEqual(scheduler.submitted, [])
+
+    # --------------------------------------------- round-2 audit coverage
+    async def test_string_author_id_fail_closed(self) -> None:
+        """A producer echoing author_id as a STRING must not pass the gate
+        ('1001' is not in {1001}) — the owner check is int-membership."""
+        bridge, bus, scheduler, api = make_bridge()
+        bus.publish_nowait(
+            mention_message(f"<@{ALPHA_ID}> status", author=str(OWNER)))
+        await bus.drain(timeout=2)
+        await asyncio.sleep(0.05)
+        bridge.stop()
+        self.assertEqual(scheduler.submitted, [])
+        self.assertEqual(api.calls, [])
+
+    async def test_two_mentions_in_one_message_is_one_command(self) -> None:
+        bridge, bus, scheduler, _ = make_bridge()
+        await asyncio.wait_for(bus.publish_nowait(
+            mention_message(f"<@{ALPHA_ID}> status <@{ALPHA_ID}> estop")), 2)
+        await asyncio.sleep(0.05)
+        bridge.stop()
+        # parsed as 'status' + junk args: one reply, no crash, no estop run
+        self.assertEqual(len(scheduler.submitted), 1)
+        self.assertIn("takes no arguments", scheduler.submitted[0]["content"])
+
+    async def test_self_mention_when_account_is_owner_runs_once(self) -> None:
+        bridge, bus, scheduler, _ = make_bridge(owner=ALPHA_ID)
+        await asyncio.wait_for(bus.publish_nowait(
+            mention_message(f"<@{ALPHA_ID}> status", author=ALPHA_ID)), 2)
+        await asyncio.sleep(0.05)
+        bridge.stop()
+        self.assertEqual(len(scheduler.submitted), 1)
+
+    async def test_flood_executes_every_command_replies_bounded(self) -> None:
+        """Command flood inside the cooldown window: EXECUTION is never
+        throttled; the reply stream is bounded by the cooldown."""
+        bridge, bus, scheduler, api = make_bridge(cooldown=0.3)
+        for _ in range(6):
+            await asyncio.wait_for(bus.publish_nowait(
+                mention_message(f"<@{ALPHA_ID}> status")), 2)
+            await asyncio.sleep(0.01)  # faster than the window
+        await asyncio.sleep(0.2)
+        bridge.stop()
+        self.assertEqual(len(api.calls), 6)
+        self.assertLessEqual(len(scheduler.submitted), 6)
+
+    async def test_safety_command_runs_inside_cooldown_window(self) -> None:
+        bridge, bus, scheduler, api = make_bridge(cooldown=60.0)
+        await asyncio.wait_for(bus.publish_nowait(
+            mention_message(f"<@{ALPHA_ID}> status")), 2)
+        await asyncio.sleep(0.05)
+        await asyncio.wait_for(bus.publish_nowait(
+            mention_message(f"<@{ALPHA_ID}> estop")), 2)
+        await asyncio.sleep(0.05)
+        bridge.stop()
+        self.assertEqual(api.calls, ["status", "estop"])  # estop RAN
+
+    async def test_undeliverable_reply_is_contained(self) -> None:
+        class DeadScheduler(FakeScheduler):
+            def submit(self, *a, **kw):
+                raise RuntimeError("scheduler stopped (estop)")
+        bus = EventBus()
+        scheduler = DeadScheduler()
+        api = FakeApi()
+        credentials = Credentials.from_values({"OWNER_USER_IDS": str(OWNER)})
+        bridge = RemoteControl(
+            bus, scheduler, FakeAccounts(), lambda: api, credentials,
+        ).start()
+        bus.publish_nowait(mention_message(f"<@{ALPHA_ID}> status"))
+        await bus.drain(timeout=2)
+        await asyncio.sleep(0.05)
+        bridge.stop()
+
+    async def test_start_is_idempotent_no_double_subscription(self) -> None:
+        bridge, bus, scheduler, _ = make_bridge()
+        bridge.start()  # second start must not duplicate the handler
+        registered = sum(
+            1 for handlers in bus._subs.values() for h in handlers
+            if getattr(h, "__name__", "") == "_on_message")
+        bridge.stop()
+        self.assertEqual(registered, 1)
 
 
 if __name__ == "__main__":

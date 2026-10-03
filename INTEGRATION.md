@@ -9,20 +9,25 @@ Spec source: `TODO + Ideas.md` (architecture, phases, safety rules).
 
 ## Ground rules
 
-- Python **>= 3.10**, **standard library only** (no pip deps anywhere).
-- Repo root: `/home/Liboster/Workspace/SlaughterMudae`. All paths below are
-  relative to it.
-- Old implementation was battle-tested through 3 audit rounds. It is preserved
-  in git history — consult it with `git show HEAD:<old-path>` (see each
-  section). Port proven logic; do not reinvent.
+- Python **>= 3.10**. Runtime dependencies are exactly `aiosqlite` +
+  `cryptography` (see `requirements.txt`); everything else is standard
+  library. (`discord.py-self` is live-mode only, imported lazily.)
+- All paths below are relative to the repository root.
+- The old implementation was battle-tested through 3 audit rounds. It lived
+  in the PRE-REWRITE repository — the `git show HEAD:<old-path>` references
+  sprinkled through this document resolved against that project's HEAD at
+  contract time and do NOT resolve in this repo's history; treat them as
+  historical pointers to the ported logic, not runnable commands.
 - Every public function/class gets a docstring (what/why/raises).
 - Domain errors carry **human-readable messages**; validate inputs at the
   boundary; never crash the process on bad input.
 - **Never** touch files outside your deliverables (except your own tests).
-- Secrets/tokens: values only ever live in `.env`; DB stores refs only.
+- Secrets/tokens: account tokens live encrypted (Fernet) in the database;
+  `.env` holds ids/auth switches only.
 - Safety floor: **no rate policy faster than 1.5s/action can ever be set**
   (`UnsafePolicyError`). Constant `MIN_ACTION_INTERVAL = 1.5` in
-  `core/rate_limit_manager`.
+  `core/rate_limit_manager` (intervals and the floor are also capped at
+  `MAX_INTERVAL = 86400.0`).
 
 ## API BOUNDARY (binding architecture contract)
 
@@ -82,7 +87,7 @@ interfaces/
   dashboard/             (A8)     HTTP+WS server + SPA
 plugins/                 (A3: soulcopy migrated + roll example)
 tests/unit|integration|simulation/
-config/  main.py  scripts/run_tests.sh
+config/  main.py  scripts/ (run_tests.sh, gen_knowledgebase.py, bench_db.py, bench_hot.py)
 ```
 
 ## Send pipeline (THE core dataflow)
@@ -133,7 +138,8 @@ global_layer=None)`; `.resolve(plugin_name, schema, account=None) -> dict`;
 `.set_plugin_setting(account, plugin, key, value, schema) -> value`;
 `.account_settings(account) -> dict`; `.set_account_setting(account, key, value)`.
 Framework account schema: `ACCOUNT_SETTINGS` (reconnect_enabled,
-reconnect_initial_delay, reconnect_max_delay, reconnect_multiplier).
+reconnect_initial_delay, reconnect_max_delay, reconnect_multiplier,
+typing_probability).
 
 ### core/rate_limit_manager (A4 + GlobalSendLane)
 ```python
@@ -165,7 +171,8 @@ class RateLimitManager:
     def cooldown_remaining(self, account=None, action=None) -> float
     def stats(self) -> dict     # policies + cooldowns + last-fire ages + counters (UI page)
     def warnings(self) -> list[dict]   # [{"level","code","message"}] aggressive(<3s), no_jitter, narrow_jitter
-    def set_floor(self, seconds)       # may only raise, never below 1.5
+    def set_floor(self, seconds) -> float  # may only raise, never below 1.5
+                                           # (floor/interval cap: 86400s)
     # --- sequential send lane (FarmLite concept, robust port — lane.py) ---
     def set_lane_enabled(self, enabled: bool) -> dict      # persisted (kv 'ratelimit:lane')
     def set_lane_prefixrate(self, seconds: float) -> dict  # 0 PAUSES; persisted
@@ -182,8 +189,9 @@ and server-limit ideas from `git show HEAD:core/rest_buckets.py` +
 ```python
 TaskStatus = "queued|running|completed|failed|cancelled|timed_out"
 @dataclass Task: id, name, account, plugin, action, channel_id, user_id, content,
-    priority, submitted_at, started_at, finished_at, attempts, max_retries,
-    timeout_s, status, error, result_summary, grant_wait_ms, grant_jitter_ms
+    message_id, priority, submitted_at, started_at, finished_at, attempts,
+    max_retries, timeout_s, status, error, result_summary, grant_wait_ms,
+    grant_jitter_ms
     def as_dict(self) -> dict
 class TaskScheduler:
     def __init__(self, bus, logger, limiter, sender, audit=None, *,
@@ -193,8 +201,8 @@ class TaskScheduler:
     def start(self) -> None                 # spawn dispatch loop (idempotent)
     async def stop(self, *, drain=True, timeout=10.0) -> None
     def submit(self, account, plugin, action, *, channel_id=None, user_id=None,
-               content=None, priority=Priority.NORMAL, name=None,
-               timeout=None, retries=0) -> Task      # raises SchedulerError when stopped
+                content=None, message_id=None, priority=Priority.NORMAL,
+                name=None, timeout=None, retries=0) -> Task      # raises SchedulerError when stopped
     def cancel(self, task_id) -> bool
     def cancel_matching(self, *, account=None, plugin=None, action=None) -> int
     def get(self, task_id) -> Task | None
@@ -241,7 +249,8 @@ class PluginServices(Protocol):        # implemented by account_manager (A6)
     @property credentials, account, plugin, settings
 class PluginManager:
     def __init__(self, bus, logger, settings: SettingsManager, plugin_repo=None,
-                 plugin_dir="plugins"): ...
+                 plugin_dir="plugins", *, credential_service=None,
+                 cooldowns=None, plugin_state=None): ...
     def discover(self) -> dict                          # name -> record (port old loader)
     def manifests(self) -> list[dict]                   # metadata + settings schema (UI)
     def attach_account(self, account, allowed: set | None) -> None
@@ -296,7 +305,9 @@ class AccountStatus(str, Enum): created connecting running reconnecting stopped 
 class AccountManager:
     def __init__(self, bus, logger, accounts_repo, plugin_manager, profile_manager,
                  scheduler, settings: SettingsManager, audit, client_factory,
-                 credentials, *, supervisor_tick=0.2): ...
+                 credentials, *, limiter=None, supervisor_tick=0.2,
+                 api_cache_repo=None, credential_service=None, cooldowns=None,
+                 plugin_state=None): ...
     def add_account(self, name, *, token_ref=None, enabled=True, sync_group=None,
                     profiles=None) -> dict          # validates + persists
     def remove_account(self, name) -> dict          # must be stopped; cascades
@@ -304,7 +315,8 @@ class AccountManager:
     def accounts(self) -> list[dict]                # status list (names + ids + roles)
     def set_enabled(self, name, enabled) -> dict
     async def start(self, name) -> dict ; async def stop(self, name) -> dict
-    async def start_all(self) -> dict ; async def stop_all(self) -> dict
+    async def start_all(self, *, stagger=5.0) -> dict
+    async def stop_all(self) -> dict
     def emergency_stop(self, name) -> dict          # cancel tasks + stop account NOW
     def details(self, name) -> dict                 # spec §8 page (see below)
     async def send_hook(self, task: Task) -> DiscordMessage   # scheduler sender
@@ -374,7 +386,8 @@ latency_ms/user_id/on_message/on_disconnect), `ClientFactory` protocol
   (tight-ish policy -> every outbound gap >= interval), `server_429_respected`
   (simulated 429 -> retry happens AFTER retry_after), `channel_gone_aborts`
   (target channel deleted -> flow aborts cleanly, no partial chunks).
-  `runner.py`: `SimulationRunner(plugin_dir, db=None)` builds a COMPLETE
+  `runner.py`: `SimulationRunner(plugin_dir, credentials=None)` builds a
+  COMPLETE
   in-memory stack (Database(":memory:"), bus, LogService, RateLimitManager,
   TaskScheduler, SettingsManager, ProfileManager, PluginManager,
   AccountManager with SimClient factory, AuditRecorder) per run — wiring per
@@ -387,18 +400,22 @@ latency_ms/user_id/on_message/on_disconnect), `ClientFactory` protocol
 ### interfaces/cli (A1)
 - `interfaces/cli/commands.py`: `run_command(api, line) -> str | None`
   (raises `QuitRequested`, `UsageError`), `HELP` registry, pure `format_*`
-  helpers. Command groups (spec §13 — subcommand style):
-  `accounts list|add <name> [profiles...]|remove <name>|info <name>|enable|
-  disable <name>|start [name|all]|stop [name|all]|estop <name>`,
+  helpers.   Command groups (spec §13 — subcommand style):
+  `accounts list|add <name> [profiles...]|remove <name>|info <name>|
+  credential <name> <token>|enable <name> <on|off>|start [name|all]|
+  stop [name|all]|estop <name>`,
+  `credentials status|import-env [--overwrite]`,
+  `cooldowns clear <account> <plugin> [key]`,
   `plugins list|state <account>|enable <acct> <plugin>|disable <acct> <plugin>|
   settings <account>|set <account> <plugin> <key> <value>`,
   `profiles list|create <name> <plugin...>|delete <name>|assign <acct> <profile>|
   unassign <acct> <profile>`,
   `ratelimit show|set <action> <interval> [jitter_min jitter_max] [level owner]|
-  clear <level> <owner> <action>|effective <action> [account] [plugin]|warnings`,
-  `tasks list [status]|cancel <id>|history [n]`,
+  clear <level> <owner> <action>|effective <action> [account] [plugin]|warnings|
+  floor <seconds>|lane [on [rate]|off|rate <s>]`,
+  `tasks list [status]|cancel <id>|history [n]|cancel-matching [account] [plugin]`,
   `simulation list|run [name]`, `logs [n] [account]`, `audit [n] [account]`,
-  `estop` (global emergency stop), `status`, `help`, `quit`.
+  `estop [resume]` (global emergency stop), `status`, `help`, `quit`.
   Strict arg validation with usage messages; strict bool parsing
   (`parse_bool` from core.api). Port command-engine patterns from
   `git show HEAD:cli/commands.py`.
@@ -409,14 +426,17 @@ latency_ms/user_id/on_message/on_disconnect), `ClientFactory` protocol
 
 ### interfaces/dashboard (A8)
 - `interfaces/dashboard/server.py`: stdlib `ThreadingHTTPServer` +
-  `DashboardServer(api, token=None, host="127.0.0.1", port=8070)` with
-  `.start()/.stop()/.attach_logs(log_service)`, JSON REST mapping 1:1 to
+  `DashboardServer(api, token=None, host="127.0.0.1", port=8070, bus=None,
+  exit_signal=False)` with `.start()/.stop()/.attach_logs(log_service)/
+  .attach_audit(recorder)`, JSON REST mapping 1:1 to
   CoreAPI (`/api/status`, `/api/accounts`, `/api/accounts/add|remove|info|
-  enable|start|stop|emergency-stop`, `/api/plugins`, `/api/plugins/state|
-  set-enabled|settings|set-setting`, `/api/profiles`, `/api/profiles/create|
-  delete|assign|unassign`, `/api/ratelimit/policies|set|clear|effective|
-  stats|warnings`, `/api/tasks`, `/api/tasks/cancel|cancel-matching|history`,
-  `/api/simulation/list|run`, `/api/logs`, `/api/audit`, `/api/estop`,
+  enable|credential|start|stop|emergency-stop`, `/api/credentials/status|
+  import-env`, `/api/cooldowns`, `/api/cooldowns/clear`, `/api/plugins`,
+  `/api/plugins/state|set-enabled|settings|set-setting`, `/api/profiles`,
+  `/api/profiles/create|delete|assign|unassign`, `/api/ratelimit/policies|
+  set|clear|effective|stats|warnings|floor|lane`, `/api/tasks`,
+  `/api/tasks/cancel|cancel-matching|history`, `/api/simulation/list|run`,
+  `/api/logs`, `/api/audit`, `/api/estop`, `/api/resume`,
   `/api/shutdown`). Strict bool parsing (`parse_json_bool`), field guards,
   body-size caps, 400/401/404/413/500/504 semantics — port wholesale from
   `git show HEAD:dashboard/server.py` (keep auth via `X-Dashboard-Token` or
@@ -461,7 +481,8 @@ Task.content with Task.message_id as target; audit notes carry counts only.
 ## Database (A2 implements; models+schema in spine)
 
 `database/db.py`: `Database(path="state/slaughter.db", *, audit_keep=10000,
-log_keep=10000)` — thread-safe (RLock), 0600 file perms, WAL, `.migrate()`
+log_keep=10000)` — one background-thread aiosqlite connection (async API;
+ops never run on the event loop), 0600 file perms, WAL, `.migrate()`
 runs pending migrations from `database/schema.py:MIGRATIONS` using a
 `schema_migrations` table, `.close()`, and repository properties:
 `.accounts .account_settings .profiles .plugins .policies .audit .logs .tasks .kv`.
@@ -476,6 +497,7 @@ AccountsRepository:
     assign_profile(name, profile) ; unassign_profile(name, profile)
     profiles_of(name) -> list[str]
 AccountSettingsRepository: get(name) -> dict ; set(name, key, value) ; delete(name, key)
+    list_accounts() -> list[str]
 ProfilesRepository: upsert(name, plugins, description="") ; delete(name) -> bool
     get(name) -> ProfileRecord | None ; list() -> list[ProfileRecord]
 PluginRepository:
@@ -487,13 +509,16 @@ PluginRepository:
     all_account_settings() -> dict[account][plugin][key] = value
 RatePolicyRepository: get(level, owner, action) -> RatePolicyRecord | None
     set(level, owner, action, interval, jitter_min, jitter_max)
-    delete(level, owner, action) -> bool ; list() -> list[RatePolicyRecord]
-AuditRepository: add(entry: dict) ; recent(limit=100, account=None) -> list[dict]
-LogRepository: add(entry: dict) ; recent(limit=100, *, account=None, severity=None,
-    source=None) -> list[dict]
+    delete(level, owner, action) -> bool ; delete_account(account) -> int
+    list() -> list[RatePolicyRecord]
+AuditRepository: add(entry: dict) ; add_many(entries) -> int ;
+    recent(limit=100, account=None) -> list[dict]
+LogRepository: add(entry: dict) ; add_many(entries) -> int ; recent(limit=100,
+    *, account=None, severity=None, source=None) -> list[dict]
 TaskHistoryRepository: add(entry: dict) -> int ; update(task_id, **fields)
-    recent(limit=50, account=None) -> list[dict]
+    max_id() -> int ; recent(limit=50, account=None) -> list[dict]
 KvRepository: get(key, default=None) ; set(key, value) ; delete(key) ; prefix(p) -> dict
+    delete_prefix(p) -> int
 ```
 `Database(":memory:")` must work (simulations). Port robustness from
 `git show HEAD:core/database.py` (pruning, chmod, thread-safety).

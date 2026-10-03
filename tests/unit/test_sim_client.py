@@ -120,11 +120,56 @@ class TestSends(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TargetGone) as caught:
             await client.send_message(SYNTHETIC_GUILD_CHANNEL, "ghost")
         self.assertIn("vanished", str(caught.exception.reason))
-        # DM path: a deleted DM channel is equally gone
+        # DM path: a deleted DM channel is equally gone (and the deliberate
+        # resurrection divergence is logged loudly by the world)
         dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
-        world.channel_gone(dm)
+        with self.assertLogs("slaughtermudae.simulator", level="WARNING"):
+            world.channel_gone(dm)
         with self.assertRaises(TargetGone):
             await client.send_dm(SYNTHETIC_MUDAE_ID, "ghost-dm")
+
+    async def test_vanished_dm_channel_does_not_consume_one_shot_limit(self) -> None:
+        world = _world()
+        client = await _connected(world, SYNTHETIC_ALPHA_ID)
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        world.server_limit_next(channel_id=dm, retry_after=0.4)
+        with self.assertLogs("slaughtermudae.simulator", level="WARNING"):
+            world.channel_gone(dm)
+        with self.assertRaises(TargetGone):
+            await client.send_dm(SYNTHETIC_MUDAE_ID, "ghost-dm")
+        self.assertEqual(world.blocked_sends, [])  # 429 not spent on a dead send
+        world.add_channel(dm, "dm-restored", dm=True)
+        with self.assertRaises(ServerRateLimit):  # still armed for a live send
+            await client.send_message(dm, "later")
+
+    async def test_armed_limit_with_live_channel_fires_on_send_dm(self) -> None:
+        """Reverse of the ordering guard: channel exists, 429 armed on it ->
+        ServerRateLimit fires (channel-first must not starve the 429)."""
+        world = _world()
+        client = await _connected(world, SYNTHETIC_ALPHA_ID)
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        self.assertTrue(world.channel_exists(dm))  # channel fine...
+        world.server_limit_next(channel_id=dm, retry_after=0.6, global_=False)
+        with self.assertRaises(ServerRateLimit) as caught:  # ...429 fires
+            await client.send_dm(SYNTHETIC_MUDAE_ID, "blocked-dm")
+        self.assertEqual(caught.exception.retry_after, 0.6)
+        self.assertFalse(caught.exception.global_)
+        self.assertEqual(len(world.blocked_sends), 1)  # recorded with evidence
+        self.assertEqual(world.blocked_sends[0]["channel_id"], dm)
+        self.assertEqual(world.messages_of(dm), [])  # nothing leaked through
+        sent = await client.send_dm(SYNTHETIC_MUDAE_ID, "after")  # one-shot
+        self.assertEqual(sent.content, "after")
+
+    async def test_armed_limit_with_live_channel_fires_on_send_message(self) -> None:
+        world = _world()
+        client = await _connected(world, SYNTHETIC_ALPHA_ID)
+        world.server_limit_next(
+            channel_id=SYNTHETIC_GUILD_CHANNEL, retry_after=0.5
+        )
+        with self.assertRaises(ServerRateLimit):
+            await client.send_message(SYNTHETIC_GUILD_CHANNEL, "blocked")
+        self.assertEqual(len(world.blocked_sends), 1)
+        await client.send_message(SYNTHETIC_GUILD_CHANNEL, "through")
 
     async def test_send_message_success_shape(self) -> None:
         world = _world()

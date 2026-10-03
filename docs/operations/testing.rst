@@ -1,7 +1,7 @@
 Testing
 =======
 
-Offline-first: 705 tests (``tests/unit``, ``tests/integration``,
+Offline-first: 992 tests (``tests/unit``, ``tests/integration``,
 ``tests/simulation``) run the PRODUCTION composition over the in-memory
 ``SimWorld`` — zero network, zero tokens. Determinism comes from injected
 manual clocks, sleep seams, and seeded RNGs. Six scenarios

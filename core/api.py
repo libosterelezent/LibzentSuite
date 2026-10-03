@@ -18,7 +18,7 @@ Method map (grouped like the dashboard navigation, spec §12):
                     (+lane; every mutation persists through the db repos)
   tasks_*           list/cancel/cancel-matching/history
   simulation_*      list/run
-  logs_tail / audit_tail / credentials_summary
+  logs_tail / audit_tail
   emergency_stop_all / shutdown
 
 Management audit: every management mutation emits an audit row via the
@@ -33,6 +33,7 @@ through ``_resolved()`` so this facade keeps working at every step.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time as _time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -63,7 +64,7 @@ async def _resolved(outcome: Any) -> Any:
     method may return a plain value today and a coroutine after the async
     persistence switch — both shapes work through here.
     """
-    if asyncio.iscoroutine(outcome):
+    if inspect.iscoroutine(outcome):
         return await outcome
     return outcome
 
@@ -801,10 +802,6 @@ class ControlAPI:
         return await _resolved(self._audit.history(limit=n, account=account))
 
     # ---------------------------------------------------------------- system
-    def credentials_summary(self) -> Dict[str, str]:
-        """Redacted credential view (tokens masked; ids shown)."""
-        return self._credentials.redacted() if self._credentials else {}
-
     @property
     def dashboard_token(self) -> Optional[str]:
         return self._credentials.dashboard_token if self._credentials else None

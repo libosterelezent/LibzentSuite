@@ -27,8 +27,14 @@ SQLite configuration (spec §8) — each pragma justified:
                                 state (cooldowns/state) with far fewer
                                 fsyncs than FULL. Secrets are tiny rows.
 
-Transactions: ``async with conn.write()`` — COMMIT on success, ROLLBACK on
-exception. Repos never manage cursors/commits themselves.
+Transactions: ``async with conn.write()`` — explicit ``BEGIN IMMEDIATE``
+on entry, COMMIT on success, ROLLBACK on exception. Beginning eagerly
+(write lock up front) instead of SQLite's deferred default removes the
+cross-connection upgrade race: a deferred writer that first reads holds
+a read snapshot, and its later write returns SQLITE_BUSY immediately
+(busy_timeout cannot retry a stale snapshot) the moment another
+connection commits in between — exactly the "sim runner + live" pattern.
+Repos never manage cursors/commits themselves.
 """
 from __future__ import annotations
 
@@ -64,6 +70,13 @@ PRAGMAS = (
 #: how long close() waits for an in-flight transaction before closing anyway
 CLOSE_TIMEOUT_S = 5.0
 
+#: how long any task may wait for the single connection before a clear
+#: DatabaseError replaces the silent alternative: the classic deadlock is a
+#: write() body that awaits OTHER database work (gather) — the child waits
+#: for the lock the parent holds, forever. Generous enough that legitimate
+#: writer queues (write storms, big batches) never trip it.
+LOCK_WAIT_TIMEOUT_S = 30.0
+
 
 class _TaskGuard:
     """Re-entrant (per asyncio task) mutual exclusion for the ONE connection.
@@ -73,26 +86,54 @@ class _TaskGuard:
     that task's UNCOMMITTED rows (and a commit by anyone commits everyone).
     Every access therefore goes through this guard. The task that already
     owns it may re-enter (read its own writes, nest writes) without
-    deadlocking; any other task waits its turn.
+    deadlocking; any other task waits its turn — but only up to
+    LOCK_WAIT_TIMEOUT_S, because a parent that awaits gathered child DB
+    work inside its own write() block deadlocks the child against itself.
     """
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._owner: Optional[asyncio.Task] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def _check_loop(self) -> None:
+        """One connection, one event loop — forever.
+
+        aiosqlite futures bind to whichever loop submits them, so a second
+        loop would interleave work on the SAME sqlite session while the
+        asyncio.Lock only serializes within its own loop. The fast path of
+        Lock.acquire would silently allow it; fail loud instead.
+        """
+        loop = asyncio.get_running_loop()
+        if self._loop is None:
+            self._loop = loop
+        elif loop is not self._loop:
+            raise DatabaseError(
+                "database connection used from multiple event loops; keep one "
+                "Database per loop (use asyncio.run_coroutine_threadsafe to "
+                "submit work to the owning loop)")
 
     @asynccontextmanager
     async def hold(self) -> AsyncIterator[bool]:
         """Yield True for the outermost holder, False when re-entered."""
+        self._check_loop()
         task = asyncio.current_task()
         if task is not None and self._owner is task:
             yield False
             return
-        async with self._lock:
-            self._owner = task
-            try:
-                yield True
-            finally:
-                self._owner = None
+        if not await self.acquire_bounded(LOCK_WAIT_TIMEOUT_S):
+            raise DatabaseError(
+                f"database lock not acquired within {LOCK_WAIT_TIMEOUT_S}s: "
+                f"task {task!r} waited for the connection held by "
+                f"{self._owner!r}; awaiting other database work (e.g. gather) "
+                f"inside a write()/read() block deadlocks the single "
+                f"connection")
+        self._owner = task
+        try:
+            yield True
+        finally:
+            self._owner = None
+            self._lock.release()
 
     async def acquire_bounded(self, timeout: float) -> bool:
         try:
@@ -122,37 +163,50 @@ class DatabaseConnection:
         self._path = Path(path) if str(path) != ":memory:" else ":memory:"
         self._conn: Optional[aiosqlite.Connection] = None
         self._guard = _TaskGuard()  # one transaction state -> one guard
+        self._connect_lock = asyncio.Lock()  # concurrent connect()s leak workers
 
     @property
     def connected(self) -> bool:
         return self._conn is not None
 
     async def connect(self) -> None:
-        """Open the connection and apply pragmas (idempotent)."""
+        """Open the connection and apply pragmas (idempotent, race-free).
+
+        Two concurrent connect() calls would each open an aiosqlite
+        connection; the loser's worker thread (non-daemon) would keep the
+        interpreter alive forever — hence the lock.
+        """
         if self._conn is not None:
             return
-        if self._path != ":memory:":
-            Path(self._path).parent.mkdir(parents=True, exist_ok=True)
-            _touch_private(Path(self._path))
-        conn = await aiosqlite.connect(str(self._path))
-        try:
-            conn.row_factory = aiosqlite.Row
-            for pragma in PRAGMAS:
-                # entries are either full "PRAGMA x=y" strings or (name, value)
-                statement = pragma if isinstance(pragma, str) else (
-                    f"PRAGMA {pragma[0]}={pragma[1]}")
-                await conn.execute(statement)
-            await conn.commit()
-        except BaseException:
-            # never leak the worker thread when setup fails (it would keep
-            # the interpreter alive at exit)
+        async with self._connect_lock:
+            if self._conn is not None:
+                return
+            if self._path != ":memory:":
+                Path(self._path).parent.mkdir(parents=True, exist_ok=True)
+                _touch_private(Path(self._path))
+            # isolation_level=None: full manual transaction control. write()
+            # issues BEGIN IMMEDIATE explicitly (see module docstring);
+            # single statements run in autocommit exactly as before, where
+            # execute() committed each one anyway.
+            conn = await aiosqlite.connect(str(self._path), isolation_level=None)
             try:
-                await conn.close()
-            except Exception:
-                pass
-            raise
-        self._conn = conn
-        TELEMETRY.set_worker_thread(conn)  # G1: worker TID for thread CPU
+                conn.row_factory = aiosqlite.Row
+                for pragma in PRAGMAS:
+                    # entries are either full "PRAGMA x=y" strings or (name, value)
+                    statement = pragma if isinstance(pragma, str) else (
+                        f"PRAGMA {pragma[0]}={pragma[1]}")
+                    await conn.execute(statement)
+                await conn.commit()
+            except BaseException:
+                # never leak the worker thread when setup fails (it would keep
+                # the interpreter alive at exit)
+                try:
+                    await conn.close()
+                except Exception:
+                    pass
+                raise
+            self._conn = conn
+            TELEMETRY.set_worker_thread(conn)  # G1: worker TID for thread CPU
 
     async def close(self, timeout: float = CLOSE_TIMEOUT_S) -> None:
         """Close the connection (idempotent; safe during shutdown).
@@ -188,6 +242,9 @@ class DatabaseConnection:
         """One statement, committed (simple writes / pragmas / DDL).
 
         Inside the caller's own open transaction it joins it (no commit).
+        The statement's cursor is always closed: an unreset SELECT would
+        pin a read snapshot on this connection and make the next
+        write() BEGIN fail SQLITE_BUSY (see write()).
         """
         async with self._guard.hold() as outer:
             conn = self._require()
@@ -195,17 +252,19 @@ class DatabaseConnection:
                 _t0 = perf_counter()
                 _ok = True
                 try:
-                    await conn.execute(sql, tuple(params))
-                    if outer:
-                        await conn.commit()
+                    async with conn.execute(sql, tuple(params)):
+                        pass
                 except BaseException:
                     _ok = False
                     raise
                 finally:
                     TELEMETRY.record("write_stmt", perf_counter() - _t0,
                                      ok=_ok)
+                if outer:
+                    await conn.commit()
                 return
-            await conn.execute(sql, tuple(params))
+            async with conn.execute(sql, tuple(params)):
+                pass
             if outer:
                 await conn.commit()
 
@@ -239,29 +298,40 @@ class DatabaseConnection:
 
     @asynccontextmanager
     async def write(self) -> AsyncIterator[aiosqlite.Connection]:
-        """Transaction: COMMIT on success, ROLLBACK on any exception.
+        """Transaction: BEGIN IMMEDIATE, COMMIT on success, ROLLBACK on error.
 
-        Writers (and readers) are serialized by the task guard. A task that
-        already holds the transaction may nest ``write()``: the inner block
-        joins the outer one and the OUTERMOST block commits/rolls back.
+        Writers (and readers) are serialized by the task guard. The write
+        lock is taken EAGERLY (not deferred) so a second connection to the
+        same file never sees a stale-snapshot upgrade (immediate SQLITE_BUSY
+        that busy_timeout cannot resolve). A task that already holds the
+        transaction may nest ``write()``: the inner block joins the outer
+        one and the OUTERMOST block commits/rolls back.
+
+        Cursor rule for bodies that SELECT directly on the yielded
+        connection: consume the rows AND let the cursor close (``async with
+        conn.execute(...)``). An unreset SELECT pins this connection's read
+        snapshot; the next BEGIN IMMEDIATE here then fails BUSY immediately
+        once another connection commits — busy_timeout cannot retry a
+        stale snapshot.
         """
         async with self._guard.hold() as outer:
             conn = self._require()
             if not outer:
                 yield conn
                 return
+            await conn.execute("BEGIN IMMEDIATE")
             if TELEMETRY.enabled:
                 _t0 = perf_counter()
                 _ok = True
                 try:
                     yield conn
                     _tc = perf_counter()
-                    await conn.commit()
+                    await conn.execute("COMMIT")
                     TELEMETRY.record("commit", perf_counter() - _tc)
                 except BaseException:
                     _ok = False
                     try:
-                        await conn.rollback()
+                        await conn.execute("ROLLBACK")
                     except Exception:
                         LOG.debug("rollback failed", exc_info=True)
                     raise
@@ -271,10 +341,10 @@ class DatabaseConnection:
                 return
             try:
                 yield conn
-                await conn.commit()
+                await conn.execute("COMMIT")
             except BaseException:
                 try:
-                    await conn.rollback()
+                    await conn.execute("ROLLBACK")
                 except Exception:
                     LOG.debug("rollback failed", exc_info=True)
                 raise
@@ -282,6 +352,18 @@ class DatabaseConnection:
     @asynccontextmanager
     async def read(self) -> AsyncIterator[aiosqlite.Connection]:
         """Read access that never observes another task's open transaction."""
+        async with self._guard.hold():
+            yield self._require()
+
+    @asynccontextmanager
+    async def serialized(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Guard-only access: serialized, but NO transaction management.
+
+        For callers that manage transactions themselves in the SQL text
+        (e.g. migration scripts with their own BEGIN IMMEDIATE..COMMIT);
+        write() would open a BEGIN IMMEDIATE that the script's own COMMIT
+        closes, and the outer COMMIT would then fail.
+        """
         async with self._guard.hold():
             yield self._require()
 

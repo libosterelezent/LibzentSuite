@@ -42,7 +42,7 @@ async def run_sim(name: str | None, list_only: bool) -> int:
     except Exception as exc:
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps(report["summary"], default=str) if False else report["summary"])
+    print(report["summary"])
     for line in report["log_lines"]:
         print(f"  | {line}")
     for failure in report["failures"]:
@@ -64,12 +64,18 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
         logging.getLogger("slaughtermudae").info(
             "DEBUG MODE: slaughtermudae tree at DEBUG, discord at INFO, "
             "DB worker telemetry enabled")
-    framework = await build(
-        env_file=args.env,
-        config_dir=args.config,
-        db_path=args.db,
-        plugin_dir=args.plugins,
-    )
+    try:
+        framework = await build(
+            env_file=args.env,
+            config_dir=args.config,
+            db_path=args.db,
+            plugin_dir=args.plugins,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        # boot-time USER errors (unwritable --db path, malformed config,
+        # failed migration): one clean line + exit 2, never a raw traceback
+        print(f"error: cannot boot: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     api = framework.api
     dashboard = None
     exit_code = 0
@@ -91,11 +97,19 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
                 print("WARNING: dashboard starting WITHOUT auth on "
                       "127.0.0.1 — set DASHBOARD_TOKEN in .env; "
                       "credential management stays locked", flush=True)
-            dashboard = DashboardServer(api, token=api.dashboard_token, port=args.port,
-                                         bus=framework.bus, exit_signal=True)
-            dashboard.start().attach_logs(api.logs_service())
-            if api.audit_recorder() is not None:
-                dashboard.attach_audit(api.audit_recorder())
+            try:
+                dashboard = DashboardServer(
+                    api, token=api.dashboard_token, port=args.port,
+                    bus=framework.bus, exit_signal=True)
+                dashboard.start().attach_logs(api.logs_service())
+                if api.audit_recorder() is not None:
+                    dashboard.attach_audit(api.audit_recorder())
+            except (OSError, OverflowError, ValueError) as exc:
+                # bind failures: port in use / out of range (0-65535) —
+                # a clean line + exit 2, never a raw bind traceback
+                print(f"error: cannot start dashboard on port {args.port}: "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                return 2
             print(f"dashboard: {dashboard.url}")
 
         if argv:  # one-shot command mode
@@ -108,18 +122,22 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
         else:
             from interfaces.cli import Repl
 
-            repl = Repl(api)
             stop = asyncio.Event()
+            repl = Repl(api, stop_event=stop)
 
-            def _sig_exit() -> None:  # SIGTERM/SIGINT end the REPL cleanly
-                stop.set()  # (a service manager's stop is SIGTERM — the
-                repl.running = False  # default disposition would kill the
+            def _sig_exit(code: int) -> None:
+                # SIGTERM/SIGINT end the REPL cleanly (a service manager's
+                # stop is SIGTERM — the default disposition would kill the
                 # process with NO teardown: queues dropped, DB unclosed)
+                nonlocal exit_code
+                exit_code = code
+                stop.set()
+                repl.running = False
 
             loop = asyncio.get_running_loop()
-            for sig in (signal.SIGTERM, signal.SIGINT):
+            for sig, code in ((signal.SIGTERM, 0), (signal.SIGINT, 130)):
                 try:
-                    loop.add_signal_handler(sig, _sig_exit)
+                    loop.add_signal_handler(sig, _sig_exit, code)
                 except (NotImplementedError, RuntimeError, ValueError):
                     pass
             try:
@@ -206,7 +224,10 @@ def main() -> int:
     args, extra = parser.parse_known_args()
 
     if args.sim is not None or args.sim_list:
-        return asyncio.run(run_sim(args.sim or None, args.sim_list))
+        try:
+            return asyncio.run(run_sim(args.sim or None, args.sim_list))
+        except KeyboardInterrupt:
+            return 130
     if args.bench is not None:
         # isolated benchmark process: never boots the live framework
         from benchmark.cli import run_bench_cli
@@ -218,7 +239,7 @@ def main() -> int:
         # (values included — the bench parser validates the rest)
         owned = {"--sim", "--sim-list", "--bench", "--config", "--plugins",
                  "--env", "--start-all", "--dashboard", "--headless",
-                 "--port", "--db"}
+                 "--port", "--db", "--debug"}
         # parse_known_args already consumed the main parser's flags; every
         # remaining token belongs to the bench CLI — pass verbatim
         bench_argv.extend(

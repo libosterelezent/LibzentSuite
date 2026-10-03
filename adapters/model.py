@@ -163,11 +163,15 @@ class DiscordMessageReference:
 
     ``referenced`` is populated ONLY when the library already cached the
     referenced message — otherwise None (explicitly not fetched).
+    ``type_name`` is the stable projection of the library's
+    MessageReferenceType ("reply" | "forward"; the fork's "default"
+    aliases value 0 = reply).
     """
 
     message_id: Optional[int] = None
     channel_id: Optional[int] = None
     guild_id: Optional[int] = None
+    type_name: str = "reply"
     referenced: Optional["DiscordMessage"] = None
 
 
@@ -278,7 +282,20 @@ def _optional_int(value: Any) -> Optional[int]:
         return None
 
 
+def _timestamp_text(value: Any) -> str:
+    """ISO 8601 text: the library hands embed timestamps over as aware
+    ``datetime`` objects (str() would not be ISO-formatted)."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return _text(value)
+
+
 _COMPONENT_TYPE_NAMES = {1: "action_row", 2: "button", 3: "select", 4: "text_input"}
+
+#: how deep ``reference.referenced`` nesting converts cached reply chains;
+#: beyond it the ids stay but the nested DTO is dropped (bounds pathological
+#: reply-chain recursion without losing the documented one-level surface)
+_MAX_REFERENCED_DEPTH = 1
 
 
 def convert_component(component: Any) -> DiscordComponent:
@@ -322,7 +339,7 @@ def convert_embed(embed: Any) -> DiscordEmbed:
         url=_text(getattr(embed, "url", "")),
         type=_text(getattr(embed, "type", "")) or "rich",
         color=_optional_int(color),
-        timestamp=(_text(timestamp) if timestamp is not None else None),
+        timestamp=(_timestamp_text(timestamp) if timestamp is not None else None),
         author_name=_text(getattr(author, "name", "")) if author else "",
         author_url=_text(getattr(author, "url", "")) if author else "",
         author_icon=_text(getattr(author, "icon_url", "")) if author else "",
@@ -348,7 +365,11 @@ def _emoji_repr(emoji: Any) -> str:
         return emoji
     name = getattr(emoji, "name", "")
     eid = _optional_int(getattr(emoji, "id", None))
-    return f"<:{name}:{eid}>" if eid else _text(name)
+    if not eid:
+        return _text(name)
+    if getattr(emoji, "animated", False):
+        return f"<a:{name}:{eid}>"
+    return f"<:{name}:{eid}>"
 
 
 def convert_user(user: Any) -> DiscordUser:
@@ -389,8 +410,22 @@ def convert_channel(channel: Any, *, dm: bool) -> DiscordChannel:
     )
 
 
+def _reference_type_name(reference: Any) -> str:
+    ref_type = getattr(reference, "type", None)
+    name = getattr(ref_type, "name", None)
+    if isinstance(name, str) and name:
+        return name if name == "forward" else "reply"
+    try:
+        if ref_type == 1:
+            return "forward"
+    except Exception:
+        pass
+    return "reply"
+
+
 def convert_message(
-    message: Any, *, dm: bool, viewer_id: Optional[int] = None
+    message: Any, *, dm: bool, viewer_id: Optional[int] = None,
+    _depth: int = 0,
 ) -> DiscordMessage:
     """Library message -> rich DiscordMessage (pure, non-blocking, no fetch).
 
@@ -411,10 +446,15 @@ def convert_message(
     if referenced is None:
         reference = getattr(message, "reference", None)
         resolved = getattr(reference, "resolved", None)
-        # DeletedReferencedMessage (a NamedTuple with a deleted marker) is
-        # not a message — leave None rather than feed a tuple to the DTO
-        if resolved is not None and hasattr(resolved, "id"):
+        # DeletedReferencedMessage (the deleted-reply marker: a _deleted
+        # flag upstream, a _parent slot in discord.py-self) is not a
+        # message — leave None rather than feed a sentinel to the DTO
+        if (resolved is not None and hasattr(resolved, "id")
+                and not getattr(resolved, "_deleted", False)
+                and not hasattr(resolved, "_parent")):
             referenced = resolved
+    if _depth >= _MAX_REFERENCED_DEPTH:
+        referenced = None
 
     def _ref_ids(ref: Any) -> tuple:
         if ref is None:
@@ -433,8 +473,10 @@ def convert_message(
             or (_optional_int(getattr(referenced, "id", None)) if referenced else None),
             channel_id=ref_channel_id,
             guild_id=ref_guild_id or (_optional_int(getattr(guild, "id", None)) if guild else None),
+            type_name=_reference_type_name(reference),
             referenced=(
-                convert_message(referenced, dm=False) if referenced is not None else None
+                convert_message(referenced, dm=False, _depth=_depth + 1)
+                if referenced is not None else None
             ),
         )
 

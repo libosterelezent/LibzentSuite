@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import sys
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace as NS
+from unittest import mock
 
 from adapters.model import (
     DiscordComponent,
@@ -151,6 +154,58 @@ class TestConversion(unittest.TestCase):
         self.assertEqual(dto.reactions[0].emoji, "<:kakera:77>")
         self.assertEqual(dto.reactions[0].id, 77)
         self.assertTrue(dto.reactions[0].me)
+
+    def test_animated_custom_emoji_repr(self) -> None:
+        reaction = NS(emoji=NS(name="kakera", id=77, animated=True),
+                      count=2, me=False)
+        dto = convert_message(library_message(reactions=[reaction]), dm=False)
+        self.assertEqual(dto.reactions[0].emoji, "<a:kakera:77>")
+
+    def test_embed_timestamp_datetime_becomes_iso(self) -> None:
+        from adapters.model import convert_embed as ce
+
+        embed = ce(NS(title="t", timestamp=datetime(
+            2026, 1, 1, tzinfo=timezone.utc)))
+        self.assertEqual(embed.timestamp, "2026-01-01T00:00:00+00:00")
+        passthrough = ce(NS(title="t", timestamp="2026-01-01T00:00:00"))
+        self.assertEqual(passthrough.timestamp, "2026-01-01T00:00:00")
+        self.assertIsNone(ce(NS(title="t", timestamp=None)).timestamp)
+
+    def test_deleted_referenced_sentinel_stays_none(self) -> None:
+        # discord.py-self shape: DeletedReferencedMessage exposes id via a
+        # _parent MessageReference (so plain hasattr(resolved, "id") lies)
+        sentinel = NS(id=999, channel_id=500, guild_id=42,
+                      _parent=NS(message_id=999, channel_id=500, guild_id=42))
+        lib = library_message(reference=NS(
+            message_id=999, channel_id=500, guild_id=42, resolved=sentinel))
+        dto = convert_message(lib, dm=False)
+        self.assertIsNone(dto.reference.referenced)
+        self.assertEqual(dto.reference.message_id, 999)
+        # upstream shape: the NamedTuple-style _deleted marker
+        marked = NS(id=999, channel_id=500, guild_id=42, _deleted=True)
+        lib2 = library_message(reference=NS(
+            message_id=999, channel_id=500, guild_id=42, resolved=marked))
+        self.assertIsNone(convert_message(lib2, dm=False).reference.referenced)
+
+    def test_reply_chain_conversion_is_bounded(self) -> None:
+        m1 = library_message(id=1, content="first", reference=None)
+        ref2 = NS(message_id=1, channel_id=500, guild_id=42, resolved=m1)
+        m2 = library_message(id=2, content="second", reference=ref2)
+        ref3 = NS(message_id=2, channel_id=500, guild_id=42, resolved=m2)
+        m3 = library_message(id=3, content="third", reference=ref3)
+        dto = convert_message(m3, dm=False)
+        self.assertEqual(dto.reference.referenced.id, 2)  # one level down
+        inner = dto.reference.referenced
+        self.assertEqual(inner.reference.message_id, 1)  # ids kept...
+        self.assertIsNone(inner.reference.referenced)     # ...chain capped
+
+    def test_self_referential_resolution_terminates(self) -> None:
+        lib = library_message(id=7, reference=NS(
+            message_id=7, channel_id=500, guild_id=42))
+        lib.reference.resolved = lib  # pathological cache cycle
+        dto = convert_message(lib, dm=False)
+        self.assertEqual(dto.reference.referenced.id, 7)
+        self.assertIsNone(dto.reference.referenced.reference.referenced)
 
 
 class TestBackwardCompatibility(unittest.TestCase):
@@ -393,6 +448,460 @@ class TestFuturePluginShapes(unittest.TestCase):
         dto = convert_message(lib, dm=True)
         self.assertTrue(dto.dm)          # DM detection lives on the flag;
         self.assertIn("Alice", dto.content)  # channel mgmt stays in services
+
+
+class TestLiveClientBoundary(unittest.IsolatedAsyncioTestCase):
+    """Live-adapter boundary fidelity that the simulator cannot mirror
+    (library error shapes, session-liveness gating, lazy import)."""
+
+    class NotFound(Exception):
+        pass
+
+    class Forbidden(Exception):
+        pass
+
+    class _FailingFetchClient:
+        def __init__(self, exc: Exception) -> None:
+            self._exc = exc
+
+        async def fetch_user(self, user_id: int):
+            raise self._exc
+
+    class _ReadyLibClient:
+        """discord.Client stand-in that reaches READY then parks."""
+
+        last_built = None
+
+        def __init__(self) -> None:
+            self.closed = False
+            self.user = NS(id=777)
+            self._park = asyncio.Event()
+
+        def event(self, coro):
+            setattr(self, coro.__name__, coro)
+            return coro
+
+        async def start(self, token: str) -> None:
+            await self.on_ready()
+            await self._park.wait()
+
+        async def close(self) -> None:
+            self.closed = True
+            self._park.set()
+
+    def test_module_import_never_pulls_the_library(self) -> None:
+        import importlib
+
+        saved = {name: sys.modules.get(name)
+                 for name in ("discord", "adapters.discord",
+                              "adapters.discord.client")}
+        for name in saved:
+            sys.modules.pop(name, None)
+        try:
+            importlib.import_module("adapters.discord")
+            self.assertNotIn("discord", sys.modules)
+        finally:
+            for name, mod in saved.items():
+                if mod is not None:
+                    sys.modules[name] = mod
+                else:
+                    sys.modules.pop(name, None)
+
+    async def test_fetch_user_none_for_gone_users(self) -> None:
+        from adapters.discord.client import RealDiscordClient
+
+        for exc in (
+            self.NotFound("404 Not Found (error code: 10013): Unknown User"),
+            self.Forbidden("403 Forbidden (error code: 10013): Unknown User"),
+        ):
+            client = RealDiscordClient("tok")
+            client._client = self._FailingFetchClient(exc)
+            client.connected = True
+            self.assertIsNone(await client.fetch_user(1))
+
+    async def test_fetch_user_raises_real_denials(self) -> None:
+        from adapters.discord.client import RealDiscordClient
+
+        client = RealDiscordClient("tok")
+        client._client = self._FailingFetchClient(
+            self.Forbidden("403 Forbidden (error code: 50001): Missing Access"))
+        client.connected = True
+        with self.assertRaises(self.Forbidden):
+            await client.fetch_user(1)
+
+    async def test_sends_raise_connection_error_offline(self) -> None:
+        from adapters.discord.client import RealDiscordClient
+
+        client = RealDiscordClient("tok")
+        self.assertFalse(client.connected)
+        with self.assertRaises(ConnectionError):
+            client._require_client()
+        client._client = object()
+        with self.assertRaises(ConnectionError):  # built but not connected
+            client._require_client()
+        client.connected = True
+        self.assertIs(client._require_client(), client._client)
+        client.connected = False
+        with self.assertRaises(ConnectionError):
+            client._require_client()
+
+    async def test_connected_lifecycle_through_connect_and_disconnect(self) -> None:
+        from adapters.discord.client import RealDiscordClient
+
+        lib_cls = type("LibClient", (self._ReadyLibClient,), {})
+        mod = NS(Client=lib_cls, DMChannel=type("DMChannel", (), {}))
+        with mock.patch.dict(sys.modules, {"discord": mod}):
+            client = RealDiscordClient("tok")
+            await client.connect()
+            self.assertTrue(client.connected)
+            self.assertEqual(client.user_id, 777)
+            self.assertTrue(client.cached_snapshot()["available"])
+            await client.disconnect()
+            self.assertFalse(client.connected)
+            self.assertFalse(client.cached_snapshot()["available"])
+            with self.assertRaises(ConnectionError):
+                client._require_client()
+
+    async def test_latency_ms_rejects_inf_and_nan(self) -> None:
+        from adapters.discord.client import RealDiscordClient
+
+        client = RealDiscordClient("tok")
+        self.assertIsNone(client.latency_ms)
+        for bad in (float("inf"), float("-inf"), float("nan"), -1.0):
+            client._client = NS(latency=bad)
+            self.assertIsNone(client.latency_ms)
+        client._client = NS(latency=0.021)
+        self.assertAlmostEqual(client.latency_ms, 21.0)
+
+
+class _LibErrors:
+    """discord.errors stand-ins shaped like discord.py-self 2.1.0."""
+
+    class HTTPException(Exception):
+        def __init__(self, status=0, headers=None):
+            super().__init__(f"{status} error")
+            self.status = status
+            self.response = NS(status=status, headers=headers or {})
+
+    class Forbidden(HTTPException):
+        def __init__(self, headers=None):
+            super().__init__(403, headers)
+
+    class NotFound(HTTPException):
+        def __init__(self, headers=None):
+            super().__init__(404, headers)
+
+    class DiscordServerError(HTTPException):
+        def __init__(self, headers=None):
+            super().__init__(502, headers)
+
+    class RateLimited(Exception):
+        def __init__(self, retry_after, cloudflare=False):
+            super().__init__("Too many requests.")
+            self.retry_after = retry_after
+            self.cloudflare = cloudflare
+
+    class CaptchaRequired(HTTPException):
+        def __init__(self):
+            super().__init__(400, {})
+
+
+class TestErrorMappingRound2(unittest.TestCase):
+    """Exception-shape table from the installed fork (errors.py / http.py)."""
+
+    def _client(self):
+        from adapters.discord.client import RealDiscordClient
+
+        client = RealDiscordClient("tok")
+        client._discord = NS(
+            HTTPException=_LibErrors.HTTPException,
+            Forbidden=_LibErrors.Forbidden,
+            NotFound=_LibErrors.NotFound,
+        )
+        return client
+
+    def test_rate_limited_maps_to_server_rate_limit(self) -> None:
+        from core.errors import ServerRateLimit
+
+        client = self._client()
+        mapped = client._map_send_error(_LibErrors.RateLimited(73.5), 1)
+        self.assertIsInstance(mapped, ServerRateLimit)
+        self.assertEqual(mapped.retry_after, 73.5)
+        self.assertFalse(mapped.global_)
+
+    def test_rate_limited_garbage_retry_after_defaults(self) -> None:
+        from core.errors import ServerRateLimit
+
+        client = self._client()
+        mapped = client._map_send_error(
+            _LibErrors.RateLimited(None), 1)
+        self.assertIsInstance(mapped, ServerRateLimit)
+        self.assertEqual(mapped.retry_after, 1.0)
+
+    def test_captcha_required_maps_to_access_denied(self) -> None:
+        from core.errors import AccessDenied
+
+        client = self._client()
+        client.account = "alpha"
+        mapped = client._map_send_error(_LibErrors.CaptchaRequired(), 42)
+        self.assertIsInstance(mapped, AccessDenied)
+        self.assertIn("captcha", str(mapped))
+
+    def test_429_header_intake_honors_retry_after(self) -> None:
+        from core.errors import ServerRateLimit
+
+        client = self._client()
+        exc = _LibErrors.HTTPException(
+            429, {"Retry-After": "0.625", "X-RateLimit-Global": "true"})
+        mapped = client._map_send_error(exc, 1)
+        self.assertIsInstance(mapped, ServerRateLimit)
+        self.assertEqual(mapped.retry_after, 0.625)
+        self.assertTrue(mapped.global_)
+
+    def test_429_lowercase_headers_and_defaults(self) -> None:
+        from core.errors import ServerRateLimit
+
+        client = self._client()
+        exc = _LibErrors.HTTPException(429, {"retry-after": "2"})
+        mapped = client._map_send_error(exc, 1)
+        self.assertEqual(mapped.retry_after, 2.0)
+        self.assertFalse(mapped.global_)
+        bare = client._map_send_error(_LibErrors.HTTPException(429), 1)
+        self.assertIsInstance(bare, ServerRateLimit)
+        self.assertEqual(bare.retry_after, 1.0)
+
+    def test_429_non_finite_retry_after_clamped(self) -> None:
+        for garbage in ("inf", "-inf", "nan", "Infinity"):
+            client = self._client()
+            exc = _LibErrors.HTTPException(429, {"Retry-After": garbage})
+            mapped = client._map_send_error(exc, 1)
+            self.assertEqual(mapped.retry_after, 1.0)
+
+    def test_5xx_and_discord_server_error_map_to_connection_error(self) -> None:
+        client = self._client()
+        self.assertIsInstance(
+            client._map_send_error(_LibErrors.DiscordServerError(), 1),
+            ConnectionError)
+        self.assertIsInstance(
+            client._map_send_error(_LibErrors.HTTPException(500), 1),
+            ConnectionError)
+
+    def test_unknown_4xx_still_propagates_unmapped(self) -> None:
+        client = self._client()
+        self.assertIsNone(
+            client._map_send_error(_LibErrors.HTTPException(400), 1))
+
+    def test_403_and_404_map_to_domain_errors(self) -> None:
+        from core.errors import AccessDenied, TargetGone
+
+        client = self._client()
+        self.assertIsInstance(
+            client._map_send_error(_LibErrors.Forbidden(), 1), AccessDenied)
+        self.assertIsInstance(
+            client._map_send_error(_LibErrors.NotFound(), 1), TargetGone)
+
+
+class _HangingLibClient:
+    """discord.Client stand-in that never reaches READY."""
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.user = None
+        self._park = asyncio.Event()
+
+    def event(self, coro):
+        setattr(self, coro.__name__, coro)
+        return coro
+
+    async def start(self, token: str) -> None:
+        await self._park.wait()
+
+    async def close(self) -> None:
+        self.closed = True
+        self._park.set()
+
+
+class _CrashingLibClient(_HangingLibClient):
+    """Reaches READY, parks, then start() exits (terminal session end)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.user = NS(id=777)
+
+    async def start(self, token: str) -> None:
+        await self.on_ready()
+        await self._park.wait()
+
+
+class TestConnectedFlagRound2(unittest.IsolatedAsyncioTestCase):
+    """Round-2 state-transition coverage for the `connected` flag."""
+
+    def _patch_discord(self, lib_cls):
+        mod = NS(Client=lib_cls, DMChannel=type("DMChannel", (), {}))
+        return mock.patch.dict(sys.modules, {"discord": mod})
+
+    async def test_disconnect_during_connect_is_not_a_bad_token(self) -> None:
+        from adapters.discord.client import RealDiscordClient
+
+        lib_cls = type("LibClient", (_HangingLibClient,), {})
+        with self._patch_discord(lib_cls):
+            client = RealDiscordClient("tok")
+            lib_client = None
+
+            original_init = lib_cls.__init__
+
+            def spy_init(self):
+                nonlocal lib_client
+                original_init(self)
+                lib_client = self
+
+            lib_cls.__init__ = spy_init
+            task = asyncio.get_running_loop().create_task(client.connect())
+            await asyncio.sleep(0.05)
+            self.assertFalse(client.connected)
+            await client.disconnect()
+            with self.assertRaises(ConnectionError):
+                await task
+            self.assertFalse(client.connected)
+            self.assertTrue(lib_client.closed)
+            self.assertEqual(client.cached_snapshot(), {"available": False})
+
+    async def test_run_exit_flips_connected_and_snapshot(self) -> None:
+        from adapters.discord.client import RealDiscordClient
+
+        lib_cls = type("LibClient", (_CrashingLibClient,), {})
+        with self._patch_discord(lib_cls):
+            client = RealDiscordClient("tok")
+            lib_client = None
+
+            original_init = lib_cls.__init__
+
+            def spy_init(self):
+                nonlocal lib_client
+                original_init(self)
+                lib_client = self
+
+            lib_cls.__init__ = spy_init
+            await client.connect()
+            self.assertTrue(client.connected)
+            self.assertTrue(client.cached_snapshot()["available"])
+            lib_client._park.set()  # terminal session end (start returns)
+            for _ in range(100):
+                await asyncio.sleep(0.02)
+                if not client.connected:
+                    break
+            self.assertFalse(client.connected)
+            self.assertFalse(client.cached_snapshot()["available"])
+            with self.assertRaises(ConnectionError):
+                client._require_client()
+
+    async def test_resume_replay_duplicate_suppressed(self) -> None:
+        from adapters.discord.client import RealDiscordClient
+
+        lib_cls = type("LibClient", (_CrashingLibClient,), {})
+        with self._patch_discord(lib_cls):
+            client = RealDiscordClient("tok")
+            await client.connect()
+            seen: list = []
+            client.on_message = seen.append
+
+            def lib_message(mid):
+                return NS(id=mid, content="$mu",
+                          author=NS(id=999999, name="Mudae"),
+                          channel=NS(id=500, name="grind",
+                                     type=NS(name="text"), guild=NS(id=42)),
+                          guild=NS(id=42), embeds=[], components=[],
+                          attachments=[], reactions=[], reference=None,
+                          created_at=None)
+
+            handler = getattr(client._client, "on_message")
+            await handler(lib_message(1001))
+            await handler(lib_message(1001))  # gateway RESUME replay
+            await handler(lib_message(1002))
+            self.assertEqual([m.id for m in seen], [1001, 1002])
+            self.assertTrue(all(m.reference is None for m in seen))
+
+
+class TestReferenceShapesRound2(unittest.TestCase):
+    """Reference fork shapes against the installed library's classes."""
+
+    def test_forward_reference_type_projected(self) -> None:
+        lib = library_message(reference=NS(
+            message_id=999, channel_id=500, guild_id=42,
+            type=NS(name="forward"), resolved=None),
+            message_snapshots=[NS(id=999, content="forwarded", embeds=[],
+                                   attachments=[], components=[])])
+        dto = convert_message(lib, dm=False)
+        self.assertEqual(dto.reference.type_name, "forward")
+        self.assertEqual(dto.reference.message_id, 999)
+        self.assertIsNone(dto.reference.referenced)
+
+    def test_reply_and_default_aliases_project_to_reply(self) -> None:
+        reply = convert_message(library_message(reference=NS(
+            message_id=9, channel_id=500, type=NS(name="reply"))), dm=False)
+        default = convert_message(library_message(reference=NS(
+            message_id=9, channel_id=500, type=NS(name="default"))), dm=False)
+        raw_int = convert_message(library_message(reference=NS(
+            message_id=9, channel_id=500, type=1)), dm=False)
+        legacy = convert_message(library_message(reference=NS(
+            message_id=9, channel_id=500)), dm=False)
+        self.assertEqual(reply.reference.type_name, "reply")
+        self.assertEqual(default.reference.type_name, "reply")
+        self.assertEqual(raw_int.reference.type_name, "forward")
+        self.assertEqual(legacy.reference.type_name, "reply")
+
+    def test_real_library_deleted_sentinel_excluded(self) -> None:
+        import importlib.util
+
+        if importlib.util.find_spec("discord") is None:
+            self.skipTest("discord.py-self not installed")
+        from discord.message import DeletedReferencedMessage, MessageReference
+
+        ref = MessageReference(message_id=999, channel_id=500, guild_id=42)
+        sentinel = DeletedReferencedMessage(ref)
+        self.assertTrue(hasattr(sentinel, "id"))
+        self.assertTrue(hasattr(sentinel, "_parent"))
+        lib = library_message(reference=NS(
+            message_id=999, channel_id=500, guild_id=42, resolved=sentinel))
+        dto = convert_message(lib, dm=False)
+        self.assertIsNone(dto.reference.referenced)
+        self.assertEqual(dto.reference.message_id, 999)
+
+    def test_real_library_resolved_message_included(self) -> None:
+        import importlib.util
+
+        if importlib.util.find_spec("discord") is None:
+            self.skipTest("discord.py-self not installed")
+        cached = library_message(id=999, content="original", reference=None,
+                                 referenced_message=None)
+        lib = library_message(reference=NS(
+            message_id=999, channel_id=500, guild_id=42, resolved=cached))
+        dto = convert_message(lib, dm=False)
+        self.assertEqual(dto.reference.referenced.id, 999)
+        self.assertIsNone(dto.reference.referenced.reference)
+
+    def test_all_none_message_converts_without_crash(self) -> None:
+        lib = NS(id=None, content=None, author=None, channel=None, guild=None,
+                 embeds=None, components=None, attachments=None,
+                 reactions=None, reference=None, referenced_message=None,
+                 created_at=None)
+        dto = convert_message(lib, dm=False)
+        self.assertEqual(
+            (dto.id, dto.channel_id, dto.author_id, dto.content, dto.dm),
+            (0, 0, 0, "", False))
+        self.assertIsNone(dto.author)
+        self.assertIsNone(dto.channel)
+        self.assertIsNone(dto.reference)
+        self.assertEqual(dto.embeds, ())
+
+    def test_uncached_channel_partial_messageable_shape(self) -> None:
+        lib = library_message(channel=NS(id=700, name=None, type=None,
+                                         guild=None))
+        dto = convert_message(lib, dm=False)
+        self.assertEqual(dto.channel.id, 700)
+        self.assertEqual(dto.channel.name, "")
+        self.assertEqual(dto.channel.type, "")
+        self.assertIsNone(dto.channel.guild_id)
 
 
 if __name__ == "__main__":

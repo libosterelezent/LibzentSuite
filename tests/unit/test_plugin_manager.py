@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
-from core.event_bus import EventBus, MessageReceived
+from core.event_bus import EventBus, MessageReceived, PluginEnabledChanged
 from core.errors import PluginError, SettingsValidationError
 from core.plugin_manager import PluginLoader, PluginManager
 from core.settings_manager import SettingsManager
@@ -101,12 +103,12 @@ class FakeServices:
         return {}
 
 
-def make_manager(repo=None, global_layer=None) -> tuple:
+def make_manager(repo=None, global_layer=None, plugin_dir=None) -> tuple:
     bus = EventBus()
     settings = SettingsManager(bus, logging.getLogger("t"), global_layer=global_layer)
     manager = PluginManager(
         bus, logging.getLogger("t"), settings, plugin_repo=repo,
-        plugin_dir=str(FIXTURES),
+        plugin_dir=str(plugin_dir if plugin_dir is not None else FIXTURES),
     )
     return manager, bus, settings
 
@@ -204,6 +206,75 @@ class TestLifecycle(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SettingsValidationError):
             await manager.set_setting("alpha", "spy", "unknown_key", 1)
 
+    async def test_set_enabled_publishes_final_state(self) -> None:
+        """When on_enable crashes, the runtime ends disabled — the event
+        must report that final state, not the requested one."""
+        manager, bus, _ = make_manager()
+        await manager.attach_account("alpha")
+        await manager.activate_account("alpha", FakeServices("alpha"))
+        events: list = []
+        bus.subscribe(PluginEnabledChanged, events.append)
+        spy = manager._accounts["alpha"]["spy"]
+
+        async def _boom(ctx):
+            raise RuntimeError("enable explodes")
+
+        spy.instance.on_enable = _boom
+        await manager.set_enabled("alpha", "spy", False)
+        await manager.set_enabled("alpha", "spy", True)
+        await asyncio.sleep(0.05)  # publish_nowait dispatch tick
+        self.assertFalse(spy.enabled)  # activation failed -> disabled
+        self.assertEqual(
+            [(e.plugin, e.enabled) for e in events],
+            [("spy", False), ("spy", False)],
+        )
+
+
+class TestConstructorIsolation(unittest.IsolatedAsyncioTestCase):
+    """A plugin whose __init__ explodes must not break the account."""
+
+    async def test_broken_constructor_skips_plugin_not_account(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            boom = Path(tmp) / "boom"
+            boom.mkdir()
+            (boom / "__init__.py").write_text(
+                "from core.plugin_base import PluginBase\n"
+                "class BoomPlugin(PluginBase):\n"
+                "    name = 'boom'\n"
+                "    def __init__(self):\n"
+                "        raise RuntimeError('constructor explodes')\n"
+            )
+            ok = Path(tmp) / "ok"
+            ok.mkdir()
+            (ok / "__init__.py").write_text(
+                "from core.plugin_base import PluginBase\n"
+                "class OkPlugin(PluginBase):\n"
+                "    name = 'ok'\n"
+                "    def __init__(self):\n"
+                "        self.seen = []\n"
+                "    async def handle_event(self, ctx, event):\n"
+                "        self.seen.append(event)\n"
+            )
+            manager, bus, _ = make_manager(plugin_dir=Path(tmp))
+            await manager.attach_account("alpha")
+            self.assertEqual(manager.allowed_names("alpha"), ["boom", "ok"])
+            await manager.activate_account("alpha", FakeServices("alpha"))
+            self.assertTrue(manager._accounts["alpha"]["ok"].active)
+            boom_rt = manager._accounts["alpha"]["boom"]
+            self.assertFalse(boom_rt.enabled)
+            self.assertFalse(boom_rt.active)
+            self.assertIn("constructor explodes", boom_rt.last_error)
+            state = {s["name"]: s for s in manager.states("alpha")}["boom"]
+            self.assertEqual(state["error_count"], 1)
+            # dispatch to the healthy plugin still works
+            ok_inst = manager._accounts["alpha"]["ok"].instance
+            bus.publish_nowait(MessageReceived(
+                account="alpha", message_id=1, channel_id=5, author_id=9,
+                content="hi",
+            ))
+            await asyncio.sleep(0.05)
+            self.assertEqual(len(ok_inst.seen), 1)
+
 
 class TestDispatch(unittest.IsolatedAsyncioTestCase):
     async def test_routing_and_isolation(self) -> None:
@@ -294,6 +365,276 @@ class TestMetadataPersist(unittest.IsolatedAsyncioTestCase):
         manager, _, _ = make_manager()
         manager.discover()
         self.assertEqual(await manager.persist_metadata(), 0)
+
+
+class TestLoaderHardening(unittest.TestCase):
+    """Round-2: import-time failures, sys.modules hygiene, dir collisions."""
+
+    def test_import_time_error_names_culprit_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            culprit = Path(tmp) / "kaboom.py"
+            culprit.write_text("raise RuntimeError('import-time death')\n")
+            loader = PluginLoader(Path(tmp))
+            with self.assertRaises(PluginError) as ctx:
+                loader.discover()
+            self.assertIn(str(culprit), str(ctx.exception))
+            self.assertIn("import-time death", str(ctx.exception))
+            # no half-executed module residue under any synthetic prefix
+            residue = [m for m in sys.modules
+                       if m.startswith("_mudae_plugroot") and "kaboom" in m]
+            self.assertEqual(residue, [])
+
+    def test_rescan_purges_previous_synthetic_modules(self) -> None:
+        loader = PluginLoader(FIXTURES)
+        loader.discover()
+        stale_parent = loader._parent_names[0]
+        stale_cls = loader.record("spy").cls
+        baseline = len([m for m in sys.modules if m.startswith("_mudae_plugroot")])
+        loader.discover()
+        loader.discover()
+        current = [m for m in sys.modules if m.startswith("_mudae_plugroot")]
+        self.assertLessEqual(len(current), baseline)  # bounded, not accumulating
+        self.assertNotIn(stale_parent, sys.modules)
+        self.assertNotIn(stale_cls.__module__, sys.modules)
+        # fresh scan -> fresh class identity, live module registered
+        fresh_cls = loader.record("spy").cls
+        self.assertIsNot(fresh_cls, stale_cls)
+        self.assertIn(fresh_cls.__module__, sys.modules)
+        self.assertEqual(loader._parent_names, [loader._parent_names[0]])
+
+    def test_same_plugin_name_in_two_dirs_no_collision(self) -> None:
+        source = (
+            "from core.plugin_base import PluginBase\n"
+            "class TwinPlugin(PluginBase):\n"
+            "    name = 'twin'\n"
+            "    marker = {__r__!r}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp1, tempfile.TemporaryDirectory() as tmp2:
+            f1 = Path(tmp1) / "twin.py"
+            f2 = Path(tmp2) / "twin.py"
+            f1.write_text(source.format(__r__=1))
+            f2.write_text(source.format(__r__=2))
+            rec1 = PluginLoader(Path(tmp1)).discover()["twin"]
+            rec2 = PluginLoader(Path(tmp2)).discover()["twin"]
+            self.assertIsNot(rec1.cls, rec2.cls)
+            self.assertEqual(rec1.cls.marker, 1)
+            self.assertEqual(rec2.cls.marker, 2)
+            self.assertNotEqual(rec1.cls.__module__, rec2.cls.__module__)
+
+
+class TestRetryAfterFailure(unittest.IsolatedAsyncioTestCase):
+    """Round-2: a broken plugin must stay retry-able, never zombie state."""
+
+    async def test_healed_constructor_retries_on_next_attach(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            boom = Path(tmp) / "boom"
+            boom.mkdir()
+            init = boom / "__init__.py"
+            init.write_text(
+                "from core.plugin_base import PluginBase\n"
+                "class BoomPlugin(PluginBase):\n"
+                "    name = 'boom'\n"
+                "    def __init__(self):\n"
+                "        raise RuntimeError('constructor explodes')\n"
+            )
+            manager, bus, _ = make_manager(plugin_dir=Path(tmp))
+            await manager.attach_account("alpha")
+            self.assertFalse(manager._accounts["alpha"]["boom"].enabled)
+
+            init.write_text(  # heal the plugin on disk
+                "from core.plugin_base import PluginBase\n"
+                "class BoomPlugin(PluginBase):\n"
+                "    name = 'boom'\n"
+                "    async def handle_event(self, ctx, event):\n"
+                "        pass\n"
+            )
+            manager.discover()  # rescan picks the healed module up
+            await manager.attach_account("alpha")  # deactivates old runtimes
+            await manager.activate_account("alpha", FakeServices("alpha"))
+            healed = manager._accounts["alpha"]["boom"]
+            self.assertTrue(healed.enabled)
+            self.assertTrue(healed.active)
+
+    async def test_set_enabled_on_instanceless_runtime_degrades(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            boom = Path(tmp) / "boom"
+            boom.mkdir()
+            (boom / "__init__.py").write_text(
+                "from core.plugin_base import PluginBase\n"
+                "class BoomPlugin(PluginBase):\n"
+                "    name = 'boom'\n"
+                "    def __init__(self):\n"
+                "        raise RuntimeError('constructor explodes')\n"
+            )
+            manager, bus, _ = make_manager(plugin_dir=Path(tmp))
+            await manager.attach_account("alpha")
+            await manager.activate_account("alpha", FakeServices("alpha"))
+            events: list = []
+            bus.subscribe(PluginEnabledChanged, events.append)
+            await manager.set_enabled("alpha", "boom", True)  # must not raise
+            runtime = manager._accounts["alpha"]["boom"]
+            self.assertFalse(runtime.enabled)   # ended disabled, not zombie
+            self.assertFalse(runtime.active)
+            await asyncio.sleep(0.05)
+            self.assertEqual(
+                [(e.plugin, e.enabled) for e in events], [("boom", False)]
+            )
+
+
+class TestDispatchHardening(unittest.IsolatedAsyncioTestCase):
+    """Round-2: stale snapshots, wedged handlers, mid-flight disable."""
+
+    async def test_event_to_detached_account_not_dispatched(self) -> None:
+        manager, bus, _ = make_manager()
+        await manager.attach_account("alpha")
+        await manager.activate_account("alpha", FakeServices("alpha"))
+        spy = manager._accounts["alpha"]["spy"].instance
+        bus.publish_nowait(MessageReceived(
+            account="alpha", message_id=6, channel_id=5, author_id=9, content="x",
+        ))
+        manager.detach_account("alpha")  # between enqueue and dispatch
+        await asyncio.sleep(0.05)
+        self.assertEqual(spy.seen, [])
+
+    async def test_wedged_handler_does_not_block_subsequent_events(self) -> None:
+        manager, bus, _ = make_manager()
+        await manager.attach_account("alpha")
+        await manager.activate_account("alpha", FakeServices("alpha"))
+        spy = manager._accounts["alpha"]["spy"].instance
+        gate = asyncio.Event()
+        calls: list = []
+
+        async def handler(ctx, event):
+            calls.append(event)
+            if len(calls) == 1:
+                await gate.wait()  # first handler wedges "forever"
+
+        spy.handle_event = handler
+        bus.publish_nowait(MessageReceived(
+            account="alpha", message_id=7, channel_id=5, author_id=9, content="one",
+        ))
+        await asyncio.sleep(0.05)  # first dispatch is now wedged
+        bus.publish_nowait(MessageReceived(
+            account="alpha", message_id=8, channel_id=5, author_id=9, content="two",
+        ))
+        await asyncio.sleep(0.05)
+        self.assertEqual(len(calls), 2)  # second event got through
+        gate.set()  # unwind the wedged dispatch
+        await asyncio.sleep(0.05)
+        manager.close()
+
+    async def test_disable_during_inflight_handler(self) -> None:
+        manager, bus, _ = make_manager()
+        await manager.attach_account("alpha")
+        await manager.activate_account("alpha", FakeServices("alpha"))
+        spy_runtime = manager._accounts["alpha"]["spy"]
+        inst = spy_runtime.instance
+        events: list = []
+        bus.subscribe(PluginEnabledChanged, events.append)
+        started = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def handler(ctx, event):
+            started.set()
+            await finish.wait()  # handler parks mid-dispatch
+            inst.seen.append(event)
+
+        inst.handle_event = handler
+        bus.publish_nowait(MessageReceived(
+            account="alpha", message_id=9, channel_id=5, author_id=9, content="x",
+        ))
+        await started.wait()
+        await manager.set_enabled("alpha", "spy", False)  # disable mid-flight
+        self.assertFalse(spy_runtime.enabled)
+        self.assertIn("on_disable", inst.calls)
+        finish.set()  # the in-flight handler completes
+        await asyncio.sleep(0.05)
+        self.assertEqual(len(inst.seen), 1)
+        bus.publish_nowait(MessageReceived(  # further events skipped
+            account="alpha", message_id=10, channel_id=5, author_id=9, content="y",
+        ))
+        await asyncio.sleep(0.05)
+        self.assertEqual(len(inst.seen), 1)
+        await asyncio.sleep(0.05)
+        self.assertEqual(
+            [(e.plugin, e.enabled) for e in events], [("spy", False)]
+        )
+
+    async def test_allowlist_with_unknown_names_is_ignored(self) -> None:
+        manager, _, _ = make_manager()
+        await manager.attach_account("alpha", allowed={"spy", "no-such-plugin"})
+        self.assertEqual(manager.allowed_names("alpha"), ["spy"])
+
+
+class FakeKv:
+    """Dict-backed kv repository incl. prefix deletes."""
+
+    def __init__(self) -> None:
+        self.rows: dict = {}
+
+    async def set(self, key, value):
+        self.rows[key] = value
+
+    async def get(self, key):
+        return self.rows.get(key)
+
+    async def delete(self, key):
+        return self.rows.pop(key, None) is not None
+
+    async def delete_prefix(self, prefix):
+        doomed = [k for k in self.rows if k.startswith(prefix)]
+        for k in doomed:
+            self.rows.pop(k)
+        return len(doomed)
+
+
+class TestPluginStateKeys(unittest.IsolatedAsyncioTestCase):
+    """Round-2: kv key-space collisions, cascade completeness, big values."""
+
+    async def asyncSetUp(self) -> None:
+        from core.plugin_state import PluginStateService
+        self.kv = FakeKv()
+        self.state = PluginStateService(self.kv)
+
+    async def test_pair_owner_separator_collisions_rejected(self) -> None:
+        with self.assertRaises(PluginError):
+            await self.state.set_pair("a/p", "x", "k", 1)  # would collide with
+        with self.assertRaises(PluginError):               # ("a", "p/x")
+            await self.state.set_pair("a", "p/x", "k", 1)
+        with self.assertRaises(PluginError):
+            await self.state.set_pair("a:b", "p", "k", 1)
+        await self.state.set_pair("a", "p", "k", "v")  # the legal pair works
+        self.assertEqual(await self.state.get_pair("a", "p", "k"), "v")
+
+    async def test_key_may_contain_separators_stay_scoped(self) -> None:
+        await self.state.set_pair("a", "p", "x/y:z", {"n": 1})
+        stored = [k for k in self.kv.rows if k.startswith("pstate:account_plugin:")]
+        self.assertEqual(stored, ["pstate:account_plugin:a/p:x/y:z"])
+        # a colon key in global scope must not bleed into account scope
+        await self.state.set_global("account:alice:x", 1)
+        self.assertIsNone(await self.state.get_account("alice", "x"))
+        self.assertEqual(await self.state.get_global("account:alice:x"), 1)
+
+    async def test_cascade_account_complete_and_selective(self) -> None:
+        await self.state.set_account("a", "k1", 1)
+        await self.state.set_pair("a", "p", "k2", 2)
+        await self.state.set_pair("other", "p", "k3", 3)   # survives
+        await self.state.set_plugin("a", "k4", 4)          # survives
+        await self.state.set_global("k5", 5)               # survives
+        removed = await self.state.cascade_account("a")
+        self.assertEqual(removed, 2)
+        self.assertEqual(sorted(self.kv.rows),
+                         ["pstate:account_plugin:other/p:k3",
+                          "pstate:global:k5", "pstate:plugin:a:k4"])
+
+    async def test_cascade_rejects_slash_in_account(self) -> None:
+        with self.assertRaises(PluginError):
+            await self.state.cascade_account("a/b")  # would wipe ("a","b") pairs
+
+    async def test_large_value_round_trips(self) -> None:
+        blob = "x" * (1 << 20)  # 1 MiB: no size cap, but must round-trip
+        await self.state.set_pair("a", "p", "big", blob)
+        self.assertEqual(await self.state.get_pair("a", "p", "big"), blob)
 
 
 if __name__ == "__main__":

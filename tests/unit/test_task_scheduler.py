@@ -532,13 +532,327 @@ class TestStop(SchedulerTestBase):
         await self.settle(0.05)
 
 
+# ----------------------------------------------- stop single-flight (round 2)
+class TestStopSingleFlight(SchedulerTestBase):
+    async def test_joiner_raises_owner_failure_and_retry_heals(self) -> None:
+        """Owner cancelled mid-drain with a joiner parked on the latch: the
+        joiner re-raises the owner's failure (fail-loud, no swallow), the
+        scheduler is NOT marked stopped, and a retry stop() completes."""
+        gate = asyncio.Event()
+        in_sender = asyncio.Event()
+
+        async def gated(task):
+            in_sender.set()
+            await gate.wait()
+
+        self.scheduler._sender = gated
+        self.scheduler.submit("alpha", "p", "message")
+        await in_sender.wait()
+        owner = asyncio.create_task(self.scheduler.stop(drain=True, timeout=30.0))
+        await asyncio.sleep(0.02)  # owner parked in the drain loop
+        joiner = asyncio.create_task(self.scheduler.stop(drain=True))
+        await asyncio.sleep(0.02)  # joiner parked on the pending latch
+        self.assertTrue(self.scheduler._stop_latch is not None
+                        and not self.scheduler._stop_latch.done())
+
+        owner.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await owner
+        with self.assertRaises(SchedulerError):
+            await joiner  # joined a stop whose owner died: loud, not silent
+        self.assertFalse(self.scheduler._stopped)  # retry must be possible
+        self.assertFalse(self.scheduler._stopping)
+
+        await self.scheduler.stop(drain=False)  # retry completes the teardown
+        self.assertTrue(self.scheduler._stopped)
+
+    async def test_latch_replaced_while_old_pending(self) -> None:
+        """J parked on L1; L1's owner fails; a fresh stop() takes L2 and
+        SUCCEEDS; J still reports the stale L1 failure (documented
+        single-flight semantics: joiners inherit their owner's fate)."""
+        gate = asyncio.Event()
+        in_sender = asyncio.Event()
+
+        async def gated(task):
+            in_sender.set()
+            await gate.wait()
+
+        self.scheduler._sender = gated
+        self.scheduler.submit("alpha", "p", "message")
+        await in_sender.wait()
+        owner1 = asyncio.create_task(self.scheduler.stop(drain=True, timeout=30.0))
+        await asyncio.sleep(0.02)
+        joiner = asyncio.create_task(self.scheduler.stop(drain=True))
+        await asyncio.sleep(0.02)
+        owner1.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await owner1
+        owner2 = asyncio.create_task(self.scheduler.stop(drain=False))
+        await owner2  # L1 failed -> L2 owned this fresh stop and completed
+        self.assertTrue(self.scheduler._stopped)
+        with self.assertRaises(SchedulerError):
+            await joiner  # stale-but-loud: J's owner died under it
+
+    async def test_joiner_cancelled_leaves_owner_intact(self) -> None:
+        gate = asyncio.Event()
+        in_sender = asyncio.Event()
+
+        async def gated(task):
+            in_sender.set()
+            await gate.wait()
+            return None
+
+        self.scheduler._sender = gated
+        self.scheduler.submit("alpha", "p", "message")
+        await in_sender.wait()
+        owner = asyncio.create_task(self.scheduler.stop(drain=True, timeout=30.0))
+        await asyncio.sleep(0.02)
+        joiner = asyncio.create_task(self.scheduler.stop(drain=True))
+        await asyncio.sleep(0.02)
+        joiner.cancel()  # cancelling a JOINER must never cancel the teardown
+        with self.assertRaises(asyncio.CancelledError):
+            await joiner
+        self.assertFalse(self.scheduler._stop_latch.done())  # owner still live
+        gate.set()
+        await owner
+        self.assertTrue(self.scheduler._stopped)
+
+    async def test_owner_recancelled_during_abort_still_heals(self) -> None:
+        """Double-cancel the owner mid-_abort_stop (a sender that stalls the
+        reap): state stays consistent and a later stop() retries clean."""
+        gate = asyncio.Event()
+        in_sender = asyncio.Event()
+
+        async def stubborn(task):
+            in_sender.set()
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.3)  # stall the abort's lane reap
+                raise
+
+        self.scheduler._sender = stubborn
+        task = self.scheduler.submit("alpha", "p", "message")
+        await in_sender.wait()
+        owner = asyncio.create_task(self.scheduler.stop(drain=True, timeout=30.0))
+        await asyncio.sleep(0.02)
+        owner.cancel()   # lands inside the teardown
+        await asyncio.sleep(0.02)
+        owner.cancel()   # lands inside _abort_stop's bounded reap
+        with self.assertRaises(asyncio.CancelledError):
+            await owner
+        self.assertFalse(self.scheduler._stopped)
+        self.assertFalse(self.scheduler._stopping)
+
+        await self.scheduler.stop(drain=False, timeout=5.0)
+        self.assertTrue(self.scheduler._stopped)
+        self.assertTrue(task.is_terminal)
+
+    async def test_start_rejected_while_stopping(self) -> None:
+        task = self.scheduler.submit("alpha", "p", "message")
+        self.sender.outcomes.append(("sleep", 0.08))
+        owner = asyncio.create_task(self.scheduler.stop(drain=True, timeout=5.0))
+        await asyncio.sleep(0.01)
+        with self.assertRaises(SchedulerError):
+            self.scheduler.start()  # re-arm mid-stop forbidden
+        await owner
+        self.scheduler.start()  # after completion: re-arm works
+        late = self.scheduler.submit("alpha", "p", "message")
+        await self.settle(0.1)
+        self.assertEqual(late.status, "completed")
+
+    async def test_joining_stop_runs_no_second_sweep_after_rearm(self) -> None:
+        """The single-flight hazard: a drain=True stop finishing followed by
+        a still-joined drain=False stop must NOT re-cancel tasks submitted
+        after start() re-armed the scheduler."""
+        task = self.scheduler.submit("alpha", "p", "message")
+        self.sender.outcomes.append(("sleep", 0.08))
+        owner = asyncio.create_task(self.scheduler.stop(drain=True, timeout=5.0))
+        await asyncio.sleep(0.01)
+        joiner = asyncio.create_task(self.scheduler.stop(drain=False))
+        await owner
+        await joiner  # joined the completed stop: success, no own sweep
+        self.assertEqual(task.status, "completed")  # drained, not cancelled
+        self.scheduler.start()
+        after = self.scheduler.submit("alpha", "p", "message")
+        await self.settle(0.1)
+        self.assertEqual(after.status, "completed")  # no stale re-cancel
+
+
+# --------------------------------------------- exactly-once races (round 2)
+class TestExactlyOnceRaces(SchedulerTestBase):
+    async def test_timeout_retry_then_success_records_exactly_once(self) -> None:
+        task = self.scheduler.submit("alpha", "p", "message", timeout=0.05, retries=1)
+        self.sender.outcomes.extend([("sleep", 0.5), ("ok", None)])
+        await self.settle(0.4)
+        self.assertEqual(task.status, "completed")
+        self.assertEqual(len(self.repo.add_calls), 1)  # one row, two sends
+        self.assertEqual(len(self.audit.calls), 1)     # one audit row
+        self.assertEqual(self.audit.calls[0]["note"], "plugin=p task=1 attempts=2")
+
+    async def test_cancel_matching_between_terminal_and_audit_keeps_exactly_once(self) -> None:
+        orig_add = self.repo.add
+
+        async def slow_add(entry):
+            await asyncio.sleep(0.05)  # widen the send-done -> audit-emit window
+            return await orig_add(entry)
+
+        self.repo.add = slow_add
+        task = self.scheduler.submit("alpha", "p", "message")
+        self.assertTrue(await self.wait_until(lambda: task.status == "completed"))
+        # sweep the task between its terminal transition and the audit emit:
+        # terminal tasks must be skipped (no double terminal, no lost audit)
+        self.assertEqual(self.scheduler.cancel_matching(account="alpha"), 0)
+        self.assertFalse(self.scheduler.cancel(task.id))
+        await self.settle(0.2)
+        self.assertEqual(task.status, "completed")
+        self.assertEqual(len(self.repo.add_calls), 1)
+        self.assertEqual(len(self.audit.calls), 1)
+        self.assertEqual(len(self.recorder.of(TaskCompleted)), 1)
+
+
+# ------------------------------------------- backoff cancel latency (round 2)
+class TestBackoffInterruption(SchedulerTestBase):
+    async def test_cancel_during_backoff_interrupts_sleep(self) -> None:
+        async def flaky(task):
+            raise ConnectionError("net down")
+
+        self.scheduler._sender = flaky
+        self.scheduler._retry_backoff = 5.0
+        del self.scheduler._sleep  # real sleep: prove the wake, not the seam
+        task = self.scheduler.submit("alpha", "p", "message", retries=3)
+        self.assertTrue(await self.wait_until(lambda: task.attempts == 1))
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        self.assertTrue(self.scheduler.cancel(task.id))
+        self.assertTrue(
+            await self.wait_until(lambda: task.status == "cancelled", timeout=1.0)
+        )
+        self.assertLess(loop.time() - t0, 1.0)  # NOT the remaining ~5s backoff
+        self.assertEqual(len(self.repo.add_calls), 1)
+        self.assertEqual(self.repo.add_calls[0]["status"], "cancelled")
+        self.assertTrue(  # terminal event follows via the async tail
+            await self.wait_until(lambda: self.recorder.of(TaskCancelled), timeout=2.0)
+        )
+
+    async def test_cancel_matching_during_backoff_interrupts_sleep(self) -> None:
+        async def flaky(task):
+            raise ConnectionError("net down")
+
+        self.scheduler._sender = flaky
+        self.scheduler._retry_backoff = 5.0
+        del self.scheduler._sleep
+        task = self.scheduler.submit("alpha", "p", "message", retries=3)
+        self.assertTrue(await self.wait_until(lambda: task.attempts == 1))
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        self.assertEqual(self.scheduler.cancel_matching(account="alpha"), 1)
+        self.assertTrue(
+            await self.wait_until(lambda: task.status == "cancelled", timeout=1.0)
+        )
+        self.assertLess(loop.time() - t0, 1.0)
+
+    async def test_backoff_without_cancel_still_sleeps_the_full_delay(self) -> None:
+        self.scheduler._retry_backoff = 0.02
+        del self.scheduler._sleep
+        task = self.scheduler.submit("alpha", "p", "message", retries=1)
+        self.sender.outcomes.append(("raise", ConnectionError("x")))
+        await self.settle(0.1)
+        self.assertEqual(task.status, "completed")
+        self.assertEqual(len(self.sender.calls), 2)  # retry happened after backoff
+
+
+# ------------------------------------------------ worker death (round 2)
+class TestWorkerDeath(SchedulerTestBase):
+    async def test_lane_death_orphans_queue_but_submit_respawns(self) -> None:
+        """A lane task dying outside stop() (crash shape): the in-flight task
+        is driven terminal by the worker's own handler, queued tasks wait,
+        and the NEXT submit proves the pump is resurrected, not dead."""
+        hold = asyncio.Event()
+        self.sender.hold = hold
+        t1 = self.scheduler.submit("alpha", "p", "message", channel_id=1)
+        await self.settle(0.02)  # t1 running, held inside the sender
+        t2 = self.scheduler.submit("alpha", "p", "message", channel_id=2)
+        lane = self.scheduler._lanes["alpha"]
+        lane.cancel()  # simulate worker death (NOT a scheduler stop)
+        await asyncio.sleep(0.05)
+        self.assertEqual(t1.status, "cancelled")  # in-flight task terminal
+        self.assertEqual(t2.status, "queued")  # orphaned until a new submit
+        self.assertTrue(lane.done())
+
+        hold.set()
+        t3 = self.scheduler.submit("alpha", "p", "message", channel_id=3)
+        await self.settle(0.3)
+        self.assertEqual(t2.status, "completed")  # respawned lane drains it
+        self.assertEqual(t3.status, "completed")
+        self.assertEqual([t.id for t in self.sender.calls], [t1.id, t2.id, t3.id])
+
+
+# ------------------------------------------------------ chaos stress (round 2)
+class TestStressExactlyOnce(SchedulerTestBase):
+    async def test_120_tasks_random_outcomes_cancels_and_stop(self) -> None:
+        import random
+
+        rng = random.Random(0xC0FFEE)
+        accounts = ["acc1", "acc2", "acc3", "acc4"]
+        tasks = []
+        for i in range(120):
+            task = self.scheduler.submit(
+                rng.choice(accounts),
+                "pl",
+                rng.choice(["message", "dm", "poke"]),
+                channel_id=i,
+                retries=rng.choice([0, 0, 1, 2]),
+                **({"timeout": 0.04} if rng.random() < 0.3 else {}),
+            )
+            tasks.append(task)
+            r = rng.random()
+            if r < 0.25:
+                self.sender.outcomes.append(("sleep", 0.06))
+            elif r < 0.45:
+                self.sender.outcomes.append(("raise", ConnectionError("net down")))
+            elif r < 0.55:
+                self.sender.outcomes.append(("raise", ServerRateLimit(0.01, False)))
+            elif r < 0.60:
+                self.sender.outcomes.append(("raise", FlowBlocked("x", "gone")))
+            else:
+                self.sender.outcomes.append(("ok", None))
+            if rng.random() < 0.15:
+                self.scheduler.cancel(task.id)
+            if rng.random() < 0.05:
+                self.scheduler.cancel_matching(account=rng.choice(accounts))
+
+        await self.scheduler.stop(drain=True, timeout=10.0)
+        await self.settle(0.05)  # publish_nowait tasks run one hop after tails
+
+        for task in tasks:
+            self.assertTrue(task.is_terminal, f"task {task.id} not terminal")
+        ids = [c["id"] for c in self.repo.add_calls]
+        self.assertEqual(len(ids), len(tasks))  # exactly one row per task
+        self.assertEqual(len(set(ids)), len(ids))  # no duplicates, any ordering
+        self.assertEqual(set(ids), {t.id for t in tasks})  # nothing dropped
+        self.assertEqual(self.scheduler._inflight_tails, 0)
+        terminal_events = self.recorder.of(TaskCompleted, TaskFailed, TaskCancelled)
+        self.assertEqual(len(terminal_events), len(tasks))  # one event each
+        self.assertEqual(len({e.task_id for e in terminal_events}), len(tasks))
+        audited = {
+            t.id for t in tasks
+            if t.action in ("message", "dm") and (t.status != "cancelled" or t.sender_ran)
+        }
+        self.assertEqual(len(self.audit.calls), len(audited))
+        for account in accounts:
+            self.assertLessEqual(self.sender.max_inflight[account], 1)  # lanes held
+
+
 # ------------------------------------------------------ history + stats
 class TestHistoryAndStats(SchedulerTestBase):
     async def test_history_recorded_once_per_terminal_task(self) -> None:
         t1 = self.scheduler.submit("alpha", "p", "message")              # completes
         await self.settle(0.02)
         t2 = self.scheduler.submit("alpha", "p", "message", retries=1)   # retries once
-        self.sender.outcomes.append(("raise", ConnectionError("x")))
+        # self-contained outcome list: attempt 1 raises, attempt 2 succeeds —
+        # never depends on when LATER tasks append their own outcomes
+        self.sender.outcomes.extend([("raise", ConnectionError("x")), ("ok", None)])
         await self.settle(0.05)
         t3 = self.scheduler.submit("beta", "p", "message")
         self.sender.outcomes.append(("raise", FlowBlocked("beta", "nope")))
@@ -586,7 +900,7 @@ class TestHistoryAndStats(SchedulerTestBase):
         self.scheduler.submit("alpha", "p", "message")                              # ok
         await self.settle(0.02)
         self.scheduler.submit("alpha", "p", "message", retries=1)                    # retry -> ok
-        self.sender.outcomes.append(("raise", ConnectionError("x")))
+        self.sender.outcomes.extend([("raise", ConnectionError("x")), ("ok", None)])
         await self.settle(0.05)
         self.scheduler.submit("alpha", "p", "message")                              # FlowBlocked
         self.sender.outcomes.append(("raise", FlowBlocked("alpha", "blocked")))
