@@ -36,6 +36,8 @@ class PluginStateService:
         parts = ["pstate", scope]
         if owner:
             if any(c in owner for c in (self.SCOPE_SEPARATOR, "\x00")):
+                # '/' is the pair-scope separator (account/plugin) — safe
+                # because NAME_RE and plugin slugs forbid '/' in components
                 raise PluginError(f"scope owner {owner!r} contains reserved characters")
             parts.append(owner)
         parts.append(key)

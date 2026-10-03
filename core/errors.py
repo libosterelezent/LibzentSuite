@@ -53,7 +53,13 @@ class ServerRateLimit(RuntimeError):
     def __init__(self, retry_after: float, global_: bool = False) -> None:
         scope = "GLOBAL" if global_ else "route"
         super().__init__(f"server rate limit ({scope}) for {retry_after:.2f}s")
-        self.retry_after = max(0.0, float(retry_after))
+        try:
+            retry_after = float(retry_after)
+        except (TypeError, ValueError):
+            retry_after = 1.0
+        if retry_after != retry_after or retry_after in (float("inf"), float("-inf")):
+            retry_after = 1.0  # NaN/inf from a hostile header: safe default
+        self.retry_after = max(0.0, retry_after)
         self.global_ = bool(global_)
 
 
@@ -109,3 +115,13 @@ __all__ = [
     "SettingsValidationError", "RatePolicyError", "UnsafePolicyError",
     "SchedulerError", "DatabaseError", "CredentialsError", "SimulationError",
 ]
+
+def flow_block_reason(exc: BaseException) -> str:
+    """One-line human reason for a flow abort.
+
+    FlowBlocked (and subclasses) carry a curated ``reason``; anything else
+    is rendered generically as ``"<TypeName>: <message>"``.
+    """
+    if isinstance(exc, FlowBlocked):
+        return exc.reason
+    return f"{type(exc).__name__}: {exc}"

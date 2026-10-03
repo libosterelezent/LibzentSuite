@@ -35,7 +35,7 @@ database/              SQLite: models, ordered migrations, repositories
 adapters/              Discord boundary: discord/ (live) + simulator/ (offline)
 interfaces/            cli/ (REPL + one-shot) + dashboard/ (SPA + REST + WS)
 plugins/               soulcopy (migrated) + roll (reference plugin)
-tests/unit|integration|simulation/   550-test offline suite
+tests/unit|integration|simulation/   705-test offline suite
 config/                global settings, rate policies, account files
 main.py                entrypoint
 ```
@@ -49,14 +49,14 @@ python3 main.py --sim soulcopy_basic   # full pipeline over the simulator
 python3 main.py                         # interactive REPL (live accounts)
 python3 main.py accounts list           # one-shot command mode
 python3 main.py --start-all --dashboard # live accounts + dashboard :8070
-bash scripts/run_tests.sh               # the whole 550-test suite
+bash scripts/run_tests.sh               # the whole 705-test suite
 ```
 
 The dashboard serves a sidebar SPA (Overview, Accounts, Plugins, Profiles,
 Rate Limits, Tasks, Logs, Simulation, Advanced) on `http://127.0.0.1:8070`
 with live WebSocket push; set `DASHBOARD_TOKEN` in `.env` to require auth.
 
-Dependencies: Python ≥ 3.10, standard library only. Live mode additionally
+Dependencies: Python ≥ 3.10 + `aiosqlite` + `cryptography` (see `requirements.txt`); live mode additionally needs `discord.py-self` (lazy import). Live mode additionally
 needs a user-account client fork (`pip install discord.py-self`), imported
 lazily — simulations/tests never require it.
 
@@ -182,10 +182,13 @@ for aggressive intervals / missing or narrow jitter.
 
 ## Credentials & IDs
 
-Everything identifiable lives in `.env` (gitignored, chmod 600): one
-`DISCORD_TOKEN_<NAME>` per account, `MUDAE_BOT_ID`, `OWNER_USER_IDS`,
-optional `DASHBOARD_TOKEN`. The database stores only the .env key
-*references* — token values never leave `.env`.
+Account tokens are stored **encrypted (Fernet) in the database**; the
+master key lives outside it (`state/credentials.key` 0600, or `SM_MASTER_KEY`
+in the process environment). Register the account, then store its token via
+the dashboard (Accounts → credential) or `python3 main.py accounts credential
+<name> <token>`. `.env` (gitignored, chmod 600) holds `MUDAE_BOT_ID`,
+`OWNER_USER_IDS` and optional `DASHBOARD_TOKEN` — legacy `DISCORD_TOKEN_*`
+entries are read only by the one-shot `credentials import-env` migration.
 
 ## Simulation system (spec §9)
 
@@ -204,7 +207,7 @@ Scenarios: `soulcopy_basic`, `soulcopy_multichunk`, `pacing_respected`,
 
 ## Management surfaces
 
-- CLI: `accounts|plugins|profiles|ratelimit|tasks|simulation|logs|audit|estop|status|help|quit`
+- CLI: `accounts|credentials|plugins|profiles|ratelimit|cooldowns|tasks|simulation|logs|audit|estop|status|help|quit`
   subcommands, interactive or one-shot; identical results everywhere.
 - Dashboard API: JSON REST routes mapping 1:1 to ControlAPI methods plus a
   WebSocket pushing stats/log/audit/task events live.

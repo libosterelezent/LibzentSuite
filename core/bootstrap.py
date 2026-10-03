@@ -94,15 +94,31 @@ async def _seed_config_defaults(limiter: RateLimitManager, config: ProjectConfig
         stored = {(p.level, p.owner, p.action) for p in await database.policies.list()}
     except Exception:
         pass  # DB read failure: apply config defaults as a safe fallback
+    removed = getattr(limiter, "removed_default", None)
+
+    def _seed(action, spec, level, owner, where):
+        if (level, owner, action) in stored:
+            return  # DB owns this key already
+        if removed is not None and removed(level, owner, action):
+            return  # user explicitly CLEARED it: never resurrect (tombstone)
+        interval, jmin, jmax = _policy_triple(action, spec, where)
+        try:
+            limiter.set_policy_values(action, interval, jmin, jmax, level, owner)
+        except UnsafePolicyError as exc:
+            # a below-floor config value must not brick the boot — clamp to
+            # the floor like load_persisted does for hand-edited DB rows
+            ROOT_LOGGER.warning(
+                "config default for %s %s clamped to the safety floor (%s)",
+                where, action, exc)
+            floor = getattr(limiter, "floor_value", lambda: 1.5)()
+            limiter.set_policy_values(action, max(interval, floor), jmin, jmax,
+                                      level, owner)
+
     for action, spec in (config.policies.get("global") or {}).items():
-        if ("global", None, action) not in stored:
-            interval, jmin, jmax = _policy_triple(action, spec, "global")
-            limiter.set_policy_values(action, interval, jmin, jmax, "global", None)
+        _seed(action, spec, "global", None, "global")
     for account, actions in (config.policies.get("accounts") or {}).items():
         for action, spec in (actions or {}).items():
-            if ("account", account, action) not in stored:
-                interval, jmin, jmax = _policy_triple(action, spec, f"account {account}")
-                limiter.set_policy_values(action, interval, jmin, jmax, "account", account)
+            _seed(action, spec, "account", account, f"account {account}")
 
 
 def _policy_triple(action: str, spec: Dict[str, Any], where: str) -> tuple:
@@ -174,35 +190,48 @@ class Framework:
         steps = (
             ("remote control", self._stop_remote_control),
             ("scheduler", lambda: self.scheduler.stop(drain=True)),
+            ("bus drain", self.bus.drain),
             ("accounts", self.accounts.stop_all),
             # QUEUED PERSISTENCE shutdown (agent C contract): drain the log
             # + audit queues BEFORE closing the DB — bounded, never hangs
             ("log persistence", self.logs.stop_persistence),
             ("audit persistence", self.audit.stop_persistence),
             ("stdlib bridge", self._detach_bridge),
+            ("plugin manager", self._close_plugins),
             ("database", self.database.close),
         )
-        cancelled: Optional[asyncio.CancelledError] = None
+        interrupted: Optional[BaseException] = None
         for label, step in steps:
             try:
                 outcome = step()
                 if asyncio.iscoroutine(outcome):
                     await outcome
             except asyncio.CancelledError as exc:
-                if cancelled is None:
-                    cancelled = exc
+                if interrupted is None:
+                    interrupted = exc
                     ROOT_LOGGER.warning(
                         "shutdown step %r was cancelled (continuing teardown)",
+                        label)
+            except KeyboardInterrupt as exc:  # a second Ctrl-C / the
+                if interrupted is None:  # dashboard's exit signal landing
+                    interrupted = exc  # mid-teardown must NOT skip the
+                    ROOT_LOGGER.warning(  # remaining steps (db.close!)
+                        "shutdown step %r interrupted (continuing teardown)",
                         label)
             except Exception as exc:
                 ROOT_LOGGER.warning("shutdown step %r failed: %s: %s",
                                     label, type(exc).__name__, exc)
-        if cancelled is not None:
-            raise cancelled
+        if interrupted is not None:
+            raise interrupted
 
     async def _stop_remote_control(self) -> None:
         if self.remote_control is not None:
             self.remote_control.stop()
+
+    def _close_plugins(self) -> None:
+        close = getattr(self.plugins, "close", None)
+        if close is not None:
+            close()
 
     @staticmethod
     async def _detach_bridge() -> None:
@@ -257,6 +286,9 @@ async def build(
             except asyncio.CancelledError:
                 ROOT_LOGGER.warning(
                     "build cleanup step %r was cancelled (continuing)", label)
+            except KeyboardInterrupt:
+                ROOT_LOGGER.warning(
+                    "build cleanup step %r interrupted (continuing)", label)
             except Exception as exc:
                 ROOT_LOGGER.warning("build cleanup step %r failed: %s: %s",
                                     label, type(exc).__name__, exc)
@@ -415,6 +447,14 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     if credentials.remote_control_enabled:
         from .remote_control import RemoteControl
 
+        owner_ids = getattr(credentials, "owner_user_ids", None)
+        if not owner_ids:  # fail loudly at boot, not per-mention
+            ROOT_LOGGER.warning(
+                "REMOTE_CONTROL is enabled but OWNER_USER_IDS is empty or "
+                "malformed — remote control will reject every mention")
+        else:
+            ROOT_LOGGER.info("remote control armed for %s owner id(s)",
+                             len(owner_ids))
         remote_control = RemoteControl(
             bus, scheduler, accounts, lambda: api, credentials,
             ServiceLogger(logs, "remote-control"),

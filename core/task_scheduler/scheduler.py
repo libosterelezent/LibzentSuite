@@ -232,6 +232,7 @@ class TaskScheduler:
         self._stopping = False
         self._stopped = False
         self._stop_latch: Optional["asyncio.Future[None]"] = None  # single-flight stop
+        self._sweeping = False  # estop barrier: lanes must not start new sends
 
     # ----------------------------------------------------------- lifecycle
     @staticmethod
@@ -292,6 +293,7 @@ class TaskScheduler:
             raise SchedulerError("scheduler is stopping; wait for stop() to finish")
         self._stopped = False
         self._stop_latch = None  # a fresh arm retires any completed latch
+        self._sweeping = False
         self._started = True
 
     async def stop(self, *, drain: bool = True, timeout: float = 10.0) -> None:
@@ -314,14 +316,30 @@ class TaskScheduler:
         """
         if self._stopped:
             return
-        if self._stop_latch is not None:
+        if self._stop_latch is not None and not (
+            self._stop_latch.done() and self._stop_latch.exception() is not None
+        ):
             # a stop is already in flight: join it (shielded — cancelling
-            # THIS caller must never cancel the underlying teardown)
-            await asyncio.wait([asyncio.shield(self._stop_latch)], timeout=30.0)
+            # THIS caller must never cancel the underlying teardown). A
+            # FAILED latch (owner was cancelled) falls through so this call
+            # retries the teardown instead of re-raising the old failure.
+            in_flight = self._stop_latch  # local ref: the owner nulls the
+            _, pending = await asyncio.wait([asyncio.shield(in_flight)], timeout=30.0)  # field
+            if pending:
+                # 30s join budget exhausted while the owner still drains:
+                # returning "success" here would let the caller close the
+                # database under a live teardown — fail loudly instead
+                raise SchedulerError(
+                    "scheduler stop still in flight after 30s join budget"
+                )
+            failure = in_flight.exception()
+            if failure is not None:
+                raise failure
             return
         latch = asyncio.get_running_loop().create_future()
         self._stop_latch = latch
         self._stopping = True
+        completed = False
         try:
             if drain:
                 try:
@@ -335,6 +353,19 @@ class TaskScheduler:
                 # cancel the lane mid-write and silently drop the row
                 while (self._tasks or self._inflight_tails) and time.monotonic() < deadline:
                     await asyncio.sleep(0.01)
+            # ESTOP BARRIER: from here on, no lane may start a new send. The
+            # per-task sweep below awaits repo writes; without this flag a
+            # lane whose current task finished would pop the next QUEUED task
+            # and drive it through gate/acquire/sender DURING the sweep —
+            # outbound traffic after "halted" was reported.
+            self._sweeping = True
+            # join in-flight finish tails (estop/drain-timeout path): a lane
+            # cancelled while its task's history write is awaited would
+            # silently drop the row AND the terminal event
+            if not drain:
+                barrier = time.monotonic() + 1.0
+                while self._inflight_tails and time.monotonic() < barrier:
+                    await asyncio.sleep(0)
             for task in list(self._tasks.values()):
                 await self._finish(task, STATUS_CANCELLED)
             for lane in list(self._lanes.values()):
@@ -348,10 +379,38 @@ class TaskScheduler:
             pending_tails = [t for t in list(self._tail_refs) if not t.done()]
             if pending_tails:
                 await asyncio.wait(pending_tails, timeout=5.0)
-        finally:
-            self._stopped = True
-            self._stopping = False
+            completed = True
+        except asyncio.CancelledError:
+            # the owner was cancelled mid-teardown: still tear the lanes down
+            # (bounded, shielded) so nothing keeps sending, but do NOT mark
+            # the scheduler stopped — a later stop() must be able to retry
+            for lane in list(self._lanes.values()):
+                if not lane.done():
+                    lane.cancel()
+            try:
+                if self._lanes:
+                    await asyncio.wait(
+                        [asyncio.shield(t) for t in list(self._lanes.values())
+                         if not t.done()],
+                        timeout=2.0,
+                    )
+            except Exception:
+                pass
             if not latch.done():
+                latch.set_exception(
+                    SchedulerError("scheduler stop was cancelled mid-teardown")
+                )
+            self._sweeping = False
+            self._stopping = False
+            raise
+        finally:
+            self._sweeping = False
+            if completed:
+                # full teardown done: idempotent fast-path from now on
+                self._stopped = True
+            self._stopping = False
+            self._stop_latch = None if completed else latch
+            if completed and not latch.done():
                 latch.set_result(None)
 
     async def cleanup_account(self, account: str) -> None:
@@ -448,9 +507,12 @@ class TaskScheduler:
             timeout_s=timeout_s,
             max_retries=retries,
         )
+        try:
+            self._ensure_lane(task.account)  # validates a running loop FIRST:
+        except Exception:  # a failed submit must not leave a ghost task
+            raise  # queued behind a lane that will never be spawned
         self._tasks[task.id] = task
         heapq.heappush(self._queues.setdefault(task.account, []), (int(task.priority), task.id, task))
-        self._ensure_lane(task.account)
         self._log(
             "info",
             "scheduler",
@@ -505,6 +567,11 @@ class TaskScheduler:
             task.cancelled = True
             return True
         return False
+
+    async def forget_account(self, account: str) -> int:
+        """Compat alias for cleanup_account (phase-3 name). See K1."""
+        await self.cleanup_account(account)
+        return 0
 
     def cancel_matching(
         self, *, account: Optional[str] = None, plugin: Optional[str] = None, action: Optional[str] = None
@@ -603,6 +670,12 @@ class TaskScheduler:
                 await event.wait()
                 event.clear()
                 continue
+            if self._sweeping:
+                # estop/drain-timeout sweep in progress: new task starts are
+                # forbidden — the sweep will drive this task CANCELLED itself
+                await event.wait()
+                event.clear()
+                continue
             _, _, task = heapq.heappop(heap)
             if task.status != STATUS_QUEUED or task.cancelled:
                 continue  # cancelled while queued: already terminal
@@ -662,9 +735,11 @@ class TaskScheduler:
         started_mono: Optional[float] = None
         try:
             while True:
-                # checkpoint 0: cancelled before we even ask for a grant
+                # checkpoint 0: cancelled (or estop sweeping) before we even
+                # ask for a grant
                 # (a retry iteration legitimately re-enters here while RUNNING)
-                if task.cancelled or task.status not in (STATUS_QUEUED, STATUS_RUNNING):
+                if (task.cancelled or self._sweeping
+                        or task.status not in (STATUS_QUEUED, STATUS_RUNNING)):
                     await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                     return
 
@@ -693,7 +768,8 @@ class TaskScheduler:
                 task.grant_jitter_ms = float(getattr(grant, "jitter_s", 0.0) or 0.0) * 1000.0
 
                 # checkpoint 1: cancelled while waiting for the grant
-                if task.cancelled or task.status not in (STATUS_QUEUED, STATUS_RUNNING):
+                if (task.cancelled or self._sweeping
+                        or task.status not in (STATUS_QUEUED, STATUS_RUNNING)):
                     await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                     return
 

@@ -829,7 +829,7 @@ def format_policies(policies: List[dict]) -> str:
             scope += f"/{policy['owner']}"
         lines.append(
             f"  {scope:<24}{str(policy.get('action', '?')):<16}"
-            f"{_fmt_policy(policy.get('interval'), policy.get('jitter_min', 0.0), policy.get('jitter_max', 0.0))}"
+            f"{_fmt_policy(policy.get('interval'), *(policy.get('jitter') or [0.0, 0.0]))}"
         )
     return "\n".join(lines)
 

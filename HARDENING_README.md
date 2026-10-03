@@ -2,7 +2,7 @@
 
 Scope of Phase 1: **database layer, logging/audit persistence, boot &
 shutdown, credentials/config, event-bus + scheduler cancellation, adapter
-task hygiene.** Phases 2+ (below) have NOT been audited yet.
+task hygiene.** Phase 2 (below) is complete; see 'Post-rebase fixes' for the upstream-sync addendum.
 
 ## Phase 1 verification update (post-recovery)
 * Recovered zip was validated on **real aiosqlite** (the original run used a
@@ -117,8 +117,7 @@ introduced:
 * Original suite: **658 tests pass** (baseline, before any change).
 * Now: **689 tests pass** — the 658 originals untouched + 31 new in
   `tests/unit/test_hardening_phase1.py`.
-* Run: `python3 -m unittest discover -s tests -t .` (needs `aiosqlite`,
-  as in `requirements.txt`).
+* Run: `python3 -m unittest discover -s tests -t .` (needs `aiosqlite` and `cryptography`, per `requirements.txt`).
 * Caveat: this sandbox had no network and no `aiosqlite` wheel, so the
   suite was run against a small stand-in I wrote (outside the project,
   not shipped). It wraps stdlib `sqlite3` on a worker thread. Please run the
@@ -198,5 +197,93 @@ introduced:
    `core/remote_control.py`, plugin manager/loader/base, profile manager.
 6. `plugins/` (roll, soulcopy) and `scripts/`.
 7. Docs: update ARCHITECTURE.md / docs for `_persist_queue`, `_asyncutil`,
-   guard semantics; README test count (docs say 550, real is now 689).
+   guard semantics; README test count (docs say 550, now 705).
 8. Re-run the suite on real `aiosqlite` + your target Python versions.
+
+
+# Hardening pass — Phase 3 (full-system audit, 17-audit sweep)
+
+17 parallel audits (event bus, scheduler, limiter, account manager, dashboard
++ SPA, DB layer, credentials/settings, bootstrap/lifecycle, CLI/remote,
+live adapter, simulator, plugins, persistence, performance, tests, docs,
+cross-cutting invariants) → ~90 findings fixed. **708 tests pass**
+(705 + 3 new; several strengthened).
+
+## Critical / high
+* **Estop still sent messages**: the stop-sweep awaited repo writes while a
+  lane popped the NEXT queued task and ran it — a `_sweeping` barrier now
+  gates lane pops + run checkpoints 0/1 (regression: sends cannot start
+  after estop begins).
+* **Persisted lane config never loaded** (kv get returns a decoded dict;
+  `json.loads(dict)` TypeError was swallowed) — every reboot silently
+  disabled the sequential send lane. Fixed + real-kv round-trip regression.
+* **Cleared config-default policies resurrected on restart**: clear now
+  writes a kv tombstone consulted by first-boot seeding; explicit set
+  removes it.
+* **Safety floor was never persisted** — a raised floor silently reverted
+  to 1.5s on restart. Now stored under `ratelimit:floor`.
+* **start/stop races**: stop-during-connect left a CONNECTED zombie client
+  invisible to every later stop; the start exception path misclassified the
+  race as INVALID_CREDENTIAL and published AccountFailed after
+  AccountDisconnected; the reconnect loop could resurrect RUNNING after a
+  stop. All windows closed (client teardown on abort, stop_requested
+  checkpoints, hardened stop() early-return).
+* **REPL blocked the whole event loop at the prompt** (dashboard 504s, WS
+  stalls, gateway heartbeats starved): input now runs on a daemon reader
+  thread feeding an asyncio queue. SIGTERM/SIGINT also end REPL sessions
+  gracefully (teardown always runs).
+* **`send_typing` called a nonexistent API** (typing indicators never fired
+  live); connect now has a 90s READY timeout (black-holed gateways used to
+  hang boot forever); 5xx maps to retryable ConnectionError; stop-during-
+  connect is no longer misread as a bad token.
+* **remove_account cascade completed**: plugin hooks now fire for FAILED
+  accounts, api_cache rows dropped, SettingsManager memory layers forgotten,
+  the parked scheduler lane torn down (new `forget_account`).
+* **A second Ctrl-C/dashboard-exit during teardown skipped database.close**:
+  the shutdown and build-cleanup loops now tolerate KeyboardInterrupt per
+  step (re-raised after the DB closes).
+* **Limiter waiter CPU burn** (67–98% of a core at fleet scale, starved the
+  configured send rate by 32%): the acquire loop services only its own
+  pacing key, cancelled heads wake successors, non-head backstop poll
+  0.25s→2s. Measured 4–37× CPU reduction at the same grant rate.
+
+## Medium / low (selected)
+* kv `case_sensitive_like=ON` (prefix cascades no longer cross case-variant
+  account names); migration 4 (per-account trail indexes, dead ts indexes
+  dropped); task_history capped at 10k rows.
+* stop_all/start_all bounded-parallel (estop latency, fleet boot minutes→
+  seconds); scheduler stop single-flight hardened (owner-cancel no longer
+  fakes completion; joiner timeout raises instead of lying).
+* Remote control: commands ALWAYS execute (estop was swallowed inside the
+  reply cooldown), reply-only throttle, internals never leak to the channel,
+  `surface="remote"` audit labels; OWNER_USER_IDS validated at boot.
+* Dashboard: chunked Transfer-Encoding rejected (keep-alive stream
+  poisoning), NaN-safe WS serialization, reserved-opcode/fragmented-close
+  protocol failures, `_register` post-stop guard, DatabaseError→500.
+* SPA: 7 mis-attributed error sections fixed, dropdowns no longer rebuilt
+  every second, account cards render-gated on structural change, dead ENV
+  chip removed, forget-token reloads.
+* Soulcopy: in-flight re-trigger guard (overlapping flows cross-collected
+  each other's pages), UTF-16 chunk budget (emoji lists no longer produce
+  API-rejected oversized chunks), broad clean-abort handling; roll: same
+  abort contract + fixed dead confirm_reply.
+* Plugins teach the cache from inbound traffic (post-READY channels no
+  longer fail validation forever); DM re-ingest heals stale deleted flags.
+* PersistQueue: outer cancellation propagates (was swallowed), failure
+  burst notification resets on batch success, counted drops drain the
+  queue, single-flight stop; LogService caps 16k messages and never raises.
+* Engine: `POLL_INTERVAL` semantics, lane `held_off` accuracy, jitter
+  capped at effective interval, `_account_cooldowns`/`_last_fire` pruning,
+  invalid config-lane values fail loud, below-floor config defaults clamp
+  instead of bricking boot.
+* Cooldown lazy-clear is expiry-scoped (a second process's extension can no
+  longer be deleted); `Setting.validate` rejects bools; `import-env`
+  re-reads .env from disk; reserved account name `all` rejected;
+  event-bus tail drain step + plugin-manager teardown step in shutdown.
+* Simulator: synthetic owner/mudae ids overlaid on fleet credentials
+  (dashboard-run scenarios were dead against real ids), bridge detach on
+  every exit path, mid-assembly DB leaks closed, edit events push frozen
+  DTOs, 429/consumer guard order matches live, reaction rebuild keeps id/me.
+* Docs: credentials story (DB-encrypted, not .env), dependency list,
+  705→708 counts, SM_MASTER_KEY documented, first-boot policy semantics,
+  dashboard resume note — see README / docs/ diffs.

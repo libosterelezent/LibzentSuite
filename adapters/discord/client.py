@@ -25,10 +25,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import math
 from typing import Any, Callable, Optional
 
-from adapters.base import DiscordMessage, convert_message
+from adapters.base import DiscordMessage
+from adapters.model import _emoji_repr
+from adapters.model import convert_message
+from core._asyncutil import outer_cancel_pending
 from core.credentials import Credentials
 from core.errors import (
     AccessDenied,
@@ -39,6 +43,10 @@ from core.errors import (
 )
 
 LOG = logging.getLogger("slaughtermudae.adapter")
+
+#: how long connect() waits for READY before failing (the library's own
+#: connect loop retries forever — a black-holed gateway must not hang boot)
+CONNECT_TIMEOUT_S = 90.0
 
 
 # ------------------------------------------------- per-process headers cache
@@ -123,6 +131,8 @@ class RealDiscordClient:
         self._client: Any = None           # the live Client instance
         self._ready = asyncio.Event()
         self._startup_error: Optional[Exception] = None
+        self._connect_aborted = False  # stop()/disconnect raced a pending connect
+        self._zombie_tasks: set = set()  # un-reaped run tasks (strong refs)
         self._run_task: Optional["asyncio.Task"] = None  # strong ref (see connect)
         self._logger = logger or LOG
         self._identify_gate = identify_gate  # shared per process (factory-owned)
@@ -188,6 +198,20 @@ class RealDiscordClient:
             self._ready.set()
 
         @self._client.event
+        async def on_error(event_method: str, *args: Any) -> None:
+            # without this, handler exceptions die on the library's own
+            # logger (raw stderr) — invisible to LogService/the dashboard
+            try:
+                import traceback
+                self._logger.error(
+                    "discord event handler %s failed: %s",
+                    event_method, traceback.format_exception_only(*sys.exc_info()[:2])[-1].strip(),
+                )
+                self._logger.debug("handler traceback:", exc_info=True)
+            except Exception:
+                pass
+
+        @self._client.event
         async def on_disconnect() -> None:
             if self.on_disconnect is not None:
                 # M1 (observability): surface the gateway close code so
@@ -241,7 +265,7 @@ class RealDiscordClient:
                 self.on_reaction(
                     "add", message.id, message.channel.id,
                     getattr(guild, "id", None) if guild else None,
-                    user.id, reaction.emoji, (reaction, user),
+                    user.id, _emoji_repr(reaction.emoji), (reaction, user),
                 )
 
         @self._client.event
@@ -253,7 +277,7 @@ class RealDiscordClient:
                 self.on_reaction(
                     "remove", message.id, message.channel.id,
                     getattr(guild, "id", None) if guild else None,
-                    user.id, reaction.emoji, (reaction, user),
+                    user.id, _emoji_repr(reaction.emoji), (reaction, user),
                 )
 
         # keep a STRONG reference: the loop only weak-references tasks, so
@@ -261,15 +285,27 @@ class RealDiscordClient:
         # disconnect() needs the handle to cancel it
         self._run_task = asyncio.get_running_loop().create_task(self._run())
         try:
-            await self._ready.wait()
+            # bounded ready wait: the library's connect loop retries forever
+            # (a black-holed gateway would hang start()/--start-all boot)
+            await asyncio.wait_for(self._ready.wait(), timeout=CONNECT_TIMEOUT_S)
             # AUDIT FIX (ported): startup failures must FAIL the connect
             # instead of silently yielding a session with user_id=None
             if self._startup_error is not None:
                 raise AccountError(
                     f"live client failed to start: {self._startup_error}")
             if self.user_id is None:
+                if self._connect_aborted:  # stop()/disconnect raced us:
+                    raise ConnectionError(  # NOT an auth-shaped failure
+                        "live client connect aborted by a concurrent stop")
                 raise AccountError(
                     "live client connected without a user (bad token?)")
+        except asyncio.TimeoutError:
+            await self._cancel_run_task()
+            await self._close_library_client()
+            raise AccountError(
+                f"live client did not become ready within "
+                f"{CONNECT_TIMEOUT_S:.0f}s (network down or gateway unreachable)"
+            ) from None
         except BaseException:
             # K7 (isolation audit S10-C5): a cancelled/failed connect must
             # close the LIBRARY client too — reaping only the _run task
@@ -280,8 +316,20 @@ class RealDiscordClient:
             except Exception:  # half-open clients can throw on close
                 pass
             await self._cancel_run_task()  # no orphaned client task
+            await self._close_library_client()  # aiohttp/curl session leak
             raise
+        self._connect_aborted = False
         self._logger.info("live client connected as user %s", self.user_id)
+
+    async def _close_library_client(self) -> None:
+        """Close the library client's HTTP sessions (best-effort)."""
+        client = self._client
+        if client is None:
+            return
+        try:
+            await client.close()
+        except Exception as exc:
+            self._logger.debug("library client close raised %s", exc)
 
     async def _run(self) -> None:
         """Run the client until it exits; capture startup errors for connect()."""
@@ -300,11 +348,18 @@ class RealDiscordClient:
         task, self._run_task = self._run_task, None
         if task is None or task.done():
             return
-        task.cancel()
+        self._connect_aborted = True  # connect() must not misread this as
+        task.cancel()  # a bad token (auth-shaped AccountError)
         try:
             await asyncio.wait_for(asyncio.shield(task), 2.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
-            pass
+        except asyncio.CancelledError:
+            if outer_cancel_pending():
+                raise  # OUR caller was cancelled: never eat it
+        except (asyncio.TimeoutError, Exception):
+            # reap window exhausted: keep a strong ref so the still-running
+            # task cannot be garbage-collected mid-flight
+            self._zombie_tasks.add(task)
+            task.add_done_callback(self._zombie_tasks.discard)
 
     async def disconnect(self) -> None:
         """Close the underlying client; safe when never started."""
@@ -323,6 +378,13 @@ class RealDiscordClient:
         return self._client
 
     def _map_send_error(self, exc: Exception, channel_id: int) -> Optional[Exception]:
+        # transient server faults retry like network errors: the library
+        # already retried internally before surfacing DiscordServerError
+        if type(exc).__name__ == "DiscordServerError" or (
+            getattr(exc, "status", None) is not None
+            and getattr(exc, "status", 0) >= 500
+        ):
+            return ConnectionError(f"discord server error ({exc})")
         """Translate one library send error into a domain error (or None).
 
         * HTTPException 429 -> ServerRateLimit (Retry-After float-parsable
@@ -434,7 +496,10 @@ class RealDiscordClient:
         channel = client.get_channel(channel_id)
         if channel is None:
             return  # unknown channel: skip rather than fetch (API-call trim)
-        await channel.trigger_typing()
+        try:
+            await channel.typing()  # 2.x fork API (trigger_typing is gone)
+        except AttributeError:
+            await channel.trigger_typing()  # older forks
 
     async def _resolve_message(self, channel_id: int, message_id: int) -> Any:
         """Message object by ids — cache first, fetch on miss (the ONE
@@ -489,8 +554,17 @@ class RealDiscordClient:
         raise TargetGone("", f"custom_id {custom_id!r} not on message {message_id}")
 
     async def fetch_user(self, user_id: int) -> Any:
-        """Fetch a user object from the library."""
-        return await self._require_client().fetch_user(user_id)
+        """Fetch a user object; None when the user is gone (NotFound).
+
+        The services seam (resolve_user) documents None-on-unresolvable —
+        letting NotFound propagate violated that contract live.
+        """
+        try:
+            return await self._require_client().fetch_user(user_id)
+        except Exception as exc:
+            if type(exc).__name__ == "NotFound":
+                return None
+            raise
 
     # ---------------------------------------------------------- observability
     @property

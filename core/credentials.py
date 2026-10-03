@@ -81,6 +81,10 @@ class Credentials:
         return cls(values)
 
     # ----------------------------------------------------------------- access
+    def snapshot(self) -> Dict[str, str]:
+        """Copy of all parsed values (overlaying consumers never mutate us)."""
+        return dict(self._values)
+
     def get(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Raw string value or default."""
         return self._values.get(key, default)

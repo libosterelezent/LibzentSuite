@@ -405,7 +405,16 @@ def convert_message(
     channel = getattr(message, "channel", None)
     guild = getattr(message, "guild", None)
     reference = getattr(message, "reference", None)
+    # 2.x forks moved the referenced message onto reference.resolved (the
+    # old attribute no longer exists there); tolerate both library shapes
     referenced = getattr(message, "referenced_message", None)
+    if referenced is None:
+        reference = getattr(message, "reference", None)
+        resolved = getattr(reference, "resolved", None)
+        # DeletedReferencedMessage (a NamedTuple with a deleted marker) is
+        # not a message — leave None rather than feed a tuple to the DTO
+        if resolved is not None and hasattr(resolved, "id"):
+            referenced = resolved
 
     def _ref_ids(ref: Any) -> tuple:
         if ref is None:

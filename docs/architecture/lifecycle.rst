@@ -12,7 +12,8 @@ control → ControlAPI → surface.
 Account
 -------
 ``add_account`` persists FIRST (repo failure leaves memory untouched);
-``start`` resolves the token (``.env`` by convention key), wires every
+``start`` resolves the token (encrypted DB credential store; `.env` keys
+are migration-only), wires every
 client callback (message + rich events) before connect, connects, ingests
 the READY snapshot (zero API calls), activates profile-filtered plugins,
 spawns the reconnect supervisor (exponential backoff from account

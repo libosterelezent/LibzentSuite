@@ -47,6 +47,10 @@ LOG = logging.getLogger("slaughtermudae.database")
 
 #: pragmas applied once per connection (see module docstring for rationale)
 PRAGMAS = (
+    # kv prefix matching is account-scoped: SQLite's LIKE is ASCII
+    # case-INSENSITIVE by default, which made delete_prefix("...:alfa:")
+    # also wipe "...:Alfa:..." (accounts names are case-sensitive-unique)
+    ("case_sensitive_like", "ON"),
     "PRAGMA journal_mode=WAL",
     "PRAGMA busy_timeout=5000",
     "PRAGMA foreign_keys=ON",
@@ -131,7 +135,10 @@ class DatabaseConnection:
         try:
             conn.row_factory = aiosqlite.Row
             for pragma in PRAGMAS:
-                await conn.execute(pragma)
+                # entries are either full "PRAGMA x=y" strings or (name, value)
+                statement = pragma if isinstance(pragma, str) else (
+                    f"PRAGMA {pragma[0]}={pragma[1]}")
+                await conn.execute(statement)
             await conn.commit()
         except BaseException:
             # never leak the worker thread when setup fails (it would keep

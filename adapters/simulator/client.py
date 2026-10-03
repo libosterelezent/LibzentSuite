@@ -129,10 +129,10 @@ class SimClient:
         Raises ConnectionError when offline, ServerRateLimit for a queued
         one-shot 429, TargetGone when the channel vanished.
         """
-        limit = self._guard_send(channel_id)
-        if limit is not None:
+        self._guard_channel(channel_id)  # channel existence FIRST (live
+        limit = self._guard_send(channel_id)  # resolves the channel before
+        if limit is not None:  # any rate state is consumed)
             raise limit
-        self._guard_channel(channel_id)
         sent = self._world.deliver(channel_id, self.user_id, content)
         return self._as_discord_message(sent, dm=False)
 
@@ -273,6 +273,8 @@ class SimClient:
         """
         if not self.connected:
             raise ConnectionError("client not connected")
+        if channel_id not in self._world.channels:
+            raise TargetGone("", f"channel {channel_id} vanished")
         try:
             self._world.react(self.user_id, message_id, emoji, kind="add")
         except KeyError:

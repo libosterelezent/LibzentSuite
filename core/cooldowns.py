@@ -112,7 +112,16 @@ class CooldownService:
         if row is not None and row["expires_at"] > now:
             return dict(row)
         if row is not None:
-            await self.clear(account, plugin, cooldown_key)
+            # expiry-scoped delete: another process may have EXTENDED the
+            # row since our memory copy — only clear what is still expired
+            if self._repo is not None:
+                try:
+                    await self._repo.clear_expired_for(
+                        account, plugin, cooldown_key, self._now())
+                except Exception:
+                    LOG.debug("lazy cooldown clear failed", exc_info=True)
+            else:
+                await self.clear(account, plugin, cooldown_key)
             return None
         if self._repo is not None:
             fresh = await self._repo.get(account, plugin, cooldown_key,

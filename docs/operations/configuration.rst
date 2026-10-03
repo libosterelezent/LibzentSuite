@@ -11,7 +11,7 @@ of the layers:
      - Where
      - Applies to
    * - ``.env``
-     - ``MUDAE_BOT_ID``, ``OWNER_USER_IDS``, ``DISCORD_TOKEN_<NAME>``, ``DASHBOARD_TOKEN``, ``REMOTE_CONTROL``
+     - ``MUDAE_BOT_ID``, ``OWNER_USER_IDS``, ``MUDAE_BOT_ID`, `OWNER_USER_IDS`, `DASHBOARD_TOKEN` (+ `SM_MASTER_KEY` via process env) — account tokens live ENCRYPTED in the DB, imported from .env only via `credentials import-env``, ``DASHBOARD_TOKEN``, ``REMOTE_CONTROL``
      - secrets & ids (never in the DB)
    * - ``config/rate_limits.json``
      - per-action ``{interval, jitter:[min,max]}`` at ``global``/``accounts.<name>`` + ``lane {enabled, prefixrate}``
