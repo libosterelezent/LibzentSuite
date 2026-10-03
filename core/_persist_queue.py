@@ -26,6 +26,8 @@ import asyncio
 import queue
 import sys
 import threading
+
+from ._asyncutil import outer_cancel_pending
 from typing import Any, Dict, List, Optional
 
 #: default cap on queued-but-undrained items
@@ -36,15 +38,18 @@ class PersistQueue:
     """Thread-safe producer queue + one async batching drain worker."""
 
     def __init__(self, label: str, *, max_inflight: int = MAX_INFLIGHT) -> None:
+        if int(max_inflight) < 1:
+            raise ValueError(f"max_inflight must be >= 1, got {max_inflight!r}")
         self._label = label
         self._max = int(max_inflight)
         self._q: "queue.SimpleQueue[Dict[str, Any]]" = queue.SimpleQueue()
         self._lock = threading.Lock()
         self._worker: Optional["asyncio.Task"] = None
         self._stopping = False
+        self._draining: Optional["asyncio.Future[None]"] = None
         self._repo: Any = None
         self._batch = 50
-        self._interval = 0.25
+        self._interval = 0.25  # floor below: 0 would busy-spin the loop
         self._carry: List[Dict[str, Any]] = []  # dequeued, not yet written
         self._notified = False
         self.db_failures = 0
@@ -77,32 +82,55 @@ class PersistQueue:
             return self._worker
         if self.active:
             return self._worker
+        if self._stopping:
+            # a stop is still draining: wait it out, else clearing _stopping
+            # here would RESURRECT the old worker's loop and two workers
+            # would share the queue/_carry (order + duplication bugs)
+            draining = self._draining
+            if draining is not None:
+                await asyncio.wait({asyncio.shield(draining)}, timeout=5.0)
+            self._stopping = False
         self._repo = repo
         self._batch = max(1, int(batch))
-        self._interval = max(0.0, float(interval))
-        self._stopping = False
+        self._interval = max(0.05, float(interval))
         self._worker = asyncio.get_running_loop().create_task(
             self._run(), name=f"{self._label}-persistence")
         return self._worker
 
     async def stop(self, timeout: float = 5.0) -> None:
         """Stop accepting, finish the in-flight batch, drain the rest.
+        Single-flight: a concurrent stop JOINS instead of returning early
+        while the first still drains (an early return let callers close the
+        DB under the live drainer).
 
         Every remaining batch write is bounded by the time still left on
         the overall ``timeout`` budget — a slow/locked repository cannot
         stretch shutdown past it. Items still queued when the budget runs
         out are counted in ``dropped`` (visible via stats()).
         """
+        if self._stopping:
+            # join the in-flight teardown: bounded by the join budget
+            await asyncio.wait({asyncio.shield(self._draining)}, timeout=timeout)
+            return
         worker = self._worker
         if worker is None:
             return
         self._worker = None  # put() callers stop enqueueing from now on
         self._stopping = True
+        self._draining = asyncio.get_running_loop().create_future()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, float(timeout))
         await asyncio.wait({worker}, timeout=min(0.5, max(0.0, float(timeout))))
         worker.cancel()  # no-op when it already exited gracefully
         await asyncio.gather(worker, return_exceptions=True)
+        try:
+            await self._drain_inline(loop, deadline)
+        finally:
+            if not self._draining.done():
+                self._draining.set_result(None)
+            self._stopping = False
+
+    async def _drain_inline(self, loop, deadline) -> None:
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -112,10 +140,21 @@ class PersistQueue:
                 return
             try:
                 await asyncio.wait_for(self._write(batch), timeout=remaining)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                # budget exhausted mid-batch: count what never landed
+            except asyncio.CancelledError:
+                # budget-exhaustion cancels the batch task; an OUTER cancel
+                # (this stop() call itself being cancelled) must propagate —
+                # swallowing it breaks asyncio.timeout/TaskGroup semantics
+                with self._lock:  # count what never landed either way
+                    self.dropped += len(self._carry) + self._q.qsize()
+                self._drain_counted()
+                self._carry = []
+                if not outer_cancel_pending():
+                    return  # our own wait_for timeout: clean stop
+                raise
+            except asyncio.TimeoutError:
                 with self._lock:
                     self.dropped += len(self._carry) + self._q.qsize()
+                self._drain_counted()
                 self._carry = []
                 return
             await asyncio.sleep(0)  # yield between batches (big drains)
@@ -123,6 +162,7 @@ class PersistQueue:
         if leftover:
             with self._lock:
                 self.dropped += leftover
+            self._drain_counted()
             self._carry = []
 
     # --------------------------------------------------------------- drain
@@ -156,6 +196,7 @@ class PersistQueue:
             if add_many is not None and len(batch) > 1:
                 try:
                     await add_many(batch)
+                    self._notified = False  # burst over: next failure logs
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -182,6 +223,15 @@ class PersistQueue:
             # mid-batch must not leave committed rows in _carry (the inline
             # drain would re-write them -> duplicate rows)
             batch.pop(0)
+
+    def _drain_counted(self) -> None:
+        """Empty the queue after counting it dropped (restart hygiene:
+        a restarted worker must not re-write rows already counted lost)."""
+        while True:
+            try:
+                self._q.get_nowait()
+            except queue.Empty:
+                return
 
     def _notify(self, exc: BaseException) -> None:
         """One raw stderr one-liner per failure BURST (reset on success)."""

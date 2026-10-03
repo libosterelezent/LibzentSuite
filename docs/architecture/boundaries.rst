@@ -24,7 +24,7 @@ Hard rules enforced by review and tests:
   — CLI and dashboard are 1:1 wrappers (parity by construction).
 * Plugins never touch clients, SQLite, or the limiter directly; everything
   goes through the ``PluginServices`` protocol.
-* Token values never enter the database; ``.env`` stores them, rows store
+* Token *plaintext* never enters the database (Fernet ciphertext only; the key lives outside the DB in `state/credentials.key` / `SM_MASTER_KEY`); ``.env`` stores them, rows store
   references.
 
 Details: ``knowledgebase/COMPONENT_MAP.md``.

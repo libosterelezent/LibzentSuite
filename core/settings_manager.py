@@ -73,6 +73,10 @@ class Setting:
                 if isinstance(value, bool):
                     return value
                 raise ValueError(value)
+            if self.type in ("int", "float") and isinstance(value, bool):
+                # float(True) == 1.0 silently inverted the operator's intent
+                # ({"interval": true} must not become a 1s interval)
+                raise ValueError(value)
             if self.type == "int":
                 coerced = int(value)
                 if isinstance(value, float) and not value.is_integer():
@@ -286,7 +290,6 @@ class SettingsManager:
         ))
         return validated
 
-    # ----------------------------------------------------------- accounts
     def account_settings(self, account: str) -> Dict[str, Any]:
         """Resolved framework account settings (reconnect policy...).
 

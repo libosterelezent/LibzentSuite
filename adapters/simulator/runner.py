@@ -230,7 +230,11 @@ class SimulationRunner:
             account_settings_repo=db.account_settings,
             global_layer=DEMO_PLUGIN_SETTINGS,
         )
-        await settings.load()
+        try:  # assembly guard: a failure below must close the ephemeral DB
+            await settings.load()
+        except BaseException:
+            await db.close()
+            raise
         limiter = mods.RateLimitManager(bus, log_ratelimit, db.policies)
         await limiter.load_persisted()
         audit = mods.AuditRecorder(db.audit)
@@ -270,13 +274,25 @@ class SimulationRunner:
         def client_factory(account_name: str, token: str) -> SimClient:
             return SimClient(world, user_ids[account_name], seed=SYNTHETIC_ALPHA_ID)
 
-        credentials = self._credentials or Credentials.from_values(
-            {
+        if self._credentials is not None:
+            # overlay the SYNTHETIC ids the scenarios script against: fleet
+            # credentials carry real OWNER/MUDAE ids, which would silently
+            # break owner-gating and Mudae-page matching in every scenario
+            merged = {
+                **self._credentials.snapshot(),
                 "MUDAE_BOT_ID": str(SYNTHETIC_MUDAE_ID),
                 "OWNER_USER_IDS": str(SYNTHETIC_OWNER_ID),
                 f"DISCORD_TOKEN_{ACCOUNT_NAME.upper()}": f"sim-token-{ACCOUNT_NAME}",
             }
-        )
+            credentials = Credentials.from_values(merged)
+        else:
+            credentials = Credentials.from_values(
+                {
+                    "MUDAE_BOT_ID": str(SYNTHETIC_MUDAE_ID),
+                    "OWNER_USER_IDS": str(SYNTHETIC_OWNER_ID),
+                    f"DISCORD_TOKEN_{ACCOUNT_NAME.upper()}": f"sim-token-{ACCOUNT_NAME}",
+                }
+            )
         # import the account's synthetic token into the ephemeral credential
         # store so the DB-first resolution path is the one scenarios exercise
         try:
@@ -411,12 +427,6 @@ class SimulationRunner:
                 except Exception as exc:  # a scenario crash is a failed report
                     failures.append(f"scenario crashed: {type(exc).__name__}: {exc}")
 
-            try:
-                if bridge_attached_here:
-                    detach_stdlib_bridge()  # never leak a bridge to a dead service
-                remote.stop()
-            except Exception:
-                pass  # teardown here must never fail a finished run
         finally:
             if account_started:
                 try:
@@ -434,6 +444,15 @@ class SimulationRunner:
                 failures.append(f"database close failed: {exc}")
             unsub_audit()
             unsub_log()
+            try:
+                if bridge_attached_here:
+                    detach_stdlib_bridge()  # EVERY exit path: a cancelled run
+            except Exception:  # must not leak the process-global bridge
+                pass
+            try:
+                remote.stop()
+            except Exception:
+                pass
 
         # publish AFTER teardown: the finally block above can still append
         # failures — the event must agree with the returned report

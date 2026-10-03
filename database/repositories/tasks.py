@@ -30,7 +30,12 @@ _TASK_COLUMNS = (
 
 
 class TaskHistoryRepository(BaseRepository):
-    """add/update/recent for the task history archive."""
+    """add/update/recent for the task history archive (bounded: newest
+    ``keep`` rows; 0 disables pruning)."""
+
+    def __init__(self, database: Any, keep: int = 0) -> None:
+        super().__init__(database)
+        self._keep = max(0, int(keep))
 
     async def add(self, entry: Dict[str, Any]) -> int:
         """Insert one history row; returns its id.
@@ -70,6 +75,8 @@ class TaskHistoryRepository(BaseRepository):
                 raise DatabaseError(
                     f"task history row for id {row.get('id')!r} already exists"
                 ) from exc
+            if self._keep:
+                await self._prune_newest(conn, "task_history", self._keep)
             return int(row["id"]) if "id" in row else int(cur.lastrowid)
 
     async def max_id(self) -> int:

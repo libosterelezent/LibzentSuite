@@ -75,7 +75,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from core.api import ControlAPI
-from core.errors import AccountError
+from core.errors import AccountError, DatabaseError
 from core.event_bus import (
     Event,
     EventBus,
@@ -142,6 +142,17 @@ CREDENTIAL_GATED_ROUTES = {
     ("POST", "/api/credentials/import-env"),
 }
 CREDENTIAL_GATE_MESSAGE = "set DASHBOARD_TOKEN in .env to manage credentials"
+
+
+def _dumps(payload: Any) -> str:
+    """NaN-safe JSON: a non-finite float must never emit the bare `NaN`
+    token (invalid JSON — WS clients drop such frames SILENTLY, freezing
+    the live view with no error)."""
+    try:
+        return json.dumps(payload, allow_nan=False)
+    except ValueError:
+        return json.dumps({"type": "error",
+                           "error": "payload contained a non-finite number"})
 
 
 def parse_json_bool(value: Any, field: str) -> bool:
@@ -293,7 +304,7 @@ class WebSocketClient:
             self._sendq.put(("text", wsproto.encode_text_frame(text)))
 
     def push_json(self, payload: Dict[str, Any]) -> None:
-        self.push_text(json.dumps(payload))
+        self.push_text(_dumps(payload))
 
     def serve(self) -> None:
         """Reader loop (runs in the handler thread that did the upgrade)."""
@@ -324,13 +335,13 @@ class WebSocketClient:
                         self._drain()
                         return
                     buffer = buffer[consumed:]
-                    if opcode == wsproto.OP_CLOSE:
-                        self._sendq.put(("raw", wsproto.encode_close_frame()))
-                        self._drain()
-                        return
-                    if opcode == wsproto.OP_PING:
+                    if opcode in (wsproto.OP_CLOSE, wsproto.OP_PING):
                         if not fin:  # RFC 6455 §5.5: control frames are whole
                             LOG.warning("websocket: fragmented control frame")
+                            self._sendq.put(("raw", wsproto.encode_close_frame()))
+                            self._drain()
+                            return
+                        if opcode == wsproto.OP_CLOSE:
                             self._sendq.put(("raw", wsproto.encode_close_frame()))
                             self._drain()
                             return
@@ -346,6 +357,8 @@ class WebSocketClient:
                             self._drain()
                             return
                         self._handle_text(text)
+                    elif opcode == wsproto.OP_PONG:
+                        pass  # unsolicited pongs are legal (RFC 6455 §5.5.3)
                     elif opcode in (wsproto.OP_CONT, wsproto.OP_BINARY):
                         # one-word app protocol: fragmentation and binary
                         # frames are protocol violations, not data
@@ -353,8 +366,13 @@ class WebSocketClient:
                         self._sendq.put(("raw", wsproto.encode_close_frame()))
                         self._drain()
                         return
-                    # unknown/reserved opcodes: ignored (already decoded; the
-                    # one-word protocol never consumes them)
+                    else:
+                        # reserved opcodes (0x3-0x7, 0xB-0xF): RFC 6455 §5.2
+                        # requires failing the connection, not ignoring them
+                        LOG.warning("websocket: reserved opcode %d", opcode)
+                        self._sendq.put(("raw", wsproto.encode_close_frame()))
+                        self._drain()
+                        return
         finally:
             self.alive = False
             self._server.unregister_threadsafe(self)
@@ -426,6 +444,7 @@ class DashboardServer:
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._clients: List[WebSocketClient] = []
+        self._clients_closed = False
         self._broadcaster: Optional[asyncio.Task] = None
         self._log_unsub: Optional[Any] = None
         self._audit_unsub: Optional[Any] = None
@@ -478,6 +497,7 @@ class DashboardServer:
         Live websocket clients are torn down too: their handler threads
         would otherwise sit on open sockets until each PEER disconnects.
         """
+        self._clients_closed = True  # a queued _register must not re-add
         for client in list(self._clients):
             client.alive = False
             try:
@@ -570,7 +590,7 @@ class DashboardServer:
             return
 
         def _push() -> None:
-            text = json.dumps(payload)
+            text = _dumps(payload)
             for client in list(self._clients):
                 client.push_text(text)
 
@@ -586,8 +606,8 @@ class DashboardServer:
         asyncio.run_coroutine_threadsafe(self._register(client), self._loop).result(timeout=2)
 
     async def _register(self, client: WebSocketClient) -> None:
-        if not client.alive:  # died while registration was queued: no ghost
-            return
+        if not client.alive or self._clients_closed:  # no ghosts, and none
+            return  # after stop() tore the sockets down
         self._clients.append(client)
         LOG.info("websocket client connected (%d online)", len(self._clients))
         self.push_stats_to(client)
@@ -710,7 +730,9 @@ class DashboardServer:
                     def _request_exit() -> None:
                         os.kill(os.getpid(), signal.SIGINT)
 
-                    threading.Timer(0.25, _request_exit).start()
+                    timer = threading.Timer(0.25, _request_exit)
+                    timer.daemon = True  # never fire during interpreter exit
+                    timer.start()
                 return 200, {"ok": True, "data": await api.shutdown()}
             if (method, path) == ("POST", "/api/resume"):
                 return 200, {"ok": True, "data": await api.system_resume()}
@@ -1009,6 +1031,9 @@ class DashboardServer:
                 }
 
             return 404, {"ok": False, "error": f"no route {method} {path}"}
+        except DatabaseError as exc:
+            # server-side persistence fault: NOT the client's bad request
+            return 500, {"ok": False, "error": f"database error: {exc}"}
         except (ValueError, RuntimeError) as exc:
             # domain errors -> honest 400 (AccountError/SchedulerError are
             # RuntimeError; RatePolicy/Setting/Profile validation ValueError)
@@ -1060,7 +1085,7 @@ def _make_handler(server: "DashboardServer") -> type:
             """
             host_header = self.headers.get("Host", "")
             if _is_loopback_host(server._host):
-                if _split_host(host_header) not in LOOPBACK_HOSTNAMES:
+                if not _is_loopback_host(_split_host(host_header)):
                     return False
             origin = self.headers.get("Origin")
             if origin is not None:
@@ -1141,6 +1166,14 @@ def _make_handler(server: "DashboardServer") -> type:
                 return
             body: Dict[str, Any] = {}
             if method == "POST":
+                if self.headers.get("Transfer-Encoding"):
+                    # chunked bodies are unsupported: answering without
+                    # consuming them poisons the keep-alive stream
+                    self._reject(411, {
+                        "ok": False,
+                        "error": "Transfer-Encoding not supported — send Content-Length",
+                    })
+                    return
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
                 except ValueError:
@@ -1221,7 +1254,10 @@ def _make_handler(server: "DashboardServer") -> type:
             # the stdlib keep-alive loop must never try to read another
             # request from the detached file object after serve() returns
             self.close_connection = True
-            self.connection.sendall(wsproto.handshake_response(key))
+            try:
+                self.connection.sendall(wsproto.handshake_response(key))
+            except OSError:
+                return  # peer vanished before the 101 — nothing to serve
             fd = self.connection.detach()  # we own the socket now
             sock = socket.socket(fileno=fd)
             client = WebSocketClient(sock, server)

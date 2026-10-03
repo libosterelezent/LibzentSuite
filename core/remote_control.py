@@ -28,8 +28,23 @@ import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from .credentials import Credentials
+from .errors import (
+    AccountError,
+    CredentialsError,
+    PluginError,
+    ProfileError,
+    RatePolicyError,
+    SettingsValidationError,
+)
 from .event_bus import Event, EventBus, MessageReceived
 from .priority import Priority
+
+#: domain errors render their (safe, human-written) message bare; anything
+#: else is an internal failure and must not leak into a Discord channel
+_DOMAIN_ERRORS = (
+    AccountError, CredentialsError, PluginError, ProfileError,
+    RatePolicyError, SettingsValidationError, ValueError, RuntimeError,
+)
 
 LOG = logging.getLogger("slaughtermudae.remote_control")
 
@@ -115,17 +130,28 @@ class RemoteControl:
         """Run one command and reply in-channel (fully error-contained)."""
         account = event.account
         now = time.monotonic()
-        last = self._last_reply_at.get(account, 0.0)
-        if now - last < self._cooldown_s:
-            return  # self-throttle: even owner spam gets one reply per window
+        last = self._last_reply_at.get(account)
+        # EXECUTION is never throttled (a safety command like `estop` must
+        # always run); only the REPLY is self-throttled — one per window.
+        # Stamped BEFORE executing: two mentions arriving inside the
+        # execution window must not both slip past the check.
+        throttled = last is not None and now - last < self._cooldown_s
+        self._last_reply_at[account] = now
         try:
             reply = await self._execute(line)
         except Exception as exc:  # a broken command must never crash the bridge
-            reply = f"error: {type(exc).__name__}: {exc}"
+            if isinstance(exc, _DOMAIN_ERRORS):
+                reply = f"error: {exc}" if str(exc) else f"error: {type(exc).__name__}"
+            else:
+                # unexpected internals (paths, sql) do not belong in a
+                # Discord channel — the traceback goes to the logs
+                self._logger.exception("remote control command failed")
+                reply = "error: internal (see logs)"
+        if throttled:
+            return  # executed; the reply is suppressed by the cooldown
         reply = (reply or "ok").strip()
         if len(reply) > MAX_REPLY_CHARS:
             reply = reply[: MAX_REPLY_CHARS - 20] + "\n… (truncated)"
-        self._last_reply_at[account] = time.monotonic()
         try:
             self._scheduler.submit(
                 account, "control", "message",
@@ -284,7 +310,11 @@ class RemoteControl:
 
     async def _cmd_estop(self, api: Any, args: list) -> str:
         if len(args) == 1:
-            out = await api.accounts_emergency_stop(args[0])
+            out = await api.accounts_emergency_stop(args[0], surface="remote")
+            self._logger.info(
+                "account-scoped estop reply may be undeliverable (account "
+                "%s is stopped) — reply was: emergency stop %s: %s task(s) "
+                "cancelled", args[0], args[0], out.get("cancelled_tasks", 0))
             return f"emergency stop {args[0]}: {out.get('cancelled_tasks', 0)} task(s) cancelled"
         if args:
             return "usage: estop [account]"

@@ -87,7 +87,28 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
         else:
             from interfaces.cli import Repl
 
-            await Repl(api).run()
+            repl = Repl(api)
+            stop = asyncio.Event()
+
+            def _sig_exit() -> None:  # SIGTERM/SIGINT end the REPL cleanly
+                stop.set()  # (a service manager's stop is SIGTERM — the
+                repl.running = False  # default disposition would kill the
+                # process with NO teardown: queues dropped, DB unclosed)
+
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    loop.add_signal_handler(sig, _sig_exit)
+                except (NotImplementedError, RuntimeError, ValueError):
+                    pass
+            try:
+                await repl.run()
+            finally:
+                for sig in (signal.SIGTERM, signal.SIGINT):
+                    try:
+                        loop.remove_signal_handler(sig)
+                    except (NotImplementedError, RuntimeError, ValueError):
+                        pass
     finally:
         # ALWAYS runs (start-all failure, dashboard bind error, Ctrl-C...):
         # a leaked database connection/worker thread can hang process exit

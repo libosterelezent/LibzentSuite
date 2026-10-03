@@ -485,6 +485,25 @@ def http_post(url: str, payload, token: str | None = TOKEN,
         return exc.code, exc.read().decode("utf-8")
 
 
+def http_post_h(url: str, payload, token: str | None = TOKEN,
+                 raw_body: bytes | None = None) -> tuple[int, str, dict]:
+    import http.client
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10)
+    data = raw_body if raw_body is not None else json.dumps(payload).encode()
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["X-Dashboard-Token"] = token
+    try:
+        conn.request("POST", parsed.path, body=data, headers=headers)
+        resp = conn.getresponse()
+        return resp.status, resp.read().decode("utf-8"), dict(resp.getheaders())
+    finally:
+        conn.close()
+
+
 def get_json(text: str) -> dict:
     return json.loads(text)
 
@@ -545,11 +564,13 @@ class TestDashboardHTTP(unittest.IsolatedAsyncioTestCase):
 
     async def test_body_over_cap_413(self) -> None:
         big = b'{"pad": "' + b"x" * 1_100_000 + b'"}'
-        status, body = await asyncio.to_thread(
-            http_post, self.url("/api/accounts/remove"), None, TOKEN, big
+        status, body, headers = await asyncio.to_thread(
+            http_post_h, self.url("/api/accounts/remove"), None, TOKEN, big
         )
         self.assertEqual(status, 413)
         self.assertIn("too large", get_json(body)["error"])
+        # keep-alive safety: a partially-drained body must close the stream
+        self.assertEqual(headers.get("Connection", "").lower(), "close")
 
     # ------------------------------------------------------------------ system
     async def test_status(self) -> None:

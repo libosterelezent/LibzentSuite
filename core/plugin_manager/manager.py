@@ -264,17 +264,34 @@ class PluginManager:
         runtime.settings.update(resolved)
         ctx = self._context(account, runtime, services)
         try:
-            if not runtime.loaded:
+            first_load = not runtime.loaded
+            if first_load:
                 await self._hook(account, runtime, runtime.instance.on_load, ctx, "on_load")
                 runtime.loaded = True
             await self._hook(account, runtime, runtime.instance.on_enable, ctx, "on_enable")
             runtime.active = True
-            self._bus.publish_nowait(PluginLoaded(account=account, plugin=runtime.name))
+            if first_load:  # a re-enable is not a load: PluginEnabledChanged
+                self._bus.publish_nowait(PluginLoaded(account=account, plugin=runtime.name))
         except Exception:
             runtime.enabled = False  # _hook already recorded the error
             self._logger.error(
                 "plugin %s failed to activate on %s; disabled", runtime.name, account
             )
+
+    def close(self) -> None:
+        """Tear the manager down: bus subscriptions off, pending tasks reaped.
+
+        Called by Framework.shutdown after accounts stopped — a lingering
+        subscription set would keep dispatching to dead plugin runtimes.
+        """
+        for unsub in (self._unsubscribe, self._unsub_edited,
+                      self._unsub_deleted, self._unsub_reaction):
+            try:
+                unsub()
+            except Exception:
+                pass
+        for task in [t for t in list(self._pending) if not t.done()]:
+            task.cancel()
 
     async def deactivate_account(self, account: str) -> None:
         """Fire on_disable + on_unload for the account's active plugins."""
@@ -294,9 +311,9 @@ class PluginManager:
                     await self._hook(account, runtime, runtime.instance.on_unload, ctx, "on_unload")
                 except Exception:
                     pass
+                runtime.loaded = False
+                self._bus.publish_nowait(PluginUnloaded(account=account, plugin=runtime.name))
             runtime.active = False
-            runtime.loaded = False
-            self._bus.publish_nowait(PluginUnloaded(account=account, plugin=runtime.name))
         self._services.pop(account, None)
 
     # ------------------------------------------------------------- mutation

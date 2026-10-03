@@ -168,6 +168,20 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         CREATE INDEX IF NOT EXISTS cooldown_expiry ON cooldowns (expires_at);
         """,
     ),
+    (
+        4,
+        "per-account trail indexes",
+        """
+        -- per-account history views walk (account, id DESC): without these a
+        -- quiet account's filter scanned the whole (10k-row) trail table
+        CREATE INDEX IF NOT EXISTS audit_logs_account ON audit_logs (account, id DESC);
+        CREATE INDEX IF NOT EXISTS logs_account ON logs (account, id DESC);
+        -- the ts indexes served no query (every trail read orders by id) and
+        -- taxed the two hottest write paths
+        DROP INDEX IF EXISTS audit_ts;
+        DROP INDEX IF EXISTS logs_ts;
+        """,
+    ),
 ]
 
 

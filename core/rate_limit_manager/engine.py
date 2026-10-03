@@ -72,7 +72,11 @@ from .warnings import evaluate_policies
 GLOBAL_KEY = "__global__"
 
 #: backstop poll for waiters that are not the head of their key's heap
-POLL_INTERVAL = 0.25
+#: non-head backstop poll (lost-wake insurance ONLY — heads compute their
+#: exact remaining block and every grant/policy/cooldown change wakes all
+#: parked waiters, so a short poll just burned a full policy recomputation
+#: per waiter 4x/second)
+POLL_INTERVAL = 2.0
 
 #: single-task concurrency is guaranteed by the heap; grant order is
 #: (priority, seq) — seq comes from this counter (FIFO within a priority).
@@ -175,6 +179,7 @@ class RateLimitManager:
         self._repo = policy_repo
         self._kv = kv_repo
         self._floor = self._validated_floor(floor)
+        self._removed_defaults: set = set()  # 'level|owner|action' cleared by the user
         self._clock = clock if clock is not None else SystemClock()
         self._jitter_rng = random.Random(jitter_seed)
         #: (level, owner, action) -> RatePolicy — the live policy table
@@ -310,6 +315,19 @@ class RateLimitManager:
             self._log("warning", "stored lane config invalid; using defaults")
             self._lane.set_prefixrate(1.5)
         self._lane.set_enabled(enabled)
+        if self._kv is not None:
+            try:  # persisted floor: a restart must not revert a raised floor
+                stored_floor = await self._kv.get("ratelimit:floor")
+                if stored_floor is not None:
+                    self._floor = max(self._floor, float(stored_floor))
+            except Exception as exc:
+                self._log("warning", f"could not load persisted floor: {exc}")
+            try:  # cleared-policy tombstones: seeding must skip these keys
+                stored_removed = await self._kv.get("ratelimit:removed")
+                if isinstance(stored_removed, list):
+                    self._removed_defaults = set(stored_removed)
+            except Exception as exc:
+                self._log("warning", f"could not load cleared-policy list: {exc}")
 
     # ------------------------------------------------------------- policies
     def set_policy(
@@ -476,6 +494,19 @@ class RateLimitManager:
             ],
         }
 
+    @property
+    def floor_value(self) -> float:
+        """Current safety floor (seconds)."""
+        return float(self._floor)
+
+    def set_removed_defaults(self, entries: list) -> None:
+        """Sync the cleared-policy tombstones (ControlAPI persist path)."""
+        self._removed_defaults = {str(e) for e in entries or []}
+
+    def removed_default(self, level: str, owner, action: str) -> bool:
+        """True when the user explicitly CLEARED this key (seed must skip)."""
+        return f"{level}|{owner or ''}|{action}" in self._removed_defaults
+
     def set_floor(self, seconds: float) -> float:
         """Raise the safety floor (never lower, never below 1.5s).
 
@@ -628,7 +659,12 @@ class RateLimitManager:
         heapq.heappush(self._pending.setdefault(key, []), entry)
         try:
             while not entry.future.done():
-                self._grant_ready()
+                # service ONLY this waiter's key: cross-key effects (floor,
+                # server cooldowns, policy changes) arrive via the shared
+                # wake event, and every grant on a key wakes that key's
+                # successors — sweeping every key per waiter was O(waiters
+                # x keys x policies) per poll tick for zero semantic gain
+                self._grant_ready(key)
                 if entry.future.done():
                     break
                 wait, server_blocks = self._entry_wait(entry)
@@ -642,6 +678,9 @@ class RateLimitManager:
         finally:
             entry.cancelled = True
             self._prune(key)
+            # a cancelled head must not leave its successors parked until
+            # the (long) backstop poll — wake them to recompute now
+            self._wake_waiters()
 
         # counters + event (before jitter: the action is already authorized)
         self._grants += 1
@@ -740,17 +779,21 @@ class RateLimitManager:
         pacing_wait = max(0.0, pacing_wait)
         return max(server_wait, pacing_wait), server_wait
 
-    def _grant_ready(self) -> None:
+    def _grant_ready(self, only: Optional[Tuple[str, str]] = None) -> None:
         """Grant every pacing-key head whose block has elapsed.
 
-        Priority order is preserved structurally: only the heap HEAD can be
-        granted, so a HIGH waiter submitted after a LOW one still goes first.
-        last_fire is stamped at grant time, and successors are woken.
+        ``only`` restricts the sweep to a single pacing key (the hot acquire
+        path); None sweeps all keys. Priority order is preserved
+        structurally: only the heap HEAD can be granted, so a HIGH waiter
+        submitted after a LOW one still goes first. last_fire is stamped at
+        grant time, and successors are woken.
         """
         granted_any = False
-        for key in list(self._pending):
+        for key in [only] if only is not None else list(self._pending):
             heap = self._pending.get(key)
             if not heap:
+                if only is not None:  # drop the empty-key husk (memory)
+                    self._pending.pop(key, None)
                 continue
             self._prune(key)
             while heap:

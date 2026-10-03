@@ -540,7 +540,7 @@ const store = (() => {
 const token = () => store.getItem("dash_token") || "";
 
 // shared client state
-let lastStats = null;
+let lastStats = null; let lastAccountsSig = "";
 let manifests = [];        // plugin manifests (settings schema source)
 let ws = null;
 
@@ -563,8 +563,8 @@ function fmtMMSS(s) {
   return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 }
 function credLabel(state) {
+  // runtime credential states are 'db' | 'missing' only (DB-only store)
   if (state === "db") return "DB";
-  if (state === "env") return "ENV";
   return "MISSING";
 }
 function fmtAge(ts) { return ts ? fmtDur((Date.now() - ts * 1000) / 1000) : "-"; }
@@ -618,6 +618,11 @@ function showNote(text, sectionId) {
 function clearErrors() { $("errbox").textContent = ""; }
 
 function fillSelect(sel, names, placeholder) {
+  // skip the rebuild when the names are unchanged: destroying options every
+  // second closed the user's open dropdown on each stats tick
+  const sig = placeholder + "\u0000" + names.join("\u0000");
+  if (sel.dataset.sig === sig) return;
+  sel.dataset.sig = sig;
   const previous = sel.value;
   sel.innerHTML = "";
   if (placeholder !== undefined) sel.append(new Option(placeholder, ""));
@@ -1359,7 +1364,7 @@ function taskRow(t, live) {
   if (live) {
     const td = document.createElement("td");
     td.appendChild(btn("cancel", () => post("/api/tasks/cancel", { task_id: t.id })
-      .then(loadTasks).catch(e => showErr(e, "#panel-ratelimit")), "danger"));
+      .then(loadTasks).catch(e => showErr(e, "#panel-tasks")), "danger"));
     tr.appendChild(td);
   } else {
     const dur = t.finished_at && t.submitted_at
@@ -1484,7 +1489,7 @@ function backfillLogs() {
     $("logbox").innerHTML = "";
     for (const entry of entries) logLine(entry);
     $("logsync").textContent = entries.length + " entries";
-  }).catch(e => showErr(e, "#panel-ratelimit"));
+  }).catch(e => showErr(e, "#panel-logs"));
 }
 $("log-backfill").onclick = backfillLogs;
 $("log-acct").onchange = backfillLogs;
@@ -1496,7 +1501,7 @@ function backfillAudit() {
   api("/api/audit?" + q).then((entries) => {
     $("auditbox").innerHTML = "";
     for (const entry of entries) auditLine(entry);
-  }).catch(e => showErr(e, "#panel-ratelimit"));
+  }).catch(e => showErr(e, "#panel-logs"));
 }
 $("audit-backfill").onclick = backfillAudit;
 $("audit-acct").onchange = backfillAudit;
@@ -1651,7 +1656,7 @@ $("estop").onclick = () => askConfirm("GLOBAL EMERGENCY STOP",
   () => post("/api/estop", {}).then((r) => {
     showNote("emergency stop executed — " + (r.cancelled_tasks ?? "?") + " tasks cancelled");
     loadAccountsQuiet();
-  }).catch(e => showErr(e, "#panel-cooldowns")));
+  }).catch(e => showErr(e, "#panel-advanced")));
 
 $("imp-env").onclick = () => askConfirm("Import .env credentials",
   "Copy every registered account's DISCORD_TOKEN_* .env entry into encrypted" +
@@ -1663,7 +1668,7 @@ $("imp-env").onclick = () => askConfirm("Import .env credentials",
       showNote("credentials imported: " + (report.imported || []).length +
         " imported, " + (report.skipped || []).length + " skipped, " +
         Object.keys(report.failed || {}).length + " failed");
-    }).catch(e => showErr(e, "#panel-cooldowns")));
+    }).catch(e => showErr(e, "#panel-advanced")));
 
 // The import button rides the server's credential gate: probe it once when
 // the Advanced panel first opens. 403 => NO DASHBOARD_TOKEN configured =>
@@ -1691,7 +1696,7 @@ $("shutdown").onclick = () => askConfirm("Graceful shutdown",
   "Shut the whole framework down (drain tasks, stop accounts, close DB)?",
   () => post("/api/shutdown", {}).then(() => {
     showNote("shutdown requested — the server will stop responding");
-  }).catch(e => showErr(e, "#panel-cooldowns")));
+  }).catch(e => showErr(e, "#panel-advanced")));
 
 $("savetoken").onclick = () => {
   store.setItem("dash_token", $("token").value.trim());
@@ -1703,6 +1708,9 @@ $("adv-save").onclick = () => {
   clearErrors(); location.reload();
 };
 $("adv-forget").onclick = () => {
+  // reload: keeping the page open would leave the WS authorized under the
+  // old token while every REST call 401s (split-brain auth state)
+  setTimeout(() => location.reload(), 120);
   store.removeItem("dash_token");
   $("adv-token").value = "";
   showNote("token forgotten from local storage");
@@ -1726,7 +1734,16 @@ function connectWS() {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
     try {
-      if (msg.type === "stats") { lastStats = msg; renderOverview(); renderAccountCards(); }
+      if (msg.type === "stats") {
+        // render-gating: an unchanged account list must not rebuild the
+        // DOM every second (open dropdowns closed, scroll reset, battery)
+        const sig = JSON.stringify((msg.accounts || []).map((a) =>
+          [a.name, a.status, a.enabled, a.credential]));
+        const structural = sig !== lastAccountsSig;
+        lastStats = msg;
+        renderOverview();
+        if (structural) { lastAccountsSig = sig; renderAccountCards(); }
+      }
       else if (msg.type === "log") logLine(msg);
       else if (msg.type === "audit") auditLine(msg);
       else if (msg.type === "task") { appendTaskEvent(msg); scheduleTaskRefresh(); }
@@ -1777,7 +1794,7 @@ $("token").value = token();
 $("adv-token").value = token();
 connectWS();
 // REST backfill so the overview renders even before the first WS push
-api("/api/status").then((stats) => { lastStats = stats; renderOverview(); renderAccountCards(); }).catch(e => showErr(e, "#panel-cooldowns"));
+api("/api/status").then((stats) => { lastStats = stats; renderOverview(); renderAccountCards(); }).catch(e => showErr(e));
 </script>
 </body>
 </html>

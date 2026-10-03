@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import asyncio
 
-from core.errors import FlowBlocked
+from core.errors import CredentialsError, FlowBlocked, SchedulerError, flow_block_reason
 from core.event_bus import Event, MessageReceived
 from core.plugin_base import PluginBase, PluginContext
 from core.priority import Priority
@@ -39,15 +39,6 @@ from core.settings_manager import Setting
 from .textutils import DEFAULT_PREFIX, build_soulcopy_chunks
 
 
-def flow_block_reason(exc: BaseException) -> str:
-    """Human-readable reason for a flow abort (pure -> unit-testable).
-
-    FlowBlocked (and subclasses) carry a curated ``reason``; anything else is
-    rendered generically as ``"<TypeName>: <message>"``.
-    """
-    if isinstance(exc, FlowBlocked):
-        return exc.reason
-    return f"{type(exc).__name__}: {exc}"
 
 
 class SoulcopyPlugin(PluginBase):
@@ -91,13 +82,10 @@ class SoulcopyPlugin(PluginBase):
             )
             return
         if self._in_flight:
-            # K16 (S4-TC1): dispatch is per-event, so a second trigger while
-            # a copy flow runs would interleave two flows over the same DM
-            # pages (both collect_messages subscribers match) and double-send
-            # chunks. Skip — the running flow owns the account until done.
-            ctx.logger.warning(
-                "copy flow already running for %s — trigger skipped",
-                ctx.account)
+            # K16: overlapping flows cross-collect each other's pages (each
+            # subscription matches BOTH exports) — drop the re-trigger
+            ctx.logger.info(
+                "copy flow already running on %s — trigger ignored", ctx.account)
             return
         self._in_flight = True
         try:
@@ -107,6 +95,11 @@ class SoulcopyPlugin(PluginBase):
             # — no partial chunks, no re-raise (the dispatcher would only see
             # a crash; the flow itself is simply over). See module docstring.
             ctx.logger.warning("flow aborted for %s: %s", ctx.account, flow_block_reason(exc))
+        except (ValueError, CredentialsError, SchedulerError) as exc:
+            # same clean-abort contract for the non-FlowBlocked failures the
+            # flow can actually hit: bad config (prefix > budget), missing
+            # MUDAE_BOT_ID, cancelled/timed-out sends during a stop/estop
+            ctx.logger.warning("flow aborted for %s: %s", ctx.account, exc)
         finally:
             self._in_flight = False  # release the K16 single-flow latch
 

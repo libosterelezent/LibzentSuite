@@ -85,6 +85,21 @@ class CooldownRepository(BaseRepository):
                 (account, plugin, cooldown_key))
             return cur.rowcount > 0
 
+    async def clear_expired_for(self, account: str, plugin: str,
+                                cooldown_key: str, now: float) -> bool:
+        """Delete one cooldown ONLY when still expired at ``now``.
+
+        A competing process may have re-upserted a longer expiry since the
+        caller's memory copy went stale — an unconditional delete would
+        destroy that extension.
+        """
+        async with self._tx("lazy clear cooldown") as conn:
+            cur = await conn.execute(
+                "DELETE FROM cooldowns WHERE account=? AND plugin=? "
+                "AND cooldown_key=? AND expires_at<=?",
+                (account, plugin, cooldown_key, now))
+            return cur.rowcount > 0
+
     async def clear_expired(self, now: Optional[float] = None) -> int:
         """Delete every expired row; returns how many (boot cleanup)."""
         now = time.time() if now is None else now

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -276,11 +277,12 @@ class SimWorld:
                             if existing.emoji == emoji:
                                 # rebuild, never mutate: the frozen DTO may
                                 # already sit in a plugin's DiscordMessage
+                                # (replace keeps id/me, unlike a fresh build)
+                                replacement = dataclasses.replace(
+                                    existing, count=existing.count + 1)
                                 message.reactions = (
                                     message.reactions[:index]
-                                    + (DiscordReaction(
-                                        emoji=existing.emoji, name=existing.name,
-                                        count=existing.count + 1),)
+                                    + (replacement,)
                                     + message.reactions[index + 1:])
                                 break
                         else:
@@ -301,13 +303,24 @@ class SimWorld:
             for message in messages:
                 if message.id == message_id:
                     message.content = content
-                    for client in list(self.subscribers):
+                    dto = self._to_dto(message)  # frozen DTO boundary: live
+                    for client in list(self.subscribers):  # adapters push
                         # self-filter: live adapters never echo your own
                         # edits/deletes back as events (fidelity parity)
                         if client.user_id != message.author_id and client.on_message_edit is not None:
-                            client.on_message_edit(message)
+                            client.on_message_edit(dto)
                     return message
         raise KeyError(f"unknown message {message_id}")
+
+    def _to_dto(self, message: "WorldMessage"):
+        """WorldMessage -> frozen adapters.base DTO (edit-event parity)."""
+        from adapters.base import DiscordMessage
+
+        return DiscordMessage(
+            id=message.id, channel_id=message.channel_id,
+            author_id=message.author_id, content=message.content,
+            dm=message.channel_id in self.dm_channels,
+        )
 
     def delete_message(self, message_id: int) -> WorldMessage:
         """Remove a message and push a delete event (ids only, like live)."""
