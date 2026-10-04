@@ -1,65 +1,250 @@
 # SlaughterMudae
 
-Multi-account Discord automation framework built to the architecture in
-`TODO + Ideas.md`: modular plugins that request services from a central core,
-first-class accounts with a persistent/runtime split, capability profiles,
-a four-level rate-policy system, a centralized task pipeline, SQLite
-persistence with repositories + migrations, and two fully parity'd management
-surfaces (CLI + browser dashboard) over ONE Core API.
+A multi-account Discord automation framework designed around one principle:
+**your accounts should behave like well-paced humans, not bots.**
+
+Built for Mudae farming with any number of accounts that take turns rolling,
+share a pacing clock so they look like one user, back off instantly when
+Discord says so, and never make an unnecessary API call — all managed from
+a local dashboard.
 
 > ⚠️ Selfbot usage violates Discord's Terms of Service and can get accounts
-> suspended. The 1.5s/action hard floor, human-like jitter ranges and the
-> always-on server-limit handling MITIGATE risk — they do not authorize it.
-> Keep policies conservative (defaults: 2.0s + 0.0–0.5s jitter) and never add
-> accounts you cannot afford to lose.
+> suspended. The safety systems (1.5s/action hard floor, human-like jitter,
+> fleet-wide serialization, always-on server-limit handling) **mitigate**
+> risk — they do not authorize anything. Keep policies conservative and
+> only use accounts you can afford to lose.
 
-## Layout (spec §14)
+---
+
+## Contents
+
+1. [What it does](#what-it-does)
+2. [Install](#install)
+3. [Quick start](#quick-start)
+4. [The dashboard](#the-dashboard)
+5. [Setting up accounts](#setting-up-accounts)
+6. [Rolling with multiple accounts](#rolling-with-multiple-accounts)
+7. [Everyday commands](#everyday-commands)
+8. [Safety model](#safety-model)
+9. [Troubleshooting](#troubleshooting)
+10. [Reference](#reference)
+
+---
+
+## What it does
+
+- **Roll automation** (`$wa`, `$wg`, `$ha`, …) — continuous rolling with
+  cooldown detection, `$us` userstack when rolls run low, `$ru` on key limits
+- **Turn-taking across accounts** — when one account hits its roulette
+  limit, the next one automatically takes over; cooldowns persist across
+  restarts
+- **Anti-detection pacing** — three composing rate layers make N accounts
+  emit the cadence of ONE careful user
+- **Soulmate export** (`soulcopy` plugin) — dump your soulmate list as
+  `$soulcopy`-ready chunks
+- **Everything from one dashboard** — accounts, tokens (encrypted),
+  plugins, rate policies, live logs, audit trail, simulation
+- **Fully offline-testable** — a complete Discord simulator runs the whole
+  stack with zero network
+
+## Install
+
+```bash
+git clone <this repo> && cd SlaughterMudae
+pip install -r requirements.txt       # aiosqlite + cryptography + discord.py-self
+cp .env.example .env                  # then edit it (see below)
+chmod 600 .env
+```
+
+`.env` needs:
+
+```ini
+MUDAE_BOT_ID=432610292342587392       # Mudae's public bot id
+OWNER_USER_IDS=123456789012345678     # YOUR Discord user id (commands are owner-only)
+DASHBOARD_TOKEN=pick-a-long-random-string
+```
+
+Account tokens are **not** in `.env` — they're stored encrypted in the
+database (see [Setting up accounts](#setting-up-accounts)).
+
+## Quick start
+
+```bash
+# 30-second offline tour — no Discord account needed
+python3 main.py --sim-list              # list scenarios
+python3 main.py --sim soulcopy_basic    # full pipeline over the simulator
+
+# go live
+python3 main.py --dashboard --headless --start-all
+# → dashboard at http://127.0.0.1:8070/?token=<your DASHBOARD_TOKEN>
+```
+
+Or without the dashboard:
+
+```bash
+python3 main.py                        # interactive REPL
+python3 main.py accounts list          # one-shot command mode
+```
+
+## The dashboard
+
+`http://127.0.0.1:8070` (requires `DASHBOARD_TOKEN`). One page per concern:
+
+| Page | What you do there |
+|---|---|
+| **Overview** | live fleet status, pressure, uptime, latency |
+| **Accounts** | add/remove, start/stop, store tokens, sync groups |
+| **Plugins** | enable/disable per account, change settings |
+| **Profiles** | bundle plugins into named capability sets |
+| **Rate Limits** | pacing policies, the sequential lane, effective rates |
+| **Tasks** | the outbound queue, history, wait times |
+| **Logs / Audit** | live log stream + every Discord interaction |
+| **Simulation** | run offline scenarios in-process |
+
+Everything the dashboard does, the CLI also does (`python3 main.py …`) and
+vice versa — same API underneath, so pick whichever you like.
+
+Debugging a live issue? Add `--debug`: DEBUG-level logs, Discord gateway
+lines (reconnect/close codes), DB worker timings, scheduler pressure.
+
+## Setting up accounts
+
+1. **Add the account** — dashboard → Accounts → Add (or
+   `python3 main.py accounts add myaccount --sync-group roll`)
+2. **Store its token** — Accounts → credential (or
+   `python3 main.py accounts credential myaccount <token>`). The token is
+   Fernet-encrypted at rest; the key lives in `state/credentials.key`
+   (back that file up — losing it means re-entering tokens).
+3. **Start it** — the ▶ button (or `accounts start myaccount`)
+
+Put every rolling account in the same **sync group** — that's what makes
+them share a pacing clock.
+
+## Rolling with multiple accounts
+
+This is the core pattern. Two (or five, or ten) accounts take turns
+rolling; whoever isn't cooldown-blocked rolls, automatically.
+
+**Setup once:**
+```bash
+python3 main.py accounts add alpha --sync-group roll
+python3 main.py accounts add beta  --sync-group roll
+# store tokens for both, start both (dashboard or CLI)
+```
+
+**Start rolling:** type `roll` (the trigger word) in a channel your
+accounts can see, from the owner account. Each account that sees it starts
+its rolling loop. Type `rollstop` to stop.
+
+**What happens:**
+
+```
+alpha: $wa ─┐
+beta:  $wa ─┤   interleaved — spaced by the SHARED group clock
+alpha: $wa ─┤   (Discord sees one user's cadence, not two)
+beta:  $wa ─┘
+...
+alpha hits "roulette is limited to **60** min"
+        └─► alpha parks (cooldown persisted, survives restarts)
+            beta keeps rolling — and now gets the FULL pacing interval
+...
+beta hits its limit ──► parks
+alpha's cooldown expired ──► already rolling again
+```
+
+Nobody hands off a shift token — each account's limit is its own, the
+shared clock keeps the combined rate constant, and the rotation just
+happens. Add a third account to the group tomorrow and it joins with zero
+extra config.
+
+## Everyday commands
+
+From your owner account in Discord (mention the bot account as prefix):
+
+```
+@account status            @account plugins alpha roll off
+@account estop             @account help
+```
+
+From the shell:
+
+```bash
+python3 main.py accounts list|start|stop|remove
+python3 main.py plugins list
+python3 main.py ratelimit effective --account alpha
+python3 main.py estop                  # fleet-wide halt
+python3 main.py --sim pacing_respected # offline sanity check
+python3 main.py --bench                # performance benchmarks
+```
+
+## Safety model
+
+Three pacing layers compose on every outbound action — the strictest wins:
+
+| Layer | What it governs |
+|---|---|
+| **Sequential send lane** | one action every 1.5s across the ENTIRE fleet |
+| **Sync-group clock** | accounts in one group serialize against each other |
+| **Per-account pacing** | each account's own minimum interval + jitter (default 2.0s + 0.1–0.5s random) |
+
+Plus: a hard 1.5s floor nothing can go below, server 429s always earn
+paced retries, cooldowns Mudae reports are persisted with absolute expiry,
+DM channels resolve once and are cached forever, and the framework itself
+makes zero self-initiated API calls — every call is a plugin action through
+the pipeline above.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `missing_credential` | store the token (Accounts → credential) |
+| `invalid_credential` | token wrong/revoked — re-enter it |
+| Account keeps reconnecting | young accounts get culled by Discord; see `--debug` close codes |
+| Dashboard unreachable | is `DASHBOARD_TOKEN` set? Port free? |
+| "cannot boot" | unwritable `--db` path or malformed config — the message says which |
+| Boot warns about permissions | `chmod 600 state/credentials.key .env` |
+| Key/DB mismatch warning | `state/credentials.key` doesn't match the stored tokens — restore the key or re-enter tokens |
+
+---
+---
+
+# Reference
+
+*Everything below is the detailed technical reference. Nothing above will
+change your mental model; everything below is for working ON the framework.*
+
+## Layout
 
 ```
 core/                  framework managers + shared contracts
   api.py               ControlAPI — the ONE facade both interfaces call
   bootstrap.py         composition root (the boot flow of main.py)
-  account_manager/     Account (first-class), lifecycle, send hook, cache
+  account_manager/     Account (first-class), lifecycle, send hook, cache,
+                       lifecycle governor + waiter registry
   plugin_manager/      discovery, per-account instances, event dispatch
   plugin_base.py       the plugin contract (PluginBase/Context/Services)
   profile_manager/     capability profiles (plugin bundles per account)
   settings_manager.py  ONE settings schema consumed by CLI + GUI alike
-  rate_limit_manager/  policies (global/account/plugin/pair), pacing, 429s
-  task_scheduler/      queue + priority + cancel + retries + timeouts
-  event_bus.py         typed pub/sub with handler isolation
+  rate_limit_manager/  policies (global/account/plugin/pair), pacing, 429s,
+                       effective-config cache, group clocks
+  task_scheduler/      queue + priority + cancel + retries + timeouts,
+                       pressure observability
+  event_bus.py         typed pub/sub: coalesced bounded dispatch
   logging_service.py   structured logging (one service for everything)
   audit.py             interaction audit trail (waits/jitter per send)
-  credentials.py       tokens/ids ONLY in .env
+  credentials.py       ids in .env; credential_service.py — DB-encrypted tokens
   config.py            config dir loading
-database/              SQLite: models, ordered migrations, repositories
-adapters/              Discord boundary: discord/ (live) + simulator/ (offline)
+database/              SQLite: models, ordered migrations, repositories,
+                       boundary worker telemetry (telemetry.py)
+adapters/              Discord boundary: discord/ (live, lazy import) +
+                       simulator/ (complete offline world)
 interfaces/            cli/ (REPL + one-shot) + dashboard/ (SPA + REST + WS)
-plugins/               soulcopy (migrated) + roll (reference plugin)
-tests/unit|integration|simulation/   992-test offline suite
+plugins/               roll (roulette automation) + soulcopy (export)
+benchmark/             the benchmark subsystem (scenarios, profiling modes)
+tests/unit|integration|simulation|stress   1191-test offline suite
 config/                global settings, rate policies, account files
 main.py                entrypoint
 ```
-
-## Quickstart
-
-```bash
-cp .env.example .env        # fill IDs + OWNER_USER_IDS (chmod 600 .env)
-python3 main.py --sim-list             # available offline scenarios
-python3 main.py --sim soulcopy_basic   # full pipeline over the simulator
-python3 main.py                         # interactive REPL (live accounts)
-python3 main.py accounts list           # one-shot command mode
-python3 main.py --start-all --dashboard # live accounts + dashboard :8070
-bash scripts/run_tests.sh               # the whole 992-test suite (venv-aware)
-```
-
-The dashboard serves a sidebar SPA (Overview, Accounts, Plugins, Profiles,
-Rate Limits, Tasks, Logs, Simulation, Advanced) on `http://127.0.0.1:8070`
-with live WebSocket push; set `DASHBOARD_TOKEN` in `.env` to require auth.
-
-Dependencies: Python ≥ 3.10 + `aiosqlite` + `cryptography` (see
-`requirements.txt`). Live mode additionally needs the user-account client
-fork `discord.py-self` (`pip install discord.py-self`), imported lazily —
-simulations/tests never require it.
 
 ## Architecture: who calls what
 
@@ -92,13 +277,12 @@ Events ────────────►│ Event routing       │
                     └──────────┬──────────┘
                                ▼
                          API functions
+```
 
-The core principle: **SlaughterMudae controls the flow; plugins control API
-usage; the RateLimiter controls when those calls may execute.** The
-framework's complete client-touch inventory is audited in the
-`core/account_manager` module docstring — every entry is demand-driven by a
-plugin task (the single deliberate exception, the opt-in typing indicator,
-ships disabled). Nothing prefetches; nothing fetches "just in case".
+**SlaughterMudae controls the flow; plugins control API usage; the
+RateLimiter controls when those calls may execute.** The framework's
+complete client-touch inventory is audited in the `core/account_manager`
+module docstring — every entry is demand-driven by a plugin task.
 
 ## The send pipeline
 
@@ -112,149 +296,104 @@ Plugin -> PluginServices.send_message()
         -> audit + history + events                  [exactly-once per task]
 ```
 
-On top of the per-account pacing sits the **sequential send lane**
-(`core/rate_limit_manager/lane.py`, FarmLite concept made robust): when
-enabled, every outbound action from EVERY account is admitted strictly one
-at a time, spaced by `prefixrate` (0 = pause the lane, everything holds).
-Server-wide serialization + per-account pacing + the 1.5s floor compose —
-`ratelimit lane` (CLI) or the Rate Limits page (dashboard) control it, and
-the config ships it on by default (`"lane": {"enabled": true,
-"prefixrate": 1.5}` in `config/rate_limits.json`).
-
 ### Rate scopes (three composing layers)
 
 | Scope | Key | Governs |
 |---|---|---|
-| **per-task** | `(account, action)` | consecutive API calls (scheduler tasks) of ONE account — a task can never fire back-to-back |
-| **per-account/group** | `(group:<sync_group>, action)` | accounts sharing a `sync_group` serialize on ONE shared clock: `A → [limit] → B → [limit] → A` |
-| **server-wide lane** | fleet | every outbound action from every account, one at a time, spaced by `prefixrate` |
+| **per-task** | `(account, action)` | consecutive API calls of ONE account |
+| **per-account/group** | `(group:<sync_group>, action)` | group members serialize on ONE shared clock: `A → [limit] → B → [limit] → A` |
+| **server-wide lane** | fleet | every outbound action, one at a time, spaced by `prefixrate` |
 
-All three compose (the strictest wait wins), then jitter is applied after
-the grant. Groups are registered automatically from each account's
-`sync_group` (pure metadata — no API involved).
+All three compose (strictest wins), then jitter applies after the grant.
+Server 429s always earn at least one paced retry; `FlowBlocked` aborts only
+that account's flow with a human reason.
 
-Retries cover transient failures and server 429s (`ServerRateLimit` always
-earns at least one retry, paced by the limiter cooldown — the framework
-always respects server-provided rate limits). `FlowBlocked` aborts only THAT
-account's flow with a human reason.
+## Lifecycle hardening
 
-**API-call hygiene (anti-flag).** The framework outside plugins makes the
-minimum possible Discord REST calls: connections are gateway-only, sends are
-plugin-initiated, and every resolved entity is cached per account in SQLite
-(`api_cache` — migration 002) so a DM channel or user costs **one call for
-the account's lifetime, not one per boot**. DM sends go through the resolved
-channel id (never re-fetching the user mid-send), stale cache rows are
-dropped when Discord reports a target gone, and an optional typing indicator
-(account setting `typing_probability`, default 0 = zero extra calls) mimics
-human composing when enabled.
+Every account runtime carries a **generation counter** bumped on each
+ownership change (start/stop/remove/estop). Async lifecycle paths capture
+it before an await and validate after — a stale start can never resurrect
+a stopped account, an old stop can never clobber a newer start, a stale
+supervisor stands down by identity. The **lifecycle governor** rate-limits
+start/stop thrashing (per-account cooldowns + global buckets; estop and
+shutdown bypass entirely). `start_all` runs as a bounded 4-lane scheduler
+with admission pacing and single-flight join. IDENTIFYs are paced by a
+process-wide gate with depth-projected fast-fail.
 
 ## Rich event model
 
 `adapters/model.py` converts every inbound Discord event ONCE into a frozen
-project-owned DTO — content, embeds (fields/author/footer/media),
-components (buttons/selects with `custom_id`, nested in action rows),
-attachments, reactions, reference ids, author/channel/guild, timestamps —
-plus a documented runtime-only `raw` escape hatch (`message.unwrap()`) for
-advanced plugins. Typed bus events (`MessageReceived`, `MessageEdited`,
-`MessageDeleted`, `ReactionAdded`) are additive: existing plugins keep the
-flat field surface, future plugins (snipe/kakerareact/kakeraloot/soulmate
-farm) read rich data without re-fetching or core rewrites. Actions are
-capabilities on `PluginServices` (`send_message`, `send_dm`,
-`add_reaction`, `click_button`) flowing through the paced pipeline — event
-models carry data only, never rate limiting. Plugins also get framework-
-managed cooldowns (`cooldown_set/remaining/active/clear/list`) and
-persistent per-plugin state (`state_get/set/delete`) through the same
-services object.
+project-owned DTO — embeds, components (buttons/selects), attachments,
+reactions, references — plus a runtime-only `raw` escape hatch
+(`message.unwrap()`). Typed bus events (`MessageReceived`, `MessageEdited`,
+`MessageDeleted`, `ReactionAdded`) are additive. Actions are capabilities
+on `PluginServices` (`send_message`, `send_dm`, `add_reaction`,
+`click_button`) through the paced pipeline; plugins also get
+framework-managed cooldowns and persistent per-plugin state.
 
-## Managing from Discord (mention prefix)
+Plugins subscribe through a **per-account waiter registry**: a waiter for
+account A structurally never runs for B's events.
 
-Owners mention a running account as the command prefix — `@account status`,
-`@account plugins alpha soulcopy off`, `@account estop` — in any channel the
-account can see. Replies go through the SAME paced pipeline (lane → pacing →
-jitter → audit), non-owners are ignored completely, commands are
-allowlisted, and `REMOTE_CONTROL=0` in `.env` disables the bridge entirely.
-
-## Rate policies (spec §5)
+## Rate policies
 
 Four levels — `global`, `account`, `plugin`, `account_plugin` — each
-`{interval: seconds, jitter: [min, max]}`. The effective pacing for an
-(account, plugin, action) is the MAX across every applicable level, so no
-level can ever make traffic FASTER than a stricter level demands. Policies
-below **1.5s/action** are rejected everywhere (`UnsafePolicyError`), the
-floor can only be raised, and intervals/floor are capped at 86400s (1
-day). `ratelimit warnings` reviews the configuration
-for aggressive intervals / missing or narrow jitter.
+`{interval: seconds, jitter: [min, max]}`. Effective pacing is the MAX
+across applicable levels. Policies below **1.5s/action** are rejected
+(`UnsafePolicyError`); the floor only rises. The composed result is
+memoized per `(action, account, plugin)` under a config generation counter
+(tuple-keyed, capped, invalidated at every mutation).
 
-## Credentials & IDs
+## Credentials & security
 
-Account tokens are stored **encrypted (Fernet) in the database**; the
-master key lives outside it (`state/credentials.key` 0600, or `SM_MASTER_KEY`
-in the process environment). Register the account, then store its token via
-the dashboard (Accounts → credential) or `python3 main.py accounts credential
-<name> <token>`. `.env` (gitignored, chmod 600) holds `MUDAE_BOT_ID`,
-`OWNER_USER_IDS`, optional `DASHBOARD_TOKEN` and optional `REMOTE_CONTROL` —
-legacy `DISCORD_TOKEN_*`
-entries are read only by the one-shot `credentials import-env` migration.
+Tokens: Fernet-encrypted in the DB; master key outside it
+(`state/credentials.key` 0600 or `SM_MASTER_KEY`). Boot audits permissions
+on db/key/.env, tightens WAL sidecars, and runs a key/DB decrypt canary.
+Dashboard auth is constant-time token compare + loopback-only origin
+checks; WS frames and bodies are size-capped; diagnostic artifacts are
+0600 and value-free (audited — no token material can reach benchmark/
+profile/tracemalloc output).
 
-## Simulation system (spec §9)
+## Simulation & benchmarks
 
-`adapters/simulator/` is a complete in-memory Discord world (users, channels,
-DM pairs, history, a scripted responder, one-shot 429s, channel deletion).
-`SimulationRunner` boots a FULL ephemeral framework per run and produces a
-timed execution log, the audit trail and pass/fail checks:
-
-```
-0000.089s INFO    scheduler scheduler: queued task 1 (soulcopy:message)
-0003.201s INFO    scheduler scheduler: queued task 2 (soulcopy:message)
-```
-
-Scenarios: `soulcopy_basic`, `soulcopy_multichunk`, `pacing_respected`,
+`adapters/simulator/` is a complete in-memory Discord world; scenarios:
+`soulcopy_basic`, `soulcopy_multichunk`, `pacing_respected`,
 `server_429_respected`, `channel_gone_aborts`, `control_mention`.
+
+`benchmark/` (see `benchmark/README.md`): scenarios incl. cold boot,
+N-account start/stop, restart/delete churn, message bursts; loop-lag
+histograms; leak verdicts from trend analysis; `--repeat` medians,
+`--profile` (main-thread cProfile), `--tracemalloc` (allocation sites),
+`--capture-spikes` (diagnostic snapshots); baselines + tolerance-aware
+compare; DB worker telemetry.
 
 ## Management surfaces
 
 - CLI: `accounts|credentials|plugins|profiles|ratelimit|cooldowns|tasks|simulation|logs|audit|estop|status|help|quit`
-  subcommands, interactive or one-shot; identical results everywhere.
-- Dashboard API: JSON REST routes mapping 1:1 to ControlAPI methods plus a
-  WebSocket pushing stats/log/audit/task events live.
+- Dashboard REST: 1:1 with ControlAPI; WebSocket pushes stats/log/audit/task
+  events live
+- Mention prefix (owner-only, allowlisted, self-throttled, replies paced)
 
-Both interfaces manipulate the exact same accounts, plugins, profiles,
-settings, tasks, rate policies, logs and simulation system — parity by
-construction, not by discipline.
+All three hit the same ControlAPI — parity by construction.
 
 ## Documentation
 
-- `knowledgebase/` — the deep knowledge base. **Local-only and gitignored**:
-  the generated parts (`read_only/` symbol snapshot, `generated/`
-  machine-readable indexes — `symbol_index.json`, coverage, drift baseline)
-  are (re)created by `python3 scripts/gen_knowledgebase.py [--check]`; the
-  handwritten guides (architecture, data flow, runtime lifecycle,
-  per-subsystem references, the formal plugin API, configuration, CLI,
-  dashboard, testing, security, glossary, changelog) are maintained
-  separately and are NOT shipped in this repository — a fresh clone has no
-  `knowledgebase/` until you generate one.
-- `docs/` — the Sphinx site (API reference from the real docstrings +
-  architecture/operations digests): `pip install --user sphinx
-  myst-parser` then `python3 -m sphinx -W -b html docs docs/_build/html`.
-- Perf harnesses: `scripts/bench_db.py` (event-loop stall: inline vs queued
-  SQLite writes) and `scripts/bench_hot.py` (hot-path micro-benchmarks:
-  bus fanout, rate acquire, persist queue, dashboard serialization, rich
-  model conversion).
+- `knowledgebase/` — deep knowledge base. **Local-only and gitignored**;
+  generate with `python3 scripts/gen_knowledgebase.py [--check]`. The
+  handwritten guides (architecture, per-subsystem references, plugin API,
+  configuration, security, changelog) live on disk and are not shipped.
+- `docs/` — Sphinx site: `pip install --user sphinx myst-parser` then
+  `python3 -m sphinx -W -b html docs docs/_build/html`
+- `INTEGRATION.md` — inter-module contracts
+- `HARDENING_README.md` — the hardening history (phases 1–2 + round-2)
+- `scripts/bench_db.py`, `scripts/bench_hot.py` — perf harnesses
+- `benchmark/README.md` — the benchmark subsystem
 
-Inter-module contracts are documented in `INTEGRATION.md`.
+## Anti-flag hardening summary
 
-## Anti-flag hardening (audit round)
-
-- **One REST call per entity, ever**: DM channels + users resolve through
-  memory cache → the per-account `api_cache` table (SQLite, migration 002) →
-  a single client call, recorded in both. Restarts never re-fetch.
-- **No double-resolution**: DM sends reuse the resolved channel id instead
-  of re-running fetch_user/create_dm inside `send_dm`.
-- **Stale-cache healing**: a TargetGone on a DM send invalidates the memory
-  + DB rows so the next resolution re-opens cleanly.
-- **Optional typing indicator**: `typing_probability` account setting
-  (default 0 — zero extra API calls); fires `trigger_typing` before guild
-  sends when enabled, best-effort only.
-- **Mention-prefix management** (`core/remote_control.py`): owner-only,
-  allowlisted, self-throttled, replies paced by the full pipeline.
-
+One REST call per entity ever (DM/user cache in SQLite, migration 002);
+no double-resolution on DM sends; stale-cache healing on TargetGone;
+optional typing indicator (default off); mention-prefix management
+owner-only and self-throttled; N-account IDENTIFY pacing with per-IP
+budget; per-account 429 cooldowns with fleet-wide global-limit handling;
+reconnect backoff with jitter and flap-escalation; event-loop-friendly
+everything (queued persistence, bounded dispatch slices).

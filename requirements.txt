@@ -1,22 +1,14 @@
 # SlaughterMudae — Python dependencies
-# ---------------------------------------------------------------------------
-# Core framework dependencies (runtime): the async database layer and the
-# credential encryption service. Everything else remains stdlib-only.
 #
-#   python3 -m unittest discover -s tests -t .     # full suite
-# ---------------------------------------------------------------------------
-
-# Async SQLite access layer: one background-thread connection keeps every
-# database operation OFF the event loop (see database/connection.py).
+# Install:      pip install -r requirements.txt
+# Run tests:    python3 -m unittest discover -s tests -t .
+#
+# The framework runs multi-account Discord automation with conservative
+# pacing (1.5s/action floor, human-like jitter, fleet-wide serialization)
+# and full server-limit respect. discord.py-self is the user-account
+# client library this project is built around — it is imported lazily
+# (adapters/discord/client.py), so simulations and tests work without a
+# network, but live accounts need it installed.
 aiosqlite>=0.20
-
-# Credential encryption at rest (Fernet — AES128-CBC + HMAC-SHA256).
-# Never homemade crypto; keys live outside the database.
 cryptography>=42
-
-# --- OPTIONAL: live Discord mode only ---------------------------------------
-# Live selfbot access needs a user-account-capable client fork. It is
-# imported LAZILY inside adapters/discord/client.py (never during
-# tests/simulations), so install ONLY if you run live accounts:
-#
-#      pip install discord.py-self
+discord.py-self>=2.1.0
