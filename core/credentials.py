@@ -156,6 +156,23 @@ class Credentials:
         return self._values.get("DASHBOARD_TOKEN") or None
 
     @property
+    def self_command_prefix(self) -> str:
+        """Prefix that lets the framework account command ITSELF.
+
+        SELF_COMMAND_PREFIX in .env: a string (e.g. ``sm!``) or ``@me``
+        (the account's own mention). When set, each live client runs the
+        library's ext.commands layer in self_bot mode — messages typed by
+        the account itself (from the user's Discord client) that match
+        the prefix become framework commands (roll/rollstop/slcopy
+        pass-throughs to the plugin trigger pipeline). Empty/unset keeps
+        today's behavior exactly (no command layer).
+
+        Requirement: the account's own Discord user id must also be in
+        OWNER_USER_IDS for the triggers to pass the owner check.
+        """
+        return (self._values.get("SELF_COMMAND_PREFIX") or "").strip()
+
+    @property
     def remote_control_enabled(self) -> bool:
         """Mention-prefix management from Discord (REMOTE_CONTROL=0 opts out)."""
         raw = (self._values.get("REMOTE_CONTROL") or "1").strip().lower()

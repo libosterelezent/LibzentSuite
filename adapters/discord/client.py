@@ -152,6 +152,7 @@ class RealDiscordClient:
         token: str,
         logger: Optional[logging.Logger] = None,
         identify_gate: Optional["IdentifyGate"] = None,
+        command_prefix: Optional[str] = None,
     ) -> None:
         self._token = token
         self._discord: Any = None          # the discord module (set in connect)
@@ -162,6 +163,11 @@ class RealDiscordClient:
         self._zombie_tasks: set = set()  # un-reaped run tasks (strong refs)
         self._run_task: Optional["asyncio.Task"] = None  # strong ref (see connect)
         self._logger = logger or LOG
+        #: self-command prefix ("" = disabled; "@me" = when_mentioned).
+        #: When set, the adapter builds an ext.commands Bot in self_bot
+        #: mode: the account's OWN messages become invocable commands,
+        #: other users' messages are skipped by the library's check.
+        self._command_prefix = command_prefix or ""
         self._identify_gate = identify_gate  # shared per process (factory-owned)
         #: best-effort account label for domain error messages (set by factory)
         self._account = ""
@@ -236,16 +242,43 @@ class RealDiscordClient:
         self._discord = discord
         # discord.py-self 2.x removed Intents (user accounts don't use them);
         # construct plain and fall back cleanly across fork variants
-        try:
-            self._client = discord.Client()
-        except TypeError:
-            self._client = discord.Client(intents=None)
+        # SELF-COMMAND layer: with a prefix configured, construct the
+        # ext.commands Bot (self_bot=True) instead of a plain Client —
+        # own messages become invocable commands, other users' are skipped
+        # by the library's own check. With no prefix, behavior is exactly
+        # today's (plain Client, no command machinery).
+        if self._command_prefix:
+            from discord.ext import commands as _ext_commands
+            prefix = self._command_prefix
+            if prefix == "@me":
+                prefix = _ext_commands.when_mentioned
+            try:
+                self._client = _ext_commands.Bot(
+                    command_prefix=prefix, self_bot=True,
+                    help_command=None,
+                )
+            except TypeError:
+                self._client = discord.Client()
+        else:
+            try:
+                self._client = discord.Client()
+            except TypeError:
+                self._client = discord.Client(intents=None)
         if self._identify_gate is not None:
             # K8: shadowing the instance method is the library-sanctioned
             # extension point (see Client.before_identify_hook) — every
             # IDENTIFY this client sends goes through the shared per-IP gate.
             self._client.before_identify_hook = self._identify_gate.acquire
         _install_headers_fetch_cache(discord)
+        # SELF-COMMAND layer: when a prefix is configured, use the
+        # library's ext.commands Bot in self_bot mode — the account's OWN
+        # messages become invocable commands (typed by the user logged in
+        # as this account), while every other user's messages are skipped
+        # by the library's own _skip_check. The plugin EVENT path keeps
+        # the self-echo filter below: a command never becomes a plugin
+        # event, and a plugin's own output never re-triggers anything.
+        if self._command_prefix:
+            self._install_command_layer(discord)
         self._ready = asyncio.Event()
         self._startup_error = None
 
@@ -290,6 +323,20 @@ class RealDiscordClient:
 
         @self._client.event
         async def on_message(message: Any) -> None:
+            # SELF-COMMAND path: when the command layer is active, route
+            # every message through process_commands — with self_bot=True,
+            # the library's _skip_check means ONLY the account's OWN
+            # messages reach command dispatch (other users' are silently
+            # dropped by get_context, so random users can't fire commands).
+            # This runs BEFORE the self-echo filter: commands and events
+            # are SEPARATE paths (a command never becomes a plugin event,
+            # and the account's own output never re-triggers plugins).
+            if self._command_prefix:
+                try:
+                    await self._client.process_commands(message)
+                except Exception:
+                    self._logger.debug(
+                        "self-command dispatch failed", exc_info=True)
             if self.on_message is None or message.author.id == self.user_id:
                 return
             if self._message_already_seen(message.id):
@@ -427,6 +474,78 @@ class RealDiscordClient:
             # task cannot be garbage-collected mid-flight
             self._zombie_tasks.add(task)
             task.add_done_callback(self._zombie_tasks.discard)
+
+    def _install_command_layer(self, discord: Any) -> None:
+        """Register the self-command surface on the ext.commands Bot.
+
+        Commands run ONLY for the account's OWN messages (self_bot=True +
+        the library's _skip_check). Each command is a thin pass-through:
+        it re-publishes its stripped content as a synthetic MessageReceived
+        through the adapter's normal event callback, so the ROLL/STOP/SOULCOPY
+        trigger words work exactly as if an owner had typed them — same
+        plugin path, same owner check (the account's own Discord user id
+        must be in OWNER_USER_IDS in .env), same paced pipeline.
+
+        Unknown commands (anything after the prefix that isn't registered
+        below) are silently ignored — they do NOT reach the event bus.
+        """
+        from discord.ext import commands as ext_commands
+        bot = self._client
+        adapter = self
+
+        @bot.command(name="roll")
+        async def _roll(ctx):
+            adapter._publish_self_trigger(ctx, "roll")
+
+        @bot.command(name="rollstop")
+        async def _rollstop(ctx):
+            adapter._publish_self_trigger(ctx, "rollstop")
+
+        @bot.command(name="slcopy")
+        async def _slcopy(ctx):
+            adapter._publish_self_trigger(ctx, "slcopy")
+
+        @bot.event
+        async def on_command_error(ctx, error):
+            # unknown commands are NOT pass-throughs — silently drop them
+            # (a typo'd prefix must not leak content into the event bus)
+            if not isinstance(error, ext_commands.errors.CommandNotFound):
+                adapter._logger.debug(
+                    "self-command error: %s", error, exc_info=True)
+
+    def _publish_self_trigger(self, ctx: Any, trigger: str) -> None:
+        """Re-publish a self-command as a synthetic MessageReceived event.
+
+        Routes through ``self.on_message`` (the account-manager callback),
+        which publishes to the bus with the account's identity. The plugin
+        owner check then applies normally: the framework account's own
+        Discord user id must be in OWNER_USER_IDS (documented requirement).
+        """
+        if self.on_message is None:
+            return
+        try:
+            channel = ctx.channel
+            guild = getattr(channel, "guild", None)
+            guild_id = getattr(guild, "id", None) if guild else None
+            # DM = no guild on the channel (works before connect() too,
+            # where self._discord is not yet imported)
+            # synthetic DTO: the account's own id as author, the real
+            # channel, the trigger as content — indistinguishable from a
+            # real owner-typed message to every downstream consumer
+            dto = DiscordMessage(
+                id=getattr(ctx.message, "id", 0),
+                channel_id=channel.id,
+                author_id=self.user_id,
+                content=trigger,
+                dm=guild_id is None,
+                guild_id=guild_id,
+            )
+            self.on_message(dto)
+            self._logger.info(
+                "self-command %r dispatched in channel %s", trigger,
+                channel.id)
+        except Exception:
+            self._logger.exception("self-command dispatch failed")
 
     async def disconnect(self) -> None:
         """Close the underlying client; safe when never started."""
@@ -799,12 +918,15 @@ class RealClientFactory:
         credentials: Optional[Credentials] = None,
         logger: Optional[logging.Logger] = None,
         identify_interval: float = 5.0,
+        command_prefix: str = "",
     ) -> None:
         self._credentials = credentials  # kept for metadata only (mudae id, owner ids)
         self._logger = logger or LOG
         # ONE gate per process (the factory is built once in bootstrap):
         # every client this factory produces IDENTIFYs through it.
         self._identify_gate = IdentifyGate(identify_interval)
+        #: self-command prefix shared by every client (from SELF_COMMAND_PREFIX)
+        self._command_prefix = command_prefix or ""
 
     def __call__(self, name: str, token: str) -> RealDiscordClient:
         """Build a RealDiscordClient for one account.
@@ -822,7 +944,8 @@ class RealClientFactory:
         # maps slaughtermudae.adapter.<name> to source "adapter:<name>".
         logger = self._logger.getChild(name) if name else self._logger
         client = RealDiscordClient(
-            token=token, logger=logger, identify_gate=self._identify_gate)
+            token=token, logger=logger, identify_gate=self._identify_gate,
+            command_prefix=self._command_prefix)
         client.account = name  # enrich AccessDenied reasons, best effort
         return client
 

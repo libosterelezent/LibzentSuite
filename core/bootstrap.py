@@ -442,7 +442,9 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     if client_factory is None:
         from adapters.discord import RealClientFactory
 
-        client_factory = RealClientFactory(credentials)
+        client_factory = RealClientFactory(
+            credentials,
+            command_prefix=getattr(credentials, "self_command_prefix", ""))
 
     accounts = AccountManager(
         bus, ServiceLogger(logs, "accounts"), database.accounts,
