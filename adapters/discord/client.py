@@ -1167,8 +1167,11 @@ class IdentifyGate:
                  "_lock", "_last", "_depth")
 
     def __init__(self, interval: float = 5.0, *, min_interval: float = MIN_INTERVAL_S,
-                 wait_budget: float = WAIT_BUDGET_S) -> None:
+                 wait_budget: float = WAIT_BUDGET_S,
+                 max_wait: Optional[float] = None) -> None:
         self.interval = float(interval)
+        if max_wait is not None:  # upstream phase-4 alias (tests/config)
+            wait_budget = max_wait
         #: expected fleet size (settable; see class docstring)
         self.expected = 1
         self.min_interval = float(min_interval)

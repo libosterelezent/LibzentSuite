@@ -504,7 +504,7 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.start("alpha")
         runtime = h.manager.get("alpha").runtime
 
-        async def _boom(name, rt):
+        async def _boom(name, rt, gen=None):
             raise RuntimeError("kaboom")
 
         h.manager._reconnect_loop = _boom  # type: ignore[method-assign]

@@ -785,11 +785,17 @@ class TestCredentialKeyFileHardening(unittest.IsolatedAsyncioTestCase):
         svc = CredentialService(FakeCredentialsRepo(), key_path=self.key_path)
         await svc.store("alpha", "tok-1")
         self.key_path.chmod(0o644)
-        with self.assertLogs("slaughtermudae.credentials", level="WARNING") as hit:
-            svc._fernet = None                    # drop the cipher to re-read
+        # merged semantics (upstream tighten + round-3 visibility): a
+        # readable-but-loose key is TIGHTENED to 0600 on read; the warning
+        # fires only when the tightening FAILED (still loose afterwards)
+        svc._fernet = None                    # drop the cipher to re-read
+        svc._memory.clear()
+        await svc.resolve("alpha")
+        self.assertEqual(self.key_path.stat().st_mode & 0o777, 0o600)
+        with self.assertNoLogs("slaughtermudae.credentials", level="WARNING"):
+            svc._fernet = None
             svc._memory.clear()
             await svc.resolve("alpha")
-        self.assertTrue(any("loose permissions" in line for line in hit.output))
         self.key_path.chmod(0o600)
 
 
