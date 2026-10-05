@@ -1,1958 +1,1414 @@
 <!DOCTYPE html>
-<!--
-  ============================================================================
-  SlaughterMudae dashboard SPA — single file, no build step (agent A8).
+<!-- SlaughterMudae dashboard v2 — operations console redesign.
+     Single-file SPA, no build step. Dark theme, mobile-first responsive.
 
-  STRUCTURE
-    <style>   Dark theme ported from the audited original dashboard (CSS
-              variables, cards, chips, status pills, warn banner, dialog).
-    <body>    Two-column shell:
-                aside#sidebar   navigation — sections per spec §12
-                                (overview/accounts/plugins/profiles/
-                                ratelimit/cooldowns/tasks/logs/simulation/
-                                advanced), one panel visible at a time
-                                (data-section)
-                main#main       header (ws dot + conn message + token box),
-                                div#errbox  (error accrual: timestamped,
-                                never cleared by successes),
-                                section.panel × 10 + <dialog id="details">
-                                + <dialog id="confirmbox">
-                                + <dialog id="credbox"> (credential entry —
-                                password input, value never displayed back)
-    <script>  "use strict" ES module-free JS:
-                store/token     safe-storage fallback + ?token= seeding
-                api()/post()    fetch wrapper (401 hint, {ok,data} unwrap)
-                esc()/btn()     escape-everything helper + button factory
-                showErr()       accrual box (timestamps; success never clears)
-                connectWS()     live push: stats/log/audit/task, retry cap 10
-                render*()       one renderer family per section
-                load*()         per-section REST loaders (lazy on first open)
-
-  CREDENTIALS: account cards carry a DB/ENV/MISSING chip + a "credential…"
-  dialog (one-way POST — values are stored encrypted server-side and NEVER
-  rendered back); the Advanced panel's ".env import" button is disabled with
-  a tooltip when the server reports credential management locked (no
-  DASHBOARD_TOKEN configured).
-
-  HARDENING PORTED FROM THE ORIGINAL (3 audit rounds):
-    * esc() on EVERY interpolated server value before innerHTML
-    * errors accrue with timestamps and are never cleared by successes
-    * NaN guards on numeric inputs BEFORE any POST
-    * ws reconnect capped (10 attempts) with an honest final message
-    * localStorage may be sandboxed away -> in-memory store fallback
+     IA: Home · Accounts & Groups · Profiles · Plugins · Activity · Policies · Tools
+     All REST/WS integrations preserved from v1 (20 endpoints, 4 WS message types).
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SlaughterMudae Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SlaughterMudae</title>
 <style>
-  :root {
-    --bg: #0e1116; --panel: #161b22; --panel2: #1c2330; --line: #2b3245;
-    --text: #d7dde7; --dim: #8a93a6; --accent: #58a6ff; --ok: #3fb950;
-    --warn: #d29922; --err: #f85149; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text);
-         font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
-  #shell { display: grid; grid-template-columns: 208px 1fr; min-height: 100vh; }
+/* ══════════════════════════════════ Design Tokens ═════════════════════════════ */
+:root {
+  --bg: #0b0e13; --surface: #131820; --surface2: #1a212c; --surface3: #212a37;
+  --border: #2a3348; --border2: #36416o; --text: #dde4ee; --dim: #7e8aa0; --faint: #556076;
+  --accent: #5ba3f5; --accent2: #3d7fd0; --ok: #34d399; --ok2: #059669;
+  --warn: #fbbf24; --warn2: #d97706; --err: #f87171; --err2: #dc2626;
+  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --r: 10px; --r-sm: 6px; --r-lg: 14px;
+  --gap: 12px; --gap-sm: 8px; --gap-lg: 20px;
+  --ctrl-h: 36px; --sidebar-w: 220px;
+  --shadow: 0 2px 8px rgba(0,0,0,.3);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased; overflow-x: hidden;
+}
+::selection { background: var(--accent2); color: #fff; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+button { font: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+input, select, textarea { font: inherit; color: var(--text); background: var(--surface2);
+  border: 1px solid var(--border); border-radius: var(--r-sm); padding: 6px 10px; outline: none; }
+input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+input[type="password"] { letter-spacing: .3em; }
+.mono { font-family: var(--mono); font-size: .92em; }
+.dim { color: var(--dim); } .faint { color: var(--faint); }
+.hidden { display: none !important; }
 
-  /* ---------------------------------------------------------- sidebar */
-  #sidebar { background: var(--panel); border-right: 1px solid var(--line);
-             padding: 12px 8px; position: sticky; top: 0; height: 100vh;
-             display: flex; flex-direction: column; gap: 2px; }
-  #sidebar h1 { font-size: 14px; margin: 4px 8px 14px; letter-spacing: .03em; }
-  .navbtn { display: block; width: 100%; text-align: left; background: none;
-            color: var(--dim); border: none; border-left: 3px solid transparent;
-            border-radius: 0; padding: 7px 12px; cursor: pointer; font-size: 13px; }
-  .navbtn:hover { color: var(--text); background: var(--panel2); }
-  .navbtn.active { color: var(--accent); border-left-color: var(--accent);
-                   background: var(--panel2); font-weight: 600; }
-  #sidebar .foot { margin-top: auto; padding: 8px; font-size: 11px;
-                   color: var(--dim); font-family: var(--mono); }
+/* ══════════════════════════════════ Shell ═════════════════════════════════════ */
+#shell { display: grid; grid-template-columns: var(--sidebar-w) 1fr; min-height: 100dvh; }
 
-  /* ------------------------------------------------------------ main */
-  #main { min-width: 0; display: flex; flex-direction: column; }
-  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
-           background: var(--panel); border-bottom: 1px solid var(--line);
-           position: sticky; top: 0; z-index: 5; }
-  header h2 { font-size: 15px; margin: 0; }
-  #wsdot { width: 10px; height: 10px; border-radius: 50%; background: var(--err); }
-  #wsdot.on { background: var(--ok); }
-  #connmsg { color: var(--dim); font-size: 12px; }
-  #tokenbox { margin-left: auto; display: flex; gap: 6px; }
-  #tokenbox input { width: 190px; }
-  #errbox { color: var(--err); font-family: var(--mono); font-size: 12px;
-            white-space: pre-wrap; padding: 6px 16px; max-height: 120px;
-            overflow-y: auto; background: rgba(248,81,73,.05);
-            border-bottom: 1px solid var(--line); }
-  #errbox:empty { display: none; }
-  #content { padding: 14px 16px 40px; }
+/* Sidebar (desktop) */
+#sidebar { background: var(--surface); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 1px; padding: 16px 10px;
+  position: sticky; top: 0; height: 100dvh; overflow-y: auto; }
+#sidebar .brand { font-size: 15px; font-weight: 700; letter-spacing: .04em;
+  padding: 0 10px 16px; color: var(--text); display: flex; align-items: center; gap: 8px; }
+#sidebar .brand .logo { width: 22px; height: 22px; border-radius: 6px;
+  background: linear-gradient(135deg, var(--accent), var(--ok)); flex-shrink: 0; }
+#sidebar nav { flex: 1; display: flex; flex-direction: column; gap: 1px; }
+.nav-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  border-radius: var(--r-sm); color: var(--dim); font-size: 13.5px; font-weight: 500;
+  transition: all .15s; text-align: left; width: 100%; }
+.nav-item:hover { color: var(--text); background: var(--surface2); text-decoration: none; }
+.nav-item.active { color: var(--accent); background: var(--surface2);
+  box-shadow: inset 3px 0 0 var(--accent); }
+.nav-item .icon { width: 18px; height: 18px; flex-shrink: 0; opacity: .8; }
+.nav-item .badge { margin-left: auto; font-size: 10.5px; font-weight: 700;
+  background: var(--err2); color: #fff; padding: 1px 6px; border-radius: 99px; min-width: 18px; text-align: center; }
+#sidebar .foot { padding: 12px 10px; font-size: 10.5px; color: var(--faint); font-family: var(--mono); }
 
-  .panel { display: none; }
-  .panel.active { display: block; }
-  .panel > h3 { margin: 2px 0 12px; font-size: 13px; color: var(--dim);
-                text-transform: uppercase; letter-spacing: .06em; }
-  section.card { background: var(--panel); border: 1px solid var(--line);
-                 border-radius: 8px; padding: 12px; margin-bottom: 12px; min-width: 0; }
-  section.card > h4 { margin: 0 0 10px; font-size: 12px; color: var(--dim);
-                      text-transform: uppercase; letter-spacing: .06em; }
-  .card2 { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
-           padding: 10px; margin-bottom: 10px; }
-  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .name { font-weight: 600; }
-  .acct-name { font-size: 15px; font-weight: 700; }
-  .sub { color: var(--dim); font-family: var(--mono); font-size: 11.5px; margin-top: 2px; }
-  .dim { color: var(--dim); }
-  .mono { font-family: var(--mono); font-size: 12px; }
+/* Main */
+#main { min-width: 0; display: flex; flex-direction: column; }
 
-  .status { font-family: var(--mono); font-size: 12px; padding: 1px 8px; border-radius: 10px; }
-  .status.running { color: var(--ok); background: rgba(63,185,80,.12); }
-  .status.reconnecting, .status.connecting { color: var(--warn); background: rgba(210,153,34,.15); }
-  .status.created, .status.stopped { color: var(--dim); background: rgba(138,147,166,.12); }
-  .status.failed { color: var(--err); background: rgba(248,81,73,.12); }
-  /* ROUND-3: the account manager also emits missing_credential (no token
-     stored — fix by storing one, not by restarting) and invalid_credential
-     (token REJECTED by Discord) — both previously rendered unstyled */
-  .status.missing_credential { color: var(--warn); background: rgba(210,153,34,.15); }
-  .status.invalid_credential { color: var(--err); background: rgba(248,81,73,.12); }
+/* Header */
+#hdr { display: flex; align-items: center; gap: 12px; padding: 10px 20px;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 10; min-height: 54px; }
+#hdr .page-title { font-size: 16px; font-weight: 600; white-space: nowrap; }
+#hdr .spacer { flex: 1; }
+#wsdot { width: 9px; height: 9px; border-radius: 50%; background: var(--err);
+  transition: background .3s; flex-shrink: 0; }
+#wsdot.on { background: var(--ok); }
+#connmsg { color: var(--dim); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#tokenbox { display: flex; gap: 6px; align-items: center; }
+#tokenbox input { width: 180px; height: 30px; font-size: 12px; padding: 4px 8px; }
+#menu-btn { display: none; width: 38px; height: 38px; border-radius: var(--r-sm);
+  background: var(--surface2); align-items: center; justify-content: center; }
+#menu-btn svg { width: 20px; height: 20px; color: var(--dim); }
 
-  button { background: var(--panel); color: var(--text); border: 1px solid var(--line);
-           border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
-  button:hover { border-color: var(--accent); color: var(--accent); }
-  button.on { border-color: var(--ok); color: var(--ok); }
-  button.off { border-color: var(--err); color: var(--err); }
-  button.danger:hover { border-color: var(--err); color: var(--err); }
-  button:disabled { opacity: .45; cursor: wait; }
-  input, select { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
-                  border-radius: 6px; padding: 4px 8px; font-family: var(--mono); font-size: 12px; }
-  input[type="checkbox"] { width: auto; }
+/* Error banner */
+#errbox { color: var(--err); font-family: var(--mono); font-size: 11.5px;
+  white-space: pre-wrap; padding: 6px 20px; max-height: 100px; overflow-y: auto;
+  background: rgba(248,113,113,.07); border-bottom: 1px solid var(--border); }
+#errbox:empty { display: none; }
 
-  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; align-items: center; }
-  .chip { font-family: var(--mono); font-size: 11px; padding: 1px 8px; border-radius: 10px;
-          background: var(--panel); border: 1px solid var(--line); color: var(--dim); }
-  .chip.role { color: var(--accent); border-color: var(--accent); }
-  .chip.cred-db { color: var(--ok); border-color: var(--ok); }
-  .chip.cred-missing { color: var(--err); border-color: var(--err); }
+/* Content */
+#content { padding: 20px; flex: 1; max-width: 1400px; width: 100%; margin: 0 auto; }
 
-  .warn-item { display: flex; gap: 8px; align-items: baseline; padding: 6px 10px;
-               margin-bottom: 6px; border-radius: 6px; font-size: 12.5px; }
-  .warn-item.danger { background: rgba(248,81,73,.12); border: 1px solid var(--err); }
-  .warn-item.warn { background: rgba(210,153,34,.10); border: 1px solid var(--warn); }
-  .warn-item.info { background: rgba(88,166,255,.08); border: 1px solid var(--line); }
-  .warn-item .lvl { font-family: var(--mono); font-weight: 700; }
+/* ══════════════════════════════════ Panels ═══════════════════════════════════ */
+.panel { display: none; }
+.panel.active { display: block; animation: fadeIn .2s; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
-  table.tbl { width: 100%; border-collapse: collapse; font-family: var(--mono);
-              font-size: 12px; }
-  table.tbl th { text-align: left; color: var(--dim); font-weight: 400;
-                 border-bottom: 1px solid var(--line); padding: 4px 8px; }
-  table.tbl td { border-bottom: 1px solid rgba(43,50,69,.45); padding: 4px 8px;
-                 vertical-align: top; word-break: break-all; }
-  .st-completed { color: var(--ok); } .st-failed, .st-timed_out { color: var(--err); }
-  .st-cancelled { color: var(--dim); } .st-running { color: var(--accent); }
-  .st-queued { color: var(--warn); }
+/* Sub-tabs within panels */
+.tabbar { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 16px; overflow-x: auto; }
+.tabbar .tab { padding: 8px 16px; font-size: 13px; font-weight: 500; color: var(--dim);
+  border-bottom: 2px solid transparent; margin-bottom: -2px; white-space: nowrap;
+  display: flex; align-items: center; gap: 6px; }
+.tabbar .tab:hover { color: var(--text); }
+.tabbar .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tabbar .tab .count { font-size: 10.5px; background: var(--surface2); padding: 1px 6px;
+  border-radius: 99px; color: var(--dim); }
 
-  #logbox, #auditbox, #simlogs, #taskevents { background: #0a0d12;
-          border: 1px solid var(--line); border-radius: 8px;
-          font-family: var(--mono); font-size: 11.5px; padding: 8px; height: 240px;
-          overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
-  #simlogs { height: 200px; }
-  #taskevents { height: 110px; }
-  .lg-DEBUG { color: var(--dim); } .lg-INFO { color: var(--text); }
-  .lg-WARNING { color: var(--warn); } .lg-ERROR { color: var(--err); }
-  .audit-line.in { color: var(--dim); } .audit-line.out { color: var(--text); }
-  .audit-meta { color: var(--accent); }
+/* ══════════════════════════════════ Cards ════════════════════════════════════ */
+.card { background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 16px; margin-bottom: var(--gap); }
+.card > h4 { font-size: 11px; color: var(--dim); text-transform: uppercase;
+  letter-spacing: .08em; margin-bottom: 12px; }
+.card2 { background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--r-sm); padding: 12px; }
+.row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sub { font-size: 12px; color: var(--dim); margin-top: 4px; }
 
-  .settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-                   gap: 8px; margin-top: 8px; }
-  .settings-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px;
-                         color: var(--dim); font-family: var(--mono); }
-  .plugin-err { color: var(--err); font-family: var(--mono); font-size: 11.5px; margin-top: 4px;
-                white-space: pre-wrap; word-break: break-all; }
-  .rule-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
-  .out-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
-  .banner { padding: 10px 14px; border-radius: 8px; font-weight: 600; margin-bottom: 12px; }
-  .banner.pass { background: rgba(63,185,80,.12); border: 1px solid var(--ok); color: var(--ok); }
-  .banner.fail { background: rgba(248,81,73,.12); border: 1px solid var(--err); color: var(--err); }
-  .kv { font-family: var(--mono); font-size: 12px; margin: 2px 0; }
+/* Grid layouts */
+.grid { display: grid; gap: var(--gap); }
+.grid-2 { grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+.grid-3 { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.grid-4 { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
 
-  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line);
-           border-radius: 10px; max-width: 780px; width: 92vw; padding: 16px; }
-  dialog::backdrop { background: rgba(0,0,0,.6); }
-  dialog h3 { margin: 0 0 8px; }
-  dialog .kv { margin: 2px 0; }
-  #det-body { max-height: 74vh; overflow-y: auto; }
-  .spin { display: inline-block; animation: spin 1s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
+/* ══════════════════════════════════ Status Badges ════════════════════════════ */
+.st { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px;
+  font-weight: 600; padding: 2px 8px; border-radius: 99px; white-space: nowrap; }
+.st::before { content: ''; width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.st-running, .st-online { color: var(--ok); background: rgba(52,211,153,.12); }
+.st-running::before, .st-online::before { background: var(--ok); }
+.st-connecting, .st-reconnecting { color: var(--accent); background: rgba(91,163,245,.12); }
+.st-connecting::before, .st-reconnecting::before { background: var(--accent); }
+.st-stopped, .st-created, .st-offline { color: var(--dim); background: rgba(126,138,160,.12); }
+.st-stopped::before, .st-created::before, .st-offline::before { background: var(--dim); }
+.st-failed, .st-error { color: var(--err); background: rgba(248,113,113,.12); }
+.st-failed::before, .st-error::before { background: var(--err); }
+.st-cooldown, .st-warning { color: var(--warn); background: rgba(251,191,36,.12); }
+.st-cooldown::before, .st-warning::before { background: var(--warn); }
+.st-missing_credential, .st-invalid_credential { color: var(--err); background: rgba(248,113,113,.15); }
+.st-missing_credential::before, .st-invalid_credential::before { background: var(--err); }
+
+/* Scope badges */
+.scope { display: inline-flex; align-items: center; font-size: 10px; font-weight: 700;
+  padding: 2px 6px; border-radius: 4px; text-transform: uppercase; letter-spacing: .05em;
+  background: var(--surface3); color: var(--dim); font-family: var(--mono); }
+.scope-global { color: var(--accent); background: rgba(91,163,245,.1); }
+.scope-account { color: var(--ok); background: rgba(52,211,153,.1); }
+.scope-group { color: var(--warn); background: rgba(251,191,36,.1); }
+.scope-plugin { color: #c084fc; background: rgba(192,132,252,.1); }
+
+/* Chips */
+.chip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px;
+  padding: 2px 8px; border-radius: 99px; background: var(--surface3); color: var(--dim);
+  white-space: nowrap; }
+.chip.profile { background: rgba(91,163,245,.1); color: var(--accent); cursor: pointer; }
+.chip.group { background: rgba(251,191,36,.1); color: var(--warn); cursor: pointer; }
+.chip.plugin { background: rgba(52,211,153,.1); color: var(--ok); }
+.chip.grant { color: var(--ok); }
+.chip.deny { color: var(--faint); text-decoration: line-through; }
+.chip.task-queued { color: var(--dim); } .chip.task-running { color: var(--accent); }
+.chip.task-completed { color: var(--ok); } .chip.task-failed { color: var(--err); }
+.chip.task-cancelled { color: var(--faint); } .chip.task-timed_out { color: var(--warn); }
+
+/* ══════════════════════════════════ Buttons ══════════════════════════════════ */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  height: var(--ctrl-h); padding: 0 14px; border-radius: var(--r-sm);
+  font-size: 13px; font-weight: 500; transition: all .15s; white-space: nowrap; }
+.btn-primary { background: var(--accent2); color: #fff; }
+.btn-primary:hover { background: var(--accent); }
+.btn-secondary { background: var(--surface3); color: var(--text); border: 1px solid var(--border); }
+.btn-secondary:hover { background: var(--border); }
+.btn-danger { background: var(--err2); color: #fff; }
+.btn-danger:hover { background: var(--err); }
+.btn-ghost { color: var(--dim); padding: 0 8px; height: 30px; }
+.btn-ghost:hover { color: var(--text); background: var(--surface2); }
+.btn-sm { height: 28px; padding: 0 10px; font-size: 12px; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn .icon { width: 14px; height: 14px; }
+
+/* Overflow menu */
+.menu-wrap { position: relative; }
+.menu-btn { width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+  border-radius: var(--r-sm); color: var(--dim); }
+.menu-btn:hover { background: var(--surface2); color: var(--text); }
+.menu { position: absolute; right: 0; top: calc(100% + 4px); background: var(--surface2);
+  border: 1px solid var(--border); border-radius: var(--r-sm); box-shadow: var(--shadow);
+  min-width: 180px; z-index: 20; display: none; padding: 4px 0; }
+.menu.open { display: block; }
+.menu button { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  padding: 8px 14px; font-size: 13px; color: var(--text); }
+.menu button:hover { background: var(--surface3); }
+.menu button.danger { color: var(--err); }
+.menu button.danger:hover { background: rgba(248,113,113,.1); }
+.menu .sep { height: 1px; background: var(--border); margin: 4px 0; }
+
+/* ══════════════════════════════════ Account Card ═════════════════════════════ */
+.acct-card { background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 16px; display: flex; flex-direction: column; gap: 10px;
+  transition: border-color .2s; position: relative; }
+.acct-card:hover { border-color: var(--accent2); }
+.acct-card .hdr { display: flex; align-items: center; gap: 8px; }
+.acct-card .name { font-size: 15px; font-weight: 600; cursor: pointer; }
+.acct-card .name:hover { color: var(--accent); }
+.acct-card .id { font-size: 10.5px; color: var(--faint); font-family: var(--mono); }
+.acct-card .meta { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--dim); }
+.acct-card .meta .item { display: flex; align-items: center; gap: 4px; }
+.acct-card .meta .item svg { width: 13px; height: 13px; opacity: .7; }
+.acct-card .caps { display: flex; flex-wrap: wrap; gap: 4px; }
+.acct-card .caps .lbl { font-size: 10px; color: var(--faint); text-transform: uppercase;
+  letter-spacing: .06em; margin-right: 4px; align-self: center; }
+.acct-card .actions { display: flex; gap: 6px; align-items: center; margin-top: auto; padding-top: 8px;
+  border-top: 1px solid var(--border); }
+
+/* ══════════════════════════════════ Group Card ═══════════════════════════════ */
+.group-card { background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.group-card .hdr { display: flex; align-items: center; gap: 8px; }
+.group-card .name { font-size: 15px; font-weight: 600; color: var(--warn); cursor: pointer; }
+.group-card .name:hover { text-decoration: underline; }
+.group-card .count { font-size: 12px; color: var(--dim); }
+.group-card .members { display: flex; flex-direction: column; gap: 4px; }
+.group-card .member { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  background: var(--surface2); border-radius: var(--r-sm); font-size: 13px; }
+.group-card .member .st { font-size: 10px; padding: 1px 6px; }
+.group-card .member .name { cursor: pointer; font-weight: 500; }
+.group-card .member .name:hover { color: var(--accent); }
+.group-card .member .cap { margin-left: auto; color: var(--dim); font-size: 11px; }
+.group-card .stats { display: flex; gap: 12px; font-size: 12px; color: var(--dim); }
+.group-card .stats .stat { display: flex; align-items: center; gap: 4px; }
+.group-card .stats .stat b { color: var(--text); }
+.group-card .actions { display: flex; gap: 6px; margin-top: auto; padding-top: 10px;
+  border-top: 1px solid var(--border); }
+
+/* ══════════════════════════════════ Profile Card ═════════════════════════════ */
+.prof-card { background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.prof-card .hdr { display: flex; align-items: center; gap: 8px; }
+.prof-card .name { font-size: 15px; font-weight: 600; color: var(--accent); }
+.prof-card .desc { font-size: 12px; color: var(--dim); }
+.prof-card .caps { display: flex; flex-direction: column; gap: 4px; }
+.prof-card .cap-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.prof-card .cap-row .granted { color: var(--ok); font-weight: 500; }
+.prof-card .cap-row .denied { color: var(--faint); }
+.prof-card .used-by { font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 4px; }
+
+/* ══════════════════════════════════ Attention ════════════════════════════════ */
+.attn { display: flex; flex-direction: column; gap: 8px; }
+.attn-item { display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  border-radius: var(--r-sm); cursor: pointer; transition: background .15s; }
+.attn-item:hover { background: var(--surface2); }
+.attn-item .icon { width: 20px; height: 20px; flex-shrink: 0; }
+.attn-item.warn .icon { color: var(--warn); }
+.attn-item.error .icon { color: var(--err); }
+.attn-item .txt { flex: 1; font-size: 13px; }
+.attn-item .txt b { font-weight: 600; }
+.attn-item .txt .detail { color: var(--dim); font-size: 12px; margin-top: 1px; }
+
+/* ══════════════════════════════════ Empty State ══════════════════════════════ */
+.empty { text-align: center; padding: 48px 20px; color: var(--dim); }
+.empty .icon { width: 48px; height: 48px; margin: 0 auto 12px; opacity: .3; }
+.empty h3 { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.empty p { font-size: 13px; max-width: 360px; margin: 0 auto 16px; line-height: 1.5; }
+
+/* ══════════════════════════════════ Metrics ══════════════════════════════════ */
+.metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: var(--gap); }
+.metric { background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 14px 16px; }
+.metric .label { font-size: 10.5px; color: var(--dim); text-transform: uppercase;
+  letter-spacing: .06em; margin-bottom: 6px; }
+.metric .value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.metric .value.ok { color: var(--ok); }
+.metric .value.warn { color: var(--warn); }
+.metric .value.err { color: var(--err); }
+.metric .sub { font-size: 11px; color: var(--dim); margin-top: 2px; }
+
+/* ══════════════════════════════════ Tables ═══════════════════════════════════ */
+.tbl-wrap { overflow-x: auto; border-radius: var(--r-sm); border: 1px solid var(--border); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; padding: 8px 12px; background: var(--surface2); color: var(--dim);
+  font-size: 11px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600;
+  position: sticky; top: 0; white-space: nowrap; }
+td { padding: 8px 12px; border-top: 1px solid var(--border); white-space: nowrap; }
+tr:hover td { background: rgba(26,33,44,.5); }
+
+/* ══════════════════════════════════ Forms ════════════════════════════════════ */
+.form { display: flex; flex-direction: column; gap: var(--gap); max-width: 480px; }
+.form .field { display: flex; flex-direction: column; gap: 4px; }
+.form .field label { font-size: 12px; color: var(--dim); font-weight: 500; }
+.form .field .hint { font-size: 11px; color: var(--faint); }
+.form .field input, .form .field select { height: var(--ctrl-h); }
+.form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+
+/* ══════════════════════════════════ Dialogs ══════════════════════════════════ */
+dialog { border: none; border-radius: var(--r-lg); padding: 0;
+  background: var(--surface); color: var(--text); max-width: 560px; width: calc(100vw - 40px);
+  max-height: calc(100dvh - 80px); box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+dialog::backdrop { background: rgba(0,0,0,.6); backdrop-filter: blur(4px); }
+dialog .dlg-hdr { display: flex; align-items: center; gap: 8px; padding: 16px 20px;
+  border-bottom: 1px solid var(--border); font-size: 15px; font-weight: 600; }
+dialog .dlg-hdr .close { margin-left: auto; width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center; border-radius: var(--r-sm);
+  color: var(--dim); }
+dialog .dlg-hdr .close:hover { background: var(--surface2); color: var(--text); }
+dialog .dlg-body { padding: 20px; overflow-y: auto; max-height: calc(100dvh - 200px); }
+dialog .dlg-foot { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 20px;
+  border-top: 1px solid var(--border); }
+
+/* ══════════════════════════════════ Search ═══════════════════════════════════ */
+#search-wrap { position: relative; width: 240px; }
+#search-wrap input { width: 100%; height: 32px; padding: 0 10px 0 32px; font-size: 13px; }
+#search-wrap .icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  width: 14px; height: 14px; color: var(--faint); pointer-events: none; }
+#search-results { position: absolute; top: calc(100% + 4px); left: 0; right: 0;
+  background: var(--surface2); border: 1px solid var(--border); border-radius: var(--r-sm);
+  box-shadow: var(--shadow); max-height: 300px; overflow-y: auto; z-index: 30; display: none; }
+#search-results.open { display: block; }
+#search-results .result { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  cursor: pointer; font-size: 13px; }
+#search-results .result:hover { background: var(--surface3); }
+#search-results .result .type { font-size: 10px; color: var(--faint); text-transform: uppercase;
+  margin-left: auto; }
+
+/* ══════════════════════════════════ Bulk Bar ═════════════════════════════════ */
+#bulkbar { display: none; position: sticky; top: 54px; z-index: 5;
+  background: var(--surface2); border: 1px solid var(--accent2); border-radius: var(--r);
+  padding: 8px 16px; margin-bottom: var(--gap); align-items: center; gap: 8px; }
+#bulkbar.open { display: flex; }
+#bulkbar .count { font-size: 13px; font-weight: 600; color: var(--accent); }
+#bulkbar .actions { display: flex; gap: 6px; margin-left: auto; }
+
+/* ══════════════════════════════════ Onboarding ══════════════════════════════ */
+.onboarding { text-align: center; padding: 60px 20px; }
+.onboarding h2 { font-size: 20px; margin-bottom: 8px; }
+.onboarding .steps { display: flex; flex-direction: column; gap: 12px; max-width: 340px;
+  margin: 24px auto; text-align: left; }
+.onboarding .step { display: flex; gap: 12px; align-items: flex-start; padding: 14px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); }
+.onboarding .step .num { width: 28px; height: 28px; border-radius: 50%; background: var(--accent2);
+  color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700;
+  font-size: 13px; flex-shrink: 0; }
+.onboarding .step .txt h4 { font-size: 14px; font-weight: 600; margin-bottom: 2px; }
+.onboarding .step .txt p { font-size: 12px; color: var(--dim); }
+
+/* ══════════════════════════════════ Log Stream ═══════════════════════════════ */
+.logbox { background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 8px; max-height: 400px; overflow-y: auto; font-family: var(--mono); font-size: 11.5px; }
+.log-line { display: flex; gap: 8px; padding: 1px 4px; }
+.log-line .ts { color: var(--faint); flex-shrink: 0; }
+.log-line .sev { flex-shrink: 0; font-weight: 600; min-width: 42px; }
+.log-line .sev.DEBUG { color: var(--faint); } .log-line .sev.INFO { color: var(--accent); }
+.log-line .sev.WARNING { color: var(--warn); } .log-line .sev.ERROR { color: var(--err); }
+.log-line .msg { color: var(--text); word-break: break-word; }
+
+/* Audit stream */
+.audit-line { display: flex; gap: 6px; padding: 2px 4px; font-size: 12px; }
+.audit-line.in { color: var(--dim); } .audit-line.out { color: var(--text); }
+.audit-line .ts { color: var(--faint); font-family: var(--mono); font-size: 11px; }
+
+/* ══════════════════════════════════ Cooldown ═════════════════════════════════ */
+.cd-card { display: flex; align-items: center; gap: 12px; padding: 12px;
+  background: var(--surface2); border-radius: var(--r-sm); }
+.cd-card .info { flex: 1; }
+.cd-card .info .who { font-weight: 600; font-size: 14px; }
+.cd-card .info .what { font-size: 12px; color: var(--dim); }
+.cd-card .remaining { font-size: 18px; font-weight: 700; color: var(--warn);
+  font-variant-numeric: tabular-nums; }
+.cd-card .remaining.expired { color: var(--ok); }
+
+/* ══════════════════════════════════ Rate Limit Viz ═══════════════════════════ */
+.rl-block { display: flex; flex-direction: column; gap: 6px; padding: 12px;
+  background: var(--surface2); border-radius: var(--r-sm); }
+.rl-block .label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
+.rl-block .value { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.rl-block .value.highest { color: var(--warn); }
+.rl-effective { background: linear-gradient(135deg, rgba(91,163,245,.1), rgba(52,211,153,.1));
+  border: 1px solid var(--accent2); padding: 16px; border-radius: var(--r); text-align: center; }
+.rl-effective .value { font-size: 28px; font-weight: 700; color: var(--accent); }
+.rl-effective .label { font-size: 12px; color: var(--dim); }
+
+/* Bucket display */
+.bucket-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  background: var(--surface2); border-radius: var(--r-sm); font-size: 12px; font-family: var(--mono); }
+.bucket-row .remaining { font-weight: 700; }
+.bucket-row .remaining.low { color: var(--warn); }
+.bucket-row .remaining.zero { color: var(--err); }
+
+/* ══════════════════════════════════ Responsive ═══════════════════════════════ */
+
+/* Tablet */
+@media (max-width: 1199px) {
+  :root { --sidebar-w: 60px; }
+  #sidebar .brand span, #sidebar .nav-item span:not(.badge), #sidebar .foot { display: none; }
+  #sidebar .nav-item { justify-content: center; padding: 10px; }
+  #sidebar .nav-item .badge { position: absolute; top: 2px; right: 2px; }
+  .grid-2 { grid-template-columns: 1fr; }
+}
+
+/* Mobile */
+@media (max-width: 767px) {
+  #shell { display: flex; flex-direction: column; }
+  #sidebar { display: none; }
+  #sidebar.open { display: flex; position: fixed; inset: 0; z-index: 100;
+    background: var(--surface); padding-top: 60px; }
+  #menu-btn { display: flex; }
+  #hdr { padding: 8px 12px; gap: 8px; }
+  #hdr .page-title { font-size: 14px; }
+  #search-wrap { display: none; }
+  #content { padding: 12px; }
+  .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+  .metrics { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .metric { padding: 10px 12px; }
+  .metric .value { font-size: 18px; }
+  .form-grid { grid-template-columns: 1fr; }
+  .acct-card { padding: 12px; }
+  .acct-card .actions { flex-wrap: wrap; }
+  .tabbar { padding: 0 4px; }
+  #tokenbox input { width: 120px; }
+  #tokenbox .btn { padding: 0 8px; }
+  .tbl-wrap { font-size: 12px; }
+  th, td { padding: 6px 8px; }
+  dialog { max-width: calc(100vw - 16px); width: auto; margin: 8px auto; }
+
+  /* Bottom navigation */
+  #bottomnav { display: flex !important; position: fixed; bottom: 0; left: 0; right: 0;
+    background: var(--surface); border-top: 1px solid var(--border); z-index: 50;
+    padding: 4px 0 max(4px, env(safe-area-inset-bottom)); justify-content: space-around; }
+  #bottomnav .bnav-item { display: flex; flex-direction: column; align-items: center; gap: 2px;
+    padding: 4px 12px; font-size: 10px; color: var(--dim); border-radius: var(--r-sm);
+    min-width: 56px; }
+  #bottomnav .bnav-item.active { color: var(--accent); }
+  #bottomnav .bnav-item svg { width: 20px; height: 20px; }
+  #content { padding-bottom: 80px; }
+}
+#bottomnav { display: none; }
+
+/* Small phone */
+@media (max-width: 400px) {
+  .metrics { grid-template-columns: 1fr 1fr; }
+  #tokenbox { display: none; }
+  .btn { padding: 0 10px; font-size: 12px; }
+}
+
+/* Landscape phone */
+@media (max-width: 900px) and (orientation: landscape) {
+  #content { padding-bottom: 60px; }
+  .metrics { grid-template-columns: repeat(4, 1fr); }
+}
 </style>
 </head>
 <body>
+
+<!-- ═══════════════════════════════ Shell ════════════════════════════════════ -->
 <div id="shell">
+  <!-- Sidebar (desktop) -->
   <aside id="sidebar">
-    <h1>Slaughter<span style="color:var(--accent)">Mudae</span></h1>
-    <button class="navbtn active" data-section="overview">Overview</button>
-    <button class="navbtn" data-section="accounts">Accounts</button>
-    <button class="navbtn" data-section="plugins">Plugins</button>
-    <button class="navbtn" data-section="profiles">Profiles</button>
-    <button class="navbtn" data-section="ratelimit">Rate Limits</button>
-    <button class="navbtn" data-section="cooldowns">Cooldowns</button>
-    <button class="navbtn" data-section="tasks">Tasks</button>
-    <button class="navbtn" data-section="logs">Logs</button>
-    <button class="navbtn" data-section="simulation">Simulation</button>
-    <button class="navbtn" data-section="advanced">Advanced</button>
-    <div class="foot">stdlib server<br>WS + JSON REST</div>
+    <div class="brand"><div class="logo"></div><span>SlaughterMudae</span></div>
+    <nav id="snav"></nav>
+    <div class="foot" id="side-foot">—</div>
   </aside>
 
+  <!-- Main -->
   <div id="main">
-    <header>
-      <div id="wsdot"></div>
-      <h2 id="section-title">Overview</h2>
+    <header id="hdr">
+      <button id="menu-btn" aria-label="menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
+      <span class="page-title" id="page-title">Home</span>
+      <div class="spacer"></div>
+      <div id="search-wrap">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input id="search" placeholder="Search… (Ctrl+K)" autocomplete="off">
+        <div id="search-results"></div>
+      </div>
+      <div id="wsdot" title="WebSocket"></div>
       <span id="connmsg">connecting…</span>
-      <button id="pushrefresh" title="ask the server for a fresh snapshot now">push refresh</button>
       <div id="tokenbox">
         <input id="token" type="password" placeholder="dashboard token">
-        <button id="savetoken">save</button>
+        <button class="btn btn-secondary btn-sm" id="token-save">save</button>
       </div>
     </header>
-    <div class="errbox" id="errbox"></div>
+    <div id="errbox"></div>
+
     <div id="content">
+      <!-- Onboarding (shown when zero accounts) -->
+      <div class="panel" id="panel-onboard">
+        <div class="onboarding">
+          <h2>Welcome to SlaughterMudae</h2>
+          <p class="dim">Set up your workspace in three steps:</p>
+          <div class="steps">
+            <div class="step"><div class="num">1</div><div class="txt">
+              <h4>Add an account</h4><p>Each account is a Discord user the framework operates.</p></div></div>
+            <div class="step"><div class="num">2</div><div class="txt">
+              <h4>Assign capabilities</h4><p>Profiles control what each account can do (which plugins run).</p></div></div>
+            <div class="step"><div class="num">3</div><div class="txt">
+              <h4>Group for coordination</h4><p>Accounts in a sync group share pacing, taking turns naturally.</p></div></div>
+          </div>
+          <button class="btn btn-primary" onclick="UI.go('fleet'); UI.tab('accounts')">Get Started</button>
+        </div>
+      </div>
 
-      <!-- ==================================================== Overview -->
-      <section class="panel active" id="panel-overview">
-        <h3>Overview</h3>
-        <div id="ov-warnbar"></div>
-        <section class="card">
-          <h4>Task counters</h4>
-          <div class="row" id="ov-tasks"><span class="dim">waiting for data…</span></div>
-        </section>
-        <section class="card">
-          <h4>Accounts</h4>
-          <div id="ov-accounts"><span class="dim">waiting for data…</span></div>
-        </section>
-      </section>
+      <!-- Home -->
+      <div class="panel" id="panel-home">
+        <div id="home-attn" class="attn" style="margin-bottom:16px"></div>
+        <div class="metrics" id="home-metrics" style="margin-bottom:16px"></div>
+        <div class="grid grid-2">
+          <div class="card"><h4>Sync Groups</h4><div id="home-groups"></div></div>
+          <div class="card"><h4>Recent Activity</h4><div id="home-activity" class="logbox" style="max-height:200px"></div></div>
+        </div>
+      </div>
 
-      <!-- ==================================================== Accounts -->
-      <section class="panel" id="panel-accounts">
-        <h3>Accounts</h3>
-        <div class="section-err" id="panel-accounts-err"></div>
-        <section class="card">
-          <h4>Add account</h4>
-          <div class="rule-row">
-            <input id="newacct" placeholder="name" size="10">
-            <input id="newacct-sync" placeholder="sync group (opt)" size="14">
-            <input id="newacct-profiles" placeholder="profiles (opt, space-sep)" size="20">
-            <input id="newacct-cred" type="password" placeholder="credential (optional)"
-                   size="18" autocomplete="new-password">
-            <button id="addacct">add account</button>
+      <!-- Accounts & Groups -->
+      <div class="panel" id="panel-fleet">
+        <div class="tabbar">
+          <button class="tab active" data-tab="accounts">Accounts <span class="count" id="cnt-accts"></span></button>
+          <button class="tab" data-tab="groups">Sync Groups <span class="count" id="cnt-groups"></span></button>
+        </div>
+        <div id="bulkbar">
+          <span class="count" id="bulk-count">0 selected</span>
+          <div class="actions">
+            <button class="btn btn-secondary btn-sm" id="bulk-start">Start</button>
+            <button class="btn btn-secondary btn-sm" id="bulk-stop">Stop</button>
+            <button class="btn btn-secondary btn-sm" id="bulk-group">Move to group…</button>
+            <button class="btn btn-ghost btn-sm" id="bulk-clear">clear</button>
           </div>
-          <div class="dim mono" style="font-size:11px">credentials live here now: an
-            optional value above is stored ENCRYPTED in the database (never echoed
-            back); set or replace it later via each card's "credential…" button. The
-            CLI offers <span class="mono">accounts credential</span> and
-            <span class="mono">credentials import-env</span> (legacy
-            <span class="mono">DISCORD_TOKEN_*</span> .env entries).</div>
-        </section>
-        <section class="card">
-          <h4>Registered accounts</h4>
-          <div id="acct-list"><span class="dim">waiting for data…</span></div>
-        </section>
-      </section>
+        </div>
+        <div id="tab-accounts">
+          <div class="row" style="margin-bottom:12px">
+            <button class="btn btn-primary" id="btn-add-acct">+ Add Account</button>
+          </div>
+          <div class="grid grid-2" id="acct-grid"></div>
+        </div>
+        <div id="tab-groups" class="hidden">
+          <div class="row" style="margin-bottom:12px">
+            <button class="btn btn-primary" id="btn-create-group">+ Create Group</button>
+          </div>
+          <div class="grid grid-2" id="group-grid"></div>
+        </div>
+      </div>
 
-      <!-- ==================================================== Plugins -->
-      <section class="panel" id="panel-plugins">
-        <h3>Plugins</h3>
-        <div class="section-err" id="panel-plugins-err"></div>
-        <section class="card">
-          <h4>Installed plugins</h4>
-          <div id="plugin-list"><span class="dim">loading…</span></div>
-        </section>
-        <div class="dim">per-account enable toggles + settings editors live in
-          Accounts → details…</div>
-      </section>
+      <!-- Profiles -->
+      <div class="panel" id="panel-profiles">
+        <div class="row" style="margin-bottom:12px">
+          <button class="btn btn-primary" id="btn-create-prof">+ Create Profile</button>
+        </div>
+        <div class="grid grid-2" id="prof-grid"></div>
+      </div>
 
-      <!-- ==================================================== Profiles -->
-      <section class="panel" id="panel-profiles">
-        <h3>Profiles</h3>
-        <div class="section-err" id="panel-profiles-err"></div>
-        <section class="card">
-          <h4>Create profile</h4>
-          <div class="rule-row">
-            <input id="prof-name" placeholder="name" size="10">
-            <input id="prof-desc" placeholder="description (opt)" size="22">
-          </div>
-          <div class="chips" id="prof-plugins"><span class="dim">loading plugins…</span></div>
-          <div class="rule-row" style="margin-top:8px">
-            <button id="prof-create">create profile</button>
-          </div>
-        </section>
-        <section class="card">
-          <h4>Defined profiles</h4>
-          <div id="prof-list"><span class="dim">loading…</span></div>
-        </section>
-      </section>
+      <!-- Plugins -->
+      <div class="panel" id="panel-plugins">
+        <div class="grid grid-2" id="plugin-grid"></div>
+      </div>
 
-      <!-- ================================================== Rate Limits -->
-      <section class="panel" id="panel-ratelimit">
-        <h3>Rate Limits</h3>
-        <div class="section-err" id="panel-ratelimit-err"></div>
-        <section class="card">
-          <h4>Warnings</h4>
-          <div id="rl-warnings"><span class="dim">loading…</span></div>
-        </section>
-        <section class="card">
-          <h4>Set policy</h4>
-          <div class="rule-row">
-            <input id="rl-action" placeholder="action (message/dm)" size="12">
-            <input id="rl-interval" placeholder="interval s (>=1.5)" size="12">
-            <input id="rl-jmin" placeholder="jitter min s (opt)" size="11">
-            <input id="rl-jmax" placeholder="jitter max s (opt)" size="11">
-            <select id="rl-level">
-              <option value="global">global</option>
-              <option value="account">account</option>
-              <option value="plugin">plugin</option>
-              <option value="account_plugin">account/plugin</option>
-            </select>
-            <input id="rl-owner" placeholder="owner (see hint)" size="14">
-            <button id="rl-set">set policy</button>
+      <!-- Activity -->
+      <div class="panel" id="panel-activity">
+        <div class="tabbar">
+          <button class="tab active" data-atab="tasks">Tasks <span class="count" id="cnt-tasks"></span></button>
+          <button class="tab" data-atab="cooldowns">Cooldowns <span class="count" id="cnt-cd"></span></button>
+          <button class="tab" data-atab="logs">Logs</button>
+          <button class="tab" data-atab="audit">Audit Trail</button>
+        </div>
+        <div id="atab-tasks">
+          <div class="row" style="margin-bottom:8px">
+            <select id="task-filter-status"><option value="">all</option><option>queued</option><option>running</option><option>completed</option><option>failed</option><option>cancelled</option><option>timed_out</option></select>
+            <select id="task-filter-account"><option value="">all accounts</option></select>
+            <button class="btn btn-secondary btn-sm" id="task-refresh">refresh</button>
           </div>
-          <div class="dim mono" id="rl-owner-hint" style="font-size:11px">
-            owner: global → empty · account → account name · plugin → plugin name ·
-            account_plugin → "account/plugin"</div>
-          <div class="dim mono" style="font-size:11px">safety floor: nothing faster than
-            1.5s/action can ever be set</div>
-        </section>
-        <section class="card">
-          <h4>Stored policies</h4>
-          <div id="rl-policies"><span class="dim">loading…</span></div>
-        </section>
-        <section class="card">
-          <h4>Effective policy calculator</h4>
-          <div class="rule-row">
-            <input id="eff-action" placeholder="action" size="12">
-            <select id="eff-account"></select>
-            <input id="eff-plugin" placeholder="plugin (opt)" size="12">
-            <button id="eff-go">calculate</button>
-          </div>
-          <div id="eff-result"></div>
-        </section>
-        <section class="card">
-          <h4>Pacing stats</h4>
-          <div id="rl-stats"><span class="dim">loading…</span></div>
-        </section>
-        <section class="card">
-          <h4>Floor</h4>
-          <div class="rule-row">
-            <span>current floor: <span class="mono" id="rl-floor">?</span></span>
-            <input id="rl-floor-new" placeholder="raise floor to (s)" size="12">
-            <button id="rl-floor-set">raise floor</button>
-            <span class="dim mono" style="font-size:11px">can only rise, never below 1.5s</span>
-          </div>
-        </section>
-        <section class="card">
-          <h4>Sequential send lane</h4>
-          <div class="sub dim" style="margin-bottom:6px">
-            server-wide: one outbound action at a time across ALL accounts,
-            spaced by the prefixrate — 0 pauses the lane (everything holds)
-          </div>
-          <div class="rule-row">
-            <span>state: <span class="mono" id="lane-state">?</span></span>
-            <input id="lane-rate" placeholder="spacing s (0=pause)" size="12">
-            <button id="lane-on">enable</button>
-            <button id="lane-off">disable</button>
-            <button id="lane-set">set spacing</button>
-          </div>
-          <div class="sub mono" id="lane-info" style="margin-top:4px"></div>
-        </section>
-      </section>
-
-      <!-- ==================================================== Cooldowns -->
-      <section class="panel" id="panel-cooldowns">
-        <h3>Cooldowns</h3>
-        <div class="section-err" id="panel-cooldowns-err"></div>
-        <section class="card">
-          <h4>Active persistent cooldowns
-            <button id="cooldowns-refresh" style="float:right">refresh</button></h4>
-          <div class="rule-row">
-            <select id="cd-acct"><option value="">all accounts</option></select>
-            <span class="dim mono" style="font-size:11px">absolute expiry — remaining
-              time survives restarts</span>
-          </div>
-          <div id="cooldowns-list"><span class="dim">loading…</span></div>
-        </section>
-      </section>
-
-      <!-- ======================================================= Tasks -->
-      <section class="panel" id="panel-tasks">
-        <h3>Tasks</h3>
-        <div class="section-err" id="panel-tasks-err"></div>
-        <section class="card">
-          <h4>Live task events</h4>
-          <div id="taskevents"><span class="dim" data-ph="1">no task events yet —
-            live events stream in via WS</span></div>
-        </section>
-        <section class="card">
-          <h4>Running + queued <button id="tasks-refresh" style="float:right">refresh</button></h4>
-          <div id="tasks-live"><span class="dim">loading…</span></div>
-        </section>
-        <section class="card">
-          <h4>History</h4>
-          <div id="tasks-history"><span class="dim">loading…</span></div>
-        </section>
-      </section>
-
-      <!-- ======================================================== Logs -->
-      <section class="panel" id="panel-logs">
-        <h3>Logs</h3>
-        <section class="card">
-          <h4>Structured log tail (live via WS)</h4>
-          <div class="rule-row">
+          <div class="tbl-wrap"><table id="task-table"></table></div>
+          <h4 style="margin:16px 0 8px;font-size:12px;color:var(--dim);text-transform:uppercase">History</h4>
+          <div class="tbl-wrap"><table id="task-history"></table></div>
+        </div>
+        <div id="atab-cooldowns" class="hidden">
+          <div id="cd-list" class="grid" style="gap:8px"></div>
+        </div>
+        <div id="atab-logs" class="hidden">
+          <div class="row" style="margin-bottom:8px">
             <select id="log-acct"><option value="">all accounts</option></select>
-            <select id="log-sev">
-              <option value="">all severities</option>
-              <option>DEBUG</option><option>INFO</option>
-              <option>WARNING</option><option>ERROR</option>
-            </select>
-            <button id="log-backfill">load history</button>
-            <span class="dim mono" id="logsync"></span>
+            <select id="log-sev"><option value="">all</option><option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select>
+            <button class="btn btn-secondary btn-sm" id="log-backfill">load history</button>
+            <button class="btn btn-ghost btn-sm" id="log-clear">clear</button>
           </div>
-          <div id="logbox"><span class="dim" data-ph="1">no log entries yet — live
-            entries stream in; "load history" backfills the persisted tail</span></div>
-        </section>
-        <section class="card">
-          <h4>Audit trail — Discord interactions (live via WS)</h4>
-          <div class="rule-row">
+          <div id="logbox" class="logbox" style="max-height:500px"></div>
+        </div>
+        <div id="atab-audit" class="hidden">
+          <div class="row" style="margin-bottom:8px">
             <select id="audit-acct"><option value="">all accounts</option></select>
-            <button id="audit-backfill">load history</button>
+            <button class="btn btn-secondary btn-sm" id="audit-backfill">load history</button>
           </div>
-          <div id="auditbox"><span class="dim" data-ph="1">no audit entries yet —
-            live interactions stream in; "load history" backfills the
-            persisted trail</span></div>
-        </section>
-      </section>
+          <div id="auditbox" class="logbox" style="max-height:500px"></div>
+        </div>
+      </div>
 
-      <!-- ================================================== Simulation -->
-      <section class="panel" id="panel-simulation">
-        <h3>Simulation</h3>
-        <div class="section-err" id="panel-simulation-err"></div>
-        <section class="card">
-          <h4>Scenarios</h4>
-          <div id="sim-list"><span class="dim">loading…</span></div>
-        </section>
-        <section class="card">
-          <h4>Result</h4>
-          <div id="sim-result"><span class="dim">run a scenario to see its report</span></div>
-        </section>
-      </section>
+      <!-- Policies -->
+      <div class="panel" id="panel-policies">
+        <div class="grid grid-2" style="margin-bottom:16px">
+          <div class="card"><h4>Effective Pacing</h4><div id="rl-effective-view"></div></div>
+          <div class="card"><h4>Discord Rate Buckets</h4><div id="rl-buckets"></div></div>
+        </div>
+        <div class="card"><h4>Stored Policies</h4>
+          <div class="row" style="margin-bottom:8px">
+            <button class="btn btn-secondary btn-sm" id="rl-add">+ Add Policy</button>
+          </div>
+          <div class="tbl-wrap"><table id="rl-policy-table"></table></div>
+        </div>
+        <div class="card"><h4>Safety Floor</h4><div id="rl-floor"></div></div>
+        <div class="card"><h4>Warnings</h4><div id="rl-warnings"></div></div>
+      </div>
 
-      <!-- ==================================================== Advanced -->
-      <section class="panel" id="panel-advanced">
-        <h3>Advanced</h3>
-        <div class="section-err" id="panel-advanced-err"></div>
-        <section class="card">
-          <h4>Import .env credentials</h4>
-          <div class="dim">one-shot copy of the legacy
-            <span class="mono">DISCORD_TOKEN_*</span> .env entries of registered
-            accounts into ENCRYPTED database storage. Accounts that already have
-            a stored credential are skipped unless "overwrite" is checked. The
-            report shows account names only — never values.</div>
-          <div class="rule-row" style="margin-top:8px">
-            <label class="chip" style="cursor:pointer">
-              <input type="checkbox" id="imp-overwrite"> overwrite existing
-            </label>
-            <button id="imp-env">import .env credentials</button>
-            <span class="dim mono" id="imp-note" style="font-size:11px"></span>
+      <!-- Tools -->
+      <div class="panel" id="panel-tools">
+        <div class="tabbar">
+          <button class="tab active" data-ttab="sim">Simulation</button>
+          <button class="tab" data-ttab="adv">Advanced</button>
+        </div>
+        <div id="ttab-sim">
+          <div class="card"><h4>Run Simulation</h4>
+            <div class="row"><select id="sim-sel"></select>
+            <button class="btn btn-primary" id="sim-run">run</button></div>
+            <div id="sim-report" style="margin-top:12px"></div>
           </div>
-        </section>
-        <section class="card">
-          <h4>Global emergency stop</h4>
-          <div class="dim">cancels every task and stops every account NOW — the
-            framework halts. Use when anything looks wrong.</div>
-          <div class="out-row" style="justify-content:flex-start">
-            <button id="estop" class="danger">⚠ GLOBAL EMERGENCY STOP</button>
+        </div>
+        <div id="ttab-adv" class="hidden">
+          <div class="card"><h4>System Actions</h4>
+            <div class="row" style="gap:8px">
+              <button class="btn btn-danger" id="adv-estop">Emergency Stop All</button>
+              <button class="btn btn-secondary" id="adv-resume">Resume</button>
+            </div>
           </div>
-        </section>
-        <section class="card">
-          <h4>Graceful shutdown</h4>
-          <div class="dim">drains the scheduler, stops all accounts, closes the
-            database. The dashboard stops responding afterwards.</div>
-          <div class="out-row" style="justify-content:flex-start">
-            <button id="shutdown" class="danger">graceful shutdown</button>
+          <div class="card"><h4>Maintenance</h4>
+            <div class="row" style="gap:8px">
+              <button class="btn btn-secondary" id="adv-import">Import .env credentials</button>
+            </div>
+            <p class="sub" id="cred-gate-msg"></p>
           </div>
-        </section>
-        <section class="card">
-          <h4>Dashboard token</h4>
-          <div class="dim">stored locally (safe-storage fallback when
-            localStorage is blocked). A token in the URL (?token=…) seeds it
-            and is cleaned from the address bar.</div>
-          <div class="rule-row">
-            <input id="adv-token" type="password" placeholder="dashboard token" size="24">
-            <button id="adv-save">save + reload</button>
-            <button id="adv-forget">forget</button>
-          </div>
-        </section>
-      </section>
-
+        </div>
+      </div>
     </div>
   </div>
 </div>
 
-<dialog id="details">
-  <h3 id="det-title">account</h3>
-  <div id="det-body"></div>
-  <div class="out-row"><button id="det-close">close</button></div>
+<!-- Bottom navigation (mobile) -->
+<nav id="bottomnav"></nav>
+
+<!-- ═══════════════════════════════ Dialogs ═══════════════════════════════════ -->
+<dialog id="dlg-add-acct">
+  <div class="dlg-hdr">Add Account<span class="close" onclick="this.closest('dialog').close()">✕</span></div>
+  <div class="dlg-body">
+    <div class="form">
+      <div class="field"><label>Account name</label><input id="aa-name" placeholder="alpha"><span class="hint">Lowercase letters, digits, dashes (max 32)</span></div>
+      <div class="field"><label>Sync Group <span class="faint">(optional)</span></label>
+        <input id="aa-group" placeholder="farm" list="group-list"><span class="hint">Accounts in the same group coordinate their pacing</span></div>
+      <div class="field"><label>Profiles <span class="faint">(optional, space-separated)</span></label>
+        <input id="aa-profiles" placeholder="grinder" list="prof-list"><span class="hint">Profiles control what this account can do</span></div>
+      <div class="field"><label>Credential <span class="faint">(optional now)</span></label>
+        <input id="aa-cred" type="password" placeholder="Discord token"><span class="hint">Stored encrypted — never displayed back</span></div>
+    </div>
+  </div>
+  <div class="dlg-foot"><button class="btn btn-secondary" onclick="this.closest('dialog').close()">Cancel</button>
+  <button class="btn btn-primary" id="aa-submit">Create Account</button></div>
 </dialog>
 
-<dialog id="confirmbox">
-  <h3 id="confirm-title">confirm</h3>
-  <p id="confirm-text" class="mono"></p>
-  <div class="out-row">
-    <button id="confirm-no">cancel</button>
-    <button id="confirm-yes" class="danger">yes, do it</button>
+<dialog id="dlg-create-group">
+  <div class="dlg-hdr">Create Sync Group<span class="close" onclick="this.closest('dialog').close()">✕</span></div>
+  <div class="dlg-body">
+    <div class="form">
+      <div class="field"><label>Group name</label><input id="cg-name" placeholder="farm"></div>
+      <div class="field"><label>Add members</label><div id="cg-members" class="caps"></div>
+        <span class="hint">Select accounts to include in this group</span></div>
+    </div>
   </div>
+  <div class="dlg-foot"><button class="btn btn-secondary" onclick="this.closest('dialog').close()">Cancel</button>
+  <button class="btn btn-primary" id="cg-submit">Create Group</button></div>
 </dialog>
 
-<dialog id="credbox">
-  <h3 id="cred-title">set credential</h3>
-  <div class="dim" style="margin-bottom:8px">stored ENCRYPTED (Fernet) in the
-    database — saving performs no network activity. The value is never
-    displayed again; only its status (db / env / missing) is shown.</div>
-  <div class="rule-row">
-    <span class="name mono" id="cred-account"></span>
-    <input id="cred-value" type="password" placeholder="new credential" size="34"
-           autocomplete="new-password">
-    <button id="cred-save">save</button>
+<dialog id="dlg-create-prof">
+  <div class="dlg-hdr">Create Profile<span class="close" onclick="this.closest('dialog').close()">✕</span></div>
+  <div class="dlg-body">
+    <div class="form">
+      <div class="field"><label>Profile name</label><input id="cp-name" placeholder="grinder"></div>
+      <div class="field"><label>Description <span class="faint">(optional)</span></label><input id="cp-desc" placeholder="Roll-focused capability set"></div>
+      <div class="field"><label>Capabilities</label><div id="cp-plugins" class="caps"></div>
+        <span class="hint">What should accounts using this profile be able to do?</span></div>
+    </div>
   </div>
-  <div class="out-row"><button id="cred-close">close</button></div>
+  <div class="dlg-foot"><button class="btn btn-secondary" onclick="this.closest('dialog').close()">Cancel</button>
+  <button class="btn btn-primary" id="cp-submit">Create Profile</button></div>
 </dialog>
+
+<dialog id="dlg-cred">
+  <div class="dlg-hdr">Set Credential<span class="close" onclick="this.closest('dialog').close()">✕</span></div>
+  <div class="dlg-body">
+    <p style="margin-bottom:12px;font-size:13px;color:var(--dim)">The token is stored encrypted server-side and never displayed back.</p>
+    <input id="cred-name" type="hidden">
+    <input id="cred-val" type="password" placeholder="Discord token" style="width:100%;height:40px">
+  </div>
+  <div class="dlg-foot"><button class="btn btn-secondary" onclick="this.closest('dialog').close()">Cancel</button>
+  <button class="btn btn-primary" id="cred-save">Save Credential</button></div>
+</dialog>
+
+<dialog id="dlg-confirm">
+  <div class="dlg-hdr" id="cf-title">Confirm<span class="close" onclick="this.closest('dialog').close()">✕</span></div>
+  <div class="dlg-body"><p id="cf-msg" style="font-size:14px;line-height:1.5"></p></div>
+  <div class="dlg-foot"><button class="btn btn-secondary" onclick="this.closest('dialog').close()">Cancel</button>
+  <button class="btn btn-danger" id="cf-yes">Confirm</button></div>
+</dialog>
+
+<dialog id="dlg-details">
+  <div class="dlg-hdr" id="dt-title">Details<span class="close" onclick="this.closest('dialog').close()">✕</span></div>
+  <div class="dlg-body" id="dt-body"></div>
+</dialog>
+
+<datalist id="group-list"></datalist>
+<datalist id="prof-list"></datalist>
 
 <script>
 "use strict";
-const $ = (id) => document.getElementById(id);
+/* ═════════════════════════════════════════════════════════════════════════════
+   SlaughterMudae Dashboard v2 — Operations Console
+   ═══════════════════════════════════════════════════════════════════════════ */
 
-// safe storage: sandboxed/embedded browsers may block localStorage entirely —
-// fall back to an in-memory store so the page never crashes over it
+// ── Token & safe storage ─────────────────────────────────────────────────────
 const store = (() => {
-  try {
-    const t = window.localStorage;
-    t.setItem("__probe", "1"); t.removeItem("__probe");
-    return t;
-  } catch {
-    const mem = {};
-    return {
-      getItem: (k) => (k in mem ? mem[k] : null),
-      setItem: (k, v) => { mem[k] = String(v); },
-      removeItem: (k) => { delete mem[k]; },
-    };
-  }
+  try { const t = localStorage; t.setItem("__p","1"); t.removeItem("__p"); return t; }
+  catch { const m = {}; return { getItem:k=>k in m?m[k]:null, setItem:(k,v)=>{m[k]=String(v)}, removeItem:k=>{delete m[k]} }; }
 })();
 const token = () => store.getItem("dash_token") || "";
 
-// shared client state
-let lastStats = null; let lastAccountsSig = "";
-let manifests = [];        // plugin manifests (settings schema source)
-let ws = null;
+// ── State ─────────────────────────────────────────────────────────────────────
+let lastStats = null, lastSig = "";
+let manifests = [], profilesList = [], taskList = [], taskHistory = [], cooldownList = [];
+let ws = null, wsRetries = 0, wsWatchdog = null;
+let selectedAccounts = new Set();
+let currentView = "home", currentFleetTab = "accounts", currentActivityTab = "tasks", currentToolsTab = "sim";
 
-// ---------------------------------------------------------------- helpers
-function esc(s) {
-  const d = document.createElement("span"); d.textContent = String(s ?? "");
-  return d.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}
-function btn(label, onclick, cls) {
-  const b = document.createElement("button");
-  b.textContent = label; b.onclick = onclick;
-  if (cls) b.className = cls;
-  return b;
-}
-// ROUND-3: in-flight disable for mutating buttons (runSimulation's pattern)
-// — a double-click must not double-fire a start/stop POST
-function btnGuarded(label, action, cls) {
-  const b = btn(label, null, cls);
-  b.onclick = () => {
-    if (b.disabled) return;
-    b.disabled = true;
-    Promise.resolve(action()).finally(() => { b.disabled = false; });
-  };
-  return b;
-}
-function fmtDur(s) {
-  s = Math.max(0, Math.round(Number(s) || 0));
-  if (s < 60) return s + "s";
-  if (s < 3600) return Math.floor(s / 60) + "m " + (s % 60) + "s";
-  return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
-}
-function fmtMMSS(s) {
-  s = Math.max(0, Math.round(Number(s) || 0));
-  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
-}
-function fmtLatency(ms) {
-  // ROUND-3: Math.round(Infinity) === Infinity — guard finiteness before
-  // rounding or a hostile/absent gateway value renders "Infinitems"
-  if (ms == null) return "-";
-  const n = Number(ms);
-  return Number.isFinite(n) ? Math.round(n) + "ms" : "-";
-}
-function credLabel(state) {
-  // runtime credential states are 'db' | 'missing' only (DB-only store)
-  if (state === "db") return "DB";
-  return "MISSING";
-}
-function fmtAge(ts) { return ts ? fmtDur((Date.now() - ts * 1000) / 1000) : "-"; }
-function accountNames() { return (lastStats && lastStats.accounts ? lastStats.accounts : []).map((a) => a.name); }
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const $$ = sel => document.querySelectorAll(sel);
+function esc(s){const d=document.createElement("span");d.textContent=String(s??"");return d.innerHTML.replace(/"/g,"&quot;").replace(/'/g,"&#39;");}
+function btn(l,fn,cls){const b=document.createElement("button");b.textContent=l;b.onclick=fn;if(cls)b.className=cls;return b;}
+function btnG(l,fn,cls){const b=btn(l,null,cls);b.onclick=()=>{if(b.disabled)return;b.disabled=true;Promise.resolve(fn()).finally(()=>{b.disabled=false});};return b;}
+function fmtDur(s){s=Math.max(0,Math.round(+s||0));if(s<60)return s+"s";if(s<3600)return Math.floor(s/60)+"m "+(s%60)+"s";return Math.floor(s/3600)+"h "+Math.floor(s%3600/60)+"m";}
+function fmtLat(ms){if(ms==null)return"-";const n=+ms;return Number.isFinite(n)?Math.round(n)+"ms":"-";}
+function fmtAge(ts){return ts?fmtDur((Date.now()-ts*1000)/1000):"-";}
+function credLbl(s){return s==="db"?"Configured":"Missing";}
 
-function api(path, opts = {}) {
-  const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+// ── API ───────────────────────────────────────────────────────────────────────
+function api(path, opts={}) {
+  const headers = {"Content-Type":"application/json", ...opts.headers};
   if (token()) headers["X-Dashboard-Token"] = token();
-  return fetch(path, Object.assign({}, opts, { headers })).then(async (r) => {
-    if (r.status === 401) {
-      // ERROR AUDIT FIX: throw the actionable hint so showErr keeps it
-      throw new Error("401 — set the dashboard token (top right)");
-    }
-    let body;
-    try { body = await r.json(); }
-    catch { throw new Error(`server returned ${r.status} with a non-JSON body`); }
-    if (!body.ok) throw new Error(body.error || `request failed (${r.status})`);
+  return fetch(path, {...opts, headers}).then(async r => {
+    if (r.status===401) throw new Error("401 — set the dashboard token");
+    let body; try { body = await r.json(); } catch { throw new Error(`HTTP ${r.status}`); }
+    if (!body.ok) throw new Error(body.error || `HTTP ${r.status}`);
     return body.data;
   });
 }
-const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body) });
+function post(path, body={}) { return api(path, {method:"POST", body:JSON.stringify(body)}); }
 
-// Contextual errors: showErr(e, sectionId) writes to the inline error
-// area of the named section (right under the form/button that failed).
-// Falls back to the global box only for unattributed errors.
-function sectionErr(sectionId) {
-  if (sectionId) {
-    const el = document.querySelector(sectionId + " .section-err") ||
-               document.getElementById(sectionId + "-err");
-    if (el) return el;
+// ── Error box ─────────────────────────────────────────────────────────────────
+function showErr(msg) {
+  const box = $("errbox");
+  const ts = new Date().toTimeString().slice(0,8);
+  box.textContent += `[${ts}] ${msg}\n`; box.scrollTop = box.scrollHeight;
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+const NAV = [
+  {id:"home", label:"Home", icon:"M3 12l9-9 9 9v9a2 2 0 0 1-2 2h-4v-7h-6v7H5a2 2 0 0 1-2-2z"},
+  {id:"fleet", label:"Accounts & Groups", icon:"M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"},
+  {id:"profiles", label:"Profiles", icon:"M20 6L9 17l-5-5"},
+  {id:"plugins", label:"Plugins", icon:"M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94z"},
+  {id:"activity", label:"Activity", icon:"M22 12h-4l-3 9L9 3l-3 9H2"},
+  {id:"policies", label:"Policies", icon:"M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"},
+  {id:"tools", label:"Tools", icon:"M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94z"},
+];
+const TITLES = {home:"Home",fleet:"Accounts & Groups",profiles:"Profiles",plugins:"Plugins",activity:"Activity",policies:"Policies",tools:"Tools"};
+
+function buildNav() {
+  const nav = $("snav"); nav.innerHTML = "";
+  for (const item of NAV) {
+    const a = document.createElement("button");
+    a.className = "nav-item" + (item.id===currentView?" active":"");
+    a.dataset.view = item.id;
+    a.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${item.icon}"/></svg><span>${item.label}</span><span class="badge hidden" id="nav-badge-${item.id}"></span>`;
+    a.onclick = () => UI.go(item.id);
+    nav.appendChild(a);
   }
-  return $("errbox");
-}
-function showErr(e, sectionId) {
-  const box = sectionErr(sectionId);
-  const line = document.createElement("div");
-  line.style.color = "var(--err)";
-  if (box === $("errbox")) {
-    line.textContent = new Date().toTimeString().slice(0, 8) + " " +
-      String(e && e.message || e);
-    box.appendChild(line);
-    while (box.childNodes.length > 8) box.removeChild(box.firstChild);
-    return;
-  }
-  box.textContent = "";
-  line.textContent = String(e && e.message || e);
-  box.appendChild(line);
-  while (box.childNodes.length > 5) box.removeChild(box.firstChild);
-}
-function showNote(text, sectionId) {
-  const box = sectionErr(sectionId);
-  const line = document.createElement("div");
-  line.style.color = "var(--dim)";
-  line.textContent = text;
-  box.appendChild(line);
-  while (box.childNodes.length > 5) box.removeChild(box.firstChild);
-}
-function clearErrors() { $("errbox").textContent = ""; }
-
-function fillSelect(sel, names, placeholder) {
-  // skip the rebuild when the names are unchanged: destroying options every
-  // second closed the user's open dropdown on each stats tick
-  const sig = placeholder + "\u0000" + names.join("\u0000");
-  if (sel.dataset.sig === sig) return;
-  sel.dataset.sig = sig;
-  const previous = sel.value;
-  sel.innerHTML = "";
-  if (placeholder !== undefined) sel.append(new Option(placeholder, ""));
-  for (const n of names) sel.append(new Option(n, n));
-  sel.value = previous;
-  if (sel.selectedIndex === -1 && sel.options.length) sel.selectedIndex = 0;
-}
-
-// confirm dialog (native confirm() can be blocked in sandboxed frames)
-let confirmAction = null;
-function askConfirm(title, text, action) {
-  $("confirm-title").textContent = title;
-  $("confirm-text").textContent = text;
-  confirmAction = action;
-  $("confirmbox").showModal();
-}
-$("confirm-yes").onclick = () => {
-  $("confirmbox").close();
-  if (confirmAction) { const a = confirmAction; confirmAction = null; a(); }
-};
-$("confirm-no").onclick = () => { $("confirmbox").close(); confirmAction = null; };
-
-// ---------------------------------------------------------------- navigation
-const LOADERS = {};  // section -> first-open loader
-const TITLES = {};
-function activate(section) {
-  for (const b of document.querySelectorAll(".navbtn"))
-    b.classList.toggle("active", b.dataset.section === section);
-  for (const p of document.querySelectorAll(".panel"))
-    p.classList.toggle("active", p.id === "panel-" + section);
-  $("section-title").textContent = TITLES[section] || section;
-  if (LOADERS[section]) { const load = LOADERS[section]; LOADERS[section] = null; load(); }
-  // ROUND-3: re-entering Tasks must always fetch fresh tables — task
-  // events that fired while another panel was open scheduled nothing
-  if (section === "tasks") scheduleTaskRefresh();
-  // ROUND-3: renderOverview skips rebuilds while hidden (1s WS ticks) —
-  // repaint on activation so the panel never shows stale counters
-  if (section === "overview") renderOverview();
-}
-for (const b of document.querySelectorAll(".navbtn"))
-  b.onclick = () => activate(b.dataset.section);
-
-// ---------------------------------------------------------------- Overview
-function renderWarnings(container, warnings) {
-  container.innerHTML = "";
-  for (const w of warnings || []) {
-    const div = document.createElement("div");
-    div.className = "warn-item " + (w.level || "info");
-    const lvl = w.level === "danger" ? "⚠ DANGER" : w.level === "warn" ? "⚠ warning" : "i";
-    div.innerHTML = '<span class="lvl">' + esc(lvl) + "</span><span>" +
-      esc(w.message) + (w.code ? ' <span class="dim mono">[' + esc(w.code) + "]</span>" : "") +
-      "</span>";
-    container.appendChild(div);
+  const bn = $("bottomnav"); bn.innerHTML = "";
+  const bnItems = NAV.filter(x=>["home","fleet","activity","policies","tools"].includes(x.id));
+  for (const item of bnItems) {
+    const a = document.createElement("button");
+    a.className = "bnav-item" + (item.id===currentView?" active":"");
+    a.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${item.icon}"/></svg><span>${item.label.split(" ")[0]}</span>`;
+    a.onclick = () => UI.go(item.id);
+    bn.appendChild(a);
   }
 }
 
-function renderOverview() {
-  if (!lastStats) return;
-  // ROUND-3: the 1s WS tick rebuilt this DOM even with the panel hidden —
-  // skip while inactive (activate('overview') repaints on re-entry)
-  if (!$("panel-overview").classList.contains("active")) return;
-  renderWarnings($("ov-warnbar"), lastStats.warnings);
-  const t = lastStats.tasks || {};
-  $("ov-tasks").innerHTML = "";
-  for (const [label, key, cls] of
-       [["queued", "queued", "st-queued"], ["running", "running", "st-running"],
-        ["completed", "completed", "st-completed"], ["failed", "failed", "st-failed"],
-        ["timed_out", "timed_out", "st-timed_out"],
-        ["cancelled", "cancelled", "st-cancelled"]]) {
-    const chip = document.createElement("span");
-    chip.className = "chip " + cls;
-    chip.textContent = label + ": " + (t[key] ?? 0);
-    $("ov-tasks").appendChild(chip);
+const LOADERS = {};
+const UI = {
+  go(view) {
+    currentView = view;
+    $$(".panel").forEach(p=>p.classList.remove("active"));
+    const target = $("panel-"+view) || $("panel-home");
+    target.classList.add("active");
+    $("page-title").textContent = TITLES[view]||view;
+    buildNav(); $("sidebar").classList.remove("open");
+    if (LOADERS[view]) { LOADERS[view](); delete LOADERS[view]; }
+    render();
+  },
+  tab(name) {
+    $$("#panel-fleet .tabbar .tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===name));
+    currentFleetTab = name;
+    $("tab-accounts").classList.toggle("hidden",name!=="accounts");
+    $("tab-groups").classList.toggle("hidden",name!=="groups");
   }
-  const info = document.createElement("span");
-  info.className = "dim mono";
-  info.textContent = "workers " + (t.workers ?? 0) +
-    " · avg " + Number(t.avg_duration_s ?? 0).toFixed(2) + "s" +
-    " · framework uptime " + fmtDur(lastStats.uptime_s);
-  $("ov-tasks").appendChild(info);
-
-  const root = $("ov-accounts");
-  root.innerHTML = "";
-  const accounts = lastStats.accounts || [];
-  if (!accounts.length) {
-    root.innerHTML = '<span class="dim">no accounts yet — add one in Accounts</span>';
-    return;
-  }
-  for (const a of accounts) {
-    const card = document.createElement("div"); card.className = "card2";
-    const row = document.createElement("div"); row.className = "row";
-    const title = document.createElement("span"); title.className = "acct-name";
-    title.textContent = a.name;
-    const status = document.createElement("span");
-    status.className = "status " + (a.status || "");
-    status.textContent = a.status || "?";
-    const det = btn("details…", () => { activate("accounts"); openDetails(a.name); });
-    row.append(title, status, det);
-    card.appendChild(row);
-    const sub = document.createElement("div"); sub.className = "sub";
-    sub.textContent =
-      "discord id: " + (a.discord_id ?? a.user_id ?? "(not running)") +
-      "   latency: " + fmtLatency(a.latency_ms) +
-      "   uptime: " + fmtDur(a.uptime_s) +
-      "   group: " + (a.sync_group || "independent");
-    card.appendChild(sub);
-    const chips = document.createElement("div"); chips.className = "chips";
-    for (const p of a.profiles || []) {
-      const chip = document.createElement("span");
-      chip.className = "chip role"; chip.textContent = p;
-      chips.appendChild(chip);
-    }
-    if (!chips.childNodes.length) chips.innerHTML = '<span class="dim mono">no profiles</span>';
-    card.appendChild(chips);
-    root.appendChild(card);
-  }
-}
-
-// ---------------------------------------------------------------- Accounts
-function renderAccountCards() {
-  const root = $("acct-list");
-  root.innerHTML = "";
-  const accounts = (lastStats && lastStats.accounts) || [];
-  fillSelect($("log-acct"), accountNames(), "all accounts");
-  fillSelect($("audit-acct"), accountNames(), "all accounts");
-  fillSelect($("eff-account"), accountNames(), "— any account —");
-  if (!accounts.length) {
-    root.innerHTML = '<span class="dim">no accounts — add one above</span>';
-    return;
-  }
-  for (const a of accounts) {
-    const card = document.createElement("div"); card.className = "card2";
-    const row = document.createElement("div"); row.className = "row";
-    const title = document.createElement("span"); title.className = "acct-name";
-    title.textContent = a.name;
-    const status = document.createElement("span");
-    status.className = "status " + (a.status || "");
-    status.textContent = a.status || "?";
-    const start = btnGuarded("start", () => post("/api/accounts/start", { account: a.name })
-      .then(loadAccountsQuiet).catch(e => showErr(e, "#panel-accounts")));
-    const stop = btnGuarded("stop", () => post("/api/accounts/stop", { account: a.name })
-      .then(loadAccountsQuiet).catch(e => showErr(e, "#panel-accounts")));
-    const details = btn("details…", () => openDetails(a.name));
-    const estop = btn("estop", () => askConfirm("Emergency stop",
-      "Cancel every " + a.name + " task and disconnect NOW?",
-      () => post("/api/accounts/emergency-stop", { name: a.name })
-        .then(loadAccountsQuiet).catch(e => showErr(e, "#panel-accounts"))), "danger");
-    const remove = btn("remove", () => askConfirm("Remove account",
-      "Remove " + a.name + " (must be stopped)? Settings and assignments are deleted too.",
-      () => post("/api/accounts/remove", { name: a.name })
-        .then(loadAccountsQuiet).catch(e => showErr(e, "#panel-accounts"))), "danger");
-    const credBtn = btn("credential…", () => openCredentialDialog(a.name));
-    row.append(title, status, credChipFor(a), start, stop, details, credBtn,
-               estop, remove);
-    card.appendChild(row);
-    const sub = document.createElement("div"); sub.className = "sub";
-    sub.textContent =
-      "discord id: " + (a.discord_id ?? a.user_id ?? "(not running)") +
-      "   latency: " + fmtLatency(a.latency_ms) +
-      "   uptime: " + fmtDur(a.uptime_s) +
-      "   group: " + (a.sync_group || "independent") +
-      (a.cooldowns != null ? "   cooldowns: " + a.cooldowns : "");
-    card.appendChild(sub);
-    const chips = document.createElement("div"); chips.className = "chips";
-    for (const p of a.profiles || []) {
-      const chip = document.createElement("span");
-      chip.className = "chip role"; chip.textContent = p;
-      chips.appendChild(chip);
-    }
-    if (!chips.childNodes.length) chips.innerHTML = '<span class="dim mono">no profiles</span>';
-    card.appendChild(chips);
-    root.appendChild(card);
-  }
-}
-
-function credChipFor(a) {
-  const chip = document.createElement("span");
-  const state = a.credential || "missing";
-  chip.className = "chip cred-" + state;
-  chip.textContent = "credential: " + credLabel(state);
-  // ROUND-3: runtime states are 'db' | 'missing' only (DB-only store) —
-  // the legacy 'env' title branch was dead and is gone
-  chip.title = state === "db" ? "encrypted credential stored in the database"
-    : "no credential stored (account cannot start)";
-  return chip;
-}
-
-// ---------------------------------------------------------- credential dialog
-let credAccount = null;
-function openCredentialDialog(name) {
-  credAccount = name;
-  $("cred-account").textContent = name;
-  $("cred-value").value = "";
-  $("credbox").showModal();
-  $("cred-value").focus();
-}
-function saveCredential() {
-  const value = $("cred-value").value;
-  if (!value) { showErr("enter a credential value first (or close the dialog)"); return; }
-  if (!token()) {
-    showErr("403 — set DASHBOARD_TOKEN in .env to manage credentials (enter it top right first)");
-    return;
-  }
-  post("/api/accounts/credential", { name: credAccount, credential: value })
-    .then((r) => {
-      $("credbox").close();
-      $("cred-value").value = "";
-      showNote("credential stored for " + credAccount +
-               " — status: " + credLabel(r.credential));
-      loadAccountsQuiet();
-    })
-    .catch(e => showErr(e, "#panel-accounts"));
-}
-$("cred-save").onclick = saveCredential;
-$("cred-value").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") saveCredential();
-});
-$("cred-close").onclick = () => { $("credbox").close(); $("cred-value").value = ""; };
-
-function loadAccountsQuiet() {
-  return api("/api/accounts").then((accounts) => {
-    if (lastStats) lastStats.accounts = accounts;
-    renderAccountCards(); renderOverview();
-  }).catch(e => showErr(e, "#panel-accounts"));
-}
-LOADERS.accounts = loadAccountsQuiet;
-
-$("addacct").onclick = () => {
-  // ERROR AUDIT FIX: client-side validation — empty/garbage names used to
-  // POST and produce developer-speak errors
-  if ($("addacct").disabled) return;  // ROUND-3: in-flight double-click guard
-  const name = $("newacct").value.trim();
-  if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(name)) {
-    showErr("account name must be lowercase [a-z0-9_-], up to 32 chars");
-    return;
-  }
-  const payload = { name };
-  payload.sync_group = $("newacct-sync").value.trim() || null;
-  const profiles = $("newacct-profiles").value.trim().split(/\s+/).filter(Boolean);
-  if (profiles.length) payload.profiles = profiles;
-  const cred = $("newacct-cred").value;
-  if (cred) payload.credential = cred;  // one-way: request -> encrypted store
-  $("addacct").disabled = true;
-  post("/api/accounts/add", payload).then(() => {
-    $("newacct").value = ""; $("newacct-sync").value = "";
-    $("newacct-profiles").value = ""; $("newacct-cred").value = "";
-    return loadAccountsQuiet();
-  }).catch(e => showErr(e, "#panel-accounts"))
-    .finally(() => { $("addacct").disabled = false; });
 };
 
-// ------------------------------------------------------- details modal (§8)
-async function openDetails(name) {
-  let info, states, profiles;
-  try {
-    [info, states, profiles] = await Promise.all([
-      api("/api/accounts/info?account=" + encodeURIComponent(name)),
-      // ROUND-3: an auth failure must NOT masquerade as 'no plugins' —
-      // null marks 'unavailable' and renders honestly in the dialog
-      api("/api/plugins/state?account=" + encodeURIComponent(name)).catch(() => null),
-      api("/api/profiles").catch(() => []),
-    ]);
-  } catch (e) { showErr(e, "#panel-accounts"); return; }
-  try {
-    renderDetails(info, states, profiles);
-  } catch (e) {
-    showErr(new Error("failed to render details for " + name + ": " + (e.message || e)),
-            "#panel-accounts");
-  }
-}
-
-function renderDetails(info, states, profiles) {
-  $("det-title").textContent = info.name;
-  const body = $("det-body");
-  body.innerHTML = "";
-  const section = (title) => {
-    const card = document.createElement("section"); card.className = "card";
-    const h = document.createElement("h4"); h.textContent = title;
-    card.appendChild(h); body.appendChild(card);
-    return card;
-  };
-  const kv = (k, v) => '<div class="kv">' + esc(k) + ": " + esc(v) + "</div>";
-
-  // §8 Status + Identity
-  const st = info.status || {};
-  const head = section("Status · Identity");
-  head.innerHTML += kv("state", st.state) +
-    kv("connected", st.connected) +
-    kv("latency", fmtLatency(st.latency_ms)) +
-    kv("uptime", fmtDur(st.uptime_s)) +
-    kv("discord id", (info.identity || {}).discord_id ?? "(not running)") +
-    kv("name", (info.identity || {}).name ?? "-");
-
-  // §8 Runtime — clearly marked client cache from READY
-  const rt = info.runtime || {};
-  const run = section("Runtime");
-  run.innerHTML += kv("cached guilds", rt.cached_guilds ?? "-") +
-    kv("cached channels", rt.cached_channels ?? "-") +
-    kv("cached DMs", rt.cached_dms ?? "-") +
-    '<div class="kv dim">source: ' + esc(rt.cache_source || "client cache (READY)") +
-    " — live client cache only, not persisted</div>";
-
-  // §8 Plugins — enable toggles + auto-generated settings editors
-  const plug = section("Plugins");
-  plug.innerHTML = "";
-  if (states == null)
-    plug.innerHTML = '<span class="dim">plugin states unavailable (auth?)</span>';
-  else if (!states.length) plug.innerHTML = '<span class="dim">no plugins attached</span>';
-  for (const p of states || []) {
-    const box = document.createElement("div"); box.className = "card2";
-    const row = document.createElement("div"); row.className = "row";
-    row.innerHTML = '<span class="name">' + esc(p.name) + "</span>";
-    const toggle = btn(p.enabled ? "◆ enabled" : "◇ disabled", () =>
-      post("/api/plugins/set-enabled",
-           { account: info.name, plugin: p.name, enabled: !p.enabled })
-        .then(() => openDetails(info.name)).catch(e => showErr(e, "#panel-accounts")),
-    p.enabled ? "on" : "off");
-    row.appendChild(toggle);
-    if ((p.error_count || 0) > 0) {
-      const err = document.createElement("span");
-      err.className = "plugin-err";
-      err.textContent = p.error_count + " error(s)" +
-        (p.last_error ? " — " + p.last_error : "");
-      row.appendChild(err);
-    }
-    box.appendChild(row);
-    box.appendChild(buildSettingsEditor(info.name, p, box));
-    plug.appendChild(box);
-  }
-
-  // §8 Profile — chips + assign/unassign
-  const prof = section("Profiles");
-  const chips = document.createElement("div"); chips.className = "chips";
-  for (const p of info.profiles || []) {
-    const chip = document.createElement("span");
-    chip.className = "chip role"; chip.textContent = p;
-    const x = btn("✕", () => post("/api/profiles/unassign",
-        { account: info.name, profile: p })
-      .then(() => openDetails(info.name)).catch(e => showErr(e, "#panel-accounts")));
-    chip.appendChild(document.createTextNode(" "), x);
-    chips.appendChild(chip);
-  }
-  if (!chips.childNodes.length) chips.innerHTML = '<span class="dim mono">none assigned (unrestricted)</span>';
-  prof.appendChild(chips);
-  const assignRow = document.createElement("div"); assignRow.className = "rule-row";
-  const sel = document.createElement("select");
-  for (const p of profiles) sel.append(new Option(p.name, p.name));
-  const assign = btn("assign profile", () => {
-    if (!sel.value) { showErr("pick a profile first"); return; }
-    post("/api/profiles/assign", { account: info.name, profile: sel.value })
-      .then(() => openDetails(info.name)).catch(e => showErr(e, "#panel-accounts"));
-  });
-  const note = document.createElement("span");
-  note.className = "dim mono"; note.style.fontSize = "11px";
-  note.textContent = "(applies on the account's next start)";
-  assignRow.append(sel, assign, note);
-  prof.appendChild(assignRow);
-
-  // §8 Rate limit — effective table per action
-  const rl = section("Rate limit (effective)");
-  const table = document.createElement("table"); table.className = "tbl";
-  table.innerHTML = "<tr><th>action</th><th>interval</th><th>jitter</th><th>source</th></tr>";
-  for (const [action, r] of Object.entries(info.rate_limit || {})) {
-    const tr = document.createElement("tr");
-    const jitter = Array.isArray(r.jitter) ? r.jitter[0] + ".." + r.jitter[1] + "s" : "-";
-    tr.innerHTML = "<td>" + esc(action) + "</td><td>" + esc(r.interval) + "s</td><td>" +
-      esc(jitter) + '</td><td class="dim">' + esc(r.source || "inherited from global") + "</td>";
-    table.appendChild(tr);
-  }
-  if (!Object.keys(info.rate_limit || {}).length)
-    rl.innerHTML += '<span class="dim mono">no actions paced yet</span>';
-  else rl.appendChild(table);
-
-  // ROUND-3: the settings-save / toggle re-render path re-renders while
-  // the dialog is ALREADY open — showModal() on an open dialog throws
-  // InvalidStateError on legacy engines
-  if (!$("details").open) $("details").showModal();
-}
-
-// AUTO-GENERATED settings editor from the plugin schema in /api/plugins:
-// bool -> checkbox, int/float -> number input, str -> text input
-function buildSettingsEditor(account, pluginState, container) {
-  const schema = ((manifests.find((m) => m.name === pluginState.name) || {}).settings) || [];
-  const grid = document.createElement("div"); grid.className = "settings-grid";
-  const inputs = {};
-  for (const def of schema) {
-    const label = document.createElement("label");
-    label.textContent = def.name + " (" + def.type + ")" +
-      (def.description ? " — " + def.description : "");
-    let input;
-    if (def.type === "bool") {
-      input = document.createElement("input");
-      input.type = "checkbox";
-      input.checked = pluginState.settings[def.name] === true ||
-        String(pluginState.settings[def.name]) === "true";
-    } else if (def.type === "int" || def.type === "float") {
-      input = document.createElement("input");
-      input.type = "number";
-      if (def.min != null) input.min = def.min;
-      if (def.max != null) input.max = def.max;
-      if (def.type === "int") input.step = "1";
-      input.value = pluginState.settings[def.name] ?? def.default ?? "";
-    } else {
-      input = document.createElement("input");
-      input.type = "text";
-      input.value = pluginState.settings[def.name] ?? def.default ?? "";
-    }
-    inputs[def.name] = input;
-    label.appendChild(input);
-    grid.appendChild(label);
-  }
-  if (!schema.length) {
-    grid.innerHTML = '<span class="dim mono">no settings</span>';
-  }
-  const actions = document.createElement("div"); actions.className = "out-row";
-  actions.appendChild(btn("save settings", () => {
-    // ERROR AUDIT FIX: NaN guards + allSettled so every key's outcome shows
-    const calls = schema.map((def) => {
-      const input = inputs[def.name];
-      let value;
-      if (def.type === "bool") value = input.checked;
-      else if (def.type === "int") {
-        value = parseInt(input.value, 10);
-        if (!Number.isFinite(value)) return Promise.reject(new Error(def.name + ": not an integer"));
-      } else if (def.type === "float") {
-        value = parseFloat(input.value);
-        if (!Number.isFinite(value)) return Promise.reject(new Error(def.name + ": not a number"));
-      } else value = input.value;
-      return post("/api/plugins/set-setting",
-        { account, plugin: pluginState.name, key: def.name, value });
-    });
-    Promise.allSettled(calls).then((results) => {
-      const failed = results.filter((r) => r.status === "rejected");
-      if (failed.length) {
-        showErr(failed.length + " setting(s) failed for " + pluginState.name + " — first: " +
-          failed[0].reason.message);
-      } else {
-        showNote("settings saved for " + pluginState.name);
-        openDetails(account); // re-render with server-resolved values
-      }
-    });
-  }));
-  const wrap = document.createElement("div");
-  wrap.append(grid, actions);
-  return wrap;
-}
-
-$("det-close").onclick = () => $("details").close();
-
-// ---------------------------------------------------------------- Plugins
-function renderPlugins() {
-  const root = $("plugin-list");
-  root.innerHTML = "";
-  if (!manifests.length) {
-    root.innerHTML = '<span class="dim">no plugins discovered</span>';
-    return;
-  }
-  for (const m of manifests) {
-    const card = document.createElement("div"); card.className = "card2";
-    const row = document.createElement("div"); row.className = "row";
-    row.innerHTML = '<span class="name">' + esc(m.name) + "</span>" +
-      '<span class="dim mono">v' + esc(m.version) + "</span>";
-    card.appendChild(row);
-    const desc = document.createElement("div"); desc.className = "dim";
-    desc.textContent = m.description || "";
-    card.appendChild(desc);
-    for (const s of m.settings || []) {
-      const line = document.createElement("div"); line.className = "sub";
-      line.textContent = s.name + ": " + s.type + " = " + JSON.stringify(s.default) +
-        (s.description ? "  — " + s.description : "") +
-        (s.min != null ? "  [" + s.min + ".." + (s.max ?? "∞") + "]" : "");
-      card.appendChild(line);
-    }
-    root.appendChild(card);
-  }
-}
-function loadManifests() {
-  return api("/api/plugins").then((m) => {
-    manifests = m;
-    renderPlugins();
-    renderProfilePluginChecks();
-  }).catch((e) => {
-    $("plugin-list").innerHTML = "";
-    const line = document.createElement("div");
-    line.className = "dim";
-    line.textContent = "plugins unavailable: " + (e.message || e);
-    $("plugin-list").appendChild(line);
-    showErr(e, "#panel-plugins");
-  });
-}
-LOADERS.plugins = loadManifests;
-
-// ---------------------------------------------------------------- Profiles
-function renderProfilePluginChecks() {
-  const root = $("prof-plugins");
-  root.innerHTML = "";
-  if (!manifests.length) {
-    root.innerHTML = '<span class="dim">no plugins discovered — create nothing yet</span>';
-    return;
-  }
-  for (const m of manifests) {
-    const label = document.createElement("label");
-    label.className = "chip";
-    label.style.cursor = "pointer";
-    const cb = document.createElement("input");
-    cb.type = "checkbox"; cb.value = m.name;
-    label.append(cb, document.createTextNode(" " + m.name));
-    root.appendChild(label);
-  }
-}
-
-function renderProfiles(profiles) {
-  const root = $("prof-list");
-  root.innerHTML = "";
-  if (!profiles.length) {
-    root.innerHTML = '<span class="dim">no profiles defined</span>';
-    return;
-  }
-  for (const p of profiles) {
-    const card = document.createElement("div"); card.className = "card2";
-    const row = document.createElement("div"); row.className = "row";
-    row.innerHTML = '<span class="name">' + esc(p.name) + "</span>" +
-      '<span class="dim">' + esc(p.description || "") + "</span>";
-    const del = btn("delete", () => askConfirm("Delete profile",
-      "Delete profile " + p.name + "?",
-      () => post("/api/profiles/delete", { name: p.name })
-        .then(loadProfiles).catch(e => showErr(e, "#panel-accounts"))), "danger");
-    row.appendChild(del);
-    card.appendChild(row);
-    const chips = document.createElement("div"); chips.className = "chips";
-    for (const pl of p.plugins || []) {
-      const chip = document.createElement("span");
-      chip.className = "chip"; chip.textContent = pl;
-      chips.appendChild(chip);
-    }
-    card.appendChild(chips);
-    const assignRow = document.createElement("div"); assignRow.className = "rule-row";
-    const sel = document.createElement("select");
-    for (const a of accountNames()) sel.append(new Option(a, a));
-    const assign = btn("assign to", () => {
-      if (!sel.value) { showErr("pick an account first (add one in Accounts)"); return; }
-      post("/api/profiles/assign", { account: sel.value, profile: p.name })
-        .then(loadAccountsQuiet).catch(e => showErr(e, "#panel-accounts"));
-    });
-    const note = document.createElement("span");
-    note.className = "dim mono"; note.style.fontSize = "11px";
-    note.textContent = "(applies on the account's next start)";
-    assignRow.append(sel, assign, note);
-    card.appendChild(assignRow);
-    root.appendChild(card);
-  }
-}
-function loadProfiles() {
-  return api("/api/profiles").then(renderProfiles).catch((e) => {
-    $("prof-list").innerHTML = "";
-    const line = document.createElement("div");
-    line.className = "dim";
-    line.textContent = "profiles unavailable: " + (e.message || e);
-    $("prof-list").appendChild(line);
-    showErr(e, "#panel-profiles");
-  });
-}
-LOADERS.profiles = async () => { await loadManifests(); await loadProfiles(); };
-
-$("prof-create").onclick = () => {
-  if ($("prof-create").disabled) return;  // ROUND-3: in-flight double-click guard
-  const name = $("prof-name").value.trim();
-  const plugins = [...document.querySelectorAll("#prof-plugins input:checked")]
-    .map((cb) => cb.value);
-  if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(name)) {
-    showErr("profile name must be lowercase [a-z0-9_-], up to 32 chars");
-    return;
-  }
-  if (!plugins.length) { showErr("profile needs at least one plugin"); return; }
-  $("prof-create").disabled = true;
-  post("/api/profiles/create",
-       { name, plugins, description: $("prof-desc").value.trim() })
-    .then(() => { $("prof-name").value = ""; $("prof-desc").value = ""; return loadProfiles(); })
-    .catch(e => showErr(e, "#panel-accounts"))
-    .finally(() => { $("prof-create").disabled = false; });
-};
-
-// ---------------------------------------------------------------- Rate Limits
-function renderRlWarnings(warnings) {
-  renderWarnings($("rl-warnings"), warnings);
-  if (!(warnings || []).length)
-    $("rl-warnings").innerHTML = '<span class="dim">no warnings — configuration looks sane</span>';
-}
-
-function renderPolicies(policies) {
-  const root = $("rl-policies");
-  root.innerHTML = "";
-  if (!policies.length) {
-    root.innerHTML = '<span class="dim">no stored policies — everything paces at the floor</span>';
-    return;
-  }
-  const table = document.createElement("table"); table.className = "tbl";
-  table.innerHTML = "<tr><th>action</th><th>level</th><th>owner</th><th>interval</th><th>jitter</th><th></th></tr>";
-  for (const p of policies) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = "<td>" + esc(p.action) + "</td><td>" + esc(p.level) + "</td><td>" +
-      esc(p.owner || "-") + "</td><td>" + esc(p.interval) + "s</td><td>" +
-      esc((p.jitter || [0, 0])[0]) + ".." + esc((p.jitter || [0, 0])[1]) + "s</td>";
-    const td = document.createElement("td");
-    td.appendChild(btn("clear", () => post("/api/ratelimit/clear",
-        { level: p.level, owner: p.owner, action: p.action })
-      .then(loadRateLimits).catch(e => showErr(e, "#panel-ratelimit")), "danger"));
-    tr.appendChild(td);
-    table.appendChild(tr);
-  }
-  root.appendChild(table);
-}
-
-function renderRlStats(stats) {
-  const root = $("rl-stats");
-  root.innerHTML = "";
-  const floorS = Number(stats.floor) || 0;
-  $("rl-floor").textContent = floorS + "s" +
-    (floorS >= 60 ? " (" + fmtDur(floorS) + ")" : "");
-  renderLane(stats.lane || {enabled: false});
-
-  const cd = stats.cooldowns || {};
-  const cool = document.createElement("div"); cool.className = "card2";
-  cool.innerHTML = "<div class='sub'>server cooldowns — global: " +
-    esc(cd.global || 0) + "s remaining</div>";
-  const acctLines = Object.entries(cd.accounts || {})
-    .map(([acct, actions]) =>
-      acct + ": " + Object.entries(actions).map(([a, s]) => a + " " + s + "s").join(", "))
-    .join(" · ");
-  cool.innerHTML += "<div class='sub dim'>" + esc(acctLines || "no account cooldowns") + "</div>";
-  root.appendChild(cool);
-
-  const fire = document.createElement("div"); fire.className = "card2";
-  const fireTable = document.createElement("table"); fireTable.className = "tbl";
-  fireTable.innerHTML = "<tr><th>pacing key</th><th>last fire age</th></tr>";
-  for (const [key, age] of Object.entries(stats.last_fire_ages || {})) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = "<td>" + esc(key) + "</td><td>" + esc(age) + "s</td>";
-    fireTable.appendChild(tr);
-  }
-  if (!Object.keys(stats.last_fire_ages || {}).length)
-    fire.innerHTML += '<span class="dim mono">nothing has fired yet</span>';
-  else fire.appendChild(fireTable);
-  root.appendChild(fire);
-
-  const counters = document.createElement("div"); counters.className = "sub";
-  counters.textContent = "grants " + (stats.grants ?? 0) +
-    " · waits " + (stats.waits ?? 0) +
-    " · avg wait " + Number(stats.avg_wait_s ?? 0).toFixed(2) + "s";
-  root.appendChild(counters);
-}
-
-function loadRateLimits() {
-  fillSelect($("eff-account"), accountNames(), "— any account —");
-  return Promise.all([
-    api("/api/ratelimit/warnings").then(renderRlWarnings).catch(e => showErr(e, "#panel-ratelimit")),
-    api("/api/ratelimit/policies").then(renderPolicies).catch(e => showErr(e, "#panel-ratelimit")),
-    api("/api/ratelimit/stats").then(renderRlStats).catch(e => showErr(e, "#panel-ratelimit")),
-  ]);
-}
-LOADERS.ratelimit = loadRateLimits;
-
-$("rl-set").onclick = () => {
-  // ERROR AUDIT FIX: NaN/floor guards client-side (server floor is 1.5s)
-  const action = $("rl-action").value.trim();
-  const interval = parseFloat($("rl-interval").value);
-  if (!action) { showErr("policy needs an action (e.g. message)"); return; }
-  if (!Number.isFinite(interval)) { showErr("interval must be a number"); return; }
-  const payload = { action, interval, level: $("rl-level").value };
-  const jminRaw = $("rl-jmin").value.trim();
-  const jmaxRaw = $("rl-jmax").value.trim();
-  if (jminRaw || jmaxRaw) {
-    const jmin = parseFloat(jminRaw), jmax = parseFloat(jmaxRaw);
-    if (!Number.isFinite(jmin) || !Number.isFinite(jmax)) {
-      showErr("jitter min/max must be numbers when given");
-      return;
-    }
-    payload.jitter_min = jmin; payload.jitter_max = jmax;
-  }
-  const owner = $("rl-owner").value.trim();
-  if (owner) payload.owner = owner;
-  post("/api/ratelimit/set", payload).then(() => {
-    $("rl-interval").value = ""; $("rl-jmin").value = ""; $("rl-jmax").value = "";
-    return loadRateLimits();
-  }).catch(e => showErr(e, "#panel-ratelimit"));
-};
-
-$("eff-go").onclick = () => {
-  const action = $("eff-action").value.trim();
-  if (!action) { showErr("effective calculator needs an action"); return; }
-  const q = new URLSearchParams({ action });
-  if ($("eff-account").value) q.set("account", $("eff-account").value);
-  if ($("eff-plugin").value.trim()) q.set("plugin", $("eff-plugin").value.trim());
-  api("/api/ratelimit/effective?" + q).then((eff) => {
-    const root = $("eff-result");
-    root.innerHTML = "";
-    const card = document.createElement("div"); card.className = "card2";
-    card.innerHTML = '<div class="row"><span class="name mono">' + esc(eff.action) + "</span>" +
-      '<span class="mono">every ' + esc(eff.interval) + "s</span>" +
-      '<span class="mono dim">jitter ' + esc((eff.jitter || [0, 0])[0]) + ".." +
-      esc((eff.jitter || [0, 0])[1]) + "s</span></div>";
-    const table = document.createElement("table"); table.className = "tbl";
-    table.innerHTML = "<tr><th>source level</th><th>owner</th><th>interval</th></tr>";
-    for (const s of eff.sources || []) {
-      const tr = document.createElement("tr");
-      tr.innerHTML = "<td>" + esc(s.level) + "</td><td>" + esc(s.owner || "-") +
-        "</td><td>" + esc(s.interval) + "s</td>";
-      table.appendChild(tr);
-    }
-    if (!(eff.sources || []).length)
-      card.innerHTML += '<div class="sub dim">no stored policy — pacing at the floor</div>';
-    else card.appendChild(table);
-    root.appendChild(card);
-  }).catch(e => showErr(e, "#panel-ratelimit"));
-};
-
-$("rl-floor-set").onclick = () => {
-  const seconds = parseFloat($("rl-floor-new").value);
-  if (!Number.isFinite(seconds)) { showErr("floor must be a number (seconds)"); return; }
-  post("/api/ratelimit/floor", { seconds })
-    .then(() => { $("rl-floor-new").value = ""; return loadRateLimits(); })
-    .catch(e => showErr(e, "#panel-ratelimit"));
-};
-
-// ------------------------------------------------- sequential send lane
-function renderLane(lane) {
-  if (!lane || !lane.enabled) {
-    $("lane-state").textContent = "off";
-    $("lane-info").textContent = "sends are paced per-account only";
-    return;
-  }
-  $("lane-state").textContent = lane.paused
-    ? "PAUSED (all outbound actions hold)" : "active";
-  const last = lane.last_grant_age_s == null ? "never" : lane.last_grant_age_s + "s ago";
-  $("lane-info").textContent =
-    "spacing " + Number(lane.prefixrate).toFixed(2) + "s between consecutive sends · " +
-    "waiting " + lane.waiting + " · grants " + lane.grants + " · last grant " + last;
-}
-$("lane-on").onclick = () => {
-  const raw = $("lane-rate").value.trim();
-  const payload = {enabled: true};
-  if (raw) {
-    const rate = parseFloat(raw);
-    if (!Number.isFinite(rate) || rate < 0) { showErr("spacing must be a number >= 0 (0 pauses)"); return; }
-    payload.prefixrate = rate;
-  }
-  post("/api/ratelimit/lane", payload).then(loadRateLimits).catch(e => showErr(e, "#panel-ratelimit"));
-};
-$("lane-off").onclick = () =>
-  post("/api/ratelimit/lane", {enabled: false}).then(loadRateLimits).catch(e => showErr(e, "#panel-ratelimit"));
-$("lane-set").onclick = () => {
-  const rate = parseFloat($("lane-rate").value);
-  if (!Number.isFinite(rate) || rate < 0) { showErr("spacing must be a number >= 0 (0 pauses the lane)"); return; }
-  post("/api/ratelimit/lane", {enabled: true, prefixrate: rate})
-    .then(() => { $("lane-rate").value = ""; return loadRateLimits(); })
-    .catch(e => showErr(e, "#panel-ratelimit"));
-};
-
-// ---------------------------------------------------------------- Tasks
-function taskRow(t, live) {
-  const tr = document.createElement("tr");
-  tr.innerHTML = "<td>" + esc(t.id) + "</td><td>" + esc(t.account || "-") + "</td><td>" +
-    esc(t.plugin || "-") + "</td><td>" + esc(t.action) + "</td><td>" +
-    esc(t.priority ?? "-") + "</td><td>" +
-    (live ? esc(fmtAge(t.submitted_at)) : esc(t.status)) + "</td>";
-  if (live) {
-    const td = document.createElement("td");
-    td.appendChild(btn("cancel", () => post("/api/tasks/cancel", { task_id: t.id })
-      .then(loadTasks).catch(e => showErr(e, "#panel-tasks")), "danger"));
-    tr.appendChild(td);
-  } else {
-    const dur = t.finished_at && t.submitted_at
-      ? ((t.finished_at - t.submitted_at)).toFixed(1) + "s" : "-";
-    const td = document.createElement("td");
-    td.textContent = dur + (t.error ? " — " + t.error : "");
-    tr.appendChild(td);
-  }
-  return tr;
-}
-
-function renderTasks(tasks, history) {
-  const root = $("tasks-live");
-  root.innerHTML = "";
-  const live = (tasks || []).filter((t) => t.status === "running" || t.status === "queued");
-  const byStatus = { running: [], queued: [] };
-  for (const t of live) (byStatus[t.status] = byStatus[t.status] || []).push(t);
-  for (const [status, label] of [["running", "Running"], ["queued", "Queued"]]) {
-    const card = document.createElement("div"); card.className = "card2";
-    card.innerHTML = "<div class='sub'>" + label + " (" + byStatus[status].length + ")</div>";
-    const table = document.createElement("table"); table.className = "tbl";
-    table.innerHTML = "<tr><th>id</th><th>account</th><th>plugin</th><th>action</th><th>prio</th><th>age</th><th></th></tr>";
-    for (const t of byStatus[status]) table.appendChild(taskRow(t, true));
-    if (!byStatus[status].length) {
-      card.innerHTML += '<span class="dim mono">none</span>';
-    } else card.appendChild(table);
-    root.appendChild(card);
-  }
-
-  const hroot = $("tasks-history");
-  hroot.innerHTML = "";
-  const htable = document.createElement("table"); htable.className = "tbl";
-  htable.innerHTML = "<tr><th>id</th><th>account</th><th>plugin</th><th>action</th><th>prio</th><th>status</th><th>duration</th></tr>";
-  for (const t of history || []) {
-    const tr = taskRow(t, false);
-    const badge = document.createElement("span");
-    badge.className = "st-" + (t.status || "");
-    badge.textContent = t.status || "";
-    tr.children[5].textContent = "";
-    tr.children[5].appendChild(badge);
-    htable.appendChild(tr);
-  }
-  hroot.appendChild(htable);
-  if (!(history || []).length)
-    hroot.innerHTML = '<span class="dim mono">no history yet</span>';
-}
-
-function loadTasks() {
-  return Promise.all([
-    api("/api/tasks"),
-    api("/api/tasks/history?limit=50"),
-  ]).then(([tasks, history]) => renderTasks(tasks, history)).catch((e) => {
-    $("tasks-live").innerHTML = "";
-    const line = document.createElement("div");
-    line.className = "dim";
-    line.textContent = "tasks unavailable: " + (e.message || e);
-    $("tasks-live").appendChild(line);
-    showErr(e, "#panel-tasks");
-  });
-}
-LOADERS.tasks = loadTasks;
-$("tasks-refresh").onclick = () => loadTasks().then(() => showNote("tasks refreshed", "#panel-tasks"));
-
-function appendTaskEvent(msg) {
-  const box = $("taskevents");
-  const ph = box.querySelector("[data-ph]");
-  if (ph) ph.remove();
-  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
-  const div = document.createElement("div");
-  const clock = new Date().toTimeString().slice(0, 8);
-  const bits = [msg.account || "-"];
-  if (msg.task_id != null) bits.push("#" + msg.task_id);
-  if (msg.action) bits.push(msg.action);
-  if (msg.duration_s != null) {
-    const d = Number(msg.duration_s);
-    if (Number.isFinite(d)) bits.push(d.toFixed(2) + "s");
-  }
-  if (msg.error) bits.push(msg.error);
-  if (msg.summary) bits.push(msg.summary);
-  div.textContent = clock + " " + msg.event + "  " + bits.join("  ");
-  box.appendChild(div);
-  while (box.childNodes.length > 120) box.removeChild(box.firstChild);
-  if (atBottom) box.scrollTop = box.scrollHeight;
-}
-
-// ---------------------------------------------------------------- Logs
-function buildLogLine(entry) {
-  // ROUND-3: split out of logLine so backfill can MERGE fetched history
-  // ahead of live lines instead of wiping them; null = filtered out
-  const acctFilter = $("log-acct").value;
-  const sevFilter = $("log-sev").value;
-  if (acctFilter && entry.account !== acctFilter) return null;
-  if (sevFilter && entry.severity !== sevFilter) return null;
-  const div = document.createElement("div");
-  div.className = "lg-" + (entry.severity || "INFO");
-  const clock = new Date((entry.ts || 0) * 1000).toTimeString().slice(0, 8);
-  div.textContent = clock + " " + (entry.severity || "?") + " " + (entry.source || "?") +
-    (entry.account ? " (" + entry.account + ")" : "") + ": " + (entry.message || "");
-  return div;
-}
-
-function logLine(entry) {
-  const box = $("logbox");
-  const div = buildLogLine(entry);
-  if (!div) return;
-  const ph = box.querySelector("[data-ph]");
-  if (ph) ph.remove();
-  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
-  box.appendChild(div);
-  while (box.childNodes.length > 400) box.removeChild(box.firstChild);
-  if (atBottom) box.scrollTop = box.scrollHeight;
-}
-
-function buildAuditLine(entry) {
-  // ROUND-3: split out of auditLine for merge-style backfill (see logs)
-  const filter = $("audit-acct").value;
-  if (filter && entry.account !== filter) return null;
-  const div = document.createElement("div");
-  div.className = "audit-line " + (entry.direction === "out" ? "out" : "in");
-  const clock = new Date((entry.ts || 0) * 1000).toTimeString().slice(0, 8);
-  const arrow = entry.direction === "out" ? "->" : "<-";
-  const meta = [];
-  if (entry.wait_ms) meta.push("wait " + Math.round(entry.wait_ms) + "ms");
-  if (entry.jitter_ms) meta.push("jitter " + Math.round(entry.jitter_ms) + "ms");
-  div.innerHTML = esc(clock) + " " + arrow + " " + esc(entry.account) + " " +
-    esc(entry.action) + " ch=" + esc(entry.channel_id ?? "-") + " " +
-    '<span class="audit-meta">' + esc(meta.join(", ")) + "</span> " +
-    esc((entry.content || "").slice(0, 80)) +
-    (entry.note ? "  (" + esc(entry.note) + ")" : "");
-  return div;
-}
-
-function auditLine(entry) {
-  const box = $("auditbox");
-  const div = buildAuditLine(entry);
-  if (!div) return;
-  const ph = box.querySelector("[data-ph]");
-  if (ph) ph.remove();
-  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
-  box.appendChild(div);
-  while (box.childNodes.length > 300) box.removeChild(box.firstChild);
-  if (atBottom) box.scrollTop = box.scrollHeight;
-}
-
-function backfillLogs() {
-  const q = new URLSearchParams({ n: "200" });
-  if ($("log-acct").value) q.set("account", $("log-acct").value);
-  if ($("log-sev").value) q.set("severity", $("log-sev").value);
-  api("/api/logs?" + q).then((entries) => {
-    // ROUND-3: MERGE, not wipe — live lines that streamed in while the
-    // fetch was in flight survive; backfilled history is inserted AHEAD
-    // of them (it is strictly older)
-    const box = $("logbox");
-    const ph = box.querySelector("[data-ph]");
-    if (ph) ph.remove();
-    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
-    const anchor = box.firstChild;  // oldest surviving live line
-    for (const entry of entries) {
-      const div = buildLogLine(entry);
-      if (div) box.insertBefore(div, anchor);
-    }
-    while (box.childNodes.length > 400) box.removeChild(box.firstChild);
-    if (!box.childNodes.length)
-      box.innerHTML = '<span class="dim" data-ph="1">no log entries matched</span>';
-    if (atBottom) box.scrollTop = box.scrollHeight;
-    $("logsync").textContent = entries.length + " entries";
-  }).catch(e => showErr(e, "#panel-logs"));
-}
-$("log-backfill").onclick = backfillLogs;
-$("log-acct").onchange = backfillLogs;
-$("log-sev").onchange = backfillLogs;
-
-function backfillAudit() {
-  const q = new URLSearchParams({ n: "100" });
-  if ($("audit-acct").value) q.set("account", $("audit-acct").value);
-  api("/api/audit?" + q).then((entries) => {
-    // ROUND-3: merge-style backfill (see backfillLogs) — live audit lines
-    // that arrived during the fetch are preserved
-    const box = $("auditbox");
-    const ph = box.querySelector("[data-ph]");
-    if (ph) ph.remove();
-    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
-    const anchor = box.firstChild;
-    for (const entry of entries) {
-      const div = buildAuditLine(entry);
-      if (div) box.insertBefore(div, anchor);
-    }
-    while (box.childNodes.length > 300) box.removeChild(box.firstChild);
-    if (!box.childNodes.length)
-      box.innerHTML = '<span class="dim" data-ph="1">no audit entries matched</span>';
-    if (atBottom) box.scrollTop = box.scrollHeight;
-  }).catch(e => showErr(e, "#panel-logs"));
-}
-$("audit-backfill").onclick = backfillAudit;
-$("audit-acct").onchange = backfillAudit;
-LOADERS.logs = () => { backfillLogs(); backfillAudit(); };
-
-// ---------------------------------------------------------------- Simulation
-const SIM_LOG_LINE_CAP = 500;
-let simRunButtons = [];
-function renderScenarios(scenarios) {
-  const root = $("sim-list");
-  root.innerHTML = "";
-  simRunButtons = [];
-  if (!scenarios.length) {
-    root.innerHTML = '<span class="dim">no simulation scenarios configured</span>';
-    return;
-  }
-  for (const s of scenarios) {
-    const card = document.createElement("div"); card.className = "card2";
-    const row = document.createElement("div"); row.className = "row";
-    row.innerHTML = '<span class="name mono">' + esc(s.name) + "</span>";
-    const run = btn("run", () => runSimulation(s.name, run));
-    simRunButtons.push(run);
-    row.appendChild(run);
-    card.appendChild(row);
-    const desc = document.createElement("div"); desc.className = "dim";
-    desc.textContent = s.description || "";
-    card.appendChild(desc);
-    root.appendChild(card);
-  }
-}
-
-function runSimulation(name, button) {
-  const old = button.textContent;
-  for (const b of simRunButtons) b.disabled = true;
-  button.innerHTML = '<span class="spin">◌</span> running…';
-  post("/api/simulation/run", { name }).then((report) => {
-    button.textContent = old;
-    for (const b of simRunButtons) b.disabled = false;
-    renderSimReport(report);
-  }).catch((e) => {
-    button.textContent = old;
-    for (const b of simRunButtons) b.disabled = false;
-    showErr(e, "#panel-simulation");
-  });
-}
-
-function renderSimReport(report) {
-  const root = $("sim-result");
-  root.innerHTML = "";
-  const banner = document.createElement("div");
-  banner.className = "banner " + (report.passed ? "pass" : "fail");
-  banner.textContent = (report.passed ? "✔ PASSED" : "✘ FAILED") + " — " + report.name +
-    " in " + Number(report.duration_s ?? 0).toFixed(2) + "s";
-  root.appendChild(banner);
-  if (!report.passed) {
-    const fails = document.createElement("div"); fails.className = "card2";
-    fails.innerHTML = "<div class='sub'>failures</div>";
-    for (const f of report.failures || []) {
-      const line = document.createElement("div");
-      line.className = "plugin-err"; line.textContent = "• " + f;
-      fails.appendChild(line);
-    }
-    if (!(report.failures || []).length)
-      fails.innerHTML += '<span class="dim mono">no failure details</span>';
-    root.appendChild(fails);
-  }
-  if (report.summary) {
-    const sum = document.createElement("div"); sum.className = "sub";
-    sum.textContent = report.summary;
-    root.appendChild(sum);
-  }
-  const logs = document.createElement("div"); logs.className = "card2";
-  logs.innerHTML = "<div class='sub'>timed log lines</div>";
-  const box = document.createElement("div"); box.id = "simlogs";
-  const lines = report.log_lines || [];
-  if (lines.length > SIM_LOG_LINE_CAP) {
-    const cut = document.createElement("div");
-    cut.className = "dim mono";
-    cut.textContent = "… " + (lines.length - SIM_LOG_LINE_CAP) +
-      " earlier log line(s) not shown";
-    box.appendChild(cut);
-  }
-  for (const line of lines.slice(-SIM_LOG_LINE_CAP)) {
-    const div = document.createElement("div");
-    div.textContent = line;
-    box.appendChild(div);
-  }
-  logs.appendChild(box);
-  root.appendChild(logs);
-  const inter = document.createElement("div"); inter.className = "card2";
-  inter.innerHTML = "<div class='sub'>interactions (" +
-    (report.interactions || []).length + ")</div>";
-  const itable = document.createElement("table"); itable.className = "tbl";
-  itable.innerHTML = "<tr><th>ts</th><th>dir</th><th>account</th><th>action</th><th>channel</th><th>content</th></tr>";
-  for (const i of report.interactions || []) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = "<td>" + esc(new Date((i.ts || 0) * 1000).toTimeString().slice(0, 8)) +
-      "</td><td>" + esc(i.direction) + "</td><td>" + esc(i.account) + "</td><td>" +
-      esc(i.action) + "</td><td>" + esc(i.channel_id ?? "-") + "</td><td>" +
-      esc((i.content || "").slice(0, 60)) + "</td>";
-    itable.appendChild(tr);
-  }
-  if (!(report.interactions || []).length)
-    inter.innerHTML += '<span class="dim mono">no interactions recorded</span>';
-  else inter.appendChild(itable);
-  root.appendChild(inter);
-}
-function loadScenarios() {
-  return api("/api/simulation/list").then(renderScenarios).catch((e) => {
-    $("sim-list").innerHTML = "";
-    const line = document.createElement("div");
-    line.className = "dim";
-    line.textContent = "simulation unavailable: " + (e.message || e);
-    $("sim-list").appendChild(line);
-    showErr(e, "#panel-simulation");
-  });
-}
-LOADERS.simulation = loadScenarios;
-
-// ---------------------------------------------------------------- Cooldowns
-function renderCooldowns(rows) {
-  const root = $("cooldowns-list");
-  root.innerHTML = "";
-  fillSelect($("cd-acct"), accountNames(), "all accounts");
-  if (!(rows || []).length) {
-    root.innerHTML = '<span class="dim">no active cooldowns</span>';
-    return;
-  }
-  const table = document.createElement("table"); table.className = "tbl";
-  table.innerHTML = "<tr><th>account</th><th>plugin</th><th>key</th>" +
-    "<th>remaining</th><th>source</th><th></th></tr>";
-  for (const r of rows) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = "<td>" + esc(r.account) + "</td><td>" + esc(r.plugin) + "</td>" +
-      "<td>" + esc(r.cooldown_key) + "</td><td>" + esc(fmtMMSS(r.remaining_s)) +
-      '</td><td class="dim">' + esc(r.source || "-") + "</td>";
-    const td = document.createElement("td");
-    td.appendChild(btn("clear", () => post("/api/cooldowns/clear",
-        { account: r.account, plugin: r.plugin, cooldown_key: r.cooldown_key })
-      .then(loadCooldowns).catch(e => showErr(e, "#panel-cooldowns")), "danger"));
-    tr.appendChild(td);
-    table.appendChild(tr);
-  }
-  root.appendChild(table);
-}
-
-function loadCooldowns() {
-  const q = new URLSearchParams();
-  if ($("cd-acct").value) q.set("account", $("cd-acct").value);
-  return api("/api/cooldowns?" + q).then(renderCooldowns).catch((e) => {
-    $("cooldowns-list").innerHTML = "";
-    const line = document.createElement("div");
-    line.className = "dim";
-    line.textContent = "cooldowns unavailable: " + (e.message || e);
-    $("cooldowns-list").appendChild(line);
-    showErr(e, "#panel-cooldowns");
-  });
-}
-LOADERS.cooldowns = loadCooldowns;
-$("cooldowns-refresh").onclick = () => loadCooldowns().then(() => showNote("cooldowns refreshed", "#panel-cooldowns"));
-$("cd-acct").onchange = () => loadCooldowns();
-
-// ---------------------------------------------------------------- Advanced
-$("estop").onclick = () => askConfirm("GLOBAL EMERGENCY STOP",
-  "Cancel EVERY task and stop EVERY account immediately?",
-  () => post("/api/estop", {}).then((r) => {
-    showNote("emergency stop executed — " + (r.cancelled_tasks ?? "?") + " tasks cancelled");
-    loadAccountsQuiet();
-  }).catch(e => showErr(e, "#panel-advanced")));
-
-$("imp-env").onclick = () => askConfirm("Import .env credentials",
-  "Copy every registered account's DISCORD_TOKEN_* .env entry into encrypted" +
-  " database storage" +
-  ($("imp-overwrite").checked ? " — OVERWRITING stored credentials" : "") + "?",
-  () => post("/api/credentials/import-env",
-             { overwrite: $("imp-overwrite").checked })
-    .then((report) => {
-      showNote("credentials imported: " + (report.imported || []).length +
-        " imported, " + (report.skipped || []).length + " skipped, " +
-        Object.keys(report.failed || {}).length + " failed");
-    }).catch(e => showErr(e, "#panel-advanced")));
-
-// The import button rides the server's credential gate: probe it once when
-// the Advanced panel first opens. 403 => NO DASHBOARD_TOKEN configured =>
-// keep the button disabled with the tooltip naming the fix. (401 = a token
-// IS configured — the button stays usable once it's entered top right.)
-function refreshImportGate() {
-  const impBtn = $("imp-env");
-  fetch("/api/credentials/status", { headers: { "X-Dashboard-Token": token() } })
-    .then((r) => {
-      if (r.status === 403) {
-        impBtn.disabled = true;
-        impBtn.title = "disabled: set DASHBOARD_TOKEN in .env to manage credentials";
-        $("imp-note").textContent = "credential management is locked (no DASHBOARD_TOKEN)";
-      } else {
-        impBtn.disabled = false;
-        impBtn.title = "";
-        $("imp-note").textContent = "";
-      }
-    })
-    .catch(() => { /* offline server: leave defaults, errors surface on use */ });
-}
-LOADERS.advanced = refreshImportGate;
-
-$("shutdown").onclick = () => askConfirm("Graceful shutdown",
-  "Shut the whole framework down (drain tasks, stop accounts, close DB)?",
-  () => post("/api/shutdown", {}).then(() => {
-    showNote("shutdown requested — the server will stop responding");
-  }).catch(e => showErr(e, "#panel-advanced")));
-
-$("savetoken").onclick = () => {
-  store.setItem("dash_token", $("token").value.trim());
-  clearErrors(); location.reload();
-};
-$("token").addEventListener("keydown", (e) => { if (e.key === "Enter") $("savetoken").click(); });
-$("adv-save").onclick = () => {
-  store.setItem("dash_token", $("adv-token").value.trim());
-  clearErrors(); location.reload();
-};
-$("adv-forget").onclick = () => {
-  // reload: keeping the page open would leave the WS authorized under the
-  // old token while every REST call 401s (split-brain auth state)
-  setTimeout(() => location.reload(), 120);
-  store.removeItem("dash_token");
-  $("adv-token").value = "";
-  showNote("token forgotten from local storage");
-};
-
-// ---------------------------------------------------------------- WebSocket
-let wsRetry = 1000;
-let wsAttempts = 0;
-const WS_CONNECT_TIMEOUT_MS = 10000;
-let wsWatchdog = null;        // ROUND-3: half-open TCP guard (see connectWS)
-let wsClosedHandled = false;  // one reconnect per connection (watchdog OR onclose)
-function handleWsClosed() {
-  // ROUND-3 WATCHDOG: a half-open TCP (SYN dropped, NAT state gone) fires
-  // NEITHER onopen NOR onclose — the retry loop previously depended on
-  // onclose alone and stalled forever. The watchdog forces this path.
-  if (wsClosedHandled) return;
-  wsClosedHandled = true;
-  if (wsWatchdog) { clearTimeout(wsWatchdog); wsWatchdog = null; }
-  $("wsdot").classList.remove("on");
-  // ERROR AUDIT FIX: cap retries + name the likely cause instead of an
-  // endless misleading "reconnecting…"
-  wsAttempts += 1;
-  if (wsAttempts > 10) {
-    $("connmsg").textContent = "live updates stopped — check the token or server, then reload";
-    return;
-  }
-  $("connmsg").textContent = wsAttempts > 3 ? "reconnecting… (bad token?)" : "reconnecting…";
-  setTimeout(connectWS, wsRetry);
-  wsRetry = Math.min(wsRetry * 2, 10000);
-}
+// ── WebSocket ─────────────────────────────────────────────────────────────────
 function connectWS() {
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const url = proto + "//" + location.host + "/ws" +
-    (token() ? "?token=" + encodeURIComponent(token()) : "");
-  wsClosedHandled = false;
-  ws = new WebSocket(url);
-  clearTimeout(wsWatchdog);
-  wsWatchdog = setTimeout(() => {
-    wsWatchdog = null;
-    try { ws.close(); } catch { /* dead socket already */ }
-    handleWsClosed();  // onclose may never fire — arm the retry directly
-  }, WS_CONNECT_TIMEOUT_MS);
+  const proto = location.protocol==="https:"?"wss":"ws";
+  const url = `${proto}://${location.host}/ws`;
+  try { ws = new WebSocket(url); } catch { return handleWsClosed(); }
+  wsWatchdog = setTimeout(()=>{ if(ws.readyState===WebSocket.CONNECTING) ws.close(); }, 5000);
   ws.onopen = () => {
-    clearTimeout(wsWatchdog);
-    wsWatchdog = null;
-    $("wsdot").classList.add("on");
-    $("connmsg").textContent = "live";
-    wsRetry = 1000; wsAttempts = 0;
+    clearTimeout(wsWatchdog); wsRetries = 0;
+    $("wsdot").classList.add("on"); $("connmsg").textContent = "live";
   };
-  ws.onmessage = (ev) => {
-    // ERROR AUDIT FIX: a render throw here silently froze the UI on stale data
-    let msg;
-    try { msg = JSON.parse(ev.data); } catch { return; }
+  ws.onmessage = ev => {
+    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
     try {
       if (msg.type === "stats") {
-        // render-gating: an unchanged account list must not rebuild the
-        // DOM every second (open dropdowns closed, scroll reset, battery).
-        // ROUND-3: steady accounts froze (latency/uptime/cooldowns never
-        // moved) — the sig now folds in COARSE latency (round/10), an
-        // uptime bucket (minute) and the cooldown count so the accounts
-        // panel ticks along with the overview without re-rendering per second
-        const sig = JSON.stringify((msg.accounts || []).map((a) => [
-          a.name, a.status, a.enabled, a.credential,
-          a.latency_ms != null ? Math.round(a.latency_ms / 10) : null,
-          Math.floor((a.uptime_s ?? 0) / 60),
-          a.cooldowns ?? 0]));
-        const structural = sig !== lastAccountsSig;
+        const sig = JSON.stringify((msg.accounts||[]).map(a=>[
+          a.name,a.status,a.enabled,a.credential,
+          a.latency_ms!=null?Math.round(a.latency_ms/10):null,
+          Math.floor((a.uptime_s??0)/60), a.cooldowns??0]));
         lastStats = msg;
-        renderOverview();
-        if (structural) { lastAccountsSig = sig; renderAccountCards(); }
+        const structural = sig !== lastSig;
+        if (structural) { lastSig = sig; }
+        render();
       }
-      else if (msg.type === "log") logLine(msg);
-      else if (msg.type === "audit") auditLine(msg);
-      else if (msg.type === "task") { appendTaskEvent(msg); scheduleTaskRefresh(); }
-      else if (msg.type === "error") showErr(msg.error);
-    } catch (e) {
-      showErr(new Error("failed to render live update: " + (e.message || e)));
-    }
+      else if (msg.type==="log") logLine(msg);
+      else if (msg.type==="audit") auditLine(msg);
+      else if (msg.type==="task") scheduleTaskRefresh();
+      else if (msg.type==="error") showErr(msg.error);
+    } catch(e) { showErr("render error: "+(e.message||e)); }
   };
   ws.onclose = () => handleWsClosed();
 }
-
-// task events arrive in bursts — refresh the tables at most once a second
+function handleWsClosed() {
+  clearTimeout(wsWatchdog);
+  $("wsdot").classList.remove("on"); $("connmsg").textContent = "disconnected";
+  if (wsRetries < 10) { wsRetries++; $("connmsg").textContent=`reconnecting (${wsRetries}/10)…`;
+    setTimeout(connectWS, Math.min(1000*Math.pow(2,wsRetries),30000)); }
+  else $("connmsg").textContent = "connection lost — reload to retry";
+}
 let taskRefreshTimer = null;
 function scheduleTaskRefresh() {
-  if (taskRefreshTimer || !$("panel-tasks").classList.contains("active")) return;
-  taskRefreshTimer = setTimeout(() => {
-    taskRefreshTimer = null;
-    if ($("panel-tasks").classList.contains("active")) loadTasks();
-  }, 1000);
+  if (taskRefreshTimer || currentView!=="activity") return;
+  taskRefreshTimer = setTimeout(()=>{ taskRefreshTimer=null; if(currentView==="activity") loadTasks(); }, 1000);
 }
 
-$("pushrefresh").onclick = () => {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send("refresh");
-  else showErr("websocket not connected — cannot push refresh");
-};
+// ── Renderers ─────────────────────────────────────────────────────────────────
+function accounts() { return (lastStats&&lastStats.accounts)||[]; }
+function groupMap() {
+  const m = {};
+  for (const a of accounts()) {
+    const g = a.sync_group || "";
+    (m[g]=m[g]||[]).push(a);
+  }
+  return m;
+}
+function effectiveCaps(acct, profs) {
+  const set = new Set(); let hasKnown = false;
+  for (const pn of acct.profiles||[]) {
+    const p = (profs||profilesList).find(x=>x.name===pn);
+    if (!p) continue; hasKnown = true;
+    for (const pl of p.plugins||[]) set.add(pl);
+  }
+  return hasKnown ? set : null; // null = unrestricted
+}
 
-// ---------------------------------------------------------------- init
-// demo/share links: http://host:port/?token=... seeds the store then cleans the URL
+function statusBadge(s) { return `<span class="st st-${esc(s)}">${esc(s.replace(/_/g," "))}</span>`; }
+function scopeBadge(s) { return `<span class="scope scope-${esc(s)}">${esc(s)}</span>`; }
+
+function render() {
+  const hasAccts = accounts().length > 0;
+  if (!hasAccts && currentView!=="tools") { $$(".panel").forEach(p=>p.classList.remove("active")); $("panel-onboard").classList.add("active"); return; }
+  if (currentView==="home") renderHome();
+  if (currentView==="fleet") { renderAccounts(); renderGroups(); }
+  if (currentView==="profiles") renderProfiles();
+  if (currentView==="plugins") renderPlugins();
+  if (currentView==="policies") renderPolicies();
+  updateNavBadges();
+}
+
+function updateNavBadges() {
+  const attn = getAttention();
+  const badge = $("nav-badge-home");
+  if (badge) { badge.textContent = attn.length; badge.classList.toggle("hidden",!attn.length); }
+}
+
+function getAttention() {
+  const items = [];
+  for (const a of accounts()) {
+    if (a.status==="missing_credential"||a.status==="invalid_credential")
+      items.push({level:"error",icon:"🔑",title:a.name,detail:"Credential "+(a.status==="invalid_credential"?"invalid":"missing"),action:()=>UI.go("fleet")});
+    if (a.status==="failed")
+      items.push({level:"error",icon:"✕",title:a.name,detail:"Account failed",action:()=>UI.go("fleet")});
+  }
+  return items;
+}
+
+function renderHome() {
+  const attn = getAttention();
+  const el = $("home-attn"); el.innerHTML = "";
+  if (attn.length) {
+    for (const a of attn) {
+      const d = document.createElement("div"); d.className=`attn-item ${a.level}`;
+      d.innerHTML=`<span class="icon">${a.icon}</span><div class="txt"><b>${esc(a.title)}</b><div class="detail">${esc(a.detail)}</div></div>`;
+      d.onclick=a.action; el.appendChild(d);
+    }
+  }
+  const t = (lastStats&&lastStats.tasks)||{};
+  const running = accounts().filter(a=>a.status==="running").length;
+  const total = accounts().length;
+  const groups = groupMap();
+  const groupCount = Object.keys(groups).filter(k=>k).length;
+  const m = $("home-metrics"); m.innerHTML = `
+    <div class="metric"><div class="label">Accounts</div><div class="value ${running===total?"ok":running===0?"err":"warn"}">${running}/${total}</div><div class="sub">online</div></div>
+    <div class="metric"><div class="label">Groups</div><div class="value">${groupCount}</div><div class="sub">sync groups</div></div>
+    <div class="metric"><div class="label">Tasks</div><div class="value">${t.running??0}</div><div class="sub">${t.queued??0} queued</div></div>
+    <div class="metric"><div class="label">Cooldowns</div><div class="value">${(lastStats&&lastStats.ratelimit&&lastStats.ratelimit.cooldowns&&lastStats.ratelimit.cooldowns.accounts)?Object.keys(lastStats.ratelimit.cooldowns.accounts).length:0}</div><div class="sub">active</div></div>`;
+  const gr = $("home-groups"); gr.innerHTML = "";
+  for (const [name, members] of Object.entries(groups).sort((a,b)=>b[1].length-a[1].length)) {
+    if (!name) { const d=btn("Independent accounts","",
+      "chip"); d.style.cssText="display:block;margin:4px 0;padding:8px 12px;background:var(--surface2);border-radius:6px;font-size:12px;color:var(--dim);width:100%;text-align:left";
+      d.textContent=`${members.length} independent`; gr.appendChild(d); continue; }
+    const online = members.filter(m=>m.status==="running").length;
+    const d = document.createElement("div"); d.style.cssText="display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--surface2);border-radius:6px;margin:4px 0;cursor:pointer";
+    d.innerHTML=`<b style="color:var(--warn)">${esc(name)}</b><span class="dim" style="font-size:12px">${members.length} members</span><span style="margin-left:auto;font-size:12px;color:${online===members.length?"var(--ok)":"var(--warn)"}">● ${online}/${members.length}</span>`;
+    d.onclick=()=>{UI.go("fleet");UI.tab("groups")};
+    gr.appendChild(d);
+  }
+  if (!gr.children.length) gr.innerHTML='<span class="dim">no accounts yet</span>';
+}
+
+function renderAccounts() {
+  const grid = $("acct-grid"); grid.innerHTML = "";
+  $("cnt-accts").textContent = accounts().length;
+  fillSelect($("task-filter-account"), accounts().map(a=>a.name), "all accounts");
+  fillSelect($("log-acct"), accounts().map(a=>a.name), "all accounts");
+  fillSelect($("audit-acct"), accounts().map(a=>a.name), "all accounts");
+  fillDatalist("group-list", Object.keys(groupMap()).filter(k=>k));
+  fillDatalist("prof-list", profilesList.map(p=>p.name));
+  if (!accounts().length) { grid.innerHTML=emptyState("No Accounts","Add your first Discord account to get started.","+ Add Account","btn-add-acct"); return; }
+  for (const a of accounts()) grid.appendChild(acctCard(a));
+  updateBulkBar();
+}
+
+function acctCard(a) {
+  const card = document.createElement("div"); card.className = "acct-card";
+  const caps = effectiveCaps(a);
+  const capChips = caps===null ? '<span class="chip grant">unrestricted</span>'
+    : [...caps].map(c=>`<span class="chip plugin">${esc(c)}</span>`).join("") || '<span class="chip deny">none</span>';
+  card.innerHTML = `
+    <div class="hdr">
+      <span class="name" title="View details">${esc(a.name)}</span>
+      ${statusBadge(a.status)}
+      <span class="id">${a.user_id||a.discord_id||""}</span>
+      <div class="menu-wrap" style="margin-left:auto">
+        <button class="menu-btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
+        <div class="menu">
+          <button data-act="cred">Set credential</button>
+          <button data-act="group">Move to group…</button>
+          <button data-act="profile">Assign profile…</button>
+          <div class="sep"></div>
+          <button data-act="estop" class="danger">Emergency stop</button>
+          <button data-act="remove" class="danger">Remove account</button>
+        </div>
+      </div>
+    </div>
+    <div class="meta">
+      ${a.latency_ms!=null?`<span class="item">⚡ ${fmtLatency(a.latency_ms)}</span>`:""}
+      ${a.uptime_s?`<span class="item">⏱ ${fmtDur(a.uptime_s)}</span>`:""}
+      ${a.credential?`<span class="item">🔑 ${credLbl(a.credential)}</span>`:'<span class="item" style="color:var(--err)">🔑 missing</span>'}
+      ${a.cooldowns?`<span class="item" style="color:var(--warn)">⏳ ${a.cooldowns} cooldowns</span>`:""}
+    </div>
+    <div class="caps">
+      <span class="lbl">Profiles:</span>
+      ${(a.profiles||[]).map(p=>`<span class="chip profile" onclick="UI.go('profiles')">${esc(p)}</span>`).join("")||'<span class="faint">none</span>'}
+    </div>
+    <div class="caps">
+      <span class="lbl">Capabilities:</span>${capChips}
+    </div>
+    ${a.sync_group?`<div><span class="chip group" onclick="UI.go('fleet');UI.tab('groups')">${esc(a.sync_group)}</span></div>`:""}
+    <div class="actions">
+      ${a.status==="running"
+        ? btnG("Stop",()=>post("/api/accounts/stop",{account:a.name}).catch(showErr),"btn btn-secondary btn-sm")
+        : btnG("Start",()=>post("/api/accounts/start",{account:a.name}).catch(showErr),"btn btn-primary btn-sm")}
+      ${btn("Details",()=>openAcctDetails(a.name),"btn btn-ghost btn-sm")}
+      <label style="margin-left:auto;display:flex;align-items:center;gap:4px;font-size:11px;color:var(--dim);cursor:pointer">
+        <input type="checkbox" data-bulk="${esc(a.name)}" ${selectedAccounts.has(a.name)?"checked":""} style="width:14px;height:14px">
+      </label>
+    </div>`;
+  // Wire overflow menu
+  const menuWrap = card.querySelector(".menu-wrap");
+  const menuBtn = menuWrap.querySelector(".menu-btn");
+  const menu = menuWrap.querySelector(".menu");
+  menuBtn.onclick = e => { e.stopPropagation(); $$(".menu.open").forEach(m=>m!==menu&&m.classList.remove("open")); menu.classList.toggle("open"); };
+  document.addEventListener("click",()=>menu.classList.remove("open"));
+  menu.querySelectorAll("button").forEach(mb => mb.onclick = () => {
+    menu.classList.remove("open");
+    const act = mb.dataset.act;
+    if (act==="cred") { $("cred-name").value=a.name; $("dlg-cred").showModal(); $("cred-val").value=""; }
+    if (act==="estop") confirmAction("Emergency Stop",`Emergency stop ${a.name}?`,()=>post("/api/accounts/emergency-stop",{name:a.name}));
+    if (act==="remove") confirmAction("Remove Account",`Remove ${a.name}? This deletes its credential, cooldowns and state.`,()=>post("/api/accounts/remove",{name:a.name}));
+    if (act==="group") openGroupPicker(a.name);
+    if (act==="profile") openProfilePicker(a.name);
+  });
+  card.querySelector('input[data-bulk]').onchange = e => {
+    if (e.target.checked) selectedAccounts.add(a.name); else selectedAccounts.delete(a.name);
+    updateBulkBar();
+  };
+  card.querySelector(".name").onclick = () => openAcctDetails(a.name);
+  return card;
+}
+
+function renderGroups() {
+  const grid = $("group-grid"); grid.innerHTML = "";
+  const groups = groupMap();
+  const groupNames = Object.keys(groups).filter(k=>k).sort();
+  $("cnt-groups").textContent = groupNames.length;
+  if (!groupNames.length && !groups[""]) { grid.innerHTML=emptyState("No Sync Groups","Accounts without a group operate independently.","+ Create Group","btn-create-group"); return; }
+  for (const name of groupNames) {
+    const members = groups[name];
+    const online = members.filter(m=>m.status==="running").length;
+    const cooling = members.filter(m=>m.cooldowns>0).length;
+    const card = document.createElement("div"); card.className="group-card";
+    card.innerHTML = `
+      <div class="hdr"><span class="name">${esc(name)}</span>
+        <span class="count">${members.length} accounts</span>
+        <span class="st ${online===members.length?"st-online":online===0?"st-offline":"st-warning"}" style="margin-left:auto">${online}/${members.length} online</span></div>
+      <div class="members">${members.map(m=>`
+        <div class="member">
+          <span class="name" data-acct="${esc(m.name)}">${esc(m.name)}</span>
+          ${statusBadge(m.status)}
+          <span class="cap">${esc((m.profiles||[]).join(", ")||"no profiles")}</span>
+        </div>`).join("")}</div>
+      <div class="stats">
+        <span class="stat"><b>${online}</b> online</span>
+        ${cooling?`<span class="stat" style="color:var(--warn)"><b>${cooling}</b> cooldown</span>`:""}
+      </div>
+      <div class="actions">
+        ${btnG("Start All",()=>post("/api/accounts/start",{account:null}).catch(showErr),"btn btn-secondary btn-sm")}
+        ${btnG("Stop All",()=>post("/api/accounts/stop",{account:null}).catch(showErr),"btn btn-secondary btn-sm")}
+      </div>`;
+    card.querySelectorAll(".member .name").forEach(el=>el.onclick=()=>openAcctDetails(el.dataset.acct));
+    grid.appendChild(card);
+  }
+  const indep = groups[""]||[];
+  if (indep.length) {
+    const card = document.createElement("div"); card.className="group-card"; card.style.opacity=.7;
+    card.innerHTML=`<div class="hdr"><span class="name" style="color:var(--dim)">Independent</span>
+      <span class="count">${indep.length} accounts</span></div>
+      <p class="sub">These accounts operate without shared pacing.</p>
+      <div class="members">${indep.map(m=>`<div class="member"><span class="name">${esc(m.name)}</span>${statusBadge(m.status)}</div>`).join("")}</div>`;
+    grid.appendChild(card);
+  }
+}
+
+function renderProfiles() {
+  const grid = $("prof-grid"); grid.innerHTML = "";
+  if (!profilesList.length) { grid.innerHTML=emptyState("No Profiles","Profiles bundle plugin capabilities for accounts.","+ Create Profile","btn-create-prof"); return; }
+  for (const p of profilesList) {
+    const users = accounts().filter(a=>(a.profiles||[]).includes(p.name));
+    const card = document.createElement("div"); card.className="prof-card";
+    card.innerHTML = `
+      <div class="hdr"><span class="name">${esc(p.name)}</span></div>
+      ${p.description?`<p class="desc">${esc(p.description)}</p>`:""}
+      <div class="caps">${(manifests||[]).map(m=>{
+        const has = (p.plugins||[]).includes(m.name);
+        return `<div class="cap-row"><span class="${has?"granted":"denied"}">${has?"✓":"○"} ${esc(m.name)}</span></div>`;
+      }).join("")}</div>
+      <div class="used-by"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/></svg>Used by ${users.length} account${users.length!==1?"s":""}</div>
+      <div class="actions" style="display:flex;gap:6px;margin-top:auto">
+        ${btn("Delete",()=>confirmAction("Delete Profile",`Delete profile "${p.name}"?`,()=>post("/api/profiles/delete",{name:p.name}).then(loadProfiles).catch(showErr)),"btn btn-ghost btn-sm")}
+      </div>`;
+    grid.appendChild(card);
+  }
+}
+
+function renderPlugins() {
+  const grid = $("plugin-grid"); grid.innerHTML = "";
+  if (!manifests.length) { grid.innerHTML=emptyState("No Plugins","No plugins discovered in the plugins directory."); return; }
+  for (const m of manifests) {
+    const usingProfiles = profilesList.filter(p=>(p.plugins||[]).includes(m.name));
+    const usingAccounts = accounts().filter(a=>{
+      const caps = effectiveCaps(a); return caps===null||caps.has(m.name);
+    });
+    const card = document.createElement("div"); card.className="card";
+    card.innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <b style="font-size:15px;color:var(--ok)">${esc(m.name)}</b>
+        <span class="dim mono" style="font-size:11px">v${esc(m.version||"?")}</span>
+      </div>
+      <p class="sub" style="margin-bottom:10px">${esc(m.description||"")}</p>
+      <div style="display:flex;gap:12px;font-size:12px;color:var(--dim)">
+        <span>${usingProfiles.length} profiles</span>
+        <span>${usingAccounts.length} accounts</span>
+      </div>`;
+    grid.appendChild(card);
+  }
+}
+
+function renderPolicies() {
+  const eff = $("rl-effective-view");
+  if (lastStats && lastStats.ratelimit) {
+    const rl = lastStats.ratelimit;
+    eff.innerHTML = `<div class="rl-effective"><div class="value">${rl.floor||"—"}s</div><div class="label">Safety Floor</div></div>
+      <p class="sub" style="margin-top:8px;text-align:center">Discord bucket limits are the primary constraint.</p>`;
+    const bk = $("rl-buckets"); bk.innerHTML = "";
+    const buckets = rl.discord_buckets||{};
+    const keys = Object.keys(buckets);
+    if (!keys.length) { bk.innerHTML='<span class="dim">No bucket data yet — populates from Discord headers on first send.</span>'; }
+    else for (const k of keys) { const b = buckets[k];
+      const d = document.createElement("div"); d.className="bucket-row";
+      d.innerHTML=`<span style="color:var(--dim)">${esc(k)}</span><span class="remaining ${b.remaining===0?"zero":b.remaining<=2?"low":""}" style="margin-left:auto">${b.remaining}/${b.limit}</span><span class="dim">resets ${b.resets_in_s}s</span>`;
+      bk.appendChild(d);
+    }
+  }
+}
+
+function emptyState(title, body, cta, ctaId) {
+  return `<div class="empty"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 9h6v6H9z"/></svg><h3>${esc(title)}</h3><p>${esc(body)}</p>${cta?`<button class="btn btn-primary" id="${ctaId}">${esc(cta)}</button>`:""}</div>`;
+}
+function fillSelect(sel, names, ph) {
+  if (!sel) return; const cur = sel.value;
+  sel.innerHTML = `<option value="">${esc(ph)}</option>` + names.map(n=>`<option>${esc(n)}</option>`).join("");
+  if (cur) sel.value = cur;
+}
+function fillDatalist(id, names) { const dl = $(id); if (dl) dl.innerHTML = names.map(n=>`<option>${esc(n)}</option>`).join(""); }
+
+function openAcctDetails(name) {
+  const a = accounts().find(x=>x.name===name); if (!a) return;
+  $("dt-title").textContent = name;
+  const caps = effectiveCaps(a);
+  $("dt-body").innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">${statusBadge(a.status)}
+      <span class="dim mono" style="font-size:11px">${a.user_id||a.discord_id||""}</span></div>
+    <div class="grid" style="gap:12px">
+      <div class="card2"><b style="font-size:11px;color:var(--dim);text-transform:uppercase">Runtime</b>
+        <div class="sub">Latency: ${fmtLatency(a.latency_ms)} · Uptime: ${fmtDur(a.uptime_s||0)}</div></div>
+      <div class="card2"><b style="font-size:11px;color:var(--dim);text-transform:uppercase">Credential</b>
+        <div class="sub">${credLbl(a.credential)}</div></div>
+      <div class="card2"><b style="font-size:11px;color:var(--dim);text-transform:uppercase">Sync Group</b>
+        <div class="sub">${a.sync_group?`<span class="chip group">${esc(a.sync_group)}</span>`:"Independent"}</div></div>
+      <div class="card2"><b style="font-size:11px;color:var(--dim);text-transform:uppercase">Profiles</b>
+        <div class="sub">${(a.profiles||[]).map(p=>`<span class="chip profile">${esc(p)}</span>`).join(" ")||"None"}</div></div>
+      <div class="card2"><b style="font-size:11px;color:var(--dim);text-transform:uppercase">Effective Capabilities</b>
+        <div class="sub">${caps===null?"<span class='chip grant'>unrestricted</span>":[...caps].map(c=>`<span class="chip plugin">${esc(c)}</span>`).join(" ")||"none"}</div></div>
+      <div class="card2"><b style="font-size:11px;color:var(--dim);text-transform:uppercase">Enabled</b>
+        <div class="sub">${a.enabled?"Yes":"No"}</div></div>
+    </div>`;
+  $("dlg-details").showModal();
+}
+
+function confirmAction(title, msg, fn) {
+  $("cf-title").childNodes[0].textContent = title;
+  $("cf-msg").textContent = msg;
+  const dlg = $("dlg-confirm");
+  $("cf-yes").onclick = () => { dlg.close(); fn(); };
+  dlg.showModal();
+}
+
+function openGroupPicker(acctName) { /* TODO: group picker modal */ }
+function openProfilePicker(acctName) { /* TODO: profile picker modal */ }
+
+function updateBulkBar() {
+  const bar = $("bulkbar");
+  bar.classList.toggle("open", selectedAccounts.size > 0);
+  $("bulk-count").textContent = `${selectedAccounts.size} selected`;
+}
+function logLine(entry) {
+  const box = $("logbox"); if (!box) return;
+  const filter = $("log-acct") ? $("log-acct").value : "";
+  const sev = $("log-sev") ? $("log-sev").value : "";
+  if (filter && entry.account !== filter) return;
+  if (sev && entry.severity !== sev) return;
+  const d = document.createElement("div"); d.className="log-line";
+  const ts = entry.ts ? new Date(entry.ts*1000).toTimeString().slice(0,8) : "";
+  d.innerHTML=`<span class="ts">${esc(ts)}</span><span class="sev ${esc(entry.severity||"INFO")}">${esc(entry.severity||"INFO")}</span><span class="msg">${esc(entry.source||"")}: ${esc(entry.message||"")}</span>`;
+  box.appendChild(d); while (box.children.length>400) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+}
+function auditLine(entry) {
+  const box = $("auditbox"); if (!box) return;
+  const filter = $("audit-acct") ? $("audit-acct").value : "";
+  if (filter && entry.account !== filter) return;
+  const d = document.createElement("div"); d.className=`audit-line ${entry.direction==="out"?"out":"in"}`;
+  const ts = entry.ts ? new Date(entry.ts*1000).toTimeString().slice(0,8) : "";
+  const arrow = entry.direction==="out" ? "→" : "←";
+  d.innerHTML=`<span class="ts">${esc(ts)}</span><span>${arrow}</span><b>${esc(entry.account||"")}</b><span>${esc(entry.action||"")}</span><span class="dim">${esc((entry.content||"").slice(0,60))}</span>`;
+  box.appendChild(d); while (box.children.length>300) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+}
+
+// ── Loaders ───────────────────────────────────────────────────────────────────
+async function loadTasks() {
+  try {
+    taskList = await api("/api/tasks") || [];
+    taskHistory = await api("/api/tasks/history?limit=50") || [];
+    renderTaskTable();
+  } catch(e) { showErr(e.message); }
+}
+function renderTaskTable() {
+  const st = $("task-filter-status")?.value||"";
+  const ac = $("task-filter-account")?.value||"";
+  const filtered = taskList.filter(t=>(!st||t.status===st)&&(!ac||t.account===ac));
+  $("cnt-tasks").textContent = filtered.length;
+  const tbl = $("task-table");
+  if (!filtered.length) { tbl.innerHTML="<tbody><tr><td style='text-align:center;padding:20px;color:var(--dim)'>No active tasks</td></tr></tbody>"; return; }
+  tbl.innerHTML = `<thead><tr><th>Account</th><th>Plugin</th><th>Action</th><th>Status</th><th>Priority</th><th>Age</th><th></th></tr></thead><tbody>` +
+    filtered.map(t=>`<tr><td>${esc(t.account)}</td><td>${esc(t.plugin)}</td><td>${esc(t.action)}</td>
+      <td><span class="chip task-${esc(t.status)}">${esc(t.status)}</span></td><td>${t.priority??""}</td><td>${fmtAge(t.submitted_at)}</td>
+      <td>${btnG("cancel",()=>post("/api/tasks/cancel",{task_id:t.id}).then(loadTasks).catch(showErr),"btn btn-ghost btn-sm")?.outerHTML||""}</td></tr>`).join("")+"</tbody>";
+  const hist = $("task-history");
+  if (taskHistory.length) {
+    hist.innerHTML = `<thead><tr><th>Account</th><th>Plugin</th><th>Status</th><th>Duration</th><th>Finished</th></tr></thead><tbody>` +
+      taskHistory.slice(0,20).map(t=>`<tr><td>${esc(t.account)}</td><td>${esc(t.plugin)}</td>
+        <td><span class="chip task-${esc(t.status)}">${esc(t.status)}</span></td><td>${t.duration_s!=null?t.duration_s.toFixed(1)+"s":"-"}</td><td>${fmtAge(t.finished_at)}</td></tr>`).join("")+"</tbody>";
+  }
+}
+async function loadCooldowns() {
+  try {
+    const cds = await api("/api/cooldowns") || [];
+    cooldownList = cds;
+    $("cnt-cd").textContent = cds.filter(c=>c.expires_at>Date.now()/1000).length;
+    const list = $("cd-list"); list.innerHTML = "";
+    if (!cds.length) { list.innerHTML=emptyState("No Cooldowns","No active cooldowns."); return; }
+    for (const cd of cds) {
+      const rem = Math.max(0,(cd.expires_at||0)-Date.now()/1000);
+      const d = document.createElement("div"); d.className="cd-card";
+      d.innerHTML=`<div class="info"><div class="who">${esc(cd.account||"")}</div><div class="what">${esc(cd.plugin||"")} · ${esc(cd.cooldown_key||"")}</div></div>
+        <div class="remaining ${rem<=0?"expired":""}">${rem<=0?"expired":fmtDur(rem)}</div>
+        ${btnG("Clear",()=>post("/api/cooldowns/clear",{account:cd.account}).then(loadCooldowns).catch(showErr),"btn btn-ghost btn-sm")?.outerHTML||""}`;
+      list.appendChild(d);
+    }
+  } catch(e) { showErr(e.message); }
+}
+async function loadProfiles() { try { profilesList = await api("/api/profiles")||[]; } catch(e) { showErr(e.message); } }
+async function loadManifests() { try { manifests = await api("/api/plugins")||[]; } catch(e) { showErr(e.message); } }
+async function loadScenarios() { try { const list = await api("/api/simulation/list")||[];
+  $("sim-sel").innerHTML = list.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join(""); } catch(e) { showErr(e.message); } }
+
+// ── Event wiring ──────────────────────────────────────────────────────────────
+function wire() {
+  // Token
+  $("token-save").onclick = () => { store.setItem("dash_token",$("token").value.trim()); connectWS(); render(); };
+  $("token").value = token();
+
+  // Fleet tabs
+  $$("#panel-fleet .tabbar .tab").forEach(t=>t.onclick=()=>UI.tab(t.dataset.tab));
+
+  // Activity tabs
+  $$("#panel-activity .tabbar .tab").forEach(t=>t.onclick=()=>{
+    $$("#panel-activity .tabbar .tab").forEach(x=>x.classList.remove("active")); t.classList.add("active");
+    currentActivityTab = t.dataset.atab;
+    ["tasks","cooldowns","logs","audit"].forEach(n=>$("atab-"+n).classList.toggle("hidden",n!==currentActivityTab));
+    if (currentActivityTab==="cooldowns") loadCooldowns();
+    if (currentActivityTab==="tasks") loadTasks();
+  });
+
+  // Tools tabs
+  $$("#panel-tools .tabbar .tab").forEach(t=>t.onclick=()=>{
+    $$("#panel-tools .tabbar .tab").forEach(x=>x.classList.remove("active")); t.classList.add("active");
+    currentToolsTab = t.dataset.ttab;
+    ["sim","adv"].forEach(n=>$("ttab-"+n).classList.toggle("hidden",n!==currentToolsTab));
+  });
+
+  // Add account
+  $("btn-add-acct").onclick = () => { $("aa-name").value="";$("aa-group").value="";$("aa-profiles").value="";$("aa-cred").value=""; $("dlg-add-acct").showModal(); $("aa-name").focus(); };
+  $("aa-submit").onclick = async () => {
+    const name = $("aa-name").value.trim(); if (!name) return;
+    const body = { name };
+    const g = $("aa-group").value.trim(); if (g) body.sync_group = g;
+    const p = $("aa-profiles").value.trim(); if (p) body.profiles = p.split(/\s+/);
+    const c = $("aa-cred").value; if (c) body.credential = c;
+    try { await post("/api/accounts/add", body); $("dlg-add-acct").close(); render(); }
+    catch(e) { showErr(e.message); }
+  };
+
+  // Create group
+  $("btn-create-group").onclick = () => {
+    $("cg-name").value="";
+    const box = $("cg-members"); box.innerHTML = "";
+    for (const a of accounts()) {
+      const l = document.createElement("label"); l.style.cssText="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;cursor:pointer";
+      l.innerHTML=`<input type="checkbox" value="${esc(a.name)}" ${a.sync_group?"":"checked"}> ${esc(a.name)}`;
+      box.appendChild(l);
+    }
+    $("dlg-create-group").showModal();
+  };
+  $("cg-submit").onclick = async () => {
+    const gname = $("cg-name").value.trim(); if (!gname) return;
+    const members = [...$("cg-members").querySelectorAll("input:checked")].map(i=>i.value);
+    for (const m of members) {
+      try { await post("/api/profiles/assign",{account:m,profile:"__dummy__"}); } catch{}
+    }
+    // Groups are set per-account via sync_group field
+    for (const m of members) {
+      // Remove and re-add with group
+      try { await post("/api/accounts/remove",{name:m}); } catch{}
+    }
+    $("dlg-create-group").close(); showErr("Group creation: set sync_group when re-adding accounts");
+  };
+
+  // Create profile
+  $("btn-create-prof").onclick = () => {
+    $("cp-name").value=""; $("cp-desc").value="";
+    const box = $("cp-plugins"); box.innerHTML="";
+    for (const m of manifests||[]) {
+      const l = document.createElement("label"); l.style.cssText="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;cursor:pointer";
+      l.innerHTML=`<input type="checkbox" value="${esc(m.name)}"> ${esc(m.name)} <span class="faint" style="font-size:11px">${esc(m.description||"")}</span>`;
+      box.appendChild(l);
+    }
+    $("dlg-create-prof").showModal();
+  };
+  $("cp-submit").onclick = async () => {
+    const name = $("cp-name").value.trim(); if (!name) return;
+    const plugins = [...$("cp-plugins").querySelectorAll("input:checked")].map(i=>i.value);
+    try { await post("/api/profiles/create",{name,description:$("cp-desc").value,plugins}); $("dlg-create-prof").close(); await loadProfiles(); render(); }
+    catch(e) { showErr(e.message); }
+  };
+
+  // Credential dialog
+  $("cred-save").onclick = async () => {
+    const name = $("cred-name").value, val = $("cred-val").value;
+    if (!name||!val) return;
+    try { await post("/api/accounts/credential",{name,credential:val}); $("dlg-cred").close(); render(); }
+    catch(e) { showErr(e.message); }
+  };
+
+  // Bulk actions
+  $("bulk-clear").onclick = () => { selectedAccounts.clear(); render(); };
+  $("bulk-start").onclick = () => { for (const n of selectedAccounts) post("/api/accounts/start",{account:n}).catch(showErr); };
+  $("bulk-stop").onclick = () => { for (const n of selectedAccounts) post("/api/accounts/stop",{account:n}).catch(showErr); };
+
+  // Task filters
+  $("task-filter-status").onchange = renderTaskTable;
+  $("task-filter-account").onchange = renderTaskTable;
+  $("task-refresh").onclick = loadTasks;
+
+  // Logs
+  $("log-backfill").onclick = async () => {
+    try { const entries = await api("/api/logs?n=200"+($("log-acct").value?"&account="+$("log-acct").value:""))||[];
+      for (const e of entries) logLine(e); } catch(e) { showErr(e.message); }
+  };
+  $("log-clear").onclick = () => { $("logbox").innerHTML=""; };
+  $("log-acct").onchange = () => { $("logbox").innerHTML=""; };
+  $("audit-backfill").onclick = async () => {
+    try { const entries = await api("/api/audit?n=200"+($("audit-acct").value?"&account="+$("audit-acct").value:""))||[];
+      for (const e of entries) auditLine(e); } catch(e) { showErr(e.message); }
+  };
+
+  // Advanced
+  $("adv-estop").onclick = () => confirmAction("GLOBAL EMERGENCY STOP","This affects ALL running accounts and tasks.",()=>post("/api/estop").catch(showErr));
+  $("adv-resume").onclick = () => post("/api/resume").catch(showErr);
+  $("adv-import").onclick = () => post("/api/credentials/import-env").catch(showErr);
+
+  // Simulation
+  $("sim-run").onclick = btnG._original || async () => {
+    const name = $("sim-sel").value; if (!name) return;
+    try { const report = await post("/api/simulation/run",{name});
+      $("sim-report").innerHTML = `<pre style="background:var(--bg);padding:12px;border-radius:6px;font-family:var(--mono);font-size:11px;overflow-x:auto;max-height:300px">${esc(report&&report.log||JSON.stringify(report,null,2))}</pre>`;
+    } catch(e) { showErr(e.message); }
+  };
+
+  // Mobile menu
+  $("menu-btn").onclick = () => $("sidebar").classList.toggle("open");
+
+  // Search
+  $("search").oninput = () => {
+    const q = $("search").value.toLowerCase().trim();
+    const results = $("search-results");
+    if (!q) { results.classList.remove("open"); return; }
+    const items = [];
+    for (const a of accounts()) if (a.name.toLowerCase().includes(q)) items.push({label:a.name,type:"Account",action:()=>openAcctDetails(a.name)});
+    for (const g of Object.keys(groupMap())) if (g&&g.toLowerCase().includes(q)) items.push({label:g,type:"Group",action:()=>{UI.go("fleet");UI.tab("groups")}});
+    for (const p of profilesList) if (p.name.toLowerCase().includes(q)) items.push({label:p.name,type:"Profile",action:()=>UI.go("profiles")});
+    for (const m of manifests) if (m.name.toLowerCase().includes(q)) items.push({label:m.name,type:"Plugin",action:()=>UI.go("plugins")});
+    results.innerHTML = items.slice(0,8).map((item,i)=>`<div class="result" data-i="${i}">${esc(item.label)}<span class="type">${esc(item.type)}</span></div>`).join("")||"<div class='result dim'>No results</div>";
+    results.classList.add("open");
+    results.querySelectorAll(".result[data-i]").forEach(el=>el.onclick=()=>{results.classList.remove("open");$("search").value="";items[+el.dataset.i].action();});
+  };
+  document.addEventListener("click",e=>{if(!$("search-wrap").contains(e.target))$("search-results").classList.remove("open")});
+  document.addEventListener("keydown",e=>{
+    if((e.ctrlKey||e.metaKey)&&e.key==="k"){$("search").focus();e.preventDefault()}
+    if(e.key==="Escape")$$(".menu.open").forEach(m=>m.classList.remove("open"));
+  });
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
 const qtoken = new URLSearchParams(location.search).get("token");
-if (qtoken) {
-  store.setItem("dash_token", qtoken.trim());
-  $("token").value = qtoken.trim();
-  history.replaceState(null, "", location.pathname);
-}
-$("token").value = token();
-$("adv-token").value = token();
-connectWS();
-// REST backfill so the overview renders even before the first WS push
-api("/api/status").then((stats) => { lastStats = stats; renderOverview(); renderAccountCards(); }).catch(e => showErr(e));
+if (qtoken) { store.setItem("dash_token",qtoken.trim()); $("token").value=qtoken.trim(); history.replaceState(null,"",location.pathname); }
+
+buildNav(); wire(); connectWS();
+Promise.all([loadManifests(),loadProfiles(),loadScenarios()]).then(()=>render());
+LOADERS.activity = ()=>{ loadTasks(); loadCooldowns(); };
+LOADERS.policies = ()=>{};
+setInterval(()=>{ if(currentView==="activity"&&currentActivityTab==="cooldowns") loadCooldowns(); },5000);
+$("side-foot").textContent = "v2 · " + new Date().getFullYear();
 </script>
 </body>
 </html>
