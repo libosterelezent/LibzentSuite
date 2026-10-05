@@ -784,6 +784,11 @@ function renderAccountCards() {
   const accounts = (lastStats && lastStats.accounts) || [];
   fillSelect($("log-acct"), accountNames(), "all accounts");
   fillSelect($("audit-acct"), accountNames(), "all accounts");
+  // ROUND-4: the cooldowns account filter used to populate only inside
+  // renderCooldowns (panel-open/manual refresh) — accounts added later
+  // never appeared until the user refreshed. This renderer runs on every
+  // stats-driven structural change, same as the log/audit filters above.
+  fillSelect($("cd-acct"), accountNames(), "all accounts");
   fillSelect($("eff-account"), accountNames(), "— any account —");
   if (!accounts.length) {
     root.innerHTML = '<span class="dim">no accounts — add one above</span>';
@@ -1572,11 +1577,24 @@ function auditLine(entry) {
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
 
+// ROUND-4: backfill re-entry guard + stale-response dedupe. Two overlapping
+// fetches (double-click, onchange racing the button click) each inserted
+// their rows ahead of the same live anchor — every history line appeared
+// twice. While a fetch is in flight further calls only mark a pending
+// re-run (fired with FRESH filters when the current one lands), and a
+// response from anything but the LATEST issued call is dropped.
+let logBackfillSeq = 0;
+let logBackfillInFlight = false;
+let logBackfillPending = false;
 function backfillLogs() {
+  if (logBackfillInFlight) { logBackfillPending = true; return; }
+  logBackfillInFlight = true;
+  const seq = ++logBackfillSeq;
   const q = new URLSearchParams({ n: "200" });
   if ($("log-acct").value) q.set("account", $("log-acct").value);
   if ($("log-sev").value) q.set("severity", $("log-sev").value);
   api("/api/logs?" + q).then((entries) => {
+    if (seq !== logBackfillSeq) return;  // stale response — a newer call owns the box
     // ROUND-3: MERGE, not wipe — live lines that streamed in while the
     // fetch was in flight survive; backfilled history is inserted AHEAD
     // of them (it is strictly older)
@@ -1594,16 +1612,28 @@ function backfillLogs() {
       box.innerHTML = '<span class="dim" data-ph="1">no log entries matched</span>';
     if (atBottom) box.scrollTop = box.scrollHeight;
     $("logsync").textContent = entries.length + " entries";
-  }).catch(e => showErr(e, "#panel-logs"));
+  }).catch(e => showErr(e, "#panel-logs"))
+    .finally(() => {
+      logBackfillInFlight = false;
+      if (logBackfillPending) { logBackfillPending = false; backfillLogs(); }
+    });
 }
 $("log-backfill").onclick = backfillLogs;
 $("log-acct").onchange = backfillLogs;
 $("log-sev").onchange = backfillLogs;
 
+let auditBackfillSeq = 0;
+let auditBackfillInFlight = false;
+let auditBackfillPending = false;
 function backfillAudit() {
+  // ROUND-4: same re-entry guard + stale-response dedupe as backfillLogs
+  if (auditBackfillInFlight) { auditBackfillPending = true; return; }
+  auditBackfillInFlight = true;
+  const seq = ++auditBackfillSeq;
   const q = new URLSearchParams({ n: "100" });
   if ($("audit-acct").value) q.set("account", $("audit-acct").value);
   api("/api/audit?" + q).then((entries) => {
+    if (seq !== auditBackfillSeq) return;  // stale response — drop
     // ROUND-3: merge-style backfill (see backfillLogs) — live audit lines
     // that arrived during the fetch are preserved
     const box = $("auditbox");
@@ -1619,7 +1649,11 @@ function backfillAudit() {
     if (!box.childNodes.length)
       box.innerHTML = '<span class="dim" data-ph="1">no audit entries matched</span>';
     if (atBottom) box.scrollTop = box.scrollHeight;
-  }).catch(e => showErr(e, "#panel-logs"));
+  }).catch(e => showErr(e, "#panel-logs"))
+    .finally(() => {
+      auditBackfillInFlight = false;
+      if (auditBackfillPending) { auditBackfillPending = false; backfillAudit(); }
+    });
 }
 $("audit-backfill").onclick = backfillAudit;
 $("audit-acct").onchange = backfillAudit;
@@ -1658,7 +1692,14 @@ function runSimulation(name, button) {
   post("/api/simulation/run", { name }).then((report) => {
     button.textContent = old;
     for (const b of simRunButtons) b.disabled = false;
-    renderSimReport(report);
+    // ROUND-4: a render throw here escaped as an unhandled rejection —
+    // buttons were restored but the failure was invisible. Contain it.
+    try {
+      renderSimReport(report);
+    } catch (e) {
+      showErr(new Error("failed to render simulation report: " + (e.message || e)),
+              "#panel-simulation");
+    }
   }).catch((e) => {
     button.textContent = old;
     for (const b of simRunButtons) b.disabled = false;
@@ -1852,6 +1893,22 @@ $("adv-forget").onclick = () => {
 let wsRetry = 1000;
 let wsAttempts = 0;
 const WS_CONNECT_TIMEOUT_MS = 10000;
+// ROUND-4: ESTABLISHED-connection staleness watchdog. The connect-timeout
+// watchdog below only covers the pre-open phase; a silently-dead
+// ESTABLISHED socket (NAT state gone, network swapped under a suspended
+// tab) delivers neither messages nor onclose — the dot stays green on
+// stale data forever. The server pushes a stats frame every ~1s, so 15s
+// of TOTAL silence means the socket is gone: force close + reconnect.
+const WS_STALE_MS = 15000;
+let wsStaleWatchdog = null;
+function armStaleWatchdog() {
+  clearTimeout(wsStaleWatchdog);
+  wsStaleWatchdog = setTimeout(() => {
+    wsStaleWatchdog = null;
+    try { ws.close(); } catch { /* dead socket already */ }
+    handleWsClosed();  // onclose may never fire — arm the retry directly
+  }, WS_STALE_MS);
+}
 let wsWatchdog = null;        // ROUND-3: half-open TCP guard (see connectWS)
 let wsClosedHandled = false;  // one reconnect per connection (watchdog OR onclose)
 function handleWsClosed() {
@@ -1860,7 +1917,13 @@ function handleWsClosed() {
   // onclose alone and stalled forever. The watchdog forces this path.
   if (wsClosedHandled) return;
   wsClosedHandled = true;
+  // ROUND-4 RE-AUDIT: the DYING socket can still handshakes buffered
+  // frames — a late onmessage would re-arm the stale-watchdog during the
+  // retry's CONNECTING window and close the healthy new socket. Detach
+  // the dying socket's handlers first.
+  if (ws) { try { ws.onmessage = null; ws.onclose = null; ws.onerror = null; } catch (e) {} }
   if (wsWatchdog) { clearTimeout(wsWatchdog); wsWatchdog = null; }
+  if (wsStaleWatchdog) { clearTimeout(wsStaleWatchdog); wsStaleWatchdog = null; }
   $("wsdot").classList.remove("on");
   // ERROR AUDIT FIX: cap retries + name the likely cause instead of an
   // endless misleading "reconnecting…"
@@ -1891,8 +1954,10 @@ function connectWS() {
     $("wsdot").classList.add("on");
     $("connmsg").textContent = "live";
     wsRetry = 1000; wsAttempts = 0;
+    armStaleWatchdog();  // ROUND-4: established-socket staleness guard
   };
   ws.onmessage = (ev) => {
+    armStaleWatchdog();  // ROUND-4: any frame proves the socket is alive
     // ERROR AUDIT FIX: a render throw here silently froze the UI on stale data
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }

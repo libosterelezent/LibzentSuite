@@ -15,7 +15,7 @@ python main.py --bench --list                   # scenario registry
 python main.py --bench restart_churn --cycles 10
 python main.py --bench log_burst --records 20000 --severity DEBUG
 python main.py --bench --json out.json --save-baseline
-python main.py --bench --compare state/benchmarks/baseline.json
+python main.py --bench --compare "$(python -c "import tempfile,os;print(os.path.join(tempfile.gettempdir(),'sm-benchmarks','baseline.json'))")"
 python -m benchmark --scenario message_burst --loop-interval-ms 1  # stall-hunt
 ```
 
@@ -37,18 +37,25 @@ python -m benchmark --scenario message_burst --loop-interval-ms 1  # stall-hunt
   `fd_peak` (resource + /proc, stdlib only — no psutil dependency).
 - Event loop: sleep-drift lag histogram (p50/p95/p99/max; 0.25ms buckets
   to 100ms, 1ms to 2s; default 5ms interval, `--loop-interval-ms 1` for
-  stall hunting).
+  stall hunting). Runs with <20 samples report `null` lag metrics
+  (`lag_quality: insufficient`) — never a fake 0.0 "no lag" baseline;
+  compare skips missing lag metrics.
 - Tasks/threads: 1 Hz census (`asyncio.all_tasks()` is itself costly at
   high frequency — deliberately decoupled from the 10 Hz process sampler).
 - Stages: per-label wall times (count/total/p50/p95/max) via `PerfCollector`.
 - Leak: per-cycle post-quiesce (gc + settle) RSS/task series with a
   TREND verdict — `stable` / `suspected-leak` / `inconclusive` — never an
-  absolute-threshold guess. Cycle 1 is warmup and excluded from trend math.
+  absolute-threshold guess. Cycle 1 is warmup and excluded from trend
+  math; the verdict compares first-third vs last-third slope (bounded
+  plateaus are `stable`, a transient drop larger than the noise band
+  masks the trend → `inconclusive`, which still passes).
 
 ## Compare / baselines
 
-`--save-baseline` stores the run at `state/benchmarks/baseline.json`
-(gitignored). `--compare` prints before/after/Δ with per-metric verdicts
+`--save-baseline` stores the run at `<tempdir>/sm-benchmarks/baseline.json`
+(system temp dir — the bench subsystem never writes into the live `state/`
+tree; pass `--json`/`--compare` for an explicit location). `--compare`
+prints before/after/Δ with per-metric verdicts
 using documented noise tolerances (`benchmark/report.py::TOLERANCES`).
 A single `REGRESSED` verdict means: **rerun with more cycles and compare
 medians** before believing it — wall times on a shared machine are noisy.
@@ -58,9 +65,10 @@ medians** before believing it — wall times on a shared machine are noisy.
 - **normal** — the `benchmark` package is never imported; zero overhead.
 - **benchmark** — samplers + stage timers (this mode; <1% CPU).
 - **`--profile`** — cProfile per scenario: `.pstats` dump under
-  `state/benchmarks/profiles/` (or `--profile-dir`) + top-N cumulative/
-  tottime embedded in the JSON. Main-thread profiler (the aiosqlite
-  worker thread's cost shows in cpu_sys_s but not function attribution).
+  `<tempdir>/sm-benchmarks/profiles/` (or `--profile-dir`) + top-N
+  cumulative/tottime embedded in the JSON. Main-thread profiler (the
+  aiosqlite worker thread's cost shows in cpu_sys_s but not function
+  attribution).
 - **`--tracemalloc`** — allocation sites per scenario boundary
   (`--trace-depth`, `--trace-top`); per-stage diffs via the existing
   `perf.stage()` seams; `clear_traces` + `reset_peak` between scenarios

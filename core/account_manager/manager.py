@@ -255,6 +255,12 @@ class Account:
     runtime: AccountRuntime = field(default_factory=AccountRuntime)
     plugins: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     credential_source: Optional[str] = None
+    # Round-4 (probe3_reconcile_tear): in-process record-mutation fence.
+    # Bumped synchronously by every local write path (set_enabled, the
+    # add-account assign flow); a _refresh_record whose repo read was
+    # parked across the bump skips its rebind so a PRE-mutation snapshot
+    # can never revert post-mutation memory.
+    record_version: int = 0
 
     def __post_init__(self) -> None:
         """Every account owns exactly one DiscordCache for its whole life."""
@@ -458,6 +464,11 @@ class AccountManager:
         account = Account(record=record)
         self._refresh_credential_source(account)
         self._accounts[name] = account
+        # Round-4 (probe3_reconcile_tear): the assign flow below mutates
+        # repo rows — fence any refresher whose read parked before the
+        # assignments, and re-check before OUR rebind so a set_enabled
+        # landing inside its await is never reverted.
+        account.record_version += 1
         for profile in dict.fromkeys(profiles or []):
             try:
                 await self._profile_manager.assign(name, profile)
@@ -465,8 +476,9 @@ class AccountManager:
                 self._logger.exception(
                     "could not assign profile %r to new account %r", profile, name
                 )
+        version = account.record_version
         fresh = await self._repo_get(name)
-        if fresh is not None:
+        if fresh is not None and account.record_version == version:
             account.record = fresh
         await self._attach_plugins(name)
         self._sync_group_scope(name, sync_group)
@@ -537,6 +549,19 @@ class AccountManager:
         except Exception:
             self._logger.exception(
                 "plugin deactivation on remove failed for %s", name)
+        # Round-4 (merge seam): the deactivate await above is the first
+        # window in which a same-named account can be RE-ADDED — from here
+        # on, verify registry identity before every by-NAME destructive
+        # step (lane cleanup, stale-client null, plugin detach), not just
+        # before the persistent cascades. A re-added account's fresh lane
+        # and plugin attachment belong to IT.
+        current = self._accounts.get(name)
+        if current is not None and current is not account:
+            self._logger.error(
+                "removal of %s aborted after deactivation: account "
+                "re-created mid-cascade — preserving the new account's "
+                "lane and plugins", name)
+            return {"removed": False, "name": name, "recreated": True}
         if self._scheduler is not None:
             try:  # drop queued/parked tasks so nothing fires against a
                 # re-created same-named account later
@@ -562,6 +587,16 @@ class AccountManager:
         # (deactivate already ran BEFORE the lane cleanup above — round-3
         # reorder; the pre-round-3 duplicate deactivate block that lived
         # here was a merge artifact from the isolation audit)
+        # Round-4 (merge seam): the cleanup/disconnect awaits above are
+        # more re-add windows — hoist the identity guard BEFORE the plugin
+        # detach so a re-added account keeps its fresh attachment.
+        current = self._accounts.get(name)
+        if current is not None and current is not account:
+            self._logger.error(
+                "removal of %s aborted before plugin detach: account "
+                "re-created mid-cascade — preserving the new account's "
+                "plugins and lane", name)
+            return {"removed": False, "name": name, "recreated": True}
         try:
             outcome = self._plugin_manager.detach_account(name)
             if inspect.iscoroutine(outcome):  # tolerant: sync pinned, async OK
@@ -580,7 +615,9 @@ class AccountManager:
         if current is not None and current is not account:
             self._logger.error(
                 "removal of %s aborted: account re-created mid-cascade — "
-                "preserving the new account's state", name)
+                "preserving the new account's state (if the detach above "
+                "reached it, its next start() re-attaches plugins: "
+                "self-healing)", name)
             return {"removed": False, "name": name, "recreated": True}
         # the new account (if any) owns the flag now — only clear ours
         self._plugin_attached.discard(name)
@@ -698,18 +735,45 @@ class AccountManager:
         Bounded staleness for out-of-band DB edits (external writers);
         in-process mutations never need this — they update the memory
         record at write time.
+
+        Scope (round-4): the pass also diffs the repository's account
+        list against memory. Rows that VANISHED are surfaced as warnings
+        and kept in memory (a live account's removal is an operator
+        action — ``remove_account`` owns the full cascade); rows that
+        APPEARED externally are logged but never auto-added (``load`` at
+        boot / ``add_account`` own registry entry).
         """
+        repo_names: Optional[set] = None
+        try:
+            repo_names = {r.name for r in (await self._accounts_repo.list()) or []}
+        except Exception:
+            self._logger.exception(
+                "could not list accounts for reconciliation (scope diff skipped)")
         for account in list(self._accounts.values()):
             try:
                 await self._refresh_record(account)
             except Exception:
                 self._logger.exception(
                     "record reconciliation failed for %s", account.record.name)
+        if repo_names is None:
+            return
+        memory_names = set(self._accounts)
+        for name in sorted(memory_names - repo_names):
+            self._logger.warning(
+                "account %r vanished from the repository but remains in "
+                "memory; removal is an operator action ('accounts remove "
+                "%s' runs the full cascade)", name, name)
+        for name in sorted(repo_names - memory_names):
+            self._logger.info(
+                "account %r exists in the repository but not in memory "
+                "(externally added?); not auto-added — restart or "
+                "'accounts add' owns registry entry", name)
 
     async def set_enabled(self, name: str, enabled: bool) -> Dict[str, Any]:
         """Flip the persisted enabled flag (False = skipped by start_all)."""
         account = self._get(name)
         await self._accounts_repo.set_enabled(name, bool(enabled))  # persist first
+        account.record_version += 1  # fence: parked refreshers must not revert
         account.record.enabled = bool(enabled)
         return account.status_dict()
 
@@ -794,6 +858,10 @@ class AccountManager:
         rt.status = AccountStatus.RUNNING
         rt.started_at = time.monotonic()
         rt.session_started = rt.started_at  # M2: flap window starts at READY
+        # Round-4 (probe1_stale_start_clobber): remember the client THIS
+        # start built — a later owner-scoped abort must never null a
+        # NEWER start's live client just because it shares the name.
+        client = rt.client
         self._refresh_credential_source(account)
         self._logger.info("account %s running (user_id=%s)", name, rt.user_id)
         # plugins: re-attach with the CURRENT profile grants (assignments
@@ -802,7 +870,7 @@ class AccountManager:
         if rt.stop_requested or rt.generation != gen:
             # PHASE-4 (S1-F1): stop landed during the attach await — the
             # NEW runtimes must not be activated on a stopped account.
-            self._abort_stale_start(name, rt)
+            self._abort_stale_start(name, rt, gen=gen, client=client)
             return account.status_dict()
         try:
             outcome = self._plugin_manager.activate_account(
@@ -819,14 +887,14 @@ class AccountManager:
             # this, freshly activated plugins (roll's loop!) keep running
             # on a stopped, supervisor-less account. Clean up everything
             # this start created: hooks, services, client.
-            self._abort_stale_start(name, rt)
+            self._abort_stale_start(name, rt, gen=gen, client=client)
             return account.status_dict()
         self._bus.publish_nowait(AccountConnected(account=name))
         self._lifecycle_commit("start", name, ok=True)
         if rt.generation != gen:
             # ownership changed between the publish and the spawn: the
             # newer owner spawns its own supervisor — never spawn a second
-            self._abort_stale_start(name, rt)
+            self._abort_stale_start(name, rt, gen=gen, client=client)
             return account.status_dict()
         if self._reconnect_settings(name)["enabled"]:
             # K5 (S1-C4): a stand-down (FAILED) or interrupted reconnect
@@ -903,14 +971,33 @@ class AccountManager:
         """Governor stats for status surfaces ({} when unlimited)."""
         return self._lifecycle.stats() if self._lifecycle is not None else {}
 
-    def _abort_stale_start(self, name: str, rt: AccountRuntime) -> None:
+    def _abort_stale_start(self, name: str, rt: AccountRuntime, *,
+                           gen: int, client: Any = None) -> None:
         """PHASE-4 cleanup for a start() that lost ownership mid-flight.
 
-        Deactivates any plugins the stale start activated (S1-F1: they
-        would otherwise run invisible to lifecycle control), drops the
-        services facades it created, discards its client, and settles
-        STOPPED — without publishing lifecycle events a second time.
+        Owner-scoped (round-4, probe1_stale_start_clobber): the
+        destructive teardown only runs with true STOP semantics —
+        ``rt.stop_requested`` is still set (a stop/estop/remove won the
+        race, or no owner change happened at all). When the newer owner
+        is another START (stop_requested was cleared, generation moved
+        on), everything on the runtime belongs to IT: never clobber its
+        RUNNING status, deactivate its freshly activated plugins, drop
+        its services facades or disconnect its live client — the stale
+        start aborts quietly instead. ``rt.client`` is only nulled when
+        it is the client THIS start built (``client``).
         """
+        if not rt.stop_requested and rt.generation != gen:
+            # Round-4: a newer START owns the account (a start clears
+            # stop_requested at entry and bumps the generation past ours).
+            # Our own artifacts were already retired by whichever
+            # lifecycle op separated us from the current owner.
+            self._logger.info(
+                "start of %s superseded by a newer start; leaving the "
+                "newer owner's state untouched", name)
+            return
+        # stop semantics: settle STOPPED, deactivating anything this
+        # start activated (S1-F1) and dropping the services facades it
+        # created — without publishing lifecycle events a second time.
         rt.status = AccountStatus.STOPPED
         try:
             outcome = self._plugin_manager.deactivate_account(name)
@@ -923,7 +1010,10 @@ class AccountManager:
             self._logger.exception(
                 "stale-start plugin cleanup failed for %s", name)
         self._drop_services(name)
-        self._discard_half_built_client(name, rt)
+        if rt.client is client:
+            # only the client THIS start built — a newer start's live
+            # client must survive this abort (its owner disconnects it)
+            self._discard_half_built_client(name, rt)
         self._logger.info(
             "account %s start aborted by concurrent lifecycle change", name)
 
@@ -1140,6 +1230,17 @@ class AccountManager:
                     overtaken.append(name)  # a stop landed during the wait
                     return
                 async with semaphore:
+                    # Round-4 (probe3_sema_overtake/probe3b): re-validate
+                    # AFTER the lane wait too — with a fleet wider than
+                    # _START_ALL_WIDTH, a stop/estop of a PARKED account
+                    # completes while this start still holds no lane; a
+                    # blind self.start() here would silently undo the
+                    # operator's decision. Identity+generation must still
+                    # be ours immediately before the start.
+                    account = self._accounts.get(name)
+                    if account is None or account.runtime.generation != snap_gen:
+                        overtaken.append(name)  # stop won the lane race
+                        return
                     try:
                         await self.start(name)
                         started.append(name)
@@ -1159,6 +1260,16 @@ class AccountManager:
             return report
         finally:
             self._start_all_flight = None
+            if not flight.done():
+                # Round-4 (probe2_joiner_hang): the owner died (cancelled
+                # or crashed) without producing a report — complete the
+                # flight with an ABORTED partial report so joiners parked
+                # on shield(flight) return instead of waiting forever.
+                flight.set_result({
+                    "started": sorted(started), "failed": failed,
+                    "skipped": skipped, "overtaken": sorted(overtaken),
+                    "aborted": True,
+                })
 
     async def stop_all(self) -> Dict[str, Any]:
         """Graceful shutdown of every account; logs and continues per account.
@@ -2084,9 +2195,17 @@ class AccountManager:
             return None
 
     async def _refresh_record(self, account: Account) -> None:
-        """Pull persistent state (profiles, enabled...) from the repository."""
+        """Pull persistent state (profiles, enabled...) from the repository.
+
+        Stale-read fence (round-4, probe3_reconcile_tear): a read parked
+        before a concurrent in-process mutation (set_enabled, the
+        add-account assign flow) must not rebind its PRE-mutation
+        snapshot over the post-mutation memory record — skip the rebind
+        when the account's record version moved during the await.
+        """
+        version = account.record_version
         fresh = await self._repo_get(account.record.name)
-        if fresh is not None:
+        if fresh is not None and account.record_version == version:
             account.record = fresh
 
     def _refresh_credential_source(self, account: Account) -> None:

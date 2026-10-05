@@ -11,4 +11,9 @@
 # network, but live accounts need it installed.
 aiosqlite>=0.20
 cryptography>=42
-discord.py-self>=2.1.0
+# discord.py-self is line-coupled to the fork's exact dispatch order
+# (raw_* before rich events, state.py), self_bot skip-check semantics
+# (bot.py:198-203) and the 60s identify wait_for ceiling (client.py:1020)
+# — probe-verified on 2.1.0 ONLY; cap below the next minor until
+# re-verified (round-4 F2-10).
+discord.py-self>=2.1.0,<2.2

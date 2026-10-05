@@ -115,6 +115,7 @@ __all__ = [
     "ServerRateLimit", "AccountError", "PluginError", "ProfileError",
     "SettingsValidationError", "RatePolicyError", "UnsafePolicyError",
     "SchedulerError", "DatabaseError", "CredentialsError", "SimulationError",
+    "flow_block_reason",
 ]
 
 def flow_block_reason(exc: BaseException) -> str:

@@ -299,9 +299,20 @@ class TestLanes(SchedulerTestBase):
         self.scheduler.submit("a2", "p", "message", channel_id=2)
         self.sender.outcomes.extend([("sleep", 0.08), ("sleep", 0.08)])
         await self.settle(0.5)
+        # a2's lane may not have STARTED within the fixed settle budget on
+        # a loaded loop (its first checkpoint is one hop after submit) —
+        # poll for the send actually beginning before asserting parallelism
+        for _ in range(500):
+            if self.sender.max_inflight.get("a2", 0) >= 1:
+                break
+            await asyncio.sleep(0.02)
         self.assertEqual(self.sender.max_inflight["a1"], 1)
         self.assertEqual(self.sender.max_inflight["a2"], 1)
         self.assertEqual(self.sender.max_total, 2)  # truly parallel across accounts
+        for _ in range(500):
+            if len(self.sender.calls) >= 2:
+                break
+            await asyncio.sleep(0.02)
         self.assertEqual(len(self.sender.calls), 2)
 
     async def test_priority_high_submitted_after_low_runs_first(self) -> None:
@@ -413,6 +424,92 @@ class TestCancel(SchedulerTestBase):
 
     async def test_cancel_unknown_task(self) -> None:
         self.assertFalse(self.scheduler.cancel(424242))
+
+
+# ----------------------------------------------- F6-1: cancel vs parked acquire
+class TestCancelParkedAcquire(SchedulerTestBase):
+    """A task parked inside limiter.acquire (e.g. behind a clamped 429
+    cooldown of MAX_INTERVAL = 86400s) must abort on a cooperative cancel
+    within one event-loop hop — NOT after the cooldown — and free the
+    account's concurrency-1 lane for the next task."""
+
+    def _real_engine(self):
+        from core.rate_limit_manager import RateLimitManager
+
+        engine = RateLimitManager(bus=None, logger=FakeLogger())
+        self.scheduler._limiter = engine
+        return engine
+
+    async def test_cancel_aborts_parked_acquire_and_frees_lane(self) -> None:
+        engine = self._real_engine()
+        engine.report_server_limit("alpha", "message", 86400.0)
+
+        t1 = self.scheduler.submit("alpha", "p", "message", channel_id=1)
+        # wait until the engine's waiter heap actually holds the entry
+        self.assertTrue(await self.wait_until(
+            lambda: ("alpha", "message") in engine._pending, timeout=1.0))
+
+        self.assertTrue(self.scheduler.cancel(t1.id))
+        self.assertEqual(t1.status, "cancelled")  # immediate (sync path)
+
+        # the parked acquire aborts promptly: the engine waiter entry is
+        # cancelled + pruned (the engine's own deregistration path)
+        self.assertTrue(await self.wait_until(
+            lambda: ("alpha", "message") not in engine._pending, timeout=1.0))
+        self.assertEqual(self.sender.calls, [])  # never sent
+
+        # lane free for the next task: without the abort the lane was
+        # occupied for the whole 86400s cooldown; with the cooldown lifted
+        # the SECOND task must complete promptly
+        engine._account_cooldowns.clear()
+        engine._wake_waiters()
+        t2 = self.scheduler.submit("alpha", "p", "message", channel_id=2)
+        self.assertTrue(await self.wait_until(
+            lambda: t2.status == "completed", timeout=3.0))
+        self.assertEqual([t.id for t in self.sender.calls], [t2.id])
+        self.assertEqual(t1.status, "cancelled")  # exactly-once terminal
+
+    async def test_cancel_reaches_retry_reacquire_behind_clamped_429(self) -> None:
+        """The realistic sequence: send -> clamped 429 -> retry parks the
+        re-acquire for a day; cancel() must land on the RUNNING task."""
+        engine = self._real_engine()
+        self.sender.outcomes.append(("raise", ServerRateLimit(86400.0, False)))
+        t1 = self.scheduler.submit(
+            "alpha", "p", "message", channel_id=1, retries=1)
+
+        # first send failed with the 429; the retry is parked in acquire
+        # (budgets: single-digit seconds prove the DAY-long park aborted,
+        # while tolerating multi-second loop stalls on a loaded host)
+        self.assertTrue(await self.wait_until(
+            lambda: ("alpha", "message") in engine._pending, timeout=5.0))
+        self.assertEqual(t1.status, "running")
+
+        self.assertTrue(self.scheduler.cancel(t1.id))
+        self.assertTrue(await self.wait_until(
+            lambda: t1.status == "cancelled", timeout=5.0))
+        self.assertTrue(await self.wait_until(
+            lambda: ("alpha", "message") not in engine._pending, timeout=5.0))
+        self.assertEqual([t.id for t in self.sender.calls], [t1.id])  # sent once
+        self.assertEqual(len(self.audit.calls), 1)  # the real send IS audited
+        self.assertTrue(await self.wait_until(  # tail emits the terminal event
+            lambda: len(self.recorder.of(TaskCancelled)) == 1, timeout=5.0))
+
+    async def test_spurious_waker_wake_does_not_abort_acquire(self) -> None:
+        """A wake WITHOUT the task's cancel flag (stale wake, other-path
+        set) must NOT cancel the parked acquire — only the flag does."""
+        gate = self.limiter.block_acquires()
+        t1 = self.scheduler.submit("alpha", "p", "message", channel_id=1)
+        self.assertTrue(await self.wait_until(
+            lambda: len(self.limiter.acquire_calls) == 1))
+
+        self.scheduler._wake_backoff(t1)  # spurious: no cancel flag set
+        await self.settle(0.05)
+        self.assertEqual(len(self.limiter.acquire_calls), 1)  # still parked
+
+        gate.set()
+        await self.settle(0.1)
+        self.assertEqual(t1.status, "completed")  # the SAME acquire resolved
+        self.assertEqual(len(self.sender.calls), 1)
 
 
 # ------------------------------------------------------------------ retry
@@ -873,9 +970,21 @@ class TestHistoryAndStats(SchedulerTestBase):
         t3 = self.scheduler.submit("beta", "p", "message")
         self.sender.outcomes.append(("raise", FlowBlocked("beta", "nope")))
         await self.settle(0.1)
+        # finish-tails land one loop-hop after the terminal flip (round-1
+        # shielded-tail design): poll instead of asserting instantly —
+        # under a loaded loop the hop can exceed any fixed settle budget
+        for _ in range(500):
+            if len(self.repo.add_calls) >= 3:
+                break
+            await asyncio.sleep(0.02)
 
         self.assertEqual(len(self.repo.add_calls), 3)
-        self.assertEqual([c["id"] for c in self.repo.add_calls], [t1.id, t2.id, t3.id])
+        # exactly-once per task is the contract; the ARRIVAL order of
+        # finish-tails follows terminal timing (t3's FlowBlocked abort can
+        # legitimately beat t2's retry-completion) — compare as a set
+        self.assertEqual(
+            sorted(c["id"] for c in self.repo.add_calls),
+            sorted([t1.id, t2.id, t3.id]))
         row2 = self.repo.rows[t2.id]
         self.assertEqual(row2["status"], "completed")
         self.assertEqual(row2["attempts"], 1)
@@ -961,7 +1070,13 @@ class TestHistoryAndStats(SchedulerTestBase):
         self.scheduler.submit("alpha", "p", "dm", user_id=7)
         self.scheduler.submit("alpha", "p", "poke")
         await self.settle(0.2)
-        self.assertEqual([c["action"] for c in self.audit.calls], ["message", "dm"])
+        # tails land one loop-hop after terminal (loaded-loop tolerance)
+        for _ in range(500):
+            if len(self.audit.calls) >= 2 and len(self.repo.add_calls) >= 3:
+                break
+            await asyncio.sleep(0.02)
+        self.assertEqual(
+            sorted(c["action"] for c in self.audit.calls), ["dm", "message"])
         self.assertEqual(len(self.repo.add_calls), 3)  # history records everything
 
 

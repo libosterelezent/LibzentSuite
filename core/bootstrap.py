@@ -204,6 +204,15 @@ class Framework:
         the remaining steps (crucially database.close) still run; the
         cancellation re-raises at the END so the caller still sees it.
 
+        ORDER MATTERS (bus drain): ``accounts.stop_all`` publishes tail
+        events (AccountDisconnected "stopped") via ``publish_nowait``;
+        the bus drain runs AFTER it so those orphans are actually
+        dispatched (and reach the still-running log-persistence queue)
+        instead of being cancelled by loop close. The scheduler still
+        drains BEFORE the accounts stop — queued tasks complete while
+        the senders are alive; one drain at the end covers both
+        backlogs (drain re-checks the queue until stable).
+
         ORDER MATTERS (logging shutdown): the db sink detaches and the
         stdlib bridge is removed BEFORE database.close() — otherwise the
         bridge keeps ingesting stdlib lines into a service whose sink is a
@@ -215,8 +224,11 @@ class Framework:
         steps = (
             ("remote control", self._stop_remote_control),
             ("scheduler", lambda: self.scheduler.stop(drain=True)),
-            ("bus drain", self.bus.drain),
             ("accounts", self.accounts.stop_all),
+            # ROUND-4 (F7/1): drain AFTER stop_all — AccountDisconnected
+            # tail events publish after the account teardown and were
+            # previously never awaited (the drain had already returned)
+            ("bus drain", self.bus.drain),
             # QUEUED PERSISTENCE shutdown (agent C contract): drain the log
             # + audit queues BEFORE closing the DB — bounded, never hangs
             ("log persistence", self.logs.stop_persistence),
@@ -261,6 +273,32 @@ class Framework:
     @staticmethod
     async def _detach_bridge() -> None:
         detach_stdlib_bridge()  # then stop ingesting stdlib
+
+
+def _env_reconcile_interval(default: float = 30.0) -> float:
+    """SM_RECONCILE_INTERVAL_S (seconds; 0 = reconcile every status call).
+
+    Round-4 tunability: operators stretching a busy dashboard beyond the
+    30s default (or tightening it for a second-process edit to surface
+    faster) no longer need a code change. Malformed/negative values warn
+    and fall back to the default — boot never fails on an env typo.
+    """
+    raw = os.environ.get("SM_RECONCILE_INTERVAL_S")
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        ROOT_LOGGER.warning(
+            "SM_RECONCILE_INTERVAL_S=%r is not a number; using the "
+            "default %.0fs", raw, default)
+        return default
+    if value < 0:
+        ROOT_LOGGER.warning(
+            "SM_RECONCILE_INTERVAL_S=%r is negative; using the default "
+            "%.0fs", raw, default)
+        return default
+    return value
 
 
 async def _security_audit(database: Any, credential_service: Any,
@@ -472,9 +510,26 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     if client_factory is None:
         from adapters.discord import RealClientFactory
 
+        command_prefix = getattr(credentials, "self_command_prefix", "")
+        if command_prefix:
+            # ROUND-4 (F7/8): a set prefix with no owner ids is a fully
+            # silent misconfiguration — every self-command fails the
+            # owner check. Mirrors the REMOTE_CONTROL boot warning.
+            if not getattr(credentials, "owner_user_ids", None):
+                ROOT_LOGGER.warning(
+                    "SELF_COMMAND_PREFIX is set but OWNER_USER_IDS is "
+                    "empty — the account's own user id must be listed in "
+                    "OWNER_USER_IDS or every self-command will be "
+                    "rejected (see core/credentials.py)")
+            if command_prefix == "@":
+                # bare '@' collides with EVERY mention, not just the
+                # account's own — degenerate, warn loudly
+                ROOT_LOGGER.warning(
+                    "SELF_COMMAND_PREFIX='@' matches every mention, not "
+                    "just the account's own — use a distinct prefix or "
+                    "'@me' for the own-mention form")
         client_factory = RealClientFactory(
-            credentials,
-            command_prefix=getattr(credentials, "self_command_prefix", ""))
+            credentials, command_prefix=command_prefix)
 
     accounts = AccountManager(
         bus, ServiceLogger(logs, "accounts"), database.accounts,
@@ -533,6 +588,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         simulation=simulation_runner, credentials=credentials, database=database,
         credentials_svc=credential_service, cooldowns=cooldowns,
         started_at=_time.time(),
+        reconcile_interval_s=_env_reconcile_interval(),
     )
 
     # Discord-side management: owners mention an account (@account status)

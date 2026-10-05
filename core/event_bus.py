@@ -4,7 +4,7 @@ Guarantees (ported from the audited original):
   * one failing handler never breaks other handlers (isolation),
   * subscribers registered for a base class receive subclass events,
   * publish() can be awaited, publish_nowait() is safe from sync callbacks,
-  * fire-and-forget tasks hold strong references (no GC mid-dispatch).
+  * the shared dispatcher task is strongly referenced (no GC mid-dispatch).
 """
 from __future__ import annotations
 
@@ -224,6 +224,31 @@ class ScenarioFinished(Event):
     duration_s: float = 0.0
 
 
+# ------------------------------------------------------------ event planes
+#: Control/lifecycle plane — the typed vocabulary that must survive a
+#: message-flood overflow (task lifecycle, account lifecycle, plugin
+#: lifecycle, rate limits, settings, simulation bookends). These get a
+#: small reserved admission lane above ``EventBus.MAX_QUEUE`` so a burst
+#: of MessageReceived can never starve shutdown/teardown tail events
+#: (AccountDisconnected / TaskFailed / ...). Message-plane types and any
+#: unclassified ``Event`` subclass keep the flood-plane drop-newest policy.
+_CONTROL_TYPES = frozenset({
+    AccountConnected, AccountDisconnected, AccountFailed,
+    PluginLoaded, PluginUnloaded, PluginEnabledChanged,
+    TaskQueued, TaskStarted, TaskCompleted, TaskFailed, TaskCancelled,
+    RateLimitTriggered, SettingChanged,
+    ScenarioStarted, ScenarioFinished,
+})
+#: subclass-aware fallback (the exact-type frozenset hit covers the hot path)
+_CONTROL_ISINSTANCE = tuple(_CONTROL_TYPES)
+
+
+def _is_control(event: "Event") -> bool:
+    """Plane test: exact-type fast path, isinstance for typed subclasses."""
+    return (type(event) in _CONTROL_TYPES
+            or isinstance(event, _CONTROL_ISINSTANCE))
+
+
 class _HandlerList(list):
     """Handler list with a mutation version + cached dispatch snapshot.
 
@@ -267,16 +292,28 @@ class EventBus:
     burst-callback lag ceiling). Events append to a bounded FIFO drained
     by ONE pending dispatcher task that yields every ``_slice_events``
     events (or ``_slice_budget_s``), so a burst occupies the loop in
-    bounded slices instead of one long callback. Overflow drops the
-    NEWEST event (delivered sequences stay FIFO), counts it, and logs
-    burst-limited — today's unbounded ``_background`` growth under a
-    message flood becomes a bounded, observable degradation.
+    bounded slices instead of one long callback. Overflow is two-tier
+    (round-4/F4): flood-plane events (message traffic, unclassified)
+    drop the NEWEST event at ``MAX_QUEUE`` — delivered sequences stay
+    FIFO, counted and logged burst-limited — while control-plane types
+    (``_CONTROL_TYPES``: task/account/plugin lifecycle, rate limits,
+    settings, simulation bookends) are admitted up to
+    ``MAX_QUEUE + CONTROL_RESERVE``, so a message flood cannot starve
+    shutdown tail events.
     """
 
     #: queue bound — headroom above the 10k PersistQueue cap (messages are
     #: the flood class); at ~150µs/event fully-loaded this is ~1.5s of
     #: sustained maximal burst before drops begin.
     MAX_QUEUE = 20_000
+    #: reserved admission headroom for control-plane events above the
+    #: flood cap — flood classes cannot occupy this lane, so at least
+    #: CONTROL_RESERVE control events always find room under overflow.
+    CONTROL_RESERVE = 1_024
+    #: wall-seconds an async handler may hold the shared dispatcher before
+    #: a slow-subscriber warning is logged (documented head-of-line
+    #: contract — logged only, never cancelled).
+    SLOW_HANDLER_S = 1.0
     #: dispatch slice: events per loop turn before yielding
     SLICE_EVENTS = 128
     #: dispatch slice: wall-seconds per loop turn before yielding
@@ -291,8 +328,6 @@ class EventBus:
         # 10-type shape). Ordering identical: dict insertion order of
         # matching types, list order within a type.
         self._type_cache: Dict[Type[Event], tuple] = {}
-        # strong refs for fire-and-forget tasks (documented create_task hazard)
-        self._background: set = set()
         self._queue: "collections.deque[Event]" = collections.deque()
         self._dispatcher: Optional["asyncio.Task[None]"] = None
         self._dropped = 0
@@ -303,6 +338,14 @@ class EventBus:
         """Register handler for event_type (and its subclasses).
 
         Returns an unsubscribe callable (idempotent).
+
+        SYNC-HANDLER CONTRACT (round-4/F4): dispatch is ordered and
+        inline — handlers run sequentially per event. One slow SYNC
+        handler blocks every later handler for that event, and one slow
+        ASYNC handler parks the shared dispatcher (head-of-line for the
+        whole bus) until it returns. Async handlers slower than
+        ``SLOW_HANDLER_S`` are logged (never cancelled); offload real
+        I/O-heavy work to your own task instead of awaiting it here.
         """
         cell = self._subs.get(event_type)
         if cell is None:
@@ -329,20 +372,31 @@ class EventBus:
         makes tail-event delivery (AccountDisconnected etc.) contractual,
         not lucky. Re-checks the queue until stable (a handler publishing
         during the drain is flushed by the same call).
+
+        Round-4 (F4/1): a dispatcher that DIED with a backlog (outer
+        cancel requeue path, or a handler that raised GeneratorExit)
+        used to turn the no-pending branch into ``await sleep(0)`` busy
+        spin (measured 130k turns/s) until the deadline, undelivered.
+        The branch now retrieves + logs the dead task's exception and
+        resurrects a fresh dispatcher to deliver the backlog.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while True:
-            pending = [t for t in list(self._background) if not t.done()]
-            if self._dispatcher is not None and not self._dispatcher.done():
-                pending.append(self._dispatcher)
-            if not pending and not self._queue:
-                return
-            if pending:
-                await asyncio.wait(pending,
-                                   timeout=max(0.0, deadline - loop.time()))
-            else:
-                await asyncio.sleep(0)
+            dispatcher = self._dispatcher
+            if dispatcher is not None and dispatcher.done():
+                if not self._queue:
+                    return  # clean exit: dispatcher idle, nothing queued
+                self._retire_dispatcher(dispatcher, "drain-resurrect")
+                dispatcher = self._dispatcher = loop.create_task(
+                    self._drain_queue(), name="eventbus-dispatch")
+            elif dispatcher is None:
+                if not self._queue:
+                    return
+                dispatcher = self._dispatcher = loop.create_task(
+                    self._drain_queue(), name="eventbus-dispatch")
+            await asyncio.wait(
+                [dispatcher], timeout=max(0.0, deadline - loop.time()))
             if loop.time() >= deadline:
                 if self._queue:
                     LOG.warning(
@@ -350,25 +404,54 @@ class EventBus:
                         "%d dropped-total", len(self._queue), self._dropped)
                 return
 
+    def _retire_dispatcher(self, task: Optional["asyncio.Task[None]"],
+                           context: str) -> None:
+        """Retrieve + log a dead dispatcher's exception before replacing it.
+
+        Round-4 (F4/3): without this, a dispatcher that died on an
+        abnormal exit (GeneratorExit from a handler, an outright bug)
+        left its exception unretrieved — the silent-death mode: the bus
+        looks idle while backlog sits behind a corpse.
+        """
+        if task is None or not task.done() or task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            LOG.error("event dispatcher died before %s: %r",
+                      context, exc, exc_info=exc)
+
     def publish_nowait(self, event: Event) -> Optional["asyncio.Task[None]"]:
         """Fire-and-forget publish; safe from sync callbacks inside a loop.
 
         Returns the shared dispatcher task (or None on drop). No caller
         consumes the return value (verified); the annotation change from
         Task[List[Any]] is interface-level only.
+
+        Overflow is two-tier (round-4/F4/2): flood-plane events (message
+        traffic and unclassified Events) drop-newest at ``MAX_QUEUE``
+        exactly as before; control-plane events (``_CONTROL_TYPES`` —
+        task/account/plugin lifecycle, rate limits, settings, simulation
+        bookends) are admitted up to ``MAX_QUEUE + CONTROL_RESERVE``, so
+        a message flood cannot starve shutdown tail events.
         """
-        if len(self._queue) >= self.MAX_QUEUE:
+        limit = self.MAX_QUEUE
+        plane = "control" if _is_control(event) else "flood"
+        if plane == "control":
+            limit += self.CONTROL_RESERVE
+        if len(self._queue) >= limit:
             self._dropped += 1
             now = time.monotonic()
             if now - self._drop_log_gate > 1.0:  # burst-limited logging
                 self._drop_log_gate = now
                 LOG.error(
-                    "event bus overflow: dropped %s (queued=%d, "
-                    "dropped_total=%d)", type(event).__name__,
+                    "event bus overflow: dropped %s (plane=%s, queued=%d, "
+                    "dropped_total=%d)", type(event).__name__, plane,
                     len(self._queue), self._dropped)
             return self._dispatcher
         self._queue.append(event)
-        if self._dispatcher is None or self._dispatcher.done():
+        dispatcher = self._dispatcher
+        if dispatcher is None or dispatcher.done():
+            self._retire_dispatcher(dispatcher, "publish_nowait")
             self._dispatcher = asyncio.get_running_loop().create_task(
                 self._drain_queue(), name="eventbus-dispatch")
         return self._dispatcher
@@ -408,6 +491,12 @@ class EventBus:
         An in-handler CancelledError counts as a handler failure unless the
         publish task itself is being cancelled; KeyboardInterrupt/SystemExit
         always propagate (process-level signals).
+
+        CAVEAT (round-4/F4/5): this DIRECT await bypasses the bounded
+        FIFO — it dispatches inline in the caller's step and returns
+        handler results. All production callers publish via
+        publish_nowait; direct publish() is for tests and for code that
+        genuinely needs the results list.
         """
         results: List[Any] = []
         key = type(event)
@@ -421,7 +510,18 @@ class EventBus:
                 try:
                     outcome = handler(event)
                     if inspect.iscoroutine(outcome):
+                        # head-of-line observability (F4/4): the shared
+                        # dispatcher is parked for the whole await — log
+                        # (never cancel) when a subscriber overruns
+                        started = time.monotonic()
                         outcome = await outcome
+                        elapsed = time.monotonic() - started
+                        if elapsed > self.SLOW_HANDLER_S:
+                            LOG.warning(
+                                "slow async event handler %r held the bus "
+                                "%.3fs for %s (>%.0fs; head-of-line — see "
+                                "subscribe() contract)", handler, elapsed,
+                                type(event).__name__, self.SLOW_HANDLER_S)
                     results.append(outcome)
                 except asyncio.CancelledError:
                     # read-only check (the old cancelling()>uncancel() idiom

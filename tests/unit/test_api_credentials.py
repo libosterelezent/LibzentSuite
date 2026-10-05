@@ -750,6 +750,21 @@ class TestAccountSettingFacades(unittest.IsolatedAsyncioTestCase):
             self.stack.settings.account_settings("alpha")["reconnect_multiplier"],
             2.0)
 
+    async def test_set_unknown_account_rejected_before_persist(self) -> None:
+        # ROUND-4 (F7/6): mirrors accounts_set_credential's guard — rows
+        # for unregistered accounts used to persist as orphan junk
+        with self.assertRaises(AccountError):
+            await self.stack.api.account_setting_set(
+                "ghost", "typing_probability", 0.5)
+        # nothing was written, emitted or audited for the ghost
+        self.assertEqual(
+            [e for e in self.stack.audit.entries
+             if e["action"] == "mgmt:account.setting"], [])
+        # a known account still works through the same path
+        out = await self.stack.api.account_setting_set(
+            "alpha", "typing_probability", 0.25)
+        self.assertEqual(out["value"], 0.25)
+
 
 class TestCredentialKeyFileHardening(unittest.IsolatedAsyncioTestCase):
     """Round-3: empty-keyfile self-heal + loose-permission warning."""

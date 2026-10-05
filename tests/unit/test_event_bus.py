@@ -11,7 +11,21 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from core.event_bus import Event, EventBus, MessageReceived
+from core import event_bus as eb
+from core.event_bus import (
+    AccountDisconnected,
+    AccountFailed,
+    Event,
+    EventBus,
+    MessageEdited,
+    MessageReceived,
+    RateLimitTriggered,
+    ReactionAdded,
+    ScenarioFinished,
+    SettingChanged,
+    TaskCancelled,
+    TaskFailed,
+)
 
 
 def _msg(account: str, i: int) -> MessageReceived:
@@ -68,6 +82,74 @@ class CoalescedDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(seen), 9)
         ids = [m.message_id for m in seen]
         self.assertEqual(ids, sorted(ids))  # delivered order stays FIFO
+
+    async def test_control_events_survive_flood_overflow(self) -> None:
+        """F4/2: control-plane tails are exempt from the flood cap.
+
+        Queue full of MessageReceived at MAX_QUEUE → an AccountDisconnected
+        (the shutdown tail event class) is still admitted via the reserved
+        lane and delivered after the flood.
+        """
+        bus = EventBus()
+        gate = asyncio.Event()
+        seen: list = []
+        async def slow(event: Event) -> None:
+            await gate.wait()
+            seen.append(event)
+        bus.subscribe(Event, slow)  # catch-all: both planes observed
+        bus.MAX_QUEUE = 8
+        bus.CONTROL_RESERVE = 4
+        bus.publish_nowait(_msg("a", 0))
+        await asyncio.sleep(0.02)  # dispatcher parks inside slow
+        for i in range(1, 20):     # flood class fills to cap, drops 11
+            bus.publish_nowait(_msg("a", i))
+        self.assertEqual(bus.stats()["dropped"], 20 - 1 - 8)
+        self.assertEqual(bus.stats()["queued"], 8)
+        bus.publish_nowait(AccountDisconnected(reason="shutdown"))
+        self.assertEqual(bus.stats()["queued"], 9)      # admitted, not dropped
+        self.assertEqual(bus.stats()["dropped"], 20 - 1 - 8)
+        gate.set()
+        await bus.drain(timeout=10.0)
+        self.assertEqual(len(seen), 10)  # 9 flood (in-flight + 8 queued) + 1 control
+        self.assertEqual(type(seen[-1]).__name__, "AccountDisconnected")
+
+    async def test_control_lane_is_also_bounded(self) -> None:
+        """F4/2: the reserved lane is headroom, not infinity — control
+        events drop (counted, logged) once MAX_QUEUE+RESERVE is hit."""
+        bus = EventBus()
+        gate = asyncio.Event()
+        async def slow(event: Event) -> None:
+            await gate.wait()
+        bus.subscribe(Event, slow)
+        bus.MAX_QUEUE = 8
+        bus.CONTROL_RESERVE = 4
+        bus.publish_nowait(_msg("a", 0))
+        await asyncio.sleep(0.02)
+        for i in range(1, 20):     # flood to cap: 8 queued, 11 dropped
+            bus.publish_nowait(_msg("a", i))
+        for i in range(6):         # control fills the 4-slot lane, drops 2
+            bus.publish_nowait(AccountFailed(error=f"e{i}"))
+        self.assertEqual(bus.stats()["queued"], 12)     # 8 flood + 4 control
+        self.assertEqual(bus.stats()["dropped"], 11 + 2)
+        gate.set()
+        await bus.drain(timeout=10.0)
+        self.assertEqual(bus.stats()["queued"], 0)
+
+    async def test_control_plane_classification(self) -> None:
+        """F4/2: the enumerated control vocabulary + the flood default."""
+        control = set(eb._CONTROL_TYPES)
+        for et in (AccountDisconnected, AccountFailed, TaskFailed,
+                   TaskCancelled, RateLimitTriggered, SettingChanged,
+                   ScenarioFinished, eb.AccountConnected):
+            self.assertIn(et, control)
+        for et in (MessageReceived, MessageEdited, eb.MessageDeleted,
+                   ReactionAdded):
+            self.assertNotIn(et, control)
+        # unclassified custom Events default to the flood plane
+        class Custom(Event):
+            pass
+        self.assertFalse(eb._is_control(Custom()))
+        self.assertTrue(eb._is_control(TaskFailed(error="x")))
 
     async def test_slice_budget_yields_the_loop(self) -> None:
         bus = EventBus()

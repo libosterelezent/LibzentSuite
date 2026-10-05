@@ -24,6 +24,15 @@ TOLERANCES = {
 }
 
 
+#: custom.* reliability counters where LOWER is better. Everything else
+#: under custom.* (throughput, rates, restored rows) improves upward —
+#: F3 round-4: these two used to render 0→5 as "improved".
+_CUSTOM_LOWER_IS_BETTER = frozenset({
+    "custom.dropped",
+    "custom.db_failures",
+})
+
+
 def _flat_metrics(report: Dict[str, Any]) -> Dict[str, float]:
     out: Dict[str, float] = {}
     proc = report.get("process", {})
@@ -34,10 +43,14 @@ def _flat_metrics(report: Dict[str, Any]) -> Dict[str, float]:
     for k in ("rss_base_kb", "rss_peak_kb", "cpu_pct"):
         if k in proc:
             out[k] = float(proc[k])
-    out["lag_p50_ms"] = float(lag.get("p50_ms", 0))
-    out["lag_p95_ms"] = float(lag.get("p95_ms", 0))
-    out["lag_p99_ms"] = float(lag.get("p99_ms", 0))
-    out["lag_max_ms"] = float(lag.get("max_ms", 0))
+    # F3 round-4: lag percentiles are None when samples were insufficient
+    # (see LoopLagMonitor.LAG_MIN_SAMPLES) — a missing metric must NOT
+    # enter compare as a fake 0.0 "no lag" reading.
+    for src, dst in (("p50_ms", "lag_p50_ms"), ("p95_ms", "lag_p95_ms"),
+                     ("p99_ms", "lag_p99_ms"), ("max_ms", "lag_max_ms")):
+        v = lag.get(src)
+        if v is not None:
+            out[dst] = float(v)
     out["tasks_end"] = float(tasks.get("end", 0))
     out["threads_end"] = float(threads.get("end", 0))
     stages = report.get("stages", {})
@@ -91,7 +104,11 @@ def _verdict(metric: str, before: float, after: float) -> str:
     rel, abs_ = TOLERANCES.get(metric, (0.15, 0.0))
     delta = after - before
     band = max(abs(before * rel), abs_)
-    lower_is_better = metric.startswith(("rss_", "cpu_", "lag_", "wall_"))
+    if metric in _CUSTOM_LOWER_IS_BETTER:
+        lower_is_better = True  # reliability counters (dropped, failures)
+    else:
+        lower_is_better = metric.startswith(
+            ("rss_", "cpu_", "lag_", "wall_", "tasks_", "threads_"))
     if abs(delta) <= band:
         return "unchanged"
     if delta > 0:
@@ -118,8 +135,11 @@ def compare(before: Dict[str, Any], after: Dict[str, Any]) -> str:
             continue
         lines.append(f"{name}:")
         b_flat, a_flat = _flat_metrics(prev), _flat_metrics(scen)
-        for metric in sorted(set(b_flat) | set(a_flat)):
-            b, a = b_flat.get(metric, 0.0), a_flat.get(metric, 0.0)
+        # F3 round-4: only metrics present on BOTH sides are comparable —
+        # insufficient-sample lag percentiles (None) must not be read as
+        # a 0.0 baseline and flagged as regression.
+        for metric in sorted(set(b_flat) & set(a_flat)):
+            b, a = b_flat[metric], a_flat[metric]
             verdict = _verdict(metric, b, a)
             if verdict == "regressed":
                 overall_regressed = True
@@ -147,9 +167,15 @@ def render_table(report: Dict[str, Any]) -> str:
                      f"(u={proc.get('cpu_user_s')}s "
                      f"s={proc.get('cpu_sys_s')}s)")
         lag = scen.get("loop_lag_ms", {})
-        lines.append(f"  Loop lag ms: p50={lag.get('p50_ms')} "
-                     f"p95={lag.get('p95_ms')} p99={lag.get('p99_ms')} "
-                     f"max={lag.get('max_ms')} ({lag.get('samples')} samples)")
+
+        def _fmt(v: Any) -> Any:
+            return "n/a" if v is None else v
+
+        lines.append(f"  Loop lag ms: p50={_fmt(lag.get('p50_ms'))} "
+                     f"p95={_fmt(lag.get('p95_ms'))} "
+                     f"p99={_fmt(lag.get('p99_ms'))} "
+                     f"max={_fmt(lag.get('max_ms'))} "
+                     f"({lag.get('samples')} samples)")
         tasks = scen.get("tasks", {})
         threads = scen.get("threads", {})
         lines.append(f"  Tasks: {tasks}   Threads: peak={threads.get('peak')}"
@@ -192,12 +218,31 @@ def load_json(path: str) -> Dict[str, Any]:
         return json.load(fh)
 
 
+def _window_slope(window: List[float]) -> Optional[float]:
+    """Per-step slope across a window, or None for single points."""
+    if len(window) < 2:
+        return None
+    return (window[-1] - window[0]) / (len(window) - 1)
+
+
 def leak_verdict(rss_series: List[float], task_series: List[int]
                  ) -> Dict[str, Any]:
     """Trend-based leak verdict (S6 §3.3): no arbitrary thresholds.
 
     cycle 1 is warmup (allocator arenas, imports, sqlite page cache) and
     is excluded from the trend math but shown.
+
+    F3 (round-4) slope comparison: the FIRST third of the post-warmup
+    series is compared against the LAST third. Endpoint-only growth used
+    to flag bounded plateaus (rise-then-flat) as "suspected-leak", and a
+    single transient drop used to inflate the noise band enough to hide
+    a real leak as "stable". Now:
+      * the noise band comes from the within-window spreads only — an
+        interior transient drop cannot collapse the tolerance;
+      * a sustained step whose tail window has gone flat (tail slope <<
+        head slope) is "stable" — bounded, growth stopped;
+      * a transient drop larger than the band masks the trend →
+        "inconclusive" (``passed`` stays True — rerun with more cycles).
     """
     n = len(rss_series)
     if n < 3:
@@ -206,19 +251,46 @@ def leak_verdict(rss_series: List[float], task_series: List[int]
                 "slope_kb_per_cycle": 0.0,
                 "verdict": "insufficient-cycles"}
     s = rss_series[1:]
-    growth = s[-1] - s[0]
-    noise = max(256.0, 2.0 * max((s[i] - s[i + 1] for i in range(len(s) - 1)),
-                                 default=0.0))
-    non_returning = all(
-        max((s[i] - later for later in s[i + 1:]), default=0.0) <= noise
-        for i in range(len(s) - 1))
-    slope = growth / max(len(s) - 1, 1)
-    if non_returning and growth > noise and n >= 5:
-        verdict = "suspected-leak"
-    elif growth <= noise:
+    m = len(s)
+    third = max(2, m // 3) if m >= 4 else 1
+    head, tail = s[:third], s[-third:]
+
+    # ROUND-4 RE-AUDIT (A): the noise band must come from RESIDUAL scatter
+    # around a fitted line, not from within-window spreads — a textbook
+    # LINEAR leak has spread proportional to its own slope, so the old
+    # band (2×max window spread) scaled WITH the leak and hid it as
+    # "stable" (a 200 kB/cycle ramp at n=5 was stable; the flat-then-leak
+    # shape at n=5+5 too). A least-squares fit leaves near-zero residuals
+    # for any clean trend (leak or bounded step) and large residuals only
+    # for genuinely noisy/drop-masked series — exactly the separation the
+    # verdicts need.
+    k = m
+    mean_x = (k - 1) / 2.0
+    mean_y = sum(s) / k
+    num = sum((i - mean_x) * (y - mean_y) for i, y in enumerate(s))
+    den = sum((i - mean_x) ** 2 for i in range(k))
+    fit_slope = (num / den) if den else 0.0
+    intercept = mean_y - fit_slope * mean_x
+    residuals = sorted(
+        abs(y - (fit_slope * i + intercept)) for i, y in enumerate(s))
+    med_res = residuals[len(residuals) // 2]
+    noise = max(256.0, 4.0 * med_res)
+    growth = fit_slope * (k - 1)  # fitted total growth across the series
+    slope = fit_slope
+    if growth <= noise:
         verdict = "stable"
     else:
-        verdict = "inconclusive"
+        big_drop = max((s[i] - s[i + 1] for i in range(m - 1)),
+                       default=0.0)
+        tail_slope = _window_slope(tail)
+        head_slope = _window_slope(head)
+        if big_drop > noise:
+            verdict = "inconclusive"  # a transient drop masks the trend
+        elif (tail_slope is not None and head_slope is not None
+                and tail_slope < 0.5 * head_slope):
+            verdict = "stable"        # bounded plateau: growth has stopped
+        else:
+            verdict = "suspected-leak"
     return {"rss_end_per_cycle_kb": rss_series,
             "tasks_end_per_cycle": task_series,
             "slope_kb_per_cycle": round(slope, 1),

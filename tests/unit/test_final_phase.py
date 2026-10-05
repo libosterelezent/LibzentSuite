@@ -289,6 +289,96 @@ class StartAllSchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("gamma", out["overtaken"])
         await h.manager.stop_all()
 
+    async def test_stop_while_parked_on_lane_is_not_undone(self) -> None:
+        """Round-4 (probe3_sema_overtake/probe3b): with a fleet wider than
+        _START_ALL_WIDTH, an operator stop of an account whose sweep-start
+        is still parked on the lane SEMAPHORE must win — the start is
+        re-checked after acquiring the lane and reported overtaken, never
+        blindly executed against the stopped account. (Which accounts park
+        on the semaphore vs grab a lane is scheduler-dependent, so the
+        victim is chosen at runtime: one with NO client built yet.)"""
+        h = make_manager(token_values={
+            f"DISCORD_TOKEN_{n.upper()}": f"tok-{n}" for n in "abcdef"})
+        gate = asyncio.Event()
+        original_factory = h.manager._client_factory
+        built: set = set()
+
+        def gated_factory(name, token):
+            client = original_factory(name, token)
+            built.add(name)  # this account is IN a lane now
+            orig_connect = client.connect
+
+            async def gated_connect():
+                await gate.wait()  # all lane occupants park here
+                await orig_connect()
+            client.connect = gated_connect
+            return client
+
+        h.manager._client_factory = gated_factory
+        for name in "abcdef":
+            await h.manager.add_account(name)
+
+        task = asyncio.create_task(h.manager.start_all(stagger=0.01))
+        await asyncio.sleep(0.1)  # 4 lanes parked in connect; 2 on the sema
+        parked = [n for n in "abcdef" if n not in built]
+        self.assertEqual(len(parked), 2)  # fleet 6 > width 4
+        victim = parked[0]  # still parked on the lane semaphore
+        await h.manager.stop(victim)  # operator stops the PARKED account
+        rt = h.manager.get(victim).runtime
+        self.assertEqual(rt.status, AccountStatus.STOPPED)
+
+        gate.set()  # lanes free; the victim's queued start hits the re-check
+        out = await asyncio.wait_for(task, timeout=10)
+        self.assertIn(victim, out["overtaken"])
+        self.assertNotIn(victim, out["started"])
+        rt = h.manager.get(victim).runtime
+        self.assertEqual(rt.status, AccountStatus.STOPPED)  # not undone
+        self.assertIsNone(rt.client)
+        self.assertEqual(h.manager.get(parked[1]).runtime.status,
+                         AccountStatus.RUNNING)  # untouched sibling ran
+        await h.manager.stop_all()
+
+    async def test_joiner_returns_when_owner_cancelled(self) -> None:
+        """Round-4 (probe2_joiner_hang): the sweep owner dying (cancelled)
+        must complete the flight — a joiner parked on shield(flight) gets
+        the aborted partial report instead of hanging forever."""
+        h = make_manager()
+        for name in ("alpha", "beta"):
+            await h.manager.add_account(name)
+        park = asyncio.Event()
+        original_factory = h.manager._client_factory
+
+        def parking_factory(name, token):
+            client = original_factory(name, token)
+            orig_connect = client.connect
+
+            async def parked_connect():
+                await park.wait()
+                await orig_connect()
+            client.connect = parked_connect
+            return client
+
+        h.manager._client_factory = parking_factory
+        owner = asyncio.create_task(h.manager.start_all(stagger=0))
+        await asyncio.sleep(0.05)  # owner mid-sweep (parked in connect)
+        joiner = asyncio.create_task(h.manager.start_all(stagger=0))
+        await asyncio.sleep(0.05)  # joiner parked on the flight
+        owner.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await owner
+
+        out = await asyncio.wait_for(asyncio.shield(joiner), timeout=3)
+        self.assertTrue(out.get("joined"))
+        self.assertTrue(out.get("aborted"))  # labelled, not a clean report
+        self.assertEqual(out["started"], [])
+        # the flight slot is free again: a fresh sweep works end-to-end
+        park.set()
+        await h.manager.stop_all()
+        retry = await h.manager.start_all(stagger=0)
+        self.assertEqual(retry["started"], ["alpha", "beta"])
+        self.assertNotIn("aborted", retry)
+        await h.manager.stop_all()
+
 
 class GateDepthTests(unittest.IsolatedAsyncioTestCase):
     async def test_projected_depth_fast_fail(self) -> None:

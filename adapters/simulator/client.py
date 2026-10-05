@@ -15,7 +15,17 @@ Behaviour highlights (audit-proven unless noted):
     for a vanished channel,
   * ``cached_snapshot`` filters DM channels to pairs involving THIS account
     (audit fix: the world-level view used to leak other accounts' DMs),
-  * ``latency_ms`` is synthetic but deterministic per client (seedable).
+  * ``latency_ms`` is synthetic but deterministic per client (seedable);
+    documented simplification: it is NEVER None, while the live property is
+    Optional (None before READY) — the sim has no pre-READY window,
+  * SELF-COMMAND layer (round-4 parity): with ``command_prefix`` set, the
+    account's OWN message naming a registered trigger after the prefix
+    (``sm!slcopy``) re-fires ``on_message`` with the synthetic trigger DTO
+    — the same fixed pass-through set (roll/rollstop/slcopy) and the same
+    DTO shape as the live adapter's ``_publish_self_trigger``. Own
+    messages that match no trigger stay dropped (self-echo filter), and
+    other users' prefixed messages never fire commands (self_bot
+    semantics: only the account's own messages are invocable).
 """
 from __future__ import annotations
 
@@ -32,6 +42,11 @@ from core.errors import ServerRateLimit, TargetGone
 LATENCY_MIN_MS = 40.0
 LATENCY_MAX_MS = 90.0
 
+#: self-command trigger words registered on the sim's command layer —
+#: the SAME fixed pass-through set the live adapter installs in
+#: ``RealDiscordClient._install_command_layer`` (roll/rollstop/slcopy)
+SELF_COMMAND_TRIGGERS = ("roll", "rollstop", "slcopy")
+
 
 class SimClient:
     """DiscordClient protocol implementation over a SimWorld (per account)."""
@@ -43,6 +58,7 @@ class SimClient:
         *,
         seed: Optional[int] = None,
         fail_connect: bool = False,
+        command_prefix: str = "",
     ) -> None:
         """Bind the client to a world as one user.
 
@@ -53,6 +69,9 @@ class SimClient:
                 (tests pin it; None uses OS entropy).
             fail_connect: when True, connect() always raises ConnectionError
                 (failure-path testing of the account supervisor).
+            command_prefix: self-command prefix ("" = disabled, the
+                default — mirroring the live bootstrap's default-off
+                SELF_COMMAND_PREFIX; "@me" = the account's own mention).
         """
         self._world = world
         self.user_id = user_id
@@ -63,6 +82,10 @@ class SimClient:
         self.on_message_delete: Optional[Callable[..., None]] = None
         self.connected = False
         self.fail_connect = fail_connect
+        #: self-command prefix ("" = disabled; "@me" = own mention) —
+        #: threaded from SELF_COMMAND_PREFIX by the sim runner, exactly
+        #: like the live factory threads it from credentials
+        self._command_prefix = str(command_prefix or "")
         self._rng = random.Random(seed)
         #: typing indicators fired (observable for anti-flag tests)
         self.typing_calls: list = []
@@ -92,13 +115,31 @@ class SimClient:
             self._world.subscribers.remove(self)
         self.connected = False
 
-    def drop(self, reason: str = "simulated network drop") -> None:
-        """Simulate an UNEXPECTED connection loss (fires on_disconnect)."""
+    def drop(
+        self, reason: Optional[str] = None, *, transient: bool = False
+    ) -> None:
+        """Simulate an UNEXPECTED connection loss (fires on_disconnect).
+
+        Default (transient=False): the session dies — unsubscribe from the
+        world, ``connected = False``, fire the callback once. Identical to
+        the historical contract (tests pin it).
+
+        transient=True models the live library's AUTO-RESUME window: the
+        disconnect callback fires (the supervisor sees the loss) but the
+        session STAYS ``connected`` — live gateway drops never flip
+        ``connected`` either, and REST sends keep working mid-reconnect.
+        The world subscription is kept so events continue to flow (a
+        documented simplification: live would replay the missed dispatches
+        on RESUME; the sim delivers them immediately).
+        """
+        if reason is None:
+            reason = "simulated network drop"
         if not self.connected:
             return
-        if self in self._world.subscribers:
-            self._world.subscribers.remove(self)
-        self.connected = False
+        if not transient:
+            if self in self._world.subscribers:
+                self._world.subscribers.remove(self)
+            self.connected = False
         if self.on_disconnect is not None:
             self.on_disconnect(reason)
 
@@ -189,7 +230,13 @@ class SimClient:
         return self._world.dm_channel_for(self.user_id, user_id)
 
     async def fetch_user(self, user_id: int) -> Optional[SimpleNamespace]:
-        """None when the world does not know the user, else id/name attrs."""
+        """None when the world does not know the user, else id/name attrs.
+
+        Live parity (round-4): ConnectionError when offline — the live
+        adapter resolves the session (``_require_client``) before any REST
+        touch, so a disconnected client never fetches.
+        """
+        self._guard_connection()
         if user_id not in self._world.users:
             return None
         return SimpleNamespace(id=user_id, name=self._world.users[user_id])
@@ -254,16 +301,79 @@ class SimClient:
         )
 
     def receive(self, message: WorldMessage) -> None:
-        """World push -> framework callback (ignores our own messages).
+        """World push -> framework callback.
 
-        Rich boundary: whatever the world row carries (embeds, components,
-        attachments, reactions, author/guild, reference) crosses into the
-        DTO untouched — same contract as the live adapter, and now the
-        SAME builder the world uses for edit events (to_discord_message)
-        so every sim crossing is shape-identical.
+        Own messages: dropped by the self-echo filter EXCEPT the
+        SELF-COMMAND path — with a prefix configured, a message naming a
+        registered trigger after the prefix re-fires ``on_message`` with
+        the synthetic trigger DTO (same shape as the live layer's
+        ``_publish_self_trigger``: bare trigger as content, the account's
+        own id as author, the real channel + message id). Rich boundary
+        for everything else: whatever the world row carries (embeds,
+        components, attachments, reactions, author/guild, reference)
+        crosses into the DTO untouched — same contract as the live
+        adapter, and the SAME builder the world uses for edit events
+        (to_discord_message) so every sim crossing is shape-identical.
         """
-        if self.on_message is not None and message.author_id != self.user_id:
-            self.on_message(to_discord_message(self._world, message))
+        if self.on_message is None:
+            return
+        if message.author_id == self.user_id:
+            trigger = self._match_self_command(message.content)
+            if trigger is not None:
+                self.on_message(self._self_trigger_dto(message, trigger))
+            return
+        self.on_message(to_discord_message(self._world, message))
+
+    # ------------------------------------------------------ self-command layer
+    def _self_command_prefixes(self) -> Tuple[str, ...]:
+        """Concrete prefix strings to match ("@me" = the own mention)."""
+        if self._command_prefix == "@me":
+            return (f"<@{self.user_id}>", f"<@!{self.user_id}>")
+        return (self._command_prefix,)
+
+    def _match_self_command(self, content: str) -> Optional[str]:
+        """Bare trigger word when content is prefix + a registered trigger.
+
+        Mirrors the library's ext.commands matching closely enough for
+        sim parity: the prefix must lead the message (no leading
+        whitespace), whitespace after it is skipped, and the first word
+        must be a REGISTERED trigger (unknown words are silently dropped —
+        they never reach the event bus, exactly like the live layer's
+        CommandNotFound handling).
+        """
+        if not self._command_prefix or not content:
+            return None
+        for prefix in self._self_command_prefixes():
+            if not content.startswith(prefix):
+                continue
+            rest = content[len(prefix):].lstrip()
+            word = rest.split(None, 1)[0] if rest else ""
+            # live is case_insensitive=True (Bot kwarg) — "sm!ROLL" fires;
+            # return the CANONICAL registered word so the published
+            # trigger matches plugin settings exactly
+            if word.lower() in SELF_COMMAND_TRIGGERS:
+                return word.lower()
+            return None  # matched the prefix, but names no trigger
+        return None
+
+    def _self_trigger_dto(
+        self, message: WorldMessage, trigger: str
+    ) -> DiscordMessage:
+        """Synthetic MessageReceived DTO (live ``_publish_self_trigger``).
+
+        The account's own id as author, the bare trigger as content, the
+        real channel + message id; ``dm`` comes from the CHANNEL SHAPE
+        (the world's dm flag), ``guild_id`` from the world row.
+        """
+        dm = bool(self._world.dm_channels.get(message.channel_id, False))
+        return DiscordMessage(
+            id=message.id,
+            channel_id=message.channel_id,
+            author_id=self.user_id,
+            content=trigger,
+            dm=dm,
+            guild_id=message.guild_id,
+        )
 
     # ------------------------------------------------- capability actions
     async def add_reaction(self, channel_id: int, message_id: int, emoji: str) -> Any:
@@ -305,4 +415,9 @@ class SimClient:
         raise TargetGone("", f"message {message_id} vanished")
 
 
-__all__ = ["SimClient", "LATENCY_MIN_MS", "LATENCY_MAX_MS"]
+__all__ = [
+    "SimClient",
+    "LATENCY_MIN_MS",
+    "LATENCY_MAX_MS",
+    "SELF_COMMAND_TRIGGERS",
+]

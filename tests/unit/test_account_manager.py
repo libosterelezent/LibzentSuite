@@ -216,6 +216,48 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((await h.repo.get("alpha")).enabled)
         self.assertTrue((await h.manager.set_enabled("alpha", True))["enabled"])
 
+    async def test_refresh_record_does_not_revert_racing_mutation(self) -> None:
+        """Round-4 (probe3_reconcile_tear): a repo read parked BEFORE a
+        concurrent set_enabled must not rebind its pre-mutation snapshot
+        over the post-mutation memory record (stale-read tear)."""
+        from tests.unit.helpers import FakeAccountsRepo
+
+        class _SlowGetRepo(FakeAccountsRepo):
+            """get() snapshots the row at entry, then parks until released."""
+            def __init__(self, inner: FakeAccountsRepo):
+                super().__init__()
+                self.records = inner.records
+                self.next_id = inner.next_id
+                self.get_entered = asyncio.Event()
+                self.get_release = asyncio.Event()
+
+            async def get(self, name):
+                rec = self.records.get(name)
+                snap = self._copy(rec) if rec is not None else None
+                self.get_entered.set()
+                await self.get_release.wait()
+                return snap
+
+        h = make_manager()
+        await h.manager.add_account("alpha")
+        repo = _SlowGetRepo(h.manager._accounts_repo)
+        h.manager._accounts_repo = repo
+
+        status_task = asyncio.create_task(
+            h.manager.accounts(refresh_records=True))
+        await asyncio.wait_for(repo.get_entered.wait(), timeout=2)
+
+        # concurrent user mutation from another surface (CLI / dashboard)
+        await h.manager.set_enabled("alpha", False)
+
+        # the parked read resumes with the PRE-write snapshot
+        repo.get_release.set()
+        rows = await asyncio.wait_for(status_task, timeout=2)
+        memory = h.manager.get("alpha").record.enabled
+        self.assertFalse(memory)                     # memory not reverted
+        self.assertEqual(memory, repo.records["alpha"].enabled)
+        self.assertFalse(rows[0]["enabled"])         # published row agrees
+
     async def test_remove_stopped_account(self) -> None:
         h = make_manager()
         await h.manager.add_account("alpha")
@@ -484,9 +526,12 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         runtime = h.manager.get("alpha").runtime
+        h.manager._client_factory = h.factory
         h.factory.client_kwargs["fail_connect"] = True  # reconnects fail
         runtime.client.drop("socket closed")
-        await asyncio.sleep(0.4)  # several overflowing attempts elapse
+        # bounded poll (round-4: the fixed 0.4s sleep flaked ~1/3 under
+        # jitter — the pin is "kept retrying", not a wall-clock budget)
+        await _poll_until(lambda: len(h.factory.clients) >= 4, timeout=2.0)
         supervisor = runtime.supervisor
         self.assertIsNotNone(supervisor)
         self.assertFalse(supervisor.done())  # alive, still driving retries
@@ -498,7 +543,16 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
     async def test_reconnect_loop_crash_stands_down_failed(self) -> None:
         """Round-3: an unexpected reconnect-loop crash must surface as a
         FAILED account (start() stays usable), not a dead supervisor with
-        the account wedged in RECONNECTING."""
+        the account wedged in RECONNECTING.
+
+        TWIN NOTE (round-4): this test pins the CRASH-SURFACING contract —
+        the supervisor's in-body ``except Exception`` handler records the
+        crash text in last_error, clears ``lost`` (no stale wake-ups) and
+        stands down CLEANLY (task done, no exception set). The wedge/
+        recovery angle (RECONNECTING flipped by _on_disconnect settling
+        FAILED so start() stays usable) is pinned separately by
+        test_hardening_phase4::test_supervisor_death_settles_failed_not_wedged.
+        """
         h = make_manager(settings=_fast_reconnect_settings())
         await h.manager.add_account("alpha")
         await h.manager.start("alpha")

@@ -133,34 +133,51 @@ class LoopLagMonitor:
 
     EDGES_MS: Tuple[float, ...] = _edges_ms()
 
+    #: F3 (round-4): below this many samples the percentile estimate is
+    #: noise, not signal — summary() emits None instead of a fake
+    #: "0.0 ms = no lag" reading (compare skips missing lag metrics).
+    LAG_MIN_SAMPLES = 20
+
     def __init__(self, interval_s: float = 0.005) -> None:
         self.interval_s = float(interval_s)
         self._task: Optional[asyncio.Task] = None
         self._hist: List[int] = [0] * len(self.EDGES_MS)
         self._count = 0
         self._max_s = 0.0
+        self._last_wake: Optional[float] = None
         self._on_lag: Optional[Any] = None  # G5 spike hook (session-set)
 
     def start(self) -> None:
-        self._task = asyncio.get_running_loop().create_task(self._run())
+        loop = asyncio.get_running_loop()
+        self._last_wake = loop.time()
+        self._task = loop.create_task(self._run())
 
     async def stop(self) -> None:
         task, self._task = self._task, None
         if task is not None:
+            # F3 (round-4, fix #9): record the in-flight sleep's drift
+            # BEFORE cancelling — cancelling mid-sleep used to discard
+            # the final stall (e.g. a blocking teardown) unmeasured.
+            # No await between record and cancel → the monitor task
+            # cannot wake in between → no double-count.
+            if self._last_wake is not None:
+                pending = (asyncio.get_running_loop().time()
+                           - self._last_wake)
+                if pending > self.interval_s:  # a real stall — not the
+                    self._record(pending - self.interval_s)  # clamped 0
             task.cancel()
             try:
-                await task  # the final starving wake IS recorded before cancel
+                await task
             except (asyncio.CancelledError, Exception):
                 pass
 
     async def _run(self) -> None:
         loop = asyncio.get_running_loop()
-        last = loop.time()
         while True:
             await asyncio.sleep(self.interval_s)
             now = loop.time()
-            self._record(now - last - self.interval_s)
-            last = now
+            self._record(now - self._last_wake - self.interval_s)
+            self._last_wake = now
 
     def _record(self, lag_s: float) -> None:
         lag_s = max(0.0, lag_s)
@@ -189,13 +206,20 @@ class LoopLagMonitor:
         return round(self._max_s * 1000.0, 3)
 
     def summary(self) -> Dict[str, Any]:
+        # F3 (round-4): an empty/short run has no honest percentile —
+        # None (rendered "n/a") instead of 0.0 "no lag". max/samples
+        # stay factual.
+        insufficient = self._count < self.LAG_MIN_SAMPLES
+        pct = self._percentile_ms
         return {
-            "p50_ms": self._percentile_ms(0.50),
-            "p95_ms": self._percentile_ms(0.95),
-            "p99_ms": self._percentile_ms(0.99),
-            "max_ms": round(self._max_s * 1000.0, 3),
+            "p50_ms": None if insufficient else pct(0.50),
+            "p95_ms": None if insufficient else pct(0.95),
+            "p99_ms": None if insufficient else pct(0.99),
+            "max_ms": (None if insufficient
+                       else round(self._max_s * 1000.0, 3)),
             "samples": self._count,
             "interval_ms": round(self.interval_s * 1000.0, 1),
+            "lag_quality": ("insufficient" if insufficient else "ok"),
         }
 
 

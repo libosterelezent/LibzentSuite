@@ -554,15 +554,18 @@ class TestSoulcopyHostileDMStream(unittest.IsolatedAsyncioTestCase):
     async def test_idle_timeout_expires_between_pages(self) -> None:
         bus = EventBus()
         services = StreamCollectServices(bus)
+        # scaled-up constants (loaded-loop tolerance): the SEMANTIC pin is
+        # the ratio — gap (1.5s) well above the idle window (0.5s) for the
+        # expiry case, gap well below it for the reset case below
         bus, _ = await build_flow(
             services, overrides={"dm_read_timeout": 0.5,
                                  "inter_chunk_delay": 0.0}, bus=bus)
         trigger(bus, "slcopy")
         await self._wait_subscribed(bus)
         bus.publish_nowait(dm_event(10, "Soulmates\n---------\nAlice"))
-        await asyncio.sleep(0.7)
+        await asyncio.sleep(1.5)
         bus.publish_nowait(dm_event(11, "Soulmates\n---------\nLate"))
-        self.assertTrue(await wait_flow_done(services, 2, timeout=3.0))
+        self.assertTrue(await wait_flow_done(services, 2, timeout=8.0))
         chunks = [c for _ch, c, _p in services.sent
                   if c.startswith("$soulcopy ")]
         self.assertEqual(chunks, [DEFAULT_PREFIX + "Alice"])
@@ -570,15 +573,17 @@ class TestSoulcopyHostileDMStream(unittest.IsolatedAsyncioTestCase):
     async def test_idle_window_resets_on_each_page(self) -> None:
         bus = EventBus()
         services = StreamCollectServices(bus)
+        # idle window 1.5s vs page gaps 0.4s (>3x margin — a multi-100ms
+        # loop stall between publishes cannot expire the window early)
         bus, _ = await build_flow(
-            services, overrides={"dm_read_timeout": 0.5,
+            services, overrides={"dm_read_timeout": 1.5,
                                  "inter_chunk_delay": 0.0}, bus=bus)
         trigger(bus, "slcopy")
         await self._wait_subscribed(bus)
         for i, name in enumerate(("A", "B", "C")):
             bus.publish_nowait(dm_event(20 + i, name))
-            await asyncio.sleep(0.25)
-        self.assertTrue(await wait_flow_done(services, 2, timeout=3.0))
+            await asyncio.sleep(0.4)
+        self.assertTrue(await wait_flow_done(services, 2, timeout=8.0))
         chunks = [c for _ch, c, _p in services.sent
                   if c.startswith("$soulcopy ")]
         self.assertEqual(chunks, [DEFAULT_PREFIX + "A$B$C"])

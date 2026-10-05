@@ -256,6 +256,58 @@ class TestStopTrigger(unittest.IsolatedAsyncioTestCase):
         # no more sends after stop (allowing for in-flight completion)
         self.assertLessEqual(count_after - count_before, 1)
 
+    async def test_stop_restart_in_one_dispatch_slice_keeps_new_loop(self) -> None:
+        """ROUND-4 race probe: rollstop+roll landing in ONE dispatch slice
+        cancels the old loop and registers its replacement BEFORE the old
+        task's finally runs. The old finally used to clear the shared
+        latch unconditionally — killing the JUST-RESTARTED loop (rolling
+        silently dead). The ownership check keeps the new loop alive."""
+        bus = EventBus()
+        manager = PluginManager(
+            bus, logging.getLogger("t"),
+            SettingsManager(bus, logging.getLogger("t"),
+                            global_layer={"roll": {"roll_interval": 1.5}}),
+            plugin_dir="plugins",
+        )
+        manager.discover()
+        await manager.attach_account("alpha", allowed={"roll"})
+        services = RollServices()
+        await manager.activate_account("alpha", services)
+        plugin = manager._accounts["alpha"]["roll"].instance
+
+        # start rolling
+        bus.publish_nowait(MessageReceived(
+            account="alpha", message_id=1, channel_id=CHANNEL,
+            author_id=OWNER_ID, content="roll"))
+        await asyncio.sleep(0.3)
+        first = len(services.sent)
+        self.assertGreater(first, 0)
+
+        # stop + restart in ONE dispatch slice: both queued before the
+        # dispatcher yields, so the old task's cancellation/finally can
+        # only run AFTER the new loop is registered (the race window)
+        bus.publish_nowait(MessageReceived(
+            account="alpha", message_id=2, channel_id=CHANNEL,
+            author_id=OWNER_ID, content="rollstop"))
+        bus.publish_nowait(MessageReceived(
+            account="alpha", message_id=3, channel_id=CHANNEL,
+            author_id=OWNER_ID, content="roll"))
+
+        await asyncio.sleep(3.5)
+        # the NEW loop survived the old task's finally: alive + sending
+        self.assertTrue(plugin._rolling.get("alpha"))
+        self.assertIn("alpha", plugin._tasks)
+        self.assertFalse(plugin._tasks["alpha"].done())
+        self.assertGreater(len(services.sent), first)
+
+        # and the bookkeeping stays exact after a final clean stop
+        bus.publish_nowait(MessageReceived(
+            account="alpha", message_id=4, channel_id=CHANNEL,
+            author_id=OWNER_ID, content="rollstop"))
+        await asyncio.sleep(0.5)
+        self.assertFalse(plugin._rolling.get("alpha"))
+        self.assertNotIn("alpha", plugin._tasks)
+
 
 def low_rolls_response():
     return {"content": "", "message": NS(
@@ -487,10 +539,12 @@ class TestRound3Hardening(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_command_rejected_at_settings_validation(self) -> None:
         """VALID_ROULETTES is enforced by the Setting manifest — an invalid
-        command disables the plugin at resolution with an error listing
-        the valid roulette commands (nothing ever sends it)."""
+        NON-$ command disables the plugin at resolution with an error
+        listing the valid roulette commands (nothing ever sends it).
+        (Round-4: $-prefixed legacy values are grandfathered instead —
+        see test_legacy_dollar_command_grandfathered_at_boot.)"""
         services, manager = await flow(
-            "roll", overrides={"command": "$spin"}, wait=0.15)
+            "roll", overrides={"command": "spin"}, wait=0.15)
         self.assertEqual(services.sent, [])
         state = roll_state(manager)
         self.assertFalse(state["enabled"])
@@ -498,15 +552,44 @@ class TestRound3Hardening(unittest.IsolatedAsyncioTestCase):
         self.assertIn("$wa", state["last_error"])  # valid set is listed
         self.assertIn("$m", state["last_error"])
 
+    async def test_legacy_dollar_command_grandfathered_at_boot(self) -> None:
+        """ROUND-4: a pre-round-3 persisted FREE-FORM command (e.g.
+        '$custom') must not disable the plugin at boot — it resolves to
+        the default command with a WARNING naming the migration path, and
+        rolling works immediately on the default."""
+        with self.assertLogs("slaughtermudae.plugins.roll",
+                             level="WARNING") as cm:
+            services, manager = await flow(
+                "roll", overrides={"command": "$custom"},
+                responses=[{"content": "nothing to see"}], wait=0.3)
+        state = roll_state(manager)
+        self.assertTrue(state["enabled"])          # never disabled for this
+        self.assertIsNone(state["last_error"])
+        self.assertEqual(state["error_count"], 0)
+        self.assertTrue(any("legacy roll command" in line and
+                            "migrate" in line for line in cm.output),
+                        cm.output)
+        self.assertEqual(manager.live_settings("alpha", "roll")["command"],
+                         "$wa")
+        # the DEFAULT command is active — sends actually flow
+        self.assertTrue(any(cmd == "$wa" for _, cmd, _ in services.sent))
+
     async def test_invalid_command_rejected_at_set_setting(self) -> None:
         services, manager = await flow("roll", wait=0.1)
         with self.assertRaises(SettingsValidationError) as ctx:
-            await manager.set_setting("alpha", "roll", "command", "$spin")
+            await manager.set_setting("alpha", "roll", "command", "spin")
         self.assertIn("$wa", str(ctx.exception))
         # bare/case/whitespace variants normalize to the canonical form
         self.assertEqual(
             await manager.set_setting("alpha", "roll", "command", " WG "),
             "$wg")
+        # $-prefixed invalid values grandfather (default + warning) instead
+        # of raising — same rule as boot-time resolution
+        with self.assertLogs("slaughtermudae.plugins.roll",
+                             level="WARNING"):
+            self.assertEqual(
+                await manager.set_setting("alpha", "roll", "command", "$spin"),
+                "$wa")
 
     async def test_explicit_userstack_true_survives_restart(self) -> None:
         """The auto-disable latch must not clobber an explicit re-enable:

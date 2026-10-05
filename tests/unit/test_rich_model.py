@@ -978,9 +978,11 @@ class TestForwardHydrationRound3(unittest.TestCase):
 
 
 class TestIdentifyGateScaling(unittest.TestCase):
-    """Round-3 F4-2: the gate derives its interval from the expected fleet
-    size so a synchronized (re)identify wave clears the library's 60s
-    hook ceiling (client.py:1020 wait_for around IDENTIFY)."""
+    """Round-3 F4-2 (algebra re-derived round-4 F2-5): the gate derives
+    its interval from the expected fleet size so a synchronized
+    (re)identify wave clears the library's 60s hook ceiling
+    (client.py:1020 wait_for around IDENTIFY) — the BINDING constraint
+    is per-waiter: depth * effective_interval < 60."""
 
     def test_interval_scales_with_expected_fleet(self) -> None:
         from adapters.discord.client import IdentifyGate
@@ -988,17 +990,60 @@ class TestIdentifyGateScaling(unittest.TestCase):
         gate = IdentifyGate(5.0)
         self.assertEqual(gate.effective_interval, 5.0)  # single account
         gate.expected = 13
-        self.assertAlmostEqual(gate.effective_interval, 50.0 / 13, places=4)
+        self.assertAlmostEqual(gate.effective_interval, 55.0 / 13, places=4)
         gate.expected = 60
         self.assertEqual(gate.effective_interval, 1.0)  # floor
         gate.expected = 1000
         self.assertEqual(gate.effective_interval, 1.0)  # floor holds
 
+    def test_round4_zero_margin_at_51_is_gone(self) -> None:
+        """N=51 previously floored the interval at 1.0 (50/51 < 1), putting
+        the last waiter at exactly the 50s budget — zero margin against
+        the 60s identify ceiling. With the 55s budget the formula stays
+        ABOVE the floor through N=55, so the last waiter's projection
+        lands AT the budget and 5s under the ceiling."""
+        from adapters.discord.client import IdentifyGate
+
+        gate = IdentifyGate(5.0)
+        gate.expected = 51
+        interval = gate.effective_interval
+        self.assertGreater(interval, 1.0)              # formula, not floor
+        self.assertAlmostEqual(interval, 55.0 / 51, places=4)
+        self.assertLessEqual(51 * interval, gate.wait_budget)
+        self.assertLess(51 * interval, 60.0)           # the real ceiling
+        # the floor binds only past ~55 accounts at the default 1.0s
+        gate.expected = 56
+        self.assertEqual(gate.effective_interval, 1.0)
+        self.assertGreater(56 * 1.0, gate.wait_budget)  # -> fast-fail path
+
+    def test_round4_per_waiter_algebra_table(self) -> None:
+        """The BINDING constraint is per-waiter: depth x interval < the
+        library's 60s wait_for. Whatever the fleet size, the formula
+        lands the last waiter AT the budget (never past it), and with a
+        floor sized to the fleet the same holds at N=300."""
+        from adapters.discord.client import IdentifyGate
+
+        for n in (1, 11, 13, 30, 51, 55):
+            gate = IdentifyGate(5.0)
+            gate.expected = n
+            last_waiter = n * gate.effective_interval
+            self.assertLessEqual(last_waiter, gate.wait_budget)
+            self.assertLess(last_waiter, 60.0)
+        # fleet-sized floor (0.18s at N=300): same invariant at scale
+        for n in (120, 300):
+            gate = IdentifyGate(5.0, min_interval=55.0 / n)
+            gate.expected = n
+            self.assertAlmostEqual(gate.effective_interval, 55.0 / n,
+                                   places=6)
+            last_waiter = n * gate.effective_interval
+            self.assertLessEqual(last_waiter, gate.wait_budget)
+            self.assertLess(last_waiter, 60.0)
+
     def test_base_interval_below_formula_is_kept(self) -> None:
         from adapters.discord.client import IdentifyGate
 
         gate = IdentifyGate(2.0)
-        gate.expected = 5  # formula says 10s — the tighter base wins
+        gate.expected = 5  # formula says 11s — the tighter base wins
         self.assertEqual(gate.effective_interval, 2.0)
 
     def test_factory_counts_distinct_accounts_not_reconnects(self) -> None:
@@ -1021,13 +1066,13 @@ class TestIdentifyGateScaling(unittest.TestCase):
         first = gate.effective_interval
         gate.expected = 50  # fleet grew mid-wave
         self.assertLess(gate.effective_interval, first)
-        self.assertEqual(gate.effective_interval, 1.0)
+        self.assertEqual(gate.effective_interval, 1.1)  # 55/50 above floor
 
 
 class TestIdentifyGateWaveBudget(unittest.IsolatedAsyncioTestCase):
     """The wave property that matters: with N waiters released FIFO, the
     LAST one still clears the gate within the wait budget (scaled-down
-    numbers — the production defaults are 5.0/50.0/1.0)."""
+    numbers — the production defaults are 5.0/55.0/1.0)."""
 
     async def test_synchronized_wave_stays_under_budget(self) -> None:
         from adapters.discord.client import IdentifyGate
@@ -1045,6 +1090,64 @@ class TestIdentifyGateWaveBudget(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(max(waits), 0.30 + 0.20)  # budget + slack
         # and the pacer actually spaced releases FIFO
         self.assertGreater(max(waits), 0.20)
+
+    async def test_scaled_120_wave_zero_fast_fails_under_ceiling(self) -> None:
+        """Round-4 F2-5 probe (scaled 10:1): a 120-account wave with a
+        fleet-sized min_interval clears with ZERO fast-fails and pacing
+        on schedule. Wall-clock assertions carry a per-sleep loop-
+        granularity allowance (120 sleeps; under a loaded PRoot loop
+        each overshoots by milliseconds — at production scale that is
+        ~0.1% of the 55s budget). The STRICT last-waiter < 60s bound is
+        algebraic and pinned by test_round4_per_waiter_algebra_table."""
+        from adapters.discord.client import IdentifyGate
+
+        gate = IdentifyGate(0.5, min_interval=0.005, wait_budget=5.5)
+        gate.expected = 120
+        loop = asyncio.get_running_loop()
+        fast_fails = 0
+
+        async def waiter(k: int) -> float:
+            nonlocal fast_fails
+            t0 = loop.time()
+            try:
+                await gate.acquire(initial=True)
+            except ConnectionError:
+                fast_fails += 1
+            return loop.time() - t0
+
+        waits = await asyncio.gather(*(waiter(k) for k in range(120)))
+        self.assertEqual(fast_fails, 0)               # no churn
+        self.assertGreaterEqual(max(waits), 5.0)      # pacing really happened
+        # budget + GENEROUS load allowance: each waiter's sleep overshoots
+        # by the loop's scheduling latency; under a loaded PRoot host with
+        # 120 concurrent waiters the overshoot compounds (observed 2-3x on
+        # the whole-wave max). The precision claim is algebraic — pinned by
+        # test_round4_per_waiter_algebra_table; here we pin that the wave
+        # CLEARS near-budget even under adverse scheduling.
+        self.assertLess(max(waits), 5.5 * 3)
+
+    async def test_scaled_floor_regime_fast_fails_beyond_support(self) -> None:
+        """Honest ceiling: when the min_interval floor binds (0.3s floor,
+        0.55s budget), waiters projected past the budget fast-fail with a
+        retryable ConnectionError instead of parking past the ceiling.
+        Deterministic: the 0.3s hold guarantees every later waiter has
+        queued (depth visible) before any release."""
+        from adapters.discord.client import IdentifyGate
+
+        gate = IdentifyGate(0.3, min_interval=0.3, wait_budget=0.55)
+        gate.expected = 10
+        outcomes: list = []
+
+        async def waiter(k: int) -> None:
+            try:
+                await gate.acquire(initial=True)
+                outcomes.append("ok")
+            except ConnectionError:
+                outcomes.append("fail")
+
+        await asyncio.gather(*(waiter(k) for k in range(10)))
+        self.assertIn("ok", outcomes)     # the admitted head passes
+        self.assertGreaterEqual(outcomes.count("fail"), 8)  # tail refused
 
 
 class TestClientConstructorRound3(unittest.IsolatedAsyncioTestCase):
@@ -1220,11 +1323,59 @@ class TestRawEventMappingRound3(unittest.IsolatedAsyncioTestCase):
         client = await self._connected_client()
         deletes: list = []
         client.on_message_delete = lambda *a: deletes.append(a)
-        own = NS(id=8, channel=NS(id=500), guild=NS(id=42),
+        own = NS(id=8, channel=NS(id=500, guild=NS(id=42)),
                  author=NS(id=777))
         await client._client.on_raw_message_delete(NS(
             message_id=8, channel_id=500, guild_id=42, cached_message=own))
         self.assertEqual(deletes, [])
+
+    async def test_raw_repeat_within_window_publishes_once(self) -> None:
+        """Round-4 F2-4: a repeated RAW dispatch inside the 5s window no
+        longer re-publishes (the raw path used to mark AFTER publishing,
+        ignoring the mark's return — publish-then-discard)."""
+        client = await self._connected_client()
+        deletes: list = []
+        reactions: list = []
+        client.on_message_delete = lambda *a: deletes.append(a)
+        client.on_reaction = lambda *a: reactions.append(a)
+        await client._client.on_raw_message_delete(NS(
+            message_id=7, channel_id=500, guild_id=42, cached_message=None))
+        await client._client.on_raw_message_delete(NS(  # raw repeat
+            message_id=7, channel_id=500, guild_id=42, cached_message=None))
+        self.assertEqual(deletes, [(7, 500, 42, None)])
+        payload = NS(message_id=1, channel_id=2, guild_id=3, user_id=42,
+                     emoji=NS(name="❤", id=None))
+        await client._client.on_raw_reaction_add(payload)
+        await client._client.on_raw_reaction_add(payload)  # raw repeat
+        self.assertEqual(len(reactions), 1)
+
+    async def test_raw_callback_failure_leaks_to_rich_sibling(self) -> None:
+        """Round-4 F2-4: when the RAW publish RAISES, the key is un-marked
+        so the sibling rich handler (same gateway dispatch, next loop
+        turn) can still deliver the event exactly once."""
+        client = await self._connected_client()
+        delivered: list = []
+        failures: list = []
+
+        def flaky(*args):
+            if not failures:  # first (raw) attempt explodes
+                failures.append("raw")
+                raise RuntimeError("callback hiccup")
+            delivered.append(args)
+
+        client.on_message_delete = flaky
+        with self.assertRaises(RuntimeError):  # raw path re-raises
+            await client._client.on_raw_message_delete(NS(
+                message_id=9, channel_id=500, guild_id=42,
+                cached_message=None))
+        # the rich sibling then delivers the same dispatch (its 4th arg
+        # is the cached message object, per the rich callback shape)
+        rich_msg = NS(id=9, channel=NS(id=500), guild=NS(id=42),
+                      author=NS(id=999999))
+        await client._client.on_message_delete(rich_msg)
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(delivered[0][:3], (9, 500, 42))
+        self.assertIs(delivered[0][3], rich_msg)
 
 
 class TestClickHardeningRound3(unittest.IsolatedAsyncioTestCase):

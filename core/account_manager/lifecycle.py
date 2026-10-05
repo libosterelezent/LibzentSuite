@@ -33,37 +33,17 @@ Costs (defaults derived from measured behavior, not magic):
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 __all__ = [
     "OUTCOME_STARTED", "OUTCOME_STOPPED", "OUTCOME_RATE_LIMITED",
     "LifecycleDecision", "LifecyclePolicy", "LifecycleGovernor",
-    "LifecycleRateLimited",
 ]
 
 OUTCOME_STARTED = "STARTED"
 OUTCOME_STOPPED = "STOPPED"
 OUTCOME_RATE_LIMITED = "RATE_LIMITED"
-
-
-class LifecycleRateLimited(Exception):
-    """A lifecycle operation was refused by the lifecycle governor.
-
-    ``retry_after_s`` is the earliest legal re-try. Subclass of Exception
-    (not AccountError) so surfaces can render it distinctly; the account
-    manager wraps it into an AccountError with the same message.
-    """
-
-    def __init__(self, account: str, op: str, retry_after_s: float,
-                 reason: str) -> None:
-        super().__init__(
-            f"account {account!r} {op} rate-limited ({reason}): retry in "
-            f"{retry_after_s:.1f}s")
-        self.account = account
-        self.op = op
-        self.retry_after_s = float(retry_after_s)
-        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -147,6 +127,28 @@ class _TokenBucket:
             return True, 0.0
         return False, (1.0 - self._tokens) * self.refill_s
 
+    # Round-4 (probe1b) observation seam: refill() credits elapsed time
+    # only (idempotent — a later try_acquire() would credit the same
+    # window, so no decision can change) and the peeks answer WITHOUT
+    # spending capacity, so observing the limiter never drains it.
+    def refill(self) -> None:
+        """Credit elapsed refill time without consuming a token."""
+        now = self._clock()
+        self._tokens = min(
+            float(self.capacity),
+            self._tokens + (now - self._last) / self.refill_s)
+        self._last = now
+
+    def peek_ok(self) -> bool:
+        """True when a token is available WITHOUT acquiring it."""
+        return self._tokens >= 1.0
+
+    def peek_wait(self) -> float:
+        """Seconds until the next token (0.0 when one is available)."""
+        if self._tokens >= 1.0:
+            return 0.0
+        return (1.0 - self._tokens) * self.refill_s
+
 
 @dataclass
 class _Pacer:
@@ -224,6 +226,55 @@ class LifecycleGovernor:
         return LifecycleDecision(
             True, OUTCOME_STARTED if op == "start" else OUTCOME_STOPPED)
 
+    def peek(self, account: str, op: str, *,
+             status: Any = None) -> LifecycleDecision:
+        """READ-ONLY preview of what ``precheck`` would answer.
+
+        Round-4 (probe1b): ``stats()``/``retry_after()`` used to route
+        through ``precheck``, so OBSERVING the limiter consumed start
+        tokens — one stats() poll with five pacers drained the entire
+        5-token bucket and refused subsequent legitimate starts. This
+        path credits refill time (idempotent vs a later
+        ``try_acquire()``) but never spends a token and never touches
+        counters; ``precheck()`` stays the only consuming (production)
+        gate. Reason labels match ``precheck`` ("account_cooldown" |
+        "global_bucket") so bucket-refill waits stay distinguishable
+        from per-account cooldowns.
+        """
+        if not self.enabled:
+            return LifecycleDecision(
+                True, OUTCOME_STARTED if op == "start" else OUTCOME_STOPPED)
+        now = self._clock()
+        pacer = self._pacers.get(account)
+        if op == "start":
+            cooldown, since = self._start_cooldown(pacer, status)
+            ready = (since + cooldown) if since else 0.0
+            if ready > now:
+                return LifecycleDecision(
+                    False, OUTCOME_RATE_LIMITED, ready - now,
+                    "account_cooldown")
+            self._start_bucket.refill()
+            if not self._start_bucket.peek_ok():
+                return LifecycleDecision(
+                    False, OUTCOME_RATE_LIMITED,
+                    self._start_bucket.peek_wait(), "global_bucket")
+        elif op == "stop":
+            if self.policy.stop_cooldown_s > 0 and pacer:
+                ready = pacer.last_stop + self.policy.stop_cooldown_s
+                if ready > now:
+                    return LifecycleDecision(
+                        False, OUTCOME_RATE_LIMITED, ready - now,
+                        "account_cooldown")
+            self._stop_bucket.refill()
+            if not self._stop_bucket.peek_ok():
+                return LifecycleDecision(
+                    False, OUTCOME_RATE_LIMITED,
+                    self._stop_bucket.peek_wait(), "global_bucket")
+        else:  # pragma: no cover - internal misuse
+            raise ValueError(f"unknown lifecycle op {op!r}")
+        return LifecycleDecision(
+            True, OUTCOME_STARTED if op == "start" else OUTCOME_STOPPED)
+
     def commit(self, account: str, op: str, *, ok: bool,
                invalid_credential: bool = False) -> None:
         """Record the outcome so cooldowns track reality."""
@@ -249,11 +300,25 @@ class LifecycleGovernor:
         self._pacers.pop(account, None)
 
     def retry_after(self, account: str, op: str) -> float:
-        """Seconds until the next legal ``op`` (0 when legal now)."""
-        decision = self.precheck(account, op)
+        """Seconds until the next legal ``op`` (0 when legal now).
+
+        Read-only (round-4): observes via :meth:`peek`, never consumes.
+        """
+        decision = self.peek(account, op)
         return decision.retry_after_s if not decision.allowed else 0.0
 
     def stats(self) -> Dict[str, Any]:
+        """Observation snapshot — read-only, never consumes capacity."""
+        cooldowns: Dict[str, Dict[str, Any]] = {}
+        for name in sorted(self._pacers):
+            decision = self.peek(name, "start")
+            if not decision.allowed and decision.retry_after_s > 0:
+                # labelled distinctly (round-4): the account's own
+                # cooldown vs the SHARED start bucket refilling
+                cooldowns[name] = {
+                    "wait_s": decision.retry_after_s,
+                    "reason": decision.reason,
+                }
         return {
             "enabled": self.enabled,
             "policy": {
@@ -268,11 +333,7 @@ class LifecycleGovernor:
                 "stop_cooldown_s": self.policy.stop_cooldown_s,
             },
             "counters": dict(self.counters),
-            "cooldowns": {
-                name: self.retry_after(name, "start")
-                for name in sorted(self._pacers)
-                if self.retry_after(name, "start") > 0
-            },
+            "cooldowns": cooldowns,
         }
 
     # ------------------------------------------------------------- helpers

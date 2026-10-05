@@ -177,6 +177,66 @@ class GenerationRaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rt.status, AccountStatus.RUNNING)
         await h.manager.stop("alpha")
 
+    async def test_stale_start_does_not_clobber_newer_start(self) -> None:
+        """Round-4 (probe1_stale_start_clobber): a start parked in plugin
+        activation that loses ownership to stop→start must NOT tear down
+        the newer start's live artifacts — the stale abort is owner-scoped
+        (status, plugins, services and client of the RUNNING newer start
+        all survive; the stale start aborts quietly)."""
+        from tests.unit.helpers import FakePluginManager
+
+        class _SlowThenFastPlugins(FakePluginManager):
+            """activate_account: the FIRST call parks until released."""
+            def __init__(self):
+                super().__init__()
+                self.gate = asyncio.Event()
+                self.first_started = asyncio.Event()
+
+            async def activate_account(self, account, services_factory):
+                if not self.first_started.is_set():
+                    self.first_started.set()
+                    await self.gate.wait()
+                return await super().activate_account(
+                    account, services_factory)
+
+        h = make_manager()
+        slow = _SlowThenFastPlugins()
+        h.manager._plugin_manager = slow
+        await h.manager.add_account("alpha")
+
+        # start#1 -> parks inside activate_account
+        start1 = asyncio.create_task(h.manager.start("alpha"))
+        await asyncio.wait_for(slow.first_started.wait(), timeout=2)
+        await asyncio.sleep(0.02)  # let start1 reach the parked await
+
+        # stop() completes fully (gen2): teardown of start#1's client
+        await h.manager.stop("alpha")
+
+        # start#2 (gen3) completes fully: RUNNING with client C2
+        start2 = asyncio.create_task(h.manager.start("alpha"))
+        await asyncio.wait_for(start2, timeout=2)
+        rt = h.manager.get("alpha").runtime
+        c2 = rt.client
+        self.assertEqual(rt.status, AccountStatus.RUNNING)
+        self.assertIsNotNone(c2)
+        self.assertTrue(c2.connected)
+
+        # start#1's slow activation finally resumes -> stale abort fires
+        slow.gate.set()
+        out1 = await asyncio.wait_for(start1, timeout=2)
+        await asyncio.sleep(0.05)  # any rogue background teardown lands here
+
+        # the newer start's artifacts survived the stale abort
+        self.assertEqual(out1["status"], "running")  # reports the OWNER
+        self.assertEqual(rt.status, AccountStatus.RUNNING)
+        self.assertIs(rt.client, c2)
+        self.assertTrue(c2.connected)
+        self.assertEqual(len(slow.deactivated), 1)  # only the stop's
+        supervisor = rt.supervisor
+        self.assertIsNotNone(supervisor)
+        self.assertFalse(supervisor.done())
+        await h.manager.stop("alpha")
+
     async def test_stop_superseded_by_newer_start_leaves_state(self) -> None:
         """PHASE-4 (S1-F6): an old stop must never clobber a newer start's
         terminal state (STOPPED-with-live-client zombie window)."""
@@ -219,7 +279,16 @@ class GenerationRaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_supervisor_death_settles_failed_not_wedged(self) -> None:
         """PHASE-4 (S2 #6): an unexpected supervisor death must not wedge
-        the account in RECONNECTING forever."""
+        the account in RECONNECTING forever.
+
+        TWIN NOTE (round-4): this test pins the WEDGE/RECOVERY contract —
+        _on_disconnect sees a live supervisor and flips RECONNECTING, the
+        crash must settle FAILED from that state and start() must recover
+        the account. The crash-text-surfacing contract (last_error carries
+        the crash, ``lost`` cleared, clean exception-free stand-down) is
+        pinned separately by test_account_manager::
+        test_reconnect_loop_crash_stands_down_failed.
+        """
         h = make_manager(settings=_fast_reconnect_settings())
         await h.manager.add_account("alpha")
         await h.manager.start("alpha")

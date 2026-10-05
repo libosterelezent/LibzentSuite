@@ -59,10 +59,18 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
         # telemetry runs live (also available via SM_DB_TELEMETRY=1 alone).
         logging.getLogger("slaughtermudae").setLevel(logging.DEBUG)
         logging.getLogger("discord").setLevel(logging.INFO)
+        # ROUND-4 (F7/2): the telemetry singleton reads SM_DB_TELEMETRY at
+        # IMPORT time, so setting the env here (post-import) never enabled
+        # it — flip the live flag directly. The env is still set for
+        # anything imported later that reads it pre-construction.
         os.environ.setdefault("SM_DB_TELEMETRY", "1")
-        logging.getLogger("slaughtermudae").info(
-            "DEBUG MODE: slaughtermudae tree at DEBUG, discord at INFO, "
-            "DB worker telemetry enabled")
+        from database.telemetry import TELEMETRY
+
+        TELEMETRY.enabled = True
+        # printed, not logged: configure_stderr() only runs inside build(),
+        # so a pre-boot log line here used to vanish entirely
+        print("DEBUG MODE: slaughtermudae tree at DEBUG, discord at INFO, "
+              "DB worker telemetry enabled", flush=True)
     try:
         framework = await build(
             env_file=args.env,
@@ -244,18 +252,30 @@ def main() -> int:
     parser.add_argument("--db", default="state/slaughter.db", help="sqlite persistence file")
     args, extra = parser.parse_known_args()
 
-    if args.sim is not None or args.sim_list:
-        if (args.start_all or args.dashboard or args.headless
-                or extra or args.db != "state/slaughter.db"):
-            print("error: --sim/--sim-list cannot be combined with live-stack "
-                  "flags (--start-all/--dashboard/--headless/--db or a command)",
+    if args.bench is not None:
+        # ROUND-4 (F7/3): --bench used to silently DROP live-stack flags —
+        # the bench process builds its own isolated temp state, so --db
+        # (filtered from the bench argv as main-parser-owned) and every
+        # live-surface flag were quietly ignored. Reject the combinations
+        # instead of pretending they applied. Extra tokens stay legal:
+        # they pass through to the bench CLI ('--bench --list', scenarios).
+        conflicts = []
+        if args.sim is not None or args.sim_list:
+            conflicts.append("--sim/--sim-list")
+        if args.start_all:
+            conflicts.append("--start-all")
+        if args.dashboard:
+            conflicts.append("--dashboard")
+        if args.headless:
+            conflicts.append("--headless")
+        if args.db != "state/slaughter.db":
+            conflicts.append("--db")
+        if conflicts:
+            print(f"error: --bench cannot be combined with "
+                  f"{'/'.join(conflicts)} — the benchmark runs on isolated "
+                  f"temporary state, those flags would be ignored",
                   file=sys.stderr)
             return 2
-        try:
-            return asyncio.run(run_sim(args.sim or None, args.sim_list))
-        except KeyboardInterrupt:
-            return 130
-    if args.bench is not None:
         # isolated benchmark process: never boots the live framework
         from benchmark.cli import run_bench_cli
 
@@ -272,6 +292,18 @@ def main() -> int:
         bench_argv.extend(
             tok for tok in extra if tok.split("=", 1)[0] not in owned)
         return run_bench_cli(bench_argv)
+
+    if args.sim is not None or args.sim_list:
+        if (args.start_all or args.dashboard or args.headless
+                or extra or args.db != "state/slaughter.db"):
+            print("error: --sim/--sim-list cannot be combined with live-stack "
+                  "flags (--start-all/--dashboard/--headless/--db or a command)",
+                  file=sys.stderr)
+            return 2
+        try:
+            return asyncio.run(run_sim(args.sim or None, args.sim_list))
+        except KeyboardInterrupt:
+            return 130
     try:
         return asyncio.run(run_app(args, extra))
     except KeyboardInterrupt:

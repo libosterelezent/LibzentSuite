@@ -80,8 +80,10 @@ class DbTelemetry:
             self._hists[kind][bisect.bisect_left(_BUCKETS_MS, ms)] += 1
             if ms > self._max_s.get(kind, 0.0) * 1000.0:
                 self._max_s[kind] = seconds
-            if len(self._ring) < self._ring.maxlen:
-                self._ring.append((kind, round(ms, 3), ok))
+            # F3 (round-4): unconditional append — the old `len <
+            # maxlen` guard froze the ring at the FIRST 1024 records
+            # (head, not tail); deque(maxlen=...) already evicts.
+            self._ring.append((kind, round(ms, 3), ok))
 
     def reset(self) -> None:
         with self._lock:
@@ -141,7 +143,13 @@ class DbTelemetry:
             with open(f"/proc/self/task/{tid}/stat", "r") as fh:
                 fields = fh.read().rsplit(")", 1)[1].split()
             utime, stime = int(fields[11]), int(fields[12])
-            hz = 100  # os.sysconf("SC_CLK_TCK") is universally 100 on Linux
+            # F3 (round-4): kernel-dependent (HZ=250/1000 kernels exist;
+            # the hardcoded 100 skewed tick→second conversion)
+            import os as _os
+            try:
+                hz = int(_os.sysconf("SC_CLK_TCK"))
+            except (ValueError, OSError, AttributeError):
+                hz = 100
             return {"available": True,
                     "user_s": round(utime / hz, 3),
                     "sys_s": round(stime / hz, 3)}

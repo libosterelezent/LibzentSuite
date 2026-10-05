@@ -23,6 +23,7 @@ state (userstack availability) across restarts.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from typing import Any, Dict, Optional
 
@@ -44,6 +45,9 @@ TRANSIENT_BACKOFF_MAX = 60.0
 #: errors that arrive untyped — see :func:`is_transient_failure`)
 _TRANSIENT_MARKERS = ("not running", "connecting", "reconnecting",
                       "did not complete within")
+
+#: module logger for schema-level warnings (a Setting has no context/logger)
+_LOG = logging.getLogger("slaughtermudae.plugins.roll")
 
 
 def is_transient_failure(exc: BaseException) -> bool:
@@ -69,6 +73,15 @@ class RouletteCommandSetting(Setting):
     ``$WA`` and `` $wa `` all become ``$wa``. Anything else is rejected
     with an error listing every valid roulette command (round-3: the
     constant existed but nothing enforced it).
+
+    LEGACY GRANDFATHER (round-4): pre-round-3 installs persisted FREE-FORM
+    commands (any ``$word`` was accepted). Strict validation at resolution
+    time silently DISABLED the plugin on upgrade — rolling just stopped.
+    A value that starts with ``$`` but is not a valid roulette command is
+    now resolved to the schema default with a WARNING naming the
+    migration path (set ``command`` to a valid roulette). The plugin is
+    never disabled for this. Non-``$`` garbage is still rejected as
+    before: it cannot be a pre-round-3 persisted command.
     """
 
     def validate(self, value: Any) -> str:
@@ -77,6 +90,15 @@ class RouletteCommandSetting(Setting):
         if cmd.startswith("$"):
             cmd = cmd[1:]
         if cmd not in VALID_ROULETTES:
+            if str(coerced).strip().startswith("$"):
+                _LOG.warning(
+                    "legacy roll command %r is not a Mudae roulette "
+                    "command — using the default %s instead; migrate by "
+                    "setting 'command' to one of: %s",
+                    str(coerced).strip(), self.default,
+                    ", ".join(f"${r}" for r in VALID_ROULETTES),
+                )
+                return self.default
             raise SettingsValidationError(
                 self.name,
                 f"{coerced!r} is not a Mudae roulette command (valid: "
@@ -125,7 +147,9 @@ class RollPlugin(PluginBase):
                 "Word that stops rolling (owners only)."),
         RouletteCommandSetting("command", "str", "$wa",
                                "Roulette command: $wa/$wg/$wx/$w/$ha/$hg/$hx/$h/$ma/$mg/"
-                               "$mx/$m (validated; anything else is rejected)."),
+                               "$mx/$m (validated; legacy $-prefixed values "
+                               "fall back to the default with a warning, "
+                               "non-$ values are rejected)."),
         Setting("userstack", "bool", True,
                 "Send '$us 20' when rolls run out (auto-disables if the "
                 "account has no kakeraloots; an explicit re-enable via the "
@@ -240,6 +264,13 @@ class RollPlugin(PluginBase):
         response → parse for cooldown/userstack/key-limit → act → sleep.
         Cancellation-safe: the stop trigger or on_disable cancels this task.
         """
+        # OWNERSHIP (round-4): a rollstop+roll pair landing in ONE dispatch
+        # slice cancels this task and registers its REPLACEMENT before this
+        # coroutine's finally ever runs. The finally must only clear the
+        # shared latch/bookkeeping when THIS task is still the registered
+        # owner — otherwise it kills the just-restarted loop (the exact
+        # self-command/RESUME-replay shape).
+        me = asyncio.current_task()
         mudae_id = ctx.services.credentials.mudae_bot_id
         retry_backoff = TRANSIENT_BACKOFF_START
         try:
@@ -340,8 +371,14 @@ class RollPlugin(PluginBase):
         except asyncio.CancelledError:
             ctx.logger.info("roll loop cancelled for %s", account)
         finally:
-            self._rolling[account] = False
-            self._tasks.pop(account, None)
+            # OWNERSHIP CHECK (round-4): only tear down the shared state
+            # when this task is still the registered one. When a restart
+            # already replaced us (rollstop+roll in one dispatch slice),
+            # the NEW loop owns the latch — touching it here would stop
+            # the new loop's next iteration and orphan its task entry.
+            if self._tasks.get(account) is me:
+                self._rolling[account] = False
+                self._tasks.pop(account, None)
 
     # ------------------------------------------------------------ parsing
     async def _parse_response(self, ctx: PluginContext, account: str,

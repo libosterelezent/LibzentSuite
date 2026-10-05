@@ -442,5 +442,59 @@ class TestAccountSettingsLayer(unittest.IsolatedAsyncioTestCase):
         mgr.forget_account("ghost")                          # no error
 
 
+class TestAccountSettingsRepoNullRoundTrip(unittest.IsolatedAsyncioTestCase):
+    """ROUND-4 (F7/5): set(key, None) -> get() must round-trip the null.
+
+    The repository's tolerant-load path used a None default, making a
+    stored JSON null indistinguishable from a corrupt row — get()
+    silently dropped the key (asymmetric with set).
+    """
+
+    async def test_stored_null_round_trips(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from database.db import Database
+
+        with tempfile.TemporaryDirectory(prefix="sm-settings2-") as tmp:
+            db = Database(Path(tmp) / "null-roundtrip.db")
+            await db.connect()
+            try:
+                await db.account_settings.set("alpha", "flag", None)
+                await db.account_settings.set("alpha", "count", 3)
+                got = await db.account_settings.get("alpha")
+                self.assertEqual(got, {"flag": None, "count": 3})
+                # still overwritable + deletable like any real value
+                await db.account_settings.set("alpha", "flag", True)
+                self.assertEqual(
+                    (await db.account_settings.get("alpha"))["flag"], True)
+                self.assertTrue(
+                    await db.account_settings.delete("alpha", "flag"))
+                self.assertNotIn("flag", await db.account_settings.get("alpha"))
+            finally:
+                await db.close()
+
+    async def test_corrupt_row_still_skipped(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from database.db import Database
+
+        with tempfile.TemporaryDirectory(prefix="sm-settings2-") as tmp:
+            db = Database(Path(tmp) / "corrupt.db")
+            await db.connect()
+            try:
+                await db.account_settings.set("alpha", "good", 1)
+                # plant a corrupt row behind the repo's back
+                async with db.connection.write() as conn:
+                    await conn.execute(
+                        "INSERT INTO account_settings (account, key, value_json)"
+                        " VALUES ('alpha', 'bad', '{not json')")
+                got = await db.account_settings.get("alpha")
+                self.assertEqual(got, {"good": 1})
+            finally:
+                await db.close()
+
+
 if __name__ == "__main__":
     unittest.main()

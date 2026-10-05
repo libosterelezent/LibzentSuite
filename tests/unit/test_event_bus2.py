@@ -11,6 +11,7 @@ DESIGN — publish is an ordered inline dispatch, not a thread pool).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 import unittest
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from dataclasses import dataclass
 from core.event_bus import (
     Event,
     EventBus,
+    MessageReceived,
     SettingChanged,
     TaskCompleted,
     TaskFailed,
@@ -160,10 +162,12 @@ class TestDrainAndTyping(unittest.IsolatedAsyncioTestCase):
 
         bus.subscribe(SettingChanged, slow)
         tasks = [bus.publish_nowait(SettingChanged()) for _ in range(5)]
-        await bus.drain(timeout=2.0)
+        # generous deadline: 5 serialized 50ms sleeps become seconds when
+        # each await stalls on a loaded loop — the pin is that drain
+        # AWAITS the whole backlog, not the wall-clock cost
+        await bus.drain(timeout=10.0)
         self.assertEqual(len(done), 5)
         self.assertTrue(all(t.done() for t in tasks))
-        self.assertEqual(bus._background, set())     # strong refs released
 
     async def test_typed_mismatch_no_delivery(self) -> None:
         bus = EventBus()
@@ -216,6 +220,66 @@ class TestDrainAndTyping(unittest.IsolatedAsyncioTestCase):
         bus.subscribe(SettingChanged, lambda e: "h2")
         results = await bus.publish(SettingChanged())
         self.assertEqual(results, ["h1", "h2"])
+
+
+class TestDeadDispatcherRecovery(unittest.IsolatedAsyncioTestCase):
+    """Round-4 (F4/1 + F4/3): a dispatcher corpse + backlog must not
+    busy-spin drain() to the deadline, and its exception must be
+    retrieved + logged before any replacement."""
+
+    async def test_drain_resurrects_dead_dispatcher_no_spin(self) -> None:
+        """Kill the dispatcher mid-dispatch (outer cancel → requeue path):
+        drain() must resurrect it, deliver the whole backlog in FIFO
+        order, and return on completion — NOT by spinning sleep(0) until
+        the 5s deadline (the measured 130k-turns/s bug)."""
+        bus = EventBus()
+        gate = asyncio.Event()
+        seen: list = []
+
+        async def parked(event: Event) -> None:
+            await gate.wait()
+            seen.append(event)
+
+        bus.subscribe(MessageReceived, parked)
+        bus.publish_nowait(MessageReceived(message_id=0))
+        await asyncio.sleep(0.02)  # dispatcher picks up event 0, parks
+        for i in range(1, 50):
+            bus.publish_nowait(MessageReceived(message_id=i))
+        dispatcher = bus._dispatcher
+        assert dispatcher is not None
+        dispatcher.cancel()  # outer cancel: in-flight event 0 requeued
+        with contextlib.suppress(asyncio.CancelledError):
+            await dispatcher
+        self.assertTrue(dispatcher.done())
+        self.assertEqual(len(bus._queue), 50)  # backlog behind the corpse
+        gate.set()
+        t0 = time.perf_counter()
+        await bus.drain(timeout=5.0)
+        elapsed = time.perf_counter() - t0
+        self.assertEqual([m.message_id for m in seen], list(range(50)))
+        self.assertEqual(bus.stats()["queued"], 0)
+        self.assertLess(elapsed, 4.0)  # returned on completion, not deadline
+
+    async def test_publish_nowait_retrieves_dead_dispatcher_exception(self) -> None:
+        """A dispatcher killed by a handler's GeneratorExit is replaced by
+        the next publish_nowait, which first retrieves + ERROR-logs the
+        corpse's exception (no silent 'exception was never retrieved')."""
+        bus = EventBus()
+
+        def genocide(event: Event) -> None:
+            raise GeneratorExit
+
+        unsub = bus.subscribe(MessageReceived, genocide)
+        bus.publish_nowait(MessageReceived(message_id=0))
+        await asyncio.sleep(0.02)  # dispatcher dies on the GeneratorExit
+        self.assertIsNotNone(bus._dispatcher)
+        self.assertTrue(bus._dispatcher.done())
+        unsub()
+        with self.assertLogs("slaughtermudae.events", level="ERROR") as cm:
+            bus.publish_nowait(MessageReceived(message_id=1))
+        self.assertTrue(any("dispatcher" in line for line in cm.output))
+        await bus.drain(timeout=5.0)
+        self.assertEqual(bus.stats()["queued"], 0)
 
 
 if __name__ == "__main__":

@@ -46,6 +46,7 @@ REQUIRED_SCENARIOS = (
     "channel_gone_aborts",
     "control_mention",
     "estop_halt",
+    "self_command",
 )
 
 
@@ -132,6 +133,13 @@ class TestRegistryShape(unittest.TestCase):
         )
         self.assertGreaterEqual(read_timeout, 1.0)
         self.assertAlmostEqual(quiet_window(), read_timeout + 1.2)
+
+    def test_self_command_scenario_declares_prefix(self) -> None:
+        scenario = SCENARIOS["self_command"]
+        self.assertEqual(scenario.self_command_prefix, "sm!")
+        for name, other in SCENARIOS.items():
+            if name != "self_command":
+                self.assertIsNone(other.self_command_prefix, name)
 
 
 class TestWorldSetups(unittest.TestCase):
@@ -339,6 +347,70 @@ class TestChecksPure(unittest.TestCase):
         failures = scenario.checks(audit, halted)
         self.assertTrue(any("re-triggered" in f for f in failures))
 
+    def test_self_command_pass_and_violations(self) -> None:
+        from adapters.simulator.scenarios import (
+            SELF_COMMAND_PREFIX,
+            SELF_COMMAND_STRANGER_ID,
+        )
+
+        scenario = SCENARIOS["self_command"]
+        retrigger = {
+            "account": ACCOUNT_NAME, "direction": "in", "action": "message",
+            "content": TRIGGER_WORD, "note": f"author={SYNTHETIC_ALPHA_ID}",
+        }
+        # pass: one re-fire, one export, one chunk, stranger lands after
+        world = SimWorld()
+        scenario.world_setup(world)
+        export = world.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, EXPORT_COMMAND
+        )
+        export.ts = 100.0
+        chunk = world.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, IMPORT_PREFIX + "x"
+        )
+        chunk.ts = 101.0
+        stranger = world.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SELF_COMMAND_STRANGER_ID,
+            SELF_COMMAND_PREFIX + TRIGGER_WORD,
+        )
+        stranger.ts = 200.0
+        self.assertEqual(scenario.checks([dict(retrigger)], world), [])
+
+        # violation: a second flow answered the stranger's command
+        leak = SimWorld()
+        scenario.world_setup(leak)
+        export = leak.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, EXPORT_COMMAND
+        )
+        export.ts = 100.0
+        stranger = leak.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SELF_COMMAND_STRANGER_ID,
+            SELF_COMMAND_PREFIX + TRIGGER_WORD,
+        )
+        stranger.ts = 200.0
+        late = leak.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, IMPORT_PREFIX + "leak"
+        )
+        late.ts = 201.0
+        failures = scenario.checks([dict(retrigger)], leak)
+        self.assertTrue(any("isolation broken" in f for f in failures))
+
+        # violation: the bare trigger never crossed the boundary
+        failures = scenario.checks([], world)
+        self.assertTrue(any("re-fire" in f for f in failures))
+
+        # violation: the stranger message never landed (check is void)
+        empty = SimWorld()
+        scenario.world_setup(empty)
+        empty.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, EXPORT_COMMAND
+        )
+        empty.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, IMPORT_PREFIX + "x"
+        )
+        failures = scenario.checks([dict(retrigger)], empty)
+        self.assertTrue(any("never landed" in f for f in failures))
+
 
 
 class TestFullStackRuns(unittest.IsolatedAsyncioTestCase):
@@ -379,6 +451,9 @@ class TestFullStackRuns(unittest.IsolatedAsyncioTestCase):
 
     async def test_estop_halt(self) -> None:
         await self._run("estop_halt")
+
+    async def test_self_command(self) -> None:
+        await self._run("self_command")
 
     async def test_report_carries_evidence(self) -> None:
         """A passing run leaves interactions and spec-§9 log lines behind."""

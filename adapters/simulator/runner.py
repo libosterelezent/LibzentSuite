@@ -51,6 +51,33 @@ RateLimitTriggered / similar event lines. Wiring it here would duplicate
 the bootstrap's process-wide subscription semantics for little scenario
 value — scenarios assert on the audit trail and world journal instead.
 
+LIFECYCLE GOVERNOR (round-4): the AccountManager is built with a REAL
+``LifecycleGovernor`` (production parity — sims used to run unlimited, so
+start/stop thrashing was untestable). Verified scenario-safe: estop and
+teardown stops bypass the governor BY DESIGN (``_bypass_lifecycle=True``
+skips both the gate and the cooldown-commit), so estop_halt's
+stop→resume→start sequence never trips pacing, and no scenario's plain
+lifecycle ops come close to the 5-start/5s bucket or the 10s restart
+floor. The governor is exposed on ``ScenarioAPI.lifecycle``.
+
+RECONCILE CADENCE (round-4): the sim ControlAPI is built with
+``reconcile_interval_s=2.0`` (production default 30s) so the periodic
+re-reconciliation pass fires inside a scenario's lifetime instead of
+being untestable. RESIDUAL GAP: the sim ControlAPI still gets no
+``cooldowns`` service, so its periodic pass reconciles account records
+only (cooldown resync stays bootstrap-side).
+
+SELF-COMMAND PREFIX (round-4): the client factory threads a
+``command_prefix`` into every SimClient, mirroring the live bootstrap
+(``RealClientFactory(credentials, command_prefix=...)``). The source is
+the same credentials object the runner already resolves — a scenario may
+override it via ``Scenario.self_command_prefix`` (the self_command
+scenario uses "sm!"); default is off, exactly like SELF_COMMAND_PREFIX.
+When a prefix is ACTIVE the runner also appends the account's own
+synthetic id to OWNER_USER_IDS — the live layer's documented requirement
+(the re-fired trigger carries the account's own id as author and must
+pass the plugin owner check).
+
 THE LATE-BOUND SENDER SEAM (documented for the integrator): the scheduler
 needs the account manager's ``send_hook`` as its sender, but the account
 manager needs the scheduler in its own constructor. The cycle is broken with
@@ -131,6 +158,11 @@ _CANCEL_GRACE_S = 5.0
 #: live via ScenarioAPI.limiter.
 _SIM_LANE_PREFIXRATE = 1.5
 
+#: sim reconcile cadence (round-4): production's 30s default never fires
+#: inside a scenario's lifetime; 2s makes the periodic re-reconciliation
+#: observable (a second status() >2s into a scenario re-reads records)
+_SIM_RECONCILE_INTERVAL_S = 2.0
+
 #: cap on the report's log_lines (dashboard payload bounded); a spec-§9
 #: shaped notice replaces the dropped older lines
 _LOG_LINES_CAP = 2000
@@ -187,6 +219,7 @@ def _load_stack_modules() -> SimpleNamespace:
     """
     try:
         from core.account_manager import AccountManager
+        from core.account_manager.lifecycle import LifecycleGovernor
         from core.audit import AuditRecorder
         from core.cooldowns import CooldownService
         from core.credential_service import CredentialService
@@ -205,6 +238,7 @@ def _load_stack_modules() -> SimpleNamespace:
         ) from exc
     return SimpleNamespace(
         AccountManager=AccountManager,
+        LifecycleGovernor=LifecycleGovernor,
         AuditRecorder=AuditRecorder,
         CooldownService=CooldownService,
         CredentialService=CredentialService,
@@ -387,30 +421,52 @@ class SimulationRunner:
             await profiles.load()
             await cooldowns.restore()
 
+            # --- credentials: SYNTHETIC ids overlaid on the fleet values
+            # (fleet credentials carry real OWNER/MUDAE ids, which would
+            # silently break owner-gating and Mudae-page matching in every
+            # scenario)
+            sim_overlay = {
+                "MUDAE_BOT_ID": str(SYNTHETIC_MUDAE_ID),
+                "OWNER_USER_IDS": str(SYNTHETIC_OWNER_ID),
+                f"DISCORD_TOKEN_{ACCOUNT_NAME.upper()}": f"sim-token-{ACCOUNT_NAME}",
+            }
+            values = (
+                {**self._credentials.snapshot(), **sim_overlay}
+                if self._credentials is not None
+                else dict(sim_overlay)
+            )
+            # SELF-COMMAND PARITY (round-4): a scenario's declared prefix
+            # wins over the fleet value; an ACTIVE prefix also appends the
+            # account's own synthetic id to OWNER_USER_IDS — the live
+            # layer's documented requirement (the re-fired trigger carries
+            # the account's own id as author and must pass the owner check)
+            # Hermeticity (round-4 re-audit A): sims honor ONLY the
+            # scenario's explicit prefix — the LIVE .env's
+            # SELF_COMMAND_PREFIX must not leak into dashboard-driven runs
+            # (it would silently activate the layer + rewrite owner lists
+            # for unrelated scenarios). Default "" = off, like a live
+            # boot with the key unset.
+            self_command_prefix = scenario.self_command_prefix or ""
+            if self_command_prefix:
+                values["SELF_COMMAND_PREFIX"] = self_command_prefix
+            if self_command_prefix:
+                values["OWNER_USER_IDS"] = (
+                    f"{SYNTHETIC_OWNER_ID},{SYNTHETIC_ALPHA_ID}"
+                )
+            credentials = Credentials.from_values(values)
+
             user_ids = {ACCOUNT_NAME: SYNTHETIC_ALPHA_ID}
 
             def client_factory(account_name: str, token: str) -> SimClient:
-                return SimClient(world, user_ids[account_name], seed=SYNTHETIC_ALPHA_ID)
-
-            if self._credentials is not None:
-                # overlay the SYNTHETIC ids the scenarios script against: fleet
-                # credentials carry real OWNER/MUDAE ids, which would silently
-                # break owner-gating and Mudae-page matching in every scenario
-                merged = {
-                    **self._credentials.snapshot(),
-                    "MUDAE_BOT_ID": str(SYNTHETIC_MUDAE_ID),
-                    "OWNER_USER_IDS": str(SYNTHETIC_OWNER_ID),
-                    f"DISCORD_TOKEN_{ACCOUNT_NAME.upper()}": f"sim-token-{ACCOUNT_NAME}",
-                }
-                credentials = Credentials.from_values(merged)
-            else:
-                credentials = Credentials.from_values(
-                    {
-                        "MUDAE_BOT_ID": str(SYNTHETIC_MUDAE_ID),
-                        "OWNER_USER_IDS": str(SYNTHETIC_OWNER_ID),
-                        f"DISCORD_TOKEN_{ACCOUNT_NAME.upper()}": f"sim-token-{ACCOUNT_NAME}",
-                    }
+                # command_prefix mirrors the live factory's threading of
+                # SELF_COMMAND_PREFIX (default "" = the layer is off)
+                return SimClient(
+                    world,
+                    user_ids[account_name],
+                    seed=SYNTHETIC_ALPHA_ID,
+                    command_prefix=self_command_prefix,
                 )
+
             # import the account's synthetic token into the ephemeral credential
             # store so the DB-first resolution path is the one scenarios exercise
             try:
@@ -420,11 +476,16 @@ class SimulationRunner:
             except Exception:
                 pass
 
+            # LIFECYCLE GOVERNOR (round-4): production-parity pacing for
+            # start/stop — estop/teardown stops bypass it by design (see
+            # module docstring), so no scenario needs a permissive policy
+            governor = mods.LifecycleGovernor()
+
             accounts = self._build_account_manager(
                 mods, bus, log_accounts, db, plugins_mgr, profiles, scheduler,
                 settings, audit, client_factory, credentials, limiter,
                 credential_service=credential_service, cooldowns=cooldowns,
-                plugin_state=plugin_state,
+                plugin_state=plugin_state, lifecycle=governor,
             )
             await accounts.load()
             box["send"] = accounts.send_hook  # fill the seam BEFORE start()
@@ -437,6 +498,10 @@ class SimulationRunner:
                 accounts=accounts, plugins=plugins_mgr, profiles=profiles,
                 settings=settings, limiter=limiter, scheduler=scheduler,
                 logs=logger, audit=audit, credentials=credentials,
+                # RECONCILE (round-4): 2s cadence so the periodic pass is
+                # observable inside a scenario's lifetime (production
+                # default 30s never fires; see module docstring)
+                reconcile_interval_s=_SIM_RECONCILE_INTERVAL_S,
             )
             from core.remote_control import RemoteControl
 
@@ -564,6 +629,7 @@ class SimulationRunner:
                     limiter=limiter,
                     scheduler=scheduler,
                     control=api,
+                    lifecycle=governor,
                 )
                 async def _scenario_phase() -> None:
                     await scenario.script(facade)
@@ -634,15 +700,18 @@ class SimulationRunner:
                     await scheduler.stop(drain=True)
                 except Exception as exc:
                     failures.append(f"scheduler stop failed: {exc}")
-            try:
-                await bus.drain()
-            except Exception:
-                pass  # bounded (2s default); teardown must never hang here
             if account_started:
                 try:
                     await accounts.stop(ACCOUNT_NAME)
                 except Exception as exc:
                     failures.append(f"account stop failed: {exc}")
+            try:
+                # AFTER accounts stop (production Framework.shutdown order,
+                # round-4): stop_all publishes AccountDisconnected tail
+                # events — draining first would strand them
+                await bus.drain()
+            except Exception:
+                pass  # bounded (2s default); teardown must never hang here
             # persistence queues stop BEFORE the database closes (agent C
             # contract) — a queued row must never drain into a dead DB
             for label, stopper in (
@@ -733,13 +802,17 @@ class SimulationRunner:
         credential_service: Any = None,
         cooldowns: Any = None,
         plugin_state: Any = None,
+        lifecycle: Any = None,
     ) -> Any:
         """AccountManager with the pinned positional arguments.
 
         ``limiter`` (and the shared services) are passed as keywords when
         the constructor accepts them; a TypeError falls back to the leaner
         construction — both variants are supported (documented seam, see
-        module docstring).
+        module docstring). ``lifecycle`` (round-4: a real
+        LifecycleGovernor, production parity) rides the PRIMARY
+        construction only — duck-typed fakes that predate the kwarg keep
+        working through the fallbacks.
         """
         try:
             return mods.AccountManager(
@@ -747,7 +820,7 @@ class SimulationRunner:
                 settings, audit, client_factory, credentials, limiter=limiter,
                 api_cache_repo=db.cache,
                 credential_service=credential_service, cooldowns=cooldowns,
-                plugin_state=plugin_state,
+                plugin_state=plugin_state, lifecycle=lifecycle,
             )
         except TypeError:
             try:

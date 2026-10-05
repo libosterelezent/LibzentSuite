@@ -86,6 +86,18 @@ class ProfileManager:
             except Exception:
                 self._logger.exception("could not load profile assignments")
 
+    async def resync(self) -> None:
+        """Reconciliation path: clear-then-reload both caches.
+
+        ``load()`` alone MERGES (a deleted profile or cleared assignment
+        would linger) — out-of-band edits (second process / manual sqlite)
+        must not keep granting or denying plugins indefinitely, so the
+        caches are dropped wholesale before the reload.
+        """
+        self._profile_cache.clear()
+        self._assignment_cache.clear()
+        await self.load()
+
     # ---------------------------------------------------------------- CRUD
     async def set_profile(self, name: str, plugins: Any,
                           description: str = "") -> Dict[str, Any]:

@@ -27,12 +27,14 @@ LOG = logging.getLogger("slaughtermudae.config")
 #: never-matching action policies)
 KNOWN_ACTIONS = ("message", "dm", "reaction", "button")
 
-#: conservative defaults when rate_limits.json is absent (spec example:
-#: base interval 2.0s, random jitter 0.0-0.5s; floor is 1.5s everywhere)
+#: conservative defaults when rate_limits.json is absent (mirrors the
+#: shipped config/rate_limits.json: base interval 2.0s, random jitter
+#: 0.1-0.5s; floor is 1.5s everywhere — ROUND-4 F7/7 aligned the fallback
+#: to the shipped file, it used to drift at [0.0, 0.5])
 DEFAULT_POLICIES: Dict[str, Dict[str, Any]] = {
     "global": {
-        "message": {"interval": 2.0, "jitter": [0.0, 0.5]},
-        "dm": {"interval": 2.0, "jitter": [0.0, 0.5]},
+        "message": {"interval": 2.0, "jitter": [0.1, 0.5]},
+        "dm": {"interval": 2.0, "jitter": [0.1, 0.5]},
     },
     "accounts": {},
 }

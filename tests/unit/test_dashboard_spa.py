@@ -395,5 +395,54 @@ class TestRound3SpaHardening(unittest.TestCase):
         self.assertNotIn('$("auditbox").innerHTML = ""', JS)
 
 
+class TestRound4SpaHardening(unittest.TestCase):
+    """Round-4 fixes pinned as static assertions."""
+
+    # -------------------------------- backfill re-entry guard (a)
+    def test_backfill_guards_reentry_and_stale_responses(self):
+        for stem in ("log", "audit"):
+            # in-flight guard: a second call only marks a pending re-run
+            self.assertIn("let %sBackfillInFlight = false;" % stem, JS)
+            self.assertIn("let %sBackfillPending = false;" % stem, JS)
+            self.assertIn(
+                "if (%sBackfillInFlight) { %sBackfillPending = true; return; }"
+                % (stem, stem), JS)
+            # stale-response drop: only the LATEST issued call may apply
+            self.assertIn("let %sBackfillSeq = 0;" % stem, JS)
+            self.assertIn("if (seq !== %sBackfillSeq) return;" % stem, JS)
+            # the guard is released when the fetch settles either way
+            self.assertIn("%sBackfillInFlight = false;" % stem, JS)
+
+    # --------------------------------- sim report containment (b)
+    def test_sim_report_render_is_contained(self):
+        self.assertIn("failed to render simulation report", JS)
+        # renderSimReport itself stays OUTSIDE the .then try block
+        self.assertIn("renderSimReport(report);", JS)
+
+    # ------------------------------ cd-acct stats refresh (c)
+    def test_cd_acct_select_refreshes_with_stats(self):
+        # the fill must live in the stats-driven renderer (renderAccountCards
+        # runs on every structural WS tick), not only in renderCooldowns
+        start = JS.index("function renderAccountCards()")
+        end = JS.index("function credChipFor(", start)
+        self.assertIn(
+            'fillSelect($("cd-acct"), accountNames(), "all accounts");',
+            JS[start:end])
+
+    # ------------------------------ stale-WS watchdog (d)
+    def test_stale_ws_watchdog_armed_and_cleared(self):
+        self.assertIn("const WS_STALE_MS = 15000;", JS)
+        self.assertIn("function armStaleWatchdog(", JS)
+        # armed on open AND re-armed on every message (liveness proof)
+        self.assertGreaterEqual(JS.count("armStaleWatchdog();"), 2)
+        # disarmed on close so the reconnect path owns the timers
+        self.assertIn("clearTimeout(wsStaleWatchdog)", JS)
+        # the watchdog forces the shared reconnect path, not a bespoke one
+        self.assertRegex(
+            JS,
+            r"wsStaleWatchdog = setTimeout\(\(\) => \{[\s\S]*?"
+            r"handleWsClosed\(\);",)
+
+
 if __name__ == "__main__":
     unittest.main()

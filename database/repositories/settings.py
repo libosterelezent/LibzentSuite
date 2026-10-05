@@ -22,6 +22,12 @@ from .base import BaseRepository, loads_tolerant
 
 __all__ = ["AccountSettingsRepository"]
 
+#: ROUND-4 (F7/5): distinct missing-sentinel. ``set(key, None)`` stores a
+#: JSON ``null``; ``json.loads("null")`` is ``None``, so a None default in
+#: the tolerant-load path made stored nulls indistinguishable from corrupt
+#: rows — get() silently dropped them (asymmetric round-trip).
+_MISSING = object()
+
 
 class AccountSettingsRepository(BaseRepository):
     """Framework account settings: get/set/delete keyed by (account, key)."""
@@ -29,16 +35,17 @@ class AccountSettingsRepository(BaseRepository):
     async def get(self, name: str) -> Dict[str, Any]:
         """All stored settings for one account ({} when none/corrupt).
 
-        Corrupt value rows are skipped with a warning — one bad row must not
-        hide the healthy ones.
+        Corrupt value rows are skipped with a warning — one bad row must
+        not hide the healthy ones. A stored JSON ``null`` round-trips as
+        ``None`` (it is a real value, not a missing one).
         """
         out: Dict[str, Any] = {}
         for row in await self._fetch_all(
             "SELECT key, value_json FROM account_settings WHERE account = ? ORDER BY key",
             (name,),
         ):
-            value = loads_tolerant(row["value_json"], None, f"account_settings[{name!r}].{row['key']}")
-            if value is not None:
+            value = loads_tolerant(row["value_json"], _MISSING, f"account_settings[{name!r}].{row['key']}")
+            if value is not _MISSING:
                 out[row["key"]] = value
         return out
 

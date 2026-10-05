@@ -47,6 +47,10 @@ _CONTENT_CAP = 2000
 #: content previews are truncated to this length in format_audit lines
 _PREVIEW_LIMIT = 60
 
+#: ROUND-4 (F7/9): the truncation marker — slicing to _CONTENT_CAP and
+#: appending it produced 2012-char rows (12 over the cap)
+_TRUNCATED = "…[truncated]"
+
 
 @dataclass
 class AuditEntry:
@@ -210,7 +214,7 @@ class AuditRecorder:
             # caps entries at 16k — audit didn't, and the scheduler writes
             # task.content untruncated at terminal; a buggy plugin could
             # land full-size rows in the ring AND the DB.
-            content = content[:_CONTENT_CAP] + "…[truncated]"
+            content = content[:_CONTENT_CAP - len(_TRUNCATED)] + _TRUNCATED
         entry = AuditEntry(
             ts=time.time(),
             account=str(account),

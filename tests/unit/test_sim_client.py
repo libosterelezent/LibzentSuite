@@ -7,6 +7,7 @@ from adapters.base import DiscordMessage
 from adapters.simulator.client import (
     LATENCY_MAX_MS,
     LATENCY_MIN_MS,
+    SELF_COMMAND_TRIGGERS,
     SimClient,
 )
 from adapters.simulator.world import (
@@ -65,6 +66,39 @@ class TestLifecycle(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(client.connected)
         client.drop("again")  # already offline: no second callback
         self.assertEqual(reasons, ["simulated network drop"])
+
+    async def test_drop_default_reason_unchanged(self) -> None:
+        world = _world()
+        client = await _connected(world, SYNTHETIC_ALPHA_ID)
+        reasons = []
+        client.on_disconnect = reasons.append
+        client.drop()  # no args: the historical default reason fires
+        self.assertEqual(reasons, ["simulated network drop"])
+
+    async def test_transient_drop_fires_callback_keeps_session(self) -> None:
+        """transient=True models the library's auto-resume window: the
+        disconnect callback fires, but connected stays True (REST sends
+        keep working mid-reconnect) and the world subscription survives."""
+        world = _world()
+        client = await _connected(world, SYNTHETIC_ALPHA_ID)
+        reasons = []
+        client.on_disconnect = reasons.append
+        client.drop("gateway blip", transient=True)
+        self.assertEqual(reasons, ["gateway blip"])
+        self.assertTrue(client.connected)          # session lives on
+        self.assertIn(client, world.subscribers)   # events keep flowing
+        sent = await client.send_message(SYNTHETIC_GUILD_CHANNEL, "mid-reconnect")
+        self.assertEqual(sent.content, "mid-reconnect")  # REST still works
+
+    async def test_transient_drop_fires_repeatedly_while_session_lives(self) -> None:
+        world = _world()
+        client = await _connected(world, SYNTHETIC_ALPHA_ID)
+        reasons = []
+        client.on_disconnect = reasons.append
+        client.drop("blip 1", transient=True)
+        client.drop("blip 2", transient=True)  # connected stayed True
+        self.assertEqual(reasons, ["blip 1", "blip 2"])
+        self.assertTrue(client.connected)
 
     async def test_receive_skips_own_messages(self) -> None:
         world = _world()
@@ -264,8 +298,120 @@ class TestDmAndUsers(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(user.name, "owner")
         self.assertIsNone(await client.fetch_user(123456789))
 
+    async def test_fetch_user_offline_raises_like_live(self) -> None:
+        """Live parity: the session check runs before any REST touch."""
+        world = _world()
+        client = SimClient(world, SYNTHETIC_ALPHA_ID)  # never connected
+        with self.assertRaises(ConnectionError):
+            await client.fetch_user(SYNTHETIC_OWNER_ID)
 
-class TestSnapshotAndLatency(unittest.IsolatedAsyncioTestCase):
+
+class TestSelfCommandLayer(unittest.IsolatedAsyncioTestCase):
+    """Prefix parsing + isolation, mirroring the live self-command layer
+    (self_bot semantics: only the account's OWN messages are invocable)."""
+
+    async def test_own_prefixed_trigger_refires_as_bare_trigger(self) -> None:
+        world = _world()
+        client = await _connected(world, SYNTHETIC_ALPHA_ID, command_prefix="sm!")
+        seen = []
+        client.on_message = seen.append
+        sent = world.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "sm!slcopy"
+        )
+        self.assertEqual(len(seen), 1)
+        dto = seen[0]
+        self.assertIsInstance(dto, DiscordMessage)
+        self.assertEqual(dto.content, "slcopy")              # bare trigger
+        self.assertEqual(dto.author_id, SYNTHETIC_ALPHA_ID)  # self as author
+        self.assertEqual(dto.channel_id, SYNTHETIC_GUILD_CHANNEL)
+        self.assertEqual(dto.id, sent.id)                    # real message id
+        self.assertFalse(dto.dm)                             # guild channel
+
+    async def test_whitespace_and_extra_args_tolerated(self) -> None:
+        """The library skips whitespace after the prefix and ignores extra
+        arguments — the first word alone names the command."""
+        world = _world()
+        client = await _connected(world, SYNTHETIC_ALPHA_ID, command_prefix="sm!")
+        seen = []
+        client.on_message = seen.append
+        world.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "sm! roll extra args"
+        )
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0].content, "roll")
+
+    async def test_every_registered_trigger_fires(self) -> None:
+        world = _world()
+        client = await _connected(world, SYNTHETIC_ALPHA_ID, command_prefix="sm!")
+        seen = []
+        client.on_message = seen.append
+        for trigger in SELF_COMMAND_TRIGGERS:
+            world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
+                          f"sm!{trigger}")
+        self.assertEqual([dto.content for dto in seen],
+                         list(SELF_COMMAND_TRIGGERS))
+
+    async def test_own_unregistered_or_unprefixed_words_dropped(self) -> None:
+        world = _world()
+        client = await _connected(world, SYNTHETIC_ALPHA_ID, command_prefix="sm!")
+        seen = []
+        client.on_message = seen.append
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "sm!nonsense")
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "slcopy")
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "smslcopy")
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, " sm!slcopy")
+        self.assertEqual(seen, [])  # unknown command + no/bad prefix = drop
+
+    async def test_stranger_prefixed_message_never_refires(self) -> None:
+        """Isolation: another user's identical prefixed command crosses as
+        a NORMAL inbound message (full content) — never a bare trigger."""
+        world = _world()
+        client = await _connected(world, SYNTHETIC_ALPHA_ID, command_prefix="sm!")
+        seen = []
+        client.on_message = seen.append
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "sm!slcopy")
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0].content, "sm!slcopy")  # the raw message
+        self.assertEqual(seen[0].author_id, SYNTHETIC_OWNER_ID)
+
+    async def test_no_prefix_defaults_to_plain_self_echo_filter(self) -> None:
+        world = _world()
+        client = await _connected(world, SYNTHETIC_ALPHA_ID)  # prefix off
+        seen = []
+        client.on_message = seen.append
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "sm!slcopy")
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "hello")
+        self.assertEqual([dto.content for dto in seen], ["hello"])
+
+    async def test_at_me_prefix_matches_own_mention_forms(self) -> None:
+        world = _world()
+        client = await _connected(world, SYNTHETIC_ALPHA_ID, command_prefix="@me")
+        seen = []
+        client.on_message = seen.append
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
+                      f"<@{SYNTHETIC_ALPHA_ID}> slcopy")
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
+                      f"<@!{SYNTHETIC_ALPHA_ID}>rollstop")
+        # someone ELSE's mention is not this account's prefix
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
+                      f"<@{SYNTHETIC_OWNER_ID}> slcopy")
+        self.assertEqual([dto.content for dto in seen], ["slcopy", "rollstop"])
+
+    async def test_dm_channel_shape_marks_dto_dm(self) -> None:
+        """dm comes from the CHANNEL shape (the world's dm flag), matching
+        the live layer's DM = channel-without-guild derivation."""
+        world = _world()
+        client = await _connected(world, SYNTHETIC_ALPHA_ID, command_prefix="sm!")
+        seen = []
+        client.on_message = seen.append
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        world.deliver(dm, SYNTHETIC_ALPHA_ID, "sm!slcopy", dm=True)
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0].dm)
+        self.assertIsNone(seen[0].guild_id)
+
+
+
     """cached_snapshot (DM filtering!) and the synthetic latency."""
 
     async def test_snapshot_unavailable_before_connect(self) -> None:

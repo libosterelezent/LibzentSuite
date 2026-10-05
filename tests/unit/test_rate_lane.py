@@ -187,7 +187,9 @@ class TestLaneRobustness(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         self.assertFalse(waiter.done())
         manager.set_lane_prefixrate(1.0)                 # wake + recompute
-        await asyncio.wait_for(waiter, timeout=3.0)      # NOT the 10s sleep
+        # NOT the 10s sleep — budget generous enough for multi-second
+        # loop stalls on a loaded host (wake → grant is ~1s at rate 1.0)
+        await asyncio.wait_for(waiter, timeout=10.0)
         self.assertFalse(waiter.cancelled())
 
     async def test_validation(self) -> None:

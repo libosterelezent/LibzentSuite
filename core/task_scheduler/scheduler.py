@@ -89,6 +89,16 @@ _FINISHED_KEEP = 500
 _AUDITED_ACTIONS = ("message", "dm", "reaction", "button")
 
 
+class _AcquireAborted(Exception):
+    """Internal: limiter.acquire was aborted by a cooperative cancel.
+
+    Raised by :meth:`TaskScheduler._acquire_or_abort` when the task's own
+    cancel flag/terminal status (or an estop sweep) was observed while the
+    acquire was parked; the worker reacts by finishing the task cancelled
+    instead of waiting out the (possibly day-long) cooldown.
+    """
+
+
 class _GrantGate:
     """Shared priority turnstile ordering ENTRY into limiter.acquire.
 
@@ -223,7 +233,7 @@ class TaskScheduler:
         }
         self._queues: Dict[str, list] = {}  # account -> heap of (prio, id, task)
         self._lane_events: Dict[str, asyncio.Event] = {}
-        self._backoff_wakers: Dict[str, asyncio.Event] = {}  # cancel->wake retry sleeps
+        self._backoff_wakers: Dict[str, asyncio.Event] = {}  # cancel->wake parked waits (backoff sleep AND raced acquire)
         self._lanes: Dict[str, asyncio.Task] = {}
         self._worker_refs: set = set()  # strong refs to spawned lane tasks
         self._tail_refs: set = set()  # strong refs to scheduled finish tails
@@ -626,10 +636,11 @@ class TaskScheduler:
 
     # ------------------------------------------------------------- cancel
     def _wake_backoff(self, task: Task) -> None:
-        """Interrupt the task's retry backoff (if it is sleeping) so a
-        cooperative cancel lands at the next checkpoint NOW, not after the
-        remaining backoff delay. No-op when the account is not mid-backoff
-        (sticky Event state is cleared before each sleep)."""
+        """Interrupt the task's parked waits (retry backoff or the raced
+        limiter acquire — see _acquire_or_abort) so a cooperative cancel
+        lands NOW, not after the remaining backoff/cooldown delay. No-op
+        when the account is parked nowhere (sticky Event state is cleared
+        before each wait)."""
         waker = self._backoff_wakers.get(task.account)
         if waker is not None:
             waker.set()
@@ -642,6 +653,13 @@ class TaskScheduler:
         worker aborts at its next checkpoint (after the grant wait or
         after the sender returns), finishing the task as cancelled.
 
+        Both branches wake the account's backoff waker: a task parked in
+        limiter.acquire (status still ``queued`` — e.g. behind a clamped
+        429 cooldown of up to 86400s) is raced against that waker by
+        _acquire_or_abort, so the parked acquire aborts and frees the
+        account's lane within one event-loop hop instead of after the
+        cooldown.
+
         Returns:
             False for unknown or already-terminal tasks.
         """
@@ -650,6 +668,7 @@ class TaskScheduler:
             return False
         if task.status == STATUS_QUEUED:
             self._finish_sync(task, STATUS_CANCELLED)
+            self._wake_backoff(task)  # abort an acquire parked on this account
             return True
         if task.status == STATUS_RUNNING:
             task.cancelled = True
@@ -680,6 +699,7 @@ class TaskScheduler:
                 continue
             if task.status == STATUS_QUEUED:
                 self._finish_sync(task, STATUS_CANCELLED)
+                self._wake_backoff(task)  # abort an acquire parked on this account
             elif task.status == STATUS_RUNNING:
                 task.cancelled = True
                 self._wake_backoff(task)
@@ -904,6 +924,96 @@ class TaskScheduler:
                     fut.cancel()
             await asyncio.gather(sleep_task, wake_task, return_exceptions=True)
 
+    def _acquire_aborted(self, task: Task) -> bool:
+        """True when a parked acquire must abort NOW (checkpoint predicate)."""
+        return (
+            task.cancelled
+            or self._sweeping
+            or task.status not in (STATUS_QUEUED, STATUS_RUNNING)
+        )
+
+    async def _acquire_or_abort(self, task: Task) -> Any:
+        """limiter.acquire raced against the account's cancel waker (F6-1).
+
+        A clamped 429 (MAX_INTERVAL = 86400s) parks the acquire inside the
+        engine's ``_wait_either`` for up to a day, and cooperative cancels
+        (cancel()/cancel_matching/ack-timeout) only set flags + wake the
+        BACKOFF waker — so a task parked on the grant noticed nothing until
+        the cooldown elapsed, keeping the account's concurrency-1 lane (and
+        every task queued behind it) occupied long after cancel() reported
+        success.
+
+        This races the acquire coroutine against the SAME per-account wake
+        event ``_sleep_backoff`` uses (the engine needs NO new seam: see
+        below). Ordering discipline is identical to _sleep_backoff — the
+        event is cleared BEFORE the flag re-check, and cancel paths set the
+        flag / apply the terminal status BEFORE the event, so every
+        interleaving is caught by the re-check or by the wake.
+
+        * Wake + NO abort predicate -> SPURIOUS: the race simply re-arms;
+          the acquire itself is never cancelled on spurious wakes.
+        * Wake + abort predicate (own cancel flag, terminal status applied
+          by the sync cancel path, or an estop sweep) -> the acquire
+          coroutine is CANCELLED. That cancellation lands inside the
+          ENGINE'S OWN cleanup path: acquire()'s ``finally`` marks the
+          waiter entry cancelled, prunes it from the pacing-key heap and
+          wakes successors (identically for a park inside the send lane's
+          enter() and the post-grant jitter sleep), so no waiter husk or
+          lost successor wake is left behind. _AcquireAborted then tells
+          _run_task to finish the task cancelled — the lane is free for
+          the next task within one event-loop hop instead of 24h.
+        * Grant wins the race -> returned as-is; a cancel that raced the
+          grant is still caught by checkpoint 1 (the engine conservatively
+          keeps the pacing stamp it already made).
+        """
+        acquire_fut = asyncio.ensure_future(self._limiter.acquire(
+            task.action, task.account, task.plugin, task.priority))
+        try:
+            if self._acquire_aborted(task):
+                raise _AcquireAborted
+            # FAST PATH: one loop hop — an acquire that needs no wait (no
+            # server cooldown, no pacing block, nothing parked ahead of it
+            # in the engine) completes on its first step, BEFORE the cancel
+            # watcher is armed. Racing every acquire (asyncio.wait + two
+            # watcher tasks) added several event-loop passes of overhead
+            # to every granted task, which is pure latency on the common
+            # uncontended path (measured 10-20ms per acquire on slow
+            # hosts); the race below is reserved for acquires that REALLY
+            # park behind a cooldown/pacing gate.
+            await asyncio.sleep(0)
+            if self._acquire_aborted(task):
+                raise _AcquireAborted
+            if acquire_fut.done():
+                return acquire_fut.result()
+            while True:
+                waker = self._backoff_wakers.get(task.account)
+                if waker is None:
+                    return await acquire_fut  # no lane bookkeeping (defensive)
+                waker.clear()  # drop stale wakes; the re-check below is the truth
+                if self._acquire_aborted(task):
+                    raise _AcquireAborted
+                wake_fut = asyncio.ensure_future(waker.wait())
+                try:
+                    await asyncio.wait(
+                        {acquire_fut, wake_fut},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    wake_fut.cancel()
+                    await asyncio.gather(wake_fut, return_exceptions=True)
+                if acquire_fut.done():
+                    return acquire_fut.result()
+                # waker fired without the grant: spurious unless the flags
+                # at the loop top say otherwise — re-arm and keep waiting
+        finally:
+            # abort path: cancel the parked acquire (no-op when it already
+            # completed) and reap it — the cancellation lands inside the
+            # ENGINE'S own cleanup (entry.cancelled + prune + wake), and
+            # the gather retrieves whatever the acquire ended with so no
+            # "exception was never retrieved" can leak from a done future
+            acquire_fut.cancel()
+            await asyncio.gather(acquire_fut, return_exceptions=True)
+
     def _outer_cancelled(self) -> bool:
         """Distinguish worker cancellation from sender-internal cancellation.
 
@@ -959,9 +1069,14 @@ class TaskScheduler:
 
                 await self._gate.enter(int(task.priority), task.id)
                 try:
-                    grant = await self._limiter.acquire(
-                        task.action, task.account, task.plugin, task.priority
-                    )
+                    grant = await self._acquire_or_abort(task)
+                except _AcquireAborted:
+                    # cooperative cancel reached the parked acquire: finish
+                    # cancelled NOW (no-op when the sync cancel path already
+                    # applied the terminal status) — the lane is free for
+                    # the next task instead of waiting out the cooldown
+                    await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
+                    return
                 except asyncio.CancelledError:
                     if self._outer_cancelled():
                         raise  # outer handler finishes the task as cancelled

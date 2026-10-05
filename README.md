@@ -88,7 +88,11 @@ python3 main.py accounts list          # one-shot command mode
 
 ## The dashboard
 
-`http://127.0.0.1:8070` (requires `DASHBOARD_TOKEN`). One page per concern:
+`http://127.0.0.1:8070`. With `DASHBOARD_TOKEN` set, everything requires
+that token; with it unset the dashboard still runs — boot prints a
+WARNING (unauthenticated on loopback; credential routes stay locked with
+403) — so set the token for anything but a throwaway machine. One page
+per concern:
 
 | Page | What you do there |
 |---|---|
@@ -97,24 +101,33 @@ python3 main.py accounts list          # one-shot command mode
 | **Plugins** | enable/disable per account, change settings |
 | **Profiles** | bundle plugins into named capability sets |
 | **Rate Limits** | pacing policies, the sequential lane, effective rates |
+| **Cooldowns** | active persistent cooldowns (survive restarts), clear them |
 | **Tasks** | the outbound queue, history, wait times |
 | **Logs / Audit** | live log stream + every Discord interaction |
 | **Simulation** | run offline scenarios in-process |
+| **Advanced** | .env credential import, global emergency stop, shutdown |
 
-Everything the dashboard does, the CLI also does (`python3 main.py …`) and
-vice versa — same API underneath, so pick whichever you like.
+Nearly everything the dashboard does, the CLI also does
+(`python3 main.py …`) and vice versa — same API underneath, so pick
+whichever you like. Known gap: **sync groups** are set from the
+dashboard's add-account form (or `config/accounts/<name>.json>`), not
+via a CLI flag.
 
 Debugging a live issue? Add `--debug`: DEBUG-level logs, Discord gateway
 lines (reconnect/close codes), DB worker timings, scheduler pressure.
 
 ## Setting up accounts
 
-1. **Add the account** — dashboard → Accounts → Add (or
-   `python3 main.py accounts add myaccount --sync-group roll`)
-2. **Store its token** — Accounts → credential (or
-   `python3 main.py accounts credential myaccount <token>`). The token is
+1. **Add the account** — dashboard → Accounts → Add (fill the "sync group
+   (opt)" field for shared-clock rolling). The CLI equivalent is
+   `python3 main.py accounts add myaccount` (no sync-group flag — set the
+   group via the dashboard or a `config/accounts/myaccount.json` file).
+2. **Store its token** — Accounts → credential, or
+   `python3 main.py accounts credential myaccount <token>`. The token is
    Fernet-encrypted at rest; the key lives in `state/credentials.key`
-   (back that file up — losing it means re-entering tokens).
+   (back that file up — losing it means re-entering tokens). CLI caveat:
+   the token lands in your shell history — prefer the dashboard on
+   shared machines.
 3. **Start it** — the ▶ button (or `accounts start myaccount`)
 
 Put every rolling account in the same **sync group** — that's what makes
@@ -125,10 +138,12 @@ them share a pacing clock.
 This is the core pattern. Two (or five, or ten) accounts take turns
 rolling; whoever isn't cooldown-blocked rolls, automatically.
 
-**Setup once:**
+**Setup once** (sync group is set at add time — dashboard add form's
+"sync group (opt)" field, or `config/accounts/<name>.json>` with
+`{"sync_group": "roll"}` for CLI/file-driven setups):
 ```bash
-python3 main.py accounts add alpha --sync-group roll
-python3 main.py accounts add beta  --sync-group roll
+python3 main.py accounts add alpha
+python3 main.py accounts add beta
 # store tokens for both, start both (dashboard or CLI)
 ```
 
@@ -171,11 +186,23 @@ From the shell:
 ```bash
 python3 main.py accounts list|start|stop|remove
 python3 main.py plugins list
-python3 main.py ratelimit effective --account alpha
+python3 main.py ratelimit effective message alpha   # <action> [account] [plugin]
 python3 main.py estop                  # fleet-wide halt
+python3 main.py estop resume           # re-arm after an estop (CLI/API only —
+                                       # the dashboard has no resume button)
 python3 main.py --sim pacing_respected # offline sanity check
 python3 main.py --bench                # performance benchmarks
 ```
+
+Lifecycle safety rails to know about (they explain "why won't it start
+right now?" moments):
+
+- **stop → start cooldown**: a start within 10s of a stop is refused
+  (`account_cooldown`) — restart thrashing looks botty and races
+  teardown. Stopping is never gated.
+- **failed-start retry floor**: 15s between start attempts after a
+  failure; an **invalid credential locks retries for 5 minutes** —
+  fix the token instead of hammering start.
 
 ## Safety model
 
@@ -205,7 +232,6 @@ the pipeline above.
 | Boot warns about permissions | `chmod 600 state/credentials.key .env` |
 | Key/DB mismatch warning | `state/credentials.key` doesn't match the stored tokens — restore the key or re-enter tokens |
 
----
 ---
 
 # Reference
@@ -241,7 +267,7 @@ adapters/              Discord boundary: discord/ (live, lazy import) +
 interfaces/            cli/ (REPL + one-shot) + dashboard/ (SPA + REST + WS)
 plugins/               roll (roulette automation) + soulcopy (export)
 benchmark/             the benchmark subsystem (scenarios, profiling modes)
-tests/unit|integration|simulation|stress   1264-test offline suite
+tests/unit|integration|simulation|stress   1470-test offline suite
 config/                global settings, rate policies, account files
 main.py                entrypoint
 ```
@@ -255,7 +281,6 @@ Dependencies: Python ≥ 3.10 + `aiosqlite` + `cryptography` (see
 fork `discord.py-self` (`pip install discord.py-self`), imported lazily —
 simulations/tests never require it.
 
->>>>>>> 4703931 (hardening: round-3 omni audit — 20 investigators, 10 fix agents, adversarial re-audit)
 ## Architecture: who calls what
 
 ```

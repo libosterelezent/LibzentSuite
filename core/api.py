@@ -176,12 +176,30 @@ class ControlAPI:
             reconcile = getattr(self._accounts, "reconcile_records", None)
             if callable(reconcile):
                 await reconcile()
-            if self._cooldowns is not None:
+        except Exception:
+            LOG.debug("status reconciliation failed", exc_info=True)
+        if self._cooldowns is not None:
+            try:
                 resync = getattr(self._cooldowns, "resync", None)
                 if callable(resync):
                     await resync()
+            except Exception:
+                LOG.debug("cooldown resync failed", exc_info=True)
+        # ROUND-4 (F7/4): the profile permission cache must reconcile too —
+        # an out-of-band unassign (second process / manual sqlite) used to
+        # keep granting plugins indefinitely. resync() is a clear-then-
+        # reload; the public load() fallback only merges (deleted profile
+        # names would linger) — kept for stripped-down doubles.
+        try:
+            resync = getattr(self._profiles, "resync", None)
+            if callable(resync):
+                await resync()
+            else:
+                reload = getattr(self._profiles, "load", None)
+                if callable(reload):
+                    await reload()
         except Exception:
-            LOG.debug("status reconciliation failed", exc_info=True)
+            LOG.debug("profile resync failed", exc_info=True)
 
     async def _enrich_accounts(
         self, accounts: List[Dict[str, Any]]
@@ -357,10 +375,13 @@ class ControlAPI:
         """Set ONE framework account setting (validated + persisted).
 
         Raises SettingsValidationError (a ValueError) for unknown keys or
-        bad values — surfaces render it like any other 400. Emits
-        SettingChanged on success; the account manager picks reconnect
-        changes up on the next reconnect decision.
+        bad values — surfaces render it like any other 400. Unknown
+        ACCOUNTS raise the manager's AccountError first (ROUND-4 F7/6:
+        persisting rows for unregistered names created orphan junk).
+        Emits SettingChanged on success; the account manager picks
+        reconnect changes up on the next reconnect decision.
         """
+        await _resolved(self._accounts.get(name))  # AccountError if unknown
         validated = await _resolved(
             self._settings.set_account_setting(name, key, value)
         )

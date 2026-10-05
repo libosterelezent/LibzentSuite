@@ -25,7 +25,8 @@ class AccountRecord:
 
     id: int
     name: str
-    token_ref: Optional[str] = None      # .env key; token VALUES never stored
+    token_ref: Optional[str] = None      # legacy label; runtime auth is the
+                                         # encrypted credentials table only
     enabled: bool = True
     sync_group: Optional[str] = None     # accounts that act in sync (optional)
     settings: Dict[str, Any] = field(default_factory=dict)   # framework layer

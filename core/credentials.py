@@ -185,7 +185,9 @@ class Credentials:
         for key, value in self._values.items():
             if not value:
                 safe[key] = ""
-            elif "token" in key.lower() or any(s in key.lower() for s in SENSITIVE_KEYS):
+            elif any(s in key.lower() for s in SENSITIVE_KEYS):
+                # ROUND-4 (F7/10): "token" is already in SENSITIVE_KEYS —
+                # the extra membership test was redundant
                 safe[key] = f"{value[:4]}…({len(value)} chars)" if len(value) > 4 else "***"
             else:
                 safe[key] = value

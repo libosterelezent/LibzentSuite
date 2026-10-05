@@ -8,9 +8,30 @@ import asyncio
 import os
 import platform
 import sys
+import tempfile
 import time
 from types import SimpleNamespace as NS
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
+
+
+def _artifacts_dir() -> str:
+    """F3 (round-4): default artifacts live under the system temp dir —
+    the bench subsystem never writes into the live state/ tree."""
+    return os.path.join(tempfile.gettempdir(), "sm-benchmarks")
+
+
+def _min_int(lo: int) -> Callable[[str], int]:
+    """Bounded int validator: rejects busy-spin intervals and empty-run
+    counts at parse time (F3 round-4, arg validation)."""
+    def parse(text: str) -> int:
+        try:
+            value = int(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{text!r} is not an integer")
+        if value < lo:
+            raise argparse.ArgumentTypeError(f"must be >= {lo} (got {value})")
+        return value
+    return parse
 
 from benchmark import SCHEMA
 from benchmark.collector import PerfCollector
@@ -30,22 +51,22 @@ def build_parser() -> argparse.ArgumentParser:
                         help="scenario name (repeatable; default: all)")
     parser.add_argument("--list", action="store_true",
                         help="list scenarios and exit")
-    parser.add_argument("--accounts", type=int, default=5)
+    parser.add_argument("--accounts", type=_min_int(1), default=5)
     parser.add_argument("--duration", type=float, default=2.0)
-    parser.add_argument("--cycles", type=int, default=None,
+    parser.add_argument("--cycles", type=_min_int(1), default=None,
                         help="override the scenario's default cycle count")
-    parser.add_argument("--records", type=int, default=10_000)
-    parser.add_argument("--messages", type=int, default=5_000)
-    parser.add_argument("--burst", type=int, default=200)
-    parser.add_argument("--ops", type=int, default=2_000)
-    parser.add_argument("--keys", type=int, default=2_000)
-    parser.add_argument("--waiters", type=int, default=4)
+    parser.add_argument("--records", type=_min_int(1), default=10_000)
+    parser.add_argument("--messages", type=_min_int(1), default=5_000)
+    parser.add_argument("--burst", type=_min_int(1), default=200)
+    parser.add_argument("--ops", type=_min_int(1), default=2_000)
+    parser.add_argument("--keys", type=_min_int(1), default=2_000)
+    parser.add_argument("--waiters", type=_min_int(1), default=4)
     parser.add_argument("--severity", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
-    parser.add_argument("--sampling-ms", type=int, default=100)
-    parser.add_argument("--loop-interval-ms", type=int, default=5,
+    parser.add_argument("--sampling-ms", type=_min_int(5), default=100)
+    parser.add_argument("--loop-interval-ms", type=_min_int(1), default=5,
                         help="1 = stall-hunt mode")
-    parser.add_argument("--task-interval-ms", type=int, default=1000)
+    parser.add_argument("--task-interval-ms", type=_min_int(5), default=1000)
     parser.add_argument("--json", default=None, help="write JSON report")
     parser.add_argument("--save-baseline", action="store_true",
                         help="also store the report as the compare baseline")
@@ -57,16 +78,16 @@ def build_parser() -> argparse.ArgumentParser:
                         help="cProfile each scenario (excluded from compare)")
     parser.add_argument("--profile-dir", default=None,
                         help="directory for .pstats dumps "
-                             "(default: state/benchmarks/profiles)")
-    parser.add_argument("--profile-top", type=int, default=15,
+                             f"(default: {_artifacts_dir()}/profiles)")
+    parser.add_argument("--profile-top", type=_min_int(1), default=15,
                         help="top-N functions printed/embedded per scenario")
     parser.add_argument("--tracemalloc", action="store_true",
                         help="trace allocation sites per scenario boundary")
     parser.add_argument("--trace-depth", type=int, default=1,
                         help="tracemalloc frame depth (default 1)")
-    parser.add_argument("--trace-top", type=int, default=10,
+    parser.add_argument("--trace-top", type=_min_int(1), default=10,
                         help="top-N allocation sites per boundary")
-    parser.add_argument("--repeat", type=int, default=1,
+    parser.add_argument("--repeat", type=_min_int(1), default=1,
                         help="re-run each scenario N times; report "
                              "median/min/max per metric (refused with "
                              "--profile/--tracemalloc)")
@@ -164,7 +185,8 @@ async def run_suite(args: NS) -> Dict[str, Any]:
 
                 if getattr(args, "profile", False):
                     from benchmark.profiling import cprofile_scope, pstats_top
-                    profile_dir = args.profile_dir or "state/benchmarks/profiles"
+                    profile_dir = args.profile_dir or os.path.join(
+                        _artifacts_dir(), "profiles")
                     dump_path = os.path.join(profile_dir, f"{name}.pstats")
                     with cprofile_scope(dump_path) as prof:
                         result = await _run_scenario()
@@ -198,20 +220,24 @@ async def run_suite(args: NS) -> Dict[str, Any]:
             # per-run trackers reset for the next repeat
             scenario.run._rss_series = getattr(
                 scenario.run, "_rss_series", []) and []
-        result = run_results[0]
-        if repeats > 1:
-            from benchmark.report import aggregate_repeats
-            result["repeat"] = aggregate_repeats(run_results)
-            result["passed"] = all(r.get("passed") for r in run_results)
-        if all_spikes:
-            result["spikes"] = all_spikes[:20]
-            result["spikes_truncated"] = len(all_spikes) > 20
-        if getattr(args, "capture_spikes", False):
-            result["profiled"] = True  # DEEP_DIAGNOSTIC: compare-excluded
-        result["name"] = name
-        result["cycles"] = cycles
-        result.setdefault("mode", run_mode)
-        report["scenarios"].append(result)
+            # F3 (round-4, fix #1): this block lives INSIDE the
+            # scenario loop — it used to be dedented out, so only the
+            # last scenario ever landed in the report (a default
+            # full-suite run discarded 6 of 7 results).
+            result = run_results[0]
+            if repeats > 1:
+                from benchmark.report import aggregate_repeats
+                result["repeat"] = aggregate_repeats(run_results)
+                result["passed"] = all(r.get("passed") for r in run_results)
+            if all_spikes:
+                result["spikes"] = all_spikes[:20]
+                result["spikes_truncated"] = len(all_spikes) > 20
+            if getattr(args, "capture_spikes", False):
+                result["profiled"] = True  # DEEP_DIAGNOSTIC: compare-excluded
+            result["name"] = name
+            result["cycles"] = cycles
+            result.setdefault("mode", run_mode)
+            report["scenarios"].append(result)
         report["meta"]["duration_s"] = round(time.perf_counter() - started, 2)
         return report
     finally:
@@ -276,13 +302,11 @@ def run_bench_cli(argv: List[str] | None = None) -> int:
     print(render_table(report))
     json_path = args.json
     if json_path is None and args.save_baseline:
-        os.makedirs("state/benchmarks", exist_ok=True)
-        json_path = "state/benchmarks/baseline.json"
+        os.makedirs(_artifacts_dir(), exist_ok=True)
+        json_path = os.path.join(_artifacts_dir(), "baseline.json")
     if json_path:
         to_json(report, json_path)
         print(f"JSON report: {json_path}")
-    if args.save_baseline and not json_path:
-        to_json(report, "state/benchmarks/baseline.json")
     if args.compare:
         before = load_json(args.compare)
         print(compare(before, report))

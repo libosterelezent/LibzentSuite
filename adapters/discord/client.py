@@ -34,7 +34,9 @@ import uuid
 from typing import Any, Callable, Optional
 
 from adapters.base import DiscordMessage
+from adapters.model import DiscordUser
 from adapters.model import _emoji_repr
+from adapters.model import convert_channel
 from adapters.model import convert_message
 from core._asyncutil import outer_cancel_pending
 from core.credentials import Credentials
@@ -216,11 +218,32 @@ _MESSAGE_DEDUP_MAX = 512
 
 #: round-3 F4-3: the fork dispatches BOTH the raw_* payload event and the
 #: cached-only rich event for cached messages, raw FIRST (state.py:1848→1850
-#: delete, 1877→1882 edit, 1927→1937 reaction). The raw handler publishes
-#: and marks a key; the rich handler suppresses itself when the key was
-#: marked inside this window (same gateway dispatch, one loop turn apart —
-#: 5s is generous and never suppresses distinct rapid gateway bursts).
+#: delete, 1877→1882 edit, 1927→1937 reaction). The raw handler MARKS a
+#: key BEFORE publishing (and un-marks if the publish raises — round-4
+#: F2-4, so repeated raw dispatches inside this window do not re-publish
+#: either); the rich handler suppresses itself when the key was marked
+#: (same gateway dispatch, one loop turn apart — 5s is generous and never
+#: suppresses distinct rapid gateway bursts).
 _RICH_EVENT_DEDUP_WINDOW_S = 5.0
+
+#: round-4 F2-8: the self-command surface is a FIXED word list (roll /
+#: rollstop / slcopy) — unlike plugin triggers they are not settings.
+#: One INFO line per process documents that plugin trigger renames do
+#: not reach this layer (case_insensitive on the Bot only relaxes the
+#: COMMAND word's case, not the prefix's).
+_SELF_COMMAND_WORDS = ("roll", "rollstop", "slcopy")
+_self_command_notice_logged = False
+
+
+def _log_self_command_notice(logger: Any) -> None:
+    global _self_command_notice_logged
+    if _self_command_notice_logged:
+        return
+    _self_command_notice_logged = True
+    logger.info(
+        "self-command triggers are fixed words %s; plugin trigger renames "
+        "do not apply here (case-insensitive command words, case-sensitive "
+        "prefix)", ", ".join(repr(w) for w in _SELF_COMMAND_WORDS))
 
 
 def _header(headers: Any, name: str) -> Optional[str]:
@@ -321,8 +344,10 @@ class RealDiscordClient:
         """Record an event key; True when the SAME key was already recorded
         inside the dedup window (raw/rich double-dispatch suppression).
 
-        Call AFTER a successful publish: a callback that raised leaves the
-        key unmarked so the sibling handler can still deliver the event.
+        Raw publishers call BEFORE publishing and un-mark on failure (see
+        :meth:`_unmark_event_key`); rich handlers call after a successful
+        publish. Either way, a callback that raised leaves the key
+        unmarked so the sibling handler can still deliver the event.
         """
         now = asyncio.get_running_loop().time()
         seen = self._seen_event_keys
@@ -333,6 +358,15 @@ class RealDiscordClient:
         previous = seen.get(key)
         seen[key] = now
         return previous is not None and now - previous < _RICH_EVENT_DEDUP_WINDOW_S
+
+    def _unmark_event_key(self, key: tuple) -> None:
+        """Reverse a pre-publish mark (round-4 F2-4).
+
+        Called when the raw publish RAISED: the sibling rich handler (one
+        loop turn later, same gateway dispatch) must still be allowed to
+        deliver the event.
+        """
+        self._seen_event_keys.pop(key, None)
 
     def _publish_raw_reaction(self, kind: str, payload: Any) -> None:
         """RawReactionActionEvent -> the on_reaction callback shape.
@@ -348,16 +382,21 @@ class RealDiscordClient:
         if user_id is None or user_id == self.user_id:
             return
         emoji_text = _emoji_repr(getattr(payload, "emoji", None))
-        self.on_reaction(
-            kind,
-            getattr(payload, "message_id", None),
-            getattr(payload, "channel_id", None),
-            getattr(payload, "guild_id", None),
-            user_id, emoji_text, payload,
-        )
-        self._mark_event_key(
-            ("reaction", kind, getattr(payload, "message_id", None),
-             user_id, emoji_text))
+        key = ("reaction", kind, getattr(payload, "message_id", None),
+               user_id, emoji_text)
+        if self._mark_event_key(key):
+            return  # already delivered inside the window (raw repeat)
+        try:
+            self.on_reaction(
+                kind,
+                getattr(payload, "message_id", None),
+                getattr(payload, "channel_id", None),
+                getattr(payload, "guild_id", None),
+                user_id, emoji_text, payload,
+            )
+        except Exception:
+            self._unmark_event_key(key)  # sibling rich handler may deliver
+            raise
 
     # ------------------------------------------------------------ labelling
     @property
@@ -409,7 +448,7 @@ class RealDiscordClient:
             try:
                 self._client = _ext_commands.Bot(
                     command_prefix=prefix, self_bot=True,
-                    help_command=None,
+                    help_command=None, case_insensitive=True,
                     max_ratelimit_timeout=MAX_RATELIMIT_TIMEOUT_S,
                 )
             except TypeError:
@@ -418,8 +457,10 @@ class RealDiscordClient:
                     "in-request 429 sleeps are UNBOUNDED on this layout")
                 self._client = _ext_commands.Bot(
                     command_prefix=prefix, self_bot=True,
-                    help_command=None,
+                    help_command=None, case_insensitive=True,
                 )
+            self._assert_self_bot_semantics()
+            _log_self_command_notice(self._logger)
         else:
             try:
                 self._client = discord.Client(
@@ -488,39 +529,14 @@ class RealDiscordClient:
 
         @self._client.event
         async def on_message(message: Any) -> None:
-            # SELF-COMMAND path: when the command layer is active, route
-            # every message through process_commands — with self_bot=True,
-            # the library's _skip_check means ONLY the account's OWN
-            # messages reach command dispatch (other users' are silently
-            # dropped by get_context, so random users can't fire commands).
-            # This runs BEFORE the self-echo filter: commands and events
-            # are SEPARATE paths (a command never becomes a plugin event,
-            # and the account's own output never re-triggers plugins).
-            if self._command_prefix:
-                try:
-                    await self._client.process_commands(message)
-                except Exception:
-                    self._logger.debug(
-                        "self-command dispatch failed", exc_info=True)
-            if self.on_message is None or message.author.id == self.user_id:
-                return
-            if self._message_already_seen(message.id):
-                return
-            # RICH BOUNDARY: capture everything the event already holds
-            # (embeds/components/attachments/reactions/reference/author/
-            # channel/guild/created_at + the runtime-only raw handle) in ONE
-            # non-blocking conversion — plugins never re-fetch it (§15)
-            self.on_message(
-                convert_message(
-                    message,
-                    dm=isinstance(message.channel, self._discord.DMChannel),
-                    viewer_id=self.user_id,
-                )
-            )
+            await self._handle_library_message(message)
 
         @self._client.event
         async def on_message_edit(before: Any, after: Any) -> None:
-            if self.on_message_edit is None or after.author.id != self.user_id:
+            # round-4 F2-4: author filter aligned with the raw path —
+            # foreign-authored edits deliver (when the raw sibling failed
+            # to), self-authored ones stay filtered (self-echo contract)
+            if self.on_message_edit is None or after.author.id == self.user_id:
                 return
             if self._mark_event_key(("edit", after.id)):
                 return  # the raw handler already published this dispatch
@@ -529,7 +545,9 @@ class RealDiscordClient:
 
         @self._client.event
         async def on_message_delete(message: Any) -> None:
-            if self.on_message_delete is None or message.author.id != self.user_id:
+            # round-4 F2-4: same alignment as on_message_edit (the raw
+            # delete path filters self-authored; so does the rich one)
+            if self.on_message_delete is None or message.author.id == self.user_id:
                 return
             if self._mark_event_key(("delete", message.id)):
                 return  # the raw handler already published this dispatch
@@ -541,7 +559,9 @@ class RealDiscordClient:
 
         @self._client.event
         async def on_reaction_add(reaction: Any, user: Any) -> None:
-            if self.on_reaction is None or user.id != self.user_id:
+            # round-4 F2-4: foreign reactions deliver (raw-sibling
+            # fallback); the account's own stay filtered
+            if self.on_reaction is None or user.id == self.user_id:
                 return
             message = reaction.message
             emoji_text = _emoji_repr(reaction.emoji)
@@ -558,7 +578,7 @@ class RealDiscordClient:
 
         @self._client.event
         async def on_reaction_remove(reaction: Any, user: Any) -> None:
-            if self.on_reaction is None or user.id != self.user_id:
+            if self.on_reaction is None or user.id == self.user_id:
                 return
             message = reaction.message
             emoji_text = _emoji_repr(reaction.emoji)
@@ -592,12 +612,18 @@ class RealDiscordClient:
             author = getattr(message, "author", None)
             if author is not None and getattr(author, "id", None) == self.user_id:
                 return
-            self.on_message_edit(convert_message(
-                message,
-                dm=isinstance(getattr(message, "channel", None),
-                              self._discord.DMChannel),
-            ))
-            self._mark_event_key(("edit", payload.message_id))
+            key = ("edit", payload.message_id)
+            if self._mark_event_key(key):
+                return  # already delivered inside the window (raw repeat)
+            try:
+                self.on_message_edit(convert_message(
+                    message,
+                    dm=isinstance(getattr(message, "channel", None),
+                                  self._discord.DMChannel),
+                ))
+            except Exception:
+                self._unmark_event_key(key)  # sibling rich handler may deliver
+                raise
 
         @self._client.event
         async def on_raw_message_delete(payload: Any) -> None:
@@ -610,11 +636,17 @@ class RealDiscordClient:
             author = getattr(cached, "author", None)
             if author is not None and getattr(author, "id", None) == self.user_id:
                 return
-            self.on_message_delete(
-                payload.message_id, payload.channel_id,
-                getattr(payload, "guild_id", None), cached,
-            )
-            self._mark_event_key(("delete", payload.message_id))
+            key = ("delete", payload.message_id)
+            if self._mark_event_key(key):
+                return  # already delivered inside the window (raw repeat)
+            try:
+                self.on_message_delete(
+                    payload.message_id, payload.channel_id,
+                    getattr(payload, "guild_id", None), cached,
+                )
+            except Exception:
+                self._unmark_event_key(key)  # sibling rich handler may deliver
+                raise
 
         @self._client.event
         async def on_raw_reaction_add(payload: Any) -> None:
@@ -707,6 +739,75 @@ class RealDiscordClient:
             self._zombie_tasks.add(task)
             task.add_done_callback(self._zombie_tasks.discard)
 
+    def _assert_self_bot_semantics(self) -> None:
+        """Fail CLOSED on self_bot drift (round-4 F2-2).
+
+        ``self_bot=True`` rides ``**options`` — a fork that stops
+        honoring it silently INVERTS the mode (skip-check flips to
+        process-everyone-ELSE; the account's own commands stop working).
+        The pinned fork's semantics (bot.py:198-203, probed on 2.1.0):
+        ``_skip_check(x, y)`` is ``x != y`` — False for (me, me), True
+        for (other, me). Assert both directions; on mismatch log CRITICAL
+        and raise AccountError rather than run in the wrong mode.
+        """
+        skip_check = getattr(self._client, "_skip_check", None)
+        if (not callable(skip_check)
+                or bool(skip_check(1, 1))      # own must NOT be skipped
+                or not bool(skip_check(2, 1))  # foreign MUST be skipped
+                ):
+            self._logger.critical(
+                "discord library self_bot semantics drifted: "
+                "_skip_check no longer skips foreign invokers only — "
+                "refusing to run (commands could fire for strangers)")
+            raise AccountError(
+                "discord client library does not honor self_bot=True "
+                "(skip-check inversion) — refusing to start account "
+                f"{self._account!r}")
+
+    async def _handle_library_message(self, message: Any) -> None:
+        """The library on_message body (extracted for offline test driving).
+
+        SELF-COMMAND path: when the command layer is active, route the
+        message through process_commands — with self_bot=True, the
+        library's _skip_check means ONLY the account's OWN messages reach
+        command dispatch (other users' are silently dropped by
+        get_context, so random users can't fire commands). This runs
+        BEFORE the self-echo filter: commands and events are SEPARATE
+        paths (a command never becomes a plugin event, and the account's
+        own output never re-triggers plugins).
+
+        RESUME replay dedup (round-4 F2-1): a replayed OWN message must
+        not re-fire the command — consult the same seen-ids window the
+        plugin path uses BEFORE dispatching process_commands. Foreign
+        messages need no dedup here (the library skips them in
+        get_context) and are deduped on the plugin path below.
+        """
+        if self._command_prefix:
+            own = (getattr(getattr(message, "author", None), "id", None)
+                   == self.user_id)
+            replayed = own and self._message_already_seen(message.id)
+            if not replayed:
+                try:
+                    await self._client.process_commands(message)
+                except Exception:
+                    self._logger.debug(
+                        "self-command dispatch failed", exc_info=True)
+        if self.on_message is None or message.author.id == self.user_id:
+            return
+        if self._message_already_seen(message.id):
+            return
+        # RICH BOUNDARY: capture everything the event already holds
+        # (embeds/components/attachments/reactions/reference/author/
+        # channel/guild/created_at + the runtime-only raw handle) in ONE
+        # non-blocking conversion — plugins never re-fetch it (§15)
+        self.on_message(
+            convert_message(
+                message,
+                dm=isinstance(message.channel, self._discord.DMChannel),
+                viewer_id=self.user_id,
+            )
+        )
+
     def _install_command_layer(self, discord: Any) -> None:
         """Register the self-command surface on the ext.commands Bot.
 
@@ -740,9 +841,12 @@ class RealDiscordClient:
         @bot.event
         async def on_command_error(ctx, error):
             # unknown commands are NOT pass-throughs — silently drop them
-            # (a typo'd prefix must not leak content into the event bus)
+            # (a typo'd prefix must not leak content into the event bus).
+            # Real command failures log at WARNING (round-4 F2-11): they
+            # mean a self-command was accepted but its pass-through
+            # failed — DEBUG hid that behind default filters.
             if not isinstance(error, ext_commands.errors.CommandNotFound):
-                adapter._logger.debug(
+                adapter._logger.warning(
                     "self-command error: %s", error, exc_info=True)
 
     def _publish_self_trigger(self, ctx: Any, trigger: str) -> None:
@@ -752,6 +856,13 @@ class RealDiscordClient:
         which publishes to the bus with the account's identity. The plugin
         owner check then applies normally: the framework account's own
         Discord user id must be in OWNER_USER_IDS (documented requirement).
+
+        Round-4 F2-7: the synthetic DTO carries an author projection (the
+        account's own id + the account label) and a channel projection
+        derived from ``ctx.channel``/``ctx.message`` — never None — so
+        downstream consumers see the same shape a converted real message
+        has. created_at rides along when the library object holds one
+        (None on pre-connect/forge contexts is acceptable and pinned).
         """
         if self.on_message is None:
             return
@@ -761,16 +872,20 @@ class RealDiscordClient:
             guild_id = getattr(guild, "id", None) if guild else None
             # DM = no guild on the channel (works before connect() too,
             # where self._discord is not yet imported)
-            # synthetic DTO: the account's own id as author, the real
-            # channel, the trigger as content — indistinguishable from a
-            # real owner-typed message to every downstream consumer
+            author = DiscordUser(
+                id=self.user_id or 0,
+                name=self._account or "",
+            )
             dto = DiscordMessage(
                 id=getattr(ctx.message, "id", 0),
                 channel_id=channel.id,
-                author_id=self.user_id,
+                author_id=self.user_id or 0,
                 content=trigger,
                 dm=guild_id is None,
                 guild_id=guild_id,
+                author=author,
+                channel=convert_channel(channel, dm=guild_id is None),
+                created_at=getattr(ctx.message, "created_at", None),
             )
             self.on_message(dto)
             self._logger.info(
@@ -853,7 +968,8 @@ class RealDiscordClient:
                 f"discord refused a send to channel {channel_id}: {exc}",
             )
         if status == 404 or isinstance(exc, getattr(discord, "NotFound", ())):
-            return TargetGone("", f"channel {channel_id} is gone: {exc}")
+            return TargetGone(self._account or "",
+                              f"channel {channel_id} is gone: {exc}")
         return None
 
     async def _send_to_channel(
@@ -1035,9 +1151,9 @@ class RealDiscordClient:
             for component in getattr(top, "children", None) or ():
                 if getattr(component, "custom_id", None) == custom_id:
                     return await self._click_component(component, channel_id)
-        from core.errors import TargetGone
-
-        raise TargetGone("", f"custom_id {custom_id!r} not on message {message_id}")
+        raise TargetGone(
+            self._account or "",
+            f"custom_id {custom_id!r} not on message {message_id}")
 
     async def fetch_user(self, user_id: int) -> Any:
         """Fetch a user object; None when the user is gone (NotFound).
@@ -1138,28 +1254,42 @@ class IdentifyGate:
     at least ``effective_interval`` seconds between consecutive IDENTIFYs
     (isolation audit K8 / S3-3.1, S7-A2).
 
-    Fleet-size scaling (round-3 F4-2): the library awaits IDENTIFY — and
-    therefore this hook — under ``asyncio.wait_for(..., 60)`` (client.py:
-    1020; the hook runs inside DiscordWebSocket.from_client), so a waiter
-    queued >= 60s is cancelled into a disconnect dispatch → reconnect
-    livelock once a synchronized (re)identify wave exceeds ~60s of
-    queueing (>= ~13 accounts at a flat 5s interval). The gate instead
-    derives its spacing from the EXPECTED fleet size::
+    Fleet-size scaling (round-3 F4-2, algebra fixed round-4 F2-5): the
+    library awaits IDENTIFY — and therefore this hook — under
+    ``asyncio.wait_for(..., 60)`` (client.py:1020; the hook runs inside
+    DiscordWebSocket.from_client). The BINDING constraint is per-waiter,
+    not per-wave: a waiter admitted at queue depth ``d`` waits ≈
+    ``d * effective_interval``, which must stay under that 60s ceiling.
+    The gate therefore derives its spacing from the EXPECTED fleet size::
 
         effective_interval = min(interval,
                                  max(min_interval, wait_budget / expected))
 
-    with ``wait_budget`` 50s (margin under the 60s library ceiling), so
-    the LAST waiter of an N-account wave still clears the hook in <= ~50s.
-    ``expected`` is a settable count (the factory raises it as it builds
-    DISTINCT accounts — reconnects rebuild already-counted accounts and
-    never inflate it; the account manager may also set it directly when
-    the fleet size is known ahead of boot). It is re-read on every
-    release, so a fleet that grows mid-wave tightens spacing dynamically.
+    with ``wait_budget`` 55s (5s headroom under the 60s ceiling), so the
+    LAST waiter of an N-account wave waits ≈ N * (55/N) = 55s < 60s —
+    for ANY N while the formula stays above the min_interval floor.
+
+    Honest ceiling (round-4): once ``wait_budget / expected`` drops below
+    ``min_interval`` (default 1.0s → N > 55), the floor binds, the last
+    waiter's projection exceeds the budget, and the gate FAST-FAILS the
+    excess waiters with a retryable ConnectionError instead of parking
+    them past the 60s identify-cancel livelock (reconnect waves drain as
+    admitted waiters release, so retries make progress). Operators with
+    genuinely larger fleets may lower ``min_interval`` (e.g. 0.18s
+    supports N≈300) — pacing friendliness is their call; the algebra
+    guarantees per-waiter safety either way. ``expected`` is a settable
+    count (the factory raises it as it builds DISTINCT accounts —
+    reconnects rebuild already-counted accounts and never inflate it;
+    the account manager may also set it directly when the fleet size is
+    known ahead of boot). It is re-read on every release, so a fleet that
+    grows mid-wave tightens spacing dynamically (expected only ever
+    grows, so the effective interval only ever tightens toward the floor
+    — a projected wait computed at queue-entry can only improve).
     """
 
-    #: total seconds a synchronized wave may spend inside the hook (< 60)
-    WAIT_BUDGET_S = 50.0
+    #: total seconds one waiter may spend inside the hook (< the library's
+    #: 60s wait_for ceiling, with headroom for sleep overshoot)
+    WAIT_BUDGET_S = 55.0
     #: never pace IDENTIFYs tighter than this (Discord per-IP friendliness)
     MIN_INTERVAL_S = 1.0
 
@@ -1187,34 +1317,51 @@ class IdentifyGate:
         user accounts are unsharded — but discord.py lineage hooks are
         invoked with it positionally, and library drift must not turn
         the gate into a TypeError). Fast-fails with a retryable
-        ConnectionError when the PROJECTED total wait (residual spacing
-        + waiters already queued ahead × interval) exceeds the wave
-        budget (FINAL-PHASE F4 + round-3: the effective interval scales
-        with the expected fleet size so a synchronized wave of ANY size
-        clears under the library's 60s identify ceiling — the fast-fail
-        now covers only genuinely pathological saturation, e.g. a
-        min_interval floor met with a huge fleet).
+        ConnectionError when the wait would exceed the wave budget:
+        once BEFORE queueing (residual spacing + waiters already queued
+        ahead × interval — do not even park a built client) and once
+        INSIDE the lock after re-reading ``effective_interval`` (round-4
+        F2-6: removes the entry-time/current-interval tear entirely; the
+        pre-queue check can only under-project when the interval TIGHTENS
+        mid-queue, but the recheck makes that provable rather than
+        hoped-for).
         """
         if self._lock is None:
             self._lock = asyncio.Lock()
+        loop = asyncio.get_running_loop()
         interval = self.effective_interval
         # projected wait BEFORE queueing: residual + the queue depth ahead
         # of us each costs a full interval (FIFO under the held lock)
-        loop = asyncio.get_running_loop()
-        projected = (self._last + interval * (self._depth + 1)
-                     - loop.time()) if self._last != float("-inf") else 0.0
-        if projected > self.wait_budget:
-            raise ConnectionError(
-                f"identify gate saturated: projected wait {projected:.0f}s "
-                f"exceeds {self.wait_budget:.0f}s ({self._depth} queued) — "
-                "retrying with backoff is cheaper than parking a built client")
+        if self._last != float("-inf"):
+            projected = (self._last + interval * (self._depth + 1)
+                         - loop.time())
+            if projected > self.wait_budget:
+                raise ConnectionError(
+                    f"identify gate saturated: projected wait "
+                    f"{max(0.0, projected):.0f}s exceeds "
+                    f"{self.wait_budget:.0f}s ({self._depth} queued) — "
+                    "retrying with backoff is cheaper than parking a "
+                    "built client past the library's 60s identify ceiling "
+                    f"(fleet expected={self.expected}, floor="
+                    f"{self.min_interval:g}s)")
         self._depth += 1
         try:
             async with self._lock:  # FIFO: hold while sleeping so waiters queue
-                now = loop.time()
-                wait = self._last + self.effective_interval - now
+                # round-4 F2-6: re-read interval + budget INSIDE the lock —
+                # everything ahead has released by now, so the residual is
+                # exactly one interval slice
+                wait = (self._last + self.effective_interval - loop.time()
+                        ) if self._last != float("-inf") else 0.0
+                if wait > self.wait_budget:
+                    raise ConnectionError(
+                        f"identify gate saturated: residual wait "
+                        f"{wait:.0f}s exceeds {self.wait_budget:.0f}s "
+                        f"(fleet expected={self.expected}) — retry with "
+                        "backoff")
                 if wait > 0:
                     await asyncio.sleep(wait)
+                    now = loop.time()
+                else:
                     now = loop.time()
                 self._last = now
         finally:

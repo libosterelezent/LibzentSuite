@@ -62,6 +62,16 @@ ESTOP_GRACE_S = 0.25
 #: hard Discord message length the chunker must respect
 MAX_CHUNK_LENGTH = 2000
 
+#: prefix the self_command scenario drives (mirror of the live layer's
+#: SELF_COMMAND_PREFIX; "sm!" is the .env.example default). Declared per
+#: scenario (Scenario.self_command_prefix) — the runner threads it into
+#: the sim clients exactly like the live factory threads it from
+#: credentials, and adds the account's own synthetic id to OWNER_USER_IDS
+#: (the live layer's documented requirement for the owner check).
+SELF_COMMAND_PREFIX = "sm!"
+#: synthetic stranger driving the isolation half of self_command
+SELF_COMMAND_STRANGER_ID = 4242
+
 #: demo plugin settings (sim pacing in seconds; production values live in
 #: config/). The runner passes this as the SettingsManager global layer.
 DEMO_PLUGIN_SETTINGS: Dict[str, Dict[str, Any]] = {
@@ -97,6 +107,9 @@ class Scenario:
     script: Callable[[Any], Awaitable[None]] = None  # type: ignore[assignment]
     #: (audit dicts, world) -> failure strings; [] means pass
     checks: Callable[[List[dict], SimWorld], List[str]] = None  # type: ignore[assignment]
+    #: self-command prefix this scenario exercises (None = the runner
+    #: falls back to the credentials' SELF_COMMAND_PREFIX, default "")
+    self_command_prefix: Optional[str] = None
 
 
 @dataclass
@@ -135,6 +148,9 @@ class ScenarioAPI:
     scheduler: Any = None
     #: the runner's ControlAPI (system_resume & friends; estop_halt)
     control: Any = None
+    #: the wired LifecycleGovernor (production-parity lifecycle pacing,
+    #: round-4) — scenarios may assert on stats()/retry_after()
+    lifecycle: Any = None
 
 
 # ------------------------------------------------------------------ fixtures
@@ -200,6 +216,65 @@ def _outbound(audit: List[dict], account: str = ACCOUNT_NAME) -> List[dict]:
 def _delivered_chunks(world: SimWorld) -> List[WorldMessage]:
     """Every delivered message that starts with the import prefix."""
     return [m for m in world.journal if m.content.startswith(IMPORT_PREFIX)]
+
+
+def _checks_self_command(audit: List[dict], world: SimWorld) -> List[str]:
+    """self_command: exactly ONE flow, driven by the own prefixed trigger.
+
+    Evidence: exactly one inbound audit row with the BARE trigger word
+    authored by the account itself (the synthetic re-fire crossing the
+    boundary), exactly one export command + one chunk in the journal
+    (exactly one flow), and NOTHING sent by the account after the
+    stranger's identical prefixed command landed.
+    """
+    failures: List[str] = []
+    refires = [
+        entry
+        for entry in audit
+        if str(entry.get("direction", "")) == "in"
+        and entry.get("content") == TRIGGER_WORD
+        and f"author={SYNTHETIC_ALPHA_ID}" in str(entry.get("note", ""))
+    ]
+    if len(refires) != 1:
+        failures.append(
+            f"expected exactly 1 bare-trigger re-fire authored by the account, "
+            f"saw {len(refires)}"
+        )
+    exports = [
+        m for m in world.journal
+        if m.author_id == SYNTHETIC_ALPHA_ID and m.content == EXPORT_COMMAND
+    ]
+    if len(exports) != 1:
+        failures.append(
+            f"expected exactly 1 export command from the self-command flow, "
+            f"saw {len(exports)}"
+        )
+    chunks = _delivered_chunks(world)
+    if len(chunks) != 1:
+        failures.append(
+            f"expected exactly 1 chunk from the self-command flow, saw {len(chunks)}"
+        )
+    strangers = [
+        m for m in world.journal
+        if m.author_id == SELF_COMMAND_STRANGER_ID
+        and m.content == SELF_COMMAND_PREFIX + TRIGGER_WORD
+    ]
+    if not strangers:
+        failures.append(
+            "stranger prefixed command never landed - isolation check is void"
+        )
+        return failures
+    stranger_ts = strangers[-1].ts
+    late = [
+        m for m in world.journal
+        if m.author_id == SYNTHETIC_ALPHA_ID and m.ts > stranger_ts
+    ]
+    if late:
+        failures.append(
+            f"{len(late)} account send(s) after the stranger's prefixed "
+            f"command - self-command isolation broken"
+        )
+    return failures
 
 
 def _checks_basic(audit: List[dict], world: SimWorld) -> List[str]:
@@ -359,6 +434,35 @@ def _checks_estop_halt(audit: List[dict], world: SimWorld) -> List[str]:
 
 
 # ------------------------------------------------------------------- scripts
+async def _script_self_command(api: ScenarioAPI) -> None:
+    """The account's OWN prefixed message drives a full soulcopy flow.
+
+    The human behind the account types ``sm!slcopy`` from their own
+    Discord client: the message lands in the world authored by the
+    account itself and the sim's command layer re-fires it as the bare
+    trigger word (same pass-through set + DTO shape as the live layer's
+    self_bot commands). A STRANGER typing the exact same prefixed command
+    must start nothing — self_bot semantics make only the account's own
+    messages invocable.
+    """
+    api.owner_says(
+        api.channel_id,
+        SELF_COMMAND_PREFIX + TRIGGER_WORD,
+        api.account_user_id,
+    )
+    await api.world.wait_for_quiet(
+        api.channel_id, quiet=quiet_window(), limit=60.0
+    )
+    # isolation: same prefix, same trigger, WRONG author -> no flow
+    api.world.add_user(SELF_COMMAND_STRANGER_ID, "stranger")
+    api.owner_says(
+        api.channel_id,
+        SELF_COMMAND_PREFIX + TRIGGER_WORD,
+        SELF_COMMAND_STRANGER_ID,
+    )
+    await api.world.wait_for_quiet(api.channel_id, quiet=2.0, limit=10.0)
+
+
 async def _script_server_429(api: ScenarioAPI) -> None:
     """Queue the one-shot 429 on the trigger channel, then start the flow."""
     api.world.server_limit_next(api.channel_id, retry_after=RETRY_AFTER)
@@ -556,6 +660,20 @@ SCENARIOS: Dict[str, Scenario] = {
         script=_script_estop_halt,
         checks=_checks_estop_halt,
     ),
+    "self_command": Scenario(
+        name="self_command",
+        description=(
+            "With SELF_COMMAND_PREFIX set, the account's own 'sm!slcopy' "
+            "message re-fires as the bare trigger and drives exactly one "
+            "full soulcopy flow; a stranger typing the same prefixed "
+            "command starts nothing (self_bot isolation)."
+        ),
+        policies={"message": {"interval": 1.5, "jitter": [0.0, 0.05]}},
+        world_setup=_base_world(SHORT_PAGES),
+        script=_script_self_command,
+        checks=_checks_self_command,
+        self_command_prefix=SELF_COMMAND_PREFIX,
+    ),
 }
 
 
@@ -568,5 +686,7 @@ __all__ = [
     "IMPORT_PREFIX",
     "TRIGGER_WORD",
     "DEMO_PLUGIN_SETTINGS",
+    "SELF_COMMAND_PREFIX",
+    "SELF_COMMAND_STRANGER_ID",
     "quiet_window",
 ]

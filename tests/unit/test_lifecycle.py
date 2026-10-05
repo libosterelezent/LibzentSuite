@@ -139,6 +139,47 @@ class GovernorUnitTests(unittest.TestCase):
         self.assertIn("policy", stats)
         self.assertEqual(stats["policy"]["start_burst"], 5)
 
+    def test_stats_and_retry_after_never_consume_tokens(self) -> None:
+        """Round-4 (probe1b): observation must not drain the shared start
+        bucket — stats()/retry_after() peek read-only; only precheck()
+        (the production gate) spends capacity."""
+        clock = _ManualClock()
+        gov = LifecycleGovernor(clock=clock)
+        for name in ("a", "b", "c", "d", "e"):
+            gov.commit(name, "start", ok=True)  # start-legal pacers
+
+        self.assertTrue(gov.precheck("fresh", "start").allowed)  # 4 left
+        # one stats() observation across 5 pacers must not eat tokens
+        stats = gov.stats()
+        self.assertEqual(stats["counters"]["decisions"], 1)
+        self.assertTrue(gov.precheck("fresh2", "start").allowed)  # 3 left
+        # retry_after is read-only too — hammering it changes nothing
+        for _ in range(10):
+            self.assertEqual(gov.retry_after("fresh3", "start"), 0.0)
+        self.assertEqual(gov.counters["decisions"], 2)
+        self.assertTrue(gov.precheck("fresh4", "start").allowed)  # 2 left
+        # peek labels bucket-refill waits distinctly from cooldowns
+        self.assertTrue(gov.precheck("drain1", "start").allowed)  # 1 left
+        self.assertTrue(gov.precheck("drain2", "start").allowed)  # 0 left
+        decision = gov.peek("fresh5", "start")
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "global_bucket")
+        self.assertGreater(decision.retry_after_s, 0)
+        # ...and the observations above consumed nothing: the refill wait
+        # is exactly one 5s refill away, without a token spent by peeking
+        self.assertAlmostEqual(decision.retry_after_s, 5.0, delta=0.1)
+
+    def test_stats_cooldowns_label_reason_distinctly(self) -> None:
+        clock = _ManualClock()
+        gov = LifecycleGovernor(clock=clock)
+        gov.commit("alpha", "stop", ok=True)  # restart cooldown active
+        stats = gov.stats()
+        self.assertIn("alpha", stats["cooldowns"])
+        entry = stats["cooldowns"]["alpha"]
+        self.assertEqual(entry["reason"], "account_cooldown")
+        self.assertGreater(entry["wait_s"], 0)
+        self.assertEqual(gov.counters["decisions"], 0)  # still read-only
+
 
 class GovernorManagerIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_thrashing_start_stop_is_rejected(self) -> None:

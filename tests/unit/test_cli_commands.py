@@ -1137,5 +1137,45 @@ class TestFloorCapDisplay(unittest.IsolatedAsyncioTestCase):
             await run_command(api, "ratelimit floor nan")
 
 
+class TestMainFlagMutex(unittest.TestCase):
+    """ROUND-4 (F7/3): --bench (and --sim) must not silently drop the
+    live-stack flags they cannot honor — the combinations exit 2 with a
+    clean stderr line instead."""
+
+    def _main(self, *argv: str):
+        import contextlib
+        import sys as _sys
+        from unittest import mock
+
+        import main as main_module
+
+        with mock.patch.object(_sys, "argv", ["main.py", *argv]):
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                code = main_module.main()
+        return code, err.getvalue()
+
+    def test_bench_conflicts_rejected(self) -> None:
+        for flags in (
+            ("--sim", "x"), ("--sim-list",), ("--start-all",),
+            ("--dashboard",), ("--headless",), ("--db", "custom.db"),
+            ("--dashboard", "--headless"),
+        ):
+            with self.subTest(flags=flags):
+                code, err = self._main("--bench", *flags)
+                self.assertEqual(code, 2)
+                self.assertIn("--bench cannot be combined", err)
+
+    def test_bench_conflict_message_names_the_flag(self) -> None:
+        code, err = self._main("--bench", "--start-all")
+        self.assertEqual(code, 2)
+        self.assertIn("--start-all", err)
+        self.assertIn("--db", self._main("--bench", "--db", "x.db")[1])
+
+    def test_sim_live_flags_rejected_regression(self) -> None:
+        code, err = self._main("--sim", "x", "--dashboard")
+        self.assertEqual(code, 2)
+        self.assertIn("--sim/--sim-list cannot be combined", err)
+
+
 if __name__ == "__main__":
     unittest.main()
