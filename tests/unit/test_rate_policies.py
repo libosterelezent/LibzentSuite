@@ -268,8 +268,8 @@ class TestSetPolicy(unittest.TestCase):
     def test_floor_rejection_message_mentions_1_5(self):
         manager = make_manager()
         with self.assertRaises(UnsafePolicyError) as ctx:
-            manager.set_policy_values("message", 0.5)
-        self.assertIn("1.5", str(ctx.exception))
+            manager.set_policy_values("message", 0.03)
+        self.assertIn("0.05", str(ctx.exception))
         # UnsafePolicyError is a RatePolicyError (interfaces render it the same)
         self.assertIsInstance(ctx.exception, RatePolicyError)
         self.assertEqual(manager.policies(), [])  # nothing stored on refusal
@@ -277,7 +277,7 @@ class TestSetPolicy(unittest.TestCase):
     def test_interval_exactly_at_floor_allowed(self):
         manager = make_manager()
         manager.set_policy_values("message", MIN_ACTION_INTERVAL)
-        self.assertEqual(manager.effective("message")["interval"], 1.5)
+        self.assertEqual(manager.effective("message")["interval"], MIN_ACTION_INTERVAL)
 
     def test_floor_applies_at_every_level(self):
         manager = make_manager()
@@ -286,7 +286,7 @@ class TestSetPolicy(unittest.TestCase):
             ("account_plugin", "alpha/soulcopy"),
         ):
             with self.assertRaises(UnsafePolicyError):
-                manager.set_policy_values("msg", 1.0, level=level, owner=owner)
+                manager.set_policy_values("msg", 0.03, level=level, owner=owner)
 
     def test_bad_values_rejected_before_storage(self):
         manager = make_manager()
@@ -442,7 +442,7 @@ class TestEffectiveComposition(unittest.TestCase):
 
     def test_empty_case_falls_back_to_floor(self):
         eff = self.manager.effective("unknown-action")
-        self.assertEqual(eff["interval"], 1.5)
+        self.assertEqual(eff["interval"], 0.05)
         self.assertEqual(eff["jitter"], [0.0, 0.0])
         self.assertEqual(eff["sources"], [])
         self.assertEqual(eff["action"], "unknown-action")
@@ -450,7 +450,7 @@ class TestEffectiveComposition(unittest.TestCase):
     def test_unknown_action_for_account_with_no_policy_is_floor(self):
         fresh = make_manager()
         eff = fresh.effective("message", account="alpha", plugin="soulcopy")
-        self.assertEqual(eff["interval"], 1.5)
+        self.assertEqual(eff["interval"], 0.05)
         self.assertEqual(eff["sources"], [])
 
     def test_losing_level_jitter_cannot_speed_up_winner(self):

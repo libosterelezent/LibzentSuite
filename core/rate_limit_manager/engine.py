@@ -230,6 +230,10 @@ class RateLimitManager:
         self._global_until: float = 0.0
         #: (account, action) -> monotonic "until" timestamp
         self._account_cooldowns: Dict[Tuple[str, str], float] = {}
+        # BUCKET-AWARE: Discord's per-route limits from X-RateLimit headers
+        # (keyed (account, action) -> {remaining, reset_at, limit}); used
+        # for pre-emptive blocking in _entry_block
+        self._bucket_state: Dict[Tuple[str, str], dict] = {}
         #: pacing key (owner, action) -> monotonic time of the last expected
         #: WIRE send (grant + jitter). TWO SCOPES share this table (spec:
         #: per-account/group + per-task):
@@ -618,6 +622,8 @@ class RateLimitManager:
             del self._last_fire[key]
         for key in [k for k in self._account_cooldowns if k[0] == account]:
             del self._account_cooldowns[key]
+        for key in [k for k in self._bucket_state if k[0] == account]:
+            del self._bucket_state[key]
         for key in [k for k in self._pending if k[0] == account]:
             del self._pending[key]  # PHASE-4 (S3-G1): waiter-heap husks
         prefix = f"{account}/"
@@ -857,8 +863,8 @@ class RateLimitManager:
     def _entry_block(self, entry: _Entry) -> Tuple[float, float]:
         """(total block, server block) in seconds until `entry` may be granted.
 
-        Total = max(fleet-wide cooldown, account+action cooldown, pacing
-        remaining). Zero when grantable right now.
+        Total = max(fleet-wide cooldown, account+action cooldown, Discord
+        bucket exhaustion, pacing remaining). Zero when grantable now.
         """
         now = self._clock.now()
         server_waits = [0.0]
@@ -867,7 +873,15 @@ class RateLimitManager:
         if entry.account is not None:
             until = self._account_cooldowns.get((entry.account, entry.action))
             if until is not None and now < until:
-                server_waits.append(until - now)
+                server_waits.append(until - until) if False else server_waits.append(until - now)
+            # BUCKET-AWARE: if Discord's per-route bucket for this account
+            # reports exhaustion, block until the bucket resets. This is
+            # pre-emptive (before the 429 arrives) — the data comes from
+            # the X-RateLimit-Remaining header the library read on the
+            # PREVIOUS send.
+            bucket_wait = self._bucket_block(entry.account, entry.action, now)
+            if bucket_wait > 0:
+                server_waits.append(bucket_wait)
         server_wait = max(server_waits)
         interval = self._effective_payload(
             entry.action, entry.account, entry.plugin)[0]
@@ -969,6 +983,51 @@ class RateLimitManager:
         )
 
     # -------------------------------------------------------- server limits
+    def report_bucket(
+        self, account: str, action: str, bucket_key: str, state: dict
+    ) -> None:
+        """Store Discord's per-route bucket state for pre-emptive blocking.
+
+        Called by the account manager's send_hook after each successful
+        send: the adapter harvested the library's internal Ratelimit
+        objects (updated from X-RateLimit-* headers on the response).
+        The engine uses `remaining` and `reset_after_s` to block the
+        NEXT acquire() for this account+action when the budget is
+        exhausted — pre-emptively, before Discord sends a 429.
+        """
+        if not isinstance(state, dict):
+            return
+        remaining = state.get("remaining")
+        reset_after = state.get("reset_after_s")
+        if remaining is None or reset_after is None:
+            return
+        self._bucket_state[(account, action)] = {
+            "remaining": int(remaining),
+            "reset_at": self._clock.now() + float(reset_after),
+            "limit": state.get("limit", 0),
+        }
+
+    def _bucket_block(self, account: Optional[str], action: str,
+                      now: float) -> float:
+        """Seconds this account+action is blocked by Discord's own bucket.
+
+        Returns 0 when no bucket data exists (GET routes / first send —
+        the engine falls back to policy pacing) or when remaining > 0.
+        """
+        if account is None:
+            return 0.0
+        state = self._bucket_state.get((account, action))
+        if state is None:
+            return 0.0
+        if state["remaining"] > 0:
+            return 0.0
+        wait = state["reset_at"] - now
+        if wait <= 0:
+            # bucket expired — clean up so we don't check it again
+            del self._bucket_state[(account, action)]
+            return 0.0
+        return wait
+
     def report_server_limit(
         self,
         account: str,
@@ -1084,6 +1143,15 @@ class RateLimitManager:
             "cooldowns": {
                 "global": round(max(0.0, self._global_until - now), 3),
                 "accounts": accounts,
+            },
+            "discord_buckets": {
+                f"{acct}:{action}": {
+                    "remaining": st["remaining"],
+                    "resets_in_s": round(max(0.0, st["reset_at"] - now), 2),
+                    "limit": st["limit"],
+                }
+                for (acct, action), st in self._bucket_state.items()
+                if st["reset_at"] > now
             },
             "last_fire_ages": last_fire_ages,
             "grants": self._grants,

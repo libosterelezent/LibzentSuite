@@ -39,7 +39,10 @@ from database.models import POLICY_LEVELS
 
 #: hard safety floor: no rate policy faster than this can ever be SET
 #: (enforced by RateLimitManager.set_policy / set_policy_values).
-MIN_ACTION_INTERVAL = 1.5
+#: Absolute sanity minimum — prevents zero-delay tight loops; Discord's
+#: own per-route bucket limits (from the X-RateLimit headers the library
+#: reads on write routes) are the ACTUAL pacing constraint now.
+MIN_ACTION_INTERVAL = 0.05
 
 #: sanity caps (one day per action / one hour of jitter) — ported idea from
 #: the audited MAX_DELAY_SECONDS: absurd values would silently wedge sends.

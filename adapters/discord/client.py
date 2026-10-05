@@ -856,6 +856,46 @@ class RealDiscordClient:
             return TargetGone("", f"channel {channel_id} is gone: {exc}")
         return None
 
+    def _harvest_bucket_state(self) -> None:
+        """Read the library's per-route bucket state after a send.
+
+        discord.py-self's HTTPClient maintains `Ratelimit` objects keyed by
+        `{bucket_hash}:{major_parameters}` — updated from X-RateLimit-*
+        headers on every response. For write routes (message sends,
+        reactions) Discord DOES send these headers; the library tracks
+        limit/remaining/reset_after per route+channel.
+
+        We store the LATEST state per action for the engine to read via
+        `get_bucket_state()`. This is the data that lets the engine pace
+        by Discord's ACTUAL budget instead of fixed intervals.
+        """
+        http = getattr(self._client, "http", None)
+        if http is None:
+            return
+        buckets = getattr(http, "_buckets", None)
+        if not buckets:
+            return
+        now = getattr(self._client, "loop", None)
+        now = now.time() if now else __import__("time").monotonic()
+        harvested: Dict[str, dict] = {}
+        for key, rl in buckets.items():
+            if not hasattr(rl, "remaining"):
+                continue
+            harvested[key] = {
+                "limit": getattr(rl, "limit", 0),
+                "remaining": getattr(rl, "remaining", 0),
+                "reset_after_s": getattr(rl, "reset_after", 0.0),
+                "expires": getattr(rl, "expires", None),
+                "outgoing": getattr(rl, "outgoing", 0),
+            }
+        if harvested:
+            self._bucket_state = harvested
+            self._bucket_state_at = now
+
+    def get_bucket_state(self) -> Dict[str, dict]:
+        """The latest per-route bucket state from the library (may be {})."""
+        return getattr(self, "_bucket_state", {})
+
     async def _send_to_channel(
         self, channel: Any, channel_id: int, content: str, *, dm: bool
     ) -> DiscordMessage:
@@ -867,13 +907,19 @@ class RealDiscordClient:
             if mapped is not None:
                 raise mapped from exc
             raise
+        self._harvest_bucket_state()  # feed Discord's limits to the engine
+        # BUCKET-AWARE PACING: harvest Discord's per-route limits after the
+        # send so the engine can read them before the NEXT acquire().
+        # Only write routes carry headers; GET-only routes harvest nothing
+        # and the engine falls back to policy pacing.
+        harvest = getattr(self, "_harvest_bucket_state", None)
+        if callable(harvest):
+            harvest()
         return DiscordMessage(
             id=getattr(sent, "id", 0),
             channel_id=channel_id,
             author_id=self.user_id or 0,
             content=content,
-            # derive from the channel TYPE when possible: DM sends now arrive
-            # through send_message with an already-resolved DM channel id
             dm=dm or self._is_dm_channel(channel),
         )
 

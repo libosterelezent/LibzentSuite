@@ -56,36 +56,36 @@ class TestEvaluatePolicy(unittest.TestCase):
 
     def test_aggressive_boundary_is_strict(self):
         self.assertEqual(
-            evaluate_policy(RatePolicy("m", 3.0, 0.5, 2.0), "global", None, 1.5), []
+            evaluate_policy(RatePolicy("m", 3.0, 0.5, 2.0), "global", None, 0.05), []
         )
-        out = evaluate_policy(RatePolicy("m", 2.99, 0.5, 2.0), "global", None, 1.5)
+        out = evaluate_policy(RatePolicy("m", 2.99, 0.5, 2.0), "global", None, 0.05)
         self.assertEqual(codes(out), ["aggressive"])
 
     def test_no_jitter(self):
-        out = evaluate_policy(RatePolicy("m", 4.0), "account", "alpha", 1.5)
+        out = evaluate_policy(RatePolicy("m", 4.0), "account", "alpha", 0.05)
         self.assertEqual(codes(out), ["no_jitter"])
         self.assertEqual(out[0]["level"], "info")
 
     def test_narrow_jitter(self):
-        out = evaluate_policy(RatePolicy("m", 4.0, 0.5, 0.6), "global", None, 1.5)
+        out = evaluate_policy(RatePolicy("m", 4.0, 0.5, 0.6), "global", None, 0.05)
         self.assertEqual(codes(out), ["narrow_jitter"])
         self.assertEqual(out[0]["level"], "info")
         # exactly at the spread threshold is fine
         self.assertEqual(
-            evaluate_policy(RatePolicy("m", 4.0, 0.5, 0.8), "global", None, 1.5), []
+            evaluate_policy(RatePolicy("m", 4.0, 0.5, 0.8), "global", None, 0.05), []
         )
 
     def test_wide_jitter_sane_interval_is_clean(self):
         self.assertEqual(
-            evaluate_policy(RatePolicy("m", 4.0, 0.5, 2.0), "global", None, 1.5), []
+            evaluate_policy(RatePolicy("m", 4.0, 0.5, 2.0), "global", None, 0.05), []
         )
 
     def test_aggressive_and_narrow_jitter_coexist(self):
-        out = evaluate_policy(RatePolicy("m", 2.0, 0.1, 0.2), "global", None, 1.5)
+        out = evaluate_policy(RatePolicy("m", 2.0, 0.1, 0.2), "global", None, 0.05)
         self.assertEqual(codes(out), ["aggressive", "narrow_jitter"])
 
     def test_entry_shape(self):
-        out = evaluate_policy(RatePolicy("m", 2.0), "global", None, 1.5)
+        out = evaluate_policy(RatePolicy("m", 2.0), "global", None, 0.05)
         for entry in out:
             self.assertEqual(set(entry), {"level", "code", "message"})
             self.assertIsInstance(entry["message"], str)
@@ -98,7 +98,7 @@ class TestFloorAndSorting(unittest.TestCase):
         entry = floor_warning(MIN_ACTION_INTERVAL)
         self.assertEqual(entry["level"], "info")
         self.assertEqual(entry["code"], "floor")
-        self.assertIn("1.50s", entry["message"])
+        self.assertIn("0.05s", entry["message"])
 
     def test_sort_warnings_danger_first(self):
         entries = [
@@ -119,7 +119,7 @@ class TestFloorAndSorting(unittest.TestCase):
         self.assertEqual(ordered[-1]["level"], "bizarre")
 
     def test_evaluate_policies_empty_is_just_the_floor(self):
-        self.assertEqual(evaluate_policies([], 1.5), [floor_warning(1.5)])
+        self.assertEqual(evaluate_policies([], 0.05), [floor_warning(0.05)])
 
     def test_describe_scope(self):
         self.assertEqual(describe_scope("global", None), "global")
@@ -134,7 +134,7 @@ class TestManagerWarnings(unittest.TestCase):
     def test_empty_manager_shows_only_floor(self):
         warnings = make_manager().warnings()
         self.assertEqual(codes(warnings), ["floor"])
-        self.assertIn("1.50s", warnings[0]["message"])
+        self.assertIn("0.05s", warnings[0]["message"])
 
     def test_one_entry_per_stored_policy(self):
         manager = make_manager()

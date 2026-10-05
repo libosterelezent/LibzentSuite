@@ -117,7 +117,7 @@ class EffectiveCacheTests(unittest.IsolatedAsyncioTestCase):
         m.set_policy_values("message", 5.0, 0.1, 0.5, "account", "alpha")
         self.assertEqual(m.effective("message", "alpha")["interval"], 5.0)
         m.clear_policy("account", "alpha", "message")
-        self.assertEqual(m.effective("message", "alpha")["interval"], 1.5)
+        self.assertEqual(m.effective("message", "alpha")["interval"], 0.05)
         m.set_floor(4.0)
         self.assertEqual(m.effective("message", "alpha")["interval"], 4.0)
         await m.prune_account("alpha")
@@ -149,7 +149,7 @@ class EffectiveCacheTests(unittest.IsolatedAsyncioTestCase):
         m.set_policy_values("message", 3.0, 0.1, 0.5, "account", "a/b")
         # the delimiter trap: ("a/b", "c") must NOT collide with ("a", "b/c")
         self.assertEqual(m.effective("message", "a/b", "c")["interval"], 3.0)
-        self.assertEqual(m.effective("message", "a", "b/c")["interval"], 1.5)
+        self.assertEqual(m.effective("message", "a", "b/c")["interval"], 0.05)
 
 
 class MemoryFirstStatusTests(unittest.IsolatedAsyncioTestCase):

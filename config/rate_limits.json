@@ -2,14 +2,14 @@
   "_comment": "Rate-limit policies. global applies to every account; accounts.<name> overrides per account. interval = minimum seconds between actions; jitter = [min, max] random extra pause. Floor: 1.5s/action enforced everywhere.",
   "global": {
     "message": {
-      "interval": 2.0,
+      "interval": 0,
       "jitter": [
         0.1,
         0.5
       ]
     },
     "dm": {
-      "interval": 2.0,
+      "interval": 0,
       "jitter": [
         0.1,
         0.5
