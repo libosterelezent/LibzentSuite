@@ -3,12 +3,19 @@ send hook, details page shape and inbound audit."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import unittest
 
 from adapters.base import DiscordMessage
 from core.account_manager import AccountStatus
 from core.errors import AccountError, CredentialsError, ProfileError, SchedulerError, TargetGone
 from core.event_bus import AccountConnected, AccountDisconnected, AccountFailed
+from core.task_scheduler import (
+    STATUS_COMPLETED,
+    STATUS_RUNNING,
+    TERMINAL_STATUSES,
+    TaskScheduler,
+)
 
 from tests.unit.helpers import (
     FakeDetailsLimiter,
@@ -22,6 +29,41 @@ STATUS_KEYS = {"id", "name", "status", "user_id", "enabled", "sync_group",
                "credential", "plugins"}
 DETAILS_KEYS = {"name", "status", "identity", "runtime", "plugins",
                 "profiles", "rate_limit", "credential"}
+
+_TEST_LOG = logging.getLogger("tests.account_manager")
+
+
+class _InstantLimiter:
+    """Duck-typed limiter for the real-scheduler tests (instant grants)."""
+
+    class _Grant:
+        wait_s = 0.0
+        jitter_s = 0.0
+
+    async def acquire(self, action, account, plugin, priority):
+        return self._Grant()
+
+    def report_server_limit(self, *args, **kwargs):
+        pass
+
+
+def _real_scheduler(bus, sender, **kwargs) -> TaskScheduler:
+    """A started real TaskScheduler wired to the given sender."""
+    scheduler = TaskScheduler(bus, _TEST_LOG, _InstantLimiter(), sender,
+                              **kwargs)
+    scheduler.start()
+    return scheduler
+
+
+async def _poll_until(predicate, timeout: float = 2.0,
+                      interval: float = 0.01) -> None:
+    """Bounded wait until predicate() is true (AssertionError on timeout)."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() > deadline:
+            raise AssertionError("condition not reached within budget")
+        await asyncio.sleep(interval)
 
 
 class RegistryTests(unittest.IsolatedAsyncioTestCase):
@@ -115,6 +157,54 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         ]
         await h.manager.accounts()
         h.plugins.fail_states = True
+        rows = await h.manager.accounts()
+        self.assertIn("soulcopy", rows[0]["plugins"])  # last known kept
+
+    async def test_fail_closed_reattach_clears_stale_plugin_view(self) -> None:
+        """Round-3: an account re-attached with ZERO plugins (fail-closed
+        profile-resolution failure) must not keep showing its previous
+        plugin rows as if they were still attached."""
+        h = make_manager()
+        await h.add_profile("basic", "soulcopy")
+        await h.manager.add_account("alpha", profiles=["basic"])
+        h.plugins.states_map["alpha"] = [
+            {"name": "soulcopy", "enabled": True, "settings": {},
+             "last_error": None, "error_count": 0},
+        ]
+        rows = await h.manager.accounts()
+        self.assertIn("soulcopy", rows[0]["plugins"])  # truthful view
+
+        # a transient profile-repo failure: the next attach (the one every
+        # start() performs) resolves the grant to NOTHING (fail-closed)
+        original = h.profile_manager.allowed_plugins
+
+        def explode(name):
+            raise RuntimeError("profile repo down")
+
+        h.profile_manager.allowed_plugins = explode
+        try:
+            await h.manager._attach_plugins("alpha")
+        finally:
+            h.profile_manager.allowed_plugins = original
+        self.assertEqual(h.plugins.attached[-1], ("alpha", set()))
+
+        # the plugin manager now HAS the account — with zero plugins
+        h.plugins.states_map["alpha"] = []
+        rows = await h.manager.accounts()
+        self.assertEqual(rows[0]["plugins"], {})  # stale view cleared
+
+    async def test_unattached_account_keeps_last_known_plugin_view(self) -> None:
+        """Empty states on an account the plugin manager does NOT have
+        (not attached) keeps the last known view (unchanged semantics)."""
+        h = make_manager()
+        await h.manager.add_account("alpha")
+        h.plugins.states_map["alpha"] = [
+            {"name": "soulcopy", "enabled": True, "settings": {},
+             "last_error": None, "error_count": 0},
+        ]
+        await h.manager.accounts()
+        h.plugins.states_map["alpha"] = []
+        h.manager._plugin_attached.discard("alpha")  # simulate "not attached"
         rows = await h.manager.accounts()
         self.assertIn("soulcopy", rows[0]["plugins"])  # last known kept
 
@@ -376,7 +466,59 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
         await h.collector.wait_for(AccountConnected, 3)
         self.assertEqual(h.manager.get("alpha").runtime.status,
-                         AccountStatus.RUNNING)
+                          AccountStatus.RUNNING)
+        await h.manager.stop("alpha")
+
+    async def test_backoff_overflow_never_kills_supervisor(self) -> None:
+        """Round-3 (backoff-overflow zombie): a multiplier/exponent whose
+        power overflows float must not crash the reconnect loop — the
+        supervisor keeps retrying at the max delay instead of dying
+        silently and leaving the account RECONNECTING forever."""
+        settings = _fast_reconnect_settings()
+        settings.overrides["alpha"] = {
+            "reconnect_initial_delay": 0.01,
+            "reconnect_max_delay": 0.05,
+            "reconnect_multiplier": 1e300,  # **2 already overflows float
+        }
+        h = make_manager(settings=settings)
+        await h.manager.add_account("alpha")
+        await h.manager.start("alpha")
+        runtime = h.manager.get("alpha").runtime
+        h.factory.client_kwargs["fail_connect"] = True  # reconnects fail
+        runtime.client.drop("socket closed")
+        await asyncio.sleep(0.4)  # several overflowing attempts elapse
+        supervisor = runtime.supervisor
+        self.assertIsNotNone(supervisor)
+        self.assertFalse(supervisor.done())  # alive, still driving retries
+        self.assertEqual(runtime.status, AccountStatus.RECONNECTING)
+        self.assertGreaterEqual(len(h.factory.clients), 4)  # kept retrying
+        await h.manager.stop("alpha")
+        self.assertEqual(runtime.status, AccountStatus.STOPPED)
+
+    async def test_reconnect_loop_crash_stands_down_failed(self) -> None:
+        """Round-3: an unexpected reconnect-loop crash must surface as a
+        FAILED account (start() stays usable), not a dead supervisor with
+        the account wedged in RECONNECTING."""
+        h = make_manager(settings=_fast_reconnect_settings())
+        await h.manager.add_account("alpha")
+        await h.manager.start("alpha")
+        runtime = h.manager.get("alpha").runtime
+
+        async def _boom(name, rt):
+            raise RuntimeError("kaboom")
+
+        h.manager._reconnect_loop = _boom  # type: ignore[method-assign]
+        runtime.client.drop("bye")
+        await _poll_until(
+            lambda: runtime.status == AccountStatus.FAILED, timeout=1.0)
+        self.assertIn("kaboom", runtime.last_error)
+        self.assertFalse(runtime.lost.is_set())  # no stale wake-ups
+        supervisor = runtime.supervisor
+        self.assertTrue(supervisor.done())
+        self.assertIsNone(supervisor.exception())  # clean stand-down
+        # automation path: the account can simply be started again
+        await h.manager.start("alpha")
+        self.assertEqual(runtime.status, AccountStatus.RUNNING)
         await h.manager.stop("alpha")
 
 
@@ -699,6 +841,133 @@ class CredentialWiringTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(await db.credentials.load("alpha"))
             finally:
                 await db.close()
+
+
+class _RemovalWindowPlugins:
+    """Delegating plugin-manager double: ``deactivate_account`` submits one
+    farewell task when the account is already UNREGISTERED — exactly the
+    still-active-plugin submit window inside remove_account that used to
+    resurrect the removed account's scheduler lane
+    (probe_lane_resurrect.py)."""
+
+    def __init__(self, inner, manager, scheduler) -> None:
+        self._inner = inner
+        self._manager = manager
+        self._scheduler = scheduler
+        self.farewell_tasks: list = []
+
+    async def deactivate_account(self, account):
+        if account not in self._manager._accounts:  # removal window
+            try:
+                self.farewell_tasks.append(self._scheduler.submit(
+                    account, "roll", "message",
+                    channel_id=100, content="farewell"))
+            except Exception:
+                pass
+        return await self._inner.deactivate_account(account)
+
+    def __getattr__(self, attr):
+        return getattr(self._inner, attr)
+
+
+class RemoveLaneIsolationTests(unittest.IsolatedAsyncioTestCase):
+    """Round-3 (probe_lane_resurrect.py): remove_account must deactivate the
+    account's plugins BEFORE the scheduler lane cleanup, so a submit fired
+    during the removal window (a farewell task from an on_disable hook)
+    cannot re-create the removed account's parked lane — a worker that
+    previously leaked until the global scheduler stop."""
+
+    async def test_remove_leaves_no_resurrected_lane(self) -> None:
+        h = make_manager(token_values={"DISCORD_TOKEN_GHOST": "tok-ghost"})
+        scheduler = _real_scheduler(h.bus, h.manager.send_hook)
+        farewell = _RemovalWindowPlugins(h.plugins, h.manager, scheduler)
+        h.manager._scheduler = scheduler
+        h.manager._plugin_manager = farewell
+        try:
+            await h.manager.add_account("ghost")
+            await h.manager.start("ghost")
+            first = scheduler.submit("ghost", "roll", "message",
+                                     channel_id=100, content="one")
+            await _poll_until(
+                lambda: scheduler.get(first.id).status == STATUS_COMPLETED)
+            await h.manager.stop("ghost")
+            # stop-time deactivation is NOT the removal window: no submit
+            self.assertEqual(farewell.farewell_tasks, [])
+            self.assertIn("ghost", scheduler._lanes)  # lane persists by design
+
+            await h.manager.remove_account("ghost")
+            # a farewell task WAS submitted inside the removal window...
+            self.assertEqual(len(farewell.farewell_tasks), 1)
+            task = farewell.farewell_tasks[0]
+            await _poll_until(lambda: task.status in TERMINAL_STATUSES)
+            # ...yet every lane bookkeeping entry for the account is GONE
+            # (no parked zombie lane until the global stop)
+            self.assertNotIn("ghost", scheduler._lanes)
+            self.assertNotIn("ghost", scheduler._lane_events)
+            self.assertNotIn("ghost", scheduler._backoff_wakers)
+            self.assertNotIn("ghost", scheduler._queues)
+        finally:
+            try:
+                await h.manager.stop("ghost")
+            except AccountError:
+                pass  # already removed
+            await scheduler.stop()
+
+
+class EmergencyStopIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """Per-account estop through the manager paths with a REAL scheduler:
+    a slow send in flight is driven terminal, the account stops, and a
+    restart of the same account works immediately after."""
+
+    async def test_estop_with_slow_task_in_flight(self) -> None:
+        h = make_manager()
+        scheduler = _real_scheduler(h.bus, h.manager.send_hook)
+        h.manager._scheduler = scheduler
+        try:
+            await h.manager.add_account("alpha")
+            await h.manager.start("alpha")
+            client = h.manager.get("alpha").runtime.client
+            original_send = client.send_message
+
+            async def slow_send(channel_id, content):
+                await asyncio.sleep(0.4)  # the "slow task in flight"
+                return await original_send(channel_id, content)
+
+            client.send_message = slow_send
+            task = scheduler.submit("alpha", "soulcopy", "message",
+                                    channel_id=100, content="slow",
+                                    timeout=10.0)
+            await _poll_until(
+                lambda: scheduler.get(task.id).status == STATUS_RUNNING)
+
+            out = h.manager.emergency_stop("alpha")
+            self.assertTrue(out["stop_initiated"])
+            self.assertEqual(out["cancelled_tasks"], 1)
+
+            runtime = h.manager.get("alpha").runtime
+            await _poll_until(
+                lambda: scheduler.get(task.id).status in TERMINAL_STATUSES,
+                timeout=3.0)
+            self.assertEqual(scheduler.get(task.id).status, "cancelled")
+            await _poll_until(
+                lambda: runtime.status == AccountStatus.STOPPED, timeout=3.0)
+            await h.collector.wait_for(AccountDisconnected, 1)
+            self.assertIsNone(runtime.client)
+
+            # restart works right away, and sends flow again (fast client)
+            await h.manager.start("alpha")
+            self.assertEqual(runtime.status, AccountStatus.RUNNING)
+            fresh = scheduler.submit("alpha", "soulcopy", "message",
+                                     channel_id=100, content="after")
+            await _poll_until(
+                lambda: scheduler.get(fresh.id).status == STATUS_COMPLETED)
+            await h.manager.stop("alpha")
+        finally:
+            try:
+                await h.manager.stop("alpha")
+            except AccountError:
+                pass
+            await scheduler.stop()
 
 
 class RejectingFactory:

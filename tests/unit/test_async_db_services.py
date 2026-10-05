@@ -128,6 +128,27 @@ class TestAsyncDatabase(AsyncTestCase):
         self.assertEqual(await db.kv.get("t"), "bridge")
         await db.close()
 
+    async def test_reuse_after_close_on_new_event_loop(self) -> None:
+        """Round 3: close() reborn the loop-bound locks (guard, connect
+        lock, migrate lock); the SAME Database service reopens cleanly
+        on a different event loop and reads the same file."""
+        db = self.tmp_db()
+        await db.connect()
+        await db.kv.set("k", "v1")
+        await db.close()
+
+        readback: list = []
+
+        def second_loop() -> None:
+            async def go() -> None:
+                await db.connect()
+                readback.append(await db.kv.get("k"))
+                await db.close()
+            asyncio.run(go())
+
+        await asyncio.get_running_loop().run_in_executor(None, second_loop)
+        self.assertEqual(readback, ["v1"])
+
     async def test_same_database_on_second_event_loop_rejected(self) -> None:
         """Two loops driving one connection corrupt the lock/sqlite
         session; the guard must fail loud with a clean DatabaseError."""

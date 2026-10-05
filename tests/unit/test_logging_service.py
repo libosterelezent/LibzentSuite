@@ -109,6 +109,23 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
         second = attach_stdlib_bridge(service)
         self.assertIs(first, second)
 
+    def test_detach_restores_pre_attach_propagate(self) -> None:
+        """Round-3: attach pinned propagate=False forever; detach must
+        restore the value observed at FIRST attach once the last bridge
+        goes away."""
+        from core.logging_service import _BRIDGE_PRIOR_PROPAGATE
+        service = LogService()
+        self.root.propagate = True
+        attach_stdlib_bridge(service)
+        self.assertFalse(self.root.propagate)      # pinned while attached
+        attach_stdlib_bridge(service)              # second attach keeps prior
+        self.root.propagate = False                # bystander flips it
+        detach_stdlib_bridge()
+        self.assertTrue(self.root.propagate)       # first-attach value back
+        self.assertNotIn("slaughtermudae", _BRIDGE_PRIOR_PROPAGATE)
+        detach_stdlib_bridge()                     # idempotent, no restore
+        self.assertTrue(self.root.propagate)
+
     def test_attach_closes_quiet_mode_propagate_hole(self) -> None:
         service = LogService()
         attach_stdlib_bridge(service)

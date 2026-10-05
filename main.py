@@ -3,7 +3,6 @@
 Usage:
   python main.py                        interactive REPL (live accounts from config/)
   python main.py <command ...>          one-shot CLI (e.g. `accounts list`, `status`)
-  python main.py --tui                  (reserved) full-screen mode
   python main.py --sim [name]           run a simulation scenario locally, no network
   python main.py --sim-list             list available scenarios
   python main.py --start-all            boot every enabled account, then REPL
@@ -115,7 +114,29 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
         if argv:  # one-shot command mode
             from interfaces.cli import run_once
 
-            exit_code = await run_once(api, argv)
+            loop = asyncio.get_running_loop()
+            task = asyncio.ensure_future(run_once(api, argv))
+
+            def _sig_stop() -> None:
+                # a service manager's stop is SIGTERM: cancel the command so
+                # the finally below still tears the whole stack down
+                task.cancel()
+
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    loop.add_signal_handler(sig, _sig_stop)
+                except (NotImplementedError, RuntimeError, ValueError):
+                    pass
+            try:
+                exit_code = await task
+            except asyncio.CancelledError:
+                exit_code = 130
+            finally:
+                for sig in (signal.SIGTERM, signal.SIGINT):
+                    try:
+                        loop.remove_signal_handler(sig)
+                    except (NotImplementedError, RuntimeError, ValueError):
+                        pass
         elif args.headless:
             print("running headless — Ctrl-C / SIGTERM to stop")
             await _wait_for_stop_signal()
@@ -166,7 +187,7 @@ async def _wait_for_stop_signal() -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     installed = []
-    for name in ("SIGTERM", "SIGINT"):
+    for name in ("SIGTERM", "SIGINT", "SIGHUP"):  # HUP: daemon on terminal close
         sig = getattr(signal, name, None)
         if sig is None:
             continue
@@ -224,6 +245,12 @@ def main() -> int:
     args, extra = parser.parse_known_args()
 
     if args.sim is not None or args.sim_list:
+        if (args.start_all or args.dashboard or args.headless
+                or extra or args.db != "state/slaughter.db"):
+            print("error: --sim/--sim-list cannot be combined with live-stack "
+                  "flags (--start-all/--dashboard/--headless/--db or a command)",
+                  file=sys.stderr)
+            return 2
         try:
             return asyncio.run(run_sim(args.sim or None, args.sim_list))
         except KeyboardInterrupt:

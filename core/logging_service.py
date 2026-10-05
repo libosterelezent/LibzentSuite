@@ -52,6 +52,11 @@ _LEVEL_BY_SEVERITY = {
 }
 _STDERR_CONFIGURED = False
 
+#: logger name -> the propagate value observed when the FIRST bridge was
+#: attached (detach restores it once the last bridge handler is removed —
+#: attach used to flip propagate=False permanently)
+_BRIDGE_PRIOR_PROPAGATE: Dict[str, bool] = {}
+
 #: stdlib level name -> canonical severity (CRITICAL/FATAL collapse to
 #: ERROR — the structured store has no crash level, and INFO would hide it)
 _SEVERITY_BY_LEVELNAME = {
@@ -482,6 +487,11 @@ def attach_stdlib_bridge(
     # quiet-mode hole: configure_stderr() sets propagate=False, but builds
     # with quiet=True never call it — without this, mirrors and raw WARNING+
     # records leak to the global root (lastResort prints them raw)
+    if logger_name not in _BRIDGE_PRIOR_PROPAGATE:
+        # remember the pre-attach value ONCE (a second attach of a stale
+        # bridge must not overwrite it); detach restores it when the last
+        # bridge goes away
+        _BRIDGE_PRIOR_PROPAGATE[logger_name] = root.propagate
     root.propagate = False
     for handler in root.handlers:
         if isinstance(handler, StdlibBridge):
@@ -496,11 +506,19 @@ def detach_stdlib_bridge(logger_name: str = "slaughtermudae") -> int:
 
     Returns how many were removed. After this, raw stdlib records under the
     tree print only (no structured ingestion) — exactly the pre-attach
-    behavior. Idempotent; safe to call from Framework.shutdown BEFORE
-    database.close() so the bridge stops feeding a dying sink.
+    behavior, INCLUDING the ``propagate`` flag attach had pinned to False
+    (restored from the value observed at first attach). Idempotent; safe to
+    call from Framework.shutdown BEFORE database.close() so the bridge
+    stops feeding a dying sink.
     """
     root = logging.getLogger(logger_name)
     bridges = [h for h in root.handlers if isinstance(h, StdlibBridge)]
     for bridge in bridges:
         root.removeHandler(bridge)
+    if bridges and not any(
+        isinstance(h, StdlibBridge) for h in root.handlers
+    ):
+        prior = _BRIDGE_PRIOR_PROPAGATE.pop(logger_name, None)
+        if prior is not None:
+            root.propagate = prior
     return len(bridges)

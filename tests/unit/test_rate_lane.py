@@ -353,6 +353,66 @@ class TestLanePersistence(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(manager.lane_status()["enabled"])  # still safe
         self.assertEqual(manager.lane_status()["prefixrate"], 1.5)
 
+    async def test_string_bool_enabled_row_is_parsed_not_rejected(self) -> None:
+        """Round-3: a hand-edited "true"/"false" STRING in 'enabled' used
+        to work (truthy) before round-2's strict-bool check made the whole
+        row corrupt — parse the two spellings explicitly; anything else is
+        still corrupt and falls back to the constructor defaults."""
+        kv = FakeKv()
+        kv.rows["ratelimit:lane"] = {"enabled": "true", "prefixrate": 0.75}
+        manager = RateLimitManager(
+            EventBus(), StubLogger(), None, kv_repo=kv,
+            lane_enabled=False, lane_prefixrate=1.5,
+        )
+        await manager.load_persisted()
+        self.assertTrue(manager.lane_status()["enabled"])
+        self.assertEqual(manager.lane_status()["prefixrate"], 0.75)
+
+        kv = FakeKv()
+        kv.rows["ratelimit:lane"] = {"enabled": "False", "prefixrate": 2.0}
+        manager = RateLimitManager(
+            EventBus(), StubLogger(), None, kv_repo=kv,
+            lane_enabled=True, lane_prefixrate=1.5,
+        )
+        await manager.load_persisted()
+        self.assertFalse(manager.lane_status()["enabled"])  # "False" honored
+        self.assertEqual(manager.lane_status()["prefixrate"], 2.0)
+
+        for bad in ("yes", "off", "1", 1, 0, None, [True]):
+            kv = FakeKv()
+            kv.rows["ratelimit:lane"] = {"enabled": bad, "prefixrate": 0.75}
+            manager = RateLimitManager(
+                EventBus(), StubLogger(), None, kv_repo=kv,
+                lane_enabled=False, lane_prefixrate=1.5,
+            )
+            await manager.load_persisted()  # logged + skipped, never fatal
+            self.assertFalse(manager.lane_status()["enabled"], bad)
+            self.assertEqual(manager.lane_status()["prefixrate"], 1.5)
+
+
+class TestLaneWireGapsWithJitter(unittest.IsolatedAsyncioTestCase):
+    """Round-3 wire-gap fix (probe P2/P7): the lane clock is stamped at
+    admission + the caller's jitter draw (the expected wire instant), so a
+    much smaller second draw can no longer compress or INVERT the
+    cross-account wire gap below prefixrate."""
+
+    async def test_lane_wire_gap_holds_under_jitter_differential(self) -> None:
+        # seed 1217: draws ~2.880 then ~0.150 in (0, 3) — under the old
+        # post-grant-only jitter the second wire left 1.23s BEFORE the
+        # first (probe P7's inversion)
+        clock = ManualClock(0.0)
+        manager = SleepAdvanceManager(
+            EventBus(), StubLogger(), None, clock=clock, jitter_seed=1217,
+            lane_enabled=True, lane_prefixrate=1.5,
+        )
+        manager.set_policy_values(ACTION, 1.5, 0.0, 3.0)
+        wires = []
+        for account in ("acctA", "acctB", "acctC"):
+            await manager.acquire(ACTION, account=account)
+            wires.append(clock.now())  # WIRE instant = post-jitter return
+        gaps = [b - a for a, b in zip(wires, wires[1:])]
+        self.assertTrue(all(g >= 1.5 - 1e-9 for g in gaps), gaps)
+
 
 class TestLaneGrantIntegrity(unittest.IsolatedAsyncioTestCase):
     """A waiter cancelled BETWEEN its gate grant and the user code must not

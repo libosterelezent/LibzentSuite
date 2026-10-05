@@ -4,16 +4,20 @@ Wiring follows the pinned constructors in INTEGRATION.md exactly (async
 boot order, same as the production bootstrap)::
 
     await Database(":memory:").connect()
-    CredentialService(db.credentials) / CooldownService(db.cooldowns) /
-        PluginStateService(db.kv)  <- synthetic creds, restore()d
+    CredentialService(db.credentials, key_path=<TEMP KEY PER RUN>) /
+        CooldownService(db.cooldowns) / PluginStateService(db.kv)
+        <- synthetic creds, restore()d
     EventBus()
-    LogService()                                   (no db — sim logs stay in RAM)
+    LogService() + await start_persistence(db.logs)   (queued db sink)
     SettingsManager(bus, logger, plugin_repo=db.plugins,
                     account_settings_repo=db.account_settings,
                     global_layer=DEMO_PLUGIN_SETTINGS) + await load()
-    RateLimitManager(bus, logger, db.policies) + await load_persisted()
-    AuditRecorder(db.audit)
+    RateLimitManager(bus, logger, db.policies, kv_repo=db.kv,
+                     lane_enabled=False, lane_prefixrate=1.5)
+        + await load_persisted()
+    AuditRecorder(db.audit) + await start_persistence(db.audit)
     TaskScheduler(bus, logger, limiter, sender)    <- LATE-BOUND SENDER (below)
+        + await restore_sequence()
     PluginManager(bus, logger, settings, db.plugins, plugin_dir)
         + discover() + await persist_metadata()
     ProfileManager(db.profiles, logger, db.accounts) + await load()
@@ -21,6 +25,31 @@ boot order, same as the production bootstrap)::
                    settings, audit, client_factory, credentials[, limiter],
                    credential_service=..., cooldowns=..., plugin_state=...)
         + await load()
+
+HERMETICITY (audit round 3): the ephemeral CredentialService gets a TEMP
+key file per run (``tempfile.mkdtemp``, removed in teardown) — the default
+key path is the CWD-relative ``state/credentials.key``, so sim runs used
+to lazily CREATE/read the PRODUCTION master key.
+
+LANE WIRING (audit round 3): the RateLimitManager is built with the kv
+repo and explicit lane args like production, but the lane is DISABLED —
+a disabled lane is a 0s pass-through, so scenario pacing is unchanged.
+Scenarios can flip it live through ``ScenarioAPI.limiter``
+(set_lane_enabled / set_lane_prefixrate); before this the lane machinery
+was absent from every sim run and lane pause was dead code in sims.
+
+TEARDOWN ORDER (audit round 3): matches Framework.shutdown — remote
+control, scheduler drain (queued tasks complete while the account can
+still send), bus drain, accounts stop, log/audit persistence stops,
+bridge detach, plugin close, database close — plus the sim-only cleanups
+(sys.modules purge of this run's plugin modules, temp key removal).
+
+RESIDUAL GAP (documented, deliberate): production's
+``_wire_event_logging`` (bus lifecycle events -> structured 'events' log
+lines) is bootstrap-only; sim reports therefore lack TaskCompleted /
+RateLimitTriggered / similar event lines. Wiring it here would duplicate
+the bootstrap's process-wide subscription semantics for little scenario
+value — scenarios assert on the audit trail and world journal instead.
 
 THE LATE-BOUND SENDER SEAM (documented for the integrator): the scheduler
 needs the account manager's ``send_hook`` as its sender, but the account
@@ -55,7 +84,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import shutil
 import sys
+import tempfile
 import time
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
@@ -93,11 +125,41 @@ _SCENARIO_TIMEOUT_S = 180.0
 #: abandons it (the 180s cap + this grace is the absolute worst case)
 _CANCEL_GRACE_S = 5.0
 
+#: sim lane baseline: the machinery is WIRED (kv repo + explicit args, like
+#: production) but DISABLED — a disabled lane is a 0s pass-through, so
+#: scenario pacing is identical to a lane-less stack. Scenarios flip it
+#: live via ScenarioAPI.limiter.
+_SIM_LANE_PREFIXRATE = 1.5
+
+#: cap on the report's log_lines (dashboard payload bounded); a spec-§9
+#: shaped notice replaces the dropped older lines
+_LOG_LINES_CAP = 2000
+
+#: prefix of the plugin loader's synthetic parent module names (see
+#: core.plugin_manager.loader). The runner purges the ones ITS discover
+#: created so repeated sim runs do not grow sys.modules forever.
+_PLUGIN_MODULE_PREFIX = "_mudae_plugroot"
+
 
 def _reap_scenario_task(task: "asyncio.Task[None]") -> None:
     """Retrieve an abandoned scenario task's outcome (no GC warning)."""
     if not task.cancelled():
         task.exception()
+
+
+def _purge_plugin_modules(names: "set[str]") -> None:
+    """Pop this run's loader-created plugin modules from sys.modules.
+
+    The sim's single-use PluginLoader never rescans, so its own
+    stale-parent purge never fires — every run leaked one generation of
+    ``_mudae_plugroot_N`` modules (~21KB measured). The runner diffs
+    sys.modules around ITS discover call and pops exactly those entries
+    (loader-private state is never touched). Classes and instances stay
+    functional — only the import registry entries go, the same contract
+    as the loader's own purge.
+    """
+    for name in names:
+        sys.modules.pop(name, None)
 
 
 
@@ -221,8 +283,20 @@ class SimulationRunner:
             ) from exc
 
         # shared services over the ephemeral database, wired exactly like
-        # the production bootstrap so scenarios exercise them
-        credential_service = mods.CredentialService(db.credentials)
+        # the production bootstrap so scenarios exercise them.
+        #
+        # HERMETICITY: an explicit TEMP master-key file per run — the
+        # service default is the CWD-relative state/credentials.key, which
+        # sim runs must never create or read (that is the PRODUCTION key).
+        key_dir = tempfile.mkdtemp(prefix="sm-sim-cred-")
+        try:
+            credential_service = mods.CredentialService(
+                db.credentials,
+                key_path=os.path.join(key_dir, "credentials.key"),
+            )
+        except BaseException:
+            shutil.rmtree(key_dir, ignore_errors=True)  # ctor failure must
+            raise  # not leak the temp key dir past the main teardown
         cooldowns = mods.CooldownService(db.cooldowns)
         plugin_state = mods.PluginStateService(db.kv)
 
@@ -246,11 +320,30 @@ class SimulationRunner:
             global_layer=DEMO_PLUGIN_SETTINGS,
         )
         remote = None
+        audit = None  # bound inside the assembly try (partial-failure teardown)
+        #: loader modules created by THIS run's discover (sys.modules purge
+        #: set — see _purge_plugin_modules)
+        sim_plugin_modules: "set[str]" = set()
         try:  # assembly guard: a failure below must close the ephemeral DB
             await settings.load()
-            limiter = mods.RateLimitManager(bus, log_ratelimit, db.policies)
+            # LANE WIRED, DISABLED (production args, zero timing impact):
+            # enter() is a 0s pass-through while the gate is off, so every
+            # scenario paces exactly as before — but the lane machinery is
+            # present and scenarios can toggle it via ScenarioAPI.limiter.
+            limiter = mods.RateLimitManager(
+                bus, log_ratelimit, db.policies,
+                kv_repo=db.kv,
+                lane_enabled=False,
+                lane_prefixrate=_SIM_LANE_PREFIXRATE,
+            )
             await limiter.load_persisted()
             audit = mods.AuditRecorder(db.audit)
+            # QUEUED PERSISTENCE (production parity): drain workers for the
+            # log/audit rows BEFORE any traffic; stopped in teardown BEFORE
+            # db.close(). record() only enqueues, so scenario timing is
+            # unaffected (measured: no material duration shift).
+            await logger.start_persistence(db.logs)
+            await audit.start_persistence(db.audit)
 
             # LATE-BOUND SENDER SEAM — see module docstring
             box: Dict[str, Callable[[Any], Any]] = {}
@@ -262,12 +355,16 @@ class SimulationRunner:
                 bus, log_scheduler, limiter, sender,
                 audit=audit, history_repo=db.tasks,
             )
+            # production parity: task ids continue after the archived ones
+            # (one :memory: high-water read at boot — no timing impact)
+            await scheduler.restore_sequence()
 
             plugins_mgr = mods.PluginManager(
                 bus, log_plugins, settings, db.plugins, self._plugin_dir,
                 credential_service=credential_service, cooldowns=cooldowns,
                 plugin_state=plugin_state,
             )
+            pre_discover_modules = frozenset(sys.modules)
             try:
                 plugins_mgr.discover()
                 await plugins_mgr.persist_metadata()
@@ -276,6 +373,15 @@ class SimulationRunner:
                     f"scenario {name!r}: plugin discovery failed in "
                     f"{self._plugin_dir!r}: {exc}"
                 ) from exc
+            finally:
+                # modules the loader's synthetic parents pulled into
+                # sys.modules during THIS discover (empty prefix match
+                # when discovery failed before creating any)
+                sim_plugin_modules = {
+                    module_name
+                    for module_name in set(sys.modules) - pre_discover_modules
+                    if module_name.startswith(_PLUGIN_MODULE_PREFIX)
+                }
 
             profiles = mods.ProfileManager(db.profiles, log_profiles, db.accounts)
             await profiles.load()
@@ -342,6 +448,18 @@ class SimulationRunner:
                     ServiceLogger(logger, "remote-control"),
                 ).start()
         except BaseException as exc:
+            # partial-assembly teardown (mirrors the main finally's steps
+            # for everything that can exist at this point)
+            for stopper in (logger.stop_persistence,
+                            getattr(audit, "stop_persistence", None)):
+                if stopper is None:
+                    continue
+                try:
+                    await stopper()
+                except Exception:
+                    pass
+            _purge_plugin_modules(sim_plugin_modules)
+            shutil.rmtree(key_dir, ignore_errors=True)
             await db.close()
             if isinstance(
                 exc,
@@ -443,6 +561,9 @@ class SimulationRunner:
                     audit_entries=lambda: list(interactions),
                     settings_overrides=DEMO_PLUGIN_SETTINGS,
                     remote=remote,
+                    limiter=limiter,
+                    scheduler=scheduler,
+                    control=api,
                 )
                 async def _scenario_phase() -> None:
                     await scenario.script(facade)
@@ -498,20 +619,40 @@ class SimulationRunner:
 
         finally:
             world.cancel_pending_replies()
-            if account_started:
-                try:
-                    await accounts.stop(ACCOUNT_NAME)
-                except Exception as exc:
-                    failures.append(f"account stop failed: {exc}")
+            # PRODUCTION TEARDOWN ORDER (Framework.shutdown, audit round 3):
+            # the scheduler drains FIRST (queued tasks complete while the
+            # account can still send), THEN the accounts stop. The old
+            # order killed the senders before the queued work, so a drain
+            # could never deliver what it waited for.
+            try:
+                if remote is not None:
+                    remote.stop()
+            except Exception:
+                pass
             if scheduler_started:
                 try:
                     await scheduler.stop(drain=True)
                 except Exception as exc:
                     failures.append(f"scheduler stop failed: {exc}")
             try:
-                await db.close()
-            except Exception as exc:
-                failures.append(f"database close failed: {exc}")
+                await bus.drain()
+            except Exception:
+                pass  # bounded (2s default); teardown must never hang here
+            if account_started:
+                try:
+                    await accounts.stop(ACCOUNT_NAME)
+                except Exception as exc:
+                    failures.append(f"account stop failed: {exc}")
+            # persistence queues stop BEFORE the database closes (agent C
+            # contract) — a queued row must never drain into a dead DB
+            for label, stopper in (
+                ("log persistence", logger.stop_persistence),
+                ("audit persistence", audit.stop_persistence),
+            ):
+                try:
+                    await stopper()
+                except Exception as exc:
+                    failures.append(f"{label} stop failed: {exc}")
             unsub_audit()
             unsub_log()
             try:
@@ -520,10 +661,18 @@ class SimulationRunner:
             except Exception:  # must not leak the process-global bridge
                 pass
             try:
-                if remote is not None:
-                    remote.stop()
+                plugins_close = getattr(plugins_mgr, "close", None)
+                if callable(plugins_close):
+                    plugins_close()
             except Exception:
                 pass
+            try:
+                await db.close()
+            except Exception as exc:
+                failures.append(f"database close failed: {exc}")
+            # sim-only cleanups: this run's plugin modules and temp key
+            _purge_plugin_modules(sim_plugin_modules)
+            shutil.rmtree(key_dir, ignore_errors=True)
 
         # publish AFTER teardown: the finally block above can still append
         # failures — the event must agree with the returned report
@@ -540,6 +689,18 @@ class SimulationRunner:
 
         duration = round(time.time() - run_start, 3)
         verdict = "passed" if not failures else "failed"
+        # CAP (audit round 3): bound the dashboard payload — keep the most
+        # recent lines (failure evidence lives at the tail) and announce
+        # the truncation in the same spec-§9 line shape
+        if len(log_lines) > _LOG_LINES_CAP:
+            dropped = len(log_lines) - _LOG_LINES_CAP
+            log_lines = log_lines[-_LOG_LINES_CAP:]
+            log_lines.insert(
+                0,
+                f"0000.000s INFO    sim "
+                f"log output capped at {_LOG_LINES_CAP} line(s) "
+                f"- {dropped} earlier line(s) dropped",
+            )
         return {
             "name": name,
             "passed": not failures,

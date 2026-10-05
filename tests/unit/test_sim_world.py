@@ -408,6 +408,90 @@ class TestServerLimits(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class TestRichEventParity(unittest.IsolatedAsyncioTestCase):
+    """Edit/reaction events cross with the SAME rich shape as live."""
+
+    def _rich_world(self) -> SimWorld:
+        from adapters.model import DiscordComponent, DiscordEmbed
+
+        world = _basic_world()
+        embed = DiscordEmbed(title="roster", description="Alice\nBob")
+        button = DiscordComponent(
+            type=2, type_name="button", custom_id="roll-once", label="Roll")
+        row = DiscordComponent(
+            type=1, type_name="action_row", components=(button,))
+        world.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "rich payload",
+            author_name="owner", embeds=(embed,), components=(row,), guild_id=7,
+        )
+        return world
+
+    async def test_edit_event_carries_rich_fields(self) -> None:
+        """Edit parity: live edits carry the full convert_message shape;
+        the sim used to push a minimal 5-field DTO (embeds dropped)."""
+        world = self._rich_world()
+        seen = []
+        subscriber = type("Sub", (), {
+            "user_id": SYNTHETIC_ALPHA_ID, "receive": lambda self, m: None,
+            "on_message_edit": staticmethod(seen.append),
+        })()
+        world.subscribers.append(subscriber)
+        world.edit_message(1, "edited rich payload")
+        self.assertEqual(len(seen), 1)
+        edited = seen[0]
+        self.assertEqual(edited.content, "edited rich payload")
+        self.assertEqual(edited.embeds[0].title, "roster")
+        self.assertEqual(edited.components[0].components[0].custom_id,
+                         "roll-once")
+        self.assertEqual(edited.channel.name, "guild-channel")
+
+    async def test_edit_event_filters_author_client(self) -> None:
+        world = self._rich_world()
+        seen = []
+        subscriber = type("Sub", (), {
+            "user_id": SYNTHETIC_OWNER_ID, "receive": lambda self, m: None,
+            "on_message_edit": staticmethod(seen.append),
+        })()
+        world.subscribers.append(subscriber)  # the author's own client
+        world.edit_message(1, "self edit")
+        self.assertEqual(seen, [])  # own edits never echo back (live parity)
+
+    async def test_reaction_raw_is_handle_tuple_like_live(self) -> None:
+        """Live pushes ``(reaction, user)`` library handles — never None."""
+        world = self._rich_world()
+        seen = []
+        subscriber = type("Sub", (), {
+            "user_id": SYNTHETIC_ALPHA_ID, "receive": lambda self, m: None,
+            "on_reaction": staticmethod(lambda *args: seen.append(args)),
+        })()
+        world.subscribers.append(subscriber)
+        world.react(SYNTHETIC_OWNER_ID, 1, "👍")
+        self.assertEqual(len(seen), 1)
+        kind, mid, cid, gid, uid, emoji, raw = seen[0]
+        self.assertEqual(kind, "add")
+        self.assertEqual(uid, SYNTHETIC_OWNER_ID)
+        self.assertEqual(emoji, "👍")
+        reaction, user = raw  # a (reaction, user) tuple, live-style
+        self.assertEqual(reaction.emoji, "👍")
+        self.assertEqual(reaction.count, 1)
+        self.assertFalse(reaction.me)
+        self.assertEqual(user.id, SYNTHETIC_OWNER_ID)
+        self.assertEqual(user.name, "owner")
+
+    async def test_to_discord_message_is_the_one_boundary_builder(self) -> None:
+        """deliveries (client.receive) and edits share to_discord_message."""
+        from adapters.simulator.world import to_discord_message
+
+        world = self._rich_world()
+        message = world.journal[-1]
+        dto = to_discord_message(world, message)
+        self.assertEqual(dto.id, message.id)
+        self.assertEqual(dto.author.name, "owner")
+        self.assertEqual(dto.embeds, message.embeds)
+        self.assertEqual(dto.components, message.components)
+        self.assertEqual(dto.channel.type, "text")
+
+
 class TestChannelGone(unittest.IsolatedAsyncioTestCase):
     """channel_gone(): snapshots stop listing it, sends raise afterwards."""
 

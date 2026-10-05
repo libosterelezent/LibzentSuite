@@ -472,7 +472,8 @@ class TestLiveClientBoundary(unittest.IsolatedAsyncioTestCase):
 
         last_built = None
 
-        def __init__(self) -> None:
+        def __init__(self, **kwargs) -> None:
+            self.constructor_kwargs = kwargs
             self.closed = False
             self.user = NS(id=777)
             self._park = asyncio.Event()
@@ -704,7 +705,8 @@ class TestErrorMappingRound2(unittest.TestCase):
 class _HangingLibClient:
     """discord.Client stand-in that never reaches READY."""
 
-    def __init__(self) -> None:
+    def __init__(self, **kwargs) -> None:
+        self.constructor_kwargs = kwargs
         self.closed = False
         self.user = None
         self._park = asyncio.Event()
@@ -724,8 +726,8 @@ class _HangingLibClient:
 class _CrashingLibClient(_HangingLibClient):
     """Reaches READY, parks, then start() exits (terminal session end)."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
         self.user = NS(id=777)
 
     async def start(self, token: str) -> None:
@@ -750,9 +752,9 @@ class TestConnectedFlagRound2(unittest.IsolatedAsyncioTestCase):
 
             original_init = lib_cls.__init__
 
-            def spy_init(self):
+            def spy_init(self, **kwargs):
                 nonlocal lib_client
-                original_init(self)
+                original_init(self, **kwargs)
                 lib_client = self
 
             lib_cls.__init__ = spy_init
@@ -776,9 +778,9 @@ class TestConnectedFlagRound2(unittest.IsolatedAsyncioTestCase):
 
             original_init = lib_cls.__init__
 
-            def spy_init(self):
+            def spy_init(self, **kwargs):
                 nonlocal lib_client
-                original_init(self)
+                original_init(self, **kwargs)
                 lib_client = self
 
             lib_cls.__init__ = spy_init
@@ -834,6 +836,18 @@ class TestReferenceShapesRound2(unittest.TestCase):
         dto = convert_message(lib, dm=False)
         self.assertEqual(dto.reference.type_name, "forward")
         self.assertEqual(dto.reference.message_id, 999)
+        # round-3 F4-4: the forward snapshot hydrates reference.referenced
+        # (content visible; ids stay on the reference) — see
+        # test_forward_snapshot_hydrates_content below for the full shape
+        self.assertEqual(dto.reference.referenced.content, "forwarded")
+
+    def test_forward_without_snapshots_stays_unresolved(self) -> None:
+        lib = library_message(reference=NS(
+            message_id=999, channel_id=500, guild_id=42,
+            type=NS(name="forward"), resolved=None),
+            message_snapshots=[])
+        dto = convert_message(lib, dm=False)
+        self.assertEqual(dto.reference.type_name, "forward")
         self.assertIsNone(dto.reference.referenced)
 
     def test_reply_and_default_aliases_project_to_reply(self) -> None:
@@ -902,6 +916,517 @@ class TestReferenceShapesRound2(unittest.TestCase):
         self.assertEqual(dto.channel.name, "")
         self.assertEqual(dto.channel.type, "")
         self.assertIsNone(dto.channel.guild_id)
+
+
+class TestForwardHydrationRound3(unittest.TestCase):
+    """Round-3 F4-4: forwarded messages hydrate reference.referenced from
+    message_snapshots (fork message.py:2101; reference.resolved stays None
+    for forwards), additively, ids kept — no content invisibility."""
+
+    def _forward(self, **snapshot_overrides):
+        snapshot = dict(id=999, content="forwarded payload",
+                        embeds=[NS(title="Fwd", description="d", fields=[])],
+                        attachments=[], components=[], created_at=None)
+        snapshot.update(snapshot_overrides)
+        return library_message(
+            reference=NS(message_id=999, channel_id=500, guild_id=42,
+                         type=NS(name="forward"), resolved=None),
+            message_snapshots=[NS(**snapshot)])
+
+    def test_forward_snapshot_hydrates_content_and_embeds(self) -> None:
+        dto = convert_message(self._forward(), dm=False)
+        ref = dto.reference
+        self.assertEqual(ref.type_name, "forward")
+        self.assertEqual((ref.message_id, ref.channel_id, ref.guild_id),
+                         (999, 500, 42))
+        hydrated = ref.referenced
+        self.assertIsNotNone(hydrated)
+        self.assertEqual(hydrated.id, 999)          # ids stay on the ref
+        self.assertEqual(hydrated.channel_id, 500)
+        self.assertEqual(hydrated.guild_id, 42)
+        self.assertEqual(hydrated.content, "forwarded payload")
+        self.assertEqual(hydrated.embeds[0].title, "Fwd")
+        self.assertIsNone(hydrated.author)          # not in the snapshot
+
+    def test_reply_references_never_hydrate_from_snapshots(self) -> None:
+        lib = library_message(reference=NS(
+            message_id=999, channel_id=500, guild_id=42,
+            type=NS(name="reply"), resolved=None),
+            message_snapshots=[NS(id=999, content="not a forward")])
+        dto = convert_message(lib, dm=False)
+        self.assertIsNone(dto.reference.referenced)
+
+    def test_cached_resolved_wins_over_snapshot(self) -> None:
+        cached = library_message(id=999, content="cached original")
+        lib = self._forward()
+        lib.reference.resolved = cached
+        dto = convert_message(lib, dm=False)
+        self.assertEqual(dto.reference.referenced.content, "cached original")
+
+    def test_nested_forward_dropped_by_depth_cap(self) -> None:
+        inner = library_message(id=2, content="inner",
+                                reference=NS(message_id=1, channel_id=500,
+                                             type=NS(name="forward"),
+                                             resolved=None),
+                                message_snapshots=[NS(id=1, content="snap")])
+        outer = library_message(id=3, reference=NS(
+            message_id=2, channel_id=500, guild_id=42, resolved=inner))
+        dto = convert_message(outer, dm=False)
+        self.assertEqual(dto.reference.referenced.id, 2)
+        self.assertIsNone(           # chain cap applies before hydration
+            dto.reference.referenced.reference.referenced)
+
+
+class TestIdentifyGateScaling(unittest.TestCase):
+    """Round-3 F4-2: the gate derives its interval from the expected fleet
+    size so a synchronized (re)identify wave clears the library's 60s
+    hook ceiling (client.py:1020 wait_for around IDENTIFY)."""
+
+    def test_interval_scales_with_expected_fleet(self) -> None:
+        from adapters.discord.client import IdentifyGate
+
+        gate = IdentifyGate(5.0)
+        self.assertEqual(gate.effective_interval, 5.0)  # single account
+        gate.expected = 13
+        self.assertAlmostEqual(gate.effective_interval, 50.0 / 13, places=4)
+        gate.expected = 60
+        self.assertEqual(gate.effective_interval, 1.0)  # floor
+        gate.expected = 1000
+        self.assertEqual(gate.effective_interval, 1.0)  # floor holds
+
+    def test_base_interval_below_formula_is_kept(self) -> None:
+        from adapters.discord.client import IdentifyGate
+
+        gate = IdentifyGate(2.0)
+        gate.expected = 5  # formula says 10s — the tighter base wins
+        self.assertEqual(gate.effective_interval, 2.0)
+
+    def test_factory_counts_distinct_accounts_not_reconnects(self) -> None:
+        from adapters.discord.client import RealClientFactory
+
+        factory = RealClientFactory()
+        self.assertEqual(factory._identify_gate.expected, 1)
+        factory("alpha", "tok")
+        factory("alpha", "tok")  # reconnect of a known account
+        self.assertEqual(factory._identify_gate.expected, 1)
+        factory("beta", "tok")
+        factory("gamma", "tok")
+        self.assertEqual(factory._identify_gate.expected, 3)
+
+    def test_expected_is_dynamic_between_releases(self) -> None:
+        from adapters.discord.client import IdentifyGate
+
+        gate = IdentifyGate(5.0)
+        gate.expected = 2
+        first = gate.effective_interval
+        gate.expected = 50  # fleet grew mid-wave
+        self.assertLess(gate.effective_interval, first)
+        self.assertEqual(gate.effective_interval, 1.0)
+
+
+class TestIdentifyGateWaveBudget(unittest.IsolatedAsyncioTestCase):
+    """The wave property that matters: with N waiters released FIFO, the
+    LAST one still clears the gate within the wait budget (scaled-down
+    numbers — the production defaults are 5.0/50.0/1.0)."""
+
+    async def test_synchronized_wave_stays_under_budget(self) -> None:
+        from adapters.discord.client import IdentifyGate
+
+        gate = IdentifyGate(1.0, min_interval=0.01, wait_budget=0.30)
+        gate.expected = 8
+        loop = asyncio.get_running_loop()
+
+        async def waiter(k: int) -> float:
+            t0 = loop.time()
+            await gate.acquire(initial=True)
+            return loop.time() - t0
+
+        waits = await asyncio.gather(*(waiter(k) for k in range(8)))
+        self.assertLessEqual(max(waits), 0.30 + 0.20)  # budget + slack
+        # and the pacer actually spaced releases FIFO
+        self.assertGreater(max(waits), 0.20)
+
+
+class TestClientConstructorRound3(unittest.IsolatedAsyncioTestCase):
+    """Round-3 F4-1/F4-8: max_ratelimit_timeout IS passed (unset, the
+    library sleeps any 429 in-request — http.py:991-1018); the dead
+    intents=None fallback is gone."""
+
+    def _patch_discord(self, lib_cls):
+        mod = NS(Client=lib_cls, DMChannel=type("DMChannel", (), {}))
+        return mock.patch.dict(sys.modules, {"discord": mod})
+
+    async def test_max_ratelimit_timeout_passed_and_no_intents(self) -> None:
+        from adapters.discord.client import MAX_RATELIMIT_TIMEOUT_S, RealDiscordClient
+
+        captured: dict = {}
+
+        class LibClient(TestLiveClientBoundary._ReadyLibClient):
+            def __init__(self, **kwargs) -> None:
+                captured.update(kwargs)
+                super().__init__(**kwargs)
+
+        with self._patch_discord(LibClient):
+            client = RealDiscordClient("tok")
+            await client.connect()
+        self.assertEqual(captured, {"max_ratelimit_timeout": MAX_RATELIMIT_TIMEOUT_S})
+        self.assertEqual(captured["max_ratelimit_timeout"], 30.0)
+        self.assertNotIn("intents", captured)  # dead fallback dropped
+
+    async def test_layout_without_kwarg_still_connects(self) -> None:
+        from adapters.discord.client import RealDiscordClient
+
+        class OldLayoutClient(TestLiveClientBoundary._ReadyLibClient):
+            def __init__(self, **kwargs) -> None:
+                if "max_ratelimit_timeout" in kwargs:
+                    raise TypeError("unexpected keyword argument")
+                super().__init__(**kwargs)
+
+        with self._patch_discord(OldLayoutClient):
+            client = RealDiscordClient("tok")
+            await client.connect()  # degraded (uncapped), never broken
+        self.assertTrue(client.connected)
+
+
+class _RawEventLibClient(_HangingLibClient):
+    """discord.Client stand-in reaching READY then parking (raw-handler
+    tests drive the registered handlers by hand)."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.user = NS(id=777)
+
+    async def start(self, token: str) -> None:
+        await self.on_ready()
+        await self._park.wait()
+
+
+class TestRawEventMappingRound3(unittest.IsolatedAsyncioTestCase):
+    """Round-3 F4-3: raw payload events (which the fork dispatches for
+    EVERY dispatch, cached or not — state.py:1848/1877/1927) map onto the
+    existing callbacks; the cached-only rich handlers (state.py:1850/1882/
+    1937) suppress as duplicates of the raw publication."""
+
+    async def _connected_client(self):
+        from adapters.discord.client import RealDiscordClient
+
+        lib_cls = type("LibClient", (_RawEventLibClient,), {})
+        mod = NS(Client=lib_cls, DMChannel=type("DMChannel", (), {}))
+        with mock.patch.dict(sys.modules, {"discord": mod}):
+            client = RealDiscordClient("tok")
+            await client.connect()
+        self.assertTrue(client.connected)
+        self.addAsyncCleanup(client.disconnect)
+        return client
+
+    async def test_raw_reaction_maps_and_rich_suppresses(self) -> None:
+        client = await self._connected_client()
+        reactions: list = []
+        client.on_reaction = lambda *a: reactions.append(a)
+        payload = NS(message_id=1, channel_id=2, guild_id=3, user_id=999999,
+                     emoji=NS(name="❤", id=None, animated=False), member=None)
+        await client._client.on_raw_reaction_add(payload)
+        self.assertEqual(len(reactions), 1)
+        kind, mid, cid, gid, uid, emoji, raw = reactions[0]
+        self.assertEqual((kind, mid, cid, gid, uid, emoji), (
+            "add", 1, 2, 3, 999999, "❤"))
+        self.assertIs(raw, payload)  # runtime-only raw handle rides along
+        # the fork follows raw with the rich event for cached messages —
+        # same dispatch, must NOT double-publish
+        await client._client.on_reaction_add(
+            NS(message=NS(id=1, channel=NS(id=2, guild=NS(id=3)), guild=None),
+               emoji=NS(name="❤", id=None)),
+            NS(id=999999))
+        self.assertEqual(len(reactions), 1)
+
+    async def test_raw_reaction_remove_maps(self) -> None:
+        client = await self._connected_client()
+        reactions: list = []
+        client.on_reaction = lambda *a: reactions.append(a)
+        await client._client.on_raw_reaction_remove(NS(
+            message_id=9, channel_id=5, guild_id=None, user_id=42,
+            emoji=NS(name="kakera", id=77, animated=False)))
+        self.assertEqual(reactions[0][:6], (
+            "remove", 9, 5, None, 42, "<:kakera:77>"))
+        # rich remove for the same cached dispatch: suppressed
+        await client._client.on_reaction_remove(
+            NS(message=NS(id=9, channel=NS(id=5, guild=None), guild=None),
+               emoji=NS(name="kakera", id=77)),
+            NS(id=42))
+        self.assertEqual(len(reactions), 1)
+
+    async def test_raw_reaction_filters_self(self) -> None:
+        client = await self._connected_client()
+        reactions: list = []
+        client.on_reaction = lambda *a: reactions.append(a)
+        await client._client.on_raw_reaction_add(NS(
+            message_id=1, channel_id=2, guild_id=3, user_id=777,
+            emoji=NS(name="❤", id=None), member=None))
+        self.assertEqual(reactions, [])
+
+    async def test_raw_edit_maps_minimal_message(self) -> None:
+        client = await self._connected_client()
+        edits: list = []
+        client.on_message_edit = edits.append
+        updated = NS(id=5, content="edited late",
+                     author=NS(id=999999, name="Mudae"),
+                     channel=NS(id=500, name="grind", type=NS(name="text"),
+                                guild=NS(id=42)),
+                     guild=NS(id=42), embeds=[], components=[],
+                     attachments=[], reactions=[], reference=None,
+                     created_at=None)
+        await client._client.on_raw_message_edit(NS(
+            message_id=5, channel_id=500, guild_id=42, data={},
+            cached_message=None, message=updated))
+        self.assertEqual(len(edits), 1)
+        self.assertEqual(edits[0].id, 5)
+        self.assertEqual(edits[0].content, "edited late")
+        # the cached-only rich edit for the same dispatch: suppressed
+        await client._client.on_message_edit(
+            NS(id=1), NS(id=5, content="edited late",
+                         author=NS(id=999999),
+                         channel=NS(id=500, type=NS(name="text"),
+                                    guild=NS(id=42))))
+        self.assertEqual(len(edits), 1)
+
+    async def test_raw_edit_filters_self(self) -> None:
+        client = await self._connected_client()
+        edits: list = []
+        client.on_message_edit = edits.append
+        await client._client.on_raw_message_edit(NS(
+            message_id=5, channel_id=500, guild_id=42, data={},
+            cached_message=None,
+            message=NS(id=5, content="own edit", author=NS(id=777),
+                       channel=NS(id=500, guild=None), embeds=[],
+                       components=[], attachments=[], reactions=[],
+                       reference=None, created_at=None)))
+        self.assertEqual(edits, [])
+
+    async def test_raw_delete_publishes_uncached_and_rich_suppresses(self) -> None:
+        client = await self._connected_client()
+        deletes: list = []
+        client.on_message_delete = lambda *a: deletes.append(a)
+        # UNCACHED delete — the case the rich path silently dropped
+        await client._client.on_raw_message_delete(NS(
+            message_id=7, channel_id=500, guild_id=42, cached_message=None))
+        self.assertEqual(deletes, [(7, 500, 42, None)])
+        # cached dispatch follows (state.py:1850): must not double-publish
+        cached = NS(id=7, channel=NS(id=500), guild=NS(id=42),
+                    author=NS(id=999999))
+        await client._client.on_message_delete(cached)
+        self.assertEqual(len(deletes), 1)
+
+    async def test_raw_delete_filters_cached_self_author(self) -> None:
+        client = await self._connected_client()
+        deletes: list = []
+        client.on_message_delete = lambda *a: deletes.append(a)
+        own = NS(id=8, channel=NS(id=500), guild=NS(id=42),
+                 author=NS(id=777))
+        await client._client.on_raw_message_delete(NS(
+            message_id=8, channel_id=500, guild_id=42, cached_message=own))
+        self.assertEqual(deletes, [])
+
+
+class TestClickHardeningRound3(unittest.IsolatedAsyncioTestCase):
+    """Round-3 F4-5/F4-6: clicks are bounded (uncapped 202 retry path —
+    http.py:936-948) and a stop()-driven cancel no longer masquerades as
+    InvalidData (interactions.py:215-216 converts CancelledError)."""
+
+    class InvalidData(Exception):
+        pass
+
+    def _clickable(self, click):
+        from adapters.discord.client import RealDiscordClient
+
+        client = RealDiscordClient("tok")
+        client.connected = True
+        component = NS(custom_id="kakera:claim", click=click)
+        message = NS(id=11, components=[NS(children=[component])])
+        channel = NS(id=500, get_message=lambda mid: message)
+        client._client = NS(get_channel=lambda cid: channel)
+        client._discord = NS(
+            DMChannel=type("DMChannel", (), {}),
+            HTTPException=type("HTTPException", (Exception,), {}),
+            Forbidden=type("Forbidden", (Exception,), {}),
+            NotFound=type("NotFound", (Exception,), {}),
+        )
+        return client
+
+    async def test_click_returns_result(self) -> None:
+        async def click():
+            return "interaction-result"
+
+        client = self._clickable(click)
+        self.assertEqual(
+            await client.click_button(500, 11, "kakera:claim"),
+            "interaction-result")
+
+    async def test_click_timeout_maps_to_transient_connection_error(self) -> None:
+        import adapters.discord.client as adc
+
+        async def click():
+            await asyncio.sleep(30)  # stuck 202 retry loop
+
+        client = self._clickable(click)
+        with mock.patch.object(adc, "CLICK_TIMEOUT_S", 0.05):
+            with self.assertRaises(ConnectionError) as ctx:
+                await client.click_button(500, 11, "kakera:claim")
+        self.assertIn("did not settle", str(ctx.exception))
+
+    async def test_click_invalid_data_becomes_cancel_when_outer_cancelled(self) -> None:
+        import adapters.discord.client as adc
+
+        exc = self.InvalidData("Did not receive a response from Discord")
+
+        async def click():
+            raise exc
+
+        client = self._clickable(click)
+        with mock.patch.object(adc, "outer_cancel_pending", return_value=True):
+            with self.assertRaises(asyncio.CancelledError):
+                await client.click_button(500, 11, "kakera:claim")
+
+    async def test_click_invalid_data_without_cancel_still_propagates(self) -> None:
+        exc = self.InvalidData("Did not receive a response from Discord")
+
+        async def click():
+            raise exc
+
+        client = self._clickable(click)
+        with self.assertRaises(self.InvalidData):
+            await client.click_button(500, 11, "kakera:claim")
+
+    async def test_cancel_in_flight_click_surfaces_cancelled(self) -> None:
+        """End-to-end stop() shape: the fork's _wrapped_interaction turns
+        the click task's CancelledError into InvalidData — the adapter
+        must still surface CancelledError to ITS caller."""
+
+        async def click():
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                raise TestClickHardeningRound3.InvalidData(
+                    "Did not receive a response from Discord")
+
+        client = self._clickable(click)
+        task = asyncio.get_running_loop().create_task(
+            client.click_button(500, 11, "kakera:claim"))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+    async def test_click_rate_limited_still_maps_to_domain(self) -> None:
+        from core.errors import ServerRateLimit
+
+        class RateLimited(Exception):
+            def __init__(self):
+                super().__init__("Too many requests.")
+                self.retry_after = 12.5
+
+        async def click():
+            raise RateLimited()
+
+        client = self._clickable(click)
+        with self.assertRaises(ServerRateLimit) as ctx:
+            await client.click_button(500, 11, "kakera:claim")
+        self.assertEqual(ctx.exception.retry_after, 12.5)
+
+
+class TestHeadersCacheRound3(unittest.TestCase):
+    """Round-3 F4-7: cached super-properties are deep-copied per HIT with
+    re-rolled per-client identity UUIDs (fork fallback regenerates them
+    per request — utils.py:1804-1806), and the cache lock survives a
+    second event loop (no RuntimeError -> connect failure).
+
+    Plain TestCase on purpose: the cross-loop behaviour needs two separate
+    asyncio.run() loops, which an IsolatedAsyncioTestCase cannot host."""
+
+    class _Headers:
+        calls = 0
+        RESULT = ({
+            "client_launch_id": "launch-shared",
+            "client_heartbeat_session_id": "heartbeat-shared",
+            "browser_version": "136.0.0.0",
+        }, {"gateway": 1}, "encoded-original")
+
+        @classmethod
+        async def get_api_properties(cls, session, type_, *, proxy=None,
+                                     proxy_auth=None):
+            cls.calls += 1
+            return cls.RESULT
+
+    def setUp(self) -> None:
+        import adapters.discord.client as adc
+
+        adc._headers_patch_installed = False
+        adc._headers_cache.clear()
+        adc._headers_cache_lock = None
+        adc._headers_cache_loop = None
+        self._adc = adc
+        self._headers_cls = type("FakeHeaders", (self._Headers,), {"calls": 0})
+        self._mod = NS(utils=NS(Headers=self._headers_cls))
+        adc._install_headers_fetch_cache(self._mod)
+        self.assertTrue(adc._headers_patch_installed)
+
+    def tearDown(self) -> None:
+        self._adc._headers_patch_installed = False
+        self._adc._headers_cache.clear()
+        self._adc._headers_cache_lock = None
+        self._adc._headers_cache_loop = None
+
+    def _fetch_twice(self) -> tuple:
+        headers_cls = self._headers_cls
+
+        async def go():
+            return (await headers_cls.get_api_properties(None, "web"),
+                    await headers_cls.get_api_properties(None, "web"))
+
+        return asyncio.run(go())
+
+    def test_hit_re_rolls_identity_and_deep_copies(self) -> None:
+        first, second = self._fetch_twice()
+        self.assertEqual(self._headers_cls.calls, 1)  # second was a HIT
+        self.assertIsNot(first[0], second[0])         # deep-copied dict
+        # the STORED cache entry is a copy too — later mutations by the
+        # first caller can never leak into another account's identity
+        self.assertIsNot(
+            self._adc._headers_cache[(None, None)][1][0],
+            self._headers_cls.RESULT[0])
+        self.assertNotEqual(second[0]["client_launch_id"], "launch-shared")
+        self.assertNotEqual(second[0]["client_heartbeat_session_id"],
+                            "heartbeat-shared")
+        # shared fingerprint data survives the copy
+        self.assertEqual(second[0]["browser_version"], "136.0.0.0")
+        self.assertEqual(second[1], {"gateway": 1})
+        # the first caller kept the ORIGINAL identity values untouched
+        self.assertEqual(first[0]["client_launch_id"], "launch-shared")
+
+    def test_encoded_super_properties_stay_consistent(self) -> None:
+        import base64 as b64
+        import json as jsonlib
+
+        _, second = self._fetch_twice()
+        decoded = jsonlib.loads(b64.b64decode(second[2]).decode("utf-8"))
+        self.assertEqual(decoded["client_launch_id"],
+                         second[0]["client_launch_id"])
+        self.assertEqual(decoded["client_heartbeat_session_id"],
+                         second[0]["client_heartbeat_session_id"])
+
+    def test_lock_rebinds_across_asyncio_run_loops(self) -> None:
+        headers_cls = self._headers_cls
+
+        async def fetch() -> tuple:
+            return await headers_cls.get_api_properties(None, "web")
+
+        # loop #1 primes the cache AND its lock; loop #2 must not hit the
+        # "lock is bound to a different event loop" RuntimeError
+        first = asyncio.run(fetch())
+        second = asyncio.run(fetch())
+        self.assertEqual(headers_cls.calls, 1)
+        self.assertIsNot(first[0], second[0])
+        self.assertNotEqual(first[0]["client_launch_id"],
+                            second[0]["client_launch_id"])
 
 
 if __name__ == "__main__":

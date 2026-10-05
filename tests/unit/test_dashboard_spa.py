@@ -304,5 +304,96 @@ class TestEmptyStatesAndCaps(unittest.TestCase):
             self.assertIn('"#panel-%s"' % section, JS)
 
 
+class TestRound3SpaHardening(unittest.TestCase):
+    """Round-3 demonic-audit fixes pinned as static assertions."""
+
+    # ------------------------------------------------- accounts sig (5)
+    def test_render_sig_folds_latency_uptime_cooldowns(self):
+        # the old sig [name,status,enabled,credential] froze steady
+        # accounts: latency/uptime/cooldowns must now gate re-renders
+        self.assertIn("a.name, a.status, a.enabled, a.credential,", JS)
+        self.assertIn("a.latency_ms != null ? Math.round(a.latency_ms / 10) : null", JS)
+        self.assertIn("Math.floor((a.uptime_s ?? 0) / 60)", JS)
+        self.assertIn("a.cooldowns ?? 0]", JS)
+
+    # --------------------------------------------- tasks re-entry (6)
+    def test_activate_tasks_schedules_refresh(self):
+        self.assertIn('if (section === "tasks") scheduleTaskRefresh();', JS)
+
+    # ---------------------------------------- overview hidden skip (7)
+    def test_overview_render_skipped_when_hidden(self):
+        self.assertIn(
+            'if (!$("panel-overview").classList.contains("active")) return;', JS)
+        # ...and repainted on re-entry
+        self.assertIn('if (section === "overview") renderOverview();', JS)
+
+    # --------------------------------------------- timed_out chip (8)
+    def test_timed_out_chip_present(self):
+        self.assertIn('["timed_out", "timed_out", "st-timed_out"]', JS)
+        self.assertIn(".st-timed_out", HTML)  # CSS existed; chip now uses it
+
+    # ------------------------------------------- showModal guard (9)
+    def test_details_showmodal_guarded(self):
+        self.assertIn('if (!$("details").open) $("details").showModal();', JS)
+
+    # ------------------------------------- double-click guards (10)
+    def test_mutating_buttons_disable_in_flight(self):
+        self.assertIn("function btnGuarded(", JS)
+        self.assertIn('btnGuarded("start"', JS)
+        self.assertIn('btnGuarded("stop"', JS)
+        for bid in ("addacct", "prof-create"):
+            self.assertIn('$("' + bid + '").disabled = true', JS)
+            self.assertIn('$("' + bid + '").disabled = false', JS)
+            self.assertIn('if ($("' + bid + '").disabled) return;', JS)
+
+    # --------------------------------------- details 401 honest (11)
+    def test_plugin_state_auth_failure_distinguished(self):
+        # .catch(() => []) rendered 'no plugins' on a 401 — the catch now
+        # marks null and the dialog says 'unavailable (auth?)'
+        self.assertIn(
+            'api("/api/plugins/state?account=" + encodeURIComponent(name)).catch(() => null)',
+            JS)
+        self.assertIn("plugin states unavailable (auth?)", JS)
+        self.assertIn("no plugins attached", JS)  # [] keeps its own copy
+        self.assertNotIn(
+            'api("/api/plugins/state?account=" + encodeURIComponent(name)).catch(() => [])',
+            JS)
+
+    # ------------------------------------------- WS watchdog (12)
+    def test_connect_watchdog_armed_and_cleared(self):
+        self.assertIn("wsWatchdog", JS)
+        self.assertIn("clearTimeout(wsWatchdog)", JS)
+        self.assertIn("WS_CONNECT_TIMEOUT_MS", JS)
+        self.assertIn("ws.onclose = () => handleWsClosed();", JS)
+
+    # -------------------------------------- finite latency (13)
+    def test_latency_finite_guarded(self):
+        self.assertIn("function fmtLatency(", JS)
+        self.assertRegex(JS, r"Number\.isFinite\(n\) \? Math\.round\(n\) \+ \"ms\"")
+        # every former raw Math.round(latency_ms) site routes through it
+        self.assertNotIn("Math.round(a.latency_ms)", JS)
+        self.assertNotIn("Math.round(st.latency_ms)", JS)
+        self.assertEqual(JS.count("fmtLatency("), 4)  # def + 3 call sites
+
+    # -------------------------------- CSS gaps + dead branch (14)
+    def test_credential_status_css_classes_exist(self):
+        self.assertIn(".status.missing_credential", HTML)
+        self.assertIn(".status.invalid_credential", HTML)
+
+    def test_dead_cred_env_branch_removed(self):
+        # server guarantees db|missing — 'env' UI is dead and must stay gone
+        self.assertNotIn("cred-env", HTML)
+        self.assertNotIn('state === "env"', JS)
+
+    # ------------------------------------------ backfill merge (15)
+    def test_backfill_merges_instead_of_wiping(self):
+        self.assertIn("function buildLogLine(", JS)
+        self.assertIn("function buildAuditLine(", JS)
+        self.assertGreaterEqual(JS.count("insertBefore(div, anchor)"), 2)
+        # the wipe must be gone from both backfill paths
+        self.assertNotIn('$("logbox").innerHTML = ""', JS)
+        self.assertNotIn('$("auditbox").innerHTML = ""', JS)
+
+
 if __name__ == "__main__":
     unittest.main()

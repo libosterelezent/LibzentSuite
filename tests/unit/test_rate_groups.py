@@ -197,5 +197,83 @@ class TestGroupScope(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(g >= interval - 1e-9 for g in gaps), gaps)
 
 
+class TestGroupWireGapsWithJitter(unittest.IsolatedAsyncioTestCase):
+    """Round-3 wire-gap fix (probe P1): jitter is drawn BEFORE admission
+    and the shared group clock is stamped at grant + jitter (the expected
+    wire instant) — a much smaller second draw can no longer compress the
+    members' WIRE gap to interval - jitter_max (0.07s here) or invert it."""
+
+    async def test_group_wire_gap_holds_under_jitter_differential(self) -> None:
+        from core.rate_limit_manager.engine import ManualClock
+
+        interval = 1.5
+        # seed 15: draws ~1.948 then ~0.517 in (0.5, 2.0) — under the old
+        # post-grant-only jitter the second wire left just 0.07s after the
+        # first (configured spacing 1.5s)
+        manager = SleepAdvanceManager(
+            EventBus(), StubLogger(), None, clock=ManualClock(0.0),
+            jitter_seed=15,
+        )
+        manager.set_policy_values(ACTION, interval, 0.5, 2.0)
+        manager.set_account_group("alpha", "grinders")
+        manager.set_account_group("beta", "grinders")
+
+        wires = []
+
+        async def send(account):
+            await manager.acquire(ACTION, account=account)
+            wires.append((account, manager._clock.now()))
+
+        await send("alpha")
+        await send("beta")
+        await send("alpha")
+        gaps = [wires[i + 1][1] - wires[i][1] for i in range(len(wires) - 1)]
+        self.assertTrue(all(g >= interval - 1e-9 for g in gaps), gaps)
+        # the alternating members really serialized on one shared clock
+        self.assertEqual([a for a, _ in wires], ["alpha", "beta", "alpha"])
+
+
+class TestGroupStampCleanup(unittest.IsolatedAsyncioTestCase):
+    """Round-3: ('group:<x>', action) stamps must not outlive the group —
+    when the LAST member leaves (set_account_group(None) or prune), the
+    shared stamps go with it; a re-created same-named group starts fresh."""
+
+    async def test_last_member_leaving_drops_group_stamps(self) -> None:
+        manager = make_group_manager()
+        manager.set_policy_values(ACTION, 2.0)
+        manager.set_account_group("alpha", "g")
+        manager.set_account_group("beta", "g")
+        await manager.acquire(ACTION, account="alpha")  # stamps group:g
+        manager.set_account_group("alpha", None)  # one member remains
+        self.assertIn(("group:g", ACTION), manager._last_fire)
+        manager.set_account_group("beta", None)  # LAST member out
+        self.assertNotIn(("group:g", ACTION), manager._last_fire)
+        # a re-created same-named group is not delayed by the old stamps
+        manager.set_account_group("gamma", "g")
+        grant = await manager.acquire(ACTION, account="gamma")
+        self.assertEqual(grant.wait_s, 0.0)
+
+    async def test_group_stamps_survive_while_members_remain(self) -> None:
+        manager = make_group_manager()
+        manager.set_policy_values(ACTION, 2.0)
+        manager.set_account_group("alpha", "g")
+        manager.set_account_group("beta", "g")
+        await manager.acquire(ACTION, account="alpha")
+        manager.set_account_group("alpha", "other")  # alpha moves away
+        self.assertIn(("group:g", ACTION), manager._last_fire)  # beta still g
+        await manager.acquire(ACTION, account="beta")  # still spaced by g
+        self.assertEqual(manager._clock.now(), 2.0)
+
+    async def test_prune_account_drops_orphaned_group_stamps(self) -> None:
+        manager = make_group_manager()
+        manager.set_policy_values(ACTION, 2.0)
+        manager.set_account_group("alpha", "g")
+        await manager.acquire(ACTION, account="alpha")
+        self.assertIn(("group:g", ACTION), manager._last_fire)
+        await manager.prune_account("alpha")  # last (only) member removed
+        self.assertNotIn(("group:g", ACTION), manager._last_fire)
+        self.assertEqual(manager.account_groups(), {})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -39,4 +39,5 @@ persisted accounts) → sender bound → scheduler start → RemoteControl →
 ControlAPI → surface (REPL / one-shot CLI / dashboard / headless).
 
 Full digest: ``knowledgebase/ARCHITECTURE.md`` and
-``knowledgebase/RUNTIME_LIFECYCLE.md``.
+``knowledgebase/RUNTIME_LIFECYCLE.md`` — if you maintain a local
+knowledgebase; it is not shipped in a fresh clone.

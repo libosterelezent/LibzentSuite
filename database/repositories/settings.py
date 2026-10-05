@@ -67,10 +67,10 @@ class AccountSettingsRepository(BaseRepository):
     async def delete(self, name: str, key: str) -> bool:
         """Remove one setting; True when a row was actually deleted."""
         async with self._tx(f"delete account setting {name!r}.{key}") as conn:
-            cur = await conn.execute(
+            async with conn.execute(
                 "DELETE FROM account_settings WHERE account = ? AND key = ?", (name, key)
-            )
-            return cur.rowcount > 0
+            ) as cur:
+                return cur.rowcount > 0
 
     # -------------------------------------------------- spine compat helper
     async def list_accounts(self) -> List[str]:

@@ -241,11 +241,21 @@ adapters/              Discord boundary: discord/ (live, lazy import) +
 interfaces/            cli/ (REPL + one-shot) + dashboard/ (SPA + REST + WS)
 plugins/               roll (roulette automation) + soulcopy (export)
 benchmark/             the benchmark subsystem (scenarios, profiling modes)
-tests/unit|integration|simulation|stress   1191-test offline suite
+tests/unit|integration|simulation|stress   1264-test offline suite
 config/                global settings, rate policies, account files
 main.py                entrypoint
 ```
 
+The dashboard serves a sidebar SPA (Overview, Accounts, Plugins, Profiles,
+Rate Limits, Cooldowns, Tasks, Logs, Simulation, Advanced) on `http://127.0.0.1:8070`
+with live WebSocket push; set `DASHBOARD_TOKEN` in `.env` to require auth.
+
+Dependencies: Python ≥ 3.10 + `aiosqlite` + `cryptography` (see
+`requirements.txt`). Live mode additionally needs the user-account client
+fork `discord.py-self` (`pip install discord.py-self`), imported lazily —
+simulations/tests never require it.
+
+>>>>>>> 4703931 (hardening: round-3 omni audit — 20 investigators, 10 fix agents, adversarial re-audit)
 ## Architecture: who calls what
 
 ```
@@ -304,9 +314,14 @@ Plugin -> PluginServices.send_message()
 | **per-account/group** | `(group:<sync_group>, action)` | group members serialize on ONE shared clock: `A → [limit] → B → [limit] → A` |
 | **server-wide lane** | fleet | every outbound action, one at a time, spaced by `prefixrate` |
 
-All three compose (strictest wins), then jitter applies after the grant.
-Server 429s always earn at least one paced retry; `FlowBlocked` aborts only
-that account's flow with a human reason.
+All three compose (the strictest wait wins). Jitter is drawn BEFORE
+admission and slept after the grant, and every spacing clock (pacing and
+lane alike) is stamped at grant + jitter — the expected wire instant — so
+consecutive wire sends stay ≥ the effective interval apart (jitter can
+never compress the gap). Server 429s always earn at least one paced
+retry; `FlowBlocked` aborts only that account's flow with a human reason.
+Groups are registered automatically from each account's `sync_group`
+(pure metadata — no API involved).
 
 ## Lifecycle hardening
 
@@ -355,9 +370,14 @@ profile/tracemalloc output).
 
 ## Simulation & benchmarks
 
-`adapters/simulator/` is a complete in-memory Discord world; scenarios:
+`adapters/simulator/` is a complete in-memory Discord world (users, channels,
+DM pairs, history, a scripted responder, one-shot 429s, channel deletion).
+`SimulationRunner` boots a FULL ephemeral framework per run (with its own
+temp master key — never touching production state) and produces a timed
+execution log, the audit trail and pass/fail checks. Scenarios:
 `soulcopy_basic`, `soulcopy_multichunk`, `pacing_respected`,
-`server_429_respected`, `channel_gone_aborts`, `control_mention`.
+`server_429_respected`, `channel_gone_aborts`, `control_mention`,
+`estop_halt`.
 
 `benchmark/` (see `benchmark/README.md`): scenarios incl. cold boot,
 N-account start/stop, restart/delete churn, message bursts; loop-lag

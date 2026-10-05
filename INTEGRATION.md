@@ -165,7 +165,7 @@ class RateLimitManager:
         # waits for: server cooldowns (account+global) THEN pacing (min interval since
         # last fire of (account,action)) THEN applies random jitter sleep.
         # Concurrent waiters granted in priority order (heap like old limiter).
-        # Publishes RateLimitTriggered when wait_s > 0 (reason "pacing"|"server").
+        # Publishes RateLimitTriggered when wait_s > 0 (reason "pacing"|"server"|"lane").
     def report_server_limit(self, account, action, retry_after: float, global_=False) -> None
         # account-scoped cooldown; global_=True ALSO cools down EVERY account (fleet-wide)
     def cooldown_remaining(self, account=None, action=None) -> float
@@ -214,8 +214,9 @@ class TaskScheduler:
 Semantics: **one worker per account** (lazy spawn; concurrency=1 per account =
 never two in-flight requests for one account — port lane ideas from
 `git show HEAD:core/send_engine.py`), cross-account fairness by priority.
-Timeout via `asyncio.wait_for`. Retry backoff `retry_backoff * 2**attempt`
-capped at `max_backoff`. Persist finished tasks to `history_repo`
+Timeout via `asyncio.wait_for`. Retry backoff `retry_backoff * 2**(attempts-1)`
+capped at `max_backoff` (attempts counts retries used; the first retry
+waits exactly `retry_backoff`). Persist finished tasks to `history_repo`
 (`tasks.add` / see database section). Before calling sender, run
 `limiter.acquire(...)` and set `task.grant_wait_ms/grant_jitter_ms`.
 On `ServerRateLimit`: `limiter.report_server_limit(task.account, task.action,
@@ -241,6 +242,18 @@ class PluginBase(abc.ABC):
 class PluginServices(Protocol):        # implemented by account_manager (A6)
     async def send_message(self, channel_id, content, *, priority=Priority.LOW) -> DiscordMessage
     async def send_dm(self, user_id, content, *, priority=Priority.LOW) -> DiscordMessage
+    async def open_dm(self, user_id) -> int            # resolve (opening if needed) the DM channel id
+    async def add_reaction(self, channel_id, message_id, emoji, *, priority=Priority.NORMAL) -> None
+    async def click_button(self, channel_id, message_id, custom_id, *, priority=Priority.NORMAL) -> None
+    async def fetch_user(self, user_id) -> Any | None  # None when the client cannot resolve them
+    async def cooldown_set(self, key, duration_s, *, source="plugin", reason="", metadata=None) -> dict
+    async def cooldown_remaining(self, key) -> float   # 0.0 when none/expired
+    async def cooldown_active(self, key) -> bool
+    async def cooldown_clear(self, key) -> bool
+    async def cooldown_list(self) -> list[dict]        # ACTIVE cooldowns, soonest first
+    async def state_get(self, key, default=None) -> Any
+    async def state_set(self, key, value) -> None      # JSON-serializable value
+    async def state_delete(self, key) -> bool
     async def wait_for_message(self, check, timeout) -> MessageReceived | None
     async def collect_messages(self, check, idle_timeout) -> list[MessageReceived]
     def publish(self, event: Event) -> None
@@ -275,10 +288,14 @@ Plugins to deliver (A3):
   behavior/flow-safety, but sends go through `ctx.services.send_message /
   send_dm` (task pipeline) and collection through
   `ctx.services.collect_messages`. Keep `FlowBlocked` catch-all contract.
-- `plugins/roll/` — small example: owner trigger word (setting, default
-  `"roll"`) sends a configurable command (setting `command`, default `"$m"`)
-  to the triggering channel via `services.send_message`. Demonstrates
-  plugin-level rate policies.
+- `plugins/roll/` (v2.0.0) — Mudae roulette automation: an owner trigger
+  word (setting `trigger`, default `"roll"`) starts a paced send loop of the
+  configured roulette command (setting `command`, default `"$wa"` of
+  $wa/$wg/$wx/$w/$ha/$hg/$hx/$h/$ma/$mg/$mx/$m); the plugin parses Mudae's
+  responses for cooldowns ("**N** min"), userstack ("2 ROLLS LEFT" →
+  `$us 20`) and the key-per-hour limit (`$ru`), persists cooldowns via
+  `cooldown_*` and userstack availability via `state_*`. Stop word:
+  setting `stop_trigger`, default `"rollstop"`.
 
 ### core/profile_manager (A6)
 ```python
@@ -297,7 +314,8 @@ plugin list, unknown-role warning behavior).
 
 ### core/account_manager (A6)
 ```python
-class AccountStatus(str, Enum): created connecting running reconnecting stopped failed
+class AccountStatus(str, Enum): created connecting running reconnecting stopped
+    failed missing_credential invalid_credential
 @dataclass Account:  # first-class object: persistent vs runtime split (spec §1)
     record: AccountRecord          # persistent (database/models.py)
     runtime: AccountRuntime        # client, status, cache, started_at, stats, last_error
@@ -327,7 +345,8 @@ class AccountManager:
   "uptime_s"}, "identity": {"name", "discord_id"}, "runtime": {"cached_guilds",
   "cached_channels", "cached_dms", "cache_source": "client cache (READY)"},
   "plugins": [{"name","enabled"}...], "profiles": [...],
-  "rate_limit": {action: {"interval","jitter","source":"inherited from global"|...}}}`
+  "rate_limit": {action: {"interval","jitter","source":"inherited from global"|...}},
+  "credential": "db"|"env"|None}`
   Everything runtime-y comes ONLY from the live client's cached state
   (`client.cached_snapshot()`); mark it clearly.
 - `start()`: client = `client_factory(name, token)`; connect; ingest
@@ -405,16 +424,16 @@ latency_ms/user_id/on_message/on_disconnect), `ClientFactory` protocol
   credential <name> <token>|enable <name> <on|off>|start [name|all]|
   stop [name|all]|estop <name>`,
   `credentials status|import-env [--overwrite]`,
-  `cooldowns clear <account> <plugin> [key]`,
+  `cooldowns [account]|clear <account> <plugin> [key]`,
   `plugins list|state <account>|enable <acct> <plugin>|disable <acct> <plugin>|
   settings <account>|set <account> <plugin> <key> <value>`,
   `profiles list|create <name> <plugin...>|delete <name>|assign <acct> <profile>|
   unassign <acct> <profile>`,
-  `ratelimit show|set <action> <interval> [jitter_min jitter_max] [level owner]|
+  `ratelimit show|stats|set <action> <interval> [jitter_min jitter_max] [level owner]|
   clear <level> <owner> <action>|effective <action> [account] [plugin]|warnings|
   floor <seconds>|lane [on [rate]|off|rate <s>]`,
   `tasks list [status]|cancel <id>|history [n]|cancel-matching [account] [plugin]`,
-  `simulation list|run [name]`, `logs [n] [account]`, `audit [n] [account]`,
+  `simulation list|run [name]`, `logs [n] [account] [severity]`, `audit [n] [account]`,
   `estop [resume]` (global emergency stop), `status`, `help`, `quit`.
   Strict arg validation with usage messages; strict bool parsing
   (`parse_bool` from core.api). Port command-engine patterns from
@@ -447,7 +466,8 @@ latency_ms/user_id/on_message/on_disconnect), `ClientFactory` protocol
   exactly per spec §12: Overview, Accounts (list + details modal per §8),
   Plugins (installed + auto-generated settings editors from the schema),
   Profiles (list + assignments), Rate Limits (global + per-account editors +
-  visualization of stats/warnings), Tasks (running/queued/history + cancel),
+  visualization of stats/warnings), Cooldowns (active persistent cooldowns),
+  Tasks (running/queued/history + cancel),
   Logs (live structured tail), Simulation (scenario list, run button,
   results incl. timed log lines), Advanced (DB info, floor, emergency stop).
   Live WS push: `{"type":"stats",...}` every second, `{"type":"log", entry}`,

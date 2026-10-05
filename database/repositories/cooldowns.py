@@ -91,10 +91,10 @@ class CooldownRepository(BaseRepository):
         """Remove one cooldown; True when it existed."""
         async with self._tx(
                 f"clear cooldown {account}/{plugin}/{cooldown_key}") as conn:
-            cur = await conn.execute(
+            async with conn.execute(
                 "DELETE FROM cooldowns WHERE account=? AND plugin=? AND cooldown_key=?",
-                (account, plugin, cooldown_key))
-            return cur.rowcount > 0
+                (account, plugin, cooldown_key)) as cur:
+                return cur.rowcount > 0
 
     async def clear_expired_for(self, account: str, plugin: str,
                                 cooldown_key: str, now: float) -> bool:
@@ -105,26 +105,26 @@ class CooldownRepository(BaseRepository):
         destroy that extension.
         """
         async with self._tx("lazy clear cooldown") as conn:
-            cur = await conn.execute(
+            async with conn.execute(
                 "DELETE FROM cooldowns WHERE account=? AND plugin=? "
                 "AND cooldown_key=? AND expires_at<=?",
-                (account, plugin, cooldown_key, now))
-            return cur.rowcount > 0
+                (account, plugin, cooldown_key, now)) as cur:
+                return cur.rowcount > 0
 
     async def clear_expired(self, now: Optional[float] = None) -> int:
         """Delete every expired row; returns how many (boot cleanup)."""
         now = time.time() if now is None else now
         async with self._tx("clear expired cooldowns") as conn:
-            cur = await conn.execute(
-                "DELETE FROM cooldowns WHERE expires_at<=?", (now,))
-            return cur.rowcount
+            async with conn.execute(
+                "DELETE FROM cooldowns WHERE expires_at<=?", (now,)) as cur:
+                return cur.rowcount
 
     async def delete_account(self, account: str) -> int:
         """Drop every cooldown owned by an account (deletion cascade)."""
         async with self._tx(f"delete cooldowns for {account!r}") as conn:
-            cur = await conn.execute(
-                "DELETE FROM cooldowns WHERE account=?", (account,))
-            return cur.rowcount
+            async with conn.execute(
+                "DELETE FROM cooldowns WHERE account=?", (account,)) as cur:
+                return cur.rowcount
 
     @staticmethod
     def _row_dict(row: Any) -> Dict[str, Any]:

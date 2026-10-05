@@ -138,11 +138,11 @@ class RatePolicyRepository(BaseRepository):
         """
         owner_key = "" if level == "global" else (owner or "")
         async with self._tx(f"delete policy {level}/{owner_key}/{action}") as conn:
-            cur = await conn.execute(
+            async with conn.execute(
                 "DELETE FROM rate_limit_policies WHERE level = ? AND owner = ? AND action = ?",
                 (level, owner_key, action),
-            )
-            return cur.rowcount > 0
+            ) as cur:
+                return cur.rowcount > 0
 
     async def delete_account(self, account: str) -> int:
         """Delete every account-scoped policy row for one account name.
@@ -159,17 +159,17 @@ class RatePolicyRepository(BaseRepository):
             + "/%"
         )
         async with self._tx(f"delete policies for account {account!r}") as conn:
-            cur = await conn.execute(
+            async with conn.execute(
                 "DELETE FROM rate_limit_policies WHERE level = ? AND owner = ?",
                 ("account", account),
-            )
-            removed += cur.rowcount
-            cur = await conn.execute(
+            ) as cur:
+                removed += cur.rowcount
+            async with conn.execute(
                 "DELETE FROM rate_limit_policies WHERE level = ? "
                 "AND owner LIKE ? ESCAPE '\\'",
                 ("account_plugin", pattern),
-            )
-            removed += cur.rowcount
+            ) as cur:
+                removed += cur.rowcount
         return removed
 
     # ---------------------------------------------------------------- read

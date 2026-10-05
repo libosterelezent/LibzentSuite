@@ -65,11 +65,11 @@ class CacheRepository(BaseRepository):
     async def delete(self, account: str, kind: str, key: str) -> bool:
         """Drop one cached value; True when a row existed."""
         async with self._tx(f"api cache delete {account}/{kind}/{key}") as conn:
-            cur = await conn.execute(
+            async with conn.execute(
                 "DELETE FROM api_cache WHERE account=? AND kind=? AND key=?",
                 (account, kind, str(key)),
-            )
-            return cur.rowcount > 0
+            ) as cur:
+                return cur.rowcount > 0
 
     async def drop_account(self, account: str, kind: Optional[str] = None) -> int:
         """Invalidate every cached entity for one account (optionally one
@@ -77,15 +77,15 @@ class CacheRepository(BaseRepository):
         removed (full) or a target went stale (kind-scoped maintenance)."""
         async with self._tx(f"api cache drop {account}") as conn:
             if kind is None:
-                cur = await conn.execute(
+                async with conn.execute(
                     "DELETE FROM api_cache WHERE account=?", (account,)
-                )
-            else:
-                cur = await conn.execute(
-                    "DELETE FROM api_cache WHERE account=? AND kind=?",
-                    (account, kind),
-                )
-            return cur.rowcount
+                ) as cur:
+                    return cur.rowcount
+            async with conn.execute(
+                "DELETE FROM api_cache WHERE account=? AND kind=?",
+                (account, kind),
+            ) as cur:
+                return cur.rowcount
 
     async def counts(self) -> Dict[str, int]:
         """Row counts per account (diagnostics for the Advanced page)."""

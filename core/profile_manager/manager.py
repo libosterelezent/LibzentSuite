@@ -30,7 +30,7 @@ from ..errors import ProfileError
 #: tests; only ACCOUNT names may start with a digit). fullmatch (NOT
 #: ``...$`` anchoring): ``$`` also matches before a trailing newline, which
 #: let names like ``"basic\n"`` through the old pattern.
-NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+from ..names import PROFILE_NAME_RE as NAME_RE
 
 
 class ProfileManager:

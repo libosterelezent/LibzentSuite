@@ -22,6 +22,11 @@ from typing import Any, Dict, List
 
 LOG = logging.getLogger("slaughtermudae.config")
 
+#: actions a rate policy can pace (spec §5) — used to warn about typo keys
+#: in flat-mode policy files (unknown keys would otherwise silently become
+#: never-matching action policies)
+KNOWN_ACTIONS = ("message", "dm", "reaction", "button")
+
 #: conservative defaults when rate_limits.json is absent (spec example:
 #: base interval 2.0s, random jitter 0.0-0.5s; floor is 1.5s everywhere)
 DEFAULT_POLICIES: Dict[str, Dict[str, Any]] = {
@@ -96,6 +101,13 @@ def load_config(config_dir: str | Path) -> ProjectConfig:
                     "must be a JSON object")
             policies["accounts"].setdefault(account, {}).update(actions or {})
     else:  # tolerate a flat {action: {...}} file -> global level
+        for key in raw_policies:
+            if key not in KNOWN_ACTIONS:
+                LOG.warning(
+                    "rate_limits.json: flat-mode key %r is not a known "
+                    "action %s — a typo would define a policy that never "
+                    "matches anything (keeping it as written)", key,
+                    list(KNOWN_ACTIONS))
         policies["global"].update(raw_policies)
     if isinstance(lane, dict) and lane:
         # server-wide sequential send lane config (kv runtime state wins on
@@ -134,7 +146,13 @@ def load_config(config_dir: str | Path) -> ProjectConfig:
     if accounts_dir.is_dir():
         seen = set()
         for path in sorted(accounts_dir.glob("*.json")):
-            data = _read_json(path)
+            try:
+                data = _read_json(path)
+            except ValueError as exc:
+                # one corrupt file must not brick the whole boot — skip it
+                # like the name/duplicate errors below, loudly
+                LOG.warning("skipping unreadable account file %s: %s", path, exc)
+                continue
             if not isinstance(data, dict) or "name" not in data:
                 LOG.warning("skipping account file without 'name': %s", path)
                 continue

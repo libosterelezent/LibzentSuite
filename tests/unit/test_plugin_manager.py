@@ -103,12 +103,14 @@ class FakeServices:
         return {}
 
 
-def make_manager(repo=None, global_layer=None, plugin_dir=None) -> tuple:
+def make_manager(repo=None, global_layer=None, plugin_dir=None,
+                 dispatch_grace_s=1.0) -> tuple:
     bus = EventBus()
     settings = SettingsManager(bus, logging.getLogger("t"), global_layer=global_layer)
     manager = PluginManager(
         bus, logging.getLogger("t"), settings, plugin_repo=repo,
         plugin_dir=str(plugin_dir if plugin_dir is not None else FIXTURES),
+        dispatch_grace_s=dispatch_grace_s,
     )
     return manager, bus, settings
 
@@ -564,6 +566,124 @@ class TestDispatchHardening(unittest.IsolatedAsyncioTestCase):
         manager, _, _ = make_manager()
         await manager.attach_account("alpha", allowed={"spy", "no-such-plugin"})
         self.assertEqual(manager.allowed_names("alpha"), ["spy"])
+
+
+class TestRound3DispatchHardening(unittest.IsolatedAsyncioTestCase):
+    """Round-3: services-None dispatch window, ghost writes past
+    deactivation, on_load double-fire."""
+
+    async def test_dispatch_skipped_when_services_popped(self) -> None:
+        """deactivate_account pops the services entry BEFORE its hook loop;
+        a dispatch task starting inside that window used to pass the
+        enabled+active gate, resolve services=None and crash the handler
+        with an AttributeError the plugin got blamed for — it must skip."""
+        manager, bus, _ = make_manager()
+        await manager.attach_account("alpha")
+        await manager.activate_account("alpha", FakeServices("alpha"))
+        spy = manager._accounts["alpha"]["spy"]
+        services_seen: list = []
+
+        async def handler(ctx, event):
+            services_seen.append(ctx.services)
+
+        spy.instance.handle_event = handler
+        manager._services.pop("alpha")  # simulate the deactivate window:
+        # services gone while the runtime still reads enabled+active
+        bus.publish_nowait(MessageReceived(
+            account="alpha", message_id=20, channel_id=5, author_id=9,
+            content="x",
+        ))
+        await asyncio.sleep(0.05)
+        self.assertEqual(services_seen, [])   # skipped, not fed services=None
+        self.assertEqual(spy.error_count, 0)  # no plugin blamed
+        self.assertIsNone(spy.last_error)
+
+    async def test_deactivate_joins_inflight_handler_before_returning(self) -> None:
+        """A handler sleeping past the deactivate call must COMPLETE before
+        deactivate_account returns — its writes land BEFORE the removal
+        cascades the account manager runs next, never after them (ghost
+        rows a re-created same-name account would inherit)."""
+        manager, bus, _ = make_manager()
+        await manager.attach_account("alpha")
+        await manager.activate_account("alpha", FakeServices("alpha"))
+        inst = manager._accounts["alpha"]["spy"].instance
+        started = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def handler(ctx, event):
+            started.set()
+            await asyncio.sleep(0.2)  # sleeping past the deactivate call
+            finished.set()            # the "late write"
+
+        inst.handle_event = handler
+        bus.publish_nowait(MessageReceived(
+            account="alpha", message_id=21, channel_id=5, author_id=9,
+            content="x",
+        ))
+        await started.wait()
+        await manager.deactivate_account("alpha")  # bounded-join (1s grace)
+        self.assertTrue(finished.is_set())
+        self.assertIsNone(manager._pending_by_account.get("alpha"))
+        self.assertIn("on_unload", inst.calls)  # hooks still ran, after quiesce
+
+    async def test_deactivate_cancels_straggler_after_grace(self) -> None:
+        """A handler that outlives the grace window is cancelled: the
+        deactivation returns bounded, and the straggler never writes."""
+        manager, bus, _ = make_manager(dispatch_grace_s=0.1)
+        await manager.attach_account("alpha")
+        await manager.activate_account("alpha", FakeServices("alpha"))
+        inst = manager._accounts["alpha"]["spy"].instance
+        started = asyncio.Event()
+        ghost_writes: list = []
+
+        async def handler(ctx, event):
+            started.set()
+            await asyncio.sleep(10)           # never finishes within grace
+            ghost_writes.append("ghost-row")  # must NEVER land
+
+        inst.handle_event = handler
+        bus.publish_nowait(MessageReceived(
+            account="alpha", message_id=22, channel_id=5, author_id=9,
+            content="x",
+        ))
+        await started.wait()
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        await manager.deactivate_account("alpha")
+        self.assertLess(loop.time() - t0, 2.0)  # grace + cancel, not 10s
+        await asyncio.sleep(0.2)
+        self.assertEqual(ghost_writes, [])       # cancelled, not landed
+        self.assertIsNone(manager._pending_by_account.get("alpha"))
+
+    async def test_concurrent_enable_fires_on_load_once(self) -> None:
+        """set_enabled(True) landing on an await point of activate_account
+        used to re-fire on_load (both read loaded=False before either set
+        it). The loaded flag is now marked BEFORE the hook is awaited."""
+        manager, bus, _ = make_manager()
+        await manager.attach_account("alpha")
+        spy = manager._accounts["alpha"]["spy"]
+        inst = spy.instance
+        gate = asyncio.Event()
+        loads: list = []
+
+        async def slow_on_load(ctx):
+            loads.append("on_load")
+            await gate.wait()  # activation parked mid-on_load
+
+        inst.on_load = slow_on_load
+        activation = asyncio.create_task(
+            manager.activate_account("alpha", FakeServices("alpha")))
+        while not loads:  # activation is parked inside on_load
+            await asyncio.sleep(0.01)
+        # the racing toggle cycle that used to double-fire the load hook
+        await manager.set_enabled("alpha", "spy", False)
+        await manager.set_enabled("alpha", "spy", True)
+        self.assertEqual(loads, ["on_load"])  # no second concurrent fire
+        gate.set()
+        await activation
+        self.assertEqual(loads, ["on_load"])
+        self.assertEqual(inst.calls.count("on_load"), 0)  # spy hook replaced
+        self.assertEqual(inst.calls.count("on_enable"), 2)  # 1st + re-enable
 
 
 class FakeKv:

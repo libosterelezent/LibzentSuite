@@ -25,7 +25,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, List, Optional, Tuple
 
 from adapters.base import DiscordMessage
-from adapters.simulator.world import SimWorld, WorldMessage
+from adapters.simulator.world import SimWorld, WorldMessage, to_discord_message
 from core.errors import ServerRateLimit, TargetGone
 
 #: synthetic latency band (milliseconds) — heartbeat stand-in
@@ -107,6 +107,19 @@ class SimClient:
         return self._world.channel_gone(channel_id)
 
     # -------------------------------------------------------------- messaging
+    def _guard_connection(self) -> None:
+        """Raise ConnectionError when offline — checked FIRST.
+
+        GUARD ORDER (audit round 3 fix, live parity): the live adapter's
+        ``_require_client()`` runs before ANY channel state is resolved, so
+        a send from a disconnected client classifies as ConnectionError
+        even when the target channel is also gone. The sim used to check
+        the channel first, so its retry-classification tests lied about
+        which failure live code would see.
+        """
+        if not self.connected:
+            raise ConnectionError("sim client not connected")
+
     def _guard_send(self, channel_id: Optional[int]) -> Optional[ServerRateLimit]:
         """Common send pre-checks: connection + queued one-shot server limit.
 
@@ -127,17 +140,22 @@ class SimClient:
         """Deliver a guild-channel message through the world.
 
         Raises ConnectionError when offline, ServerRateLimit for a queued
-        one-shot 429, TargetGone when the channel vanished.
+        one-shot 429, TargetGone when the channel vanished — checked in
+        that order, exactly like the live adapter (session first, channel
+        resolution second, rate state last: a one-shot 429 is never
+        consumed on a send whose target is already gone).
         """
-        self._guard_channel(channel_id)  # channel existence FIRST (live
-        limit = self._guard_send(channel_id)  # resolves the channel before
-        if limit is not None:  # any rate state is consumed)
+        self._guard_connection()
+        self._guard_channel(channel_id)
+        limit = self._guard_send(channel_id)
+        if limit is not None:
             raise limit
         sent = self._world.deliver(channel_id, self.user_id, content)
         return self._as_discord_message(sent, dm=False)
 
     async def send_dm(self, user_id: int, content: str) -> DiscordMessage:
         """Deliver a DM to a user through the world's deterministic DM channel."""
+        self._guard_connection()
         channel_id = self._world.dm_channel_for(self.user_id, user_id)
         self._guard_channel(channel_id)
         limit = self._guard_send(channel_id)
@@ -147,11 +165,26 @@ class SimClient:
         return self._as_discord_message(sent, dm=True)
 
     async def send_typing(self, channel_id: int) -> None:
-        """Record a typing indicator (no world effect; observable in tests)."""
+        """Record a typing indicator (no world effect; observable in tests).
+
+        Live parity (audit round 3): ConnectionError when offline, and a
+        silent skip for channels the session does not know (the live
+        adapter never fetches a channel just to type into it) — an
+        offline client no longer leaves phantom typing evidence behind.
+        """
+        self._guard_connection()
+        if channel_id not in self._world.channels:
+            return
         self.typing_calls.append((channel_id, time.monotonic()))
 
     async def open_dm(self, user_id: int) -> int:
-        """The (deterministic, symmetric) DM channel id for a user pair."""
+        """The (deterministic, symmetric) DM channel id for a user pair.
+
+        Live parity: ConnectionError when offline (the live adapter
+        resolves the session before any REST touch, so a disconnected
+        client never opens — or records — a DM).
+        """
+        self._guard_connection()
         self.open_dm_calls.append(int(user_id))  # observable for API-trim tests
         return self._world.dm_channel_for(self.user_id, user_id)
 
@@ -182,13 +215,14 @@ class SimClient:
             for cid, name in self._world.channels.items()
             if not self._world.dm_channels.get(cid, False)
         ]
+        # DM entries carry EXACTLY the live contract {id, recipient} — the
+        # extra "name" key was sim-only shape drift (audit round 3)
         dm_channels = [
             {
                 "id": cid,
-                "name": name,
                 "recipient": self._dm_recipient(cid),
             }
-            for cid, name in self._world.channels.items()
+            for cid in self._world.channels
             if self._world.dm_channels.get(cid, False)
             and any(self.user_id in pair for pair in self._world.dm_pairs_of(cid))
         ]
@@ -224,44 +258,12 @@ class SimClient:
 
         Rich boundary: whatever the world row carries (embeds, components,
         attachments, reactions, author/guild, reference) crosses into the
-        DTO untouched — same contract as the live adapter.
+        DTO untouched — same contract as the live adapter, and now the
+        SAME builder the world uses for edit events (to_discord_message)
+        so every sim crossing is shape-identical.
         """
         if self.on_message is not None and message.author_id != self.user_id:
-            from adapters.model import (
-                DiscordChannel,
-                DiscordMessageReference,
-                DiscordUser,
-            )
-
-            self.on_message(
-                DiscordMessage(
-                    id=message.id,
-                    channel_id=message.channel_id,
-                    author_id=message.author_id,
-                    content=message.content,
-                    dm=message.dm,
-                    guild_id=message.guild_id,
-                    author=DiscordUser(
-                        id=message.author_id, name=message.author_name),
-                    channel=DiscordChannel(
-                        id=message.channel_id,
-                        name=self._world.channels.get(message.channel_id, ""),
-                        type="private" if message.dm else "text",
-                        guild_id=message.guild_id,
-                    ),
-                    embeds=tuple(message.embeds),
-                    components=tuple(message.components),
-                    attachments=tuple(message.attachments),
-                    reactions=tuple(message.reactions),
-                    reference=(
-                        DiscordMessageReference(
-                            message_id=message.reference_message_id,
-                            channel_id=message.channel_id,
-                            guild_id=message.guild_id)
-                        if message.reference_message_id else None
-                    ),
-                )
-            )
+            self.on_message(to_discord_message(self._world, message))
 
     # ------------------------------------------------- capability actions
     async def add_reaction(self, channel_id: int, message_id: int, emoji: str) -> Any:

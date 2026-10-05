@@ -20,6 +20,9 @@ Design decisions (documented per the INTEGRATION ground rules):
 from .engine import (
     Clock,
     Grant,
+    KV_FLOOR_KEY,
+    KV_LANE_KEY,
+    KV_REMOVED_KEY,
     ManualClock,
     RateLimitManager,
     SystemClock,
@@ -37,4 +40,7 @@ __all__ = [
     "Clock",
     "SystemClock",
     "ManualClock",
+    "KV_LANE_KEY",
+    "KV_FLOOR_KEY",
+    "KV_REMOVED_KEY",
 ]

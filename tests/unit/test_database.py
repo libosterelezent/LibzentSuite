@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -299,6 +300,36 @@ class TestPlugins(AsyncDatabaseTestCase):
         self.assertEqual(await self.db.plugins.settings("beta", "roll"), {"command": "$m"})
         all_layers = await self.db.plugins.all_account_settings()
         self.assertEqual(all_layers["beta"]["soulcopy"]["trigger"], "go2")
+
+    async def test_delete_setting(self) -> None:
+        """Round 3 (F7 unpin support): remove ONE override; missing rows
+        are a clean False (idempotent), sibling rows stay untouched."""
+        await self.db.plugins.set_setting("alpha", "soulcopy", "trigger", "go")
+        await self.db.plugins.set_setting("alpha", "soulcopy", "other", 2)
+        await self.db.plugins.set_setting("beta", "soulcopy", "trigger", "x")
+        self.assertTrue(
+            await self.db.plugins.delete_setting("alpha", "soulcopy", "trigger"))
+        self.assertIsNone(
+            await self.db.plugins.setting("alpha", "soulcopy", "trigger"))
+        self.assertEqual(  # same (account, plugin): only the one key went
+            await self.db.plugins.settings("alpha", "soulcopy"), {"other": 2})
+        self.assertEqual(  # same key elsewhere is untouched
+            await self.db.plugins.setting("beta", "soulcopy", "trigger"), "x")
+        self.assertFalse(  # idempotent on a missing row
+            await self.db.plugins.delete_setting("alpha", "soulcopy", "trigger"))
+        self.assertFalse(
+            await self.db.plugins.delete_setting("ghost", "plugin", "key"))
+        self.assertNotIn(  # gone from the preload layer too
+            "trigger",
+            (await self.db.plugins.all_account_settings())["alpha"]["soulcopy"])
+
+    async def test_delete_setting_signature_pinned(self) -> None:
+        """SettingsManager (F7) calls this duck-typed — parameter names
+        and order ARE the contract."""
+        import inspect
+        sig = inspect.signature(type(self.db.plugins).delete_setting)
+        self.assertEqual(list(sig.parameters),
+                         ["self", "account", "plugin", "key"])
 
 
 class TestRatePolicies(AsyncDatabaseTestCase):
@@ -607,6 +638,111 @@ class TestConnectionRobustness(AsyncDatabaseTestCase):
         with self.assertRaises(ANY_DB_ERROR):
             await asyncio.get_running_loop().run_in_executor(None, other_loop)
         self.assertEqual(await self.db.kv.get("bind"), "1")  # still usable
+
+
+class TestCrossLoopLifecycle(AsyncDatabaseTestCase):
+    """Round 3: one Database, sequential event loops.
+
+    connect() binds/checks the loop BEFORE opening anything, and a clean
+    close() reborn the loop-bound primitives (guard, connect lock,
+    migrate lock). So: a closed Database is reusable on a NEW loop, and
+    a connect() from a foreign loop while open fails loud at CONNECT —
+    never after silently opening a second aiosqlite worker thread
+    (non-daemon: a leak hangs interpreter shutdown).
+    """
+
+    @staticmethod
+    async def _await_thread_settle(before: set, timeout: float = 5.0) -> set:
+        """Wait until no NEW named threads remain (worker exit is async)."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            current = {t.name for t in threading.enumerate()}
+            if not (current - before):
+                return current
+            await asyncio.sleep(0.02)
+        return {t.name for t in threading.enumerate()}
+
+    async def test_connect_after_close_works_in_new_loop(self) -> None:
+        db = Database(Path(self.tmp.name) / "reuse.db")
+        await db.connect()
+        await db.kv.set("gen", "1")
+        await db.close()
+        self.assertFalse(db.connection.connected)
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, lambda: None)  # warm executor pool
+        before = {t.name for t in threading.enumerate()}
+        readback: list = []
+
+        def second_loop() -> None:
+            async def go() -> None:
+                await db.connect()
+                readback.append(await db.kv.get("gen"))  # same file
+                await db.kv.set("gen2", "2")
+                await db.close()
+            asyncio.run(go())
+
+        await loop.run_in_executor(None, second_loop)
+        after = await self._await_thread_settle(before)
+        self.assertEqual(readback, ["1"])
+        self.assertFalse(db.connection.connected)
+        self.assertEqual(after - before, set())  # no leftover worker thread
+
+    async def test_connect_from_second_loop_while_open_raises_no_leak(self) -> None:
+        db = Database(Path(self.tmp.name) / "open.db")
+        await db.connect()
+        await db.kv.set("bind", "1")  # guard bound to THIS loop
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, lambda: None)
+        before = {t.name for t in threading.enumerate()}
+
+        def second_loop() -> None:
+            async def go() -> None:
+                await db.connect()  # must fail BEFORE opening any worker
+            asyncio.run(go())
+
+        with self.assertRaises(ANY_DB_ERROR) as ctx:
+            await loop.run_in_executor(None, second_loop)
+        self.assertIn("multiple event loops", str(ctx.exception))
+        after = await self._await_thread_settle(before)
+        self.assertEqual(after - before, set())  # refused -> nothing leaked
+        # the ORIGINAL connection is untouched and still usable
+        await db.kv.set("usable", "1")
+        self.assertEqual(await db.kv.get("usable"), "1")
+        await db.close()
+
+
+class TestWriteSelectSnapshotHygiene(AsyncDatabaseTestCase):
+    """Round 3 regression for the round-2 SQLITE_BUSY class: a SELECT
+    fully consumed inside write() (cursor closed via ``async with``)
+    must not pin this connection's read snapshot across ANOTHER
+    connection's commit — the next BEGIN IMMEDIATE here succeeds."""
+
+    async def test_select_in_write_releases_snapshot_across_other_commit(self) -> None:
+        import aiosqlite
+
+        await self.db.kv.set("seed", "1")
+        other = await aiosqlite.connect(str(self.path), isolation_level=None)
+        try:
+            async with self.db.connection.write() as conn:
+                async with conn.execute(
+                    "SELECT value FROM kv WHERE key = 'seed'"
+                ) as cur:
+                    self.assertEqual(len(await cur.fetchall()), 1)
+            # a commit by the OTHER connection lands between our writes
+            await other.execute(
+                "INSERT INTO kv (key, value) VALUES ('ext', '\"ext-v\"')")
+            # a pinned stale snapshot would fail here BUSY immediately —
+            # not retryable by busy_timeout
+            async with self.db.connection.write() as conn:
+                await conn.execute(
+                    "INSERT INTO kv (key, value) VALUES ('mine', '\"mine-v\"')")
+        finally:
+            await other.close()
+        self.assertEqual(await self.db.kv.get("ext"), "ext-v")
+        self.assertEqual(await self.db.kv.get("mine"), "mine-v")
 
 
 class TestTwoDatabasesSameFile(AsyncDatabaseTestCase):

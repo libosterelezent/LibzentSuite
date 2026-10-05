@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set
 
 from core.errors import PluginError
 from core.event_bus import (
@@ -73,13 +73,16 @@ class PluginManager:
         credential_service: Any = None,
         cooldowns: Any = None,
         plugin_state: Any = None,
+        dispatch_grace_s: float = 1.0,
     ) -> None:
         """``credential_service``/``cooldowns``/``plugin_state`` accept the
         framework's shared services (CredentialService, CooldownService,
         PluginStateService) for symmetry with the AccountManager wiring;
         they are stored as attributes (defaults None — back-compatible) and
         the per-plugin facades the plugins actually use are built by the
-        account manager's services factory.
+        account manager's services factory. ``dispatch_grace_s`` bounds how
+        long :meth:`deactivate_account` waits for in-flight dispatch tasks
+        before cancelling them (round-3 ghost-write finding).
         """
         self._bus = bus
         self._logger = logger
@@ -95,6 +98,10 @@ class PluginManager:
         self._services: Dict[str, Callable[[str], Any]] = {}
         #: strong refs for fire-and-forget dispatch tasks (no GC mid-flight)
         self._pending: Set[asyncio.Task] = set()
+        #: account -> in-flight dispatch tasks (quiesced on deactivation)
+        self._pending_by_account: Dict[str, Set[asyncio.Task]] = {}
+        #: bounded grace for in-flight handlers during deactivate_account
+        self._dispatch_grace_s = dispatch_grace_s
         # every account-scoped Discord event type routes to plugins; new
         # types are ADDITIVE — plugins filter by isinstance in handle_event
         self._unsubscribe = bus.subscribe(MessageReceived, self._on_message)
@@ -236,6 +243,9 @@ class PluginManager:
         """
         self._accounts.pop(account, None)
         self._services.pop(account, None)
+        # dispatch bookkeeping: any task still queued dies at the services
+        # gate in _dispatch (the account's services are gone)
+        self._pending_by_account.pop(account, None)
 
     async def activate_account(self, account: str, services: Any) -> None:
         """Resolve settings + fire on_load/on_enable for enabled plugins.
@@ -287,17 +297,31 @@ class PluginManager:
         # fork the documented live-settings view
         runtime.settings.clear()
         runtime.settings.update(resolved)
-        ctx = self._context(account, runtime, services)
+        ctx = self._context(account, runtime, services,
+                            explicit=self._explicit_keys(account, runtime.name))
+        first_load = not runtime.loaded
+        if first_load:
+            # DOUBLE-FIRE GUARD (round-3): mark loaded BEFORE awaiting
+            # on_load. Two racing activations (e.g. a set_enabled(True)
+            # landing on an await point of activate_account) used to both
+            # read ``loaded=False`` and fire on_load twice.
+            runtime.loaded = True
+        load_done = False
         try:
-            first_load = not runtime.loaded
             if first_load:
                 await self._hook(account, runtime, runtime.instance.on_load, ctx, "on_load")
-                runtime.loaded = True
+                load_done = True
             await self._hook(account, runtime, runtime.instance.on_enable, ctx, "on_enable")
             runtime.active = True
             if first_load:  # a re-enable is not a load: PluginEnabledChanged
                 self._bus.publish_nowait(PluginLoaded(account=account, plugin=runtime.name))
+        except asyncio.CancelledError:
+            if first_load and not load_done:
+                runtime.loaded = False  # cancelled mid-load: retry-able
+            raise
         except Exception:
+            if first_load and not load_done:
+                runtime.loaded = False  # a failed load stays retry-able
             runtime.enabled = False  # _hook already recorded the error
             self._logger.error(
                 "plugin %s failed to activate on %s; disabled", runtime.name, account
@@ -317,6 +341,7 @@ class PluginManager:
                 pass
         for task in [t for t in list(self._pending) if not t.done()]:
             task.cancel()
+        self._pending_by_account.clear()
 
     async def deactivate_account(self, account: str) -> None:
         """Fire on_disable + on_unload for the account's active plugins.
@@ -332,6 +357,12 @@ class PluginManager:
         if runtimes is None:
             return
         factory = self._services.pop(account, None)
+        # GHOST-WRITE GUARD (round-3): bounded-join this account's in-flight
+        # dispatch tasks BEFORE the hooks run. A handler that outlives the
+        # deactivation could cooldown_set/state_set for a REMOVED account
+        # AFTER the account manager's removal cascades ran — ghost rows a
+        # re-created same-name account would silently inherit.
+        await self._quiesce_dispatch(account)
         for runtime in runtimes.values():
             services = factory(runtime.name) if factory is not None else None
             ctx = self._context(account, runtime, services)
@@ -349,6 +380,30 @@ class PluginManager:
                 runtime.loaded = False
                 self._bus.publish_nowait(PluginUnloaded(account=account, plugin=runtime.name))
             runtime.active = False
+
+    async def _quiesce_dispatch(self, account: str) -> None:
+        """Bounded-join the account's in-flight dispatch tasks.
+
+        Waits up to ``dispatch_grace_s`` for every running handler, then
+        cancels the stragglers and reaps them — deactivation (and the
+        account manager's removal cascades that follow it) must be the
+        LAST writer for the account, never racing a parked handler.
+        """
+        tasks = self._pending_by_account.get(account)
+        if not tasks:
+            return
+        in_flight = [t for t in tasks if not t.done()]
+        if not in_flight:
+            return
+        _, stragglers = await asyncio.wait(in_flight, timeout=self._dispatch_grace_s)
+        for task in stragglers:
+            task.cancel()
+        if stragglers:
+            self._logger.info(
+                "cancelled %d dispatch task(s) still running on %s after "
+                "%.2fs grace", len(stragglers), account, self._dispatch_grace_s,
+            )
+            await asyncio.gather(*stragglers, return_exceptions=True)
 
     # ------------------------------------------------------------- mutation
     async def set_enabled(self, account: str, plugin: str, enabled: bool) -> None:
@@ -384,6 +439,20 @@ class PluginManager:
         )
         runtime.settings[key] = validated  # live view (contexts share the dict)
         return validated
+
+    async def clear_setting(self, account: str, plugin: str, key: str) -> Any:
+        """Remove one account-layer override; live view falls back to the
+        next layer (global/plugin default) — mirrors :meth:`set_setting`."""
+        runtime = self._runtime(account, plugin)
+        schema = self._schema_for(plugin)
+        effective = await self._settings.clear_plugin_setting(
+            account, plugin, key, schema
+        )
+        if schema:
+            runtime.settings[key] = effective  # live view (shared dict)
+        else:
+            runtime.settings.pop(key, None)
+        return effective
 
     # ---------------------------------------------------------------- state
     def states(self, account: str) -> List[Dict[str, Any]]:
@@ -430,7 +499,19 @@ class PluginManager:
             return
         task = asyncio.get_running_loop().create_task(self._dispatch(event, runtimes))
         self._pending.add(task)
-        task.add_done_callback(self._pending.discard)
+        self._pending_by_account.setdefault(event.account, set()).add(task)
+        task.add_done_callback(
+            lambda t, account=event.account: self._reap_dispatch(account, t)
+        )
+
+    def _reap_dispatch(self, account: str, task: asyncio.Task) -> None:
+        """Drop a finished dispatch task from both bookkeeping sets."""
+        self._pending.discard(task)
+        tasks = self._pending_by_account.get(account)
+        if tasks is not None:
+            tasks.discard(task)
+            if not tasks:
+                self._pending_by_account.pop(account, None)
 
     async def _dispatch(self, event: MessageReceived, runtimes: Dict[str, PluginRuntime]) -> None:
         """Await every enabled plugin's handle_event, isolated per plugin.
@@ -439,8 +520,17 @@ class PluginManager:
         account was detached (or re-attached with fresh runtimes) before
         this task got scheduled, the snapshot is STALE and dispatching to
         it would fire handlers on an account that no longer exists — skip.
+
+        SERVICES GATE (round-3): ``deactivate_account`` pops the services
+        entry BEFORE its hook loop runs; a dispatch task that starts inside
+        that window used to pass the enabled+active gate, resolve
+        ``services=None`` and crash the handler with an AttributeError the
+        plugin got blamed for. Skip instead — the account is going down.
         """
         if self._accounts.get(event.account) is not runtimes:
+            return
+        factory = self._services.get(event.account)
+        if factory is None:
             return
         for runtime in runtimes.values():
             if not runtime.enabled or not runtime.active:
@@ -449,12 +539,16 @@ class PluginManager:
             # cached per runtime — all its inputs are stable per activation
             # (settings stays the LIVE dict, services the same facade), and
             # rebuilding it per event × per plugin sat on the hottest path.
+            # (round-3: a ctx rebuilt with no services mid-deactivate is
+            # SKIPPED, never delivered — the plugin would crash on None)
             ctx = runtime.ctx
             if ctx is None or ctx.services is None:
                 services = self._services.get(
                     event.account, lambda _n: None)(runtime.name)
                 ctx = runtime.ctx = self._context(
                     event.account, runtime, services)
+                if ctx.services is None:
+                    continue
             try:
                 await runtime.instance.handle_event(ctx, event)
             except asyncio.CancelledError:
@@ -468,6 +562,28 @@ class PluginManager:
                 )
 
     # ------------------------------------------------------------ internals
+    def _explicit_keys(self, account: str, plugin: str) -> Optional[FrozenSet[str]]:
+        """Setting keys the user set EXPLICITLY in any settings layer.
+
+        A resolved value equal to the schema default is ambiguous: it may
+        be the default OR an explicit user choice that happens to match it
+        (roll's userstack auto-disable vs. an explicit re-enable, round-3).
+        The layer VIEWS carry the distinction; None when the settings
+        manager exposes no views (stripped-down test stacks).
+        """
+        views = getattr(self._settings, "layers_view", None)
+        if not callable(views):
+            return None
+        try:
+            layers = views()
+        except Exception:
+            return None
+        explicit = set(layers.get("global", {}).get(plugin, {}))
+        explicit.update(
+            layers.get("accounts", {}).get(account, {}).get(plugin, {})
+        )
+        return frozenset(explicit)
+
     def _runtime(self, account: str, plugin: str) -> PluginRuntime:
         runtimes = self._accounts.get(account)
         if runtimes is None or plugin not in runtimes:
@@ -498,7 +614,8 @@ class PluginManager:
             return services
         return lambda _name: services
 
-    def _context(self, account: str, runtime: PluginRuntime, services: Any) -> Any:
+    def _context(self, account: str, runtime: PluginRuntime, services: Any,
+                 explicit: Optional[frozenset] = None) -> Any:
         from core.plugin_base import PluginContext
 
         return PluginContext(
@@ -507,6 +624,7 @@ class PluginManager:
             settings=runtime.settings,
             services=services,
             logger=logging.getLogger(f"slaughtermudae.{account}.{runtime.name}"),
+            explicit_settings=explicit,
         )
 
 

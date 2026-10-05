@@ -7,13 +7,19 @@ control frames other than ping/close are ignored per opcode.
 
 Ported VERBATIM from the audited original (`git show HEAD:dashboard/ws.py`)
 — it survived 3 audit rounds; do not "improve" it without re-auditing.
+
+ROUND-3 AUTHORIZED DEVIATION (the only one): ``encode_close_frame`` now
+carries a status code (struct-packed >H; was a codeless ``88 00`` while
+comments claimed 1007), plus ``echo_close_code`` for answering a peer
+close, and ``decode_frame`` rejects non-minimal extended length
+encodings. Everything else stays verbatim.
 """
 from __future__ import annotations
 
 import base64
 import hashlib
 import struct
-from typing import Tuple
+from typing import Optional, Tuple
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -76,12 +82,35 @@ def encode_pong(payload: bytes) -> bytes:
     return encode_frame(OP_PONG, payload)
 
 
-def encode_close_frame() -> bytes:
+def encode_close_frame(code: Optional[int] = 1000) -> bytes:
     """
-    Encode an empty CLOSE frame (RFC 6455 §5.5.1) — sent before the
-    socket is dropped after a protocol violation or a peer close.
+    Encode a CLOSE frame (RFC 6455 §5.5.1) carrying ``code`` (struct-packed
+    ``>H``). Sent before the socket is dropped after a protocol violation
+    (1002), invalid UTF-8 in a TEXT frame (1007), or as the echo of a
+    peer-initiated close. ``code=None`` keeps the codeless form (the only
+    legal answer to a peer close that carried no code).
     """
-    return encode_frame(OP_CLOSE, b"")
+    if code is None:
+        return encode_frame(OP_CLOSE, b"")
+    return encode_frame(OP_CLOSE, struct.pack(">H", code))
+
+
+def echo_close_code(payload: bytes) -> Optional[int]:
+    """Status code to answer a peer CLOSE frame with (RFC 6455 §5.5.1/§7.4).
+
+    A well-formed peer code is echoed verbatim; a codeless close is
+    answered codeless (None). A malformed payload (1 byte) or a forbidden
+    code (outside 1000..4999, or the never-on-the-wire 1005/1006/1015)
+    fails the connection as 1002 (protocol error).
+    """
+    if not payload:
+        return None
+    if len(payload) == 1:
+        return 1002
+    (code,) = struct.unpack(">H", payload[:2])
+    if not 1000 <= code <= 4999 or code in (1005, 1006, 1015):
+        return 1002
+    return code
 
 
 def decode_frame(buffer: bytes) -> Tuple[int, bool, bytes, int]:
@@ -111,11 +140,15 @@ def decode_frame(buffer: bytes) -> Tuple[int, bool, bytes, int]:
         if len(buffer) < offset + 2:
             raise IncompleteFrame("incomplete extended length")
         (length,) = struct.unpack(">H", buffer[offset:offset + 2])
+        if length < 126:  # ROUND-3: non-minimal encoding (16-bit form < 126)
+            raise ProtocolViolation("non-minimal 16-bit length encoding")
         offset += 2
     elif length == 127:
         if len(buffer) < offset + 8:
             raise IncompleteFrame("incomplete extended length")
         (length,) = struct.unpack(">Q", buffer[offset:offset + 8])
+        if length < 65536:  # ROUND-3: non-minimal encoding (64-bit form < 2^16)
+            raise ProtocolViolation("non-minimal 64-bit length encoding")
         offset += 8
     if length > MAX_FRAME_BYTES:
         raise ProtocolViolation(f"frame length {length} exceeds {MAX_FRAME_BYTES} bytes")

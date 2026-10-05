@@ -9,10 +9,15 @@ Method map (grouped like the dashboard navigation, spec §12):
   status            overview: accounts (+credential status, cooldown count)
                     + limits + tasks + warnings
   accounts_*        list/add/remove/info/enable/start/stop/emergency-stop
+                    (+ account_setting_get/account_setting_set for the
+                    framework per-account knobs)
   credentials       set_credential / credential_status / import_env over the
                     encrypted CredentialService (values NEVER echoed back)
   cooldowns_*       list/clear persistent cooldowns (CooldownService)
   plugins_*         manifests/state/enable/settings/set-setting
+                    (set-setting value null = plugins_clear_setting: the
+                    account-layer override is DELETED, unmasking the lower
+                    layers — not pinned to the schema default)
   profiles_*        list/create/delete/assign/unassign
   ratelimit_*       policies/set/clear/effective/stats/warnings/set-floor
                     (+lane; every mutation persists through the db repos)
@@ -21,10 +26,11 @@ Method map (grouped like the dashboard navigation, spec §12):
   logs_tail / audit_tail
   emergency_stop_all / shutdown
 
-Management audit: every management mutation emits an audit row via the
-recorder (``action="mgmt:*"``, ``direction="out"``, note naming the calling
-surface). Credential material NEVER reaches the audit trail — account names
-and counters only.
+Management audit: account, credential and emergency-stop mutations emit an
+audit row via the recorder (``action="mgmt:*"``, ``direction="out"``, note
+naming the calling surface); other management calls currently do not.
+Credential material NEVER reaches the audit trail — account names and
+counters only.
 
 Manager migration note: the managers are moving to aiosqlite-backed async
 persistence; call sites below tolerate BOTH sync and async manager results
@@ -37,6 +43,13 @@ import inspect
 import logging
 import time as _time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+from .rate_limit_manager import (
+    KV_FLOOR_KEY,
+    KV_LANE_KEY,
+    KV_REMOVED_KEY,
+    MAX_PREFIXRATE,
+)
 
 if TYPE_CHECKING:  # duck-typed at runtime — no manager imports here
     from .account_manager import AccountManager
@@ -53,8 +66,9 @@ if TYPE_CHECKING:  # duck-typed at runtime — no manager imports here
 
 LOG = logging.getLogger("slaughtermudae.api")
 
-#: kv key persisting the sequential send-lane configuration
-LANE_KV_KEY = "ratelimit:lane"
+#: back-compat alias for the kv key persisting the send-lane configuration
+#: (the canonical constants live in core.rate_limit_manager)
+LANE_KV_KEY = KV_LANE_KEY
 
 
 async def _resolved(outcome: Any) -> Any:
@@ -123,6 +137,10 @@ class ControlAPI:
         # externally-edited state; 0 disables — tests/sims want determinism)
         self._reconcile_interval_s = float(reconcile_interval_s)
         self._last_reconcile = -1e9  # first status() call reconciles
+        #: serializes the cleared-policy tombstone read-modify-write: two
+        #: concurrent ratelimit_clear calls raced the kv read/write and
+        #: lost tombstones, resurrecting cleared defaults on the next boot
+        self._tombstone_lock = asyncio.Lock()
 
     # ---------------------------------------------------------------- status
     async def status(self) -> Dict[str, Any]:
@@ -250,6 +268,10 @@ class ControlAPI:
         name = out.get("name", payload["name"]) if isinstance(out, dict) else payload["name"]
         self._audit_mgmt(name, "mgmt:account.created", surface)
         if credential is not None:
+            # TOCTOU: an interleaved remove_account between the add above
+            # and the store below would re-create an orphan credential row
+            # for a dead account — re-check the registration first
+            await _resolved(self._accounts.get(name))  # AccountError if gone
             await self._credentials_svc.store(name, credential)
             self._audit_mgmt(name, "mgmt:credential.stored", surface)
             if isinstance(out, dict):
@@ -318,6 +340,34 @@ class ControlAPI:
         self._audit_mgmt(name, "mgmt:account.estop", surface)
         return out
 
+    # ------------------------------------------------------ account settings
+    async def account_setting_get(self, name: str) -> Dict[str, Any]:
+        """Resolved framework account settings (reconnect policy...).
+
+        Facade over SettingsManager.account_settings — validated against
+        the ACCOUNT_SETTINGS schema (stored junk is warned about and
+        ignored by the manager, never echoed raw).
+        """
+        settings = await _resolved(self._settings.account_settings(name))
+        return {"account": name, "settings": dict(settings or {})}
+
+    async def account_setting_set(
+        self, name: str, key: str, value: Any, surface: str = "api"
+    ) -> Dict[str, Any]:
+        """Set ONE framework account setting (validated + persisted).
+
+        Raises SettingsValidationError (a ValueError) for unknown keys or
+        bad values — surfaces render it like any other 400. Emits
+        SettingChanged on success; the account manager picks reconnect
+        changes up on the next reconnect decision.
+        """
+        validated = await _resolved(
+            self._settings.set_account_setting(name, key, value)
+        )
+        self._audit_mgmt(name, "mgmt:account.setting", surface,
+                         extra=f"key={key}")
+        return {"account": name, "key": key, "value": validated}
+
     # ----------------------------------------------------------- credentials
     async def accounts_set_credential(
         self, name: str, credential: str, surface: str = "api"
@@ -378,9 +428,8 @@ class ControlAPI:
     async def _env_account_tokens(self) -> Dict[str, str]:
         """account -> token mapping from the legacy .env view (no DB writes).
 
-        Prefers an explicit ``credentials.account_tokens()`` aggregate when
-        the Credentials object grows one; otherwise enumerates REGISTERED
-        accounts and resolves each ``DISCORD_TOKEN_<NAME>`` entry.
+        Enumerates REGISTERED accounts and resolves each
+        ``DISCORD_TOKEN_<NAME>`` entry (the migration-only accessor).
         """
         if self._credentials is None:
             return {}
@@ -401,12 +450,6 @@ class ControlAPI:
                         credentials = fresh
                 except Exception:
                     pass  # unreadable now: fall back to the boot snapshot
-        explicit = getattr(credentials, "account_tokens", None)
-        if callable(explicit):
-            mapping = explicit()
-            if isinstance(mapping, dict):
-                return {str(k): v for k, v in mapping.items() if v}
-            return {}
         token_for = getattr(credentials, "token_for", None)
         if not callable(token_for):
             return {}
@@ -519,9 +562,40 @@ class ControlAPI:
     async def plugins_set_setting(
         self, account: str, plugin: str, key: str, value: Any
     ) -> Dict[str, Any]:
-        """Change ONE plugin setting for ONE account (validated + persisted)."""
+        """Change ONE plugin setting for ONE account (validated + persisted).
+
+        ``value=None`` means RESET: the account-layer override is DELETED
+        (:meth:`plugins_clear_setting`), unmasking the global layer /
+        defaults — a null must not pin the schema default over a non-default
+        global value (the dashboard set-setting route forwards null as-is).
+        """
+        if value is None:
+            return await self.plugins_clear_setting(account, plugin, key)
         out = await self._plugins.set_setting(account, plugin, key, value)
         return {"account": account, "plugin": plugin, "key": key, "value": out}
+
+    async def plugins_clear_setting(
+        self, account: str, plugin: str, key: str
+    ) -> Dict[str, Any]:
+        """Reset ONE plugin setting: DELETE the account-layer override.
+
+        Delegates to PluginManager.clear_setting when it exists (it also
+        refreshes the running plugin's live settings view); otherwise
+        falls back to SettingsManager.clear_plugin_setting (persistence +
+        memory layers + SettingChanged; the live runtime view catches up
+        on the next boot/resolve). Returns the newly-effective value.
+        """
+        clear = getattr(self._plugins, "clear_setting", None)
+        if callable(clear):
+            effective = await _resolved(clear(account, plugin, key))
+        else:
+            effective = await _resolved(
+                self._settings.clear_plugin_setting(account, plugin, key)
+            )
+        return {
+            "account": account, "plugin": plugin, "key": key,
+            "cleared": True, "value": effective,
+        }
 
     # -------------------------------------------------------------- profiles
     async def profiles_list(self) -> List[Dict[str, Any]]:
@@ -645,10 +719,17 @@ class ControlAPI:
         """
         if enabled is None and prefixrate is None:
             raise ValueError("provide 'enabled' and/or 'prefixrate'")
-        if enabled is not None:
-            self._limiter.set_lane_enabled(self._parse_lane_bool(enabled))
-        if prefixrate is not None:
-            self._limiter.set_lane_prefixrate(self._parse_lane_number(prefixrate))
+        # validate BOTH inputs BEFORE any mutation: a bad prefixrate used
+        # to raise after set_lane_enabled had already armed the lane —
+        # error returned, lane left ON, nothing persisted
+        parsed_enabled = self._parse_lane_bool(enabled) \
+            if enabled is not None else None
+        parsed_rate = self._parse_lane_number(prefixrate) \
+            if prefixrate is not None else None
+        if parsed_enabled is not None:
+            self._limiter.set_lane_enabled(parsed_enabled)
+        if parsed_rate is not None:
+            self._limiter.set_lane_prefixrate(parsed_rate)
         lane = self._limiter.lane_status()
         await self._persist_lane(lane)
         return lane
@@ -703,7 +784,7 @@ class ControlAPI:
         if kv is None:
             return
         try:
-            await kv.set("ratelimit:floor", float(floor))
+            await kv.set(KV_FLOOR_KEY, float(floor))
         except Exception as exc:
             LOG.warning("could not persist rate-limit floor: %s", exc)
 
@@ -712,25 +793,32 @@ class ControlAPI:
     ) -> None:
         """Tombstone bookkeeping: a CLEARED first-boot default must never be
         re-seeded from the config file on the next boot; an explicit SET
-        clears the tombstone again."""
+        clears the tombstone again.
+
+        The read-modify-write is serialized by ``_tombstone_lock``: two
+        concurrent clears raced the kv get/set and each rewrote the list
+        without the other's entry — lost tombstones resurrected cleared
+        defaults on boot.
+        """
         kv = getattr(self._database, "kv", None) \
             if self._database is not None else None
         if kv is None:
             return
         key = f"{level}|{owner or ''}|{action}"
-        try:
-            raw = await kv.get("ratelimit:removed") or []
-            entries = list(raw) if isinstance(raw, list) else []
-            if removed and key not in entries:
-                entries.append(key)
-            if not removed and key in entries:
-                entries.remove(key)
-            await kv.set("ratelimit:removed", entries)
-            sync = getattr(self._limiter, "set_removed_defaults", None)
-            if callable(sync):
-                sync(entries)
-        except Exception as exc:
-            LOG.warning("could not persist cleared-policy tombstone: %s", exc)
+        async with self._tombstone_lock:
+            try:
+                raw = await kv.get(KV_REMOVED_KEY) or []
+                entries = list(raw) if isinstance(raw, list) else []
+                if removed and key not in entries:
+                    entries.append(key)
+                if not removed and key in entries:
+                    entries.remove(key)
+                await kv.set(KV_REMOVED_KEY, entries)
+                sync = getattr(self._limiter, "set_removed_defaults", None)
+                if callable(sync):
+                    sync(entries)
+            except Exception as exc:
+                LOG.warning("could not persist cleared-policy tombstone: %s", exc)
 
     @staticmethod
     def _parse_lane_bool(value: Any) -> bool:
@@ -740,10 +828,21 @@ class ControlAPI:
 
     @staticmethod
     def _parse_lane_number(value: Any) -> float:
+        """Validate prefixrate FULLY (type + engine range) BEFORE any lane
+        mutation — the engine's own RatePolicyError used to land after
+        ``enabled`` had already been applied (partial mutation)."""
         try:
             number = float(value)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"field 'prefixrate' must be a number, got {value!r}") from exc
+        if number != number or number in (float("inf"), float("-inf")):
+            raise ValueError(f"field 'prefixrate' must be finite, got {value!r}")
+        if number < 0:
+            raise ValueError(f"field 'prefixrate' must be >= 0 (0 pauses the lane), got {value!r}")
+        if number > MAX_PREFIXRATE:
+            raise ValueError(
+                f"field 'prefixrate' {number:g}s exceeds the "
+                f"{MAX_PREFIXRATE:g}s cap")
         return number
 
     # ------------------------------------------------------------------ tasks

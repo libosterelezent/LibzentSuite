@@ -1,7 +1,8 @@
 Configuration
 =============
 
-Complete settings reference: ``knowledgebase/CONFIGURATION.md``. Summary
+Complete settings reference: ``knowledgebase/CONFIGURATION.md`` (if you
+maintain a local knowledgebase — not shipped in a fresh clone). Summary
 of the layers:
 
 .. list-table::
@@ -30,5 +31,7 @@ of the layers:
      - live view for running plugins
 
 Rate scopes: per-task ``(account, action)``, per-account/group
-``(group:<sync_group>, action)`` shared clock, server-wide lane — the
-strictest wait wins, then jitter.
+ ``(group:<sync_group>, action)`` shared clock, server-wide lane — the
+strictest wait wins. Jitter is drawn before admission and slept after
+the grant, with spacing clocks stamped at the expected wire instant, so
+wire gaps keep the effective interval.

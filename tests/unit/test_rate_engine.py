@@ -194,19 +194,39 @@ class PacingKeys(unittest.IsolatedAsyncioTestCase):
 
 
 class Jitter(unittest.IsolatedAsyncioTestCase):
-    """Post-grant jitter: seeded bounds respected, never moves the pacing clock."""
+    """Post-grant jitter: seeded bounds respected; the pacing clock is
+    stamped at grant + jitter (the expected wire instant), so consecutive
+    WIRE sends stay >= interval apart no matter how the draws differ."""
 
     async def test_jitter_within_bounds_seeded(self):
         manager = make_manager(interval=2.0, jitter=(0.2, 0.8), jitter_seed=42)
         first = await manager.acquire(ACTION)
+        wire1 = manager._clock.now()  # grant(0) + first jitter draw
         self.assertGreaterEqual(first.jitter_s, 0.2)
         self.assertLessEqual(first.jitter_s, 0.8)
-        # pacing boundary is measured from grant time, so wait + prior jitter
-        # always sums back to the interval
+        # the pacing stamp sits at grant + jitter: the second grant waits a
+        # FULL interval from that stamp, so the second wait is exactly the
+        # interval regardless of the first draw
         second = await manager.acquire(ACTION)
-        self.assertAlmostEqual(first.jitter_s + second.wait_s, 2.0, places=6)
+        wire2 = manager._clock.now()
+        self.assertAlmostEqual(second.wait_s, 2.0, places=6)
         self.assertGreaterEqual(second.jitter_s, 0.2)
         self.assertLessEqual(second.jitter_s, 0.8)
+        # wire gap >= interval even when the second draw is smaller
+        self.assertGreaterEqual(wire2 - wire1, 2.0 - 1e-9)
+
+    async def test_small_second_draw_never_compresses_wire_gap(self):
+        """Round-3 wire-gap fix (probe P1/P6 shape): under post-grant-only
+        jitter a much smaller second draw compressed the wire gap to
+        interval - jitter_max (here 1.5 - ~1.4 = ~0.07s); stamping at
+        grant + jitter keeps consecutive wire sends >= interval apart."""
+        manager = make_manager(interval=1.5, jitter=(0.5, 2.0), jitter_seed=15)
+        wires = []
+        for _ in range(3):
+            await manager.acquire(ACTION)
+            wires.append(manager._clock.now())
+        gaps = [b - a for a, b in zip(wires, wires[1:])]
+        self.assertTrue(all(g >= 1.5 - 1e-9 for g in gaps), gaps)
 
     async def test_jitter_deterministic_with_same_seed(self):
         async def draws():
@@ -397,6 +417,27 @@ class ServerCooldowns(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RatePolicyError):
             manager.report_server_limit("alpha", ACTION, "soon")
 
+    async def test_huge_retry_after_clamped_at_intake(self):
+        """Round-3: a finite-huge retry_after (1e9 -> 31.7 years, memory
+        only) would block every waiter until restart — intake clamps to
+        MAX_INTERVAL (86400s), exactly like policies are capped."""
+        from core.rate_limit_manager.policies import MAX_INTERVAL
+
+        manager = make_manager()
+        manager.report_server_limit("alpha", ACTION, 1e9, global_=True)
+        self.assertEqual(manager.cooldown_remaining(), MAX_INTERVAL)
+        self.assertEqual(manager.cooldown_remaining("alpha", ACTION), MAX_INTERVAL)
+        # a numeric string coercing over the cap is clamped too
+        manager.report_server_limit("beta", ACTION, "90000000")
+        self.assertEqual(manager.cooldown_remaining("beta", ACTION), MAX_INTERVAL)
+        # exactly at the cap (and below it) passes through untouched — the
+        # fleet-wide clamp above would shadow a per-account check here
+        fresh = make_manager()
+        fresh.report_server_limit("gamma", ACTION, 60.0)
+        self.assertEqual(fresh.cooldown_remaining("gamma", ACTION), 60.0)
+        fresh.report_server_limit("gamma", ACTION, MAX_INTERVAL)
+        self.assertEqual(fresh.cooldown_remaining("gamma", ACTION), MAX_INTERVAL)
+
     async def test_expired_cooldown_entries_are_swept(self):
         """Expired rows must not linger in the table for the process
         lifetime — cooldown_remaining drops them as it walks."""
@@ -447,6 +488,19 @@ class ServerCooldowns(unittest.IsolatedAsyncioTestCase):
         grant = await task
         self.assertGreaterEqual(grant.wait_s, 5.0)
         self.assertEqual(grant.reason, "server")
+
+    async def test_stats_poll_sweeps_expired_cooldowns(self):
+        """Round-3: production never calls cooldown_remaining — the 1s
+        dashboard stats() poll must own the expiry sweep too, or dead rows
+        persist until prune_account/restart."""
+        manager = make_manager()
+        manager.report_server_limit("alpha", ACTION, 1.0)
+        manager.report_server_limit("beta", "poke", 5.0)
+        manager._clock.advance(2.0)  # alpha's cooldown elapsed, beta's not
+        stats = manager.stats()
+        self.assertNotIn(("alpha", ACTION), manager._account_cooldowns)
+        self.assertIn(("beta", "poke"), manager._account_cooldowns)
+        self.assertEqual(stats["cooldowns"]["accounts"], {"beta": {"poke": 3.0}})
 
     async def test_server_cooldown_waits_before_pacing(self):
         manager = make_manager(interval=2.0)

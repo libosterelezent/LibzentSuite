@@ -159,18 +159,20 @@ class LogRepository(BaseRepository):
         """The newest ``limit`` log rows (oldest-first), optionally filtered.
 
         Filters AND together: account=, severity= (case-insensitive — stored
-        upper-case), source=. Mirrors LogService.tail's contract.
+        upper-case), source=. Mirrors LogService.tail's contract. Each
+        filter is an exact-None check: an explicit empty string is a
+        filter matching nothing-real, not a silently-dropped filter.
         """
         limit = max(0, int(limit))
         sql = "SELECT * FROM logs WHERE 1 = 1"
         params: List[Any] = []
-        if account:
+        if account is not None:
             sql += " AND account = ?"
             params.append(account)
-        if severity:
+        if severity is not None:
             sql += " AND severity = ?"
             params.append(str(severity).upper())
-        if source:
+        if source is not None:
             sql += " AND source = ?"
             params.append(source)
         sql += " ORDER BY id DESC LIMIT ?"

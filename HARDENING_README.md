@@ -311,7 +311,7 @@ cross-cutting invariants) → ~90 findings fixed. **708 tests pass**
   `asyncio.iscoroutine` → `inspect.iscoroutine`, INTEGRATION.md contract
   fixes.
 
-**Round 2** (working tree, specialist + coordinator pass, 784 → **992
+**Round 2** (commit `c32f9c2`, specialist + coordinator pass, 784 → **1094+
 tests**):
 
 * Dashboard/WS hardening: stats serialization moved inside the failure

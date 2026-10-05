@@ -41,10 +41,13 @@ from .event_bus import Event, EventBus, MessageReceived
 from .priority import Priority
 
 #: domain errors render their (safe, human-written) message bare; anything
-#: else is an internal failure and must not leak into a Discord channel
+#: else is an internal failure and must not leak into a Discord channel.
+#: NOTE: bare RuntimeError is deliberately NOT domain — internal failures
+#: (boom-style) mask to "internal (see logs)"; typed domain errors that
+#: subclass RuntimeError (AccountError etc.) still render bare.
 _DOMAIN_ERRORS = (
     AccountError, CredentialsError, PluginError, ProfileError,
-    RatePolicyError, SettingsValidationError, ValueError, RuntimeError,
+    RatePolicyError, SettingsValidationError, ValueError,
 )
 
 LOG = logging.getLogger("slaughtermudae.remote_control")
@@ -200,7 +203,9 @@ class RemoteControl:
         try:
             return await handler(api, args)
         except Exception as exc:
-            return f"error: {type(exc).__name__}: {exc}"
+            if isinstance(exc, _DOMAIN_ERRORS):
+                return f"error: {exc}" if str(exc) else f"error: {type(exc).__name__}"
+            raise  # internals (paths, sql) render as "internal (see logs)" in _handle
 
     def _register_commands(self) -> None:
         """The allowlist: read-mostly + explicitly safe mutations only."""

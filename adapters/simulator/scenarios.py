@@ -55,6 +55,10 @@ PACING_TOLERANCE = 0.05
 #: simulated 429 wait and the tolerance when verifying the retry gap
 RETRY_AFTER = 0.8
 RETRY_TOLERANCE = 0.3
+#: grace for a send already mid-flight when the estop cancellation lands
+#: (the next paced chunk would be >= 1.5s past the halt — anything inside
+#: the grace is an in-flight completion, not a pipeline leak)
+ESTOP_GRACE_S = 0.25
 #: hard Discord message length the chunker must respect
 MAX_CHUNK_LENGTH = 2000
 
@@ -123,6 +127,14 @@ class ScenarioAPI:
     settings_overrides: Dict[str, Dict[str, Any]]
     #: the mention-prefix RemoteControl bridge (control_mention scenario)
     remote: Any = None
+    #: the wired RateLimitManager — the send lane is PRESENT but disabled
+    #: in sims (a disabled lane is a 0s pass-through); scenarios flip it
+    #: live via set_lane_enabled / set_lane_prefixrate (audit round 3)
+    limiter: Any = None
+    #: the wired TaskScheduler (resume re-arm after an estop)
+    scheduler: Any = None
+    #: the runner's ControlAPI (system_resume & friends; estop_halt)
+    control: Any = None
 
 
 # ------------------------------------------------------------------ fixtures
@@ -298,6 +310,54 @@ def _checks_channel_gone(audit: List[dict], world: SimWorld) -> List[str]:
     return failures
 
 
+def _estop_halt_ts(audit: List[dict]) -> Optional[float]:
+    """Timestamp of the owner-driven global estop (None when it never ran)."""
+    for entry in audit:
+        if "mgmt:estop" in str(entry.get("action", "")):
+            ts = float(entry.get("ts") or 0.0)
+            if ts > 0.0:
+                return ts
+    return None
+
+
+def _checks_estop_halt(audit: List[dict], world: SimWorld) -> List[str]:
+    """estop_halt: zero sends after the halt, resume re-arms the pipeline.
+
+    Evidence is purely world/audit-side: the mgmt:estop audit row stamps
+    the halt boundary, the owner's re-trigger stamps the resume, and the
+    append-only journal proves nothing left the account in between (a
+    small grace absorbs a send that was already mid-flight when the
+    cancellation landed — the next paced chunk would be >= 1.5s out).
+    """
+    failures: List[str] = []
+    estop_ts = _estop_halt_ts(audit)
+    if estop_ts is None:
+        return ["the owner estop never executed (no mgmt:estop audit entry)"]
+    retriggers = [
+        m for m in world.journal
+        if m.author_id == SYNTHETIC_OWNER_ID
+        and m.content.strip() == TRIGGER_WORD
+        and m.ts > estop_ts
+    ]
+    if not retriggers:
+        failures.append("resume never re-triggered the flow (second trigger missing)")
+        return failures
+    resume_ts = retriggers[0].ts
+    late = [
+        m for m in world.journal
+        if m.author_id == SYNTHETIC_ALPHA_ID
+        and estop_ts + ESTOP_GRACE_S < m.ts < resume_ts
+    ]
+    if late:
+        failures.append(
+            f"{len(late)} send(s) after the halt (first at "
+            f"{late[0].ts - estop_ts:.3f}s past the estop) - pipeline kept sending"
+        )
+    if not [m for m in _delivered_chunks(world) if m.ts > resume_ts]:
+        failures.append("flow did not complete after resume (no chunk delivered)")
+    return failures
+
+
 # ------------------------------------------------------------------- scripts
 async def _script_server_429(api: ScenarioAPI) -> None:
     """Queue the one-shot 429 on the trigger channel, then start the flow."""
@@ -318,6 +378,47 @@ async def _script_channel_gone(api: ScenarioAPI) -> None:
     if not delivered:
         raise RuntimeError("export command never went out - cannot stage the deletion")
     api.world.channel_gone(api.channel_id)
+    await api.world.wait_for_quiet(api.channel_id, quiet=quiet_window(), limit=90.0)
+
+
+async def _script_estop_halt(api: ScenarioAPI) -> None:
+    """Halt mid-flow: estop between the flow's two paced chunk sends.
+
+    Deterministic staging: the roster yields exactly two chunks; the owner
+    mentions estop right after chunk one lands, so chunk two is always
+    still pending when the halt executes — either as a queued paced task
+    (cancelled by the estop) or as the plugin's next submit (rejected by
+    the stopped scheduler). Either way nothing further may leave the
+    account, which is what the checks prove from journal timestamps.
+    """
+    if api.control is None:
+        raise RuntimeError("ControlAPI not exposed on the scenario facade")
+    mention = f"<@{api.account_user_id}>"
+    api.owner_says(api.channel_id, TRIGGER_WORD, api.owner_id)
+    flowing = await _await_true(
+        lambda: _delivered_chunks(api.world) != [], timeout=20.0
+    )
+    if not flowing:
+        raise RuntimeError("no chunk delivered before the estop - cannot stage the halt")
+    # owner mentions the account with estop: RemoteControl -> ControlAPI
+    # .emergency_stop_all() (cancel tasks, stop scheduler, stop accounts)
+    api.owner_says(api.channel_id, f"{mention} estop", api.owner_id)
+    stopped = await _await_true(
+        lambda: str(getattr(
+            api.accounts.get(ACCOUNT_NAME).runtime, "status", ""
+        ).value) == "stopped",
+        timeout=15.0,
+    )
+    if not stopped:
+        raise RuntimeError("account never reached STOPPED after the estop mention")
+    # a chunk that survived the halt would land within ~one pacing interval;
+    # this quiet window outlasts it (checks re-verify from journal stamps)
+    await api.world.wait_for_quiet(api.channel_id, quiet=2.2, limit=8.0)
+    # resume re-arms the terminal scheduler, then the account restarts and
+    # a fresh trigger proves the whole pipeline delivers again
+    await api.control.system_resume()
+    await api.accounts.start(ACCOUNT_NAME)
+    api.owner_says(api.channel_id, TRIGGER_WORD, api.owner_id)
     await api.world.wait_for_quiet(api.channel_id, quiet=quiet_window(), limit=90.0)
 
 
@@ -441,6 +542,19 @@ SCENARIOS: Dict[str, Scenario] = {
         world_setup=_base_world(SHORT_PAGES),
         script=_script_control_mention,
         checks=_checks_control_mention,
+    ),
+    "estop_halt": Scenario(
+        name="estop_halt",
+        description=(
+            "The owner mentions estop while a paced chunk send is still "
+            "pending mid-flow: the halt stops it (zero further sends in "
+            "the journal), stops the account, and resume + re-trigger "
+            "delivers again."
+        ),
+        policies={"message": {"interval": 1.5, "jitter": [0.0, 0.05]}},
+        world_setup=_base_world(_roster_pages(200)),
+        script=_script_estop_halt,
+        checks=_checks_estop_halt,
     ),
 }
 

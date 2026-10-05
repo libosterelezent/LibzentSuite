@@ -239,6 +239,7 @@ class TaskScheduler:
         self._wait_samples: Deque[float] = deque(maxlen=_FINISHED_KEEP)
         self._last_pressure_warn = 0.0
         self._stopped = False
+        self._stop_failed = False  # stop owner died mid-teardown: faulted gate
         self._stop_latch: Optional["asyncio.Future[None]"] = None  # single-flight stop
         self._sweeping = False  # estop barrier: lanes must not start new sends
 
@@ -275,15 +276,23 @@ class TaskScheduler:
         earlier runs: the UNIQUE failure was swallowed, so a restarted
         process silently archived NONE of its tasks. Call once at boot
         (before :meth:`start`); returns the next id that will be issued.
+
+        When the high-water mark CANNOT be read, the floor is seeded from
+        the wall clock (epoch seconds): a session counter can never reach
+        it, so the new ids cannot collide with any row an earlier run
+        could have written (restarting at 1 made every add fail its
+        UNIQUE constraint for the whole session).
         """
         floor = max(self._tasks, default=0)
         if self._history_repo is not None:
             try:
                 floor = max(floor, int(await self._history_repo.max_id()))
             except Exception as exc:
+                floor = max(floor, int(time.time()))
                 self._log("warning", "scheduler",
                           f"could not read task history high-water mark "
-                          f"({type(exc).__name__}: {exc}); ids restart at 1")
+                          f"({type(exc).__name__}: {exc}); ids seeded from "
+                          f"the epoch offset {floor} (collision-proof)")
         self._seq = itertools.count(floor + 1)
         return floor + 1
 
@@ -300,6 +309,10 @@ class TaskScheduler:
         if self._stopping:
             raise SchedulerError("scheduler is stopping; wait for stop() to finish")
         self._stopped = False
+        self._stop_failed = False  # explicit re-arm retires a faulted stop
+        latch = self._stop_latch
+        if latch is not None and latch.done():
+            latch.exception()  # retrieve: no GC 'never retrieved' warning
         self._stop_latch = None  # a fresh arm retires any completed latch
         self._sweeping = False
         self._started = True
@@ -321,6 +334,15 @@ class TaskScheduler:
         finishes can be followed by a still-running drain=False stop (e.g.
         estop racing shutdown) re-cancelling tasks submitted to a scheduler
         that start() had already re-armed.
+
+        Failed stops (owner cancelled/died mid-teardown): the teardown is
+        aborted BOUNDED — lanes are cancelled and reaped, every still-live
+        task is driven terminal 'cancelled', and in-flight finish tails are
+        joined — but the scheduler is left FAULTED, not stopped: submit()
+        keeps rejecting until a retry stop() completes the teardown or
+        start() explicitly re-arms. Without the fault gate a failed estop
+        silently re-opened submissions and a respawned lane drained the
+        very tasks the estop was cancelling.
         """
         if self._stopped:
             return
@@ -389,9 +411,10 @@ class TaskScheduler:
                     lane.cancel()
             if self._lanes:
                 await asyncio.gather(*self._lanes.values(), return_exceptions=True)
-            # join the async tails scheduled by sync cancel() calls (bounded:
-            # each tail is at most one awaited repo.add) so their history
-            # rows land BEFORE the caller proceeds to database.close()
+            # join every pending finish tail (sync-cancel, lane and sweep
+            # tails alike; bounded — each tail is at most one awaited
+            # repo.add) so their history rows land BEFORE the caller
+            # proceeds to database.close()
             pending_tails = [t for t in list(self._tail_refs) if not t.done()]
             if pending_tails:
                 await asyncio.wait(pending_tails, timeout=5.0)
@@ -419,13 +442,28 @@ class TaskScheduler:
             if completed:
                 # full teardown done: idempotent fast-path from now on
                 self._stopped = True
+                self._stop_failed = False  # a retry stop healed the fault
             self._stopping = False
             self._stop_latch = None if completed else latch
             if completed and not latch.done():
                 latch.set_result(None)
 
     async def _abort_stop(self) -> None:
-        """Bounded lane teardown for a stop() owner that died mid-way."""
+        """Bounded teardown for a stop() owner that died mid-way.
+
+        The stop faulted: raise the estop barrier (no new sends may start
+        while the abort runs), cancel + reap the lanes, drive every
+        still-live task terminal 'cancelled' (the documented contract
+        "stop() never leaves a task non-terminal" must survive an owner
+        cancel; the terminal mutation itself is synchronous, so this
+        cannot hang), then bounded-join the finish tails — a tail the
+        dead sweep had already promised must still land its history row,
+        audit record and terminal event (torn-tail repair). The scheduler
+        stays FAULTED (``_stop_failed``): submit() keeps rejecting until
+        a retry stop() or an explicit start() re-arms.
+        """
+        self._stop_failed = True
+        self._sweeping = True  # lanes must not start new sends mid-abort
         for lane in list(self._lanes.values()):
             if not lane.done():
                 lane.cancel()
@@ -438,6 +476,13 @@ class TaskScheduler:
                 )
         except Exception:
             pass
+        for task in list(self._tasks.values()):
+            row = self._apply_terminal(task, STATUS_CANCELLED)
+            if row is not None:
+                self._spawn_finish_tail(task, STATUS_CANCELLED, row)
+        pending_tails = [t for t in list(self._tail_refs) if not t.done()]
+        if pending_tails:
+            await asyncio.wait(pending_tails, timeout=5.0)
 
     async def cleanup_account(self, account: str) -> None:
         """Tear down ONE account's lane bookkeeping (called on removal).
@@ -490,6 +535,11 @@ class TaskScheduler:
         """
         if self._stopped or self._stopping:
             raise SchedulerError("scheduler is stopped; new tasks are rejected")
+        if self._stop_failed:
+            raise SchedulerError(
+                "scheduler stop was interrupted; new tasks are rejected until "
+                "a retry stop() completes or start() re-arms the scheduler"
+            )
         for label, value in (("account", account), ("plugin", plugin), ("action", action)):
             if not isinstance(value, str) or not value.strip():
                 raise SchedulerError(f"task {label} must be a non-empty string, got {value!r}")
@@ -800,8 +850,24 @@ class TaskScheduler:
                 await self._run_task(task)
             except asyncio.CancelledError:
                 raise  # stop() is tearing the lane down
-            except Exception:  # belt and braces: the lane must never die
-                self._log("error", "scheduler", f"lane {account!r} worker error on task {task.id} (contained)")
+            except Exception as exc:  # belt and braces: the lane must never die
+                detail = f"{type(exc).__name__}: {exc}"
+                tb = exc.__traceback__
+                if tb is not None:
+                    while tb.tb_next is not None:
+                        tb = tb.tb_next
+                    code = tb.tb_frame.f_code
+                    detail += (f" @ {code.co_filename.rsplit('/', 1)[-1]}"
+                               f":{tb.tb_lineno} in {code.co_name}")
+                self._log("error", "scheduler",
+                          f"lane {account!r} worker error on task {task.id} "
+                          f"(contained): {detail}")
+                try:  # the stranded task must still reach a terminal state
+                    await self._finish(task, STATUS_FAILED, error=detail)
+                except Exception:
+                    self._log("error", "scheduler",
+                              f"task {task.id} terminal fallback failed "
+                              f"after lane error: {detail}")
 
     async def _sleep(self, seconds: float) -> None:
         """Retry-backoff seam (patched to instant in unit tests)."""
@@ -1071,7 +1137,12 @@ class TaskScheduler:
         task.error = error
         task.result_summary = summary
         task.finished_at = time.time()
-        duration = time.monotonic() - started_mono if started_mono is not None else 0.0
+        if started_mono is not None:
+            duration = time.monotonic() - started_mono
+        elif task.started_at is not None:
+            duration = task.finished_at - task.started_at  # wall-clock fallback
+        else:
+            duration = 0.0  # never started (cancelled while queued)
 
         row = task.as_dict()
         row["duration_s"] = round(duration, 3)
@@ -1092,9 +1163,13 @@ class TaskScheduler:
     ) -> None:
         """Apply ONE terminal transition: fields, memory, repo, audit, event.
 
-        Exactly-once by construction (see _apply_terminal). The history
-        write is AWAITED — the repository layer is async (aiosqlite), so
-        this method must be called from a coroutine (worker lanes, stop()).
+        Exactly-once by construction (see _apply_terminal). The terminal
+        mutation is synchronous; the persistence tail runs as its OWN
+        task (strong ref in ``_tail_refs``) awaited through a shield: a
+        caller cancelled mid-tail (lane teardown, a stop owner dying)
+        loses only its own await, never the row/audit/event — the tail
+        keeps running and stop()/_abort_stop bounded-join the refs. This
+        method must be called from a coroutine (worker lanes, stop()).
         Synchronous call sites (cancel/cancel_matching) use _finish_sync(),
         which applies the mutation immediately and schedules this same tail
         on the running loop. History and audit failures are swallowed
@@ -1104,7 +1179,10 @@ class TaskScheduler:
             task, status, error=error, summary=summary, started_mono=started_mono
         )
         if row is not None:
-            await self._finish_tail(task, status, row, error=error, summary=summary)
+            tail = self._spawn_finish_tail(
+                task, status, row, error=error, summary=summary
+            )
+            await asyncio.shield(tail)
 
     async def _finish_tail(
         self,
@@ -1131,13 +1209,14 @@ class TaskScheduler:
                               f"task {task.id} history write failed (continuing): "
                               f"{type(exc).__name__}: {exc}")
 
-        # AUDIT INTEGRITY: only record an outbound row when the task could
-        # actually have touched the API. COMPLETED/FAILED/TIMED_OUT attempts
-        # all invoked the sender; a CANCELLED task only did when it was
-        # cancelled mid-send (checkpoint 2) — a cancel while still queued or
-        # parked on the grant NEVER sent and must not appear in the trail
-        # (the pacing checks read audit timestamps as real send times).
-            auditable = status != STATUS_CANCELLED or task.sender_ran
+        # AUDIT INTEGRITY: only record an outbound row when the task
+        # actually invoked the sender — sender_ran is set immediately
+        # before the send and stays False on every path that never sent:
+        # cancelled while queued/parked on the grant, and FAILED before
+        # the send (limiter acquire raised or was cancelled). Those must
+        # not appear in the trail (the pacing checks read audit
+        # timestamps as real send times).
+            auditable = task.sender_ran
             if self._audit is not None and auditable and task.action in _AUDITED_ACTIONS:
                 note = f"plugin={task.plugin} task={task.id}"
                 if task.attempts > 0:
@@ -1176,6 +1255,26 @@ class TaskScheduler:
         finally:
             self._inflight_tails -= 1
 
+    def _spawn_finish_tail(
+        self, task: Task, status: str, row: dict, *,
+        error: Optional[str] = None, summary: Optional[str] = None,
+    ) -> "asyncio.Task":
+        """Schedule one finish tail as an independent task (strong ref)."""
+        tail = asyncio.get_running_loop().create_task(
+            self._finish_tail(task, status, row, error=error, summary=summary),
+            name="scheduler-finish-tail",
+        )
+        self._tail_refs.add(tail)
+        tail.add_done_callback(self._on_tail_done)
+        return tail
+
+    def _on_tail_done(self, tail: "asyncio.Task") -> None:
+        """Drop the strong ref; retrieve any failure (a shielded owner that
+        was cancelled mid-await would otherwise leave it unretrieved)."""
+        self._tail_refs.discard(tail)
+        if not tail.cancelled():
+            tail.exception()
+
     def _finish_sync(self, task: Task, status: str) -> None:
         """Terminal transition from SYNCHRONOUS call sites (cancel paths).
 
@@ -1190,14 +1289,9 @@ class TaskScheduler:
         if row is None:
             return
         try:
-            tail = asyncio.get_running_loop().create_task(
-                self._finish_tail(task, status, row), name="scheduler-finish-tail"
-            )
+            self._spawn_finish_tail(task, status, row)
         except RuntimeError:
             self._log("warning", "scheduler", f"task {task.id} history write skipped (no running loop)")
-            return
-        self._tail_refs.add(tail)  # strong ref: never GC'd mid-flight
-        tail.add_done_callback(self._tail_refs.discard)
 
 
 __all__ = ["TaskScheduler"]

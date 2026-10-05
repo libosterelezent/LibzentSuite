@@ -55,11 +55,15 @@ class CredentialService:
         self._runtime_sources: dict = {}  # account -> "db" | "env"
         self._db_accounts: set = set()  # accounts with a stored credential
         self._delete_generation: int = 0  # PHASE-4 await-race guard (S5-L1)
+        #: True once refresh() read the stored-account list: distinguishes
+        #: "no credentials stored" (empty set, KNOWN) from "not looked yet"
+        self._db_accounts_known = False
 
     async def refresh(self) -> None:
         """Re-read the stored-credential account list (boot/status display)."""
         if self._repo is not None:
             self._db_accounts = set(await self._repo.accounts_with_credential())
+            self._db_accounts_known = True
 
     # ------------------------------------------------------------------ key
     def _load_or_create_key(self) -> bytes:
@@ -84,20 +88,56 @@ class CredentialService:
             # created 0600 ATOMICALLY (write_text + chmod left a window in
             # which the key was world-readable) and O_EXCL so two processes
             # booting together can never overwrite each other's key
-            fd = os.open(str(self._key_path),
-                         os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            fd = self._create_key_file()
         except FileExistsError:
             existing = self._read_key_file()
             if existing:
                 return existing
-            raise CredentialsError(
-                f"credential key file {self._key_path} exists but is empty")
+            if not self._empty_keyfile_safe_to_heal():
+                raise CredentialsError(
+                    f"credential key file {self._key_path} exists but is "
+                    "empty")
+            # a crash between the O_EXCL create and the write left an EMPTY
+            # file; when nothing was ever encrypted with the lost key it
+            # guarded nothing — regenerate it instead of failing every boot
+            LOG.warning(
+                "credential key file %s is empty and no credentials are "
+                "stored; regenerating (a crash likely interrupted key "
+                "creation)", self._key_path)
+            try:
+                self._key_path.unlink()
+                fd = self._create_key_file()
+            except FileExistsError:
+                existing = self._read_key_file()  # a racing process won
+                if existing:
+                    return existing
+                raise CredentialsError(
+                    f"credential key file {self._key_path} exists but is "
+                    "empty") from None
+            except OSError as exc:
+                raise CredentialsError(
+                    f"credential key file {self._key_path} exists but is "
+                    f"empty and could not be regenerated: {exc}") from exc
         with os.fdopen(fd, "wb") as fh:
             fh.write(key)
         LOG.info("generated new credential master key at %s "
                  "(lose it and stored credentials must be re-entered)",
                  self._key_path)
         return key
+
+    def _create_key_file(self) -> int:
+        """Open the key file for exclusive creation (0600); fd or FileExistsError."""
+        return os.open(str(self._key_path),
+                       os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+
+    def _empty_keyfile_safe_to_heal(self) -> bool:
+        """An empty key file may be regenerated only when we KNOW nothing
+        was encrypted yet (no repository, or a refresh saw zero stored
+        credentials) — otherwise the original key may exist in a backup
+        and failing loudly is the recoverable path."""
+        return self._repo is None or (
+            self._db_accounts_known and not self._db_accounts
+        )
 
     def _read_key_file(self) -> Optional[bytes]:
         """The stored key (stripped) or None when absent/blank.
@@ -114,10 +154,23 @@ class CredentialService:
             raise CredentialsError(
                 f"credential key file {self._key_path} is unreadable: {exc}"
             ) from exc
-        try:  # POSIX-only hardening, silently skipped elsewhere
+        # FINAL-PHASE (F7): tighten to 0600 on read (creation was 0600 via
+        # O_EXCL; a later chmod/restore that loosened it gets FIXED here),
+        # and warn when it could not be tightened (POSIX-only; skipped
+        # silently elsewhere) — group/world read on a master key is bad
+        try:
             os.chmod(self._key_path, 0o600)
         except (OSError, NotImplementedError):
             pass
+        try:
+            mode = os.stat(self._key_path).st_mode & 0o777
+            if mode & 0o077:
+                LOG.warning(
+                    "credential key file %s has loose permissions (%04o; "
+                    "expected 0600) — tighten it: chmod 600 %s",
+                    self._key_path, mode, self._key_path)
+        except OSError:
+            pass  # stat raced a delete: the read above already succeeded
         return text.encode() if text else None
 
     async def _probe_decrypt(self) -> None:

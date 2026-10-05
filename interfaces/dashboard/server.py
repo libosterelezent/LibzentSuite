@@ -117,6 +117,15 @@ WS_FRAME_DEADLINE_S = 30.0
 MAX_CONCURRENT_CONNECTIONS = 64
 
 
+class _ConflictingContentLength(ValueError):
+    """Duplicate Content-Length headers with DIFFERENT values.
+
+    ROUND-3 AUDIT: ``headers.get()`` silently resolved duplicates to the
+    FIRST value — a request-smuggling desync family. Conflicting values
+    are now refused with 400 + close.
+    """
+
+
 def _split_host(value: str) -> str:
     """Hostname part of a Host header / URL netloc (port and [] stripped)."""
     value = (value or "").strip().lower()
@@ -385,18 +394,25 @@ class WebSocketClient:
                         # ERROR AUDIT: fail the connection instead of staying
                         # deaf-but-alive swallowing every later frame
                         LOG.warning("websocket protocol violation: %s", exc)
-                        self._sendq.put(("raw", wsproto.encode_close_frame()))
+                        self._sendq.put(("raw", wsproto.encode_close_frame(1002)))
                         self._drain()
                         return
                     buffer = buffer[consumed:]
                     if opcode in (wsproto.OP_CLOSE, wsproto.OP_PING):
                         if not fin:  # RFC 6455 §5.5: control frames are whole
                             LOG.warning("websocket: fragmented control frame")
-                            self._sendq.put(("raw", wsproto.encode_close_frame()))
+                            self._sendq.put(("raw", wsproto.encode_close_frame(1002)))
                             self._drain()
                             return
                         if opcode == wsproto.OP_CLOSE:
-                            self._sendq.put(("raw", wsproto.encode_close_frame()))
+                            # peer-initiated close: echo its status code
+                            # (codeless when it carried none, 1002 when
+                            # malformed — see ws.echo_close_code)
+                            self._sendq.put((
+                                "raw",
+                                wsproto.encode_close_frame(
+                                    wsproto.echo_close_code(payload)),
+                            ))
                             self._drain()
                             return
                         self._sendq.put(("raw", wsproto.encode_pong(payload)))
@@ -404,7 +420,7 @@ class WebSocketClient:
                         if not fin:  # fragmentation is never reassembled —
                             # a partial message must not look like data
                             LOG.warning("websocket: fragmented text frame")
-                            self._sendq.put(("raw", wsproto.encode_close_frame()))
+                            self._sendq.put(("raw", wsproto.encode_close_frame(1002)))
                             self._drain()
                             return
                         try:
@@ -413,7 +429,7 @@ class WebSocketClient:
                             # RFC 6455 §8.1: invalid UTF-8 in a text frame
                             # fails the connection (1007), not a quiet U+FFFD
                             LOG.warning("websocket: invalid UTF-8 in text frame")
-                            self._sendq.put(("raw", wsproto.encode_close_frame()))
+                            self._sendq.put(("raw", wsproto.encode_close_frame(1007)))
                             self._drain()
                             return
                         self._handle_text(text)
@@ -423,19 +439,19 @@ class WebSocketClient:
                         # one-word app protocol: fragmentation and binary
                         # frames are protocol violations, not data
                         LOG.warning("websocket: unexpected frame (opcode=%d)", opcode)
-                        self._sendq.put(("raw", wsproto.encode_close_frame()))
+                        self._sendq.put(("raw", wsproto.encode_close_frame(1002)))
                         self._drain()
                         return
                     else:
                         # reserved opcodes (0x3-0x7, 0xB-0xF): RFC 6455 §5.2
                         # requires failing the connection, not ignoring them
                         LOG.warning("websocket: reserved opcode %d", opcode)
-                        self._sendq.put(("raw", wsproto.encode_close_frame()))
+                        self._sendq.put(("raw", wsproto.encode_close_frame(1002)))
                         self._drain()
                         return
                 if stalled:
                     LOG.warning("websocket: partial frame stalled; closing")
-                    self._sendq.put(("raw", wsproto.encode_close_frame()))
+                    self._sendq.put(("raw", wsproto.encode_close_frame(1002)))
                     self._drain()
                     return
                 if not buffer:
@@ -1312,6 +1328,25 @@ def _make_handler(server: "DashboardServer") -> type:
             except OSError:
                 pass  # ERROR AUDIT: client aborted mid-response — not an error worth a traceback
 
+        def _content_length(self) -> int:
+            """Single-valued Content-Length (ROUND-3 duplicate-header audit).
+
+            Identical duplicate values collapse to one (RFC 7230 §3.3.2
+            allows recipients to merge them); CONFLICTING values raise
+            ``_ConflictingContentLength`` and garbage values raise
+            ``ValueError`` — callers decide how to answer.
+            """
+            values = [v.strip() for v in (self.headers.get_all("Content-Length") or [])]
+            values = [v for v in values if v]  # present-but-empty == absent
+            distinct = set(values)
+            if len(distinct) > 1:
+                raise _ConflictingContentLength(
+                    "conflicting duplicate Content-Length headers"
+                )
+            if not distinct:
+                return 0
+            return int(distinct.pop())  # ValueError on garbage -> caller answers
+
         def _reject(
             self, status: int, payload: Dict[str, Any], content_type: str = "application/json"
         ) -> None:
@@ -1340,7 +1375,14 @@ def _make_handler(server: "DashboardServer") -> type:
                     self.close_connection = True
                 else:
                     try:
-                        extra = int(self.headers.get("Content-Length") or 0)
+                        extra = self._content_length()
+                    except _ConflictingContentLength:
+                        # ROUND-3: smuggling family — refuse, do not guess
+                        self._reject(400, {
+                            "ok": False,
+                            "error": "conflicting duplicate Content-Length headers",
+                        })
+                        return
                     except ValueError:
                         extra = -1
                     if extra:
@@ -1387,9 +1429,14 @@ def _make_handler(server: "DashboardServer") -> type:
                     })
                     return
                 try:
-                    length = int(self.headers.get("Content-Length") or 0)
-                except ValueError:
-                    self._reject(400, {"ok": False, "error": "invalid Content-Length header"})
+                    length = self._content_length()
+                except ValueError as exc:
+                    # ROUND-3: covers BOTH garbage values and conflicting
+                    # duplicates (smuggling family) — answer and close
+                    self._reject(400, {
+                        "ok": False,
+                        "error": str(exc) or "invalid Content-Length header",
+                    })
                     return
                 if length < 0:  # read(-1) would block until the peer closes
                     self._reject(400, {"ok": False, "error": "invalid Content-Length header"})
@@ -1449,11 +1496,23 @@ def _make_handler(server: "DashboardServer") -> type:
 
         def _handle_websocket(self, query: Dict[str, List[str]]) -> None:
             # ERROR AUDIT: validate the upgrade before hijacking the socket
+            if self.command != "GET":
+                # ROUND-3 DESYNC AUDIT: a non-GET body is never consumed
+                # (the drain above covers non-POST only, and this path
+                # returns before the POST body read) — answering without
+                # Connection: close left the unread body to be parsed as
+                # the NEXT request line on the keep-alive stream
+                self._reject(
+                    400,
+                    {"ok": False, "error": "not a websocket upgrade request (need GET + Upgrade: websocket)"},
+                )
+                return
             if (
-                self.command != "GET"
-                or self.headers.get("Upgrade", "").lower() != "websocket"
+                self.headers.get("Upgrade", "").lower() != "websocket"
                 or "upgrade" not in self.headers.get("Connection", "").lower()
             ):
+                # GET upgrade failures: any GET body was drained above, so
+                # the stream is clean — keep-alive reuse stays safe here
                 self._respond(
                     400,
                     {"ok": False, "error": "not a websocket upgrade request (need GET + Upgrade: websocket)"},

@@ -22,7 +22,9 @@ from core.api import ControlAPI, LANE_KV_KEY
 from core.cooldowns import CooldownService
 from core.credential_service import CredentialService
 from core.credentials import Credentials
-from core.errors import AccountError
+from core.errors import AccountError, SettingsValidationError
+from core.event_bus import EventBus
+from core.settings_manager import SettingsManager, Setting
 
 SECRET = "tok-SECRET-5f3a91c2"      # the value that must never leak
 OTHER_SECRET = "tok-OTHER-9b7d31e4"
@@ -306,6 +308,74 @@ class FakeKvRepo:
 
     async def delete(self, key):
         return self.values.pop(key, None) is not None
+
+
+class SettingsStack:
+    """ControlAPI over a REAL SettingsManager: plugin-setting clear (null)
+    and framework account-setting facades (round-3 findings)."""
+
+    def __init__(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cred_svc = CredentialService(
+            None, key_path=Path(self.tmp.name) / "creds.key")
+        self.accounts = FakeAccountsManager()
+        self.bus = EventBus()
+        self.plugin_repo = FakeDeletablePluginRepo()
+        self.settings = SettingsManager(
+            self.bus, plugin_repo=self.plugin_repo,
+            global_layer={"soulcopy": {"trigger": "global-trigger"}})
+        self.plugins = FakePluginManager(self.settings)
+        self.profiles = FakeProfileManager()
+        self.limiter = FakeLimiter()
+        self.database = FakeDatabase()
+        self.audit = FakeAuditRecorder()
+        self.api = ControlAPI(
+            accounts=self.accounts, plugins=self.plugins,
+            profiles=self.profiles, settings=self.settings,
+            limiter=self.limiter, scheduler=FakeSyncCollaborators(),
+            logs=FakeSyncCollaborators(), audit=self.audit,
+            credentials=Credentials.from_values({}),
+            database=self.database, credentials_svc=self.cred_svc,
+        )
+
+    def cleanup(self) -> None:
+        self.tmp.cleanup()
+
+
+class FakeDeletablePluginRepo:
+    """Plugin repo with the round-3 delete_setting (F9's repo shape)."""
+
+    def __init__(self) -> None:
+        self.rows: Dict[tuple, Any] = {}
+        self.deletes: list = []
+
+    async def all_account_settings(self):
+        out: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for (account, plugin, key), value in self.rows.items():
+            out.setdefault(account, {}).setdefault(plugin, {})[key] = value
+        return out
+
+    async def set_setting(self, account, plugin, key, value):
+        self.rows[(account, plugin, key)] = value
+
+    async def delete_setting(self, account, plugin, key):
+        self.deletes.append((account, plugin, key))
+        self.rows.pop((account, plugin, key), None)
+
+
+class FakePluginManager:
+    """Plugin manager WITHOUT clear_setting: exercises the api fallback.
+    set_setting delegates to the real SettingsManager (like PluginManager)."""
+
+    def __init__(self, settings: SettingsManager) -> None:
+        self._settings = settings
+        self.live: Dict[tuple, Any] = {}
+
+    async def set_setting(self, account, plugin, key, value):
+        validated = await self._settings.set_plugin_setting(
+            account, plugin, key, value, _SOULCOPY_SCHEMA)
+        self.live[(account, plugin, key)] = validated
+        return validated
 
 
 class FakeDatabase:
@@ -596,6 +666,181 @@ class TestStatusEnrichmentAndAudit(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(SECRET, repr(self.stack.audit.entries))
 
 
+class TestPluginSettingClear(unittest.IsolatedAsyncioTestCase):
+    """Round-3: set-setting value null DELETES the account override."""
+
+    def setUp(self) -> None:
+        self.stack = SettingsStack()
+
+    def tearDown(self) -> None:
+        self.stack.cleanup()
+
+    async def test_null_resets_by_deleting_the_override(self) -> None:
+        api, stack = self.stack.api, self.stack
+        await api.plugins_set_setting("alpha", "soulcopy", "trigger", "acct")
+        self.assertEqual(
+            stack.settings.resolve("soulcopy", _SOULCOPY_SCHEMA,
+                                   account="alpha")["trigger"], "acct")
+        out = await api.plugins_set_setting(
+            "alpha", "soulcopy", "trigger", None)
+        self.assertTrue(out["cleared"])
+        # fallback path has no schema: value is None (no override); the
+        # manager-path (F8) returns the effective value instead
+        self.assertIsNone(out["value"])
+        self.assertEqual(
+            stack.plugin_repo.deletes, [("alpha", "soulcopy", "trigger")])
+        self.assertEqual(
+            stack.settings.resolve("soulcopy", _SOULCOPY_SCHEMA,
+                                   account="alpha")["trigger"],
+            "global-trigger")
+
+    async def test_prefers_plugin_manager_clear_setting_when_present(self) -> None:
+        calls: list = []
+
+        class WithClear(FakePluginManager):
+            async def clear_setting(self, account, plugin, key):
+                calls.append((account, plugin, key))
+                return "from-manager"
+
+        stack = self.stack
+        stack.api._plugins = WithClear(stack.settings)
+        out = await stack.api.plugins_set_setting(
+            "alpha", "soulcopy", "trigger", None)
+        self.assertEqual(calls, [("alpha", "soulcopy", "trigger")])
+        self.assertEqual(out["value"], "from-manager")
+        self.assertEqual(stack.plugin_repo.deletes, [])  # manager owns it
+
+
+_SOULCOPY_SCHEMA = (Setting("trigger", "str", "default-trigger"),)
+
+
+class TestAccountSettingFacades(unittest.IsolatedAsyncioTestCase):
+    """Round-3: ControlAPI surface for framework account settings."""
+
+    def setUp(self) -> None:
+        self.stack = SettingsStack()
+
+    def tearDown(self) -> None:
+        self.stack.cleanup()
+
+    async def test_get_returns_resolved_settings(self) -> None:
+        out = await self.stack.api.account_setting_get("alpha")
+        self.assertEqual(out["account"], "alpha")
+        self.assertEqual(out["settings"]["reconnect_multiplier"], 2.0)
+        self.assertEqual(out["settings"]["reconnect_enabled"], True)
+
+    async def test_set_validates_and_audits(self) -> None:
+        out = await self.stack.api.account_setting_set(
+            "alpha", "typing_probability", 0.85, surface="cli")
+        self.assertEqual(out["value"], 0.85)
+        self.assertEqual(
+            self.stack.settings.account_settings("alpha")["typing_probability"],
+            0.85)
+        rows = [e for e in self.stack.audit.entries
+                if e["action"] == "mgmt:account.setting"]
+        self.assertEqual(rows[0]["note"], "surface=cli key=typing_probability")
+
+    async def test_set_rejects_unknown_and_out_of_bounds(self) -> None:
+        with self.assertRaises(SettingsValidationError):
+            await self.stack.api.account_setting_set("alpha", "bogus", 1)
+        with self.assertRaises(SettingsValidationError):
+            await self.stack.api.account_setting_set(
+                "alpha", "reconnect_multiplier", 99.0)
+        self.assertEqual(
+            self.stack.settings.account_settings("alpha")["reconnect_multiplier"],
+            2.0)
+
+
+class TestCredentialKeyFileHardening(unittest.IsolatedAsyncioTestCase):
+    """Round-3: empty-keyfile self-heal + loose-permission warning."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.key_path = Path(self.tmp.name) / "creds.key"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    async def test_empty_keyfile_regenerates_when_nothing_stored(self) -> None:
+        repo = FakeCredentialsRepo()
+        svc = CredentialService(repo, key_path=self.key_path)
+        await svc.refresh()                       # known: zero stored
+        self.key_path.write_text("")              # crash artifact
+        await svc.store("alpha", "tok-1")         # must self-heal, not raise
+        self.assertTrue(self.key_path.read_text().strip())
+        self.assertEqual(await svc.resolve("alpha"), "tok-1")
+
+    async def test_empty_keyfile_still_fails_when_credentials_stored(self) -> None:
+        repo = FakeCredentialsRepo()
+        svc = CredentialService(repo, key_path=self.key_path)
+        await svc.store("alpha", "tok-1")         # creates the key file
+        self.key_path.write_text("")              # disaster: key lost
+        await svc.refresh()                       # DB still has a row
+        svc._fernet = None                        # next use re-reads the file
+        from core.errors import CredentialsError
+        with self.assertRaises(CredentialsError):
+            await svc.store("beta", "tok-2")
+
+    async def test_loose_keyfile_permissions_warn_on_read(self) -> None:
+        svc = CredentialService(FakeCredentialsRepo(), key_path=self.key_path)
+        await svc.store("alpha", "tok-1")
+        self.key_path.chmod(0o644)
+        with self.assertLogs("slaughtermudae.credentials", level="WARNING") as hit:
+            svc._fernet = None                    # drop the cipher to re-read
+            svc._memory.clear()
+            await svc.resolve("alpha")
+        self.assertTrue(any("loose permissions" in line for line in hit.output))
+        self.key_path.chmod(0o600)
+
+
+class TestPluginStateSingleEncoding(unittest.IsolatedAsyncioTestCase):
+    """Round-3: PluginStateService stores RAW values (kv encodes once);
+    rows written via raw kv.set must read back, legacy double-encoded
+    rows stay readable."""
+
+    async def test_raw_kv_rows_read_back_instead_of_default(self) -> None:
+        import json as _json
+
+        from core.plugin_state import PluginStateService
+
+        class MiniKv:
+            """Mirrors KvRepository's contract: JSON-encode on set,
+            tolerant-decode on get (raw string when not valid JSON)."""
+
+            def __init__(self) -> None:
+                self.rows: Dict[str, str] = {}
+
+            async def set(self, key, value):
+                self.rows[key] = _json.dumps(value)
+
+            async def get(self, key, default=None):
+                raw = self.rows.get(key)
+                if raw is None:
+                    return default
+                try:
+                    return _json.loads(raw)
+                except ValueError:
+                    return raw
+
+        kv = MiniKv()
+        state = PluginStateService(kv)
+        # a row written through RAW kv (what used to read back as default)
+        await kv.set("pstate:global:counter", 41)
+        self.assertEqual(await state.get_global("counter"), 41)
+        # service writes are stored RAW (single-encoded) at the kv layer
+        await state.set_global("flag", {"on": True})
+        self.assertEqual(kv.rows["pstate:global:flag"], '{"on": true}')
+        # ...and round-trip through the service
+        self.assertEqual(await state.get_global("flag"), {"on": True})
+        # plain strings survive too (JSON-looking ones mangle per K10 note)
+        await state.set_global("note", "hello world")
+        self.assertEqual(await state.get_global("note"), "hello world")
+        # LEGACY double-encoded rows still decode
+        await kv.set("pstate:global:old", _json.dumps({"legacy": [1, 2]}))
+        self.assertEqual(
+            await state.get_global("old"), {"legacy": [1, 2]})
+
+
 class TestRateLimitPersistence(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.stack = ApiStack()
@@ -628,6 +873,16 @@ class TestRateLimitPersistence(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.stack.database.kv.values[LANE_KV_KEY]["enabled"], False)
 
+    async def test_lane_rejects_bad_prefixrate_without_partial_mutation(self) -> None:
+        # round-3 probe: enabled=True + prefixrate=-5 used to raise AFTER
+        # the lane was armed — error returned, lane left ON, nothing saved
+        for bad in (-5, "fast", float("inf")):
+            with self.assertRaises(ValueError):
+                await self.stack.api.ratelimit_set_lane(enabled=True,
+                                                        prefixrate=bad)
+        self.assertFalse(self.stack.limiter.lane["enabled"])  # untouched
+        self.assertNotIn(LANE_KV_KEY, self.stack.database.kv.values)
+
     async def test_persistence_failure_never_fails_the_call(self) -> None:
         async def boom(*args, **kwargs):
             raise RuntimeError("db down")
@@ -638,6 +893,21 @@ class TestRateLimitPersistence(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["action"], "message")  # engine still mutated
         lane = await self.stack.api.ratelimit_set_lane(enabled=True)
         self.assertTrue(lane["enabled"])
+
+    async def test_concurrent_clears_keep_both_tombstones(self) -> None:
+        """Round-3 RMW race: two clears racing the kv read-modify-write
+        lost tombstones — cleared defaults resurrected on the next boot."""
+        import asyncio
+
+        await self.stack.api.ratelimit_set("message", 3.0)
+        await self.stack.api.ratelimit_set("dm", 3.0)
+        await asyncio.gather(
+            self.stack.api.ratelimit_clear("global", None, "message"),
+            self.stack.api.ratelimit_clear("global", None, "dm"),
+        )
+        stored = self.stack.database.kv.values["ratelimit:removed"]
+        self.assertIn("global||message", stored)
+        self.assertIn("global||dm", stored)
 
 
 if __name__ == "__main__":

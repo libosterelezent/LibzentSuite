@@ -45,6 +45,7 @@ REQUIRED_SCENARIOS = (
     "server_429_respected",
     "channel_gone_aborts",
     "control_mention",
+    "estop_halt",
 )
 
 
@@ -282,6 +283,62 @@ class TestChecksPure(unittest.TestCase):
         failures = scenario.checks([], empty)
         self.assertTrue(any("never started" in f for f in failures))
 
+    def test_estop_halt_pass_and_violations(self) -> None:
+        from adapters.simulator.scenarios import ESTOP_GRACE_S
+
+        scenario = SCENARIOS["estop_halt"]
+        audit = [{"account": "system", "direction": "out",
+                  "action": "mgmt:estop", "ts": 100.0}]
+        # pass: chunk one + halt + quiet + re-trigger + post-resume chunk
+        world = SimWorld()
+        scenario.world_setup(world)
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
+                      IMPORT_PREFIX + "one")
+        retrigger = world.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "slcopy")
+        retrigger.ts = 105.0
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
+                      IMPORT_PREFIX + "two")  # after resume: fine
+        self.assertEqual(scenario.checks(audit, world), [])
+
+        # violation: a send after the halt (inside the re-trigger window)
+        leaker = SimWorld()
+        scenario.world_setup(leaker)
+        leaker.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
+                       IMPORT_PREFIX + "one")
+        late = leaker.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "post-halt send")
+        late.ts = 102.0  # 2.0s past the estop: outside any in-flight grace
+        retrigger = leaker.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "slcopy")
+        retrigger.ts = 105.0
+        failures = scenario.checks(audit, leaker)
+        self.assertTrue(any("after the halt" in f for f in failures))
+
+        # in-flight grace: a send INSIDE the grace window is not a leak
+        grace = SimWorld()
+        scenario.world_setup(grace)
+        grace.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
+                      IMPORT_PREFIX + "one")
+        racing = grace.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "mid-flight")
+        racing.ts = 100.0 + ESTOP_GRACE_S / 2
+        retrigger = grace.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "slcopy")
+        retrigger.ts = 105.0
+        grace.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
+                      IMPORT_PREFIX + "two")
+        self.assertEqual(scenario.checks(audit, grace), [])
+
+        # violation: estop never executed
+        self.assertTrue(any("never executed" in f for f in
+                            scenario.checks([], SimWorld())))
+        # violation: no re-trigger after the halt
+        halted = SimWorld()
+        scenario.world_setup(halted)
+        failures = scenario.checks(audit, halted)
+        self.assertTrue(any("re-triggered" in f for f in failures))
+
 
 
 class TestFullStackRuns(unittest.IsolatedAsyncioTestCase):
@@ -319,6 +376,9 @@ class TestFullStackRuns(unittest.IsolatedAsyncioTestCase):
 
     async def test_channel_gone_aborts(self) -> None:
         await self._run("channel_gone_aborts")
+
+    async def test_estop_halt(self) -> None:
+        await self._run("estop_halt")
 
     async def test_report_carries_evidence(self) -> None:
         """A passing run leaves interactions and spec-§9 log lines behind."""

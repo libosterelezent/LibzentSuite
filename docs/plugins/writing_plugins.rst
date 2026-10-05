@@ -31,9 +31,9 @@ Structure (see ``plugins/roll/`` for the real minimal example):
                return
            ctx.services.validate_channel(event.channel_id)  # TargetGone aborts
            rich = event.message                     # rich DTO (may be None)
-           if rich is not None and rich.buttons:
-               await ctx.services.click_button(
-                   event.channel_id, event.id, rich.buttons[0].custom_id)
+            if rich is not None and rich.buttons:
+                await ctx.services.click_button(
+                    event.channel_id, event.message_id, rich.buttons[0].custom_id)
            else:
                await ctx.services.send_message(
                    event.channel_id, "done", priority=Priority.LOW)

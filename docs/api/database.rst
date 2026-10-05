@@ -15,4 +15,5 @@ database — persistence
    :members: TaskHistoryRepository
 
 Schema/migrations: ``knowledgebase/DATABASE.md`` (tables, indexes,
-pruning, cascades, secrets policy).
+pruning, cascades, secrets policy) — if you maintain a local
+knowledgebase; it is not shipped in a fresh clone.

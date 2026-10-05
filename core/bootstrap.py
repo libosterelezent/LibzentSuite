@@ -41,7 +41,7 @@ from .config import ProjectConfig, load_config
 from .cooldowns import CooldownService
 from .credential_service import CredentialService
 from .credentials import Credentials
-from .errors import UnsafePolicyError
+from .errors import RatePolicyError, UnsafePolicyError
 from .event_bus import EventBus
 from .logging_service import LogService, ServiceLogger, attach_stdlib_bridge, configure_stderr, detach_stdlib_bridge
 from .plugin_manager import PluginManager
@@ -97,8 +97,12 @@ async def _seed_config_defaults(limiter: RateLimitManager, config: ProjectConfig
     stored = set()
     try:
         stored = {(p.level, p.owner, p.action) for p in await database.policies.list()}
-    except Exception:
-        pass  # DB read failure: apply config defaults as a safe fallback
+    except Exception as exc:
+        # DB read failure: apply config defaults as a safe fallback — but
+        # say so (silent swallow hid 'why do removed defaults reappear?')
+        ROOT_LOGGER.warning(
+            "could not read stored policies (%s: %s); applying config "
+            "defaults as a fallback", type(exc).__name__, exc)
     removed = getattr(limiter, "removed_default", None)
     if not callable(removed):  # vintage manager shape (attr/property):
         removed = None  # no tombstone knowledge -> seed normally
@@ -120,8 +124,20 @@ async def _seed_config_defaults(limiter: RateLimitManager, config: ProjectConfig
             floor = getattr(limiter, "floor_value", 1.5)
             if callable(floor):  # property vs method across manager vintages
                 floor = floor()
-            limiter.set_policy_values(action, max(interval, float(floor)),
-                                      jmin, jmax, level, owner)
+            try:
+                limiter.set_policy_values(action, max(interval, float(floor)),
+                                          jmin, jmax, level, owner)
+            except RatePolicyError as exc:
+                ROOT_LOGGER.warning(
+                    "skipping invalid config default for %s %s (%s)",
+                    where, action, exc)
+        except RatePolicyError as exc:
+            # a malformed spec (e.g. an inverted jitter pair) must not brick
+            # the whole boot either — skip THIS policy with a warning,
+            # consistent with the floor clamp above
+            ROOT_LOGGER.warning(
+                "skipping invalid config default for %s %s (%s)",
+                where, action, exc)
 
     for action, spec in (config.policies.get("global") or {}).items():
         _seed(action, spec, "global", None, "global")
@@ -326,7 +342,7 @@ async def build(
             plugin_dir=plugin_dir, client_factory=client_factory,
             simulation_runner=simulation_runner,
             credential_key_path=credential_key_path,
-            env_file=env_file)
+            env_file=env_file, db_path=db_path)
     except BaseException:
         for label, undo in reversed(cleanups):
             try:
@@ -358,16 +374,30 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
                     client_factory: Optional[Callable[[str, str], Any]],
                     simulation_runner: Any,
                     credential_key_path: Optional[Path] = None,
-                    env_file: str = ".env") -> Framework:
+                    env_file: str = ".env",
+                    db_path: str = "state/slaughter.db") -> Framework:
     """Wire every manager over an already-connected database."""
 
     # shared services over the database (credentials encrypted at rest,
     # persistent cooldowns, scoped plugin state)
+    # The master key lives NEXT TO THE DATABASE FILE, not the CWD: a
+    # different --db path (or another working directory) used to mint a
+    # FRESH key at ./state/credentials.key and every stored token became
+    # undecryptable. The default db path resolves to the same file as the
+    # old CWD-relative default — zero migration.
     credential_service = CredentialService(
         database.credentials,
-        # benchmark isolation: an explicit key path keeps a concurrent
-        # bench process from touching the live state/credentials.key
-        key_path=credential_key_path or Path("state/credentials.key"),
+        # The master key lives NEXT TO THE DATABASE FILE, not the CWD: a
+        # different --db path (or another working directory) used to mint a
+        # FRESH key at ./state/credentials.key and every stored token became
+        # undecryptable. The default db path resolves to the same file as the
+        # old CWD-relative default — zero migration. An EXPLICIT key path
+        # (benchmark isolation) wins over the derived one.
+        key_path=(
+            credential_key_path
+            if credential_key_path is not None
+            else Path(db_path).expanduser().absolute().parent / "credentials.key"
+        ),
     )
     cooldowns = CooldownService(database.cooldowns)
     plugin_state = PluginStateService(database.kv)
@@ -462,8 +492,11 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     # boot recovery for the shared services (before any traffic)
     try:
         await credential_service.refresh()  # status pages know 'db' sources
-    except Exception:
-        pass
+    except Exception as exc:
+        ROOT_LOGGER.warning(
+            "could not read stored-credential accounts (%s: %s); status "
+            "pages may show credentials as missing until the next refresh",
+            type(exc).__name__, exc)
     await _security_audit(database, credential_service, env_file)
     await cooldowns.restore()
 

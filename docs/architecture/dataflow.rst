@@ -33,4 +33,5 @@ CLI ``run_command`` / dashboard route / Discord ``@account <cmd>`` all
 resolve to the same :class:`core.api.ControlAPI` methods; persistence and
 validation happen once, below the facade.
 
-Deep version: ``knowledgebase/DATA_FLOW.md``.
+Deep version: ``knowledgebase/DATA_FLOW.md`` (if you maintain a local
+knowledgebase — not shipped in a fresh clone).

@@ -22,6 +22,11 @@ from .errors import SettingsValidationError
 
 SETTING_TYPES = ("str", "int", "float", "bool")
 
+#: schema-level cap for str-typed settings: an unbounded string was a 1MB
+#: trigger persisted + compared per message. A Setting may override via
+#: ``max_length`` (None here means "use the schema default").
+STR_MAX_LENGTH = 4096
+
 
 @dataclass(frozen=True)
 class Setting:
@@ -33,6 +38,7 @@ class Setting:
     description: str = ""
     min_value: Optional[float] = None
     max_value: Optional[float] = None
+    max_length: Optional[int] = None  # str settings only; None -> STR_MAX_LENGTH
 
     def __post_init__(self) -> None:
         if not self.name or not self.name.replace("_", "").isalnum():
@@ -91,6 +97,15 @@ class Setting:
             raise SettingsValidationError(
                 self.name, f"expected {self.type}, got {value!r}"
             ) from exc
+        if self.type == "str":
+            limit = self.max_length if self.max_length is not None \
+                else STR_MAX_LENGTH
+            if len(coerced) > limit:
+                raise SettingsValidationError(
+                    self.name,
+                    f"string is {len(coerced)} chars, longer than the "
+                    f"max {limit}",
+                )
         if self.type in ("int", "float") and math.isinf(coerced):
             raise SettingsValidationError(self.name, f"{value!r} is not a finite number")
         if self.min_value is not None and coerced < self.min_value:
@@ -112,8 +127,9 @@ class Setting:
 
 
 #: Framework-level per-account settings (NOT plugin settings): reconnect
-#: policy knobs every account owns. Persisted in `account_settings`, surfaced
-#: on the account details page + editable from both interfaces.
+#: policy knobs every account owns. Persisted in `account_settings`;
+#: surfaced via ControlAPI.account_setting_get / account_setting_set
+#: (surfaces can adopt those facades — see the round-3 report).
 ACCOUNT_SETTINGS: tuple = (
     Setting("reconnect_enabled", "bool", True, "Reconnect automatically after drops."),
     Setting("reconnect_initial_delay", "float", 1.0,
@@ -213,6 +229,9 @@ class SettingsManager:
                         await self._account_repo.get(name) or {}
                     )
                 except Exception:
+                    self._logger.exception(
+                        "could not load account settings for %r "
+                        "(defaults will resolve for this account)", name)
                     self._account_framework[name] = {}
         self._loaded = True
 
@@ -290,6 +309,55 @@ class SettingsManager:
         ))
         return validated
 
+    async def clear_plugin_setting(
+        self, account: str, plugin: str, key: str,
+        schema: Sequence[Setting] = (),
+    ) -> Any:
+        """DELETE one account-layer plugin setting override (dashboard 'reset').
+
+        The account layer is a MASK over the global layer/defaults: the old
+        reset persisted the schema DEFAULT as an override, permanently
+        shadowing a non-default global value with no unpin path. Deleting
+        the row unmasks the lower layers (defaults <- global).
+
+        Emits SettingChanged on success (``new_value`` = the newly
+        effective value when a schema is provided, else None). Raises
+        SettingsValidationError for unknown keys when a schema is given.
+        The repository delete is DUCK-TYPED (``delete_setting``): a repo
+        without it is warned at and skipped — the memory layer still
+        clears, so in-memory resolution unmasks immediately either way.
+        Persistence errors propagate (memory only clears after the write).
+        """
+        defs = {s.name: s for s in schema}
+        if defs and key not in defs:
+            raise SettingsValidationError(
+                f"{plugin}.{key}",
+                f"unknown setting (supports: {sorted(defs)})",
+            )
+        old = self._account_plugin.get(account, {}).get(plugin, {}).get(key)
+        delete = getattr(self._plugin_repo, "delete_setting", None)
+        if callable(delete):
+            await delete(account, plugin, key)
+        elif self._plugin_repo is not None:
+            self._logger.warning(
+                "plugin repository cannot delete settings "
+                "(no delete_setting); cleared %r/%s.%s from memory only",
+                account, plugin, key)
+        plugins = self._account_plugin.get(account)
+        if plugins is not None:
+            plugins.get(plugin, {}).pop(key, None)
+            if not plugins.get(plugin):
+                plugins.pop(plugin, None)
+            if not plugins:
+                self._account_plugin.pop(account, None)
+        effective = self.resolve(plugin, schema, account=account)[key] if defs \
+            else None
+        self._bus.publish_nowait(SettingChanged(
+            account=account, scope=f"account:{account}/plugin:{plugin}/key:{key}",
+            key=key, old_value=old, new_value=effective,
+        ))
+        return effective
+
     def account_settings(self, account: str) -> Dict[str, Any]:
         """Resolved framework account settings (reconnect policy...).
 
@@ -348,4 +416,4 @@ class SettingsManager:
 
 
 __all__ = ["Setting", "SettingsManager", "ACCOUNT_SETTINGS", "SETTING_TYPES",
-           "SettingsValidationError"]
+           "STR_MAX_LENGTH", "SettingsValidationError"]

@@ -492,6 +492,19 @@ class TestRetry(SchedulerTestBase):
         self.assertEqual(task.attempts, 1)
         self.assertEqual(self.sleeps, [0.5])
 
+    async def test_server_rate_limit_retries_once_even_with_retries_zero(self) -> None:
+        """429 contract: server-provided limits ALWAYS earn one retry even
+        when the task was submitted with retries=0 (the limiter cooldown,
+        not the caller's budget, paces it)."""
+        task = self.scheduler.submit("alpha", "p", "message", retries=0)
+        self.sender.outcomes.append(("raise", ServerRateLimit(1.0, True)))
+        await self.settle(0.2)
+        self.assertEqual(task.status, "completed")
+        self.assertEqual(len(self.sender.calls), 2)  # failed once, retried
+        self.assertEqual(task.attempts, 1)
+        self.assertEqual(self.sleeps, [0.5])
+        self.assertEqual(self.limiter.reports, [("alpha", "message", 1.0, True)])
+
 
 # ------------------------------------------------------------------- stop
 class TestStop(SchedulerTestBase):
@@ -729,10 +742,13 @@ class TestBackoffInterruption(SchedulerTestBase):
             await self.wait_until(lambda: task.status == "cancelled", timeout=1.0)
         )
         self.assertLess(loop.time() - t0, 1.0)  # NOT the remaining ~5s backoff
-        self.assertEqual(len(self.repo.add_calls), 1)
-        self.assertEqual(self.repo.add_calls[0]["status"], "cancelled")
-        self.assertTrue(  # terminal event follows via the async tail
-            await self.wait_until(lambda: self.recorder.of(TaskCancelled), timeout=2.0)
+        self.assertTrue(  # row + terminal event land via the detached tail
+            await self.wait_until(
+                lambda: self.repo.add_calls
+                and self.repo.add_calls[0]["status"] == "cancelled"
+                and self.recorder.of(TaskCancelled),
+                timeout=2.0,
+            )
         )
 
     async def test_cancel_matching_during_backoff_interrupts_sleep(self) -> None:
@@ -837,7 +853,7 @@ class TestStressExactlyOnce(SchedulerTestBase):
         self.assertEqual(len({e.task_id for e in terminal_events}), len(tasks))
         audited = {
             t.id for t in tasks
-            if t.action in ("message", "dm") and (t.status != "cancelled" or t.sender_ran)
+            if t.action in ("message", "dm") and t.sender_ran
         }
         self.assertEqual(len(self.audit.calls), len(audited))
         for account in accounts:
@@ -998,6 +1014,311 @@ class TestValidation(SchedulerTestBase):
             TaskScheduler(bus, logger, limiter, sender, retry_backoff=-0.5)
         with self.assertRaises(ValueError):
             TaskScheduler(bus, logger, limiter, sender, max_backoff=float("nan"))
+
+
+# ------------------------------------------- stop hardening (round 3)
+class TestFailedStopHardening(SchedulerTestBase):
+    async def test_owner_cancelled_stop_persists_terminal_state(self) -> None:
+        """TORN TAIL regression: a stop owner cancelled while the sweep's
+        history write is in flight must not tear the terminal transition —
+        the tail runs shielded, the abort joins it, and rows/audit/events
+        all land even though _apply_terminal already removed the task."""
+        gate = asyncio.Event()
+        orig_add = self.repo.add
+
+        async def blocked_add(entry):
+            await gate.wait()  # simulate a slow aiosqlite write
+            return await orig_add(entry)
+
+        self.repo.add = blocked_add
+        t1 = self.scheduler.submit("alpha", "p", "message")
+        t2 = self.scheduler.submit("alpha", "p", "message")  # queued behind
+        await self.settle(0.02)  # t1 completed, its tail parked on the gate
+
+        owner = asyncio.create_task(self.scheduler.stop(drain=False, timeout=0.0))
+        await asyncio.sleep(0.05)  # owner parked: t1 terminal, row not landed
+        owner.cancel()
+        gate.set()  # DB becomes responsive again
+        with self.assertRaises(asyncio.CancelledError):
+            await owner
+        await self.settle(0.1)
+
+        self.assertEqual(t1.status, "completed")
+        self.assertEqual(t2.status, "cancelled")
+        self.assertEqual({r["id"] for r in self.repo.add_calls}, {t1.id, t2.id})
+        completed = self.recorder.of(TaskCompleted)
+        cancelled = self.recorder.of(TaskCancelled)
+        self.assertEqual([e.task_id for e in completed], [t1.id])
+        self.assertEqual([e.task_id for e in cancelled], [t2.id])
+        self.assertEqual(len(self.scheduler._tasks), 0)
+        # retry stop() completes the teardown and heals the fault
+        await self.scheduler.stop(drain=False)
+        self.assertTrue(self.scheduler._stopped)
+
+    async def test_failed_stop_rejects_submit_and_leaves_no_stale_tasks(self) -> None:
+        """FAILED STOP re-opened submissions (round 3): after an
+        owner-cancelled estop the scheduler is FAULTED — submit() rejects
+        (no respawned lane may drain tasks the estop was cancelling) until
+        start() explicitly re-arms."""
+        hold = asyncio.Event()
+        entered = asyncio.Event()
+        db = asyncio.Event()
+
+        async def held(task):
+            entered.set()
+            await hold.wait()
+
+        orig_add = self.repo.add
+
+        async def blocked_add(entry):
+            await db.wait()  # keep the teardown parked mid-sweep
+            return await orig_add(entry)
+
+        self.scheduler._sender = held
+        self.repo.add = blocked_add
+        t1 = self.scheduler.submit("alpha", "p", "message")
+        self.assertTrue(await self.wait_until(entered.is_set))
+        t2 = self.scheduler.submit("alpha", "p", "message")  # queued behind
+
+        owner = asyncio.create_task(self.scheduler.stop(drain=False, timeout=0.0))
+        await asyncio.sleep(0.05)  # sweep parked inside the blocked history write
+        owner.cancel()
+        db.set()
+        hold.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await owner
+        await self.settle(0.1)
+
+        self.assertTrue(t1.is_terminal)               # abort drove it terminal
+        self.assertEqual(t2.status, "cancelled")      # NOT left for a respawn
+        self.assertTrue(self.scheduler._stop_failed)
+        with self.assertRaises(SchedulerError) as ctx:
+            self.scheduler.submit("alpha", "p", "message")
+        self.assertIn("interrupted", str(ctx.exception))
+
+        self.scheduler.start()  # explicit re-arm retires the fault
+        late = self.scheduler.submit("alpha", "p", "message")
+        await self.settle(0.1)
+        self.assertEqual(late.status, "completed")
+
+    async def test_cancelled_running_task_duration_uses_wall_clock(self) -> None:
+        """CANCELLED rows persisted duration 0.0 despite wall
+        started_at/finished_at: cancel paths without a monotonic start must
+        fall back to the wall-clock diff."""
+        hold = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def held(task):
+            entered.set()
+            await hold.wait()
+
+        self.scheduler._sender = held
+        task = self.scheduler.submit("alpha", "p", "message")
+        self.assertTrue(await self.wait_until(entered.is_set))
+        await asyncio.sleep(0.03)  # measurable wall time mid-send
+        await self.scheduler.stop(drain=False)
+        row = self.repo.rows[task.id]
+        self.assertEqual(row["status"], "cancelled")
+        self.assertGreaterEqual(row["duration_s"], 0.02)
+
+
+# ------------------------------------------------ lane containment (round 3)
+class TestLaneContainment(SchedulerTestBase):
+    async def test_lane_worker_error_drives_task_failed(self) -> None:
+        """The belt-and-braces lane catch used to strand the task RUNNING
+        forever: it must log the exception detail AND drive the task
+        terminal FAILED (history row + TaskFailed event included)."""
+
+        async def broken(task):
+            raise RuntimeError("worker blew up")
+
+        orig_run = self.scheduler._run_task
+        self.scheduler._run_task = broken
+        task = self.scheduler.submit("alpha", "p", "message")
+        self.assertTrue(await self.wait_until(
+            lambda: task.is_terminal and self.repo.add_calls
+            and self.recorder.of(TaskFailed)
+        ))
+        self.assertEqual(task.status, "failed")
+        self.assertIn("RuntimeError: worker blew up", task.error)
+        self.assertEqual(len(self.repo.add_calls), 1)
+        self.assertEqual(self.repo.add_calls[0]["status"], "failed")
+        failed = self.recorder.of(TaskFailed)
+        self.assertEqual([e.task_id for e in failed], [task.id])
+        self.assertEqual(failed[0].error_kind, "RuntimeError")
+        self.assertEqual(self.scheduler.stats()["running"], 0)
+        # the lane itself survives for the next task
+        self.scheduler._run_task = orig_run
+        nxt = self.scheduler.submit("alpha", "p", "message")
+        await self.settle(0.1)
+        self.assertEqual(nxt.status, "completed")
+
+
+# -------------------------------------------- pre-send failures (round 3)
+class TestPreSendFailureNoAudit(SchedulerTestBase):
+    async def test_limiter_failure_never_audited(self) -> None:
+        """PHANTOM AUDIT ROWS: FAILED paths where acquire() raised or was
+        cancelled never invoked the sender — no outbound audit row may
+        exist for a send that did not happen."""
+
+        async def exploding(action, account, plugin, priority):
+            raise RuntimeError("limiter db gone")
+
+        async def cancelling(action, account, plugin, priority):
+            raise asyncio.CancelledError()
+
+        self.limiter.acquire = exploding
+        t1 = self.scheduler.submit("alpha", "p", "message")
+        self.assertTrue(await self.wait_until(lambda: t1.is_terminal))
+        self.limiter.acquire = cancelling
+        t2 = self.scheduler.submit("alpha", "p", "message")
+        await self.settle(0.1)
+
+        self.assertEqual(t1.status, "failed")
+        self.assertIn("rate limiter error", t1.error)
+        self.assertEqual(t2.status, "failed")
+        self.assertIn("acquire was cancelled", t2.error)
+        self.assertEqual(self.sender.calls, [])       # nothing was sent
+        self.assertEqual(self.audit.calls, [])        # ...so nothing audited
+        self.assertEqual(len(self.repo.add_calls), 2)  # history still written
+
+
+# ---------------------------------------------------- estop sweep (round 3)
+class TestEstopSweep(SchedulerTestBase):
+    async def test_zero_sender_calls_after_stop_returns(self) -> None:
+        """Estop barrier contract: with one send held mid-flight and five
+        tasks queued, stop(drain=False) cancels everything and ZERO sender
+        calls may happen after stop() returns."""
+        hold = asyncio.Event()
+        entered = asyncio.Event()
+        calls = []
+
+        async def held(task):
+            calls.append(task)
+            entered.set()
+            await hold.wait()
+
+        self.scheduler._sender = held
+        t1 = self.scheduler.submit("alpha", "p", "message")
+        self.assertTrue(await self.wait_until(entered.is_set))
+        queued = [self.scheduler.submit("alpha", "p", "message") for _ in range(5)]
+
+        await self.scheduler.stop(drain=False)  # estop racing the held send
+
+        self.assertEqual(len(calls), 1)  # only the pre-stop in-flight send
+        for task in [t1, *queued]:
+            self.assertEqual(task.status, "cancelled")
+        self.assertEqual(self.scheduler.stats()["workers"], 0)
+        self.assertEqual(self.scheduler._inflight_tails, 0)
+        await self.settle(0.1)  # nothing may fire after stop() returned
+        self.assertEqual(len(calls), 1)
+
+
+# ------------------------------------------------ error-kind seam (round 3)
+class TestErrorKindSeam(SchedulerTestBase):
+    async def test_flow_blocked_classes_survive_the_ack_seam(self) -> None:
+        """Drive a REAL scheduler failure per FlowBlocked subclass: the
+        published TaskFailed must carry error_kind == '<ClassName>' and
+        TaskAckRegistry must reconstruct the SAME class for the waiter
+        (pins the seam the services layer hardens)."""
+        from core.account_manager.services import TaskAckRegistry
+        from core.errors import AccessDenied, CacheInvalid, FetchRequired, TargetGone
+
+        registry = TaskAckRegistry(self.bus, scheduler=self.scheduler)
+        cases = (
+            FlowBlocked("alpha", "flow dead end"),
+            CacheInvalid("alpha", "cache evaporated"),
+            TargetGone("alpha", "channel 500 vanished"),
+            AccessDenied("alpha", "permissions revoked"),
+            FetchRequired("alpha", "not cached"),
+        )
+        for exc in cases:
+            with self.subTest(kind=type(exc).__name__):
+                raised = exc
+
+                async def failing(task, _exc=raised):
+                    raise _exc
+
+                self.scheduler._sender = failing
+                task = self.scheduler.submit("alpha", "p", "message")
+                future = registry.register(task.id)
+                with self.assertRaises(type(exc)) as ctx:
+                    await asyncio.wait_for(future, 2.0)
+                self.assertTrue(task.is_terminal)
+                events = [
+                    e for e in self.recorder.of(TaskFailed) if e.task_id == task.id
+                ]
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0].error_kind, type(exc).__name__)
+                self.assertTrue(events[0].error.startswith(f"{type(exc).__name__}: "))
+                self.assertIs(type(ctx.exception), type(exc))
+                self.assertEqual(ctx.exception.account, "alpha")
+                self.assertIn(exc.reason, ctx.exception.reason)
+
+    async def test_non_flow_failure_maps_to_scheduler_error(self) -> None:
+        from core.account_manager.services import TaskAckRegistry
+
+        registry = TaskAckRegistry(self.bus, scheduler=self.scheduler)
+
+        async def failing(task):
+            raise KeyError("no such channel")
+
+        self.scheduler._sender = failing
+        task = self.scheduler.submit("alpha", "p", "poke")
+        future = registry.register(task.id)
+        with self.assertRaises(SchedulerError) as ctx:
+            await asyncio.wait_for(future, 2.0)
+        self.assertTrue(task.is_terminal)
+        events = [e for e in self.recorder.of(TaskFailed) if e.task_id == task.id]
+        self.assertEqual(events[0].error_kind, "KeyError")
+        self.assertIn("no such channel", str(ctx.exception))
+
+
+# ---------------------------------------------- restore sequence (round 3)
+class TestRestoreSequence(SchedulerTestBase):
+    async def test_sequence_continues_after_history_max_id(self) -> None:
+        class MaxIdRepo(FakeHistoryRepo):
+            async def max_id(self):
+                return 41
+
+        repo = MaxIdRepo()
+        scheduler = TaskScheduler(
+            self.bus, FakeLogger(), self.limiter, self.sender, None,
+            history_repo=repo,
+        )
+        scheduler.start()
+        try:
+            self.assertEqual(await scheduler.restore_sequence(), 42)
+            task = scheduler.submit("alpha", "p", "message")
+            self.assertEqual(task.id, 42)
+        finally:
+            await scheduler.stop(drain=False)
+
+    async def test_max_id_read_failure_seeds_collision_proof_ids(self) -> None:
+        """On a max_id() read failure ids must NOT restart at 1: every add
+        would fail its UNIQUE constraint for the whole session. The floor
+        is seeded from the epoch — unreachable by any prior session."""
+        import time
+
+        class BrokenMaxId(FakeHistoryRepo):
+            async def max_id(self):
+                raise RuntimeError("history db locked")
+
+        repo = BrokenMaxId()
+        scheduler = TaskScheduler(
+            self.bus, FakeLogger(), self.limiter, self.sender, None,
+            history_repo=repo,
+        )
+        scheduler.start()
+        try:
+            nxt = await scheduler.restore_sequence()
+            self.assertGreaterEqual(nxt, int(time.time()))
+            task = scheduler.submit("alpha", "p", "message")
+            self.assertEqual(task.id, nxt)
+            await self.settle(0.05)
+            self.assertEqual(len(repo.add_calls), 1)  # no swallowed collision
+        finally:
+            await scheduler.stop(drain=False)
 
 
 if __name__ == "__main__":
