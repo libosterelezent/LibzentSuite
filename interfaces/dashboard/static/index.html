@@ -111,6 +111,11 @@
   .status.reconnecting, .status.connecting { color: var(--warn); background: rgba(210,153,34,.15); }
   .status.created, .status.stopped { color: var(--dim); background: rgba(138,147,166,.12); }
   .status.failed { color: var(--err); background: rgba(248,81,73,.12); }
+  /* ROUND-3: the account manager also emits missing_credential (no token
+     stored — fix by storing one, not by restarting) and invalid_credential
+     (token REJECTED by Discord) — both previously rendered unstyled */
+  .status.missing_credential { color: var(--warn); background: rgba(210,153,34,.15); }
+  .status.invalid_credential { color: var(--err); background: rgba(248,81,73,.12); }
 
   button { background: var(--panel); color: var(--text); border: 1px solid var(--line);
            border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
@@ -128,7 +133,6 @@
           background: var(--panel); border: 1px solid var(--line); color: var(--dim); }
   .chip.role { color: var(--accent); border-color: var(--accent); }
   .chip.cred-db { color: var(--ok); border-color: var(--ok); }
-  .chip.cred-env { color: var(--warn); border-color: var(--warn); }
   .chip.cred-missing { color: var(--err); border-color: var(--err); }
 
   .warn-item { display: flex; gap: 8px; align-items: baseline; padding: 6px 10px;
@@ -559,6 +563,17 @@ function btn(label, onclick, cls) {
   if (cls) b.className = cls;
   return b;
 }
+// ROUND-3: in-flight disable for mutating buttons (runSimulation's pattern)
+// — a double-click must not double-fire a start/stop POST
+function btnGuarded(label, action, cls) {
+  const b = btn(label, null, cls);
+  b.onclick = () => {
+    if (b.disabled) return;
+    b.disabled = true;
+    Promise.resolve(action()).finally(() => { b.disabled = false; });
+  };
+  return b;
+}
 function fmtDur(s) {
   s = Math.max(0, Math.round(Number(s) || 0));
   if (s < 60) return s + "s";
@@ -568,6 +583,13 @@ function fmtDur(s) {
 function fmtMMSS(s) {
   s = Math.max(0, Math.round(Number(s) || 0));
   return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+}
+function fmtLatency(ms) {
+  // ROUND-3: Math.round(Infinity) === Infinity — guard finiteness before
+  // rounding or a hostile/absent gateway value renders "Infinitems"
+  if (ms == null) return "-";
+  const n = Number(ms);
+  return Number.isFinite(n) ? Math.round(n) + "ms" : "-";
 }
 function credLabel(state) {
   // runtime credential states are 'db' | 'missing' only (DB-only store)
@@ -669,6 +691,12 @@ function activate(section) {
     p.classList.toggle("active", p.id === "panel-" + section);
   $("section-title").textContent = TITLES[section] || section;
   if (LOADERS[section]) { const load = LOADERS[section]; LOADERS[section] = null; load(); }
+  // ROUND-3: re-entering Tasks must always fetch fresh tables — task
+  // events that fired while another panel was open scheduled nothing
+  if (section === "tasks") scheduleTaskRefresh();
+  // ROUND-3: renderOverview skips rebuilds while hidden (1s WS ticks) —
+  // repaint on activation so the panel never shows stale counters
+  if (section === "overview") renderOverview();
 }
 for (const b of document.querySelectorAll(".navbtn"))
   b.onclick = () => activate(b.dataset.section);
@@ -689,12 +717,16 @@ function renderWarnings(container, warnings) {
 
 function renderOverview() {
   if (!lastStats) return;
+  // ROUND-3: the 1s WS tick rebuilt this DOM even with the panel hidden —
+  // skip while inactive (activate('overview') repaints on re-entry)
+  if (!$("panel-overview").classList.contains("active")) return;
   renderWarnings($("ov-warnbar"), lastStats.warnings);
   const t = lastStats.tasks || {};
   $("ov-tasks").innerHTML = "";
   for (const [label, key, cls] of
        [["queued", "queued", "st-queued"], ["running", "running", "st-running"],
         ["completed", "completed", "st-completed"], ["failed", "failed", "st-failed"],
+        ["timed_out", "timed_out", "st-timed_out"],
         ["cancelled", "cancelled", "st-cancelled"]]) {
     const chip = document.createElement("span");
     chip.className = "chip " + cls;
@@ -729,7 +761,7 @@ function renderOverview() {
     const sub = document.createElement("div"); sub.className = "sub";
     sub.textContent =
       "discord id: " + (a.discord_id ?? a.user_id ?? "(not running)") +
-      "   latency: " + (a.latency_ms != null ? Math.round(a.latency_ms) + "ms" : "-") +
+      "   latency: " + fmtLatency(a.latency_ms) +
       "   uptime: " + fmtDur(a.uptime_s) +
       "   group: " + (a.sync_group || "independent");
     card.appendChild(sub);
@@ -765,9 +797,9 @@ function renderAccountCards() {
     const status = document.createElement("span");
     status.className = "status " + (a.status || "");
     status.textContent = a.status || "?";
-    const start = btn("start", () => post("/api/accounts/start", { account: a.name })
+    const start = btnGuarded("start", () => post("/api/accounts/start", { account: a.name })
       .then(loadAccountsQuiet).catch(e => showErr(e, "#panel-accounts")));
-    const stop = btn("stop", () => post("/api/accounts/stop", { account: a.name })
+    const stop = btnGuarded("stop", () => post("/api/accounts/stop", { account: a.name })
       .then(loadAccountsQuiet).catch(e => showErr(e, "#panel-accounts")));
     const details = btn("details…", () => openDetails(a.name));
     const estop = btn("estop", () => askConfirm("Emergency stop",
@@ -785,7 +817,7 @@ function renderAccountCards() {
     const sub = document.createElement("div"); sub.className = "sub";
     sub.textContent =
       "discord id: " + (a.discord_id ?? a.user_id ?? "(not running)") +
-      "   latency: " + (a.latency_ms != null ? Math.round(a.latency_ms) + "ms" : "-") +
+      "   latency: " + fmtLatency(a.latency_ms) +
       "   uptime: " + fmtDur(a.uptime_s) +
       "   group: " + (a.sync_group || "independent") +
       (a.cooldowns != null ? "   cooldowns: " + a.cooldowns : "");
@@ -807,8 +839,9 @@ function credChipFor(a) {
   const state = a.credential || "missing";
   chip.className = "chip cred-" + state;
   chip.textContent = "credential: " + credLabel(state);
+  // ROUND-3: runtime states are 'db' | 'missing' only (DB-only store) —
+  // the legacy 'env' title branch was dead and is gone
   chip.title = state === "db" ? "encrypted credential stored in the database"
-    : state === "env" ? "no db credential — legacy .env fallback in use"
     : "no credential stored (account cannot start)";
   return chip;
 }
@@ -856,6 +889,7 @@ LOADERS.accounts = loadAccountsQuiet;
 $("addacct").onclick = () => {
   // ERROR AUDIT FIX: client-side validation — empty/garbage names used to
   // POST and produce developer-speak errors
+  if ($("addacct").disabled) return;  // ROUND-3: in-flight double-click guard
   const name = $("newacct").value.trim();
   if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(name)) {
     showErr("account name must be lowercase [a-z0-9_-], up to 32 chars");
@@ -867,11 +901,13 @@ $("addacct").onclick = () => {
   if (profiles.length) payload.profiles = profiles;
   const cred = $("newacct-cred").value;
   if (cred) payload.credential = cred;  // one-way: request -> encrypted store
+  $("addacct").disabled = true;
   post("/api/accounts/add", payload).then(() => {
     $("newacct").value = ""; $("newacct-sync").value = "";
     $("newacct-profiles").value = ""; $("newacct-cred").value = "";
     return loadAccountsQuiet();
-  }).catch(e => showErr(e, "#panel-accounts"));
+  }).catch(e => showErr(e, "#panel-accounts"))
+    .finally(() => { $("addacct").disabled = false; });
 };
 
 // ------------------------------------------------------- details modal (§8)
@@ -880,7 +916,9 @@ async function openDetails(name) {
   try {
     [info, states, profiles] = await Promise.all([
       api("/api/accounts/info?account=" + encodeURIComponent(name)),
-      api("/api/plugins/state?account=" + encodeURIComponent(name)).catch(() => []),
+      // ROUND-3: an auth failure must NOT masquerade as 'no plugins' —
+      // null marks 'unavailable' and renders honestly in the dialog
+      api("/api/plugins/state?account=" + encodeURIComponent(name)).catch(() => null),
       api("/api/profiles").catch(() => []),
     ]);
   } catch (e) { showErr(e, "#panel-accounts"); return; }
@@ -909,7 +947,7 @@ function renderDetails(info, states, profiles) {
   const head = section("Status · Identity");
   head.innerHTML += kv("state", st.state) +
     kv("connected", st.connected) +
-    kv("latency", st.latency_ms != null ? Math.round(st.latency_ms) + "ms" : "-") +
+    kv("latency", fmtLatency(st.latency_ms)) +
     kv("uptime", fmtDur(st.uptime_s)) +
     kv("discord id", (info.identity || {}).discord_id ?? "(not running)") +
     kv("name", (info.identity || {}).name ?? "-");
@@ -926,8 +964,10 @@ function renderDetails(info, states, profiles) {
   // §8 Plugins — enable toggles + auto-generated settings editors
   const plug = section("Plugins");
   plug.innerHTML = "";
-  if (!states.length) plug.innerHTML = '<span class="dim">no plugins attached</span>';
-  for (const p of states) {
+  if (states == null)
+    plug.innerHTML = '<span class="dim">plugin states unavailable (auth?)</span>';
+  else if (!states.length) plug.innerHTML = '<span class="dim">no plugins attached</span>';
+  for (const p of states || []) {
     const box = document.createElement("div"); box.className = "card2";
     const row = document.createElement("div"); row.className = "row";
     row.innerHTML = '<span class="name">' + esc(p.name) + "</span>";
@@ -992,7 +1032,10 @@ function renderDetails(info, states, profiles) {
     rl.innerHTML += '<span class="dim mono">no actions paced yet</span>';
   else rl.appendChild(table);
 
-  $("details").showModal();
+  // ROUND-3: the settings-save / toggle re-render path re-renders while
+  // the dialog is ALREADY open — showModal() on an open dialog throws
+  // InvalidStateError on legacy engines
+  if (!$("details").open) $("details").showModal();
 }
 
 // AUTO-GENERATED settings editor from the plugin schema in /api/plugins:
@@ -1181,6 +1224,7 @@ function loadProfiles() {
 LOADERS.profiles = async () => { await loadManifests(); await loadProfiles(); };
 
 $("prof-create").onclick = () => {
+  if ($("prof-create").disabled) return;  // ROUND-3: in-flight double-click guard
   const name = $("prof-name").value.trim();
   const plugins = [...document.querySelectorAll("#prof-plugins input:checked")]
     .map((cb) => cb.value);
@@ -1189,10 +1233,12 @@ $("prof-create").onclick = () => {
     return;
   }
   if (!plugins.length) { showErr("profile needs at least one plugin"); return; }
+  $("prof-create").disabled = true;
   post("/api/profiles/create",
        { name, plugins, description: $("prof-desc").value.trim() })
     .then(() => { $("prof-name").value = ""; $("prof-desc").value = ""; return loadProfiles(); })
-    .catch(e => showErr(e, "#panel-accounts"));
+    .catch(e => showErr(e, "#panel-accounts"))
+    .finally(() => { $("prof-create").disabled = false; });
 };
 
 // ---------------------------------------------------------------- Rate Limits
@@ -1468,32 +1514,37 @@ function appendTaskEvent(msg) {
 }
 
 // ---------------------------------------------------------------- Logs
-function logLine(entry) {
-  const box = $("logbox");
+function buildLogLine(entry) {
+  // ROUND-3: split out of logLine so backfill can MERGE fetched history
+  // ahead of live lines instead of wiping them; null = filtered out
   const acctFilter = $("log-acct").value;
   const sevFilter = $("log-sev").value;
-  if (acctFilter && entry.account !== acctFilter) return;
-  if (sevFilter && entry.severity !== sevFilter) return;
-  const ph = box.querySelector("[data-ph]");
-  if (ph) ph.remove();
-  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+  if (acctFilter && entry.account !== acctFilter) return null;
+  if (sevFilter && entry.severity !== sevFilter) return null;
   const div = document.createElement("div");
   div.className = "lg-" + (entry.severity || "INFO");
   const clock = new Date((entry.ts || 0) * 1000).toTimeString().slice(0, 8);
   div.textContent = clock + " " + (entry.severity || "?") + " " + (entry.source || "?") +
     (entry.account ? " (" + entry.account + ")" : "") + ": " + (entry.message || "");
+  return div;
+}
+
+function logLine(entry) {
+  const box = $("logbox");
+  const div = buildLogLine(entry);
+  if (!div) return;
+  const ph = box.querySelector("[data-ph]");
+  if (ph) ph.remove();
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
   box.appendChild(div);
   while (box.childNodes.length > 400) box.removeChild(box.firstChild);
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
 
-function auditLine(entry) {
-  const box = $("auditbox");
+function buildAuditLine(entry) {
+  // ROUND-3: split out of auditLine for merge-style backfill (see logs)
   const filter = $("audit-acct").value;
-  if (filter && entry.account !== filter) return;
-  const ph = box.querySelector("[data-ph]");
-  if (ph) ph.remove();
-  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+  if (filter && entry.account !== filter) return null;
   const div = document.createElement("div");
   div.className = "audit-line " + (entry.direction === "out" ? "out" : "in");
   const clock = new Date((entry.ts || 0) * 1000).toTimeString().slice(0, 8);
@@ -1506,6 +1557,16 @@ function auditLine(entry) {
     '<span class="audit-meta">' + esc(meta.join(", ")) + "</span> " +
     esc((entry.content || "").slice(0, 80)) +
     (entry.note ? "  (" + esc(entry.note) + ")" : "");
+  return div;
+}
+
+function auditLine(entry) {
+  const box = $("auditbox");
+  const div = buildAuditLine(entry);
+  if (!div) return;
+  const ph = box.querySelector("[data-ph]");
+  if (ph) ph.remove();
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
   box.appendChild(div);
   while (box.childNodes.length > 300) box.removeChild(box.firstChild);
   if (atBottom) box.scrollTop = box.scrollHeight;
@@ -1516,10 +1577,22 @@ function backfillLogs() {
   if ($("log-acct").value) q.set("account", $("log-acct").value);
   if ($("log-sev").value) q.set("severity", $("log-sev").value);
   api("/api/logs?" + q).then((entries) => {
-    $("logbox").innerHTML = "";
-    for (const entry of entries) logLine(entry);
-    if (!entries.length)
-      $("logbox").innerHTML = '<span class="dim" data-ph="1">no log entries matched</span>';
+    // ROUND-3: MERGE, not wipe — live lines that streamed in while the
+    // fetch was in flight survive; backfilled history is inserted AHEAD
+    // of them (it is strictly older)
+    const box = $("logbox");
+    const ph = box.querySelector("[data-ph]");
+    if (ph) ph.remove();
+    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+    const anchor = box.firstChild;  // oldest surviving live line
+    for (const entry of entries) {
+      const div = buildLogLine(entry);
+      if (div) box.insertBefore(div, anchor);
+    }
+    while (box.childNodes.length > 400) box.removeChild(box.firstChild);
+    if (!box.childNodes.length)
+      box.innerHTML = '<span class="dim" data-ph="1">no log entries matched</span>';
+    if (atBottom) box.scrollTop = box.scrollHeight;
     $("logsync").textContent = entries.length + " entries";
   }).catch(e => showErr(e, "#panel-logs"));
 }
@@ -1531,10 +1604,21 @@ function backfillAudit() {
   const q = new URLSearchParams({ n: "100" });
   if ($("audit-acct").value) q.set("account", $("audit-acct").value);
   api("/api/audit?" + q).then((entries) => {
-    $("auditbox").innerHTML = "";
-    for (const entry of entries) auditLine(entry);
-    if (!entries.length)
-      $("auditbox").innerHTML = '<span class="dim" data-ph="1">no audit entries matched</span>';
+    // ROUND-3: merge-style backfill (see backfillLogs) — live audit lines
+    // that arrived during the fetch are preserved
+    const box = $("auditbox");
+    const ph = box.querySelector("[data-ph]");
+    if (ph) ph.remove();
+    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+    const anchor = box.firstChild;
+    for (const entry of entries) {
+      const div = buildAuditLine(entry);
+      if (div) box.insertBefore(div, anchor);
+    }
+    while (box.childNodes.length > 300) box.removeChild(box.firstChild);
+    if (!box.childNodes.length)
+      box.innerHTML = '<span class="dim" data-ph="1">no audit entries matched</span>';
+    if (atBottom) box.scrollTop = box.scrollHeight;
   }).catch(e => showErr(e, "#panel-logs"));
 }
 $("audit-backfill").onclick = backfillAudit;
@@ -1767,12 +1851,43 @@ $("adv-forget").onclick = () => {
 // ---------------------------------------------------------------- WebSocket
 let wsRetry = 1000;
 let wsAttempts = 0;
+const WS_CONNECT_TIMEOUT_MS = 10000;
+let wsWatchdog = null;        // ROUND-3: half-open TCP guard (see connectWS)
+let wsClosedHandled = false;  // one reconnect per connection (watchdog OR onclose)
+function handleWsClosed() {
+  // ROUND-3 WATCHDOG: a half-open TCP (SYN dropped, NAT state gone) fires
+  // NEITHER onopen NOR onclose — the retry loop previously depended on
+  // onclose alone and stalled forever. The watchdog forces this path.
+  if (wsClosedHandled) return;
+  wsClosedHandled = true;
+  if (wsWatchdog) { clearTimeout(wsWatchdog); wsWatchdog = null; }
+  $("wsdot").classList.remove("on");
+  // ERROR AUDIT FIX: cap retries + name the likely cause instead of an
+  // endless misleading "reconnecting…"
+  wsAttempts += 1;
+  if (wsAttempts > 10) {
+    $("connmsg").textContent = "live updates stopped — check the token or server, then reload";
+    return;
+  }
+  $("connmsg").textContent = wsAttempts > 3 ? "reconnecting… (bad token?)" : "reconnecting…";
+  setTimeout(connectWS, wsRetry);
+  wsRetry = Math.min(wsRetry * 2, 10000);
+}
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const url = proto + "//" + location.host + "/ws" +
     (token() ? "?token=" + encodeURIComponent(token()) : "");
+  wsClosedHandled = false;
   ws = new WebSocket(url);
+  clearTimeout(wsWatchdog);
+  wsWatchdog = setTimeout(() => {
+    wsWatchdog = null;
+    try { ws.close(); } catch { /* dead socket already */ }
+    handleWsClosed();  // onclose may never fire — arm the retry directly
+  }, WS_CONNECT_TIMEOUT_MS);
   ws.onopen = () => {
+    clearTimeout(wsWatchdog);
+    wsWatchdog = null;
     $("wsdot").classList.add("on");
     $("connmsg").textContent = "live";
     wsRetry = 1000; wsAttempts = 0;
@@ -1784,9 +1899,16 @@ function connectWS() {
     try {
       if (msg.type === "stats") {
         // render-gating: an unchanged account list must not rebuild the
-        // DOM every second (open dropdowns closed, scroll reset, battery)
-        const sig = JSON.stringify((msg.accounts || []).map((a) =>
-          [a.name, a.status, a.enabled, a.credential]));
+        // DOM every second (open dropdowns closed, scroll reset, battery).
+        // ROUND-3: steady accounts froze (latency/uptime/cooldowns never
+        // moved) — the sig now folds in COARSE latency (round/10), an
+        // uptime bucket (minute) and the cooldown count so the accounts
+        // panel ticks along with the overview without re-rendering per second
+        const sig = JSON.stringify((msg.accounts || []).map((a) => [
+          a.name, a.status, a.enabled, a.credential,
+          a.latency_ms != null ? Math.round(a.latency_ms / 10) : null,
+          Math.floor((a.uptime_s ?? 0) / 60),
+          a.cooldowns ?? 0]));
         const structural = sig !== lastAccountsSig;
         lastStats = msg;
         renderOverview();
@@ -1800,19 +1922,7 @@ function connectWS() {
       showErr(new Error("failed to render live update: " + (e.message || e)));
     }
   };
-  ws.onclose = () => {
-    $("wsdot").classList.remove("on");
-    // ERROR AUDIT FIX: cap retries + name the likely cause instead of an
-    // endless misleading "reconnecting…"
-    wsAttempts += 1;
-    if (wsAttempts > 10) {
-      $("connmsg").textContent = "live updates stopped — check the token or server, then reload";
-      return;
-    }
-    $("connmsg").textContent = wsAttempts > 3 ? "reconnecting… (bad token?)" : "reconnecting…";
-    setTimeout(connectWS, wsRetry);
-    wsRetry = Math.min(wsRetry * 2, 10000);
-  };
+  ws.onclose = () => handleWsClosed();
 }
 
 // task events arrive in bursts — refresh the tables at most once a second

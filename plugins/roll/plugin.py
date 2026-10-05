@@ -24,9 +24,9 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
-from core.errors import FlowBlocked
+from core.errors import FlowBlocked, PluginError, SettingsValidationError
 from core.event_bus import Event, MessageReceived
 from core.plugin_base import PluginBase, PluginContext
 from core.priority import Priority
@@ -35,6 +35,54 @@ from core.settings_manager import Setting
 #: roulette commands Mudae accepts
 VALID_ROULETTES = ("wa", "wg", "wx", "w", "ha", "hg", "hx", "h",
                    "ma", "mg", "mx", "m")
+
+#: transient-retry backoff bounds (seconds): starts at 5, doubles up to 60
+TRANSIENT_BACKOFF_START = 5.0
+TRANSIENT_BACKOFF_MAX = 60.0
+
+#: error-text markers of a transient transport/pacing failure (fallback for
+#: errors that arrive untyped — see :func:`is_transient_failure`)
+_TRANSIENT_MARKERS = ("not running", "connecting", "reconnecting",
+                      "did not complete within")
+
+
+def is_transient_failure(exc: BaseException) -> bool:
+    """True when ``exc`` looks like a transient transport/pacing failure.
+
+    PRIMARY signal: a typed ``ConnectionError``/``TimeoutError`` — the
+    services layer reconstructs those across the task-ack seam once the
+    scheduler's internal retries are exhausted. FALLBACK (kept for errors
+    that still arrive untyped, e.g. SchedulerError text from the ack
+    timeout): substring match on the error message. The matching lives
+    ONLY here so the typed path can eventually replace it wholesale.
+    """
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    text = str(exc)
+    return any(marker in text for marker in _TRANSIENT_MARKERS)
+
+
+class RouletteCommandSetting(Setting):
+    """``command`` setting that only accepts a Mudae roulette command.
+
+    Values are normalized to the canonical ``$<roulette>`` form: ``wa``,
+    ``$WA`` and `` $wa `` all become ``$wa``. Anything else is rejected
+    with an error listing every valid roulette command (round-3: the
+    constant existed but nothing enforced it).
+    """
+
+    def validate(self, value: Any) -> str:
+        coerced = super().validate(value)
+        cmd = str(coerced).strip().lower()
+        if cmd.startswith("$"):
+            cmd = cmd[1:]
+        if cmd not in VALID_ROULETTES:
+            raise SettingsValidationError(
+                self.name,
+                f"{coerced!r} is not a Mudae roulette command (valid: "
+                + ", ".join(f"${r}" for r in VALID_ROULETTES) + ")",
+            )
+        return f"${cmd}"
 
 #: cooldown key used with the framework's CooldownService
 COOLDOWN_KEY = "roulette"
@@ -75,11 +123,13 @@ class RollPlugin(PluginBase):
                 "Word that starts rolling in the channel it's typed in (owners only)."),
         Setting("stop_trigger", "str", "rollstop",
                 "Word that stops rolling (owners only)."),
-        Setting("command", "str", "$wa",
-                "Roulette command: $wa/$wg/$wx/$w/$ha/$hg/$hx/$h/$ma/$mg/$mx/$m."),
+        RouletteCommandSetting("command", "str", "$wa",
+                               "Roulette command: $wa/$wg/$wx/$w/$ha/$hg/$hx/$h/$ma/$mg/"
+                               "$mx/$m (validated; anything else is rejected)."),
         Setting("userstack", "bool", True,
                 "Send '$us 20' when rolls run out (auto-disables if the "
-                "account has no kakeraloots)."),
+                "account has no kakeraloots; an explicit re-enable via the "
+                "settings survives restarts)."),
         Setting("ignore_keys", "bool", False,
                 "Skip '$ru' when the per-hour key limit is reached."),
         Setting("roll_interval", "float", 2.0,
@@ -98,10 +148,25 @@ class RollPlugin(PluginBase):
     # ------------------------------------------------------------ lifecycle
     async def on_load(self, ctx: PluginContext) -> None:
         # restore persisted userstack availability (disabled when the
-        # account ran out of kakeraloots in a previous session)
+        # account ran out of kakeraloots in a previous session).
+        #
+        # ONE-WAY-LATCH FIX (round-3): the stored False only forces the
+        # setting OFF when the user has NOT set 'userstack' explicitly.
+        # The auto-disable flips the LIVE dict only — it never persists a
+        # setting — so at load time an un-set key resolves to the schema
+        # default (True), indistinguishable BY VALUE from an explicit
+        # re-enable. ctx.explicit_settings (keys present in any settings
+        # layer, built by the plugin manager) carries the distinction:
+        # an explicit choice — re-enable OR disable — always wins.
         available = await ctx.services.state_get("userstack_available", True)
         if available is False:
-            ctx.settings["userstack"] = False
+            explicit = ctx.explicit_settings or frozenset()
+            if "userstack" in explicit:
+                ctx.logger.info(
+                    "userstack was auto-disabled last session but is "
+                    "explicitly set — honoring the explicit value")
+            else:
+                ctx.settings["userstack"] = False
         ctx.logger.info("roll v%s loaded (command=%r userstack=%s)",
                         self.version, ctx.settings["command"],
                         ctx.settings["userstack"])
@@ -158,6 +223,15 @@ class RollPlugin(PluginBase):
         for account in list(self._rolling):
             await self._stop(ctx, account)
 
+    async def _sleep_while_rolling(self, ctx: PluginContext, account: str,
+                                   duration: float) -> None:
+        """Sleep up to ``duration`` in chunks so a stop() lands quickly."""
+        remaining = float(duration)
+        while remaining > 0 and self._rolling.get(account):
+            chunk = min(remaining, 30.0)
+            await asyncio.sleep(chunk)
+            remaining -= chunk
+
     async def _roll_loop(self, ctx: PluginContext, account: str,
                          channel_id: int) -> None:
         """The rolling loop — one iteration per roulette send.
@@ -167,6 +241,7 @@ class RollPlugin(PluginBase):
         Cancellation-safe: the stop trigger or on_disable cancels this task.
         """
         mudae_id = ctx.services.credentials.mudae_bot_id
+        retry_backoff = TRANSIENT_BACKOFF_START
         try:
             while self._rolling.get(account):
                 # ── ONE iteration, with per-iteration error handling ──
@@ -212,8 +287,17 @@ class RollPlugin(PluginBase):
                                                response, mudae_id)
 
                     await asyncio.sleep(ctx.settings["roll_interval"])
+                    retry_backoff = TRANSIENT_BACKOFF_START  # healthy: reset
                 except asyncio.CancelledError:
                     raise  # stop trigger / shutdown — outer handler logs it
+                except PluginError as exc:
+                    # framework services (cooldowns/state) not wired: this
+                    # roll loop cannot work at all — name it precisely
+                    # instead of landing in the generic crash line.
+                    ctx.logger.error(
+                        "plugin services unavailable on %s (%s) — roll loop "
+                        "stopped; check the framework wiring", account, exc)
+                    break
                 except FlowBlocked as exc:
                     # one clean line, then the flow (and loop) is over
                     ctx.logger.warning("flow aborted for %s: %s",
@@ -221,8 +305,8 @@ class RollPlugin(PluginBase):
                     break
                 except Exception as exc:
                     # ConnectionError during a reconnect is TRANSIENT — the
-                    # supervisor will bring the account back; wait, probe,
-                    # and CONTINUE the loop instead of dying.
+                    # supervisor will bring the account back; back off and
+                    # RETRY the send instead of dying.
                     error_text = str(exc)
                     if "scheduler is stopped" in error_text:
                         # K11 (S5-C4): global estop/shutdown stops the
@@ -232,29 +316,25 @@ class RollPlugin(PluginBase):
                         ctx.logger.info(
                             "roll loop stopped with scheduler for %s", account)
                         break
-                    if "not running" in error_text or "connecting" in error_text \
-                            or "reconnecting" in error_text \
-                            or "did not complete within" in error_text:
-                        # "did not complete within" = the 30s task-ack
-                        # timeout: the send sat in pacing/queue longer than
-                        # the ack window (e.g. the fleet send lane paused) —
-                        # transient, NOT a crash (K11 / S5-C2: previously
-                        # this killed the loop for good).
+                    if is_transient_failure(exc):
+                        # HONEST RECOVERY (round-3): there is no cheap probe
+                        # that proves the account is back — the previous
+                        # validate_channel probe was a pure cache lookup
+                        # that ALWAYS passed, logging "recovered" while the
+                        # account was still down and spinning every 5s.
+                        # The retry send itself is the probe: wait a
+                        # GROWING backoff (bounded start→max) and let the
+                        # next iteration succeed or fail on its own merits.
                         ctx.logger.warning(
-                            "account %s temporarily disconnected — roll loop "
-                            "pausing until reconnection", account)
-                        while self._rolling.get(account):
-                            await asyncio.sleep(5.0)
-                            # probe: can we reach the channel again?
-                            try:
-                                ctx.services.validate_channel(channel_id)
-                                break  # account is back — resume rolling
-                            except Exception:
-                                continue
-                        ctx.logger.info(
-                            "account %s recovered — roll loop resuming",
-                            account)
-                        continue  # ACTUALLY resume the outer rolling loop
+                            "send failed on %s (%s: %s) — account still "
+                            "down, retrying in %.0fs (backoff grows to %.0fs)",
+                            account, type(exc).__name__, exc,
+                            retry_backoff, TRANSIENT_BACKOFF_MAX)
+                        await self._sleep_while_rolling(ctx, account,
+                                                        retry_backoff)
+                        retry_backoff = min(retry_backoff * 2.0,
+                                            TRANSIENT_BACKOFF_MAX)
+                        continue
                     ctx.logger.exception("roll loop crashed on %s", account)
                     break
         except asyncio.CancelledError:
@@ -354,4 +434,5 @@ class RollPlugin(PluginBase):
             await ctx.services.state_set("userstack_available", False)
 
 
-__all__ = ["RollPlugin", "parse_pause_minutes", "VALID_ROULETTES"]
+__all__ = ["RollPlugin", "parse_pause_minutes", "VALID_ROULETTES",
+           "is_transient_failure", "RouletteCommandSetting"]

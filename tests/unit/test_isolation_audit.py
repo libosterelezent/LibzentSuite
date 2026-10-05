@@ -10,6 +10,7 @@ Each test pins one minimal fix:
   K6  remove_account deactivates plugins of a never-stopped FAILED account
   K7  cancelled/failed connect() closes the LIBRARY client (session leak)
   K8  shared IdentifyGate spaces concurrent IDENTIFYs (factory-owned)
+  K9  reconnect backoff jitter per account (anti-thundering-herd)
   K10 lane-config kv rows that decode to dicts load correctly
   K11 roll loop treats the 30s task-ack timeout as transient
   K12 ServiceLogger stdlib surface forwards account= context
@@ -17,6 +18,9 @@ Each test pins one minimal fix:
   K14 settings/profile mirrors are evicted on account removal
   K15 rate-engine residue + account policies are pruned on removal
   K16 soulcopy skips a second trigger while a flow is running
+  K17 live adapter declares edit/delete/reaction callbacks (undeclared
+      attrs are read inside library dispatch, which swallows the error
+      and silently drops the events)
 """
 from __future__ import annotations
 

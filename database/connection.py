@@ -174,8 +174,13 @@ class DatabaseConnection:
 
         Two concurrent connect() calls would each open an aiosqlite
         connection; the loser's worker thread (non-daemon) would keep the
-        interpreter alive forever — hence the lock.
+        interpreter alive forever — hence the lock. The loop check runs
+        BEFORE anything opens: a connect() from a second event loop must
+        fail loud HERE — otherwise it would open a fresh aiosqlite
+        worker, first USE would raise multi-loop, and the never-closed
+        non-daemon worker would hang interpreter shutdown.
         """
+        self._guard._check_loop()
         if self._conn is not None:
             return
         async with self._connect_lock:
@@ -213,10 +218,15 @@ class DatabaseConnection:
 
         Waits (bounded) for an in-flight transaction so a graceful shutdown
         never cuts a write in half; after the timeout it closes anyway.
+        A cleanly closed connection may be reopened on ANOTHER event loop:
+        the guard and connect lock are loop-bound once awaited, so they
+        are reborn here (the guard is REPLACED, never mutated — holders
+        and waiters of the old object stay balanced on its old lock).
         """
         if self._conn is None:
             return
-        locked = await self._guard.acquire_bounded(timeout)
+        guard = self._guard
+        locked = await guard.acquire_bounded(timeout)
         if not locked:
             LOG.warning("database close: transaction still running after "
                         "%.1fs; closing anyway", timeout)
@@ -229,7 +239,10 @@ class DatabaseConnection:
                     LOG.debug("database close failed", exc_info=True)
         finally:
             if locked:
-                self._guard.release()
+                guard.release()
+                if self._guard is guard:  # a concurrent close already
+                    self._guard = _TaskGuard()  # reborn them: don't orphan
+                    self._connect_lock = asyncio.Lock()  # in-flight guards
 
     def _require(self) -> aiosqlite.Connection:
         if self._conn is None:

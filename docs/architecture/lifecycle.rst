@@ -28,4 +28,5 @@ closes. The global emergency stop halts everything; ``system_resume``
 (``estop`` resume / ``POST /api/resume``) re-arms the scheduler — accounts
 restart explicitly.
 
-Exact walk-through: ``knowledgebase/RUNTIME_LIFECYCLE.md``.
+Exact walk-through: ``knowledgebase/RUNTIME_LIFECYCLE.md`` (if you
+maintain a local knowledgebase — not shipped in a fresh clone).

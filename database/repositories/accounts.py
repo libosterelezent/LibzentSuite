@@ -130,11 +130,11 @@ class AccountsRepository(BaseRepository):
         updating zero rows would hide caller bugs.
         """
         async with self._tx(f"set enabled={bool(enabled)} for account {name!r}") as conn:
-            cur = await conn.execute(
+            async with conn.execute(
                 "UPDATE accounts SET enabled = ? WHERE name = ?", (int(bool(enabled)), name)
-            )
-            if cur.rowcount == 0:
-                raise DatabaseError(f"unknown account: {name!r}")
+            ) as cur:
+                if cur.rowcount == 0:
+                    raise DatabaseError(f"unknown account: {name!r}")
 
     async def set_settings(self, name: str, settings: Dict[str, Any]) -> None:
         """Replace the account's whole framework-settings JSON blob.
@@ -151,11 +151,11 @@ class AccountsRepository(BaseRepository):
                 f"account settings for {name!r} are not JSON-serializable: {exc}"
             ) from exc
         async with self._tx(f"store settings for account {name!r}") as conn:
-            cur = await conn.execute(
+            async with conn.execute(
                 "UPDATE accounts SET settings_json = ? WHERE name = ?", (payload, name)
-            )
-            if cur.rowcount == 0:
-                raise DatabaseError(f"unknown account: {name!r}")
+            ) as cur:
+                if cur.rowcount == 0:
+                    raise DatabaseError(f"unknown account: {name!r}")
 
     async def delete(self, name: str) -> bool:
         """Delete an account AND every dependent row; True when it existed.
@@ -166,8 +166,10 @@ class AccountsRepository(BaseRepository):
         account's profiles themselves and other accounts' rows are untouched.
         """
         async with self._tx(f"delete account {name!r}") as conn:
-            cur = await conn.execute("DELETE FROM accounts WHERE name = ?", (name,))
-            existed = cur.rowcount > 0
+            async with conn.execute(
+                "DELETE FROM accounts WHERE name = ?", (name,)
+            ) as cur:
+                existed = cur.rowcount > 0
             if existed:
                 for table in _DEPENDENT_TABLES:
                     await conn.execute(f"DELETE FROM {table} WHERE account = ?", (name,))

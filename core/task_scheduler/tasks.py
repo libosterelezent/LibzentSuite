@@ -103,10 +103,10 @@ class Task:
     grant_wait_ms: float = 0.0
     grant_jitter_ms: float = 0.0
     cancelled: bool = False
-    #: True once the sender was actually invoked for the last attempt —
-    #: discriminates CANCELLED tasks that touched the API from those
-    #: cancelled while still queued/parked (audit integrity: a cancel that
-    #: never called the sender must not produce an outbound audit row).
+    #: True once the sender was actually invoked (any attempt) — only
+    #: tasks that touched the API may produce an outbound audit row: a
+    #: cancel while queued/parked on the grant AND a failure before the
+    #: send (limiter error) never sent, so both must stay unaudited.
     sender_ran: bool = False
 
     @property

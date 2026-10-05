@@ -136,6 +136,11 @@ class DeleteRecreateTests(unittest.IsolatedAsyncioTestCase):
         h.manager._plugin_manager.detach_account = parked_detach
         remove_task = asyncio.create_task(h.manager.remove_account("alpha"))
         await asyncio.sleep(0.05)              # removal parked in cascade
+        # the real repo raises on the duplicate UNTIL the cascade's late
+        # row delete — simulate the re-create landing exactly in the
+        # post-delete window (an external/ raced writer) so the guard is
+        # exercised the way production can actually reach it
+        h.repo.records.pop("alpha", None)
         await h.manager.add_account("alpha")   # same name re-created NOW
         park.set()
         out = await remove_task

@@ -24,7 +24,12 @@ Hard rules enforced by review and tests:
   — CLI and dashboard are 1:1 wrappers (parity by construction).
 * Plugins never touch clients, SQLite, or the limiter directly; everything
   goes through the ``PluginServices`` protocol.
-* Token *plaintext* never enters the database (Fernet ciphertext only; the key lives outside the DB in `state/credentials.key` / `SM_MASTER_KEY`); ``.env`` stores them, rows store
-  references.
+* Account tokens are stored as Fernet **ciphertext in the database** —
+  plaintext never enters it, and the key lives outside the DB
+  (``state/credentials.key`` 0600 or ``SM_MASTER_KEY`` in the process
+  environment). ``.env`` holds ids/auth switches only; legacy
+  ``DISCORD_TOKEN_*`` entries are read just once by the
+  ``credentials import-env`` migration into the encrypted store.
 
-Details: ``knowledgebase/COMPONENT_MAP.md``.
+Details: ``knowledgebase/COMPONENT_MAP.md`` (if you maintain a local
+knowledgebase — not shipped in a fresh clone).

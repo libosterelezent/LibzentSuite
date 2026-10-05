@@ -36,6 +36,7 @@ from typing import (
     Callable,
     ClassVar,
     Dict,
+    FrozenSet,
     List,
     Optional,
     Protocol,
@@ -116,6 +117,13 @@ class PluginContext:
     services: "PluginServices"
     #: pre-scoped logger: slaughtermudae.<account>.<plugin>
     logger: logging.Logger
+    #: setting keys the user set EXPLICITLY in any settings layer (None =
+    #: unknown / not computed). A resolved value equal to the schema
+    #: default is ambiguous — it may be the default itself OR an explicit
+    #: choice that happens to match it. Plugins that force a setting at
+    #: runtime (e.g. roll's userstack auto-disable) consult this to avoid
+    #: clobbering an explicit user re-enable on the next load.
+    explicit_settings: Optional[FrozenSet[str]] = None
 
     def __repr__(self) -> str:
         return f"<PluginContext {self.account}:{self.plugin} settings={sorted(self.settings)}>"
@@ -151,13 +159,21 @@ class PluginServices(Protocol):
 
     async def send_message(
         self, channel_id: int, content: str, *, priority: Priority = Priority.LOW
-    ) -> "DiscordMessage":
-        """Send to a guild/channel id through the task pipeline."""
+    ) -> None:
+        """Send to a guild/channel id through the task pipeline.
+
+        Fire-and-await-ack: returns ``None`` on success and RAISES on
+        failure — the pipeline produces a human summary, not a round-tripped
+        DiscordMessage, so callers must not use a return value (the
+        round-3 annotation fix; the implementing facade documents the same
+        contract from its side).
+        """
 
     async def send_dm(
         self, user_id: int, content: str, *, priority: Priority = Priority.LOW
-    ) -> "DiscordMessage":
-        """Send a DM to a user id through the task pipeline."""
+    ) -> None:
+        """Send a DM to a user id through the task pipeline
+        (fire-and-await-ack — see :meth:`send_message`)."""
 
     async def open_dm(self, user_id: int) -> int:
         """Resolve (opening if needed) the DM channel id for a user."""

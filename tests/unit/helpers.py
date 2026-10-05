@@ -81,6 +81,13 @@ class FakeAccountsRepo:
 
     async def add(self, name, *, token_ref=None, enabled=True, sync_group=None):
         self._maybe_fail("add")
+        # parity with the real AccountsRepository (database/repositories/
+        # accounts.py): empty/whitespace and duplicate names are
+        # DatabaseErrors, not RuntimeErrors
+        if not isinstance(name, str) or not name.strip():
+            raise DatabaseError("account name must be a non-empty string")
+        if name in self.records:
+            raise DatabaseError(f"account {name!r} already exists")
         record = AccountRecord(
             id=self.next_id, name=name, token_ref=token_ref,
             enabled=enabled, sync_group=sync_group,
@@ -186,16 +193,26 @@ class FakeScheduler:
         self.fail_submit = False
 
     def submit(self, account, plugin, action, *, channel_id=None, user_id=None,
-               content=None, priority=None, name=None, timeout=None, retries=0):
+               content=None, message_id=None, priority=None, name=None,
+               timeout=None, retries=0):
+        # ``message_id`` mirrors the real scheduler signature
+        # (core/task_scheduler/scheduler.py submit) — reaction/button
+        # sends pass it positionally-by-keyword and a fake without it
+        # dies with a TypeError that blames the caller.
         if self.fail_submit:
             raise SchedulerError("scheduler is stopped")
         task = SimpleNamespace(
             id=self.next_id, name=name or f"{action}-{self.next_id}",
             account=account, plugin=plugin, action=action,
             channel_id=channel_id, user_id=user_id, content=content,
-            priority=priority, status="queued",
+            message_id=message_id, priority=priority, status="queued",
             grant_wait_ms=12.0, grant_jitter_ms=5.0,
+            # parity with core.task_scheduler.Task attributes consumed by
+            # the account manager's send/audit paths
+            attempts=0, cancelled=False, sender_ran=False,
         )
+        task.is_terminal = task.status in (
+            "completed", "failed", "cancelled", "timed_out")
         self.next_id += 1
         self.submitted.append(task)
         return task

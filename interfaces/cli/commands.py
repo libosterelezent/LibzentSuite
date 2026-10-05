@@ -103,7 +103,8 @@ HELP: Dict[str, Tuple[str, str]] = {
         "task queue + history",
     ),
     "simulation": ("list|run [name]", "offline scenario runs"),
-    "logs": ("[n] [account] [severity]", "structured log tail (default: last 20)"),
+    "logs": ("[n] [account] [DEBUG|INFO|WARNING|ERROR]",
+             "structured log tail (default: last 20; severity UPPERCASE)"),
     "audit": ("[n] [account]", "interaction audit trail (default: last 20)"),
     "estop": ("[resume]", "GLOBAL emergency stop; 'estop resume' re-arms after one"),
     "quit": ("", "graceful shutdown, then exit (alias: exit)"),
@@ -193,8 +194,8 @@ async def run_command(api: Any, line: str) -> Optional[str]:
     if cmd == "logs":
         rest = list(args)
         severity = None
-        if len(rest) >= 2 and rest[-1].upper() in ("DEBUG", "INFO", "WARNING", "ERROR"):
-            severity = rest.pop(-1).upper()
+        if rest and rest[-1] in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            severity = rest.pop(-1)  # exact-case: account names are lowercase
         limit, account = _tail_args(cmd, rest)
         return format_logs(
             await api.logs_tail(limit, account=account, severity=severity)

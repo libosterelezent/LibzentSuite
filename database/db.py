@@ -158,8 +158,14 @@ class Database:
                 raise
 
     async def close(self) -> None:
-        """Close the connection (idempotent; part of graceful shutdown)."""
+        """Close the connection (idempotent; part of graceful shutdown).
+
+        The migrate lock is reborn with the connection: both are
+        loop-bound once awaited, and a cleanly closed Database must be
+        reusable on a NEW event loop (see DatabaseConnection.close).
+        """
         await self.connection.close()
+        self._migrate_lock = asyncio.Lock()
 
 
 __all__ = ["Database", "DatabaseError"]

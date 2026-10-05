@@ -165,6 +165,25 @@ class PluginRepository(BaseRepository):
                 (account, plugin, key, payload),
             )
 
+    async def delete_setting(self, account: str, plugin: str, key: str) -> bool:
+        """Remove one per-account setting override; True when a row existed.
+
+        The unpin counterpart to :meth:`set_setting` (SettingsManager
+        calls it duck-typed: exactly ``delete_setting(account, plugin,
+        key) -> bool``). Unknown (account, plugin, key) is a clean
+        False, never an error — unpinning something already gone is
+        idempotent.
+        """
+        async with self._tx(
+            f"delete plugin setting {account!r}/{plugin!r}.{key}"
+        ) as conn:
+            async with conn.execute(
+                "DELETE FROM plugin_settings "
+                "WHERE account = ? AND plugin = ? AND key = ?",
+                (account, plugin, key),
+            ) as cur:
+                return cur.rowcount > 0
+
     async def all_account_settings(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
         """The whole override layer: account -> plugin -> key -> value.
 

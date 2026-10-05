@@ -15,7 +15,12 @@ DESIGN — how sends await task completion (the lead asked for this):
         bounded timeout (``task_ack_timeout``, default 30s),
       * ``TaskCompleted`` resolves the future with the event's summary,
         ``TaskFailed``/``TaskCancelled`` raise :class:`core.errors.SchedulerError`
-        carrying the reason, a timeout raises ``SchedulerError`` too,
+        carrying the reason, a timeout raises ``SchedulerError`` too. A
+        terminal failure whose ``error_kind`` names a FlowBlocked subclass
+        or a transient transport error (``ConnectionError`` /
+        ``TimeoutError``) is re-raised as THAT exception type across the
+        seam — the flow-abort contract and transient handling survive the
+        ack boundary,
 
     ``scheduler.submit`` is synchronous, so the future is registered in the
     same event-loop step as the submit — a completion event can never arrive
@@ -93,19 +98,44 @@ class TaskAckRegistry:
         "FetchRequired": FetchRequired,
     }
 
+    #: Transient transport errors reconstructed as their BUILTIN types. The
+    #: scheduler retries ConnectionError/TimeoutError internally; once those
+    #: retries are exhausted the terminal TaskFailed carries the class name
+    #: in ``error_kind`` — without this map the waiting plugin would get an
+    #: opaque SchedulerError and flow code would have to substring-match
+    #: English error text to guess transience (fragile, round-3 finding).
+    #: Constructed with a single message string (not the (account, reason)
+    #: FlowBlocked shape). ``ServerRateLimit`` stays UNMAPPED: the scheduler
+    #: always retries it at least once, so it stays retried-invisible here.
+    _TRANSIENT_CLASSES = {
+        "ConnectionError": ConnectionError,
+        "TimeoutError": TimeoutError,
+        # stdlib subclasses: reconstructed as their own type so plugins
+        # catching the base still match (isinstance holds for all of these)
+        "ConnectionResetError": ConnectionResetError,
+        "ConnectionAbortedError": ConnectionAbortedError,
+        "ConnectionRefusedError": ConnectionRefusedError,
+        "BrokenPipeError": BrokenPipeError,
+    }
+
     def _on_failed(self, event: TaskFailed) -> None:
         future = self._futures.pop(event.task_id, None)
         if future is None or future.done():
             return
-        blocked = self._FLOW_CLASSES.get(getattr(event, "error_kind", "") or "")
+        kind = getattr(event, "error_kind", "") or ""
+        blocked = self._FLOW_CLASSES.get(kind)
         if blocked is not None:
             future.set_exception(
                 blocked(event.account, self._flow_reason(event.error))
             )
-        else:
-            future.set_exception(
-                SchedulerError(f"task {event.task_id} failed: {event.error}")
-            )
+            return
+        transient = self._TRANSIENT_CLASSES.get(kind)
+        if transient is not None:
+            future.set_exception(transient(self._flow_reason(event.error)))
+            return
+        future.set_exception(
+            SchedulerError(f"task {event.task_id} failed: {event.error}")
+        )
 
     @staticmethod
     def _flow_reason(error: str) -> str:
@@ -147,7 +177,11 @@ class TaskAckRegistry:
         """Await one task's completion event; returns the TaskCompleted summary.
 
         Raises:
-            SchedulerError: the task failed, was cancelled, or did not
+            ConnectionError / TimeoutError: the task failed terminally with
+            that transient transport error (typed across the ack seam — the
+            scheduler already exhausted its retries).
+            SchedulerError: the task failed with anything else, was
+            cancelled, or did not
             produce a completion event within ``timeout`` seconds (in the
             timeout case the task is CANCELLED first — a plugin must never
             observe a failure for a send that still executes minutes later).

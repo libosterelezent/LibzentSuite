@@ -201,7 +201,9 @@ class TestRemoteControl(unittest.IsolatedAsyncioTestCase):
         bus.publish_nowait(mention_message(f"<@{ALPHA_ID}> status"))
         await asyncio.sleep(0.05)
         bridge.stop()
-        self.assertIn("error: RuntimeError: boom", scheduler.submitted[0]["content"])
+        # non-domain internals must NOT leak class/text into the channel
+        self.assertIn("error: internal (see logs)", scheduler.submitted[0]["content"])
+        self.assertNotIn("RuntimeError", scheduler.submitted[0]["content"])
 
     async def test_help_lists_commands(self) -> None:
         bridge, bus, scheduler, _ = make_bridge()

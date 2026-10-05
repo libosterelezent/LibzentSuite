@@ -18,10 +18,16 @@ Contract
 
 :class:`core.plugin_base.PluginServices` — the ONLY Discord surface:
 ``send_message`` / ``send_dm`` / ``open_dm`` / ``fetch_user`` /
-``add_reaction`` / ``click_button`` (all pipeline-paced, fire-and-await-ack),
-``wait_for_message`` / ``collect_messages`` (bus reads),
-``publish``, ``validate_channel`` / ``describe_channel`` (cache),
-``credentials`` (owner ids, Mudae id).
+``add_reaction`` / ``click_button`` (all pipeline-paced, fire-and-await-ack;
+``fetch_user`` returns ``None`` when the account's client cannot resolve
+the user), ``wait_for_message`` / ``collect_messages`` (bus reads;
+``wait_for_message`` returns ``None`` on timeout), ``publish``,
+``validate_channel`` / ``describe_channel`` (cache), the persistent
+account+plugin-scoped families ``cooldown_set`` / ``cooldown_remaining`` /
+``cooldown_active`` / ``cooldown_clear`` / ``cooldown_list`` and
+``state_get`` / ``state_set`` / ``state_delete``, plus the
+``credentials`` (owner ids, Mudae id), ``account``, ``plugin`` and
+``settings`` properties.
 
 Events plugins receive
 ----------------------
@@ -48,4 +54,5 @@ self-throttle.
 
 Deep dive (why/ownership/errors per method): ``knowledgebase/PLUGIN_API.md``.
 Examples: ``knowledgebase/PLUGIN_EXAMPLES.md``. Anti-patterns:
-``knowledgebase/PLUGIN_ANTIPATTERNS.md``.
+``knowledgebase/PLUGIN_ANTIPATTERNS.md`` — if you maintain a local
+knowledgebase; it is not shipped in a fresh clone (see :doc:`/reference/index`).

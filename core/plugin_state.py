@@ -8,8 +8,11 @@ touch SQL or connections (spec §31). Scopes:
     plugin           — one plugin across accounts
     account_plugin   — one (account, plugin) pair
 
-Storage keys are namespaced (``pstate:<scope>:...``) inside kv, values
-JSON-encoded. All methods async (aiosqlite underneath). Plugins obtain
+Storage keys are namespaced (``pstate:<scope>:...``) inside kv. Values are
+stored RAW: the kv repository JSON-encodes on write and decodes on read
+(one layer of encoding — values used to be pre-encoded here, double-encoding
+every row; legacy rows are still decoded transparently in ``_get``).
+All methods async (aiosqlite underneath). Plugins obtain
 this service through PluginServices (approved plugin API), not directly.
 """
 from __future__ import annotations
@@ -135,13 +138,34 @@ class PluginStateService:
         raw = await self._kv.get(stored_key)
         if raw is None:
             return default
+        if isinstance(raw, dict) and len(raw) == 1 and self._STR_TAG in raw:
+            return raw[self._STR_TAG]  # tagged str payload (lossless)
+        if not isinstance(raw, str):
+            # current rows store the value ONCE-encoded (kv decodes it)
+            return raw
+        # K10-mirror: LEGACY rows were pre-encoded by this service on top
+        # of the kv layer's own encoding — kv.get hands back the inner
+        # JSON text, which must be decoded once more. Rows written through
+        # raw kv.set with a plain-string payload fall through to the raw
+        # string (it IS the stored value), matching the kv repository's
+        # own tolerant-read contract.
         try:
             return json.loads(raw)
         except (ValueError, TypeError):
-            return default  # corrupt row -> default; next set heals it
+            return raw
+
+    #: write-tag for str payloads: kv stores values JSON-encoded, so a raw
+    #: string that itself parses as JSON ('"123"', '"{\"a\": 1}"') would be
+    #: indistinguishable from a real int/dict on read — wrapping EVERY str
+    #: makes the round-trip lossless (a dict with exactly this key unwraps)
+    _STR_TAG = "__sm_str__"
 
     async def _set(self, stored_key: str, value: Any) -> None:
-        await self._kv.set(stored_key, json.dumps(value))
+        # RAW value: the kv repository JSON-encodes on write (it used to be
+        # pre-encoded here, double-encoding every row — and rows written
+        # via raw kv.set then read back as the caller's default, silently)
+        payload = ({self._STR_TAG: value} if isinstance(value, str) else value)
+        await self._kv.set(stored_key, payload)
 
     async def _delete(self, stored_key: str) -> bool:
         return await self._kv.delete(stored_key)

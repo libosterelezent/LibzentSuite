@@ -179,7 +179,58 @@ class TestFrames(unittest.TestCase):
     def test_close_frame(self) -> None:
         frame = wsproto.encode_close_frame()
         self.assertEqual(frame[0] & 0x0F, 0x8)
-        self.assertEqual(len(frame), 2)
+        self.assertEqual(frame[1], 2)  # 2-byte struct-packed status code
+        self.assertEqual(frame[2:], b"\x03\xe8")  # default 1000 normal closure
+
+    def test_close_frame_carries_code(self) -> None:
+        # ROUND-3: close frames must carry a status code — the old frame
+        # was a codeless 88 00 while comments claimed 1007
+        self.assertEqual(wsproto.encode_close_frame(1002), b"\x88\x02\x03\xea")
+        self.assertEqual(wsproto.encode_close_frame(1007), b"\x88\x02\x03\xef")
+        self.assertEqual(wsproto.encode_close_frame(None), b"\x88\x00")  # codeless
+
+    def test_echo_close_code(self) -> None:
+        # peer close code echoed verbatim; codeless stays codeless
+        self.assertEqual(wsproto.echo_close_code(b""), None)
+        self.assertEqual(wsproto.echo_close_code(b"\x03\xe8"), 1000)
+        self.assertEqual(wsproto.echo_close_code(b"\x03\xef" + b"bye"), 1007)
+        # malformed: 1-byte payload / out of range / never-on-the-wire codes
+        self.assertEqual(wsproto.echo_close_code(b"\x03"), 1002)
+        self.assertEqual(wsproto.echo_close_code(b"\x03\xf6"), 1014)  # in range: echoed
+        self.assertEqual(wsproto.echo_close_code(struct.pack(">H", 999)), 1002)
+        self.assertEqual(wsproto.echo_close_code(struct.pack(">H", 5000)), 1002)
+        for forbidden in (1005, 1006, 1015):
+            self.assertEqual(
+                wsproto.echo_close_code(struct.pack(">H", forbidden)), 1002)
+
+    def test_decode_rejects_non_minimal_16bit_length(self) -> None:
+        # ROUND-3: a 5-byte payload MUST use the 7-bit form — the 16-bit
+        # extended form encoding 5 was accepted (smuggling-adjacent)
+        frame = (bytes([0x81, 0x80 | 126]) + struct.pack(">H", 5)
+                 + b"\x01\x02\x03\x04" + mask(b"hello"))
+        with self.assertRaises(wsproto.ProtocolViolation):
+            wsproto.decode_frame(frame)
+
+    def test_decode_rejects_non_minimal_64bit_length(self) -> None:
+        # ROUND-3: a 5-byte payload MUST NOT use the 64-bit form either
+        frame = (bytes([0x81, 0x80 | 127]) + struct.pack(">Q", 5)
+                 + b"\x01\x02\x03\x04" + mask(b"hello"))
+        with self.assertRaises(wsproto.ProtocolViolation):
+            wsproto.decode_frame(frame)
+
+    def test_decode_accepts_minimal_extended_lengths(self) -> None:
+        # boundary sanity: exactly-126 in 16-bit form and exactly-65536 in
+        # 64-bit form stay legal
+        payload = b"x" * 126
+        frame = (bytes([0x81, 0x80 | 126]) + struct.pack(">H", 126)
+                 + b"\x01\x02\x03\x04" + mask(payload))
+        opcode, _fin, decoded, _consumed = wsproto.decode_frame(frame)
+        self.assertEqual((opcode, decoded), (wsproto.OP_TEXT, payload))
+        payload = b"y" * 65536
+        frame = (bytes([0x81, 0x80 | 127]) + struct.pack(">Q", 65536)
+                 + b"\x01\x02\x03\x04" + mask(payload))
+        opcode, _fin, decoded, _consumed = wsproto.decode_frame(frame)
+        self.assertEqual((opcode, decoded), (wsproto.OP_TEXT, payload))
 
 
 class TestEventAsDict(unittest.TestCase):
@@ -661,7 +712,7 @@ class TestRound2WSHardening(unittest.IsolatedAsyncioTestCase):
             try:
                 _first, _p0, rest = read_server_frame(sock, rest)
                 sock.sendall(masked_frame(wsproto.OP_CLOSE, b"\x03\xe8"))  # 1000
-                opcode, _p, rest = read_server_frame(sock, rest)
+                opcode, payload, rest = read_server_frame(sock, rest)
                 sock.settimeout(5)
                 tail = b""
                 try:
@@ -672,13 +723,44 @@ class TestRound2WSHardening(unittest.IsolatedAsyncioTestCase):
                         tail += chunk
                 except OSError:
                     pass
-                return opcode, tail
+                return opcode, payload, tail
             finally:
                 sock.close()
 
-        opcode, tail = await asyncio.to_thread(_run)
+        opcode, payload, tail = await asyncio.to_thread(_run)
         self.assertEqual(opcode, wsproto.OP_CLOSE)
+        # ROUND-3: the peer's close code is echoed (was a codeless 88 00)
+        self.assertEqual(payload, b"\x03\xe8")
         self.assertEqual(tail, b"")  # socket fully closed after the echo
+
+    async def test_close_code_on_protocol_violation_is_1002(self) -> None:
+        def _run() -> bytes:
+            sock, _h, rest = ws_connect(self.port)
+            try:
+                _first, _p0, rest = read_server_frame(sock, rest)
+                sock.sendall(bytes([0x81, 0x02]) + b"hi")  # unmasked: §5.1
+                _opcode, payload, _r = read_server_frame(sock, rest)
+                return payload
+            finally:
+                sock.close()
+
+        payload = await asyncio.to_thread(_run)
+        self.assertEqual(payload, b"\x03\xea")  # 1002 protocol error
+
+    async def test_close_code_on_invalid_utf8_text_is_1007(self) -> None:
+        def _run() -> bytes:
+            sock, _h, rest = ws_connect(self.port)
+            try:
+                _first, _p0, rest = read_server_frame(sock, rest)
+                # valid frame, invalid UTF-8 payload (lone 0xFF starter)
+                sock.sendall(masked_frame(wsproto.OP_TEXT, b"a\xff\xfeb"))
+                _opcode, payload, _r = read_server_frame(sock, rest)
+                return payload
+            finally:
+                sock.close()
+
+        payload = await asyncio.to_thread(_run)
+        self.assertEqual(payload, b"\x03\xef")  # 1007 invalid payload data
 
     async def test_16mb_declared_length_closed_immediately(self) -> None:
         # declare 16MB, send only the mask-key bytes: the length cap must
@@ -741,7 +823,7 @@ class TestRound2WSHardening(unittest.IsolatedAsyncioTestCase):
 
         opcode, payload = await asyncio.to_thread(_run)
         self.assertEqual(opcode, wsproto.OP_CLOSE)  # NOT a pong
-        self.assertEqual(payload, b"")
+        self.assertEqual(payload, b"\x03\xea")  # ROUND-3: 1002 protocol error
 
     # ------------------------------------------------------------ auth slots
     async def test_ws_token_query_precedence_over_header(self) -> None:

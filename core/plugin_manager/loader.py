@@ -47,7 +47,7 @@ LOG = logging.getLogger("slaughtermudae.loader")
 _PARENT_SEQ = itertools.count()
 
 #: the only legal plugin slugs: lowercase ascii, digits, underscore, dash
-_NAME_RE = re.compile(r"[a-z0-9_-]+")
+from ..names import PLUGIN_NAME_RE as _NAME_RE
 
 
 @dataclass(frozen=True)

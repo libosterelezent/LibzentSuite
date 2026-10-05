@@ -158,10 +158,7 @@ class DiscordCache:
         see (and could send to) it. Never downgrades an existing entry.
         """
         if channel_id in self.channels:
-            info = self.channels[channel_id]
-            if guild_id is None and not info.dm:
-                return  # guild entry already fine
-            return
+            return  # existing entry is authoritative (never downgraded)
         if guild_id is None:  # DM-shaped but unknown recipient
             self.channels[channel_id] = ChannelInfo(
                 channel_id=channel_id, name=name or f"dm-{channel_id}", dm=True

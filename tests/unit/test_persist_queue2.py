@@ -150,6 +150,30 @@ class TestStopRaces(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repo.rows, list(range(20)))  # exactly once, in order
         self.assertEqual(pq.stats()["dropped"], 0)
 
+    async def test_joiner_budget_expiry_warns_loudly_no_raise(self) -> None:
+        """Round-3: the joiner's bounded re-join loop must exhaust its OWN
+        budget (not bail after one join), then WARN instead of raising —
+        raising would abort the caller's remaining shutdown cleanups."""
+        pq = PersistQueue("t")
+        repo = BlockRepo()
+        await pq.start(repo, interval=0.05, batch=10)
+        for n in (1, 2):
+            pq.put({"n": n})
+        await asyncio.sleep(0.05)      # worker parked inside add(item 1)
+        owner = asyncio.create_task(pq.stop(30.0))
+        await asyncio.sleep(0.2)       # owner's inline drain parked too
+        self.assertTrue(pq._stopping)
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            await pq.stop(0.05)        # joiner budget far shorter than drain
+        self.assertIn("join timed out", captured.getvalue())
+        self.assertIn("do NOT close the database", captured.getvalue())
+        self.assertTrue(pq._stopping)  # owner still draining; joiner returned
+        repo.gate.set()                # let the owner finish cleanly
+        with quiet_stderr():
+            await owner
+        self.assertEqual(repo.rows, [1, 2])
+
     async def test_put_during_inline_drain_is_flushed(self) -> None:
         pq = PersistQueue("t")
         repo = ListRepo(delay=0.01)

@@ -15,8 +15,13 @@ Waiting model (three stages inside ``acquire``, in order):
    key are granted in priority order, then FIFO within a priority — the
    heap + sequence-number waiter pattern ported from the old limiter
    (Grant.reason == "pacing").
-3. JITTER — one uniform draw from the effective jitter window, slept AFTER
-   the grant (human-like pause; does not move the pacing clock).
+3. JITTER — one uniform draw from the effective jitter window, made BEFORE
+   admission (right after ``effective()``) and slept AFTER the grant. The
+   draw travels through the waiter entry (and the lane), and every spacing
+   clock is stamped at ``grant + jitter`` — the EXPECTED wire instant — so
+   consecutive WIRE sends stay >= the effective interval apart no matter
+   how the draws differ (a post-grant-only draw let a smaller second jitter
+   compress the wire gap to ``interval - jitter_max`` and even invert it).
 
 Determinism seams (all time flows through them — see INTEGRATION.md):
 
@@ -88,6 +93,14 @@ _LEVEL_RANK: Dict[str, int] = {name: i for i, name in enumerate(POLICY_LEVELS)}
 #: against caller-supplied action/account/plugin strings.
 _EFFECTIVE_CACHE_CAP = 4096
 
+#: kv keys shared with the ControlAPI persistence layer: the engine READS
+#: them at boot (load_persisted), the ControlAPI WRITES them on edits.
+#: Defined here — the reading layer — and exported so the writer layer
+#: imports them (a literal on each side could silently drift apart).
+KV_LANE_KEY = "ratelimit:lane"
+KV_FLOOR_KEY = "ratelimit:floor"
+KV_REMOVED_KEY = "ratelimit:removed"
+
 #: backstop poll for waiters that are not the head of their key's heap
 #: non-head backstop poll (lost-wake insurance ONLY — heads compute their
 #: exact remaining block and every grant/policy/cooldown change wakes all
@@ -153,7 +166,12 @@ class Grant:
 
 @dataclass
 class _Entry:
-    """Pending waiter, heap-ordered by (priority, sequence) — ported as-is."""
+    """Pending waiter, heap-ordered by (priority, sequence) — ported as-is.
+
+    ``jitter`` is this waiter's ALREADY-DRAWN post-grant pause: drawn once
+    per acquire() before admission so _grant_ready can stamp every pacing
+    clock at grant + jitter (the expected wire instant).
+    """
 
     priority: int
     seq: int
@@ -161,6 +179,7 @@ class _Entry:
     account: Optional[str]
     plugin: Optional[str]
     future: "asyncio.Future[None]"
+    jitter: float = 0.0
     cancelled: bool = False
 
     def __lt__(self, other: "_Entry") -> bool:
@@ -212,8 +231,9 @@ class RateLimitManager:
         self._global_until: float = 0.0
         #: (account, action) -> monotonic "until" timestamp
         self._account_cooldowns: Dict[Tuple[str, str], float] = {}
-        #: pacing key (owner, action) -> monotonic time of the last grant.
-        #: TWO SCOPES share this table (spec: per-account/group + per-task):
+        #: pacing key (owner, action) -> monotonic time of the last expected
+        #: WIRE send (grant + jitter). TWO SCOPES share this table (spec:
+        #: per-account/group + per-task):
         #:   ("alpha", "message")        per-TASK scope — consecutive API
         #:                               calls (tasks) of ONE account
         #:   ("group:grinders", "message") per-ACCOUNT/GROUP scope — the
@@ -284,8 +304,9 @@ class RateLimitManager:
         must never crash the process (ground rule). Rows below the current
         floor are kept (effective() clamps them via max(interval, floor)).
 
-        The lane config comes from the kv row ``ratelimit:lane`` when
-        present (precedence: persisted value > constructor defaults).
+        The lane config comes from the kv row ``KV_LANE_KEY``
+        (``ratelimit:lane``) when present (precedence: persisted value >
+        constructor defaults).
         """
         if self._repo is not None:
             try:
@@ -326,7 +347,7 @@ class RateLimitManager:
         enabled, prefixrate = bool(default_enabled), float(default_prefixrate)
         if self._kv is not None:
             try:
-                raw = await self._kv.get("ratelimit:lane")
+                raw = await self._kv.get(KV_LANE_KEY)
                 if raw:
                     import json as _json
 
@@ -338,9 +359,16 @@ class RateLimitManager:
                     # edits to the config-file defaults on every reboot.
                     data = raw if isinstance(raw, dict) else _json.loads(raw)
                     raw_enabled = data.get("enabled", enabled)
+                    if isinstance(raw_enabled, str):
+                        # round 3: a hand-edited "true"/"false" STRING used
+                        # to work (truthy) before the strict-bool check and
+                        # must keep working — accept it explicitly...
+                        lowered = raw_enabled.strip().lower()
+                        if lowered in ("true", "false"):
+                            raw_enabled = lowered == "true"
                     if not isinstance(raw_enabled, bool):
-                        # a hand-edited truthy STRING ('false') must not
-                        # silently enable the lane — the whole row is corrupt
+                        # ...anything else ('yes', 1, 'off') is still corrupt:
+                        # a truthy non-bool must not silently enable the lane
                         raise ValueError(
                             f"lane row 'enabled' must be true/false, got {raw_enabled!r}")
                     enabled = raw_enabled
@@ -360,7 +388,7 @@ class RateLimitManager:
         self._lane.set_enabled(enabled)
         if self._kv is not None:
             try:  # persisted floor: a restart must not revert a raised floor
-                stored_floor = await self._kv.get("ratelimit:floor")
+                stored_floor = await self._kv.get(KV_FLOOR_KEY)
                 if stored_floor is not None:
                     # validated: a hand-edited row (inf, 1e999, below 1.5)
                     # must never wedge the fleet — pacing safety never
@@ -372,7 +400,7 @@ class RateLimitManager:
             except Exception as exc:
                 self._log("warning", f"could not load persisted floor: {exc}")
             try:  # cleared-policy tombstones: seeding must skip these keys
-                stored_removed = await self._kv.get("ratelimit:removed")
+                stored_removed = await self._kv.get(KV_REMOVED_KEY)
                 if isinstance(stored_removed, list):
                     self._removed_defaults = set(stored_removed)
             except Exception as exc:
@@ -643,9 +671,13 @@ class RateLimitManager:
         ``_account_cooldowns`` 429 entries and account-scoped policy rows
         would otherwise survive account removal and be silently inherited
         by a re-created same-named account (a stale pacing delay, a
-        leftover 429 cooldown, predecessor pacing overrides). Group scope
-        is already deregistered separately via ``set_account_group(None)``.
+        leftover 429 cooldown, predecessor pacing overrides). The group
+        membership is dropped here too: when this was the group's LAST
+        member, the shared ``group:<x>`` pacing stamps go with it (they
+        would otherwise outlive the group and delay the next member of a
+        re-created same-named group).
         """
+        group = self._groups.pop(account, None)
         for key in [k for k in self._last_fire if k[0] == account]:
             del self._last_fire[key]
         for key in [k for k in self._account_cooldowns if k[0] == account]:
@@ -659,6 +691,7 @@ class RateLimitManager:
                          or (k[0] == "account_plugin"
                              and str(k[1]).startswith(prefix)))]:
             del self._policies[key]
+        self._drop_group_stamps(group)
         # FINAL-PHASE (F2): always invalidate — the cache may hold entries
         # for this account even when no policy rows were (the table can be
         # empty while cached compositions from earlier still exist).
@@ -677,16 +710,38 @@ class RateLimitManager:
         activity against one shared clock).
 
         Framework-fed metadata only — no Discord API is involved. ``None``
-        removes the account from any group (back to per-task pacing alone).
+        removes the account from any group (back to per-task pacing alone);
+        when the LAST member leaves (here or via prune_account), the
+        group's shared pacing stamps are dropped so a re-created
+        same-named group starts fresh.
         """
         account = (account or "").strip()
         if not account:
             raise RatePolicyError("group registration needs an account name")
+        previous = self._groups.get(account)
         if group is None or not str(group).strip():
             self._groups.pop(account, None)
         else:
             self._groups[account] = str(group).strip()
+        if previous is not None and previous != self._groups.get(account):
+            self._drop_group_stamps(previous)
         self._wake_waiters()
+
+    def _drop_group_stamps(self, group: Optional[str]) -> None:
+        """Drop a group's shared pacing stamps when its LAST member left.
+
+        ``('group:<x>', action)`` stamps would otherwise outlive the group
+        itself and be silently inherited by the next member of a re-created
+        same-named group (a stale pacing delay). No-op while any member
+        remains, and for stamps of groups that never existed.
+        """
+        if not group:
+            return
+        if any(membership == group for membership in self._groups.values()):
+            return  # still populated: the shared clock stays meaningful
+        prefix = f"group:{group}"
+        for key in [k for k in self._last_fire if k[0] == prefix]:
+            del self._last_fire[key]
 
     def account_groups(self) -> Dict[str, str]:
         """account -> group mapping (stats/UI)."""
@@ -740,8 +795,12 @@ class RateLimitManager:
         Stages: server cooldowns (account+action and fleet-wide) -> pacing on
         key (account or "__global__", action) -> post-grant jitter sleep.
         Concurrent waiters on the SAME pacing key are granted in priority
-        order, then FIFO. last_fire is stamped at GRANT time; Grant.wait_s is
-        the total pre-jitter wait and Grant.reason is "server" when a server
+        order, then FIFO. The jitter is drawn BEFORE admission (once, after
+        effective()) and slept after the grant; pacing clocks are stamped
+        at grant + jitter — the expected wire instant — so consecutive
+        WIRE sends stay >= the effective interval apart. Grant.wait_s is
+        the total pre-jitter wait and Grant.reason is "lane" when the
+        sequential lane admission contributed, "server" when a server
         cooldown contributed, else "pacing".
 
         Raises:
@@ -755,6 +814,18 @@ class RateLimitManager:
 
         loop = asyncio.get_running_loop()
         key = (account or GLOBAL_KEY, action)
+        # draw the jitter BEFORE admission so every spacing clock can be
+        # stamped at grant + jitter (the expected WIRE instant): with a
+        # post-grant-only draw, wire_i = grant_i + jitter_i while grant
+        # spacing ignored the jitter, letting a small second draw compress
+        # the wire gap to interval - jitter_max or even invert it (probe
+        # P1/P2/P7). The draw rides the entry (and the lane admission) so
+        # _grant_ready stamps the clocks correctly.
+        jitter_min, jitter_max = self._effective_payload(
+            action, account, plugin)[1:3]
+        jitter_s = 0.0
+        if jitter_max > 0:
+            jitter_s = max(0.0, self._jitter_rng.uniform(jitter_min, jitter_max))
         entry = _Entry(
             priority=int(priority),
             seq=next(self._seq),
@@ -762,15 +833,17 @@ class RateLimitManager:
             account=account,
             plugin=plugin,
             future=loop.create_future(),
+            jitter=jitter_s,
         )
         started_at = self._clock.now()
         reason = "pacing"
         # stage 0: server-wide sequential send lane (no-op when disabled) —
-        # one grant at a time across EVERY account, spaced by prefixrate;
-        # cooldown/pacing/jitter below only ever ADD delay after admission
+        # one grant at a time across EVERY account, spaced by prefixrate
+        # measured between expected wire instants (admission + jitter);
+        # cooldown/pacing below only ever ADD delay after admission
         lane_wait_s = 0.0
         if self._lane.enabled:
-            lane_wait_s = await self._lane.enter(int(priority))
+            lane_wait_s = await self._lane.enter(int(priority), jitter_s)
             if lane_wait_s > 0:
                 reason = "lane"
         heapq.heappush(self._pending.setdefault(key, []), entry)
@@ -809,14 +882,11 @@ class RateLimitManager:
                     account=account or "", action=action, wait_s=wait_s, reason=reason
                 )
             )
-        # stage 3: human-like jitter pause AFTER the grant (never moves pacing)
-        jitter_s = 0.0
-        jitter_min, jitter_max = self._effective_payload(
-            action, account, plugin)[1:3]
-        if jitter_max > 0:
-            jitter_s = self._jitter_rng.uniform(jitter_min, jitter_max)
-            if jitter_s > 0:
-                await self._sleep(jitter_s)
+        # stage 3: human-like jitter pause AFTER the grant — the draw was
+        # made before admission; the pacing/lane stamps already account for
+        # it, so the pause cannot compress the next send's wire gap
+        if jitter_s > 0:
+            await self._sleep(jitter_s)
         return Grant(
             action=action,
             account=account,
@@ -905,7 +975,8 @@ class RateLimitManager:
         path); None sweeps all keys. Priority order is preserved
         structurally: only the heap HEAD can be granted, so a HIGH waiter
         submitted after a LOW one still goes first. last_fire is stamped at
-        grant time, and successors are woken.
+        grant + jitter (the expected wire instant), and successors are
+        woken.
         """
         granted_any = False
         for key in [only] if only is not None else list(self._pending):
@@ -922,12 +993,13 @@ class RateLimitManager:
                     continue
                 if self._entry_block(head)[0] > 0:
                     break  # head not ready: everyone behind it waits too
-                # stamp EVERY pacing clock this grant satisfies: the account
+                # stamp EVERY pacing clock this grant satisfies — the account
                 # key (per-task scope) and, for grouped accounts, the shared
-                # group key (per-account/group scope) — both from this grant
-                # instant, so the next member waits the full interval
+                # group key (per-account/group scope) — at grant + jitter,
+                # the EXPECTED wire instant, so the next member's WIRE send
+                # stays a full interval after this one's
                 for stamp_key in self._pacing_keys(head.account, head.action):
-                    self._last_fire[stamp_key] = self._clock.now()
+                    self._last_fire[stamp_key] = self._clock.now() + head.jitter
                 heapq.heappop(heap)
                 head.future.set_result(None)
                 granted_any = True
@@ -1006,6 +1078,17 @@ class RateLimitManager:
         if not math.isfinite(wait):
             raise RatePolicyError(f"retry_after must be finite, got {retry_after!r}")
         wait = max(0.0, wait)
+        if wait > MAX_INTERVAL:
+            # intake clamp: a finite-huge header (1e9 -> a 31.7-YEAR fleet
+            # cooldown, memory-only) would block every waiter until restart.
+            # Policies are capped at MAX_INTERVAL for exactly this reason;
+            # the clamp keeps server-reported cooldowns in the same league.
+            self._log(
+                "warning",
+                f"retry_after {wait:g}s exceeds the {MAX_INTERVAL:g}s cap; "
+                f"clamping the cooldown to {MAX_INTERVAL:g}s",
+            )
+            wait = MAX_INTERVAL
         account, action = self._validate_acquire_args(account, action, None)[:2]
         now = self._clock.now()
         # FINAL-PHASE (F8 gap 2): sweep expired tombstones for this account
@@ -1038,13 +1121,9 @@ class RateLimitManager:
         Filters: account=None means every account; action=None means every
         action; the fleet-wide global cooldown is ALWAYS considered.
         """
+        # opportunistic expiry sweep (see _sweep_expired_cooldowns)
+        self._sweep_expired_cooldowns()
         now = self._clock.now()
-        # opportunistic expiry sweep: this call already walks every entry,
-        # so dead cooldown rows are dropped here instead of lingering for
-        # the process lifetime (only prune_account removed them before)
-        for key in [k for k, until in self._account_cooldowns.items()
-                    if until <= now]:
-            del self._account_cooldowns[key]
         remaining = [max(0.0, self._global_until - now)]
         for (acct, act), until in self._account_cooldowns.items():
             if account is not None and acct != account:
@@ -1054,10 +1133,24 @@ class RateLimitManager:
             remaining.append(max(0.0, until - now))
         return round(max(remaining), 3)
 
+    def _sweep_expired_cooldowns(self) -> None:
+        """Drop expired 429 rows from the table.
+
+        Called from cooldown_remaining AND stats() — production polls
+        stats() once per second (dashboard) but never calls
+        cooldown_remaining, so without the stats() sweep dead rows lingered
+        for the process lifetime (only prune_account removed them before).
+        """
+        now = self._clock.now()
+        for key in [k for k, until in self._account_cooldowns.items()
+                    if until <= now]:
+            del self._account_cooldowns[key]
+
     # -------------------------------------------------------------- reporting
     def stats(self) -> dict:
         """JSON-safe snapshot for the UI: floor, policies, active cooldowns,
         last-fire ages per pacing key, and grant/wait counters."""
+        self._sweep_expired_cooldowns()  # the 1s dashboard poll owns expiry
         now = self._clock.now()
         accounts: Dict[str, Dict[str, float]] = {}
         for (acct, act) in sorted(self._account_cooldowns):
@@ -1138,4 +1231,7 @@ __all__ = [
     "SystemClock",
     "ManualClock",
     "GLOBAL_KEY",
+    "KV_LANE_KEY",
+    "KV_FLOOR_KEY",
+    "KV_REMOVED_KEY",
 ]

@@ -37,13 +37,21 @@ ROBUSTNESS OVER THE FARMLITE ORIGINAL
 
 SEMANTICS (precise)
     ``prefixrate`` is the minimum spacing between consecutive lane GRANTS,
-    ordered by (priority, seq). Cooldown/pacing/jitter run AFTER lane
-    admission (they can add delay, never remove it), so the guarantee on the
-    wire is: consecutive globally-admitted actions are >= prefixrate apart,
-    and every single account still honors its own effective interval + the
-    1.5s floor. The prefixrate itself is NOT floor-bound (it spaces the fleet
-    share of the API, not one account's action rate) but it is validated:
-    finite, >= 0, <= one day.
+    ordered by (priority, seq). Each caller passes the jitter it has
+    ALREADY drawn (before admission — see engine.acquire); a grant stamps
+    the spacing clock at ``admission + jitter`` — the EXPECTED wire
+    instant — so the next admission waits a full prefixrate after the
+    previous send was expected to leave. Cooldown/pacing run AFTER lane
+    admission (they can add delay, never remove it), so an actual wire can
+    only leave LATER than its expected instant: same-key wire gaps always
+    hold, and a cross-account wire gap can only shrink below prefixrate
+    when the EARLIER admission's own pacing held it past its expectation
+    (documented residual — the lane cannot know a future pacing hold at
+    admission time; the earlier send's own per-key interval still holds).
+    Every single account still honors its own effective interval + the
+    1.5s floor. The prefixrate itself is NOT floor-bound (it spaces the
+    fleet share of the API, not one account's action rate) but it is
+    validated: finite, >= 0, <= one day.
 """
 from __future__ import annotations
 
@@ -67,13 +75,20 @@ LANE_POLL_INTERVAL = 2.0
 
 
 class _LaneEntry:
-    """One pending lane waiter, heap-ordered by (priority, seq)."""
+    """One pending lane waiter, heap-ordered by (priority, seq).
 
-    __slots__ = ("priority", "seq", "future", "cancelled")
+    ``jitter`` is the caller's ALREADY-DRAWN post-admission pause: granting
+    stamps the spacing clock at admission + jitter (the expected wire
+    instant), so a small follow-up draw can no longer compress or invert
+    the cross-account wire gap (probe P2/P7).
+    """
 
-    def __init__(self, priority: int, seq: int) -> None:
+    __slots__ = ("priority", "seq", "jitter", "future", "cancelled")
+
+    def __init__(self, priority: int, seq: int, jitter: float = 0.0) -> None:
         self.priority = priority
         self.seq = seq
+        self.jitter = max(0.0, float(jitter))
         self.future: "asyncio.Future[None]" = asyncio.get_running_loop().create_future()
         self.cancelled = False
 
@@ -118,7 +133,7 @@ class GlobalSendLane:
         self.prefixrate = 1.5
         self._heap: List[_LaneEntry] = []
         self._seq = itertools.count()
-        self._last_grant: Optional[float] = None
+        self._last_grant: Optional[float] = None  # last admission + jitter
         # stats
         self.grants = 0
         self.held_off_seconds = 0.0  # total time waiters spent holding (paused)
@@ -182,8 +197,13 @@ class GlobalSendLane:
         }
 
     # ---------------------------------------------------------------- enter
-    async def enter(self, priority: int) -> float:
+    async def enter(self, priority: int, jitter: float = 0.0) -> float:
         """Wait for this caller's turn through the gate.
+
+        ``jitter`` is the caller's already-drawn post-admission pause; the
+        grant stamps the spacing clock at admission + jitter (the expected
+        wire instant), so consecutive admissions are spaced a full
+        prefixrate after the previous expected wire departure.
 
         Returns the seconds spent waiting INSIDE the lane (0 when admitted
         immediately). No-op pass-through (0.0, no queueing) when disabled —
@@ -192,7 +212,7 @@ class GlobalSendLane:
         """
         if not self.enabled:
             return 0.0
-        entry = _LaneEntry(int(priority), next(self._seq))
+        entry = _LaneEntry(int(priority), next(self._seq), jitter)
         heapq.heappush(self._heap, entry)
         started_at = self._clock.now()
         was_held = False
@@ -246,7 +266,8 @@ class GlobalSendLane:
 
         Only the HEAD is grantable — priority order is structural, exactly
         like the pacing heaps. Granting stamps ``_last_grant`` (the spacing
-        clock) and wakes the next waiter through ``on_change``.
+        clock) at admission + the grantee's jitter draw — the expected wire
+        instant — and wakes the next waiter through ``on_change``.
         """
         self._prune()
         heap = self._heap
@@ -267,7 +288,7 @@ class GlobalSendLane:
                 remaining = self._last_grant + self.prefixrate - self._clock.now()
                 if remaining > 0:
                     break  # spacing not elapsed: everyone behind waits too
-            self._last_grant = self._clock.now()
+            self._last_grant = self._clock.now() + head.jitter
             heapq.heappop(heap)
             if not head.future.done():
                 head.future.set_result(None)

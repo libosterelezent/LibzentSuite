@@ -96,6 +96,35 @@ class TestSends(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ConnectionError):
             await client.send_dm(SYNTHETIC_OWNER_ID, "hi")
 
+    async def test_connection_guard_beats_channel_guard(self) -> None:
+        """Live parity: a disconnected client classifies as ConnectionError
+        even when the target channel is ALSO gone (the sim used to check
+        the channel first, so retry-classification tests lied)."""
+        world = _world()
+        client = SimClient(world, SYNTHETIC_ALPHA_ID)  # never connected
+        client.delete_channel(SYNTHETIC_GUILD_CHANNEL)
+        with self.assertRaises(ConnectionError):
+            await client.send_message(SYNTHETIC_GUILD_CHANNEL, "ghost")
+        with self.assertRaises(ConnectionError):
+            await client.send_dm(SYNTHETIC_MUDAE_ID, "ghost-dm")
+        # the offline dm guard runs before any channel resolution, so the
+        # attempt must not even create the pair's DM channel
+        pair = (SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        self.assertNotIn(pair, world._dm_pairs)
+
+    async def test_offline_send_does_not_consume_one_shot_limit(self) -> None:
+        world = _world()
+        client = SimClient(world, SYNTHETIC_ALPHA_ID)  # never connected
+        world.server_limit_next(
+            channel_id=SYNTHETIC_GUILD_CHANNEL, retry_after=0.5
+        )
+        with self.assertRaises(ConnectionError):
+            await client.send_message(SYNTHETIC_GUILD_CHANNEL, "offline")
+        self.assertEqual(world.blocked_sends, [])  # 429 armed for a live send
+        client2 = await _connected(world, SYNTHETIC_ALPHA_ID)
+        with self.assertRaises(ServerRateLimit):
+            await client2.send_message(SYNTHETIC_GUILD_CHANNEL, "now live")
+
     async def test_pending_server_limit_raises_then_consumed(self) -> None:
         world = _world()
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
@@ -204,6 +233,29 @@ class TestDmAndUsers(unittest.IsolatedAsyncioTestCase):
         from_mudae = await mudae.open_dm(SYNTHETIC_ALPHA_ID)
         self.assertEqual(from_alpha, from_mudae)
 
+    async def test_offline_typing_and_open_dm_raise(self) -> None:
+        """Live parity: a disconnected client raises ConnectionError from
+        typing/open_dm (no phantom REST-touch evidence is recorded)."""
+        world = _world()
+        client = SimClient(world, SYNTHETIC_ALPHA_ID)  # never connected
+        with self.assertRaises(ConnectionError):
+            await client.send_typing(SYNTHETIC_GUILD_CHANNEL)
+        with self.assertRaises(ConnectionError):
+            await client.open_dm(SYNTHETIC_MUDAE_ID)
+        self.assertEqual(client.typing_calls, [])
+        self.assertEqual(client.open_dm_calls, [])
+        pair = (SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        self.assertNotIn(pair, world._dm_pairs)  # no DM channel resolved
+
+    async def test_typing_skips_unknown_channel_like_live(self) -> None:
+        """Live skips unknown channels silently (never fetches to type)."""
+        world = _world()
+        client = await _connected(world, SYNTHETIC_ALPHA_ID)
+        await client.send_typing(424242)  # unknown channel: quiet no-op
+        self.assertEqual(client.typing_calls, [])
+        await client.send_typing(SYNTHETIC_GUILD_CHANNEL)
+        self.assertEqual(len(client.typing_calls), 1)
+
     async def test_fetch_user_known_and_unknown(self) -> None:
         world = _world()
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
@@ -247,6 +299,15 @@ class TestSnapshotAndLatency(unittest.IsolatedAsyncioTestCase):
             if entry["id"] == alpha_dm
         )
         self.assertEqual(recipient, SYNTHETIC_MUDAE_ID)
+
+    async def test_snapshot_dm_entries_match_live_contract(self) -> None:
+        """DM entries carry EXACTLY {id, recipient} — the sim-only "name"
+        key was shape drift against the live adapter's snapshot."""
+        world = _world()
+        alpha = await _connected(world, SYNTHETIC_ALPHA_ID)
+        world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        for entry in alpha.cached_snapshot()["dm_channels"]:
+            self.assertEqual(sorted(entry), ["id", "recipient"])
 
     async def test_snapshot_stops_listing_deleted_channel(self) -> None:
         world = _world()

@@ -67,17 +67,18 @@ class TaskHistoryRepository(BaseRepository):
         placeholders = ", ".join("?" for _ in row)
         async with self._tx("append task history") as conn:
             try:
-                cur = await conn.execute(
+                async with conn.execute(
                     f"INSERT INTO task_history ({columns}) VALUES ({placeholders})",
                     tuple(row.values()),
-                )
+                ) as cur:
+                    lastrowid = int(cur.lastrowid)
             except sqlite3.IntegrityError as exc:
                 raise DatabaseError(
                     f"task history row for id {row.get('id')!r} already exists"
                 ) from exc
             if self._keep:
                 await self._prune_newest(conn, "task_history", self._keep)
-            return int(row["id"]) if "id" in row else int(cur.lastrowid)
+            return int(row["id"]) if "id" in row else lastrowid
 
     async def max_id(self) -> int:
         """Highest stored task id (0 when the archive is empty)."""
@@ -108,12 +109,12 @@ class TaskHistoryRepository(BaseRepository):
             updates[col] = value
         assignments = ", ".join(f"{col} = ?" for col in updates)
         async with self._tx(f"update task history {task_id}") as conn:
-            cur = await conn.execute(
+            async with conn.execute(
                 f"UPDATE task_history SET {assignments} WHERE id = ?",
                 (*updates.values(), task_id),
-            )
-            if cur.rowcount == 0:
-                raise DatabaseError(f"no task history row for id {task_id}")
+            ) as cur:
+                if cur.rowcount == 0:
+                    raise DatabaseError(f"no task history row for id {task_id}")
 
     async def recent(self, limit: int = 50, account: Optional[str] = None) -> List[Dict[str, Any]]:
         """The newest ``limit`` rows (oldest-first), optionally per-account.

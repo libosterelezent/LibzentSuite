@@ -24,9 +24,13 @@ NOTE: selfbots violate Discord ToS; the framework keeps pacing conservative.
 from __future__ import annotations
 
 import asyncio
+import base64
+import copy
+import json
 import logging
-import sys
 import math
+import sys
+import uuid
 from typing import Any, Callable, Optional
 
 from adapters.base import DiscordMessage
@@ -48,6 +52,21 @@ LOG = logging.getLogger("slaughtermudae.adapter")
 #: connect loop retries forever — a black-holed gateway must not hang boot)
 CONNECT_TIMEOUT_S = 90.0
 
+#: round-3 F4-1: hard ceiling handed to the library for in-request 429
+#: sleeps. UNSET (None — the default, client.py:377) makes HTTPClient sleep
+#: ANY ``retry_after`` inside the request (http.py:991-1018) and pre-request
+#: bucket sleeps (http.py:521-546), so one pathological 429 could park a
+#: scheduler slot for minutes while the adapter's RateLimited mapping stays
+#: dead code (it only fires when the cap is set). 30.0 is the fork's own
+#: minimum clamp: http.py:637 ``max(30.0, max_ratelimit_timeout)``.
+MAX_RATELIMIT_TIMEOUT_S = 30.0
+
+#: round-3 F4-6: the fork's interaction path retries 202s with code
+#: 110000-119999 by sleeping ``retry_after`` with NO cap and exempt from
+#: max_ratelimit_timeout (http.py:936-948); _wrapped_interaction also waits
+#: on the gateway (interactions.py:210-214). Bound one click's total await.
+CLICK_TIMEOUT_S = 30.0
+
 
 # ------------------------------------------------- per-process headers cache
 #: M3 (isolation audit S3-3.3/S7-A2): discord.py-self fetches its client
@@ -57,12 +76,77 @@ CONNECT_TIMEOUT_S = 90.0
 #: hammers cordapi (which then throttles us onto the STATIC fallback
 #: fingerprint — more detectable) and adds up to 3s of latency per attempt.
 #: We cache the fetched property DATA process-wide with a TTL; the Headers
-#: INSTANCE stays per-client so the per-client identity UUIDs
-#: (client_launch_id / client_heartbeat_session_id) are NEVER shared.
+#: INSTANCE stays per-client. Round-3 F4-7: every cache HIT is deep-copied
+#: and its per-client identity UUIDs (client_launch_id /
+#: client_heartbeat_session_id — regenerated per request by the fork's own
+#: fallback path, utils.py:1804-1806) are re-rolled so two accounts can
+#: never share one fingerprint; the encoded super-properties header is
+#: re-encoded to stay consistent with the fresh UUIDs.
 _HEADERS_CACHE_TTL = 600.0
+#: keys in super_properties that identify ONE client instance (fork:
+#: utils.py:1804-1806)
+_HEADERS_IDENTITY_KEYS = ("client_launch_id", "client_heartbeat_session_id")
 _headers_cache: dict = {}          # (proxy, proxy_auth) -> (monotonic, result)
 _headers_cache_lock: Optional[asyncio.Lock] = None
+_headers_cache_loop: Any = None    # the loop _headers_cache_lock is bound to
 _headers_patch_installed = False
+
+
+def _headers_lock_for(loop: Any) -> asyncio.Lock:
+    """A cache lock bound to the CURRENT loop (round-3 F4-7).
+
+    An asyncio.Lock binds to the first loop that uses it; a module-level
+    lock reused from a second ``asyncio.run`` raises RuntimeError inside
+    connect(). Recreate the primitive whenever the running loop changes.
+    """
+    global _headers_cache_lock, _headers_cache_loop
+    if _headers_cache_lock is None or _headers_cache_loop is not loop:
+        _headers_cache_lock = asyncio.Lock()
+        _headers_cache_loop = loop
+    return _headers_cache_lock
+
+
+def _encode_super_properties(properties: dict, fallback: str,
+                             discord: Any) -> str:
+    """b64(JSON) exactly like the fork (utils.py:1813 b64encode(_to_json)).
+
+    Falls back to the cached encoding when anything unexpected happens —
+    a re-encode failure must never break connect().
+    """
+    to_json = getattr(getattr(discord, "utils", None), "_to_json", None)
+    if to_json is None:
+        def to_json(obj: Any) -> str:  # type: ignore[misc]
+            return json.dumps(obj, separators=(",", ":"), ensure_ascii=True)
+    try:
+        return base64.b64encode(
+            to_json(properties).encode("utf-8")).decode("utf-8")
+    except Exception:
+        return fallback
+
+
+def _reidentified_copy(result: tuple, discord: Any) -> tuple:
+    """Deep-copy a cached headers result + re-roll per-client identity.
+
+    The stored dicts are NEVER handed to a second account as-is (fork
+    parity: the fallback path regenerates these UUIDs per request,
+    utils.py:1804-1806). Non-deepcopyable payloads pass through unchanged
+    rather than failing the caller.
+    """
+    try:
+        properties, extra, encoded = result
+        properties = copy.deepcopy(properties)
+        extra = copy.deepcopy(extra)
+    except Exception:
+        return result
+    fresh = False
+    if isinstance(properties, dict):
+        for key in _HEADERS_IDENTITY_KEYS:
+            if key in properties:
+                properties[key] = str(uuid.uuid4())
+                fresh = True
+    if fresh:
+        encoded = _encode_super_properties(properties, encoded, discord)
+    return (properties, extra, encoded)
 
 
 def _install_headers_fetch_cache(discord: Any, ttl: float = _HEADERS_CACHE_TTL) -> None:
@@ -71,7 +155,7 @@ def _install_headers_fetch_cache(discord: Any, ttl: float = _HEADERS_CACHE_TTL) 
     Idempotent; silently skipped when the library layout changes (a missing
     seam must never break connect()).
     """
-    global _headers_patch_installed, _headers_cache_lock
+    global _headers_patch_installed
     if _headers_patch_installed:
         return
     try:
@@ -85,27 +169,35 @@ def _install_headers_fetch_cache(discord: Any, ttl: float = _HEADERS_CACHE_TTL) 
     # true original via the marker attribute instead.
     original = getattr(original, "_sm_original", original)
     _headers_patch_installed = True
-    if _headers_cache_lock is None:
-        _headers_cache_lock = asyncio.Lock()
 
     async def cached_get_api_properties(cls, session, type_, *, proxy=None,
                                          proxy_auth=None):
         key = (proxy, proxy_auth)
         loop = asyncio.get_running_loop()
-        if _headers_cache_lock is not None:
+        try:
+            lock = _headers_lock_for(loop)
+        except RuntimeError:
+            lock = None  # no running loop: bypass the cache entirely
+        if lock is not None:
             # FINAL-PHASE (F8 gap 5): SINGLE-FLIGHT — the fetch runs INSIDE
             # the lock (it previously ran between the read and write
             # windows, so a reconnect storm / cold fleet boot fired up to N
             # concurrent cordapi fetches — exactly the hammering the cache
             # exists to prevent). Waiters already queue on the IdentifyGate,
             # so serializing behind one ~3s fetch is harmless.
-            async with _headers_cache_lock:
+            # Round-3: the lock is PER-LOOP (a process-global lock binds to
+            # the first loop and breaks every later one) and hits are DEEP
+            # COPIES with re-rolled per-client identity UUIDs — a shared
+            # frozen properties dict would fingerprint-correlate the whole
+            # fleet for the cache TTL.
+            async with lock:
                 hit = _headers_cache.get(key)
                 if hit is not None and loop.time() - hit[0] < ttl:
-                    return hit[1]
+                    return _reidentified_copy(hit[1], discord)
                 result = await original(session, type_, proxy=proxy,
                                         proxy_auth=proxy_auth)
-                _headers_cache[key] = (loop.time(), result)
+                _headers_cache[key] = (
+                    loop.time(), _reidentified_copy(result, discord))
                 return result
         result = await original(session, type_, proxy=proxy,
                                 proxy_auth=proxy_auth)
@@ -121,6 +213,14 @@ def _install_headers_fetch_cache(discord: Any, ttl: float = _HEADERS_CACHE_TTL) 
 
 _MESSAGE_DEDUP_WINDOW_S = 120.0
 _MESSAGE_DEDUP_MAX = 512
+
+#: round-3 F4-3: the fork dispatches BOTH the raw_* payload event and the
+#: cached-only rich event for cached messages, raw FIRST (state.py:1848→1850
+#: delete, 1877→1882 edit, 1927→1937 reaction). The raw handler publishes
+#: and marks a key; the rich handler suppresses itself when the key was
+#: marked inside this window (same gateway dispatch, one loop turn apart —
+#: 5s is generous and never suppresses distinct rapid gateway bursts).
+_RICH_EVENT_DEDUP_WINDOW_S = 5.0
 
 
 def _header(headers: Any, name: str) -> Optional[str]:
@@ -189,6 +289,9 @@ class RealDiscordClient:
         #: auto-resumes and keeps accepting REST traffic)
         self.connected: bool = False
         self._seen_messages: dict = {}
+        #: raw/rich double-dispatch suppression keys (see
+        #: _RICH_EVENT_DEDUP_WINDOW_S) — key -> loop-monotonic timestamp
+        self._seen_event_keys: dict = {}
 
     def _message_already_seen(self, message_id: Any) -> bool:
         """True when this inbound id arrived recently (gateway RESUME replay).
@@ -213,6 +316,48 @@ class RealDiscordClient:
             return True
         seen[message_id] = now
         return False
+
+    def _mark_event_key(self, key: tuple) -> bool:
+        """Record an event key; True when the SAME key was already recorded
+        inside the dedup window (raw/rich double-dispatch suppression).
+
+        Call AFTER a successful publish: a callback that raised leaves the
+        key unmarked so the sibling handler can still deliver the event.
+        """
+        now = asyncio.get_running_loop().time()
+        seen = self._seen_event_keys
+        if len(seen) >= _MESSAGE_DEDUP_MAX:
+            cutoff = now - _RICH_EVENT_DEDUP_WINDOW_S
+            for stale in [k for k, t in seen.items() if t < cutoff]:
+                del seen[stale]
+        previous = seen.get(key)
+        seen[key] = now
+        return previous is not None and now - previous < _RICH_EVENT_DEDUP_WINDOW_S
+
+    def _publish_raw_reaction(self, kind: str, payload: Any) -> None:
+        """RawReactionActionEvent -> the on_reaction callback shape.
+
+        Fires for EVERY reaction dispatch (cached or not — state.py:1927
+        dispatches raw_reaction_add unconditionally, 1937 gates the rich
+        one on the message cache), which is what makes kakera reactions on
+        old/restart-surviving messages visible at all.
+        """
+        if self.on_reaction is None:
+            return
+        user_id = getattr(payload, "user_id", None)
+        if user_id is None or user_id == self.user_id:
+            return
+        emoji_text = _emoji_repr(getattr(payload, "emoji", None))
+        self.on_reaction(
+            kind,
+            getattr(payload, "message_id", None),
+            getattr(payload, "channel_id", None),
+            getattr(payload, "guild_id", None),
+            user_id, emoji_text, payload,
+        )
+        self._mark_event_key(
+            ("reaction", kind, getattr(payload, "message_id", None),
+             user_id, emoji_text))
 
     # ------------------------------------------------------------ labelling
     @property
@@ -240,13 +385,22 @@ class RealDiscordClient:
                 "library (e.g. pip install discord.py-self)"
             ) from exc
         self._discord = discord
-        # discord.py-self 2.x removed Intents (user accounts don't use them);
-        # construct plain and fall back cleanly across fork variants
-        # SELF-COMMAND layer: with a prefix configured, construct the
-        # ext.commands Bot (self_bot=True) instead of a plain Client —
-        # own messages become invocable commands, other users' are skipped
-        # by the library's own check. With no prefix, behavior is exactly
-        # today's (plain Client, no command machinery).
+        # discord.py-self 2.x removed Intents (user accounts don't use
+        # them) — construct plainly (round-3 F4-8: the old intents=None
+        # fallback was dead code; the kwarg is silently swallowed by
+        # ConnectionState's **options sink). max_ratelimit_timeout is
+        # explicit (round-3 F4-1): unset, the library sleeps ANY 429
+        # retry_after in-request (http.py:991-1018) and our
+        # RateLimited→ServerRateLimit mapping can never fire — the pinned
+        # discord.py-self 2.1.0 accepts the kwarg (min-clamped at 30 by
+        # http.py:637); the TypeError fallback covers only exotic/test
+        # layouts without it.
+        # SELF-COMMAND layer (upstream): with a prefix configured,
+        # construct the ext.commands Bot (self_bot=True) instead of a
+        # plain Client — own messages become invocable commands, other
+        # users' are skipped by the library's own check. With no prefix,
+        # behavior is exactly today's (plain Client, no command
+        # machinery).
         if self._command_prefix:
             from discord.ext import commands as _ext_commands
             prefix = self._command_prefix
@@ -256,14 +410,25 @@ class RealDiscordClient:
                 self._client = _ext_commands.Bot(
                     command_prefix=prefix, self_bot=True,
                     help_command=None,
+                    max_ratelimit_timeout=MAX_RATELIMIT_TIMEOUT_S,
                 )
             except TypeError:
-                self._client = discord.Client()
+                self._logger.warning(
+                    "discord client library ignores max_ratelimit_timeout — "
+                    "in-request 429 sleeps are UNBOUNDED on this layout")
+                self._client = _ext_commands.Bot(
+                    command_prefix=prefix, self_bot=True,
+                    help_command=None,
+                )
         else:
             try:
-                self._client = discord.Client()
+                self._client = discord.Client(
+                    max_ratelimit_timeout=MAX_RATELIMIT_TIMEOUT_S)
             except TypeError:
-                self._client = discord.Client(intents=None)
+                self._logger.warning(
+                    "discord client library ignores max_ratelimit_timeout — "
+                    "in-request 429 sleeps are UNBOUNDED on this layout")
+                self._client = discord.Client()
         if self._identify_gate is not None:
             # K8: shadowing the instance method is the library-sanctioned
             # extension point (see Client.before_identify_hook) — every
@@ -355,42 +520,109 @@ class RealDiscordClient:
 
         @self._client.event
         async def on_message_edit(before: Any, after: Any) -> None:
-            if self.on_message_edit is not None and after.author.id != self.user_id:
-                self.on_message_edit(convert_message(
-                    after, dm=isinstance(after.channel, self._discord.DMChannel)))
+            if self.on_message_edit is None or after.author.id != self.user_id:
+                return
+            if self._mark_event_key(("edit", after.id)):
+                return  # the raw handler already published this dispatch
+            self.on_message_edit(convert_message(
+                after, dm=isinstance(after.channel, self._discord.DMChannel)))
 
         @self._client.event
         async def on_message_delete(message: Any) -> None:
-            if self.on_message_delete is not None and message.author.id != self.user_id:
-                guild = getattr(message, "guild", None)
-                self.on_message_delete(
-                    message.id, message.channel.id,
-                    getattr(guild, "id", None) if guild else None, message,
-                )
+            if self.on_message_delete is None or message.author.id != self.user_id:
+                return
+            if self._mark_event_key(("delete", message.id)):
+                return  # the raw handler already published this dispatch
+            guild = getattr(message, "guild", None)
+            self.on_message_delete(
+                message.id, message.channel.id,
+                getattr(guild, "id", None) if guild else None, message,
+            )
 
         @self._client.event
         async def on_reaction_add(reaction: Any, user: Any) -> None:
-            if self.on_reaction is not None and user.id != self.user_id:
-                message = reaction.message
-                guild = (getattr(message, "guild", None)
-                         or getattr(getattr(message, "channel", None), "guild", None))
-                self.on_reaction(
-                    "add", message.id, message.channel.id,
-                    getattr(guild, "id", None) if guild else None,
-                    user.id, _emoji_repr(reaction.emoji), (reaction, user),
-                )
+            if self.on_reaction is None or user.id != self.user_id:
+                return
+            message = reaction.message
+            emoji_text = _emoji_repr(reaction.emoji)
+            if self._mark_event_key(
+                    ("reaction", "add", message.id, user.id, emoji_text)):
+                return  # the raw handler already published this dispatch
+            guild = (getattr(message, "guild", None)
+                     or getattr(getattr(message, "channel", None), "guild", None))
+            self.on_reaction(
+                "add", message.id, message.channel.id,
+                getattr(guild, "id", None) if guild else None,
+                user.id, emoji_text, (reaction, user),
+            )
 
         @self._client.event
         async def on_reaction_remove(reaction: Any, user: Any) -> None:
-            if self.on_reaction is not None and user.id != self.user_id:
-                message = reaction.message
-                guild = (getattr(message, "guild", None)
-                         or getattr(getattr(message, "channel", None), "guild", None))
-                self.on_reaction(
-                    "remove", message.id, message.channel.id,
-                    getattr(guild, "id", None) if guild else None,
-                    user.id, _emoji_repr(reaction.emoji), (reaction, user),
-                )
+            if self.on_reaction is None or user.id != self.user_id:
+                return
+            message = reaction.message
+            emoji_text = _emoji_repr(reaction.emoji)
+            if self._mark_event_key(
+                    ("reaction", "remove", message.id, user.id, emoji_text)):
+                return  # the raw handler already published this dispatch
+            guild = (getattr(message, "guild", None)
+                     or getattr(getattr(message, "channel", None), "guild", None))
+            self.on_reaction(
+                "remove", message.id, message.channel.id,
+                getattr(guild, "id", None) if guild else None,
+                user.id, emoji_text, (reaction, user),
+            )
+
+        # ------------------------------------------------ raw (uncached) events
+        # Round-3 F4-3: the rich handlers above fire ONLY for cached
+        # messages (state.py:1848-1937; the cache is bounded at 1000 and
+        # EMPTY after a restart) — precisely the old-message kakera
+        # reaction events this framework feeds on would be silently
+        # missed. The fork dispatches raw_* for EVERY dispatch, raw FIRST,
+        # so the raw handlers below are the primary publishers and the
+        # rich ones suppress as duplicates (see _mark_event_key).
+
+        @self._client.event
+        async def on_raw_message_edit(payload: Any) -> None:
+            if self.on_message_edit is None:
+                return
+            message = getattr(payload, "message", None)
+            if message is None:
+                return
+            author = getattr(message, "author", None)
+            if author is not None and getattr(author, "id", None) == self.user_id:
+                return
+            self.on_message_edit(convert_message(
+                message,
+                dm=isinstance(getattr(message, "channel", None),
+                              self._discord.DMChannel),
+            ))
+            self._mark_event_key(("edit", payload.message_id))
+
+        @self._client.event
+        async def on_raw_message_delete(payload: Any) -> None:
+            if self.on_message_delete is None:
+                return
+            cached = getattr(payload, "cached_message", None)
+            # self-authored deletes stay filtered when the cache can tell;
+            # for UNCACHED deletes the author is unknowable and the event
+            # MUST still flow (that is the entire point of the raw path)
+            author = getattr(cached, "author", None)
+            if author is not None and getattr(author, "id", None) == self.user_id:
+                return
+            self.on_message_delete(
+                payload.message_id, payload.channel_id,
+                getattr(payload, "guild_id", None), cached,
+            )
+            self._mark_event_key(("delete", payload.message_id))
+
+        @self._client.event
+        async def on_raw_reaction_add(payload: Any) -> None:
+            self._publish_raw_reaction("add", payload)
+
+        @self._client.event
+        async def on_raw_reaction_remove(payload: Any) -> None:
+            self._publish_raw_reaction("remove", payload)
 
         # keep a STRONG reference: the loop only weak-references tasks, so
         # an unreferenced client task can be garbage-collected mid-run, and
@@ -733,6 +965,58 @@ class RealDiscordClient:
                 raise mapped from exc
             raise
 
+    async def _reap_click_task(self, task: "asyncio.Task") -> None:
+        """Await a cancelled click task, swallowing its death exceptions —
+        unless OUR caller's cancellation is pending (never eat that)."""
+        try:
+            await task
+        except asyncio.CancelledError:
+            if outer_cancel_pending():
+                raise
+        except Exception:
+            pass
+
+    async def _click_component(self, component: Any, channel_id: int) -> Any:
+        """Click with a hard total-await ceiling (round-3 F4-5/F4-6).
+
+        * the fork's 202-with-code-110000-119999 interaction path retries
+          by sleeping ``retry_after`` UNCAPPED and exempt from
+          max_ratelimit_timeout (http.py:936-948) — asyncio.wait_for
+          bounds one click to CLICK_TIMEOUT_S and a TimeoutError maps to
+          the domain's transient vocabulary (ConnectionError, same as the
+          5xx mapping) so the scheduler retries rather than hangs;
+        * _wrapped_interaction converts CancelledError into InvalidData
+          (interactions.py:215-216), so a stop()-driven cancel of a click
+          in flight would masquerade as a data error — when the enclosing
+          task's cancellation is pending, re-raise CancelledError.
+        """
+        task = asyncio.get_running_loop().create_task(component.click())
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(task), CLICK_TIMEOUT_S)
+        except TimeoutError:
+            task.cancel()
+            await self._reap_click_task(task)
+            raise ConnectionError(
+                f"button click on channel {channel_id} did not settle "
+                f"within {CLICK_TIMEOUT_S:.0f}s (interaction retry loop "
+                "or stalled gateway)"
+            ) from None
+        except Exception as exc:
+            if (type(exc).__name__ == "InvalidData"
+                    and outer_cancel_pending()):
+                task.cancel()
+                await self._reap_click_task(task)
+                raise asyncio.CancelledError from exc
+            mapped = self._map_send_error(exc, channel_id)
+            if mapped is not None:
+                raise mapped from exc
+            raise
+        finally:
+            if not task.done():
+                task.cancel()
+                await self._reap_click_task(task)
+
     async def click_button(self, channel_id: int, message_id: int, custom_id: str) -> Any:
         """Click a component by custom_id (kakeraloot capability).
 
@@ -750,13 +1034,7 @@ class RealDiscordClient:
         for top in getattr(message, "components", None) or ():
             for component in getattr(top, "children", None) or ():
                 if getattr(component, "custom_id", None) == custom_id:
-                    try:
-                        return await component.click()
-                    except Exception as exc:
-                        mapped = self._map_send_error(exc, channel_id)
-                        if mapped is not None:
-                            raise mapped from exc
-                        raise
+                    return await self._click_component(component, channel_id)
         from core.errors import TargetGone
 
         raise TargetGone("", f"custom_id {custom_id!r} not on message {message_id}")
@@ -782,7 +1060,13 @@ class RealDiscordClient:
     # ---------------------------------------------------------- observability
     @property
     def latency_ms(self) -> Optional[float]:
-        """Gateway heartbeat latency in ms (None before READY / when NaN/inf)."""
+        """Gateway heartbeat latency in ms (None before READY / when NaN/inf).
+
+        Note (round-3 F4-9): once connected the library's ``latency`` is
+        always a float — the None paths here are the pre-connect and
+        non-finite sentinel cases, so callers see float-or-None, never a
+        NaN/inf leak.
+        """
         client = self._client
         if client is None:
             return None
@@ -806,6 +1090,9 @@ class RealDiscordClient:
         Uses exactly what the live client already holds in cache after READY:
         our user, guilds + their channels, open DM channels (recipient ids),
         and the heartbeat latency. ``{"available": False}`` before connect.
+        ``dm_channels`` entries follow the flat ``{"id", "recipient"}``
+        contract (round-3 F4-9 parity nit — recipient is the OTHER user's
+        id, never an embedded object).
         """
         client = self._client
         if client is None or self.user_id is None or not self.connected:
@@ -848,59 +1135,97 @@ class IdentifyGate:
     startup and, worse, during synchronized reconnect storms that
     ``start_all``'s stagger does not cover). One gate instance is shared
     by every client the factory builds; waiters are released FIFO with
-    at least ``interval`` seconds between consecutive IDENTIFYs
+    at least ``effective_interval`` seconds between consecutive IDENTIFYs
     (isolation audit K8 / S3-3.1, S7-A2).
+
+    Fleet-size scaling (round-3 F4-2): the library awaits IDENTIFY — and
+    therefore this hook — under ``asyncio.wait_for(..., 60)`` (client.py:
+    1020; the hook runs inside DiscordWebSocket.from_client), so a waiter
+    queued >= 60s is cancelled into a disconnect dispatch → reconnect
+    livelock once a synchronized (re)identify wave exceeds ~60s of
+    queueing (>= ~13 accounts at a flat 5s interval). The gate instead
+    derives its spacing from the EXPECTED fleet size::
+
+        effective_interval = min(interval,
+                                 max(min_interval, wait_budget / expected))
+
+    with ``wait_budget`` 50s (margin under the 60s library ceiling), so
+    the LAST waiter of an N-account wave still clears the hook in <= ~50s.
+    ``expected`` is a settable count (the factory raises it as it builds
+    DISTINCT accounts — reconnects rebuild already-counted accounts and
+    never inflate it; the account manager may also set it directly when
+    the fleet size is known ahead of boot). It is re-read on every
+    release, so a fleet that grows mid-wave tightens spacing dynamically.
     """
 
-    __slots__ = ("interval", "max_wait", "_lock", "_last", "_depth")
+    #: total seconds a synchronized wave may spend inside the hook (< 60)
+    WAIT_BUDGET_S = 50.0
+    #: never pace IDENTIFYs tighter than this (Discord per-IP friendliness)
+    MIN_INTERVAL_S = 1.0
 
-    def __init__(self, interval: float = 5.0,
-                 max_wait: float = 45.0) -> None:
+    __slots__ = ("interval", "expected", "min_interval", "wait_budget",
+                 "_lock", "_last", "_depth")
+
+    def __init__(self, interval: float = 5.0, *, min_interval: float = MIN_INTERVAL_S,
+                 wait_budget: float = WAIT_BUDGET_S,
+                 max_wait: Optional[float] = None) -> None:
         self.interval = float(interval)
-        #: fast-fail bound: 45s >= 8 accounts' worth of queue at 5s spacing
-        self.max_wait = float(max_wait)
+        if max_wait is not None:  # upstream phase-4 alias (tests/config)
+            wait_budget = max_wait
+        #: expected fleet size (settable; see class docstring)
+        self.expected = 1
+        self.min_interval = float(min_interval)
+        self.wait_budget = float(wait_budget)
         self._lock: Optional[asyncio.Lock] = None  # bound lazily to the loop
         self._last: float = float("-inf")
         self._depth: int = 0  # FINAL-PHASE (F4): FIFO waiters ahead-of-lock
 
     async def acquire(self, shard_id=None, *, initial: bool = False) -> None:
-        """Space consecutive IDENTIFYs by ``interval`` seconds.
+        """Space consecutive IDENTIFYs by ``effective_interval`` seconds.
 
         The leading ``shard_id`` positional is tolerated (never used —
         user accounts are unsharded — but discord.py lineage hooks are
         invoked with it positionally, and library drift must not turn
         the gate into a TypeError). Fast-fails with a retryable
         ConnectionError when the PROJECTED total wait (residual spacing
-        + waiters already queued ahead × interval) exceeds ``max_wait``
-        (FINAL-PHASE F4: the phase-4 fast-fail checked the residual only
-        AFTER lock acquisition — where it always equals ≤ interval — so
-        it could never fire; queue depth tracking makes the projection
-        real). Failing fast into the reconnect backoff is strictly
-        cheaper than parking a built client for 90s only to time out.
+        + waiters already queued ahead × interval) exceeds the wave
+        budget (FINAL-PHASE F4 + round-3: the effective interval scales
+        with the expected fleet size so a synchronized wave of ANY size
+        clears under the library's 60s identify ceiling — the fast-fail
+        now covers only genuinely pathological saturation, e.g. a
+        min_interval floor met with a huge fleet).
         """
         if self._lock is None:
             self._lock = asyncio.Lock()
+        interval = self.effective_interval
         # projected wait BEFORE queueing: residual + the queue depth ahead
         # of us each costs a full interval (FIFO under the held lock)
         loop = asyncio.get_running_loop()
-        projected = (self._last + self.interval * (self._depth + 1)
+        projected = (self._last + interval * (self._depth + 1)
                      - loop.time()) if self._last != float("-inf") else 0.0
-        if projected > self.max_wait:
+        if projected > self.wait_budget:
             raise ConnectionError(
                 f"identify gate saturated: projected wait {projected:.0f}s "
-                f"exceeds {self.max_wait:.0f}s ({self._depth} queued) — "
+                f"exceeds {self.wait_budget:.0f}s ({self._depth} queued) — "
                 "retrying with backoff is cheaper than parking a built client")
         self._depth += 1
         try:
             async with self._lock:  # FIFO: hold while sleeping so waiters queue
                 now = loop.time()
-                wait = self._last + self.interval - now
+                wait = self._last + self.effective_interval - now
                 if wait > 0:
                     await asyncio.sleep(wait)
                     now = loop.time()
                 self._last = now
         finally:
             self._depth -= 1
+
+    @property
+    def effective_interval(self) -> float:
+        """Current spacing, derived from the expected fleet size."""
+        expected = max(1, int(self.expected))
+        return min(self.interval,
+                   max(self.min_interval, self.wait_budget / expected))
 
 
 class RealClientFactory:
@@ -927,6 +1252,10 @@ class RealClientFactory:
         self._identify_gate = IdentifyGate(identify_interval)
         #: self-command prefix shared by every client (from SELF_COMMAND_PREFIX)
         self._command_prefix = command_prefix or ""
+        #: distinct accounts this factory has EVER built a client for —
+        #: reconnects rebuild already-counted accounts, so the gate's
+        #: ``expected`` never ratchets down through reconnect cycles
+        self._gate_accounts: set = set()
 
     def __call__(self, name: str, token: str) -> RealDiscordClient:
         """Build a RealDiscordClient for one account.
@@ -939,6 +1268,11 @@ class RealClientFactory:
                 f"account {name!r} has no stored credential — add one "
                 "through the dashboard or CLI 'accounts credential'"
             )
+        if name:
+            # round-3 F4-2: the gate paces a synchronized fleet wave inside
+            # the library's 60s identify ceiling (client.py:1020)
+            self._gate_accounts.add(name)
+            self._identify_gate.expected = len(self._gate_accounts)
         # K13 (S9-C1): a per-account child logger keeps adapter lines
         # (connected/terminated/close-failed) attributable — the bridge
         # maps slaughtermudae.adapter.<name> to source "adapter:<name>".

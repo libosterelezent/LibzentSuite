@@ -40,9 +40,12 @@ class CredentialsRepository(BaseRepository):
     async def delete(self, account: str) -> bool:
         """Remove the credential; True when one existed."""
         async with self._tx(f"delete credential for {account!r}") as conn:
-            cur = await conn.execute(
-                "DELETE FROM credentials WHERE account=?", (account,))
-            return cur.rowcount > 0
+            # async with: the cursor closes before the tx commits — an
+            # unclosed one could pin a read snapshot (SQLITE_BUSY class)
+            async with conn.execute(
+                "DELETE FROM credentials WHERE account=?", (account,)
+            ) as cur:
+                return cur.rowcount > 0
 
     async def accounts_with_credential(self) -> list:
         """Account names that have a stored credential (status display)."""

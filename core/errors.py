@@ -51,15 +51,16 @@ class ServerRateLimit(RuntimeError):
     """
 
     def __init__(self, retry_after: float, global_: bool = False) -> None:
-        scope = "GLOBAL" if global_ else "route"
-        super().__init__(f"server rate limit ({scope}) for {retry_after:.2f}s")
         try:
             retry_after = float(retry_after)
         except (TypeError, ValueError):
             retry_after = 1.0
         if retry_after != retry_after or retry_after in (float("inf"), float("-inf")):
             retry_after = 1.0  # NaN/inf from a hostile header: safe default
-        self.retry_after = max(0.0, retry_after)
+        retry_after = max(0.0, retry_after)
+        scope = "GLOBAL" if global_ else "route"
+        super().__init__(f"server rate limit ({scope}) for {retry_after:.2f}s")
+        self.retry_after = retry_after
         self.global_ = bool(global_)
 
 

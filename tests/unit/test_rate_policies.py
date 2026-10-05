@@ -500,13 +500,14 @@ class TestEffectiveComposition(unittest.TestCase):
         )
 
 
-class TestJitterNeverMovesPacingClock(unittest.IsolatedAsyncioTestCase):
-    """Jitter sleeps AFTER the grant: grant-to-grant gaps equal the interval
-    exactly, no matter the draws (a smaller second draw cannot shrink the
-    pacing gap — the fire-time shrink risk is pinned design, the GRANT gap
-    is the pacing invariant)."""
+class TestJitterCountsIntoPacingStamps(unittest.IsolatedAsyncioTestCase):
+    """Round-3 wire-spacing semantics: the jitter draw is made BEFORE
+    admission and the pacing clock is stamped at grant + jitter — the
+    expected WIRE instant. Consecutive wire sends on one key stay >=
+    interval apart no matter how the draws differ: a smaller second draw
+    can no longer compress (or invert) the gap."""
 
-    async def test_grant_gap_equals_interval_despite_jitter(self):
+    async def test_wire_gap_holds_interval_despite_jitter(self):
         from tests.unit.test_rate_engine import make_manager
 
         interval = 10.0
@@ -515,12 +516,23 @@ class TestJitterNeverMovesPacingClock(unittest.IsolatedAsyncioTestCase):
         )
         first = await manager.acquire("message")
         grant1 = manager._clock.now() - first.jitter_s
+        wire1 = manager._clock.now()
         second = await manager.acquire("message")
         grant2 = manager._clock.now() - second.jitter_s
+        wire2 = manager._clock.now()
         self.assertGreaterEqual(second.jitter_s, 1.0)
         self.assertLessEqual(second.jitter_s, 4.0)
-        self.assertGreaterEqual(grant2 - grant1, interval - 1e-9)
-        self.assertLessEqual(grant2 - grant1, interval + 1e-9)
+        # grant spacing: the next grant waits a full interval from the
+        # previous stamp (grant + jitter), so the grant gap is >= interval
+        # and exactly interval + first_draw
+        self.assertAlmostEqual(grant2 - grant1, interval + first.jitter_s,
+                               places=6)
+        # wire spacing: consecutive wire sends stay >= interval apart, and
+        # equal interval + the SECOND draw (the first draw is already part
+        # of the stamp the second grant waited out)
+        self.assertGreaterEqual(wire2 - wire1, interval - 1e-9)
+        self.assertAlmostEqual(wire2 - wire1, interval + second.jitter_s,
+                               places=6)
 
 
 if __name__ == "__main__":

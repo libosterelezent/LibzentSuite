@@ -59,8 +59,10 @@ class KvRepository(BaseRepository):
     async def delete(self, key: str) -> bool:
         """Remove one entry; True when a row was deleted."""
         async with self._tx(f"kv delete {key!r}") as conn:
-            cur = await conn.execute("DELETE FROM kv WHERE key = ?", (key,))
-            return cur.rowcount > 0
+            async with conn.execute(
+                "DELETE FROM kv WHERE key = ?", (key,)
+            ) as cur:
+                return cur.rowcount > 0
 
     async def prefix(self, p: str) -> Dict[str, Any]:
         """All entries whose key starts with ``p`` (key -> decoded value).
@@ -96,7 +98,7 @@ class KvRepository(BaseRepository):
             p.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         )
         async with self._tx(f"kv delete_prefix {p!r}") as conn:
-            cur = await conn.execute(
+            async with conn.execute(
                 "DELETE FROM kv WHERE key LIKE ? ESCAPE '\\'", (pattern,)
-            )
-            return int(cur.rowcount or 0)
+            ) as cur:
+                return int(cur.rowcount or 0)

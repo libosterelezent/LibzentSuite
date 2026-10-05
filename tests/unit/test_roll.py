@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import unittest
 from types import SimpleNamespace as NS
 
 from core.credentials import Credentials
 from core.event_bus import EventBus, MessageReceived
-from core.errors import AccessDenied, TargetGone
+from core.errors import AccessDenied, PluginError, SettingsValidationError, TargetGone
 from core.plugin_manager import PluginManager
 from core.priority import Priority
 from core.settings_manager import SettingsManager
@@ -121,6 +122,11 @@ async def flow(content, author=OWNER_ID, overrides=None, responses=None,
     ))
     await asyncio.sleep(wait)
     return services, manager
+
+
+def roll_state(manager) -> dict:
+    """The roll plugin's state row (error counters, settings view)."""
+    return {s["name"]: s for s in manager.states("alpha")}["roll"]
 
 
 class TestParsePauseMinutes(unittest.TestCase):
@@ -473,6 +479,133 @@ class TestHostileSettingsAndReload(unittest.IsolatedAsyncioTestCase):
         commands = [c for _, c, _ in services.sent]
         self.assertIn("$wa", commands)
         self.assertIn("$wg", commands)
+
+
+class TestRound3Hardening(unittest.IsolatedAsyncioTestCase):
+    """Round-3: command validation, userstack re-enable, transient backoff,
+    precise PluginError handling."""
+
+    async def test_invalid_command_rejected_at_settings_validation(self) -> None:
+        """VALID_ROULETTES is enforced by the Setting manifest — an invalid
+        command disables the plugin at resolution with an error listing
+        the valid roulette commands (nothing ever sends it)."""
+        services, manager = await flow(
+            "roll", overrides={"command": "$spin"}, wait=0.15)
+        self.assertEqual(services.sent, [])
+        state = roll_state(manager)
+        self.assertFalse(state["enabled"])
+        self.assertTrue(state["last_error"].startswith("settings:"))
+        self.assertIn("$wa", state["last_error"])  # valid set is listed
+        self.assertIn("$m", state["last_error"])
+
+    async def test_invalid_command_rejected_at_set_setting(self) -> None:
+        services, manager = await flow("roll", wait=0.1)
+        with self.assertRaises(SettingsValidationError) as ctx:
+            await manager.set_setting("alpha", "roll", "command", "$spin")
+        self.assertIn("$wa", str(ctx.exception))
+        # bare/case/whitespace variants normalize to the canonical form
+        self.assertEqual(
+            await manager.set_setting("alpha", "roll", "command", " WG "),
+            "$wg")
+
+    async def test_explicit_userstack_true_survives_restart(self) -> None:
+        """The auto-disable latch must not clobber an explicit re-enable:
+        on_load only forces userstack False when the key was never set
+        explicitly in any settings layer."""
+        low = low_rolls_response()
+        responses = [
+            low,                                                # roll reply
+            {"content": "You don't have enough rolls stacked!"},  # $us reply
+        ]
+        services, manager = await flow(
+            "roll", responses=responses,
+            overrides={"roll_interval": 1.5, "response_timeout": 2.0},
+            wait=2.0,
+        )
+        # session 1: Mudae refused $us -> the one-way latch engaged
+        self.assertIs(manager.live_settings("alpha", "roll")["userstack"], False)
+        # the user explicitly re-enables (persisted settings layer)
+        await manager.set_setting("alpha", "roll", "userstack", True)
+        self.assertIs(manager.live_settings("alpha", "roll")["userstack"], True)
+        # "restart": deactivate + activate runs on_load again
+        await manager.deactivate_account("alpha")
+        await manager.activate_account("alpha", services)
+        self.assertIs(manager.live_settings("alpha", "roll")["userstack"], True)
+
+    async def test_unwired_cooldown_service_stops_loop_with_precise_error(self) -> None:
+        """A PluginError from unwired framework services gets its own
+        precise stop line — not the generic 'roll loop crashed'."""
+
+        class NoCooldownServices(RollServices):
+            async def cooldown_remaining(self, key):
+                raise PluginError(
+                    "cooldown service is not wired for alpha/roll")
+
+        services = NoCooldownServices()
+        bus = EventBus()
+        manager = PluginManager(
+            bus, logging.getLogger("t"),
+            SettingsManager(bus, logging.getLogger("t"), global_layer={}),
+            plugin_dir="plugins",
+        )
+        manager.discover()
+        await manager.attach_account("alpha", allowed={"roll"})
+        await manager.activate_account("alpha", services)
+        with self.assertLogs("slaughtermudae.alpha.roll", level="ERROR") as cm:
+            bus.publish_nowait(MessageReceived(
+                account="alpha", message_id=1, channel_id=CHANNEL,
+                author_id=OWNER_ID, content="roll"))
+            await asyncio.sleep(0.5)
+        self.assertTrue(
+            any("plugin services unavailable" in line for line in cm.output),
+            cm.output)
+        plugin = manager._accounts["alpha"]["roll"].instance
+        self.assertFalse(plugin._rolling.get("alpha"))  # stopped, precisely
+        state = roll_state(manager)
+        self.assertEqual(state["error_count"], 0)       # not a plugin crash
+        self.assertIsNone(state["last_error"])
+
+    async def test_transient_send_failures_back_off_without_fake_recovery(self) -> None:
+        """Send failures keep the loop ALIVE with a growing bounded backoff
+        — no fake 'recovered' probe, no fixed 5s spin, no hot loop."""
+
+        class DownServices(RollServices):
+            def __init__(self):
+                super().__init__()
+                self.attempts = 0
+
+            async def send_message(self, channel_id, content, *,
+                                   priority=Priority.LOW):
+                self.attempts += 1
+                raise ConnectionError("gateway closed mid-send")
+
+        services = DownServices()
+        bus = EventBus()
+        manager = PluginManager(
+            bus, logging.getLogger("t"),
+            SettingsManager(bus, logging.getLogger("t"), global_layer={}),
+            plugin_dir="plugins",
+        )
+        manager.discover()
+        await manager.attach_account("alpha", allowed={"roll"})
+        await manager.activate_account("alpha", services)
+        plugin = manager._accounts["alpha"]["roll"].instance
+        module = sys.modules[type(plugin).__module__]
+        saved = (module.TRANSIENT_BACKOFF_START, module.TRANSIENT_BACKOFF_MAX)
+        module.TRANSIENT_BACKOFF_START, module.TRANSIENT_BACKOFF_MAX = 0.05, 0.2
+        try:
+            bus.publish_nowait(MessageReceived(
+                account="alpha", message_id=1, channel_id=CHANNEL,
+                author_id=OWNER_ID, content="roll"))
+            await asyncio.sleep(1.5)
+            self.assertTrue(plugin._rolling.get("alpha"))  # loop survived
+            self.assertGreaterEqual(services.attempts, 3)  # still retrying
+            self.assertLessEqual(services.attempts, 40)    # with backoff
+        finally:
+            module.TRANSIENT_BACKOFF_START, module.TRANSIENT_BACKOFF_MAX = saved
+        state = roll_state(manager)
+        self.assertEqual(state["error_count"], 0)  # transient is not a crash
+        self.assertIsNone(state["last_error"])
 
 
 if __name__ == "__main__":

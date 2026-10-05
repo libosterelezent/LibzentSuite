@@ -38,6 +38,18 @@ class FakePluginRepo:
         self.writes.append((account, plugin, key, value))
 
 
+class DeletablePluginRepo(FakePluginRepo):
+    """Repo shape once F9 lands PluginRepository.delete_setting."""
+
+    def __init__(self, layers=None) -> None:
+        super().__init__(layers)
+        self.deletes: list = []
+
+    async def delete_setting(self, account: str, plugin: str, key: str) -> None:
+        self.deletes.append((account, plugin, key))
+        self.layers.get(account, {}).get(plugin, {}).pop(key, None)
+
+
 class BoomPluginRepo:
     async def all_account_settings(self) -> Dict:
         return {}
@@ -288,6 +300,23 @@ class TestCoercionEdges(unittest.TestCase):
         self.assertEqual(s.validate(123), "123")
         self.assertEqual(s.validate(None), "d")
 
+    def test_str_length_capped_at_schema_default(self):
+        from core.settings_manager import STR_MAX_LENGTH
+        s = Setting("t", "str", "d")
+        self.assertEqual(len(s.validate("x" * STR_MAX_LENGTH)), STR_MAX_LENGTH)
+        with self.assertRaises(SettingsValidationError):
+            s.validate("x" * (STR_MAX_LENGTH + 1))
+        with self.assertRaises(SettingsValidationError):  # default too
+            Setting("big", "str", "y" * (STR_MAX_LENGTH + 1))
+
+    def test_str_length_override_per_setting(self):
+        s = Setting("t", "str", "d", max_length=10)
+        self.assertEqual(s.validate("x" * 10), "x" * 10)
+        with self.assertRaises(SettingsValidationError):
+            s.validate("x" * 11)
+        unlimited = Setting("t", "str", "d", max_length=10**9)
+        self.assertEqual(len(unlimited.validate("x" * 5000)), 5000)
+
     def test_construction_rejects_bad_shapes(self):
         with self.assertRaises(SettingsValidationError):
             Setting("bad-name", "int", 1)
@@ -298,6 +327,70 @@ class TestCoercionEdges(unittest.TestCase):
         with self.assertRaises(SettingsValidationError):
             Setting("ok", "int", 99, min_value=0, max_value=10)
         Setting("ok_name", "int", 1)                        # underscore fine
+
+
+class TestClearPluginSetting(unittest.IsolatedAsyncioTestCase):
+    """Round-3: null reset must DELETE the account-layer row (unpin),
+    not persist the schema default as a mask over the global layer."""
+
+    async def test_clear_unmasks_global_layer(self):
+        bus = EventBus()
+        events = Events(bus)
+        repo = DeletablePluginRepo()
+        mgr = SettingsManager(
+            bus, global_layer={"p": {"gain": 2}}, plugin_repo=repo)
+        await mgr.load()
+        await mgr.set_plugin_setting("a", "p", "gain", 3, SCHEMA)
+        self.assertEqual(mgr.resolve("p", SCHEMA, account="a")["gain"], 3)
+        effective = await mgr.clear_plugin_setting("a", "p", "gain", SCHEMA)
+        self.assertEqual(effective, 2)              # global layer unmasked
+        self.assertEqual(mgr.resolve("p", SCHEMA, account="a")["gain"], 2)
+        self.assertEqual(repo.deletes, [("a", "p", "gain")])
+        settled = await events.settle()
+        self.assertEqual(len(settled), 2)           # set + clear, once each
+        cleared = [e for e in settled if e.new_value == 2]
+        self.assertEqual(cleared[0].old_value, 3)
+
+    async def test_clear_without_delete_method_clears_memory_with_warning(self):
+        bus = EventBus()
+        mgr = SettingsManager(
+            bus, logging.getLogger("t-clear"),
+            global_layer={"p": {"gain": 2}}, plugin_repo=FakePluginRepo())
+        await mgr.load()
+        await mgr.set_plugin_setting("a", "p", "gain", 3, SCHEMA)
+        with self.assertLogs("t-clear", level="WARNING"):
+            await mgr.clear_plugin_setting("a", "p", "gain", SCHEMA)
+        self.assertEqual(mgr.resolve("p", SCHEMA, account="a")["gain"], 2)
+
+    async def test_clear_unknown_key_raises_only_with_schema(self):
+        bus = EventBus()
+        mgr = SettingsManager(bus, plugin_repo=DeletablePluginRepo())
+        await mgr.load()
+        with self.assertRaises(SettingsValidationError):
+            await mgr.clear_plugin_setting("a", "p", "ghost", SCHEMA)
+        # schema-less clear (api fallback path) is permissive
+        effective = await mgr.clear_plugin_setting("a", "p", "ghost")
+        self.assertIsNone(effective)
+
+    async def test_clear_missing_row_is_noop_delete_still_sent(self):
+        bus = EventBus()
+        events = Events(bus)
+        repo = DeletablePluginRepo()
+        mgr = SettingsManager(bus, plugin_repo=repo)
+        await mgr.load()
+        effective = await mgr.clear_plugin_setting("a", "p", "gain", SCHEMA)
+        self.assertEqual(effective, 1)              # schema default
+        self.assertEqual(repo.deletes, [("a", "p", "gain")])
+        self.assertEqual(len(await events.settle()), 1)
+
+    async def test_layers_view_drops_emptied_overrides(self):
+        bus = EventBus()
+        mgr = SettingsManager(bus, plugin_repo=DeletablePluginRepo())
+        await mgr.load()
+        await mgr.set_plugin_setting("a", "p", "gain", 3, SCHEMA)
+        self.assertIn("a", mgr.layers_view()["accounts"])
+        await mgr.clear_plugin_setting("a", "p", "gain", SCHEMA)
+        self.assertEqual(mgr.layers_view()["accounts"], {})
 
 
 class TestAccountSettingsLayer(unittest.IsolatedAsyncioTestCase):
@@ -322,6 +415,20 @@ class TestAccountSettingsLayer(unittest.IsolatedAsyncioTestCase):
         await mgr.load()
         self.assertEqual(mgr.account_settings("a")["reconnect_initial_delay"], 5.0)
         self.assertEqual(mgr.account_settings("ghost")["reconnect_multiplier"], 2.0)
+
+    async def test_per_account_read_failure_logs_and_defaults(self):
+        class LockedRepo(FakeAccountRepo):
+            async def get(self, account: str) -> Dict:
+                raise RuntimeError("db locked")
+
+        bus = EventBus()
+        mgr = SettingsManager(
+            bus, logging.getLogger("t-load"),
+            account_settings_repo=LockedRepo(rows={"a": {}}))
+        with self.assertLogs("t-load", level="ERROR"):
+            await mgr.load()
+        self.assertEqual(           # defaults still resolve for that account
+            mgr.account_settings("a")["reconnect_multiplier"], 2.0)
 
     async def test_forget_account_drops_memory_layers(self):
         bus = EventBus()

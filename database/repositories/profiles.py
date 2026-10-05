@@ -52,8 +52,10 @@ class ProfilesRepository(BaseRepository):
         """Delete a profile, its plugin memberships AND its account
         assignments; True when the profile existed."""
         async with self._tx(f"delete profile {name!r}") as conn:
-            cur = await conn.execute("DELETE FROM profiles WHERE name = ?", (name,))
-            existed = cur.rowcount > 0
+            async with conn.execute(
+                "DELETE FROM profiles WHERE name = ?", (name,)
+            ) as cur:
+                existed = cur.rowcount > 0
             await conn.execute("DELETE FROM profile_plugins WHERE profile = ?", (name,))
             await conn.execute("DELETE FROM account_profiles WHERE profile = ?", (name,))
         return existed

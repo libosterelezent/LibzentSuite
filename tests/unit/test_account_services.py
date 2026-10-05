@@ -3,16 +3,36 @@ collect idle-timeout semantics, cache-first DMs and passthrough helpers."""
 from __future__ import annotations
 
 import asyncio
+import logging
+import tempfile
 import unittest
+from pathlib import Path
 
 from core.account_manager import DiscordCache
 from core.account_manager.services import AccountPluginServices, TaskAckRegistry
 from core.credentials import Credentials
-from core.errors import AccountError, SchedulerError, TargetGone
+from core.errors import AccountError, SchedulerError, ServerRateLimit, TargetGone
 from core.event_bus import EventBus, MessageReceived, TaskCancelled, TaskCompleted, TaskFailed
 from core.priority import Priority
+from core.task_scheduler import TaskScheduler
 
 from tests.unit.helpers import FakeClient, FakeScheduler, default_snapshot, make_manager
+
+_TEST_LOG = logging.getLogger("tests.account_services")
+
+
+class _InstantLimiter:
+    """Duck-typed limiter for the real-scheduler tests (instant grants)."""
+
+    class _Grant:
+        wait_s = 0.0
+        jitter_s = 0.0
+
+    async def acquire(self, action, account, plugin, priority):
+        return self._Grant()
+
+    def report_server_limit(self, *args, **kwargs):
+        pass
 
 
 def make_services(*, bus=None, scheduler=None, client=None, settings_dict=None,
@@ -466,6 +486,131 @@ class PassthroughTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(services.settings, settings_dict)  # live reference kept
         settings_dict["live"] = False
         self.assertFalse(services.settings["live"])
+
+
+class TransientTypingAcrossAckSeamTests(unittest.IsolatedAsyncioTestCase):
+    """Round-3 (3-lens cross-validated): a terminal task failure caused by a
+    ConnectionError must reach the waiting plugin as a TYPED
+    ConnectionError — not an opaque SchedulerError the flow code has to
+    substring-match English error text against."""
+
+    @staticmethod
+    def _scheduler(sender, **kwargs) -> TaskScheduler:
+        scheduler = TaskScheduler(
+            EventBus(), _TEST_LOG, _InstantLimiter(), sender, **kwargs)
+        scheduler.start()
+        return scheduler
+
+    async def test_real_connection_error_raises_connection_error(self) -> None:
+        async def sender(task):
+            raise ConnectionError("discord unreachable")
+
+        scheduler = self._scheduler(sender)
+        try:
+            bus = scheduler._bus
+            registry = TaskAckRegistry(bus, scheduler)
+            task = scheduler.submit("alpha", "roll", "message",
+                                    channel_id=1, content="x", retries=0)
+            with self.assertRaises(ConnectionError) as ctx:
+                await asyncio.wait_for(
+                    registry.wait_for_task(task.id, timeout=2.0), 2.5)
+            self.assertIs(type(ctx.exception), ConnectionError)
+            self.assertNotIsInstance(ctx.exception, SchedulerError)
+            self.assertIn("discord unreachable", str(ctx.exception))
+        finally:
+            await scheduler.stop()
+
+    async def test_timeout_error_mapped_by_kind(self) -> None:
+        """Kind-map pin: a TaskFailed carrying error_kind="TimeoutError" is
+        reconstructed as TimeoutError (duck-typed schedulers / future
+        formats; the live scheduler renders timeouts as 'timed out …')."""
+        bus = EventBus()
+        registry = TaskAckRegistry(bus)
+        future = registry.register(31)
+        await bus.publish(TaskFailed(account="alpha", task_id=31,
+                                     error="TimeoutError: gateway hung",
+                                     error_kind="TimeoutError"))
+        with self.assertRaises(TimeoutError) as ctx:
+            await asyncio.wait_for(future, 1.0)
+        self.assertIn("gateway hung", str(ctx.exception))
+
+    async def test_server_rate_limit_stays_retried_invisible(self) -> None:
+        """The scheduler always retries ServerRateLimit at least once; when
+        it finally goes terminal it stays an OPAQUE SchedulerError here
+        (unchanged contract — plugins never see transport 429 churn)."""
+        attempts = []
+
+        async def sender(task):
+            attempts.append(task.id)
+            raise ServerRateLimit(0.01)
+
+        scheduler = self._scheduler(sender, retry_backoff=0.0,
+                                    max_backoff=0.0)
+        try:
+            bus = scheduler._bus
+            registry = TaskAckRegistry(bus, scheduler)
+            task = scheduler.submit("alpha", "roll", "message",
+                                    channel_id=1, content="x", retries=0)
+            with self.assertRaises(SchedulerError) as ctx:
+                await asyncio.wait_for(
+                    registry.wait_for_task(task.id, timeout=2.0), 2.5)
+            self.assertIn("server rate limit", str(ctx.exception))
+            self.assertNotIsInstance(ctx.exception, ServerRateLimit)
+            self.assertEqual(len(attempts), 2)  # retried once, then terminal
+        finally:
+            await scheduler.stop()
+
+    async def test_plugin_send_sees_typed_connection_error(self) -> None:
+        """The plugin-facing path: services.send_message raises the typed
+        ConnectionError raised by the real pipeline (here: send_hook's
+        not-running gate through the manager harness)."""
+        h = make_manager()
+        scheduler = TaskScheduler(h.bus, _TEST_LOG, _InstantLimiter(),
+                                  h.manager.send_hook)
+        scheduler.start()
+        h.manager._scheduler = scheduler
+        try:
+            await h.manager.add_account("alpha")  # never started: not running
+            services = h.manager.services_for("alpha", "soulcopy")
+            services.task_ack_timeout = 2.0
+            with self.assertRaises(ConnectionError) as ctx:
+                await asyncio.wait_for(services.send_message(100, "hi"), 2.5)
+            self.assertIs(type(ctx.exception), ConnectionError)
+            self.assertIn("is not running", str(ctx.exception))
+        finally:
+            await scheduler.stop()
+
+
+class CredentialKeyRotationTests(unittest.IsolatedAsyncioTestCase):
+    """Investigator-11 gap (a): credentials stored under Fernet master key A
+    are unreadable under key B — resolve must fail closed with a
+    CredentialsError that names the master key (never plaintext, never a
+    raw InvalidToken escaping the service boundary)."""
+
+    async def test_rotated_master_key_fails_closed_with_clear_error(self) -> None:
+        from cryptography.fernet import Fernet
+
+        from core.credential_service import CredentialService
+        from core.errors import CredentialsError
+        from database.db import Database
+
+        with tempfile.TemporaryDirectory() as tmp:
+            key_a = Path(tmp) / "a.key"
+            key_b = Path(tmp) / "b.key"
+            key_b.write_bytes(Fernet.generate_key())  # a DIFFERENT key
+            db = Database(":memory:")
+            await db.connect()
+            try:
+                service_a = CredentialService(db.credentials, key_path=key_a)
+                await service_a.store("alpha", "tok-under-a")
+
+                service_b = CredentialService(db.credentials, key_path=key_b)
+                with self.assertRaises(CredentialsError) as ctx:
+                    await service_b.resolve("alpha")
+                self.assertIn("master key", str(ctx.exception))
+                self.assertIn("alpha", str(ctx.exception))
+            finally:
+                await db.close()
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -121,14 +121,45 @@ class PersistQueue:
         while the first still drains (an early return let callers close the
         DB under the live drainer).
 
+        The joiner re-joins until the owner's teardown actually finishes,
+        bounded by its own overall ``timeout`` budget (one bounded join
+        used to return while the owner still drained — the caller then
+        closed the DB under the drainer). If even the budgeted re-join
+        loop expires, a LOUD raw-stderr warning is emitted and stop()
+        returns WITHOUT raising: raising would abort the caller's own
+        framework-cleanups (the next steps of Framework.shutdown still
+        must run), so the warning is the contract — callers that see it
+        must not close the database.
+
         Every remaining batch write is bounded by the time still left on
         the overall ``timeout`` budget — a slow/locked repository cannot
         stretch shutdown past it. Items still queued when the budget runs
         out are counted in ``dropped`` (visible via stats()).
         """
         if self._stopping:
-            # join the in-flight teardown: bounded by the join budget
-            await asyncio.wait({asyncio.shield(self._draining)}, timeout=timeout)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + max(0.0, float(timeout))
+            while self._stopping:
+                draining = self._draining
+                if draining is None:
+                    break
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.wait(
+                    {asyncio.shield(draining)}, timeout=remaining)
+            if self._stopping:
+                # judged: warn, don't raise (see docstring) — but make the
+                # hazard impossible to miss on the console
+                try:
+                    sys.stderr.write(
+                        f"[slaughtermudae] {self._label} persistence: stop"
+                        f"() join timed out after {timeout:g}s while the "
+                        f"owner's drain is still running — do NOT close "
+                        f"the database under it (queued rows may be lost)"
+                        "\n")
+                except Exception:
+                    pass
             return
         worker = self._worker
         if worker is None:

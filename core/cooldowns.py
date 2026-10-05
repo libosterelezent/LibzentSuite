@@ -94,17 +94,21 @@ class CooldownService:
                 started_at=now, expires_at=expires_at, source=source,
                 reason=reason, metadata=metadata)
         self._active[(account, plugin, cooldown_key)] = row
+        # log the COERCED duration: the raw argument may be a numeric
+        # string ("60"), which printf's %f rejects with a TypeError
         LOG.info("cooldown set %s/%s/%s for %.0fs (source=%s)",
-                 account, plugin, cooldown_key, duration_seconds, source)
+                 account, plugin, cooldown_key, duration, source)
         return dict(row)
 
     async def get(self, account: str, plugin: str, cooldown_key: str
                   ) -> Optional[Dict[str, Any]]:
         """The ACTIVE cooldown row, or None when absent/expired.
 
-        Memory-first; consults the repository only on a miss so restarts
-        and multi-process writes stay correct. Expired rows are lazily
-        cleared.
+        Memory-first; consults the repository only on a miss — or ONCE
+        more when memory says expired (another process may have EXTENDED
+        the row since our copy; a still-live row is adopted, a truly
+        expired one is lazily cleared and its memory copy dropped, so the
+        round-trip is not repeated on every subsequent get).
         """
         key = (account, plugin, cooldown_key)
         row = self._active.get(key)
@@ -112,21 +116,26 @@ class CooldownService:
         if row is not None and row["expires_at"] > now:
             return dict(row)
         if row is not None:
-            # expiry-scoped delete: another process may have EXTENDED the
-            # row since our memory copy — only clear what is still expired
+            # memory says expired: drop the stale copy first, then re-check
+            # the repository once — this both adopts rows EXTENDED by
+            # another process and stops the expired row from shadowing
+            # them forever
+            self._active.pop(key, None)
             if self._repo is not None:
+                # expiry-scoped delete: only clears what is still expired
                 try:
                     await self._repo.clear_expired_for(
                         account, plugin, cooldown_key, self._now())
                 except Exception:
                     LOG.debug("lazy cooldown clear failed", exc_info=True)
-            else:
-                await self.clear(account, plugin, cooldown_key)
-            # FINAL-PHASE (F8 gap 1): drop the expired tombstone — it
-            # occupied a slot forever and every get() re-attempted the
-            # DELETE. The repo fallback below re-reads on the next access
-            # (correct for the multi-process extension case).
-            self._active.pop(key, None)
+                # one-shot re-check: adopts rows EXTENDED by another
+                # process (FINAL-PHASE F8 gap 1 + round-3 — same fix from
+                # both sides); a truly-expired row is gone for good now
+                fresh = await self._repo.get(account, plugin, cooldown_key,
+                                             now=self._now())
+                if fresh is not None:
+                    self._active[key] = fresh
+                    return dict(fresh)
             return None
         if self._repo is not None:
             fresh = await self._repo.get(account, plugin, cooldown_key,
@@ -150,11 +159,18 @@ class CooldownService:
 
     async def clear(self, account: str, plugin: str, cooldown_key: str
                     ) -> bool:
-        """Remove one cooldown (memory + DB)."""
-        existed = self._active.pop((account, plugin, cooldown_key), None) is not None
+        """Remove one cooldown (memory + DB).
+
+        The repository delete runs FIRST and memory is popped only on
+        success: popping memory first used to RESURRECT the cooldown on
+        the next get() (the memory miss fell through to the repository,
+        which still held the row the failed delete never removed).
+        """
+        existed = False
         if self._repo is not None:
-            existed = await self._repo.clear(account, plugin, cooldown_key) or existed
-        return existed
+            existed = await self._repo.clear(account, plugin, cooldown_key)
+        popped = self._active.pop((account, plugin, cooldown_key), None)
+        return existed or popped is not None
 
     async def active_for(self, account: str,
                          plugin: Optional[str] = None) -> List[Dict[str, Any]]:

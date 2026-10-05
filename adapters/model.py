@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any, Optional, Tuple
 
 
@@ -162,10 +163,14 @@ class DiscordMessageReference:
     """Reply/reference identifiers (§12): ids only, never a fetch.
 
     ``referenced`` is populated ONLY when the library already cached the
-    referenced message — otherwise None (explicitly not fetched).
-    ``type_name`` is the stable projection of the library's
-    MessageReferenceType ("reply" | "forward"; the fork's "default"
-    aliases value 0 = reply).
+    referenced message — otherwise None (explicitly not fetched) — with
+    ONE exception (round-3 F4-4): for FORWARD references the fork ships
+    the forwarded content as ``message_snapshots`` on the message itself
+    (discord.py-self message.py:2101; ``reference.resolved`` stays None),
+    and that snapshot is hydrated into ``referenced`` additively (the ids
+    stay on the reference; nothing is fetched). ``type_name`` is the
+    stable projection of the library's MessageReferenceType ("reply" |
+    "forward"; the fork's "default" aliases value 0 = reply).
     """
 
     message_id: Optional[int] = None
@@ -423,6 +428,36 @@ def _reference_type_name(reference: Any) -> str:
     return "reply"
 
 
+def _forward_snapshot_view(snapshot: Any, reference: Any) -> Any:
+    """Message-shaped view over ONE MessageSnapshot (the forward source).
+
+    discord.py-self 2.1 keeps forwarded content in
+    ``message.message_snapshots`` (message.py:2101) while
+    ``reference.resolved`` stays None for forwards; the snapshot object
+    itself carries no channel/author. This view re-attaches the reference
+    ids (MessageSnapshot.id already mirrors reference.message_id —
+    message.py:574) so ``convert_message`` can project it like any cached
+    message, additively and without any fetch (§12/§15).
+    """
+    channel_id = _optional_int(getattr(reference, "channel_id", None))
+    guild_id = _optional_int(getattr(reference, "guild_id", None))
+    guild = (SimpleNamespace(id=guild_id) if guild_id is not None else None)
+    return SimpleNamespace(
+        id=getattr(snapshot, "id", None),
+        content=getattr(snapshot, "content", ""),
+        embeds=getattr(snapshot, "embeds", None) or (),
+        attachments=getattr(snapshot, "attachments", None) or (),
+        components=getattr(snapshot, "components", None) or (),
+        reactions=(),
+        created_at=getattr(snapshot, "created_at", None),
+        author=getattr(snapshot, "author", None),
+        channel=SimpleNamespace(id=channel_id, name="", type=None, guild=guild),
+        guild=guild,
+        reference=None,
+        referenced_message=None,
+    )
+
+
 def convert_message(
     message: Any, *, dm: bool, viewer_id: Optional[int] = None,
     _depth: int = 0,
@@ -453,6 +488,13 @@ def convert_message(
                 and not getattr(resolved, "_deleted", False)
                 and not hasattr(resolved, "_parent")):
             referenced = resolved
+    if referenced is None and reference is not None:
+        # round-3 F4-4: a FORWARD keeps its content in message_snapshots
+        # (the fork leaves reference.resolved None) — hydrate additively
+        # from the snapshot so the forwarded content is not invisible
+        snapshots = getattr(message, "message_snapshots", None) or ()
+        if snapshots and _reference_type_name(reference) == "forward":
+            referenced = _forward_snapshot_view(snapshots[0], reference)
     if _depth >= _MAX_REFERENCED_DEPTH:
         referenced = None
 

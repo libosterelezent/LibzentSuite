@@ -1177,5 +1177,125 @@ class TestRound2BodyHardening(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tail, b"")  # socket closed; second request unanswered
 
 
+class TestRound3HttpHardening(unittest.IsolatedAsyncioTestCase):
+    """Round-3: non-GET /ws keep-alive desync + duplicate Content-Length."""
+
+    async def asyncSetUp(self) -> None:
+        self.fake = FakeControlAPI()
+        self.server = DashboardServer(self.fake, token=None, port=0)
+        self.server.start()
+        self.port = self.server.bound_port
+
+    async def asyncTearDown(self) -> None:
+        self.server.stop()
+
+    def _open(self) -> socket.socket:
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+        sock.settimeout(8)
+        return sock
+
+    async def test_post_ws_with_body_rejected_with_close(self) -> None:
+        # a POST /ws body is never consumed (the drain covers non-POST
+        # only) — the 400 MUST carry Connection: close or the unread body
+        # desyncs the keep-alive stream (garbage-parsed next request)
+        def _attack() -> tuple[str, bytes]:
+            sock = self._open()
+            try:
+                sock.sendall(
+                    b"POST /ws HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    b"Content-Length: 9\r\n\r\nJUNKJUNK!")
+                return read_http_response(sock)
+            finally:
+                sock.close()
+
+        head, body = await asyncio.to_thread(_attack)
+        self.assertIn("400", head.splitlines()[0])
+        self.assertIn("websocket upgrade", get_json(body)["error"])
+        self.assertEqual(header_value(head, "Connection").lower(), "close")
+
+    async def test_get_ws_upgrade_failure_keeps_alive_cleanly(self) -> None:
+        # a bodyless GET upgrade failure leaves a CLEAN stream — the
+        # connection stays reusable (unlike the non-GET case above)
+        def _attempt() -> tuple[str, str]:
+            import http.client
+
+            conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+            try:
+                conn.request("GET", "/ws")
+                resp = conn.getresponse()
+                first_status = str(resp.status)
+                conn_header = resp.getheader("Connection") or ""
+                resp.read()
+                # prove no desync: the NEXT request on this socket parses
+                conn.request("GET", "/api/status")
+                resp2 = conn.getresponse()
+                body2 = resp2.read().decode("utf-8")
+                return first_status + " " + conn_header, body2
+            finally:
+                conn.close()
+
+        combined, body2 = await asyncio.to_thread(_attempt)
+        status, conn_header = combined.split(" ", 1)
+        self.assertEqual(status, "400")
+        self.assertNotEqual(conn_header.lower(), "close")  # reuse is safe
+        self.assertTrue(get_json(body2)["ok"])  # stream stayed parseable
+
+    async def test_conflicting_duplicate_content_length_post_rejected(self) -> None:
+        # two DIFFERENT Content-Length values: first-value-wins silently
+        # is the smuggling family — must 400 and close
+        def _attack() -> tuple[str, bytes]:
+            sock = self._open()
+            try:
+                sock.sendall(
+                    b"POST /api/accounts/remove HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    b"Content-Length: 2\r\nContent-Length: 3\r\n\r\n{}xx")
+                return read_http_response(sock)
+            finally:
+                sock.close()
+
+        head, body = await asyncio.to_thread(_attack)
+        self.assertIn("400", head.splitlines()[0])
+        self.assertIn("conflicting duplicate Content-Length",
+                      get_json(body)["error"])
+        self.assertEqual(header_value(head, "Connection").lower(), "close")
+
+    async def test_identical_duplicate_content_length_accepted(self) -> None:
+        # RFC 7230 §3.3.2: recipients may merge IDENTICAL duplicates —
+        # the request is processed normally (here: a normal domain 400)
+        def _attempt() -> tuple[str, bytes]:
+            sock = self._open()
+            try:
+                sock.sendall(
+                    b"POST /api/accounts/remove HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    b"Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}")
+                return read_http_response(sock)
+            finally:
+                sock.close()
+
+        head, body = await asyncio.to_thread(_attempt)
+        self.assertIn("400", head.splitlines()[0])  # missing 'name' domain error
+        error = get_json(body)["error"]
+        self.assertIn("'name'", error)
+        self.assertNotIn("Content-Length", error)  # NOT the duplicate rejection
+
+    async def test_conflicting_duplicate_content_length_get_rejected(self) -> None:
+        # the non-POST drain path must refuse conflicting duplicates too
+        def _attack() -> tuple[str, bytes]:
+            sock = self._open()
+            try:
+                sock.sendall(
+                    b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                    b"Content-Length: 5\r\nContent-Length: 6\r\n\r\nhello!")
+                return read_http_response(sock)
+            finally:
+                sock.close()
+
+        head, body = await asyncio.to_thread(_attack)
+        self.assertIn("400", head.splitlines()[0])
+        self.assertIn("conflicting duplicate Content-Length",
+                      get_json(body)["error"])
+        self.assertEqual(header_value(head, "Connection").lower(), "close")
+
+
 if __name__ == "__main__":
     unittest.main()

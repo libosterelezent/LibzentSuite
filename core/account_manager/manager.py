@@ -87,7 +87,7 @@ from .cache import DiscordCache, invalidate_dm_channel, resolve_dm_channel
 from .services import AccountPluginServices, MessageWaiterRegistry, TaskAckRegistry
 
 #: account names share the profile namespace style (may start with a digit)
-NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+from ..names import ACCOUNT_NAME_RE as NAME_RE
 
 
 def _forget_account_loggers(name: str) -> None:
@@ -133,6 +133,15 @@ _DEFAULT_RECONNECT = {"initial": 1.0, "max": 60.0, "multiplier": 2.0}
 #: only bounds how many clients are built-and-parked concurrently: 4
 #: lanes + ~5 storm-reconnect waiters stays under the gate's max_wait.
 _START_ALL_WIDTH = 4
+
+#: exponent cap for the reconnect backoff (``initial * multiplier**attempt``).
+#: float ** int raises OverflowError once the result leaves the float range
+#: (2.0 ** 1025, ~21h into an outage at the default policy) — clamping the
+#: exponent keeps the product astronomically above any sane ``max`` while
+#: making the default-config long-outage case unrepresentable. A hostile
+#: huge multiplier is still caught at the computation site (see
+#: ``_reconnect_loop``).
+_BACKOFF_EXPONENT_CAP = 32
 
 #: login-failure text markers used to classify INVALID_CREDENTIAL (the live
 #: client surfaces library LoginFailures as plain AccountError strings, so
@@ -342,6 +351,12 @@ class AccountManager:
         self._typing_rng = _random.Random()
 
         self._accounts: Dict[str, Account] = {}
+        #: accounts WE attached to the plugin manager (and have not yet
+        #: detached) — lets _refresh_plugins tell "plugin manager does not
+        #: have the account" (keep the last known view) apart from "attached
+        #: but with ZERO plugins" (fail-closed re-attach: the stale view
+        #: must be cleared, not kept)
+        self._plugin_attached: set = set()
         #: ONE task-ack registry per manager (single bus subscription set)
         self._ack_registry = TaskAckRegistry(bus)
         # FINAL-PHASE (F1-b′): one per-account waiter index per manager —
@@ -502,6 +517,26 @@ class AccountManager:
         rt.supervisor = None
         if supervisor is not None:  # sync context: cancel, the loop reaps it
             supervisor.cancel()
+        try:
+            # K6 (S1-C7/S5-C3/S10-C3): a FAILED account was never stop()ed,
+            # so its plugins may still be ACTIVE (roll's recovery loop,
+            # on_load resources). detach fires no lifecycle hooks —
+            # deactivate first or they outlive the account's removal.
+            #
+            # Round-3 (probe_lane_resurrect.py): deactivate ALSO has to run
+            # BEFORE the scheduler lane cleanup below (and before the
+            # awaited stale-client disconnect). Plugins still active across
+            # those awaits kept submitting tasks, and every submit after
+            # ``cleanup_account`` re-created the removed account's lane
+            # (scheduler ``_ensure_lane``) — a parked worker that leaked
+            # until the global stop. With plugins quiet first, the
+            # cancel/cleanup pair below is the LAST word on the lanes.
+            outcome = self._plugin_manager.deactivate_account(name)
+            if inspect.iscoroutine(outcome):  # tolerant: sync pinned, async OK
+                await outcome
+        except Exception:
+            self._logger.exception(
+                "plugin deactivation on remove failed for %s", name)
         if self._scheduler is not None:
             try:  # drop queued/parked tasks so nothing fires against a
                 # re-created same-named account later
@@ -524,19 +559,9 @@ class AccountManager:
                 await stale_client.disconnect()
             except Exception:
                 self._logger.warning("stale client close failed for %s", name)
-        try:
-            # K6 (S1-C7/S5-C3/S10-C3): a FAILED account was never stop()ed,
-            # so its plugins may still be ACTIVE (roll's recovery loop,
-            # on_load resources). detach fires no lifecycle hooks —
-            # deactivate first or they outlive the account's removal.
-            # (Single call — the pre-phase-4 code had this block duplicated
-            # back-to-back, a merge artifact from the isolation audit.)
-            outcome = self._plugin_manager.deactivate_account(name)
-            if inspect.iscoroutine(outcome):  # tolerant: sync pinned, async OK
-                await outcome
-        except Exception:
-            self._logger.exception(
-                "plugin deactivation on remove failed for %s", name)
+        # (deactivate already ran BEFORE the lane cleanup above — round-3
+        # reorder; the pre-round-3 duplicate deactivate block that lived
+        # here was a merge artifact from the isolation audit)
         try:
             outcome = self._plugin_manager.detach_account(name)
             if inspect.iscoroutine(outcome):  # tolerant: sync pinned, async OK
@@ -557,6 +582,8 @@ class AccountManager:
                 "removal of %s aborted: account re-created mid-cascade — "
                 "preserving the new account's state", name)
             return {"removed": False, "name": name, "recreated": True}
+        # the new account (if any) owns the flag now — only clear ours
+        self._plugin_attached.discard(name)
         if self._api_cache is not None:
             try:  # persisted DM/user rows are keyed by NAME: a re-created
                 await self._api_cache.drop_account(name)  # account must not
@@ -1234,7 +1261,28 @@ class AccountManager:
                 # path below can return without awaiting, and a fully
                 # synchronous while body would starve the entire event loop
                 if rt.status == AccountStatus.RECONNECTING or rt.lost.is_set():
-                    await self._reconnect_loop(name, rt, gen=gen)
+                    try:
+                        await self._reconnect_loop(name, rt, gen=gen)
+                    except asyncio.CancelledError:
+                        raise  # deliberate stop/removal — never swallow
+                    except Exception as exc:
+                        # Round-3 (backoff-overflow zombie): an unexpected
+                        # crash in the reconnect loop previously killed the
+                        # supervisor SILENTLY — the account then sat in
+                        # RECONNECTING forever with nobody driving it. Stand
+                        # down as FAILED (start() stays usable for
+                        # automation) and surface the crash in last_error.
+                        if not rt.stop_requested:
+                            rt.status = AccountStatus.FAILED
+                            rt.last_error = (
+                                f"reconnect supervisor crashed: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                            rt.lost.clear()
+                        self._logger.exception(
+                            "reconnect supervisor for %s crashed; standing "
+                            "down (status %s)", name, rt.status.value)
+                        return
                     continue
                 # PHASE-4 (S7-C8): event-driven wait with a long backstop —
                 # the 0.2s poll was 5 timer+task wakeups/s per idle account.
@@ -1296,15 +1344,26 @@ class AccountManager:
                         " sessions shortly after connect (young/flagged"
                         " account?); reconnect backoff escalated",
                         name, len(rt.flaps))
-            attempt = min(attempt, 16)  # clamp the exponent: multiplier**N
-            # would OverflowError after ~17h of failures (S2 audit #6)
-            delay = min(
-                cfg["initial"] * (cfg["multiplier"] ** attempt), cfg["max"]
-            )
+            # Round-3 (backoff-overflow zombie): clamp the exponent and
+            # guard the power itself. The clamp covers the default policy
+            # (2.0 ** 1025 overflows ~21h into an outage); the OverflowError
+            # guard covers pathological multipliers (1e300 ** 2) that would
+            # otherwise kill the supervisor and leave the account stuck in
+            # RECONNECTING forever with nobody driving it.
+            try:
+                delay = min(
+                    cfg["initial"]
+                    * (cfg["multiplier"] ** min(attempt, _BACKOFF_EXPONENT_CAP)),
+                    cfg["max"],
+                )
+            except OverflowError:
+                delay = cfg["max"]
             # K9 (S7-A5): jitter the backoff per account — pure exponential
             # delays re-cluster synchronized reconnect storms under a shared
             # drop event, re-tripping Discord's per-IP IDENTIFY limit even
-            # with the identify gate in place.
+            # with the identify gate in place. NOTE: jitter is applied AFTER
+            # the cap, so ``max`` is a soft ceiling (up to 1.5x) — accepted:
+            # the anti-thundering-herd property outweighs the overshoot.
             delay *= self._typing_rng.uniform(1.0, 1.5)
             self._logger.warning(
                 "account %s reconnect attempt %d in %.2fs", name, attempt + 1, delay
@@ -1861,7 +1920,10 @@ class AccountManager:
 
         The plugin manager's attach is async (it reads persisted enabled
         state from the repository); a collaborator returning plain None
-        (sync duck-typed doubles) is accepted unchanged.
+        (sync duck-typed doubles) is accepted unchanged. A SUCCESSFUL attach
+        marks the account as plugin-manager-attached (manager-side view used
+        by ``_refresh_plugins``); a failed attach leaves it unmarked so the
+        last known plugin view is kept rather than cleared.
         """
         try:
             outcome = self._plugin_manager.attach_account(
@@ -1871,6 +1933,8 @@ class AccountManager:
                 await outcome
         except Exception:
             self._logger.exception("plugin attach failed for %s", name)
+            return
+        self._plugin_attached.add(name)
 
     def _allowed_plugins(self, name: str) -> Optional[set]:
         """Profile-derived plugin grant (None = unrestricted).
@@ -1878,6 +1942,15 @@ class AccountManager:
         FAIL-CLOSED: a profile-resolution error grants NOTHING (empty set)
         rather than everything — an automation framework must not escalate
         capabilities because a repository read hiccupped.
+
+        Recovery (round-3 decision, documented): the fail-closed grant is
+        NOT permanent — ``_attach_plugins`` re-runs ``_allowed_plugins`` on
+        every account start (and on remove+re-add), so once the profile
+        repository recovers, a stop+start of the account restores the real
+        grant. Until then the account stays closed (each re-attach simply
+        re-fails and re-logs). Lazy re-resolution at dispatch time would
+        live in the plugin manager (outside this subsystem), so the
+        manager's contract is: warn loudly + recover on restart.
         """
         try:
             return self._profile_manager.allowed_plugins(name)
@@ -1885,16 +1958,33 @@ class AccountManager:
             self._logger.exception(
                 "could not resolve allowed plugins for %s (no plugins granted)", name
             )
+            self._logger.warning(
+                "account %s: plugins stay disabled (fail-closed) until "
+                "profile resolution succeeds; the grant is re-attempted on "
+                "every account start — stop+start the account (or remove and "
+                "re-add it) once the profile repository is healthy", name,
+            )
             return set()
 
     def _refresh_plugins(self, account: Account) -> None:
-        """Refresh Account.plugins from plugin_manager.states (keep last known)."""
+        """Refresh Account.plugins from plugin_manager.states (keep last known).
+
+        An EMPTY states() answer is ambiguous on its own (both a missing
+        account and an attached-with-zero-plugins account return ``[]``), so
+        the manager-side ``_plugin_attached`` view breaks the tie: attached +
+        empty means a fail-closed re-attach genuinely left the account with
+        no plugins — the stale view is cleared (round-3: it previously kept
+        showing plugins that were no longer attached). Not attached (yet)
+        keeps the last known view, as before.
+        """
         name = account.record.name
         try:
             states = self._plugin_manager.states(name)
         except Exception:
             return
         if not states:
+            if name in self._plugin_attached:
+                account.plugins = {}  # attached with zero plugins: the truth
             return  # plugin manager does not have the account (yet) — keep old
         plugins: Dict[str, Dict[str, Any]] = {}
         for state in states:

@@ -28,6 +28,7 @@ import logging
 import time
 import dataclasses
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.errors import ServerRateLimit
@@ -40,6 +41,47 @@ SYNTHETIC_ALPHA_ID = 2001
 SYNTHETIC_BETA_ID = 2002
 SYNTHETIC_GUILD_CHANNEL = 500
 SYNTHETIC_MUDAE_ID = 999_999
+
+
+def to_discord_message(world: "SimWorld", message: "WorldMessage"):
+    """WorldMessage -> rich frozen DTO (the sim's convert_message).
+
+    ONE builder for every crossing — live deliveries (SimClient.receive)
+    and edit events (SimWorld.edit_message) — so the sim's rich boundary
+    matches the live adapter's :func:`adapters.model.convert_message`
+    projection: author/channel/guild, embeds, components, attachments,
+    reactions and the reply reference all cross untouched.
+    """
+    from adapters.base import DiscordMessage
+    from adapters.model import DiscordChannel, DiscordMessageReference, DiscordUser
+
+    return DiscordMessage(
+        id=message.id,
+        channel_id=message.channel_id,
+        author_id=message.author_id,
+        content=message.content,
+        dm=message.dm,
+        guild_id=message.guild_id,
+        author=DiscordUser(
+            id=message.author_id, name=message.author_name),
+        channel=DiscordChannel(
+            id=message.channel_id,
+            name=world.channels.get(message.channel_id, ""),
+            type="private" if message.dm else "text",
+            guild_id=message.guild_id,
+        ),
+        embeds=tuple(message.embeds),
+        components=tuple(message.components),
+        attachments=tuple(message.attachments),
+        reactions=tuple(message.reactions),
+        reference=(
+            DiscordMessageReference(
+                message_id=message.reference_message_id,
+                channel_id=message.channel_id,
+                guild_id=message.guild_id)
+            if message.reference_message_id else None
+        ),
+    )
 
 
 @dataclass
@@ -306,12 +348,25 @@ class SimWorld:
                         else:
                             message.reactions = message.reactions + (
                                 DiscordReaction(emoji=emoji, name=emoji, count=1),)
+                    # RAW PARITY (live pushes ``(reaction, user)`` handles,
+                    # never None): synthetic library-shaped stand-ins built
+                    # from what the world already knows — no fetch.
+                    count = 0
+                    for reaction in message.reactions:
+                        if reaction.emoji == emoji:
+                            count = reaction.count
+                    user_ns = SimpleNamespace(
+                        id=user_id, name=self.users.get(user_id, ""))
+                    reaction_ns = SimpleNamespace(
+                        emoji=emoji, count=count, me=False,
+                        message_id=message_id, channel_id=channel_id)
                     for client in list(self.subscribers):
                         if client.user_id != user_id and client.on_reaction is not None:
                             try:
                                 client.on_reaction(
-                                    kind, message_id, channel_id, message.guild_id,
-                                    user_id, emoji, None,
+                                    kind, message_id, channel_id,
+                                    message.guild_id,
+                                    user_id, emoji, (reaction_ns, user_ns),
                                 )
                             except Exception:
                                 LOG.exception(
@@ -327,7 +382,7 @@ class SimWorld:
                 if message.id == message_id:
                     message.content = content
                     dto = self._to_dto(message)  # frozen DTO boundary: live
-                    for client in list(self.subscribers):  # adapters push
+                    for client in list(self.subscribers):  # adapters push the
                         # self-filter: live adapters never echo your own
                         # edits/deletes back as events (fidelity parity)
                         if client.user_id != message.author_id and client.on_message_edit is not None:
@@ -341,14 +396,15 @@ class SimWorld:
         raise KeyError(f"unknown message {message_id}")
 
     def _to_dto(self, message: "WorldMessage"):
-        """WorldMessage -> frozen adapters.base DTO (edit-event parity)."""
-        from adapters.base import DiscordMessage
+        """WorldMessage -> rich frozen adapters.base DTO (edit-event parity).
 
-        return DiscordMessage(
-            id=message.id, channel_id=message.channel_id,
-            author_id=message.author_id, content=message.content,
-            dm=message.channel_id in self.dm_channels,
-        )
+        EDIT PARITY (audit round 3): live edit events carry the FULL
+        :func:`adapters.model.convert_message` projection — the sim used to
+        push a minimal 5-field DTO, so plugins testing against edits saw a
+        poorer shape in sims than live. Now the SAME rich builder used for
+        deliveries (``to_discord_message``) builds edit events too.
+        """
+        return to_discord_message(self, message)
 
     def delete_message(self, message_id: int) -> WorldMessage:
         """Remove a message and push a delete event (ids only, like live)."""
@@ -449,6 +505,7 @@ class SimWorld:
 __all__ = [
     "SimWorld",
     "WorldMessage",
+    "to_discord_message",
     "SYNTHETIC_OWNER_ID",
     "SYNTHETIC_ALPHA_ID",
     "SYNTHETIC_BETA_ID",
