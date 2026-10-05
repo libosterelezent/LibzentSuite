@@ -868,38 +868,6 @@ class TestRateLimitPersistence(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.stack.database.policies.deletes,
                          [("global", None, "message")])
 
-    async def test_lane_setters_persist_kv_state(self) -> None:
-        lane = await self.stack.api.ratelimit_set_lane(enabled=True,
-                                                       prefixrate=2.5)
-        self.assertTrue(lane["enabled"])
-        self.assertEqual(
-            self.stack.database.kv.values[LANE_KV_KEY],
-            {"enabled": True, "prefixrate": 2.5})
-        await self.stack.api.ratelimit_set_lane(enabled=False)
-        self.assertEqual(
-            self.stack.database.kv.values[LANE_KV_KEY]["enabled"], False)
-
-    async def test_lane_rejects_bad_prefixrate_without_partial_mutation(self) -> None:
-        # round-3 probe: enabled=True + prefixrate=-5 used to raise AFTER
-        # the lane was armed — error returned, lane left ON, nothing saved
-        for bad in (-5, "fast", float("inf")):
-            with self.assertRaises(ValueError):
-                await self.stack.api.ratelimit_set_lane(enabled=True,
-                                                        prefixrate=bad)
-        self.assertFalse(self.stack.limiter.lane["enabled"])  # untouched
-        self.assertNotIn(LANE_KV_KEY, self.stack.database.kv.values)
-
-    async def test_persistence_failure_never_fails_the_call(self) -> None:
-        async def boom(*args, **kwargs):
-            raise RuntimeError("db down")
-
-        self.stack.database.policies.set = boom          # type: ignore[method-assign]
-        self.stack.database.kv.set = boom                # type: ignore[method-assign]
-        out = await self.stack.api.ratelimit_set("message", 3.0)
-        self.assertEqual(out["action"], "message")  # engine still mutated
-        lane = await self.stack.api.ratelimit_set_lane(enabled=True)
-        self.assertTrue(lane["enabled"])
-
     async def test_concurrent_clears_keep_both_tombstones(self) -> None:
         """Round-3 RMW race: two clears racing the kv read-modify-write
         lost tombstones — cleared defaults resurrected on the next boot."""

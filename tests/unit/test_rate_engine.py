@@ -638,7 +638,7 @@ class FloorSemantics(unittest.IsolatedAsyncioTestCase):
     async def test_persisted_floor_row_is_validated(self):
         """A hand-edited kv floor row (inf / 1e999 / below 1.5) must never
         wedge the fleet: it is ignored with a warning, never applied."""
-        from tests.unit.test_rate_lane import FakeKv
+        from tests.unit._fake_kv import FakeKv
 
         for bad in (float("inf"), 1e999, 0.5, "oops"):
             kv = FakeKv()
@@ -653,7 +653,7 @@ class FloorSemantics(unittest.IsolatedAsyncioTestCase):
         crash, never a wedge. Validated numerics (incl. numeric strings and
         the 86400 cap) apply; bools/containers/garbage are ignored; a valid
         row can only ever RAISE the constructor floor."""
-        from tests.unit.test_rate_lane import FakeKv
+        from tests.unit._fake_kv import FakeKv
 
         for good, expected in ((2.5, 2.5), ("2.5", 2.5), ("86400", 86400.0),
                                (86400.0, 86400.0)):

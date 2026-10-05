@@ -1,9 +1,20 @@
 {
-  "_comment": "Rate-limit policies (spec §5). global applies to every account; accounts.<name> overrides per account. interval = minimum seconds between actions; jitter = [min, max] random extra pause. Floor: 1.5s/action enforced everywhere. lane: server-wide SEQUENTIAL sends — every outbound action (all accounts) goes one-at-a-time, spaced by prefixrate; 0 pauses the lane.",
+  "_comment": "Rate-limit policies. global applies to every account; accounts.<name> overrides per account. interval = minimum seconds between actions; jitter = [min, max] random extra pause. Floor: 1.5s/action enforced everywhere.",
   "global": {
-    "message": {"interval": 2.0, "jitter": [0.1, 0.5]},
-    "dm": {"interval": 2.0, "jitter": [0.1, 0.5]}
+    "message": {
+      "interval": 2.0,
+      "jitter": [
+        0.1,
+        0.5
+      ]
+    },
+    "dm": {
+      "interval": 2.0,
+      "jitter": [
+        0.1,
+        0.5
+      ]
+    }
   },
-  "accounts": {},
-  "lane": {"enabled": true, "prefixrate": 1.5}
+  "accounts": {}
 }

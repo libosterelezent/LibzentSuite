@@ -43,7 +43,7 @@ from core.task_scheduler import TaskScheduler
 from tests.unit.helpers import make_manager, make_task
 from tests.unit.test_account_manager import _fast_reconnect_settings
 from tests.unit.test_rate_engine import StubLogger
-from tests.unit.test_rate_lane import FakeKv
+from tests.unit._fake_kv import FakeKv
 from tests.unit.test_roll import CHANNEL, OWNER_ID, RollServices
 from tests.unit.test_soulcopy import TRIGGER_CHANNEL, make_plugin
 from tests.unit.test_task_scheduler import (
@@ -379,22 +379,6 @@ class AdapterIsolationTests(unittest.IsolatedAsyncioTestCase):
 
 
 # -------------------------------------------------------------------- K10
-class LaneConfigDictRowTests(unittest.IsolatedAsyncioTestCase):
-    async def test_real_repo_shape_dict_row_loads(self) -> None:
-        """KvRepository.get JSON-DECODES — the engine must accept a dict."""
-        kv = FakeKv()
-        kv.rows["ratelimit:lane"] = {"enabled": True, "prefixrate": 0.75}
-        manager = RateLimitManager(
-            EventBus(), StubLogger(), None, kv_repo=kv,
-            lane_enabled=False, lane_prefixrate=1.5,
-        )
-        await manager.load_persisted()
-        status = manager.lane_status()
-        self.assertTrue(status["enabled"])
-        self.assertEqual(status["prefixrate"], 0.75)
-
-
-# -------------------------------------------------------------------- K12
 class ServiceLoggerContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_stdlib_surface_forwards_account_context(self) -> None:
         logs = LogService()

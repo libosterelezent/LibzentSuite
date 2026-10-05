@@ -705,35 +705,17 @@ class ControlAPI:
         return {"floor": floor}
 
     async def ratelimit_lane(self) -> Dict[str, Any]:
-        """Sequential send lane state (server-wide serialization)."""
-        return self._limiter.lane_status()
+        """Sequential send lane state (REMOVED — returns stub for compat)."""
+        return {"enabled": False, "prefixrate": 0, "removed": True,
+                "reason": "fleet send lane removed: sync groups + per-account "
+                           "pacing replace it without throttling single accounts"}
 
     async def ratelimit_set_lane(
-        self, enabled: bool = None, prefixrate: float = None
+        self, enabled: Any = None, prefixrate: Any = None
     ) -> Dict[str, Any]:
-        """Configure the sequential send lane (persisted).
-
-        ``prefixrate`` is the minimum spacing between consecutive outbound
-        actions across EVERY account; 0 PAUSES the lane (submissions hold
-        until a non-zero rate is set — FarmLite semantics).
-        """
-        if enabled is None and prefixrate is None:
-            raise ValueError("provide 'enabled' and/or 'prefixrate'")
-        # validate BOTH inputs BEFORE any mutation: a bad prefixrate used
-        # to raise after set_lane_enabled had already armed the lane —
-        # error returned, lane left ON, nothing persisted
-        parsed_enabled = self._parse_lane_bool(enabled) \
-            if enabled is not None else None
-        parsed_rate = self._parse_lane_number(prefixrate) \
-            if prefixrate is not None else None
-        if parsed_enabled is not None:
-            self._limiter.set_lane_enabled(parsed_enabled)
-        if parsed_rate is not None:
-            self._limiter.set_lane_prefixrate(parsed_rate)
-        lane = self._limiter.lane_status()
-        await self._persist_lane(lane)
-        return lane
-
+        """Lane configuration (REMOVED — accepts and returns stub for compat)."""
+        return {"enabled": False, "prefixrate": 0, "removed": True,
+                "note": "fleet send lane removed; setting ignored"}
     async def _persist_policy(self, level: str, owner: Optional[str],
                               policy: Any) -> None:
         """Best-effort awaited policy write (pacing never depends on the DB)."""

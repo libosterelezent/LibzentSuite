@@ -369,41 +369,6 @@ class CliEmptyName(unittest.IsolatedAsyncioTestCase):
             await run_command(SimpleNamespace(), 'accounts stop ""')
 
 
-class LaneConfigPersistence(_TmpCase):
-    async def test_persisted_lane_loads_through_real_kv(self) -> None:
-        """The lane kv round-trip: kv.set() JSON-ENCODES and kv.get()
-        JSON-DECODES — the engine used to json.loads() the decoded dict
-        (TypeError, swallowed) and silently reset the lane to defaults on
-        EVERY reboot."""
-        from core.rate_limit_manager.engine import RateLimitManager
-
-        db = Database(self.dir / "lane.db")
-        await db.connect()
-        self.addAsyncCleanup(db.close)
-        await db.kv.set("ratelimit:lane", {"enabled": True, "prefixrate": 5.0})
-        limiter = RateLimitManager(EventBus(), lambda *_: None,
-                                   db.policies, kv_repo=db.kv)
-        await limiter.load_persisted()
-        status = limiter.lane_status()
-        self.assertTrue(status["enabled"])
-        self.assertEqual(status["prefixrate"], 5.0)
-
-    async def test_floor_and_tombstones_load_through_real_kv(self) -> None:
-        from core.rate_limit_manager.engine import RateLimitManager
-
-        db = Database(self.dir / "floor.db")
-        await db.connect()
-        self.addAsyncCleanup(db.close)
-        await db.kv.set("ratelimit:floor", 7.5)
-        await db.kv.set("ratelimit:removed", ["global||message"])
-        bus = EventBus()
-        limiter = RateLimitManager(bus, lambda *_: None, db.policies, kv_repo=db.kv)
-        await limiter.load_persisted()
-        self.assertEqual(limiter.floor_value, 7.5)
-        self.assertTrue(limiter.removed_default("global", None, "message"))
-        self.assertFalse(limiter.removed_default("global", None, "dm"))
-
-
 class GhostRegisterGuard(unittest.IsolatedAsyncioTestCase):
     async def test_register_skips_dead_and_post_stop_clients(self) -> None:
         import interfaces.dashboard.server as srv

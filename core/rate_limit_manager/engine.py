@@ -70,7 +70,6 @@ from ..errors import RatePolicyError, UnsafePolicyError
 from ..event_bus import EventBus, RateLimitTriggered
 from ..priority import Priority
 from database.models import POLICY_LEVELS
-from .lane import GlobalSendLane
 from .policies import (
     MAX_INTERVAL,
     MIN_ACTION_INTERVAL,
@@ -253,22 +252,10 @@ class RateLimitManager:
         # server-wide sequential send lane (FarmLite concept, robust port):
         # every acquire() from every account passes one gate, spaced by
         # prefixrate; waiter-driven so it cannot die; see lane.py
-        self._lane = GlobalSendLane(
-            clock=self._clock,
-            wait_either=self._wait_either,
-            on_change=self._wake_waiters,
-            log=self._log,
-        )
-        self._lane.set_enabled(bool(lane_enabled))
-        try:
-            self._lane.set_prefixrate(lane_prefixrate)
-        except RatePolicyError:
-            self._lane.set_prefixrate(1.5)
-        #: constructor defaults — the baseline :meth:`load_persisted` falls
-        # back to when the kv has no persisted lane row. Built from the
-        # SANITIZED lane state: a non-numeric/absurd constructor value must
-        # not crash the process nor survive into the boot baseline.
-        self._lane_defaults = (bool(lane_enabled), float(self._lane.prefixrate))
+        # FLEET SEND LANE REMOVED: redundant with sync groups;
+        # throttled single-account throughput. Per-account pacing
+        # + sync groups + the 1.5s floor are the pacing layers.
+        self._lane_defaults = (False, 1.5)
 
     # ------------------------------------------------------------ validation
     @staticmethod
@@ -333,78 +320,27 @@ class RateLimitManager:
                         f"than the floor; effective pacing is clamped to "
                         f"{self._floor:g}s",
                     )
-        await self._load_lane_config(*getattr(self, "_lane_defaults", (False, 1.5)))
 
-    async def _load_lane_config(self, default_enabled: bool = False,
-                                default_prefixrate: float = 1.5) -> None:
-        """Restore the lane config from kv when present (best-effort).
-
-        Precedence: persisted kv value > the constructor's defaults. A
-        corrupt row is logged and skipped — persistence must never crash
-        the limiter. (First-boot baseline persistence is the ControlAPI's
-        job now; the engine keeps memory only.)
-        """
-        enabled, prefixrate = bool(default_enabled), float(default_prefixrate)
+        # persisted floor: a restart must not revert a raised floor
+        # (was inside _load_lane_config before the lane removal)
         if self._kv is not None:
             try:
-                raw = await self._kv.get(KV_LANE_KEY)
-                if raw:
-                    import json as _json
-
-                    # K10 (S6-C1/S8-C4): KvRepository.get already JSON-DECODES
-                    # and returns a dict — only re-decode legacy/hand-written
-                    # rows that hold a pre-encoded string. The previous
-                    # unconditional json.loads(dict) raised TypeError, got
-                    # swallowed below, and silently reverted dashboard lane
-                    # edits to the config-file defaults on every reboot.
-                    data = raw if isinstance(raw, dict) else _json.loads(raw)
-                    raw_enabled = data.get("enabled", enabled)
-                    if isinstance(raw_enabled, str):
-                        # round 3: a hand-edited "true"/"false" STRING used
-                        # to work (truthy) before the strict-bool check and
-                        # must keep working — accept it explicitly...
-                        lowered = raw_enabled.strip().lower()
-                        if lowered in ("true", "false"):
-                            raw_enabled = lowered == "true"
-                    if not isinstance(raw_enabled, bool):
-                        # ...anything else ('yes', 1, 'off') is still corrupt:
-                        # a truthy non-bool must not silently enable the lane
-                        raise ValueError(
-                            f"lane row 'enabled' must be true/false, got {raw_enabled!r}")
-                    enabled = raw_enabled
-                    prefixrate = float(data.get("prefixrate", prefixrate))
-            except Exception as exc:
-                self._log("warning", f"could not load lane config: {exc}")
-        try:
-            self._lane.set_prefixrate(prefixrate)
-        except RatePolicyError:
-            # a rejected spacing makes the WHOLE row corrupt: fall back to
-            # the constructor defaults (both fields), exactly like an
-            # unparseable row — a half-applied row must never silently
-            # enable the lane nor discard a custom constructor rate
-            self._log("warning", "stored lane config invalid; using defaults")
-            enabled, prefixrate = bool(default_enabled), float(default_prefixrate)
-            self._lane.set_prefixrate(prefixrate)
-        self._lane.set_enabled(enabled)
-        if self._kv is not None:
-            try:  # persisted floor: a restart must not revert a raised floor
                 stored_floor = await self._kv.get(KV_FLOOR_KEY)
                 if stored_floor is not None:
-                    # validated: a hand-edited row (inf, 1e999, below 1.5)
-                    # must never wedge the fleet — pacing safety never
-                    # depends on the database
                     self._floor = max(
-                        self._floor, self._validated_floor(float(stored_floor))
-                    )
-                    self._invalidate_effective_cache()  # F2: floor raised at boot
+                        self._floor,
+                        self._validated_floor(float(stored_floor)))
+                    self._invalidate_effective_cache()
             except Exception as exc:
-                self._log("warning", f"could not load persisted floor: {exc}")
+                self._log("warning",
+                          f"could not load persisted floor: {exc}")
             try:  # cleared-policy tombstones: seeding must skip these keys
                 stored_removed = await self._kv.get(KV_REMOVED_KEY)
                 if isinstance(stored_removed, list):
                     self._removed_defaults = set(stored_removed)
             except Exception as exc:
-                self._log("warning", f"could not load cleared-policy list: {exc}")
+                self._log("warning",
+                          f"could not load cleared-policy list: {exc}")
 
     # ------------------------------------------------------------- policies
     def set_policy(
@@ -763,25 +699,6 @@ class RateLimitManager:
                 keys.append((f"group:{group}", action))
         return keys
 
-    def set_lane_enabled(self, enabled: bool) -> dict:
-        """Enable/disable the server-wide sequential send lane (memory only).
-
-        Persisting the lane config is the ControlAPI layer's job; the
-        engine keeps the in-memory state and exposes :meth:`lane_status`.
-        """
-        self._lane.set_enabled(bool(enabled))
-        return self.lane_status()
-
-    def set_lane_prefixrate(self, seconds: float) -> dict:
-        """Set the lane spacing; 0 PAUSES the lane (memory only; persisted
-        by the ControlAPI layer)."""
-        self._lane.set_prefixrate(seconds)  # RatePolicyError on bad input
-        return self.lane_status()
-
-    def lane_status(self) -> dict:
-        """Lane state for stats/CLI/dashboard."""
-        return self._lane.status()
-
     # ------------------------------------------------------------- acquiring
     async def acquire(
         self,
@@ -842,10 +759,6 @@ class RateLimitManager:
         # measured between expected wire instants (admission + jitter);
         # cooldown/pacing below only ever ADD delay after admission
         lane_wait_s = 0.0
-        if self._lane.enabled:
-            lane_wait_s = await self._lane.enter(int(priority), jitter_s)
-            if lane_wait_s > 0:
-                reason = "lane"
         heapq.heappush(self._pending.setdefault(key, []), entry)
         try:
             while not entry.future.done():
@@ -1165,7 +1078,7 @@ class RateLimitManager:
         avg = round(self._total_wait / self._waits, 3) if self._waits else 0.0
         return {
             "floor": self._floor,
-            "lane": self._lane.status(),
+            "lane": {"enabled": False, "prefixrate": 0, "removed": True},
             "groups": self.account_groups(),
             "policies": self.policies(),
             "cooldowns": {
@@ -1190,7 +1103,7 @@ class RateLimitManager:
             for (level, owner, _action), policy in self._policies.items()
         )
         items = evaluate_policies(stored, self._floor)
-        if self._lane.paused():
+        if False:
             items.append({
                 "level": "warn",
                 "code": "lane_paused",
