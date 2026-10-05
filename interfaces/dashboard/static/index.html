@@ -834,9 +834,13 @@ function connectWS() {
           a.latency_ms!=null?Math.round(a.latency_ms/10):null,
           Math.floor((a.uptime_s??0)/60), a.cooldowns??0]));
         lastStats = msg;
-        const structural = sig !== lastSig;
-        if (structural) { lastSig = sig; }
-        render();
+        // Only full-render when the STRUCTURAL signature changed (status
+        // flip, account add/remove, credential change, minute-level
+        // uptime, latency bucket, cooldown count). Per-second cosmetic
+        // ticks (uptime seconds, cooldown countdown) don't rebuild the
+        // DOM — the old v1 "structural sig" pattern, preserved.
+        if (sig !== lastSig) { lastSig = sig; render(); }
+        else renderTick(); // lightweight numeric updates only
       }
       else if (msg.type==="log") logLine(msg);
       else if (msg.type==="audit") auditLine(msg);
@@ -897,6 +901,23 @@ function updateNavBadges() {
   const attn = getAttention();
   const badge = $("nav-badge-home");
   if (badge) { badge.textContent = attn.length; badge.classList.toggle("hidden",!attn.length); }
+}
+
+// Lightweight per-second updates (no DOM rebuild) — uptime strings, cooldown
+// countdown text, metric numbers. The structural render above handles layout.
+function renderTick() {
+  if (currentView==="home") {
+    const t = (lastStats&&lastStats.tasks)||{};
+    const running = accounts().filter(a=>a.status==="running").length;
+    const total = accounts().length;
+    const m = $("home-metrics");
+    if (m && m.querySelector(".metric .value")) {
+      m.querySelector(".metric .value").textContent = `${running}/${total}`;
+      const vals = m.querySelectorAll(".metric .value");
+      if (vals[2]) vals[2].textContent = t.running??0;
+      if (vals[3]) vals[3].textContent = (lastStats&&lastStats.ratelimit&&lastStats.ratelimit.cooldowns&&lastStats.ratelimit.cooldowns.accounts)?Object.keys(lastStats.ratelimit.cooldowns.accounts).length:0;
+    }
+  }
 }
 
 function getAttention() {
@@ -1007,7 +1028,9 @@ function acctCard(a) {
   const menuBtn = menuWrap.querySelector(".menu-btn");
   const menu = menuWrap.querySelector(".menu");
   menuBtn.onclick = e => { e.stopPropagation(); $$(".menu.open").forEach(m=>m!==menu&&m.classList.remove("open")); menu.classList.toggle("open"); };
-  document.addEventListener("click",()=>menu.classList.remove("open"));
+  // NOTE: the global click-to-close is registered ONCE in wire(), not here —
+  // this function runs per-render (1s WS tick); adding a document listener
+  // per card per render accumulated thousands of listeners and froze the page.
   menu.querySelectorAll("button").forEach(mb => mb.onclick = () => {
     menu.classList.remove("open");
     const act = mb.dataset.act;
@@ -1377,6 +1400,11 @@ function wire() {
 
   // Mobile menu
   $("menu-btn").onclick = () => $("sidebar").classList.toggle("open");
+
+  // ONE global click handler closes all open overflow menus (per-card
+  // listeners accumulated on every render and froze the page)
+  document.addEventListener("click", () =>
+    $$(".menu.open").forEach(m => m.classList.remove("open")));
 
   // Search
   $("search").oninput = () => {
