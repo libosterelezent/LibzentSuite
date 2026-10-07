@@ -1050,9 +1050,9 @@ function acctCard(a) {
     ${a.sync_group?`<div><span class="chip group" data-group-chip="${esc(a.sync_group)}" title="Open group">${esc(a.sync_group)}</span></div>`:""}
     <div class="actions">
       ${a.status==="running"
-        ? btnG("Stop",()=>post("/api/accounts/stop",{account:a.name}).catch(showErr),"btn btn-secondary btn-sm")
-        : btnG("Start",()=>post("/api/accounts/start",{account:a.name}).catch(showErr),"btn btn-primary btn-sm")}
-      ${btn("Details",()=>openAcctDetails(a.name),"btn btn-ghost btn-sm")}
+        ? '<button class="btn btn-secondary btn-sm" data-card-act="stop">Stop</button>'
+        : '<button class="btn btn-primary btn-sm" data-card-act="start">Start</button>'}
+      <button class="btn btn-ghost btn-sm" data-card-act="details">Details</button>
       <label style="margin-left:auto;display:flex;align-items:center;gap:4px;font-size:11px;color:var(--dim);cursor:pointer">
         <input type="checkbox" data-bulk="${esc(a.name)}" ${selectedAccounts.has(a.name)?"checked":""} style="width:14px;height:14px">
       </label>
@@ -1080,6 +1080,16 @@ function acctCard(a) {
     if (e.target.checked) selectedAccounts.add(a.name); else selectedAccounts.delete(a.name);
     updateBulkBar();
   };
+  // Start/Stop/Details. Raw HTML above + wired here — btn()/btnG() return
+  // ELEMENTS and stringify to [object HTMLButtonElement] inside innerHTML.
+  card.querySelectorAll("[data-card-act]").forEach(b => b.onclick = () => {
+    const act = b.dataset.cardAct;
+    if (act==="details") return openAcctDetails(a.name);
+    if (b.disabled) return;
+    b.disabled = true;
+    const path = act==="start" ? "/api/accounts/start" : "/api/accounts/stop";
+    post(path, {account:a.name}).catch(showErr).finally(()=>{ b.disabled=false; });
+  });
   card.querySelector(".name").onclick = () => openAcctDetails(a.name);
   const gchip = card.querySelector("[data-group-chip]");
   if (gchip) gchip.onclick = () => openGroupDetails(gchip.dataset.groupChip);
@@ -1197,8 +1207,12 @@ function renderProfiles() {
       }).join("")}</div>
       <div class="used-by"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/></svg>Used by ${users.length} account${users.length!==1?"s":""}</div>
       <div class="actions" style="display:flex;gap:6px;margin-top:auto">
-        ${btn("Delete",()=>confirmAction("Delete Profile",`Delete profile "${p.name}"?`,()=>post("/api/profiles/delete",{name:p.name}).then(loadProfiles).catch(showErr)),"btn btn-ghost btn-sm")}
+        <button class="btn btn-ghost btn-sm" data-del-profile="${esc(p.name)}">Delete</button>
       </div>`;
+    // btn() returns an element — never interpolate it into innerHTML
+    card.querySelector("[data-del-profile]").onclick = () =>
+      confirmAction("Delete Profile", `Delete profile "${p.name}"?`,
+        () => post("/api/profiles/delete", {name:p.name}).then(loadProfiles).catch(showErr));
     grid.appendChild(card);
   }
 }

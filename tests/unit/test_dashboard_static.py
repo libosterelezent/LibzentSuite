@@ -237,6 +237,17 @@ class TestStartupRobustness(unittest.TestCase):
             called - defined, set(),
             "fmt helpers called but not defined: %s" % (called - defined))
 
+    def test_element_helpers_not_interpolated(self):
+        """Regression: btn()/btnG() return DOM elements — interpolating
+        them into an innerHTML template literal stringifies them to
+        [object HTMLButtonElement] (account cards lost Start/Stop/Details
+        and profile cards lost Delete, showing raw placeholder text)."""
+        js = _script(_spa())
+        for helper in ("btn(", "btnG("):
+            self.assertNotIn("${" + helper, js,
+                             f"${{{helper}...}} interpolates an element into "
+                             "innerHTML — use raw HTML + post-parse wiring")
+
 
 class TestApiCompatibility(unittest.TestCase):
     """The SPA may only call endpoints the real server implements."""
