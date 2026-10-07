@@ -14,7 +14,7 @@
 /* ══════════════════════════════════ Design Tokens ═════════════════════════════ */
 :root {
   --bg: #0b0e13; --surface: #131820; --surface2: #1a212c; --surface3: #212a37;
-  --border: #2a3348; --border2: #36416o; --text: #dde4ee; --dim: #7e8aa0; --faint: #556076;
+  --border: #2a3348; --border2: #364160; --text: #dde4ee; --dim: #7e8aa0; --faint: #556076;
   --accent: #5ba3f5; --accent2: #3d7fd0; --ok: #34d399; --ok2: #059669;
   --warn: #fbbf24; --warn2: #d97706; --err: #f87171; --err2: #dc2626;
   --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
@@ -192,6 +192,8 @@ input[type="password"] { letter-spacing: .3em; }
 .menu button:hover { background: var(--surface3); }
 .menu button.danger { color: var(--err); }
 .menu button.danger:hover { background: rgba(248,113,113,.1); }
+.menu button:disabled { color: var(--faint); cursor: not-allowed; }
+.menu button:disabled:hover { background: none; }
 .menu .sep { height: 1px; background: var(--border); margin: 4px 0; }
 
 /* ══════════════════════════════════ Account Card ═════════════════════════════ */
@@ -519,7 +521,7 @@ dialog .dlg-foot { display: flex; gap: 8px; justify-content: flex-end; padding: 
           <div class="actions">
             <button class="btn btn-secondary btn-sm" id="bulk-start">Start</button>
             <button class="btn btn-secondary btn-sm" id="bulk-stop">Stop</button>
-            <button class="btn btn-secondary btn-sm" id="bulk-group">Move to group…</button>
+            <button class="btn btn-secondary btn-sm" id="bulk-group" disabled title="Group management backend is not available yet — set the sync group when adding the account">Move to group…</button>
             <button class="btn btn-ghost btn-sm" id="bulk-clear">clear</button>
           </div>
         </div>
@@ -530,8 +532,8 @@ dialog .dlg-foot { display: flex; gap: 8px; justify-content: flex-end; padding: 
           <div class="grid grid-2" id="acct-grid"></div>
         </div>
         <div id="tab-groups" class="hidden">
-          <div class="row" style="margin-bottom:12px">
-            <button class="btn btn-primary" id="btn-create-group">+ Create Group</button>
+          <div class="card" style="margin-bottom:12px;padding:10px 14px">
+            <p class="sub" style="margin:0">Group management backend is not available yet. Existing sync-group assignments are shown read-only.</p>
           </div>
           <div class="grid grid-2" id="group-grid"></div>
         </div>
@@ -658,19 +660,6 @@ dialog .dlg-foot { display: flex; gap: 8px; justify-content: flex-end; padding: 
   <button class="btn btn-primary" id="aa-submit">Create Account</button></div>
 </dialog>
 
-<dialog id="dlg-create-group">
-  <div class="dlg-hdr">Create Sync Group<span class="close" onclick="this.closest('dialog').close()">✕</span></div>
-  <div class="dlg-body">
-    <div class="form">
-      <div class="field"><label>Group name</label><input id="cg-name" placeholder="farm"></div>
-      <div class="field"><label>Add members</label><div id="cg-members" class="caps"></div>
-        <span class="hint">Select accounts to include in this group</span></div>
-    </div>
-  </div>
-  <div class="dlg-foot"><button class="btn btn-secondary" onclick="this.closest('dialog').close()">Cancel</button>
-  <button class="btn btn-primary" id="cg-submit">Create Group</button></div>
-</dialog>
-
 <dialog id="dlg-create-prof">
   <div class="dlg-hdr">Create Profile<span class="close" onclick="this.closest('dialog').close()">✕</span></div>
   <div class="dlg-body">
@@ -727,6 +716,7 @@ const token = () => store.getItem("dash_token") || "";
 // ── State ─────────────────────────────────────────────────────────────────────
 let lastStats = null, lastSig = "";
 let manifests = [], profilesList = [], taskList = [], taskHistory = [], cooldownList = [];
+let manifestsFailed = false, profilesFailed = false;
 let ws = null, wsRetries = 0, wsWatchdog = null;
 let selectedAccounts = new Set();
 let currentView = "home", currentFleetTab = "accounts", currentActivityTab = "tasks", currentToolsTab = "sim";
@@ -816,9 +806,16 @@ const UI = {
 };
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
+let wsRetryTimer = null;
 function connectWS() {
+  // Browsers cannot set headers on a WebSocket upgrade, so the token MUST
+  // ride the URL as ?token= — the same auth the server accepts for REST.
   const proto = location.protocol==="https:"?"wss":"ws";
-  const url = `${proto}://${location.host}/ws`;
+  const url = `${proto}://${location.host}/ws` + (token() ? "?token=" + encodeURIComponent(token()) : "");
+  // Cancel any pending backoff retry and retire the old socket SILENTLY
+  // (onclose nulled first, else closing it here schedules another retry).
+  if (wsRetryTimer) { clearTimeout(wsRetryTimer); wsRetryTimer = null; }
+  if (ws) { ws.onclose = null; try { ws.close(); } catch {} ws = null; }
   try { ws = new WebSocket(url); } catch { return handleWsClosed(); }
   wsWatchdog = setTimeout(()=>{ if(ws.readyState===WebSocket.CONNECTING) ws.close(); }, 5000);
   ws.onopen = () => {
@@ -853,9 +850,9 @@ function connectWS() {
 function handleWsClosed() {
   clearTimeout(wsWatchdog);
   $("wsdot").classList.remove("on"); $("connmsg").textContent = "disconnected";
-  if (wsRetries < 10) { wsRetries++; $("connmsg").textContent=`reconnecting (${wsRetries}/10)…`;
-    setTimeout(connectWS, Math.min(1000*Math.pow(2,wsRetries),30000)); }
-  else $("connmsg").textContent = "connection lost — reload to retry";
+  if (wsRetries < 10) { wsRetries++; $("connmsg").textContent=`reconnecting (${wsRetries}/10)${wsRetries>3?" (bad token?)":""}…`;
+    wsRetryTimer = setTimeout(()=>{ wsRetryTimer=null; connectWS(); }, Math.min(1000*Math.pow(2,wsRetries),30000)); }
+  else $("connmsg").textContent = "connection lost — reload or re-save the token";
 }
 let taskRefreshTimer = null;
 function scheduleTaskRefresh() {
@@ -973,7 +970,9 @@ function renderAccounts() {
   fillSelect($("audit-acct"), accounts().map(a=>a.name), "all accounts");
   fillDatalist("group-list", Object.keys(groupMap()).filter(k=>k));
   fillDatalist("prof-list", profilesList.map(p=>p.name));
-  if (!accounts().length) { grid.innerHTML=emptyState("No Accounts","Add your first Discord account to get started.","+ Add Account","btn-add-acct"); return; }
+  if (!accounts().length) { grid.innerHTML=emptyState("No Accounts","Add your first Discord account to get started.","+ Add Account","btn-add-acct");
+    const cta = grid.querySelector("button"); if (cta) cta.onclick = () => $("btn-add-acct").click();
+    return; }
   for (const a of accounts()) grid.appendChild(acctCard(a));
   updateBulkBar();
 }
@@ -992,7 +991,7 @@ function acctCard(a) {
         <button class="menu-btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
         <div class="menu">
           <button data-act="cred">Set credential</button>
-          <button data-act="group">Move to group…</button>
+          <button data-act="group" disabled title="Group management backend is not available yet — set the sync group when adding the account">Move to group…</button>
           <button data-act="profile">Assign profile…</button>
           <div class="sep"></div>
           <button data-act="estop" class="danger">Emergency stop</button>
@@ -1032,12 +1031,12 @@ function acctCard(a) {
   // this function runs per-render (1s WS tick); adding a document listener
   // per card per render accumulated thousands of listeners and froze the page.
   menu.querySelectorAll("button").forEach(mb => mb.onclick = () => {
+    if (mb.disabled) return;
     menu.classList.remove("open");
     const act = mb.dataset.act;
     if (act==="cred") { $("cred-name").value=a.name; $("dlg-cred").showModal(); $("cred-val").value=""; }
     if (act==="estop") confirmAction("Emergency Stop",`Emergency stop ${a.name}?`,()=>post("/api/accounts/emergency-stop",{name:a.name}));
     if (act==="remove") confirmAction("Remove Account",`Remove ${a.name}? This deletes its credential, cooldowns and state.`,()=>post("/api/accounts/remove",{name:a.name}));
-    if (act==="group") openGroupPicker(a.name);
     if (act==="profile") openProfilePicker(a.name);
   });
   card.querySelector('input[data-bulk]').onchange = e => {
@@ -1053,7 +1052,7 @@ function renderGroups() {
   const groups = groupMap();
   const groupNames = Object.keys(groups).filter(k=>k).sort();
   $("cnt-groups").textContent = groupNames.length;
-  if (!groupNames.length && !groups[""]) { grid.innerHTML=emptyState("No Sync Groups","Accounts without a group operate independently.","+ Create Group","btn-create-group"); return; }
+  if (!groupNames.length && !groups[""]) { grid.innerHTML=emptyState("No Sync Groups","No accounts yet. A sync group can be assigned when adding an account."); return; }
   for (const name of groupNames) {
     const members = groups[name];
     const online = members.filter(m=>m.status==="running").length;
@@ -1074,10 +1073,20 @@ function renderGroups() {
         ${cooling?`<span class="stat" style="color:var(--warn)"><b>${cooling}</b> cooldown</span>`:""}
       </div>
       <div class="actions">
-        ${btnG("Start All",()=>post("/api/accounts/start",{account:null}).catch(showErr),"btn btn-secondary btn-sm")}
-        ${btnG("Stop All",()=>post("/api/accounts/stop",{account:null}).catch(showErr),"btn btn-secondary btn-sm")}
+        <button class="btn btn-secondary btn-sm" data-gact="start">Start All</button>
+        <button class="btn btn-secondary btn-sm" data-gact="stop">Stop All</button>
       </div>`;
     card.querySelectorAll(".member .name").forEach(el=>el.onclick=()=>openAcctDetails(el.dataset.acct));
+    // Scoped to THIS group's members — never the whole fleet. Buttons are
+    // serialized via innerHTML, so handlers are bound AFTER parsing.
+    card.querySelectorAll("[data-gact]").forEach(b=>b.onclick=()=>{
+      if (b.disabled) return; b.disabled = true;
+      const path = b.dataset.gact==="start"?"/api/accounts/start":"/api/accounts/stop";
+      Promise.allSettled(members.map(m=>post(path,{account:m.name}))).then(rs=>{
+        b.disabled = false;
+        for (const r of rs) if (r.status==="rejected") showErr(r.reason&&r.reason.message||String(r.reason));
+      });
+    });
     grid.appendChild(card);
   }
   const indep = groups[""]||[];
@@ -1093,7 +1102,10 @@ function renderGroups() {
 
 function renderProfiles() {
   const grid = $("prof-grid"); grid.innerHTML = "";
-  if (!profilesList.length) { grid.innerHTML=emptyState("No Profiles","Profiles bundle plugin capabilities for accounts.","+ Create Profile","btn-create-prof"); return; }
+  if (profilesFailed) { grid.innerHTML=emptyState("Profiles Unavailable","The profiles list could not be loaded — see the error banner. The rest of the dashboard remains usable."); return; }
+  if (!profilesList.length) { grid.innerHTML=emptyState("No Profiles","Profiles bundle plugin capabilities for accounts.","+ Create Profile","btn-create-prof");
+    const cta = grid.querySelector("button"); if (cta) cta.onclick = () => $("btn-create-prof").click();
+    return; }
   for (const p of profilesList) {
     const users = accounts().filter(a=>(a.profiles||[]).includes(p.name));
     const card = document.createElement("div"); card.className="prof-card";
@@ -1114,6 +1126,7 @@ function renderProfiles() {
 
 function renderPlugins() {
   const grid = $("plugin-grid"); grid.innerHTML = "";
+  if (manifestsFailed) { grid.innerHTML=emptyState("Plugins Unavailable","The plugins list could not be loaded — see the error banner. The rest of the dashboard remains usable."); return; }
   if (!manifests.length) { grid.innerHTML=emptyState("No Plugins","No plugins discovered in the plugins directory."); return; }
   for (const m of manifests) {
     const usingProfiles = profilesList.filter(p=>(p.plugins||[]).includes(m.name));
@@ -1153,8 +1166,8 @@ function renderPolicies() {
   }
 }
 
-function emptyState(title, body, cta, ctaId) {
-  return `<div class="empty"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 9h6v6H9z"/></svg><h3>${esc(title)}</h3><p>${esc(body)}</p>${cta?`<button class="btn btn-primary" id="${ctaId}">${esc(cta)}</button>`:""}</div>`;
+function emptyState(title, body, cta, ctaCls) {
+  return `<div class="empty"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 9h6v6H9z"/></svg><h3>${esc(title)}</h3><p>${esc(body)}</p>${cta?`<button class="btn btn-primary">${esc(cta)}</button>`:""}</div>`;
 }
 function fillSelect(sel, names, ph) {
   if (!sel) return; const cur = sel.value;
@@ -1195,8 +1208,61 @@ function confirmAction(title, msg, fn) {
   dlg.showModal();
 }
 
-function openGroupPicker(acctName) { /* TODO: group picker modal */ }
-function openProfilePicker(acctName) { /* TODO: profile picker modal */ }
+// Group picker intentionally absent: there is no backend endpoint to change
+// an account's sync_group after creation (only accounts/add accepts it), so
+// a "Move to group…" dialog would be a fake mutation. The menu item is
+// rendered disabled with an explanation instead.
+
+// Assign/unassign REAL profiles via the real endpoints (this is Profiles
+// functionality, not group emulation). Reuses the generic details dialog.
+function openProfilePicker(acctName) {
+  const a = accounts().find(x=>x.name===acctName); if (!a) return;
+  $("dt-title").textContent = `Assign profiles — ${a.name}`;
+  const body = $("dt-body");
+  if (!profilesList.length) {
+    body.innerHTML = '<p class="dim">No profiles defined yet — create one on the Profiles page first.</p>';
+    $("dlg-details").showModal(); return;
+  }
+  const current = new Set(a.profiles||[]);
+  body.innerHTML = "";
+  const list = document.createElement("div");
+  list.className = "form";
+  for (const p of profilesList) {
+    const l = document.createElement("label");
+    l.style.cssText = "display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;cursor:pointer";
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = current.has(p.name); cb.dataset.profile = p.name;
+    l.appendChild(cb);
+    l.appendChild(document.createTextNode(p.name));
+    if (p.description) { const s=document.createElement("span"); s.className="faint"; s.style.fontSize="11px"; s.textContent=" — "+p.description; l.appendChild(s); }
+    list.appendChild(l);
+  }
+  const actions = document.createElement("div");
+  actions.className = "form-actions";
+  const save = document.createElement("button");
+  save.className = "btn btn-primary"; save.textContent = "Save";
+  save.onclick = async () => {
+    save.disabled = true;
+    const chosen = new Set([...body.querySelectorAll("input[data-profile]:checked")].map(i=>i.dataset.profile));
+    try {
+      const ops = [];
+      for (const p of profilesList) {
+        if (chosen.has(p.name) && !current.has(p.name)) ops.push(post("/api/profiles/assign",{account:a.name,profile:p.name}));
+        if (!chosen.has(p.name) && current.has(p.name)) ops.push(post("/api/profiles/unassign",{account:a.name,profile:p.name}));
+      }
+      const rs = await Promise.allSettled(ops);
+      for (const r of rs) if (r.status==="rejected") showErr(r.reason&&r.reason.message||String(r.reason));
+      $("dlg-details").close();
+    } finally { save.disabled = false; }
+  };
+  const cancel = document.createElement("button");
+  cancel.className = "btn btn-secondary"; cancel.textContent = "Cancel";
+  cancel.onclick = () => $("dlg-details").close();
+  actions.append(cancel, save);
+  list.appendChild(actions);
+  body.appendChild(list);
+  $("dlg-details").showModal();
+}
 
 function updateBulkBar() {
   const bar = $("bulkbar");
@@ -1245,7 +1311,9 @@ function renderTaskTable() {
   tbl.innerHTML = `<thead><tr><th>Account</th><th>Plugin</th><th>Action</th><th>Status</th><th>Priority</th><th>Age</th><th></th></tr></thead><tbody>` +
     filtered.map(t=>`<tr><td>${esc(t.account)}</td><td>${esc(t.plugin)}</td><td>${esc(t.action)}</td>
       <td><span class="chip task-${esc(t.status)}">${esc(t.status)}</span></td><td>${t.priority??""}</td><td>${fmtAge(t.submitted_at)}</td>
-      <td>${btnG("cancel",()=>post("/api/tasks/cancel",{task_id:t.id}).then(loadTasks).catch(showErr),"btn btn-ghost btn-sm")?.outerHTML||""}</td></tr>`).join("")+"</tbody>";
+      <td>${t.status==="queued"||t.status==="running"?`<button class="btn btn-ghost btn-sm" data-cancel="${t.id}">cancel</button>`:""}</td></tr>`).join("")+"</tbody>";
+  // innerHTML-serialized buttons carry no handlers — bind after parsing
+  tbl.querySelectorAll("[data-cancel]").forEach(b=>b.onclick=()=>post("/api/tasks/cancel",{task_id:+b.dataset.cancel}).then(loadTasks).catch(showErr));
   const hist = $("task-history");
   if (taskHistory.length) {
     hist.innerHTML = `<thead><tr><th>Account</th><th>Plugin</th><th>Status</th><th>Duration</th><th>Finished</th></tr></thead><tbody>` +
@@ -1257,28 +1325,38 @@ async function loadCooldowns() {
   try {
     const cds = await api("/api/cooldowns") || [];
     cooldownList = cds;
-    $("cnt-cd").textContent = cds.filter(c=>c.expires_at>Date.now()/1000).length;
+    // API rows carry remaining_s (restart-correct), not absolute expiry
+    $("cnt-cd").textContent = cds.filter(c=>(c.remaining_s??0)>0).length;
     const list = $("cd-list"); list.innerHTML = "";
     if (!cds.length) { list.innerHTML=emptyState("No Cooldowns","No active cooldowns."); return; }
     for (const cd of cds) {
-      const rem = Math.max(0,(cd.expires_at||0)-Date.now()/1000);
+      const rem = Math.max(0,(cd.remaining_s??0));
       const d = document.createElement("div"); d.className="cd-card";
-      d.innerHTML=`<div class="info"><div class="who">${esc(cd.account||"")}</div><div class="what">${esc(cd.plugin||"")} · ${esc(cd.cooldown_key||"")}</div></div>
+      d.innerHTML=`<div class="info"><div class="who">${esc(cd.account||"")}</div><div class="what">${esc(cd.plugin||"")} · ${esc(cd.cooldown_key||"all")}</div></div>
         <div class="remaining ${rem<=0?"expired":""}">${rem<=0?"expired":fmtDur(rem)}</div>
-        ${btnG("Clear",()=>post("/api/cooldowns/clear",{account:cd.account}).then(loadCooldowns).catch(showErr),"btn btn-ghost btn-sm")?.outerHTML||""}`;
+        <button class="btn btn-ghost btn-sm" data-cda="${esc(cd.account||"")}" data-cdp="${esc(cd.plugin||"")}" data-cdk="${esc(cd.cooldown_key||"")}">Clear</button>`;
       list.appendChild(d);
     }
+    // clear requires account+plugin (cooldown_key optional) — bound after parsing
+    list.querySelectorAll("[data-cda]").forEach(b=>b.onclick=()=>{
+      const body = {account:b.dataset.cda, plugin:b.dataset.cdp};
+      if (b.dataset.cdk) body.cooldown_key = b.dataset.cdk;
+      post("/api/cooldowns/clear",body).then(loadCooldowns).catch(showErr);
+    });
   } catch(e) { showErr(e.message); }
 }
-async function loadProfiles() { try { profilesList = await api("/api/profiles")||[]; } catch(e) { showErr(e.message); } }
-async function loadManifests() { try { manifests = await api("/api/plugins")||[]; } catch(e) { showErr(e.message); } }
+async function loadProfiles() { try { profilesList = await api("/api/profiles")||[]; profilesFailed = false; } catch(e) { profilesFailed = true; showErr(e.message); } }
+async function loadManifests() { try { manifests = await api("/api/plugins")||[]; manifestsFailed = false; } catch(e) { manifestsFailed = true; showErr(e.message); } }
 async function loadScenarios() { try { const list = await api("/api/simulation/list")||[];
-  $("sim-sel").innerHTML = list.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join(""); } catch(e) { showErr(e.message); } }
+  $("sim-sel").innerHTML = list.length
+    ? list.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join("")
+    : '<option value="">(no scenarios available)</option>';
+  } catch(e) { $("sim-sel").innerHTML = '<option value="">(simulation unavailable)</option>'; showErr(e.message); } }
 
 // ── Event wiring ──────────────────────────────────────────────────────────────
 function wire() {
   // Token
-  $("token-save").onclick = () => { store.setItem("dash_token",$("token").value.trim()); connectWS(); render(); };
+  $("token-save").onclick = () => { store.setItem("dash_token",$("token").value.trim()); wsRetries = 0; connectWS(); render(); };
   $("token").value = token();
 
   // Fleet tabs
@@ -1312,30 +1390,10 @@ function wire() {
     catch(e) { showErr(e.message); }
   };
 
-  // Create group
-  $("btn-create-group").onclick = () => {
-    $("cg-name").value="";
-    const box = $("cg-members"); box.innerHTML = "";
-    for (const a of accounts()) {
-      const l = document.createElement("label"); l.style.cssText="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;cursor:pointer";
-      l.innerHTML=`<input type="checkbox" value="${esc(a.name)}" ${a.sync_group?"":"checked"}> ${esc(a.name)}`;
-      box.appendChild(l);
-    }
-    $("dlg-create-group").showModal();
-  };
-  $("cg-submit").onclick = async () => {
-    const gname = $("cg-name").value.trim(); if (!gname) return;
-    const members = [...$("cg-members").querySelectorAll("input:checked")].map(i=>i.value);
-    for (const m of members) {
-      try { await post("/api/profiles/assign",{account:m,profile:"__dummy__"}); } catch{}
-    }
-    // Groups are set per-account via sync_group field
-    for (const m of members) {
-      // Remove and re-add with group
-      try { await post("/api/accounts/remove",{name:m}); } catch{}
-    }
-    $("dlg-create-group").close(); showErr("Group creation: set sync_group when re-adding accounts");
-  };
+  // NOTE: no Create Group action — there is no group-management backend
+  // yet (no group API routes exist; sync_group can only be set when adding
+  // an account). The Sync Groups tab is read-only by design. Creating a
+  // UI object must never destroy/recreate accounts to emulate groups.
 
   // Create profile
   $("btn-create-prof").onclick = () => {
@@ -1391,7 +1449,7 @@ function wire() {
   $("adv-import").onclick = () => post("/api/credentials/import-env").catch(showErr);
 
   // Simulation
-  $("sim-run").onclick = btnG._original || async () => {
+  $("sim-run").onclick = async () => {
     const name = $("sim-sel").value; if (!name) return;
     try { const report = await post("/api/simulation/run",{name});
       $("sim-report").innerHTML = `<pre style="background:var(--bg);padding:12px;border-radius:6px;font-family:var(--mono);font-size:11px;overflow-x:auto;max-height:300px">${esc(report&&report.log||JSON.stringify(report,null,2))}</pre>`;
@@ -1428,15 +1486,26 @@ function wire() {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
-const qtoken = new URLSearchParams(location.search).get("token");
-if (qtoken) { store.setItem("dash_token",qtoken.trim()); $("token").value=qtoken.trim(); history.replaceState(null,"",location.pathname); }
+try {
+  const qtoken = new URLSearchParams(location.search).get("token");
+  if (qtoken) { store.setItem("dash_token",qtoken.trim()); $("token").value=qtoken.trim(); history.replaceState(null,"",location.pathname); }
 
-buildNav(); wire(); connectWS();
-Promise.all([loadManifests(),loadProfiles(),loadScenarios()]).then(()=>render());
-LOADERS.activity = ()=>{ loadTasks(); loadCooldowns(); };
-LOADERS.policies = ()=>{};
-setInterval(()=>{ if(currentView==="activity"&&currentActivityTab==="cooldowns") loadCooldowns(); },5000);
-$("side-foot").textContent = "v2 · " + new Date().getFullYear();
+  buildNav(); wire(); connectWS();
+  // Every loader catches its own failures (error banner + per-page fallback
+  // state), so one dead endpoint can never block the others or the render.
+  Promise.all([loadManifests(),loadProfiles(),loadScenarios()])
+    .then(()=>render())
+    .catch(e=>{ showErr("startup: "+(e&&e.message||e)); render(); });
+  LOADERS.activity = ()=>{ loadTasks(); loadCooldowns(); };
+  LOADERS.policies = ()=>{};
+  setInterval(()=>{ if(currentView==="activity"&&currentActivityTab==="cooldowns") loadCooldowns(); },5000);
+  $("side-foot").textContent = "v2 · " + new Date().getFullYear();
+} catch (e) {
+  // Report loudly instead of leaving a blank page with no explanation.
+  const box = document.getElementById("errbox");
+  if (box) { box.textContent = "dashboard init failed: " + (e && (e.stack || e.message) || e); }
+  throw e;
+}
 </script>
 </body>
 </html>
