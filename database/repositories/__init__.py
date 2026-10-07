@@ -15,11 +15,12 @@ from .plugins import PluginRepository
 from .profiles import ProfilesRepository
 from .rate_policies import RatePolicyRepository
 from .settings import AccountSettingsRepository
+from .sync_groups import SyncGroupsRepository
 from .tasks import TaskHistoryRepository
 
 __all__ = [
     "AccountsRepository", "AccountSettingsRepository", "ProfilesRepository",
     "PluginRepository", "RatePolicyRepository", "AuditRepository",
     "LogRepository", "TaskHistoryRepository", "KvRepository", "CacheRepository",
-    "BaseRepository", "loads_tolerant",
+    "SyncGroupsRepository", "BaseRepository", "loads_tolerant",
 ]

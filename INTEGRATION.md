@@ -51,8 +51,9 @@ Events ──► SlaughterMudae (routing/orchestration/lifecycle) ──► Plug
 - The RATE LIMITER owns execution timing, in three composing scopes:
   per-task (`(account, action)` — one account's consecutive calls),
   per-account/group (`(group:<name>, action)` shared clock registered via
-  `RateLimitManager.set_account_group(account, group)`; the account manager
-  feeds it from `sync_group` on add/remove/restore), and the server-wide
+  `RateLimitManager.set_account_group(account, group)`; SyncGroupManager —
+  the persistent-membership owner — feeds it on add/remove/rename/restore,
+  and AccountManager delegates to it when wired), and the server-wide
   lane (`set_lane_*`). `stats()` exposes `groups` + all pacing clocks.
 
 ## Target structure
@@ -520,6 +521,14 @@ AccountSettingsRepository: get(name) -> dict ; set(name, key, value) ; delete(na
     list_accounts() -> list[str]
 ProfilesRepository: upsert(name, plugins, description="") ; delete(name) -> bool
     get(name) -> ProfileRecord | None ; list() -> list[ProfileRecord]
+SyncGroupsRepository: create(name, description="", *, enabled=True) -> SyncGroupRecord
+    get(group_id) -> SyncGroupRecord | None ; get_by_name(name) ; list()
+    update(group_id, *, name=None, description=None, enabled=None)
+    delete(group_id) -> bool
+    members(group_name) -> list[str] ; membership_counts() -> dict[str, int]
+    account_group_name(account) -> str | None
+    set_account_group(account, group: str | None)   # None leaves every group
+    detach_members(group_name) -> list[str]         # names of the detached
 PluginRepository:
     upsert_metadata(name, version, description, settings_manifest) 
     metadata() -> list[dict] ; metadata_for(name) -> dict | None

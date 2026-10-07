@@ -182,6 +182,36 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         DROP INDEX IF EXISTS logs_ts;
         """,
     ),
+    (
+        5,
+        "first-class sync groups",
+        """
+        -- Sync groups become a first-class resource: identity + metadata
+        -- live here, MEMBERSHIP stays on accounts.sync_group (the group
+        -- NAME pointer) — an account belongs to at most one group, so a
+        -- join table would add nothing the column does not already say.
+        CREATE TABLE IF NOT EXISTS sync_groups (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL UNIQUE,
+            description TEXT NOT NULL DEFAULT '',
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            created_at  REAL NOT NULL,
+            updated_at  REAL NOT NULL
+        );
+        -- LEGACY CONVERSION (one group per DISTINCT name, never one per
+        -- account): A->Alpha B->Alpha C->Beta yields Alpha{A,B} + Beta{C}.
+        -- INSERT OR IGNORE keeps a hand-seeded table intact; names are
+        -- stored VERBATIM (validation is the manager's job at create/
+        -- rename time — a migration must never reject existing data).
+        INSERT OR IGNORE INTO sync_groups
+            (name, description, enabled, created_at, updated_at)
+        SELECT DISTINCT sync_group, '', 1,
+               CAST(strftime('%s', 'now') AS REAL),
+               CAST(strftime('%s', 'now') AS REAL)
+        FROM accounts
+        WHERE sync_group IS NOT NULL AND sync_group != '';
+        """,
+    ),
 ]
 
 

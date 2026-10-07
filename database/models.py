@@ -42,6 +42,32 @@ class AccountRecord:
 
 
 @dataclass
+class SyncGroupRecord:
+    """A named sync group: accounts that act in sync (shared pacing).
+
+    MEMBERSHIP is deliberately NOT stored here: an account belongs to at
+    most one group, recorded on ``accounts.sync_group`` (the group NAME —
+    the membership pointer), exactly like the pre-group-table field. This
+    table is the group's first-class identity + metadata only.
+    """
+
+    id: int
+    name: str
+    description: str = ""
+    enabled: bool = True
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id, "name": self.name,
+            "description": self.description, "enabled": self.enabled,
+            "created_at": round(self.created_at, 3),
+            "updated_at": round(self.updated_at, 3),
+        }
+
+
+@dataclass
 class ProfileRecord:
     """A named capability bundle: the plugins it permits (spec §4)."""
 
@@ -107,5 +133,5 @@ class RatePolicyRecord:
         }
 
 
-__all__ = ["AccountRecord", "ProfileRecord", "PluginMetadata", "RatePolicyRecord",
-           "POLICY_LEVELS"]
+__all__ = ["AccountRecord", "SyncGroupRecord", "ProfileRecord",
+           "PluginMetadata", "RatePolicyRecord", "POLICY_LEVELS"]

@@ -815,8 +815,8 @@ class TestHelpCommand(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             set(HELP),
             {"help", "status", "accounts", "credentials", "cooldowns",
-             "plugins", "profiles", "ratelimit", "tasks", "simulation",
-             "logs", "audit", "estop", "quit"},
+             "plugins", "profiles", "groups", "ratelimit", "tasks",
+             "simulation", "logs", "audit", "estop", "quit"},
         )
         for name, (sig, desc) in HELP.items():
             self.assertTrue(desc, f"HELP[{name!r}] has no description")

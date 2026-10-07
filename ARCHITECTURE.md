@@ -6,25 +6,28 @@ architecture", §14 project structure). Inter-module contracts: INTEGRATION.md.
 ```
                     CLI / GUI
         (interfaces/cli)   (interfaces/dashboard)
-                        |
-                        v
-                  Core API  (core.api.ControlAPI — ONE facade)
-                        |
-         +--------------+--------------+
-         |              |              |
-  Account Manager  Plugin Manager  Settings Manager
-  (core.account_   (core.plugin_   (core.settings_
-   manager)          manager)        manager)
-         |              |              |
-         +--------------+--------------+
-                        |
-                 Task Scheduler (core.task_scheduler)
-                        |
-             Rate Limit Manager (core.rate_limit_manager)
-                        |
-                  Discord Adapter (adapters/discord | adapters/simulator)
-                        |
-                     Database (database/ — models, migrations, repositories)
+                         |
+                         v
+                   Core API  (core.api.ControlAPI — ONE facade)
+                         |
+     +---------+---------+---------+---------+
+     |         |         |         |         |
+ Account   Profile    Sync     Plugin   Settings
+ Manager   Manager    Group     Manager  Manager
+ (core.    (core.     Manager   (core.   (core.
+  account_  profile_  (core.     plugin_  settings_
+  manager)  manager)  sync_       manager) manager)
+     |         |       group_      |         |
+     |         |       manager)    |         |
+     +---------+---------+---------+---------+
+                         |
+                  Task Scheduler (core.task_scheduler)
+                         |
+              Rate Limit Manager (core.rate_limit_manager)
+                         |
+                   Discord Adapter (adapters/discord | adapters/simulator)
+                         |
+                      Database (database/ — models, migrations, repositories)
 ```
 
 Cross-cutting (every manager consumes them):
@@ -53,6 +56,26 @@ the live client's cached snapshot — zero extra fetches.
 A profile names a bundle of permitted plugins; accounts get profiles; the
 union gates the plugin set at account start (no roles = unrestricted). All
 CRUD + assignments persist in SQLite and are reachable from both surfaces.
+Profiles and sync groups are ORTHOGONAL: changing one never touches the
+other.
+
+## Sync groups
+
+`SyncGroupManager` (core/sync_group_manager) owns PERSISTENT group
+membership: first-class group rows in `sync_groups` (id = stable identity,
+unique name, description, enabled), membership itself on
+`accounts.sync_group` (an account is in at most one group). It is the only
+writer of membership and cooperates with — never absorbs — its neighbours:
+`RateLimitManager` stays the sole owner of RUNTIME pacing (grouped
+accounts share the `group:<name>` clock exactly as before; the manager
+just keeps the engine's account→group metadata in sync via the existing
+`set_account_group` API). `AccountManager` stays the account lifecycle
+owner and delegates the group bits of add/remove/restore to the group
+manager (AccountManager → SyncGroupManager → RateLimitManager). Deleting
+a group never deletes accounts; a non-empty group must be emptied (or
+explicitly detached) first. Migration v5 backfills one group per DISTINCT
+legacy `accounts.sync_group` value, and legacy values keep working
+(get-or-adopt).
 
 ## Rate limiting (spec §5)
 
@@ -84,9 +107,11 @@ tokens.
 
 ```
 .env -> Credentials -> config/ -> Database(+migrations) -> LogService
-  -> EventBus -> RateLimitManager(config policies) -> SettingsManager
-  -> AuditRecorder -> TaskScheduler(late-bound sender) -> PluginManager
-  -> ProfileManager -> AccountManager(restores persisted accounts)
+  -> EventBus -> RateLimitManager(config policies) -> SyncGroupManager
+  -> SettingsManager -> AuditRecorder
+  -> Task Scheduler(late-bound sender) -> PluginManager
+  -> ProfileManager -> AccountManager(restores persisted accounts,
+     delegates group-membership restore to SyncGroupManager)
   -> sender bound -> scheduler.start() -> SimulationRunner -> ControlAPI
   -> {REPL | one-shot CLI | Dashboard | headless}
 ```

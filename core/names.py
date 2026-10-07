@@ -14,7 +14,12 @@ ACCOUNT_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 #: profile names (core/profile_manager) — must start lowercase-letter, <= 32
 PROFILE_NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
+#: sync group names (core/sync_group_manager) — profile-style; must never
+#: contain ':'/'/' (the limiter paces groups under ``group:<name>`` keys)
+GROUP_NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+
 #: plugin slugs (core/plugin_manager loader) — directory/file names; no cap
 PLUGIN_NAME_RE = re.compile(r"[a-z0-9_-]+")
 
-__all__ = ["ACCOUNT_NAME_RE", "PROFILE_NAME_RE", "PLUGIN_NAME_RE"]
+__all__ = ["ACCOUNT_NAME_RE", "PROFILE_NAME_RE", "GROUP_NAME_RE",
+           "PLUGIN_NAME_RE"]

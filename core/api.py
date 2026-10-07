@@ -19,6 +19,10 @@ Method map (grouped like the dashboard navigation, spec §12):
                     account-layer override is DELETED, unmasking the lower
                     layers — not pinned to the schema default)
   profiles_*        list/create/delete/assign/unassign
+  groups_*          sync groups: list/get/create/update/delete + membership
+                    (add/remove account, set/clear account) + snapshot;
+                    membership persists through SyncGroupManager and the
+                    runtime pacing scope through RateLimitManager
   ratelimit_*       policies/set/clear/effective/stats/warnings/set-floor
                     (+lane; every mutation persists through the db repos)
   tasks_*           list/cancel/cancel-matching/history
@@ -50,6 +54,7 @@ from .rate_limit_manager import (
     KV_REMOVED_KEY,
     MAX_PREFIXRATE,
 )
+from .errors import SyncGroupError
 
 if TYPE_CHECKING:  # duck-typed at runtime — no manager imports here
     from .account_manager import AccountManager
@@ -62,6 +67,7 @@ if TYPE_CHECKING:  # duck-typed at runtime — no manager imports here
     from .profile_manager import ProfileManager
     from .rate_limit_manager import RateLimitManager
     from .settings_manager import SettingsManager
+    from .sync_group_manager import SyncGroupManager
     from .task_scheduler import TaskScheduler
 
 LOG = logging.getLogger("slaughtermudae.api")
@@ -115,6 +121,7 @@ class ControlAPI:
         database: Any = None,
         credentials_svc: Optional["CredentialService"] = None,
         cooldowns: Optional["CooldownService"] = None,
+        sync_groups: Any = None,
         started_at: float = 0.0,
         reconcile_interval_s: float = 30.0,
     ) -> None:
@@ -131,6 +138,7 @@ class ControlAPI:
         self._database = database
         self._credentials_svc = credentials_svc
         self._cooldowns = cooldowns
+        self._sync_groups = sync_groups
         self._started_at = started_at
         self._booted_at = _time.time()
         # FINAL-PHASE (F3): authoritative reconciliation cadence (bounds
@@ -638,6 +646,177 @@ class ControlAPI:
                     cache.get(account, []))
         except Exception:
             LOG.debug("profile memory refresh failed for %r", account,
+                      exc_info=True)
+
+    # ------------------------------------------------------------ sync groups
+    async def groups_list(self) -> List[Dict[str, Any]]:
+        """Every sync group with its member count (sorted by name)."""
+        if self._sync_groups is None:
+            return []
+        return await _resolved(self._sync_groups.list_groups())
+
+    async def groups_get(self, group: Any) -> Dict[str, Any]:
+        """One group by id or name (SyncGroupError when unknown)."""
+        self._require_groups()
+        out = await _resolved(self._sync_groups.get_group(group))
+        if out is None:
+            raise SyncGroupError(f"unknown sync group {group!r}")
+        return out
+
+    async def groups_create(
+        self, payload: Dict[str, Any], surface: str = "api"
+    ) -> Dict[str, Any]:
+        """Create a group (may have zero members).
+
+        payload: {name (required), description?, enabled?}. Unknown keys are
+        rejected (typo trap, same convention as accounts_add).
+        """
+        self._require_groups()
+        if not isinstance(payload, dict) or not payload.get("name"):
+            raise ValueError("group payload needs at least {'name': ...}")
+        allowed = {"name", "description", "enabled"}
+        unknown = set(payload) - allowed
+        if unknown:
+            raise ValueError(f"unknown group payload keys: {sorted(unknown)}")
+        description = payload.get("description", "")
+        if not isinstance(description, str):
+            raise ValueError("field 'description' must be a string")
+        enabled = payload.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError("field 'enabled' must be a boolean")
+        out = await _resolved(self._sync_groups.create_group(
+            payload["name"], description, enabled=enabled))
+        self._audit_mgmt("system", "mgmt:group.created", surface,
+                         extra=f"group={out.get('name')}")
+        return out
+
+    async def groups_update(
+        self, group: Any, payload: Dict[str, Any], surface: str = "api"
+    ) -> Dict[str, Any]:
+        """Update name/description/enabled; a rename moves every member's
+        runtime pacing scope with it (no stale group:<old> mapping)."""
+        self._require_groups()
+        if not isinstance(payload, dict) or not payload:
+            raise ValueError(
+                "group update payload needs at least one of "
+                "{'name', 'description', 'enabled'}"
+            )
+        allowed = {"name", "description", "enabled"}
+        unknown = set(payload) - allowed
+        if unknown:
+            raise ValueError(f"unknown group payload keys: {sorted(unknown)}")
+        if "description" in payload and not isinstance(payload["description"], str):
+            raise ValueError("field 'description' must be a string")
+        if "enabled" in payload:
+            payload = dict(payload)
+            payload["enabled"] = parse_bool(payload["enabled"], "enabled")
+        out = await _resolved(self._sync_groups.update_group(group, **payload))
+        self._audit_mgmt("system", "mgmt:group.updated", surface,
+                         extra=f"group={out.get('name')}")
+        return out
+
+    async def groups_delete(
+        self, group: Any, detach_members: bool = False, surface: str = "api"
+    ) -> Dict[str, Any]:
+        """Delete a group (accounts are NEVER deleted). Refuses while
+        members remain unless detach_members is explicitly True."""
+        self._require_groups()
+        detach_members = parse_bool(detach_members, "detach_members")
+        out = await _resolved(
+            self._sync_groups.delete_group(group, detach_members=detach_members)
+        )
+        self._audit_mgmt(
+            "system", "mgmt:group.deleted", surface,
+            extra=f"group={out.get('deleted')} detached={len(out.get('detached') or [])}",
+        )
+        return out
+
+    async def groups_add_account(
+        self, group: Any, account: str, surface: str = "api"
+    ) -> Dict[str, Any]:
+        """Put an account in a group (replaces any previous membership)."""
+        self._require_groups()
+        out = await _resolved(
+            self._sync_groups.add_account_to_group(group, account))
+        self._refresh_account_group(account, out.get("group"))
+        self._audit_mgmt(account, "mgmt:group.member_added", surface,
+                         extra=f"group={out.get('group')}")
+        return out
+
+    async def groups_remove_account(
+        self, group: Any, account: str, surface: str = "api"
+    ) -> Dict[str, Any]:
+        """Remove an account from one group (back to per-account pacing)."""
+        self._require_groups()
+        out = await _resolved(
+            self._sync_groups.remove_account_from_group(group, account))
+        if out.get("existed"):
+            self._refresh_account_group(account, None)
+        self._audit_mgmt(account, "mgmt:group.member_removed", surface,
+                         extra=f"group={out.get('group')}")
+        return out
+
+    async def groups_set_account(
+        self, account: str, group: Any, surface: str = "api"
+    ) -> Dict[str, Any]:
+        """Set/replace an account's group (None -> G and G1 -> G2)."""
+        self._require_groups()
+        out = await _resolved(self._sync_groups.set_account_group(account, group))
+        self._refresh_account_group(account, out.get("group"))
+        self._audit_mgmt(account, "mgmt:group.member_set", surface,
+                         extra=f"group={out.get('group')}")
+        return out
+
+    async def groups_clear_account(
+        self, account: str, surface: str = "api"
+    ) -> Dict[str, Any]:
+        """Remove the account from any group (group -> None)."""
+        self._require_groups()
+        out = await _resolved(self._sync_groups.clear_account_group(account))
+        self._refresh_account_group(account, None)
+        self._audit_mgmt(account, "mgmt:group.member_cleared", surface)
+        return out
+
+    async def groups_snapshot(self, group: Any) -> Dict[str, Any]:
+        """Group snapshot: identity/metadata + members + runtime pacing
+        info. Member rows are enriched with the account manager's live
+        status (derived — no duplicate runtime registry)."""
+        self._require_groups()
+        snapshot = await _resolved(self._sync_groups.snapshot(group))
+        members = snapshot.pop("members", [])
+        by_name = {
+            row.get("name"): row
+            for row in await self._accounts.accounts()
+            if isinstance(row, dict) and row.get("name")
+        }
+        snapshot["members"] = [
+            {
+                "name": name,
+                "status": (by_name.get(name) or {}).get("status"),
+                "enabled": (by_name.get(name) or {}).get("enabled"),
+            }
+            for name in members
+        ]
+        return snapshot
+
+    def _require_groups(self) -> None:
+        """Honest failure on stacks built without the group manager."""
+        if self._sync_groups is None:
+            raise RuntimeError(
+                "sync group manager is not configured on this api")
+
+    def _refresh_account_group(self, account: str, group: Optional[str]) -> None:
+        """Propagate a membership change into the account manager's memory
+        record (FINAL-PHASE F3 pattern, same as _refresh_account_profiles):
+        the 1 Hz dashboard poll reads record.sync_group, and the sync-group
+        manager owns the persisted value but never touches Account.record.
+        """
+        try:
+            account_obj = getattr(self._accounts, "_accounts", {}).get(account)
+            if account_obj is not None:
+                account_obj.record.sync_group = group
+        except Exception:
+            LOG.debug("group memory refresh failed for %r", account,
                       exc_info=True)
 
     # ------------------------------------------------------------- rate limits

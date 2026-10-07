@@ -194,6 +194,7 @@ def _load_stack_modules() -> SimpleNamespace:
         from core.plugin_state import PluginStateService
         from core.profile_manager import ProfileManager
         from core.rate_limit_manager import MIN_ACTION_INTERVAL, RateLimitManager
+        from core.sync_group_manager import SyncGroupManager
         from core.task_scheduler import TaskScheduler
         from database.db import Database
     except (ImportError, AttributeError) as exc:
@@ -212,6 +213,7 @@ def _load_stack_modules() -> SimpleNamespace:
         PluginStateService=PluginStateService,
         ProfileManager=ProfileManager,
         RateLimitManager=RateLimitManager,
+        SyncGroupManager=SyncGroupManager,
         TaskScheduler=TaskScheduler,
         Database=Database,
         floor=float(MIN_ACTION_INTERVAL),
@@ -312,6 +314,7 @@ class SimulationRunner:
         log_plugins = ServiceLogger(logger, "plugins")
         log_profiles = ServiceLogger(logger, "profiles")
         log_accounts = ServiceLogger(logger, "accounts")
+        log_sync_groups = ServiceLogger(logger, "sync-groups")
         settings = SettingsManager(
             bus,
             log_settings,
@@ -337,6 +340,13 @@ class SimulationRunner:
                 lane_prefixrate=_SIM_LANE_PREFIXRATE,
             )
             await limiter.load_persisted()
+            # sync groups: membership owner between accounts and the
+            # limiter, exactly as the production bootstrap wires it
+            sync_groups = mods.SyncGroupManager(
+                db.sync_groups, log_sync_groups, accounts_repo=db.accounts,
+                limiter=limiter,
+            )
+            await sync_groups.load()
             audit = mods.AuditRecorder(db.audit)
             # QUEUED PERSISTENCE (production parity): drain workers for the
             # log/audit rows BEFORE any traffic; stopped in teardown BEFORE
@@ -424,7 +434,7 @@ class SimulationRunner:
                 mods, bus, log_accounts, db, plugins_mgr, profiles, scheduler,
                 settings, audit, client_factory, credentials, limiter,
                 credential_service=credential_service, cooldowns=cooldowns,
-                plugin_state=plugin_state,
+                plugin_state=plugin_state, sync_groups=sync_groups,
             )
             await accounts.load()
             box["send"] = accounts.send_hook  # fill the seam BEFORE start()
@@ -437,6 +447,7 @@ class SimulationRunner:
                 accounts=accounts, plugins=plugins_mgr, profiles=profiles,
                 settings=settings, limiter=limiter, scheduler=scheduler,
                 logs=logger, audit=audit, credentials=credentials,
+                sync_groups=sync_groups,
             )
             from core.remote_control import RemoteControl
 
@@ -733,6 +744,7 @@ class SimulationRunner:
         credential_service: Any = None,
         cooldowns: Any = None,
         plugin_state: Any = None,
+        sync_groups: Any = None,
     ) -> Any:
         """AccountManager with the pinned positional arguments.
 
@@ -747,7 +759,7 @@ class SimulationRunner:
                 settings, audit, client_factory, credentials, limiter=limiter,
                 api_cache_repo=db.cache,
                 credential_service=credential_service, cooldowns=cooldowns,
-                plugin_state=plugin_state,
+                plugin_state=plugin_state, sync_groups=sync_groups,
             )
         except TypeError:
             try:

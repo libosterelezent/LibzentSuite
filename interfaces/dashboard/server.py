@@ -1054,6 +1054,102 @@ class DashboardServer:
                     ),
                 }
 
+            # ------------------------------------------------------------ sync groups
+            if (method, path) == ("GET", "/api/groups"):
+                return 200, {"ok": True, "data": await api.groups_list()}
+            if (method, path) == ("GET", "/api/groups/info"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.groups_snapshot(q_str(query, "group", path)),
+                }
+            if (method, path) == ("POST", "/api/groups/create"):
+                payload = {"name": require_str(body, "name", path)}
+                if "description" in body and body["description"] is not None:
+                    if not isinstance(body["description"], str):
+                        raise ValueError(
+                            f"field 'description' in POST {path} must be a string"
+                        )
+                    payload["description"] = body["description"]
+                if "enabled" in body and body["enabled"] is not None:
+                    payload["enabled"] = parse_json_bool(
+                        body["enabled"], "enabled")
+                return 200, {
+                    "ok": True,
+                    "data": await api.groups_create(payload, surface="dashboard"),
+                }
+            if (method, path) == ("POST", "/api/groups/update"):
+                payload: Dict[str, Any] = {}
+                for field in ("name", "description"):
+                    if field in body and body[field] is not None:
+                        if not isinstance(body[field], str):
+                            raise ValueError(
+                                f"field {field!r} in POST {path} must be a string"
+                            )
+                        payload[field] = body[field]
+                if "enabled" in body and body["enabled"] is not None:
+                    payload["enabled"] = parse_json_bool(
+                        body["enabled"], "enabled")
+                if not payload:
+                    return 400, {
+                        "ok": False,
+                        "error": "provide at least one of 'name',"
+                                 " 'description', 'enabled'",
+                    }
+                return 200, {
+                    "ok": True,
+                    "data": await api.groups_update(
+                        require_str(body, "group", path), payload,
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("POST", "/api/groups/delete"):
+                detach = body.get("detach_members", False)
+                if detach is None:
+                    detach = False
+                detach = parse_json_bool(detach, "detach_members")
+                return 200, {
+                    "ok": True,
+                    "data": await api.groups_delete(
+                        require_str(body, "group", path),
+                        detach_members=detach, surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("POST", "/api/groups/add-member"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.groups_add_account(
+                        require_str(body, "group", path),
+                        require_str(body, "account", path),
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("POST", "/api/groups/remove-member"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.groups_remove_account(
+                        require_str(body, "group", path),
+                        require_str(body, "account", path),
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("POST", "/api/groups/set-account"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.groups_set_account(
+                        require_str(body, "account", path),
+                        require_str(body, "group", path),
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("POST", "/api/groups/clear-account"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.groups_clear_account(
+                        require_str(body, "account", path),
+                        surface="dashboard",
+                    ),
+                }
+
             # ------------------------------------------------------------ rate limits
             if (method, path) == ("GET", "/api/ratelimit/policies"):
                 return 200, {"ok": True, "data": await api.ratelimit_policies()}

@@ -43,7 +43,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 __all__ = [
     "HELP", "QuitRequested", "UsageError", "help_text", "run_command",
     "format_status", "format_accounts", "format_account_info", "format_plugins",
-    "format_plugin_state", "format_profiles", "format_policies",
+    "format_plugin_state", "format_profiles", "format_groups",
+    "format_group_snapshot", "format_policies",
     "format_effective", "format_tasks", "format_history", "format_logs",
     "format_audit", "format_warnings", "format_simulation_report",
     "format_credential_status", "format_import_report", "format_cooldowns",
@@ -90,6 +91,14 @@ HELP: Dict[str, Tuple[str, str]] = {
         "list|create <name> <plugin ...>|delete <name>"
         "|assign <account> <profile>|unassign <account> <profile>",
         "capability profiles",
+    ),
+    "groups": (
+        "list|show <group>|create <name> [description]"
+        "|update <group> <field> <value>|delete <group> [--detach-members]"
+        "|add-member <group> <account>|remove-member <group> <account>"
+        "|set-account <account> <group>|clear-account <account>",
+        "sync groups (shared pacing membership; update fields: name,"
+        " description, enabled)",
     ),
     "ratelimit": (
         "show|stats|set <action> <interval> [jitter_min jitter_max] [level owner]"
@@ -185,6 +194,8 @@ async def run_command(api: Any, line: str) -> Optional[str]:
         return await _plugins_group(api, args)
     if cmd == "profiles":
         return await _profiles_group(api, args)
+    if cmd == "groups":
+        return await _groups_group(api, args)
     if cmd == "ratelimit":
         return await _ratelimit_group(api, args)
     if cmd == "tasks":
@@ -249,6 +260,17 @@ _PROFILES_USAGE = {
     "assign": "profiles assign <account> <profile>",
     "unassign": "profiles unassign <account> <profile>",
 }
+_GROUPS_USAGE = {
+    "list": "groups list",
+    "show": "groups show <group>",
+    "create": "groups create <name> [description]",
+    "update": "groups update <group> <field> <value>",
+    "delete": "groups delete <group> [--detach-members]",
+    "add-member": "groups add-member <group> <account>",
+    "remove-member": "groups remove-member <group> <account>",
+    "set-account": "groups set-account <account> <group>",
+    "clear-account": "groups clear-account <account>",
+}
 _RATELIMIT_USAGE = {
     "show": "ratelimit show",
     "stats": "ratelimit stats",
@@ -297,7 +319,8 @@ def _usage_for(ctx: str) -> str:
     group, _, sub = ctx.partition(" ")
     table = {
         "accounts": _ACCOUNTS_USAGE, "plugins": _PLUGINS_USAGE,
-        "profiles": _PROFILES_USAGE, "ratelimit": _RATELIMIT_USAGE,
+        "profiles": _PROFILES_USAGE, "groups": _GROUPS_USAGE,
+        "ratelimit": _RATELIMIT_USAGE,
         "tasks": _TASKS_USAGE, "credentials": _CREDENTIALS_USAGE,
         "cooldowns": _COOLDOWNS_USAGE,
     }.get(group, {})
@@ -532,6 +555,79 @@ async def _profiles_group(api: Any, args: List[str]) -> str:
         account, profile = _exact(rest, 2, ctx)
         return _result(await api.profiles_unassign(account, profile), verb="unassigned")
     raise UsageError(f"profiles: unknown subcommand {sub!r}")  # pragma: no cover
+
+
+async def _groups_group(api: Any, args: List[str]) -> str:
+    """groups list|show|create|update|delete|add-member|remove-member|
+    set-account|clear-account (thin wrappers over ControlAPI)."""
+    sub, rest = _sub(_GROUPS_USAGE, args, "groups")
+    ctx = f"groups {sub}"
+    if sub == "list":
+        _exact(rest, 0, ctx)
+        return format_groups(await api.groups_list())
+    if sub == "show":
+        return format_group_snapshot(
+            await api.groups_snapshot(_exact(rest, 1, ctx))
+        )
+    if sub == "create":
+        if not rest:
+            raise UsageError(
+                f"groups create: needs a name — usage: {_GROUPS_USAGE['create']}"
+            )
+        payload: Dict[str, Any] = {"name": rest[0]}
+        if rest[1:]:
+            payload["description"] = " ".join(rest[1:])
+        return _result(await api.groups_create(payload, surface="cli"),
+                       verb="created")
+    if sub == "update":
+        group, field, value = _exact(rest, 3, ctx)
+        if field not in ("name", "description", "enabled"):
+            raise UsageError(
+                f"groups update: unknown field {field!r} — expected"
+                " name|description|enabled"
+            )
+        if field == "enabled":
+            payload = {"enabled": _on_off(value, ctx)}
+        else:
+            payload = {field: value}
+        return _result(
+            await api.groups_update(group, payload, surface="cli"),
+            verb="updated",
+        )
+    if sub == "delete":
+        detach = "--detach-members" in rest
+        rest = [token for token in rest if token != "--detach-members"]
+        group = _exact(rest, 1, ctx)
+        return _result(
+            await api.groups_delete(group, detach_members=detach,
+                                    surface="cli"),
+            verb="deleted",
+        )
+    if sub == "add-member":
+        group, account = _exact(rest, 2, ctx)
+        return _result(
+            await api.groups_add_account(group, account, surface="cli"),
+            verb="member added",
+        )
+    if sub == "remove-member":
+        group, account = _exact(rest, 2, ctx)
+        return _result(
+            await api.groups_remove_account(group, account, surface="cli"),
+            verb="member removed",
+        )
+    if sub == "set-account":
+        account, group = _exact(rest, 2, ctx)
+        return _result(
+            await api.groups_set_account(account, group, surface="cli"),
+            verb="group set",
+        )
+    if sub == "clear-account":
+        account = _exact(rest, 1, ctx)
+        return _result(
+            await api.groups_clear_account(account, surface="cli"),
+            verb="group cleared",
+        )
+    raise UsageError(f"groups: unknown subcommand {sub!r}")  # pragma: no cover
 
 
 async def _ratelimit_group(api: Any, args: List[str]) -> str:
@@ -854,6 +950,50 @@ def format_profiles(profiles: List[dict]) -> str:
             f"  {str(profile.get('name', '?')):<18}[{plugins}]"
             + (f" — {desc}" if desc else "")
         )
+    return "\n".join(lines)
+
+
+def format_groups(groups: List[dict]) -> str:
+    """Sync groups payload (api.groups_list) -> name, members, description."""
+    if not groups:
+        return "  (no sync groups — 'groups create <name>')"
+    lines: List[str] = []
+    for group in groups:
+        count = group.get("member_count", 0)
+        flag = "" if group.get("enabled", True) else " [disabled]"
+        desc = group.get("description") or ""
+        lines.append(
+            f"  {str(group.get('name', '?')):<18}{count} member(s){flag}"
+            + (f" — {desc}" if desc else "")
+        )
+    return "\n".join(lines)
+
+
+def format_group_snapshot(snapshot: dict) -> str:
+    """Group snapshot (api.groups_snapshot) -> the full group page."""
+    lines = [
+        f"Group: {snapshot.get('name', '?')}  (id={snapshot.get('id', '?')})",
+        f"  Members: {snapshot.get('member_count', 0)}"
+        f"  pacing key: {snapshot.get('pacing_key', '-')}",
+    ]
+    desc = snapshot.get("description") or ""
+    if desc:
+        lines.append(f"  Description: {desc}")
+    lines.append(
+        "  Enabled: " + ("yes" if snapshot.get("enabled", True) else "no")
+    )
+    members = snapshot.get("members") or []
+    if members:
+        for member in members:
+            if isinstance(member, dict):
+                status = member.get("status") or "-"
+                lines.append(
+                    f"    {str(member.get('name', '?')):<18}{status}"
+                )
+            else:
+                lines.append(f"    {member}")
+    else:
+        lines.append("    (none — accounts join with 'groups add-member')")
     return "\n".join(lines)
 
 

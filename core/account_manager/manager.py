@@ -26,7 +26,8 @@ purposes. The COMPLETE inventory of client touches (each demand-driven):
 There is NO prefetching, NO "just in case" fetching, and NO API-derived
 state beyond what a live send/flow actually consumed. ``details()`` reads
 exclusively from the ingested READY snapshot + repos. Rate-scope metadata
-(``_sync_group_scope``) is pure plumbing — no API involved.
+(``_sync_group_apply`` / ``_sync_group_scope``) is pure plumbing — no API
+involved.
 ════════════════════════════════════════════════════════════════════════
 
 One :class:`Account` per Discord user account, split into PERSISTENT state
@@ -311,6 +312,7 @@ class AccountManager:
         cooldowns: Any = None,
         plugin_state: Any = None,
         lifecycle: Any = None,
+        sync_groups: Any = None,
     ) -> None:
         """``limiter`` (optional) enriches details() with effective rate data;
         ``supervisor_tick`` is the supervisor's poll granularity in seconds;
@@ -323,7 +325,11 @@ class AccountManager:
         are handed to the per-plugin services facades (plugin API);
         ``lifecycle`` (optional LifecycleGovernor, PHASE-4) rate-limits
         start/stop thrashing per account and fleet-wide — None disables
-        limiting (tests/simulators construct managers without it).
+        limiting (tests/simulators construct managers without it);
+        ``sync_groups`` (optional SyncGroupManager) owns group membership:
+        when wired, the group-scope plumbing of add/remove/restore is
+        delegated to it (AccountManager -> SyncGroupManager ->
+        RateLimitManager); unwired stacks keep the legacy direct plumbing.
 
         The constructor does NO repository I/O — persisted accounts are
         restored by awaiting :meth:`load` (the bootstrap does, right after
@@ -375,6 +381,10 @@ class AccountManager:
         self._dying_supervisors: set = set()
         # PHASE-4 (S4): lifecycle rate governor (None = unlimited)
         self._lifecycle = lifecycle
+        # SyncGroupManager (optional): the application-level owner of group
+        # membership. When present, every group-scope touch below delegates
+        # to it; when absent, the legacy direct limiter plumbing runs.
+        self._sync_groups = sync_groups
 
         # inbound audit trail (spec §10): every message seen by any account
         bus.subscribe(MessageReceived, self._audit_inbound)
@@ -383,7 +393,11 @@ class AccountManager:
     def _sync_group_scope(self, name: str, group: Optional[str]) -> None:
         """Feed the account's group membership to the limiter (per-account/
         group rate scope). Pure metadata plumbing — NO Discord API is
-        involved; tolerant of limiters without group support (tests)."""
+        involved; tolerant of limiters without group support (tests).
+
+        LEGACY path: only used when no SyncGroupManager is wired (unwired
+        test/sim stacks) — the wired path goes through _sync_group_apply.
+        """
         register = getattr(self._limiter, "set_account_group", None)
         if register is None:
             return
@@ -392,6 +406,34 @@ class AccountManager:
         except Exception:
             self._logger.exception("group scope registration failed for %s", name)
 
+    async def _sync_group_apply(
+        self, name: str, group: Optional[str], *, forget: bool = False
+    ) -> None:
+        """One membership -> runtime sync, through the owning manager.
+
+        With SyncGroupManager wired this is the AccountManager ->
+        SyncGroupManager -> RateLimitManager path (the wired manager also
+        adopts the group row for legacy names). Without it, the legacy
+        direct plumbing keeps unwired stacks behaving exactly as before.
+        Never raises: group plumbing must not break account lifecycle.
+        """
+        if self._sync_groups is not None:
+            try:
+                if forget:
+                    outcome = self._sync_groups.forget_account(name)
+                else:
+                    outcome = self._sync_groups.sync_membership(name, group)
+                if inspect.iscoroutine(outcome):
+                    await outcome
+            except Exception:
+                self._logger.exception(
+                    "sync-group sync failed for account %s", name)
+            return
+        if forget:
+            self._sync_group_scope(name, None)
+        else:
+            self._sync_group_scope(name, group)
+
     # ------------------------------------------------------------------ boot
     async def load(self) -> None:
         """Rebuild Account objects (and attach their plugins) from the repo.
@@ -399,6 +441,11 @@ class AccountManager:
         Boot path: awaited by the bootstrap (and the simulation runner)
         right after construction — the constructor itself does no I/O.
         Best-effort: a repository failure must not break the boot.
+
+        Group restoration is owned by SyncGroupManager when wired: ONE
+        delegated ``sync_runtime()`` pass after the accounts are restored
+        (no per-record group logic here). Unwired stacks keep the legacy
+        per-record limiter plumbing.
         """
         try:
             records = await self._accounts_repo.list() or []
@@ -411,9 +458,17 @@ class AccountManager:
                 self._refresh_credential_source(account)
                 self._accounts[record.name] = account
                 await self._attach_plugins(record.name)
-                self._sync_group_scope(record.name, record.sync_group)
+                if self._sync_groups is None:  # legacy path (see docstring)
+                    self._sync_group_scope(record.name, record.sync_group)
             except Exception:
                 self._logger.exception("could not restore account %r", record.name)
+        if self._sync_groups is not None:
+            try:
+                outcome = self._sync_groups.sync_runtime()
+                if inspect.iscoroutine(outcome):
+                    await outcome
+            except Exception:
+                self._logger.exception("sync-group runtime restore failed")
 
     # ------------------------------------------------------------ registry
     async def add_account(
@@ -469,7 +524,7 @@ class AccountManager:
         if fresh is not None:
             account.record = fresh
         await self._attach_plugins(name)
-        self._sync_group_scope(name, sync_group)
+        await self._sync_group_apply(name, sync_group)
         self._logger.info(
             "account %s added (enabled=%s sync_group=%s profiles=%s)",
             name, enabled, sync_group, account.record.profiles or "-",
@@ -590,7 +645,7 @@ class AccountManager:
             except Exception:  # inherit the old one's DM channel ids
                 self._logger.exception("api-cache cascade failed for %s", name)
         self._drop_services(name)
-        self._sync_group_scope(name, None)
+        await self._sync_group_apply(name, None, forget=True)
         if self._credential_service is not None:
             try:
                 await self._credential_service.delete(name)

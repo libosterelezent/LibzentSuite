@@ -77,6 +77,10 @@ class ProfileError(ValueError):
     """Invalid profile definition or assignment."""
 
 
+class SyncGroupError(ValueError):
+    """Invalid sync group definition or membership operation."""
+
+
 class SettingsValidationError(ValueError):
     """A setting value failed schema validation (path included)."""
 
@@ -113,8 +117,9 @@ class SimulationError(RuntimeError):
 __all__ = [
     "FlowBlocked", "CacheInvalid", "TargetGone", "AccessDenied", "FetchRequired",
     "ServerRateLimit", "AccountError", "PluginError", "ProfileError",
-    "SettingsValidationError", "RatePolicyError", "UnsafePolicyError",
-    "SchedulerError", "DatabaseError", "CredentialsError", "SimulationError",
+    "SyncGroupError", "SettingsValidationError", "RatePolicyError",
+    "UnsafePolicyError", "SchedulerError", "DatabaseError", "CredentialsError",
+    "SimulationError",
 ]
 
 def flow_block_reason(exc: BaseException) -> str:

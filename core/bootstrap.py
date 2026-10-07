@@ -4,10 +4,12 @@ Construction order (the only place that knows how the managers interconnect):
 
   Credentials -> Config -> Database(await connect) -> LogService(+db sink)
     -> EventBus -> RateLimitManager(+config policies, await load_persisted)
-    -> SettingsManager(await load) -> AuditRecorder
+    -> SyncGroupManager(await load) -> SettingsManager(await load)
+    -> AuditRecorder
     -> TaskScheduler(late-bound sender) -> PluginManager(discover + await
     persist_metadata) -> ProfileManager(await load)
-    -> AccountManager(await load; restores persisted accounts)
+    -> AccountManager(await load; restores persisted accounts + delegates
+       group membership restore to SyncGroupManager)
     -> CredentialService(+refresh)/CooldownService(await restore)/
        PluginStateService wired into the managers
     -> sender bound (accounts.send_hook) -> scheduler.start()
@@ -49,6 +51,7 @@ from .plugin_state import PluginStateService
 from .profile_manager import ProfileManager
 from .rate_limit_manager import RateLimitManager
 from .settings_manager import SettingsManager
+from .sync_group_manager import SyncGroupManager
 from .task_scheduler import TaskScheduler
 from .account_manager import AccountManager
 from .account_manager.lifecycle import LifecycleGovernor, LifecyclePolicy
@@ -172,7 +175,8 @@ class Framework:
                  remote_control: Any = None,
                  credential_service: Any = None,
                  cooldowns: Any = None,
-                 plugin_state: Any = None) -> None:
+                 plugin_state: Any = None,
+                 sync_groups: Any = None) -> None:
         self.api = api
         self.bus = bus
         self.logs = logs
@@ -191,6 +195,7 @@ class Framework:
         self.credential_service = credential_service
         self.cooldowns = cooldowns
         self.plugin_state = plugin_state
+        self.sync_groups = sync_groups
         self._shut_down = False
 
     async def shutdown(self) -> None:
@@ -427,6 +432,16 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     # is the sole source of truth — the config file never re-adds it.
     await _seed_config_defaults(limiter, config, database)
 
+    # Sync groups: persistent membership owner, sits BETWEEN the accounts
+    # and the limiter (AccountManager -> SyncGroupManager -> RateLimitManager).
+    # Runtime pacing itself stays in the limiter; this manager only keeps
+    # the engine's account->group metadata in sync with persistence.
+    sync_groups = SyncGroupManager(
+        database.sync_groups, ServiceLogger(logs, "sync-groups"),
+        accounts_repo=database.accounts, limiter=limiter,
+    )
+    await sync_groups.load()
+
     settings = SettingsManager(
         bus, ServiceLogger(logs, "settings"),
         plugin_repo=database.plugins, account_settings_repo=database.account_settings,
@@ -484,6 +499,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         credential_service=credential_service, cooldowns=cooldowns,
         plugin_state=plugin_state,
         lifecycle=LifecycleGovernor(),  # PHASE-4 (S4): anti-thrash defaults
+        sync_groups=sync_groups,
     )
     cleanups.append(("accounts", accounts.stop_all))
     await accounts.load()  # restore persisted accounts (attach their plugins)
@@ -532,6 +548,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         limiter=limiter, scheduler=scheduler, logs=logs, audit=audit,
         simulation=simulation_runner, credentials=credentials, database=database,
         credentials_svc=credential_service, cooldowns=cooldowns,
+        sync_groups=sync_groups,
         started_at=_time.time(),
     )
 
@@ -564,5 +581,5 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         audit=audit, database=database, credentials=credentials, config=config,
         remote_control=remote_control,
         credential_service=credential_service, cooldowns=cooldowns,
-        plugin_state=plugin_state,
+        plugin_state=plugin_state, sync_groups=sync_groups,
     )
