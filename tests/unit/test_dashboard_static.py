@@ -1,14 +1,17 @@
-"""Dashboard v2 SPA regression tests: startup safety, Groups safety,
-API compatibility with the real server, and static validation.
+"""Dashboard v2 SPA regression tests: startup safety, Groups integration
+with the real /api/groups backend, API compatibility with the real server,
+and static validation.
 
 The dashboard is a single-file static SPA (no build step), so its contract
 with the backend is verifiable statically:
 
 * every ``/api/...`` endpoint the SPA calls must exist in the route table
   of interfaces/dashboard/server.py (startup can never 404),
-* the Groups UI must never mutate accounts or fake profiles (the v2
-  redesign once "created" groups by assigning a ``__dummy__`` profile and
-  REMOVING every member account — forbidden forever),
+* the Groups UI drives the REAL SyncGroupManager backend
+  (``/api/groups/*``): the obsolete read-only-era assumptions must stay
+  gone, group moves must use the group endpoints — and NEVER fake groups
+  by destroying/recreating accounts or assigning ``__dummy__`` profiles
+  (the v2 redesign once did both — forbidden forever),
 * the script block must be structurally balanced and reference only
   element ids that exist in the document.
 
@@ -56,44 +59,71 @@ def _spa_endpoints() -> set:
 
 
 # --------------------------------------------------------------------- static
-class TestGroupsSafety(unittest.TestCase):
-    """The Groups UI must be read-only: no fake profiles, no account
-    destruction, no calls to a group backend that does not exist."""
+class TestGroupsIntegration(unittest.TestCase):
+    """The Groups UI is a real client of the /api/groups/* backend: every
+    endpoint is called, the read-only-era assumptions are gone, and the
+    forbidden fake-mutation patterns stay forbidden."""
 
-    def test_no_group_backend_api_assumptions(self):
-        html = _spa()
-        for forbidden in ("/api/groups", "group_create", "group_members",
-                          "group_delete", "group_add", "group_remove"):
-            self.assertNotIn(forbidden, html, f"SPA references {forbidden!r}")
+    GROUP_ENDPOINTS = (
+        "/api/groups", "/api/groups/info", "/api/groups/create",
+        "/api/groups/update", "/api/groups/delete",
+        "/api/groups/add-member", "/api/groups/remove-member",
+        "/api/groups/set-account", "/api/groups/clear-account",
+    )
 
-    def test_no_dummy_profile_and_no_create_group_ui(self):
+    def test_every_group_endpoint_is_called(self):
         html = _spa()
-        for forbidden in ("__dummy__", "cg-submit", "cg-name", "cg-members",
-                          "btn-create-group", "dlg-create-group"):
-            self.assertNotIn(forbidden, html, f"dangerous group UI remnant {forbidden!r}")
+        for endpoint in self.GROUP_ENDPOINTS:
+            self.assertIn(endpoint, html,
+                          f"the Groups UI must use the real {endpoint!r}")
 
-    def test_readonly_notice_present(self):
-        html = _spa()
-        self.assertIn(
-            "Group management backend is not available yet", html,
-            "the read-only explanation message must be shown")
+    def test_group_endpoints_exist_on_server(self):
+        routes = _server_routes()
+        for endpoint in self.GROUP_ENDPOINTS:
+            self.assertTrue(any((m, endpoint) in routes for m in ("GET", "POST")),
+                            f"server does not serve {endpoint}")
 
-    def test_group_moves_rendered_disabled(self):
+    def test_obsolete_readonly_assumptions_gone(self):
         html = _spa()
-        # both group-move entry points must be disabled with an explanation
+        for obsolete in ("Group management backend is not available",
+                         "group-management backend", "read-only by design",
+                         "no Create Group action",
+                         "picker intentionally absent"):
+            self.assertNotIn(obsolete, html,
+                             f"obsolete group assumption {obsolete!r} must be gone")
+
+    def test_group_controls_functional(self):
+        html = _spa()
         menu = re.search(r'<button data-act="group"[^>]*>', html)
-        self.assertIsNotNone(menu, "group menu item must exist (disabled)")
-        self.assertIn("disabled", menu.group(0))
+        self.assertIsNotNone(menu, "the Move-to-group menu item must exist")
+        self.assertNotIn("disabled", menu.group(0),
+                         "Move to group must no longer be disabled")
         bulk = re.search(r'<button[^>]*id="bulk-group"[^>]*>', html)
-        self.assertIsNotNone(bulk, "bulk group button must exist (disabled)")
-        self.assertIn("disabled", bulk.group(0))
+        self.assertIsNotNone(bulk, "the bulk Move-to-group button must exist")
+        self.assertNotIn("disabled", bulk.group(0),
+                         "bulk Move to group must no longer be disabled")
+        for functional in ('id="btn-create-group"', 'id="cg-submit"',
+                           'id="dlg-create-group"'):
+            self.assertIn(functional, html, f"{functional} missing")
 
-    def test_accounts_remove_only_in_explicit_menu(self):
+    def test_no_dummy_profile_and_no_fake_group_ui(self):
+        html = _spa()
+        for forbidden in ("__dummy__",):
+            self.assertNotIn(forbidden, html,
+                             f"dangerous group UI remnant {forbidden!r}")
+
+    def test_group_moves_use_group_endpoints_only(self):
+        """Membership changes go through /api/groups/* — never account
+        destruction/recreation and never profile assignment."""
         html = _spa()
         self.assertEqual(
             html.count('"/api/accounts/remove"'), 1,
             "accounts/remove may only appear in the explicit Remove Account "
             "confirmation — never in a group flow")
+        self.assertEqual(
+            html.count('"/api/accounts/add"'), 1,
+            "accounts/add may only appear in the explicit Add Account dialog "
+            "— group moves must never recreate accounts")
         self.assertEqual(
             html.count('"/api/profiles/assign"'), 1,
             "profiles/assign may only appear in the real profile picker")
@@ -107,6 +137,15 @@ class TestGroupsSafety(unittest.TestCase):
                              f"group card must not send {path} fleet-wide")
         self.assertIn("members.map(m=>post(", js,
                       "group Start/Stop must iterate the group's members")
+
+    def test_groups_loaded_over_rest_not_derived(self):
+        """GET /api/groups is the authoritative list (empty groups must be
+        discoverable) — not the account-derived groupMap()."""
+        js = _script(_spa())
+        self.assertIn('await api("/api/groups")', js,
+                      "loadGroups must fetch the persisted group list")
+        self.assertIn("groupsList", js,
+                      "the SPA must keep a persisted-groups state variable")
 
 
 class TestStartupRobustness(unittest.TestCase):
@@ -137,7 +176,8 @@ class TestStartupRobustness(unittest.TestCase):
 
     def test_startup_loaders_catch_own_failures(self):
         js = _script(_spa())
-        for loader in ("loadManifests", "loadProfiles", "loadScenarios"):
+        for loader in ("loadManifests", "loadProfiles", "loadGroups",
+                       "loadScenarios"):
             # every loader definition contains a try/catch -> showErr path
             body = re.search(
                 rf"async function {loader}\(\) {{(.*?)\n}}", js, re.S)
@@ -205,6 +245,9 @@ class _ZeroAccountAPI:
     async def profiles_list(self):
         return []
 
+    async def groups_list(self):
+        return []
+
     async def simulation_list(self):
         return []
 
@@ -257,7 +300,8 @@ class TestStartupEndpointsLive(unittest.IsolatedAsyncioTestCase):
 
     async def test_startup_endpoints_answer(self):
         for path in ("/api/status", "/api/accounts", "/api/plugins",
-                     "/api/profiles", "/api/simulation/list", "/api/tasks",
+                     "/api/profiles", "/api/groups",
+                     "/api/simulation/list", "/api/tasks",
                      "/api/tasks/history", "/api/cooldowns",
                      "/api/logs", "/api/audit"):
             status, body = await self._get(path)
