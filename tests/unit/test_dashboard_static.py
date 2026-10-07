@@ -147,6 +147,20 @@ class TestGroupsIntegration(unittest.TestCase):
         self.assertIn("groupsList", js,
                       "the SPA must keep a persisted-groups state variable")
 
+    def test_group_mutation_renders_once_after_both_fetches(self):
+        """afterGroupMutation must fetch groups AND accounts, then render
+        exactly once — loadGroups' own render is suppressed, otherwise a
+        mutation paints fresh groups with stale account chips (and does a
+        duplicate full DOM rebuild) before the accounts land."""
+        js = _script(_spa())
+        body = js.split("async function afterGroupMutation")[1].split("\n}")[0]
+        self.assertIn("loadGroups(false)", body,
+                      "mutation path must suppress loadGroups' own render")
+        self.assertIn("refreshAccountsNow()", body,
+                      "mutation path must also refresh account records")
+        self.assertEqual(body.count("render()"), 1,
+                         "exactly one render per group mutation")
+
 
 class TestStartupRobustness(unittest.TestCase):
     """One uncaught init error must not be possible from static causes."""
@@ -180,7 +194,7 @@ class TestStartupRobustness(unittest.TestCase):
                        "loadScenarios"):
             # every loader definition contains a try/catch -> showErr path
             body = re.search(
-                rf"async function {loader}\(\) {{(.*?)\n}}", js, re.S)
+                rf"async function {loader}\([^)]*\) {{(.*?)\n}}", js, re.S)
             self.assertIsNotNone(body, f"{loader} missing")
             self.assertIn("catch", body.group(1),
                           f"{loader} must not reject (blocks Promise.all)")
@@ -189,6 +203,39 @@ class TestStartupRobustness(unittest.TestCase):
         js = _script(_spa())
         self.assertIn("dashboard init failed", js,
                       "init failures must be reported via the error banner")
+
+    def test_boot_activates_initial_view(self):
+        """Regression: .panel{display:none} — the boot sequence must call
+        UI.go(...) once, otherwise the first paint is a blank main area
+        until the user clicks a nav item."""
+        js = _script(_spa())
+        boot = js.split("buildNav(); wire(); connectWS();")[1].split(
+            "Promise.all")[0]
+        self.assertIn("UI.go(", boot,
+                      "boot must activate the initial panel view")
+
+    def test_render_activates_current_view_panel(self):
+        """Regression: when the first WS stats arrive AFTER boot, render()
+        must move the dashboard off the onboarding panel onto the current
+        view — renderHome() filling hidden metrics left the onboarding
+        screen up forever."""
+        js = _script(_spa())
+        self.assertIn('showPanel("panel-"+currentView)', js,
+                      "render must activate the current view's panel")
+        self.assertIn('showPanel("panel-onboard")', js,
+                      "empty-state render must activate onboarding")
+
+    def test_formatter_calls_have_definitions(self):
+        """Regression: fmtLatency() was called at two render sites but the
+        function was defined as fmtLat — openAcctDetails() threw
+        ReferenceError on EVERY open, and account cards with measured
+        latency broke the fleet view."""
+        js = _script(_spa())
+        called = set(re.findall(r"\b(fmt[A-Z]\w*)\s*\(", js))
+        defined = set(re.findall(r"function (fmt[A-Z]\w*)\s*\(", js))
+        self.assertEqual(
+            called - defined, set(),
+            "fmt helpers called but not defined: %s" % (called - defined))
 
 
 class TestApiCompatibility(unittest.TestCase):

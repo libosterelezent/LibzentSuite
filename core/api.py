@@ -711,6 +711,13 @@ class ControlAPI:
             payload = dict(payload)
             payload["enabled"] = parse_bool(payload["enabled"], "enabled")
         out = await _resolved(self._sync_groups.update_group(group, **payload))
+        # A rename rewrites every member's pointer in the repository AND the
+        # limiter, but never Account.record — propagate the new name into
+        # the memory records the 1 Hz poll serves (same F3 pattern as the
+        # membership endpoints below; idempotent for non-rename updates).
+        for member in await _resolved(
+                self._sync_groups.get_group_members(out["name"])):
+            self._refresh_account_group(member, out.get("name"))
         self._audit_mgmt("system", "mgmt:group.updated", surface,
                          extra=f"group={out.get('name')}")
         return out
@@ -725,6 +732,11 @@ class ControlAPI:
         out = await _resolved(
             self._sync_groups.delete_group(group, detach_members=detach_members)
         )
+        # Detached members' Account.records still name the deleted group —
+        # clear them (the repo + limiter are already clean) so the account
+        # cards / group picker show Independent, not a dangling group name.
+        for member in out.get("detached") or []:
+            self._refresh_account_group(member, None)
         self._audit_mgmt(
             "system", "mgmt:group.deleted", surface,
             extra=f"group={out.get('deleted')} detached={len(out.get('detached') or [])}",

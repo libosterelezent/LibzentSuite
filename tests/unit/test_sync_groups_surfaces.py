@@ -144,6 +144,43 @@ class ControlApiGroupsTests(ControlApiGroupsTestBase):
         self.assertEqual(out["detached"], ["alpha"])
         self.assertEqual(await self.api.groups_list(), [])
 
+    async def test_rename_and_detach_refresh_account_records(self) -> None:
+        """Regression: rename / delete+detach used to leave the account
+        manager's memory record naming the OLD (or deleted) group — the
+        1 Hz dashboard poll serves record.sync_group, so account cards
+        showed a stale/dangling chip until restart."""
+        await self.api.groups_create({"name": "alpha-grp"})
+        await self.api.groups_add_account("alpha-grp", "alpha")
+        await self.api.groups_add_account("alpha-grp", "beta")
+
+        renamed = await self.api.groups_update(
+            "alpha-grp", {"name": "beta-grp"})
+        self.assertEqual(renamed["name"], "beta-grp")
+        for name in ("alpha", "beta"):
+            self.assertEqual(
+                self.accounts_mgr._accounts[name].record.sync_group,
+                "beta-grp", f"{name}'s memory record must follow the rename")
+            self.assertEqual(
+                (await self.db.accounts.get(name)).sync_group, "beta-grp")
+        self.assertEqual(
+            self.limiter.account_groups(),
+            {"alpha": "beta-grp", "beta": "beta-grp"})
+
+        out = await self.api.groups_delete("beta-grp", detach_members=True)
+        self.assertEqual(sorted(out["detached"]), ["alpha", "beta"])
+        for name in ("alpha", "beta"):
+            self.assertIsNone(
+                self.accounts_mgr._accounts[name].record.sync_group,
+                f"{name}'s memory record must clear on detach-delete")
+        self.assertEqual(self.limiter.account_groups(), {})
+        # a non-rename update must not disturb the propagated value
+        await self.api.groups_create({"name": "gamma-grp"})
+        await self.api.groups_add_account("gamma-grp", "alpha")
+        await self.api.groups_update("gamma-grp", {"enabled": False})
+        self.assertEqual(
+            self.accounts_mgr._accounts["alpha"].record.sync_group,
+            "gamma-grp")
+
     async def test_unwired_api_fails_loudly(self) -> None:
         api = ControlAPI(
             accounts=_StubAccountsManager(),

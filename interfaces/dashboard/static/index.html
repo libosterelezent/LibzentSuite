@@ -746,7 +746,7 @@ function esc(s){const d=document.createElement("span");d.textContent=String(s??"
 function btn(l,fn,cls){const b=document.createElement("button");b.textContent=l;b.onclick=fn;if(cls)b.className=cls;return b;}
 function btnG(l,fn,cls){const b=btn(l,null,cls);b.onclick=()=>{if(b.disabled)return;b.disabled=true;Promise.resolve(fn()).finally(()=>{b.disabled=false});};return b;}
 function fmtDur(s){s=Math.max(0,Math.round(+s||0));if(s<60)return s+"s";if(s<3600)return Math.floor(s/60)+"m "+(s%60)+"s";return Math.floor(s/3600)+"h "+Math.floor(s%3600/60)+"m";}
-function fmtLat(ms){if(ms==null)return"-";const n=+ms;return Number.isFinite(n)?Math.round(n)+"ms":"-";}
+function fmtLatency(ms){if(ms==null)return"-";const n=+ms;return Number.isFinite(n)?Math.round(n)+"ms":"-";}
 function fmtAge(ts){return ts?fmtDur((Date.now()-ts*1000)/1000):"-";}
 function credLbl(s){return s==="db"?"Configured":"Missing";}
 
@@ -901,9 +901,22 @@ function effectiveCaps(acct, profs) {
 function statusBadge(s) { return `<span class="st st-${esc(s)}">${esc(s.replace(/_/g," "))}</span>`; }
 function scopeBadge(s) { return `<span class="scope scope-${esc(s)}">${esc(s)}</span>`; }
 
+// Panel activation is centralized: a render ALWAYS shows the current
+// view's panel. This is what moves the dashboard off onboarding when the
+// first WS stats arrive AFTER boot (renderHome used to fill hidden
+// metrics while the onboarding screen stayed up forever).
+function showPanel(id) {
+  const target = $(id) || $("panel-home");
+  if (!target.classList.contains("active")) {
+    $$(".panel").forEach(p => p.classList.remove("active"));
+    target.classList.add("active");
+  }
+}
+
 function render() {
   const hasAccts = accounts().length > 0;
-  if (!hasAccts && currentView!=="tools") { $$(".panel").forEach(p=>p.classList.remove("active")); $("panel-onboard").classList.add("active"); return; }
+  if (!hasAccts && currentView!=="tools") { showPanel("panel-onboard"); return; }
+  showPanel("panel-"+currentView);
   if (currentView==="home") renderHome();
   if (currentView==="fleet") { renderAccounts(); renderGroups(); }
   if (currentView==="profiles") renderProfiles();
@@ -1283,10 +1296,10 @@ function confirmAction(title, msg, fn, yesLabel) {
 // member/runtime state comes from the WS stats. Mutations refresh the
 // displayed state without reloading the page.
 
-async function loadGroups() {
+async function loadGroups(thenRender=true) {
   try { groupsList = await api("/api/groups")||[]; groupsFailed = false; }
   catch(e) { groupsFailed = true; showErr(e.message); }
-  render();
+  if (thenRender) render();
 }
 
 async function refreshAccountsNow() {
@@ -1298,9 +1311,12 @@ async function refreshAccountsNow() {
   } catch { /* WS broadcast catches up */ }
 }
 
+// One coherent post-mutation update: fetch groups AND accounts, then a
+// single render. loadGroups' own render is suppressed here — rendering
+// between the two fetches showed fresh groups with stale account chips
+// (double DOM rebuild + one frame of stale intermediate state).
 async function afterGroupMutation() {
-  await loadGroups();
-  await refreshAccountsNow();
+  await Promise.all([loadGroups(false), refreshAccountsNow()]);
   render();
 }
 
@@ -1774,6 +1790,11 @@ try {
   if (qtoken) { store.setItem("dash_token",qtoken.trim()); $("token").value=qtoken.trim(); history.replaceState(null,"",location.pathname); }
 
   buildNav(); wire(); connectWS();
+  // Activate the initial view — .panel{display:none} means NOTHING is
+  // visible until UI.go() adds .active; without this the first paint is
+  // a blank main area (nav clicks would also fix it, but first load
+  // must not depend on one).
+  UI.go("home");
   // Every loader catches its own failures (error banner + per-page fallback
   // state), so one dead endpoint can never block the others or the render.
   Promise.all([loadManifests(),loadProfiles(),loadGroups(),loadScenarios()])
