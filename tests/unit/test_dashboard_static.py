@@ -414,6 +414,29 @@ class TestUiStructure(unittest.TestCase):
         js = _js()
         self.assertIn("function setFb(", js, "inline feedback helper missing")
 
+    def test_policy_rows_are_editable(self):
+        """Each stored policy row must offer an edit button that prefills
+        the shared dialog — editing reuses POST /api/ratelimit/set (the
+        engine keys by (level, owner, action): setting an existing key
+        UPDATES it, memory-first) and loadPolicies() re-renders the table
+        instantly. No new endpoint, no page reload."""
+        js = _js()
+        html = _spa()
+        self.assertIn("data-rledit=", js, "policy rows need edit buttons")
+        self.assertEqual(
+            js.count("data-rledit="), 1,
+            "edit buttons are wired once in renderPolicyTable")
+        self.assertIn("function openPolicyEditor", js)
+        # the editor carries every field the row holds
+        for ref in ("rp-action", "rp-interval", "rp-jmin", "rp-jmax",
+                    "rp-level", "rp-owner"):
+            self.assertIn(f'"{ref}")', js.split("function openPolicyEditor")[1].split("\n}")[0],
+                          f"openPolicyEditor must prefill {ref}")
+        self.assertIn('id="rp-title"', html,
+                      "dialog title needs an id for Add/Edit switching")
+        # edit must go through the SAME set endpoint as add
+        self.assertEqual(js.count('post("/api/ratelimit/set"'), 1)
+
     def test_custom_scrollbar_theme(self):
         css = _css()
         self.assertIn("::-webkit-scrollbar", css,

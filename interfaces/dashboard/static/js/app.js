@@ -300,6 +300,7 @@ function wire() {
 
   // Stored policies (real /api/ratelimit/* endpoints)
   $("rl-add").onclick = () => {
+    $("rp-title").textContent = "Add Policy";
     $("rp-action").value="message"; $("rp-interval").value=""; $("rp-jmin").value=""; $("rp-jmax").value="";
     $("rp-level").value="global"; $("rp-owner").value="";
     const dlg=$("dlg-policy"); clearFb(dlg.querySelector(".form")); dlg.showModal(); $("rp-interval").focus();

@@ -110,6 +110,22 @@ function renderPlugins() {
 
 /* ── Policies ──────────────────────────────────────────────────────────────── */
 let policyList = [];
+/* Prefill the shared policy dialog for EDITING an existing row (same
+   POST /api/ratelimit/set — the engine keys policies by (level, owner,
+   action), so setting an existing key UPDATES it: memory first (instant),
+   then persisted). */
+function openPolicyEditor([level, owner, action, interval, jmin, jmax]) {
+  $("rp-title").textContent = "Edit Policy";
+  $("rp-action").value = action;
+  $("rp-interval").value = interval;
+  $("rp-jmin").value = jmin || "";
+  $("rp-jmax").value = jmax || "";
+  $("rp-level").value = level;
+  $("rp-owner").value = owner || "";
+  const dlg = $("dlg-policy");
+  clearFb(dlg.querySelector(".form"));
+  dlg.showModal(); $("rp-interval").focus();
+}
 async function loadPolicies() {
   try { policyList = await api("/api/ratelimit/policies")||[]; } catch(e) { showErr(e.message); }
   renderPolicyTable();
@@ -120,7 +136,9 @@ function renderPolicyTable() {
   tbl.innerHTML = `<thead><tr><th>Scope</th><th>Owner</th><th>Action</th><th>Interval</th><th>Jitter</th><th></th></tr></thead><tbody>` +
     policyList.map(p=>`<tr><td>${scopeBadge(p.level)}</td><td>${esc(p.owner||"—")}</td><td>${esc(p.action)}</td>
       <td>${p.interval}s</td><td>${(p.jitter&&p.jitter.length)?esc(p.jitter[0]+"–"+p.jitter[1])+"s":"—"}</td>
-      <td><button class="btn btn-ghost btn-sm" data-rlclear="${esc(p.level)}|${esc(p.owner||"")}|${esc(p.action)}">clear</button></td></tr>`).join("")+"</tbody>";
+      <td><button class="btn btn-ghost btn-sm" data-rledit="${esc(p.level)}|${esc(p.owner||"")}|${esc(p.action)}|${esc(p.interval)}|${esc(p.jitter&&p.jitter[0]||0)}|${esc(p.jitter&&p.jitter[1]||0)}">edit</button>
+      <button class="btn btn-ghost btn-sm" data-rlclear="${esc(p.level)}|${esc(p.owner||"")}|${esc(p.action)}">clear</button></td></tr>`).join("")+"</tbody>";
+  tbl.querySelectorAll("[data-rledit]").forEach(b=>b.onclick=()=>openPolicyEditor(b.dataset.rledit.split("|")));
   tbl.querySelectorAll("[data-rlclear]").forEach(b=>b.onclick=()=>{
     const [level, owner, action] = b.dataset.rlclear.split("|");
     confirmAction("Clear Policy", `Remove the ${level}${owner?" · "+owner:""} policy for '${action}'?`,
