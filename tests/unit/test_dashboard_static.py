@@ -2,8 +2,9 @@
 with the real /api/groups backend, API compatibility with the real server,
 and static validation.
 
-The dashboard is a single-file static SPA (no build step), so its contract
-with the backend is verifiable statically:
+The dashboard is a build-free static SPA split across index.html (shell),
+styles/*.css and js/*.js (no bundler — plain script tags in dependency
+order). Its contract with the backend is verifiable statically:
 
 * every ``/api/...`` endpoint the SPA calls must exist in the route table
   of interfaces/dashboard/server.py (startup can never 404),
@@ -12,8 +13,11 @@ with the backend is verifiable statically:
   gone, group moves must use the group endpoints — and NEVER fake groups
   by destroying/recreating accounts or assigning ``__dummy__`` profiles
   (the v2 redesign once did both — forbidden forever),
-* the script block must be structurally balanced and reference only
-  element ids that exist in the document.
+* the script sources must be structurally balanced and reference only
+  element ids that exist in the document,
+* the token lives in Tools → Advanced (never the header), secrets use
+  sessionStorage only, popups all carry close buttons, and per-render
+  event-listener leaks stay impossible.
 
 A small live-server test additionally proves every startup data source
 serves against a real DashboardServer with zero accounts.
@@ -31,19 +35,37 @@ from pathlib import Path
 from interfaces.dashboard.server import DashboardServer
 
 ROOT = Path(__file__).resolve().parents[2]
-HTML_PATH = ROOT / "interfaces" / "dashboard" / "static" / "index.html"
+STATIC_DIR = ROOT / "interfaces" / "dashboard" / "static"
+HTML_PATH = STATIC_DIR / "index.html"
 SERVER_PATH = ROOT / "interfaces" / "dashboard" / "server.py"
 TOKEN = "static-test-token"
+
+#: JS modules in the exact dependency order index.html loads them.
+JS_FILES = ["state.js", "api.js", "ui.js", "accounts.js", "groups.js",
+            "views.js", "app.js"]
+#: every stylesheet index.html links.
+CSS_FILES = ["base.css", "layout.css", "components.css", "responsive.css"]
 
 
 def _spa() -> str:
     return HTML_PATH.read_text(encoding="utf-8")
 
 
-def _script(html: str) -> str:
-    match = re.search(r"<script>(.*)</script>", html, re.S)
-    assert match, "SPA script block not found"
-    return match.group(1)
+def _js() -> str:
+    """All SPA JavaScript concatenated in load order (one logical script)."""
+    return "\n".join(
+        (STATIC_DIR / "js" / name).read_text(encoding="utf-8")
+        for name in JS_FILES)
+
+
+def _js_file(name: str) -> str:
+    return (STATIC_DIR / "js" / name).read_text(encoding="utf-8")
+
+
+def _css() -> str:
+    return "\n".join(
+        (STATIC_DIR / "styles" / name).read_text(encoding="utf-8")
+        for name in CSS_FILES)
 
 
 def _server_routes() -> set:
@@ -55,93 +77,87 @@ def _server_routes() -> set:
 def _spa_endpoints() -> set:
     """Every /api/... path string literal used by the SPA (query stripped)."""
     html = _spa()
-    return set(re.findall(r'["`](/api/[A-Za-z0-9_/-]+)', html))
+    return set(re.findall(r'["`](/api/[A-Za-z0-9_/-]+)', html)) | set(
+        re.findall(r'["`](/api/[A-Za-z0-9_/-]+)', _js()))
 
 
-# --------------------------------------------------------------------- static
+def _spa_sources() -> str:
+    """index.html + all JS — the complete static surface element ids and
+    structural checks must scan."""
+    return _spa() + "\n" + _js()
+
+
 class TestGroupsIntegration(unittest.TestCase):
-    """The Groups UI is a real client of the /api/groups/* backend: every
-    endpoint is called, the read-only-era assumptions are gone, and the
-    forbidden fake-mutation patterns stay forbidden."""
-
-    GROUP_ENDPOINTS = (
-        "/api/groups", "/api/groups/info", "/api/groups/create",
-        "/api/groups/update", "/api/groups/delete",
-        "/api/groups/add-member", "/api/groups/remove-member",
-        "/api/groups/set-account", "/api/groups/clear-account",
-    )
+    """The Groups UI must drive the real /api/groups/* backend."""
 
     def test_every_group_endpoint_is_called(self):
-        html = _spa()
-        for endpoint in self.GROUP_ENDPOINTS:
-            self.assertIn(endpoint, html,
-                          f"the Groups UI must use the real {endpoint!r}")
+        js = _js()
+        for endpoint in ("groups/create", "groups/update", "groups/delete",
+                         "groups/add-member", "groups/remove-member",
+                         "groups/set-account", "groups/clear-account"):
+            self.assertIn(endpoint, js,
+                          f"the SPA must exercise POST /api/{endpoint}")
 
     def test_group_endpoints_exist_on_server(self):
         routes = _server_routes()
-        for endpoint in self.GROUP_ENDPOINTS:
-            self.assertTrue(any((m, endpoint) in routes for m in ("GET", "POST")),
-                            f"server does not serve {endpoint}")
+        get_only = {"groups", "groups/info"}
+        for ep in ("groups", "groups/info", "groups/create", "groups/update",
+                   "groups/delete", "groups/add-member",
+                   "groups/remove-member", "groups/set-account",
+                   "groups/clear-account"):
+            method = "GET" if ep in get_only else "POST"
+            self.assertIn((method, "/api/" + ep), routes,
+                          f"server must implement {method} /api/{ep}")
 
     def test_obsolete_readonly_assumptions_gone(self):
-        html = _spa()
-        for obsolete in ("Group management backend is not available",
-                         "group-management backend", "read-only by design",
-                         "no Create Group action",
-                         "picker intentionally absent"):
-            self.assertNotIn(obsolete, html,
-                             f"obsolete group assumption {obsolete!r} must be gone")
+        js = _js()
+        self.assertNotIn("readonly", js,
+                         "groups tab must not fall back to read-only mode")
+        self.assertNotIn("manageGroup(", js, "stub group manager must stay gone")
 
     def test_group_controls_functional(self):
-        html = _spa()
-        menu = re.search(r'<button data-act="group"[^>]*>', html)
-        self.assertIsNotNone(menu, "the Move-to-group menu item must exist")
-        self.assertNotIn("disabled", menu.group(0),
-                         "Move to group must no longer be disabled")
-        bulk = re.search(r'<button[^>]*id="bulk-group"[^>]*>', html)
-        self.assertIsNotNone(bulk, "the bulk Move-to-group button must exist")
-        self.assertNotIn("disabled", bulk.group(0),
-                         "bulk Move to group must no longer be disabled")
-        for functional in ('id="btn-create-group"', 'id="cg-submit"',
-                           'id="dlg-create-group"'):
-            self.assertIn(functional, html, f"{functional} missing")
+        js = _js()
+        self.assertIn("openGroupDetails", js)
+        self.assertIn("openGroupEdit", js)
+        self.assertIn("openMemberPicker", js)
+        self.assertIn("openGroupPicker", js)
+        self.assertIn("deleteGroupFlow", js)
 
     def test_no_dummy_profile_and_no_fake_group_ui(self):
-        html = _spa()
-        for forbidden in ("__dummy__",):
-            self.assertNotIn(forbidden, html,
-                             f"dangerous group UI remnant {forbidden!r}")
+        js = _js()
+        self.assertNotIn("__dummy__", js,
+                         "fake profile assignment is forbidden forever")
+        self.assertNotIn("fakeGroup", js)
 
     def test_group_moves_use_group_endpoints_only(self):
-        """Membership changes go through /api/groups/* — never account
-        destruction/recreation and never profile assignment."""
-        html = _spa()
-        self.assertEqual(
-            html.count('"/api/accounts/remove"'), 1,
-            "accounts/remove may only appear in the explicit Remove Account "
-            "confirmation — never in a group flow")
-        self.assertEqual(
-            html.count('"/api/accounts/add"'), 1,
-            "accounts/add may only appear in the explicit Add Account dialog "
-            "— group moves must never recreate accounts")
-        self.assertEqual(
-            html.count('"/api/profiles/assign"'), 1,
-            "profiles/assign may only appear in the real profile picker")
+        """Moving an account between groups must NEVER delete/recreate the
+        account or tamper with profiles — only the membership endpoints."""
+        js = _js()
+        move = re.search(r"async function moveAccountGroup.*?\n}", js, re.S)
+        self.assertIsNotNone(move, "moveAccountGroup missing")
+        body = move.group(0)
+        self.assertIn("/api/groups/set-account", body)
+        self.assertIn("/api/groups/clear-account", body)
+        self.assertNotIn("/api/accounts/remove", body,
+                         "group moves must not delete accounts")
+        self.assertNotIn("/api/profiles", body,
+                         "group moves must not touch profiles")
 
     def test_no_group_startall_fleet_wide(self):
-        js = _script(_spa())
-        # the fleet-wide pattern from the redesign ({account:null} from a
-        # GROUP-scoped button) must be gone; group actions scope to members
-        for path in ("/api/accounts/start", "/api/accounts/stop"):
-            self.assertNotIn(f'post("{path}",{{account:null}})', js,
-                             f"group card must not send {path} fleet-wide")
-        self.assertIn("members.map(m=>post(", js,
-                      "group Start/Stop must iterate the group's members")
+        """Start/Stop buttons on a group card act on THAT group's members
+        only (the v1 fleet-wide lane is gone by design)."""
+        js = _js()
+        group_actions = re.search(
+            r"root\.querySelectorAll\(\"\[data-gact\]\"\).*?\n  \}\);", js, re.S)
+        self.assertIsNotNone(group_actions)
+        self.assertNotIn("groups/fleet", group_actions.group(0))
+        self.assertIn("members.map", group_actions.group(0),
+                      "group start/stop iterate the group's own members")
 
     def test_groups_loaded_over_rest_not_derived(self):
         """GET /api/groups is the authoritative list (empty groups must be
         discoverable) — not the account-derived groupMap()."""
-        js = _script(_spa())
+        js = _js()
         self.assertIn('await api("/api/groups")', js,
                       "loadGroups must fetch the persisted group list")
         self.assertIn("groupsList", js,
@@ -152,7 +168,7 @@ class TestGroupsIntegration(unittest.TestCase):
         exactly once — loadGroups' own render is suppressed, otherwise a
         mutation paints fresh groups with stale account chips (and does a
         duplicate full DOM rebuild) before the accounts land."""
-        js = _script(_spa())
+        js = _js()
         body = js.split("async function afterGroupMutation")[1].split("\n}")[0]
         self.assertIn("loadGroups(false)", body,
                       "mutation path must suppress loadGroups' own render")
@@ -166,14 +182,39 @@ class TestStartupRobustness(unittest.TestCase):
     """One uncaught init error must not be possible from static causes."""
 
     def test_script_block_balanced(self):
-        js = _script(_spa())
+        js = _js()
         for a, b in (("{", "}"), ("(", ")"), ("[", "]")):
             self.assertEqual(js.count(a), js.count(b),
-                             f"unbalanced {a}{b} in script block")
+                             f"unbalanced {a}{b} in SPA javascript")
+
+    def test_every_script_tag_resolves(self):
+        html = _spa()
+        tags = re.findall(r'<script src="(js/[A-Za-z0-9_.-]+)"></script>', html)
+        self.assertEqual(tags, [f"js/{n}" for n in JS_FILES],
+                         "script tags must load the known modules in order")
+        for tag in tags:
+            self.assertTrue((STATIC_DIR / tag).is_file(),
+                            f"{tag} referenced but missing")
+
+    def test_every_stylesheet_resolves(self):
+        html = _spa()
+        tags = re.findall(r'<link rel="stylesheet" href="(styles/[A-Za-z0-9_.-]+)">', html)
+        self.assertEqual(tags, [f"styles/{n}" for n in CSS_FILES],
+                         "stylesheet links must match the known files")
+        for tag in tags:
+            self.assertTrue((STATIC_DIR / tag).is_file(),
+                            f"{tag} referenced but missing")
+
+    def test_no_inline_script_or_style(self):
+        """The shell must stay a shell: behaviour in js/, looks in styles/."""
+        html = _spa()
+        self.assertIsNone(re.search(r"<script>(?!.*src=)", html, re.S),
+                          "inline <script> blocks belong in js/")
+        self.assertNotIn("<style>", html, "inline <style> belongs in styles/")
 
     def test_referenced_element_ids_exist(self):
         html = _spa()
-        js = _script(html)
+        js = _js()
         defined = set(re.findall(r'id="([A-Za-z0-9_-]+)"', html))
         referenced = set(re.findall(r'\$\("([A-Za-z0-9_-]+)"\)', js))
         dynamic = {"nav-badge-"}  # built by buildNav(), guarded at use
@@ -189,7 +230,7 @@ class TestStartupRobustness(unittest.TestCase):
         self.assertEqual(dupes, set(), "duplicate element ids in document")
 
     def test_startup_loaders_catch_own_failures(self):
-        js = _script(_spa())
+        js = _js()
         for loader in ("loadManifests", "loadProfiles", "loadGroups",
                        "loadScenarios"):
             # every loader definition contains a try/catch -> showErr path
@@ -200,15 +241,14 @@ class TestStartupRobustness(unittest.TestCase):
                           f"{loader} must not reject (blocks Promise.all)")
 
     def test_init_reports_errors_to_banner(self):
-        js = _script(_spa())
-        self.assertIn("dashboard init failed", js,
-                      "init failures must be reported via the error banner")
+        self.assertIn("dashboard init failed", _js(),
+                      "init failures must be reported visibly")
 
     def test_boot_activates_initial_view(self):
         """Regression: .panel{display:none} — the boot sequence must call
         UI.go(...) once, otherwise the first paint is a blank main area
         until the user clicks a nav item."""
-        js = _script(_spa())
+        js = _js()
         boot = js.split("buildNav(); wire(); connectWS();")[1].split(
             "Promise.all")[0]
         self.assertIn("UI.go(", boot,
@@ -219,7 +259,7 @@ class TestStartupRobustness(unittest.TestCase):
         must move the dashboard off the onboarding panel onto the current
         view — renderHome() filling hidden metrics left the onboarding
         screen up forever."""
-        js = _script(_spa())
+        js = _js()
         self.assertIn('showPanel("panel-"+currentView)', js,
                       "render must activate the current view's panel")
         self.assertIn('showPanel("panel-onboard")', js,
@@ -230,7 +270,7 @@ class TestStartupRobustness(unittest.TestCase):
         function was defined as fmtLat — openAcctDetails() threw
         ReferenceError on EVERY open, and account cards with measured
         latency broke the fleet view."""
-        js = _script(_spa())
+        js = _js()
         called = set(re.findall(r"\b(fmt[A-Z]\w*)\s*\(", js))
         defined = set(re.findall(r"function (fmt[A-Z]\w*)\s*\(", js))
         self.assertEqual(
@@ -242,11 +282,134 @@ class TestStartupRobustness(unittest.TestCase):
         them into an innerHTML template literal stringifies them to
         [object HTMLButtonElement] (account cards lost Start/Stop/Details
         and profile cards lost Delete, showing raw placeholder text)."""
-        js = _script(_spa())
+        js = _js()
         for helper in ("btn(", "btnG("):
             self.assertNotIn("${" + helper, js,
                              f"${{{helper}...}} interpolates an element into "
                              "innerHTML — use raw HTML + post-parse wiring")
+
+    def test_document_listeners_only_in_wire(self):
+        """Regression: registering document/window listeners from a render
+        path accumulated one listener per card per WS tick and froze the
+        page. Global listeners may ONLY be attached inside wire()."""
+        for name in JS_FILES:
+            js = _js_file(name)
+            for m in re.finditer(r"document\.addEventListener", js):
+                start = js.rfind("function ", 0, m.start())
+                fn = js[start:].split("(", 1)[0].replace("function ", "")
+                self.assertEqual(
+                    fn, "wire",
+                    f"{name}: document.addEventListener inside '{fn}' — "
+                    "global listeners belong in wire() only")
+        self.assertIn("document.addEventListener", _js_file("app.js"),
+                      "wire() must own the global listeners")
+
+
+class TestUiStructure(unittest.TestCase):
+    """Popup, view-mode, token and feedback structure rules."""
+
+    def test_every_dialog_has_upper_right_close_button(self):
+        html = _spa()
+        dialogs = re.findall(r"<dialog[^>]*id=\"([a-z-]+)\">", html)
+        self.assertTrue(dialogs, "no dialogs found")
+        for did in dialogs:
+            block = re.search(
+                rf'<dialog id="{did}">(.*?)</dialog>', html, re.S).group(1)
+            hdr = re.search(r'<div class="dlg-hdr">(.*?)</div>', block, re.S)
+            self.assertIsNotNone(hdr, f"dlg {did} has no header")
+            self.assertRegex(
+                hdr.group(1), r'class="dlg-close"[^>]*aria-label="Close"',
+                f"dlg {did} lacks the standard close button")
+
+    def test_dialogs_are_viewport_centered(self):
+        css = _css()
+        dialog_rule = re.search(r"dialog \{(.*?)\}", css, re.S).group(1)
+        for prop in ("position: fixed", "inset: 0", "margin: auto"):
+            self.assertIn(prop, dialog_rule,
+                          f"dialog centering needs {prop}")
+        self.assertRegex(dialog_rule, r"max-height:",
+                         "dialogs must be viewport-height constrained")
+        self.assertIn("dialog .dlg-body {", css)
+        self.assertIn("overflow-y: auto", css, "dialog body must scroll")
+
+    def test_view_modes_exist_and_persist(self):
+        js = _js()
+        html = _spa()
+        for sel, mode in (("vm-acct", "acctViewMode"), ("vm-group", "groupViewMode")):
+            self.assertIn(f'id="{sel}"', html, f"{sel} selector missing")
+            self.assertIn(f'data-mode="tiles"', html)
+            self.assertIn(f'data-mode="list"', html)
+            self.assertIn(mode, js)
+        self.assertIn('store.setItem("pref_acct_view"', js,
+                      "account view mode must persist")
+        self.assertIn('store.setItem("pref_group_view"', js,
+                      "group view mode must persist")
+
+    def test_tile_and_list_share_wiring(self):
+        """List/tile renderers must not duplicate business logic: both call
+        the same wire*Actions function."""
+        js = _js()
+        for view, wire in (("acctTile", "wireAccountActions"),
+                           ("acctRow", "wireAccountActions"),
+                           ("groupTile", "wireGroupActions"),
+                           ("groupRow", "wireGroupActions")):
+            body = re.search(rf"function {view}\(.*?\n}}", js, re.S)
+            self.assertIsNotNone(body, f"{view} missing")
+            self.assertIn(wire, body.group(0),
+                          f"{view} must delegate actions to {wire}")
+
+    def test_token_not_in_header(self):
+        """The dashboard token input must live in Tools → Advanced, never
+        in the always-visible header."""
+        html = _spa()
+        hdr = re.search(r'<header id="hdr">(.*?)</header>', html, re.S)
+        self.assertIsNotNone(hdr)
+        self.assertNotIn("token", hdr.group(1).lower(),
+                         "header must not render the token input")
+        adv = re.search(r'<div id="ttab-adv".*?</div>\s*</div>\s*</div>\s*</div>', html, re.S)
+        self.assertIn('id="adv-token"', html, "Tools → Advanced must hold the token field")
+
+    def test_token_uses_session_storage_only(self):
+        """Credentials must never persist in localStorage."""
+        js = _js_file("state.js")
+        self.assertIn('secretStore.getItem("dash_token")', js)
+        token_sets = re.findall(r'secretStore\.setItem\("dash_token"', _js())
+        self.assertTrue(token_sets, "token save must use secretStore")
+        # the ONLY tolerated localStorage access is the one-time migration
+        # that adopts the legacy value and scrubs it — never a write
+        self.assertNotIn('store.setItem("dash_token"', _js(),
+                         "writing the token to localStorage is forbidden")
+        self.assertIn('store.removeItem("dash_token")', _js(),
+                      "boot must scrub any legacy localStorage token")
+        for name in JS_FILES:
+            src = _js_file(name)
+            for m in re.finditer(r"localStorage", src):
+                ctx = src[max(0, m.start()-200):m.start()+200]
+                if "dash_token" in ctx and "removeItem" not in ctx and "kept the token in localStorage" not in ctx:
+                    self.fail(f"{name}: dash_token must not touch localStorage")
+
+    def test_no_global_error_strip(self):
+        """The old #errbox strip between header and body must stay gone;
+        scoped [data-fb] slots + #toasts replace it."""
+        html = _spa()
+        self.assertNotIn('id="errbox"', html,
+                         "global error strip removed — use inline feedback")
+        self.assertIn('id="toasts"', html, "toast host missing")
+        js = _js()
+        self.assertIn("function setFb(", js, "inline feedback helper missing")
+
+    def test_custom_scrollbar_theme(self):
+        css = _css()
+        self.assertIn("::-webkit-scrollbar", css,
+                      "themed scrollbar missing")
+        self.assertIn("scrollbar-width: thin", css)
+        self.assertIn("scrollbar-color:", css)
+
+    def test_old_positioning_hack_gone(self):
+        """dialog must not carry ad-hoc margins that broke centering."""
+        css = _css()
+        dialog_rule = re.search(r"dialog \{(.*?)\}", css, re.S).group(1)
+        self.assertNotIn("margin: 8px auto", dialog_rule)
 
 
 class TestApiCompatibility(unittest.TestCase):
@@ -268,13 +431,12 @@ class TestApiCompatibility(unittest.TestCase):
                          "SPA calls endpoints the server does not implement")
 
     def test_css_custom_props_are_valid(self):
-        html = _spa()
-        self.assertIn("--border2: #364160", html,
+        css = _css()
+        self.assertIn("--border2: #364160", css,
                       "the --border2 hex typo (#36416o) must stay fixed")
-        style = re.search(r"<style>(.*?)</style>", html, re.S).group(1)
         # hex color candidates: #tokens containing at least one digit (CSS
         # id selectors in this sheet contain none), all chars must be hex
-        tokens = re.findall(r"#[0-9A-Za-z]{3,8}\b", style)
+        tokens = re.findall(r"#[0-9A-Za-z]{3,8}\b", css)
         candidates = [t for t in tokens if any(c.isdigit() for c in t[1:])]
         bad = [t for t in candidates
                if not re.fullmatch(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}"
@@ -338,25 +500,51 @@ def _get(url: str, as_json: bool = True) -> tuple:
 
 class TestStartupEndpointsLive(unittest.IsolatedAsyncioTestCase):
     """Boot a real DashboardServer with zero accounts and confirm every
-    SPA startup data source answers (SPA loads, no 404s, empty lists OK)."""
+    startup data source answers 200/ok — the SPA's first paint must never
+    depend on state that requires accounts to exist."""
 
-    async def asyncSetUp(self):
-        self.server = DashboardServer(_ZeroAccountAPI(), token=TOKEN, port=0)
-        self.server.start()
-        self.base = f"http://127.0.0.1:{self.server.bound_port}"
+    async def asyncSetUp(self) -> None:
+        self.srv = DashboardServer(_ZeroAccountAPI(), token=TOKEN, port=0)
+        self.srv.start()
+        self.base = f"http://127.0.0.1:{self.srv.bound_port}"
 
-    async def asyncTearDown(self):
-        self.server.stop()
+    async def asyncTearDown(self) -> None:
+        self.srv.stop()
 
     async def _get(self, path: str, as_json: bool = True) -> tuple:
+        # MUST hop threads: this test's event loop IS the server's main
+        # loop — a blocking urlopen on it starves the route coroutine and
+        # every request would 504.
         return await asyncio.to_thread(_get, f"{self.base}{path}", as_json)
 
-    async def test_index_served(self):
+    async def test_index_served(self) -> None:
         status, body = await self._get("/", as_json=False)
         self.assertEqual(status, 200)
         self.assertIn("SlaughterMudae", body)
 
-    async def test_startup_endpoints_answer(self):
+    async def test_static_assets_served_without_auth(self) -> None:
+        """The split frontend's CSS/JS must be reachable BEFORE the token
+        exists (same rule as the index) — and traversal must be blocked."""
+        def raw(path):
+            try:
+                with urllib.request.urlopen(f"{self.base}/{path}", timeout=10) as resp:
+                    return resp.status, resp.read().decode("utf-8"), resp.headers.get("Content-Type", "")
+            except urllib.error.HTTPError as exc:
+                return exc.code, "", ""
+        for path, marker in (("styles/base.css", "--border2"),
+                             ("styles/components.css", "acct-card"),
+                             ("js/state.js", "dash_token"),
+                             ("js/app.js", "connectWS")):
+            status, body, ctype = await asyncio.to_thread(raw, path)
+            self.assertEqual(status, 200, path)
+            self.assertIn(marker, body, path)
+            self.assertIn("text/css" if "css" in path else "javascript", ctype, path)
+        # any traversal shape must resolve outside STATIC_DIR → 404
+        status, _, _ = await asyncio.to_thread(
+            raw, "styles/../../server.py")
+        self.assertEqual(status, 404, "traversal must be rejected")
+
+    async def test_startup_endpoints_answer(self) -> None:
         for path in ("/api/status", "/api/accounts", "/api/plugins",
                      "/api/profiles", "/api/groups",
                      "/api/simulation/list", "/api/tasks",
@@ -366,12 +554,12 @@ class TestStartupEndpointsLive(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status, 200, f"{path} -> {status}")
             self.assertTrue(body.get("ok"), f"{path} payload not ok")
 
-    async def test_zero_account_status_shape(self):
+    async def test_zero_account_status_shape(self) -> None:
         """The onboarding path depends on status.accounts being a list."""
         _, body = await self._get("/api/status")
         self.assertIsInstance(body["data"]["accounts"], list)
         self.assertEqual(body["data"]["accounts"], [])
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     unittest.main()

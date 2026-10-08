@@ -1506,6 +1506,20 @@ def _make_handler(server: "DashboardServer") -> type:
                 else:
                     self._respond(404, {"ok": False, "error": "index.html missing"})
                 return
+            if method == "GET" and (path.startswith("/styles/") or path.startswith("/js/")):
+                # Frontend assets (CSS/JS) of the SPA — same no-auth rule as
+                # the index: they must load before the token is known and
+                # contain no secrets. Resolved inside STATIC_DIR with a
+                # traversal guard; correct MIME (X-Content-Type-Options:
+                # nosniff is set on every response).
+                asset = (STATIC_DIR / path.lstrip("/")).resolve()
+                if not asset.is_relative_to(STATIC_DIR.resolve()) or not asset.is_file():
+                    self._reject(404, {"ok": False, "error": "not found"})
+                    return
+                mime = ("text/css; charset=utf-8" if asset.suffix == ".css"
+                        else "text/javascript; charset=utf-8")
+                self._respond(200, asset.read_bytes(), mime)
+                return
             if not self._authorized(
                 self.headers.get("X-Dashboard-Token") or (query.get("token") or [None])[0]
             ):
