@@ -28,6 +28,7 @@ from .schema import MIGRATIONS, latest_version
 
 LOG = logging.getLogger("slaughtermudae.database")
 
+from .repositories.account_plugins import AccountPluginsRepository
 from .repositories.accounts import AccountsRepository
 from .repositories.cache import CacheRepository
 from .repositories.cooldowns import CooldownRepository
@@ -54,6 +55,7 @@ class Database:
         self._migrate_lock = asyncio.Lock()  # concurrent connect() -> one migrate
         # stateless repositories, sharing the owned connection
         self.accounts = AccountsRepository(self)
+        self.account_plugins = AccountPluginsRepository(self)
         self.account_settings = AccountSettingsRepository(self)
         self.profiles = ProfilesRepository(self)
         self.sync_groups = SyncGroupsRepository(self)

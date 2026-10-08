@@ -212,6 +212,28 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         WHERE sync_group IS NOT NULL AND sync_group != '';
         """,
     ),
+    (
+        6,
+        "account plugin assignments",
+        """
+        -- Plugins are assigned to accounts DIRECTLY (Account -> Plugins):
+        -- one row per (account, plugin) means "this account runs this
+        -- plugin". The profile tables (profiles / profile_plugins /
+        -- account_profiles) are left untouched for a future
+        -- plugin-specific profile system but stop being the source of
+        -- account capabilities. Deliberately NO data migration from
+        -- account_profiles: assignments start empty and are managed by
+        -- the layer above. Keyed by account NAME like account_profiles;
+        -- no FK and no cascade by the same convention (cleanup on
+        -- account deletion belongs to the account-delete path, as with
+        -- the other name-keyed per-account tables).
+        CREATE TABLE IF NOT EXISTS account_plugins (
+            account TEXT NOT NULL,
+            plugin  TEXT NOT NULL,
+            PRIMARY KEY (account, plugin)
+        );
+        """,
+    ),
 ]
 
 
