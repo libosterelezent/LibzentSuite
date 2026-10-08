@@ -85,8 +85,12 @@ function showPanel(id) {
 }
 
 function render() {
+  // Zero accounts → the onboarding WELCOME shows on Home only. Every other
+  // view stays reachable — the user must be able to navigate to
+  // Accounts to add the first one (Get Started used to snap straight
+  // back to onboarding because this guard covered all views).
   const hasAccts = accounts().length > 0;
-  if (!hasAccts && currentView!=="tools") { showPanel("panel-onboard"); return; }
+  if (!hasAccts && currentView==="home") { showPanel("panel-onboard"); return; }
   showPanel("panel-"+currentView);
   if (currentView==="home") renderHome();
   if (currentView==="fleet") { renderAccounts(); renderGroups(); }
@@ -331,6 +335,11 @@ function wire() {
       $("sim-report").innerHTML = `<pre style="background:var(--bg);padding:var(--sp-3);border-radius:6px;font-family:var(--mono);font-size:11px;overflow-x:auto;max-height:300px">${esc(report&&report.log||JSON.stringify(report,null,2))}</pre>`;
     } catch(e) { setFb($("sim-report"),"error",e.message); }
   };
+
+  // Onboarding CTA — the zero-account welcome's "Get Started" jump into
+  // the Accounts tab (must actually navigate: render() only pins the
+  // onboarding panel to Home).
+  $("onboard-cta").onclick = () => { UI.go("fleet"); UI.tab("accounts"); };
 
   // Mobile menu
   $("menu-btn").onclick = () => $("sidebar").classList.toggle("open");

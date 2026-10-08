@@ -265,6 +265,22 @@ class TestStartupRobustness(unittest.TestCase):
         self.assertIn('showPanel("panel-onboard")', js,
                       "empty-state render must activate onboarding")
 
+    def test_zero_accounts_do_not_trap_navigation(self):
+        """Regression: with zero accounts, the onboarding welcome pinned
+        every view but Tools — 'Get Started' (and any nav click) snapped
+        straight back to onboarding, making the first account impossible
+        to add. The guard must cover Home only."""
+        js = _js()
+        guard = re.search(
+            r"if \(!hasAccts && ([^)]+)\) \{ showPanel\(\"panel-onboard\"\)", js)
+        self.assertIsNotNone(guard, "zero-account onboarding guard missing")
+        self.assertEqual(guard.group(1).strip(), 'currentView==="home"',
+                         "onboarding must pin Home only, not all views")
+        self.assertIn('id="onboard-cta"', _spa(),
+                      "Get Started button must exist in the shell")
+        self.assertIn('$("onboard-cta").onclick', js,
+                      "Get Started must be wired in wire()")
+
     def test_formatter_calls_have_definitions(self):
         """Regression: fmtLatency() was called at two render sites but the
         function was defined as fmtLat — openAcctDetails() threw
