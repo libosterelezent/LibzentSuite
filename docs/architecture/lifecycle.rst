@@ -15,7 +15,8 @@ Account
 ``start`` resolves the token (encrypted DB credential store; `.env` keys
 are migration-only), wires every
 client callback (message + rich events) before connect, connects, ingests
-the READY snapshot (zero API calls), activates profile-filtered plugins,
+the READY snapshot (zero API calls), activates the account's assigned
+plugins (direct ``account_plugins`` rows — profiles are not consulted),
 spawns the reconnect supervisor (exponential backoff from account
 settings).
 

@@ -11,6 +11,7 @@ from interfaces.cli.commands import (
     QuitRequested,
     UsageError,
     format_account_info,
+    format_account_plugins,
     format_accounts,
     format_audit,
     format_effective,
@@ -45,7 +46,8 @@ class FakeApi:
         return {
             "uptime_s": 12.5, "tasks": {"queued": 1, "running": 0, "completed": 3},
             "accounts": [{"name": "alpha", "status": "running", "user_id": 42,
-                          "enabled": True, "profiles": ["roller"]}],
+                          "enabled": True, "profiles": ["roller"],
+                          "assigned_plugins": ["roll"]}],
             "ratelimit": {"policies": [{"level": "global", "owner": None,
                                         "action": "message", "interval": 2.0,
                                         "jitter": [0.1, 0.5]}]},
@@ -56,12 +58,27 @@ class FakeApi:
     async def accounts_list(self):
         self._record("accounts_list")
         return [{"name": "alpha", "status": "running", "user_id": 42, "enabled": True,
-                 "profiles": ["roller"], "latency_ms": 83.0, "uptime_s": 100.0}]
+                 "profiles": ["roller"], "assigned_plugins": ["roll", "soulcopy"],
+                 "latency_ms": 83.0, "uptime_s": 100.0}]
 
     async def accounts_add(self, payload, surface="api"):
         self._record("accounts_add", payload, surface=surface)
-        return {"added": payload["name"], "profiles": payload.get("profiles", []),
+        return {"added": payload["name"],
+                "plugins": sorted(payload.get("plugins", [])),
                 "credential": "db" if payload.get("credential") else None}
+
+    # ---- account plugin assignments (direct account→plugin capabilities)
+    async def accounts_plugins_list(self, account):
+        self._record("accounts_plugins_list", account)
+        return ["roll", "soulcopy"]
+
+    async def accounts_plugin_assign(self, account, plugin, surface="api"):
+        self._record("accounts_plugin_assign", account, plugin, surface=surface)
+        return {"account": account, "plugin": plugin}
+
+    async def accounts_plugin_unassign(self, account, plugin, surface="api"):
+        self._record("accounts_plugin_unassign", account, plugin, surface=surface)
+        return {"account": account, "plugin": plugin, "existed": True}
 
     async def accounts_remove(self, name, surface="api"):
         self._record("accounts_remove", name, surface=surface)
@@ -312,13 +329,16 @@ class TestAccountsGroup(unittest.IsolatedAsyncioTestCase):
         text = await run_command(api, "accounts list")
         self.assertIn("alpha", text)
         self.assertIn("42", text)
+        # capabilities render from assigned_plugins (not legacy profiles)
+        self.assertIn("plugins: roll, soulcopy", text)
+        self.assertNotIn("profiles:", text)
         self.assertTrue(called(api, "accounts_list"))
 
-    async def test_add_with_profiles(self) -> None:
+    async def test_add_with_plugins(self) -> None:
         api = FakeApi()
-        await run_command(api, "accounts add bob roller sniper")
+        await run_command(api, "accounts add bob roll soulcopy")
         args, _ = called(api, "accounts_add")
-        self.assertEqual(args[0], {"name": "bob", "profiles": ["roller", "sniper"]})
+        self.assertEqual(args[0], {"name": "bob", "plugins": ["roll", "soulcopy"]})
 
     async def test_add_bare(self) -> None:
         api = FakeApi()
@@ -326,12 +346,22 @@ class TestAccountsGroup(unittest.IsolatedAsyncioTestCase):
         args, _ = called(api, "accounts_add")
         self.assertEqual(args[0], {"name": "bob"})
 
+    async def test_add_never_sends_profiles(self) -> None:
+        # the backend rejects a 'profiles' payload key (unknown-key
+        # ValueError) — the CLI must never build one
+        api = FakeApi()
+        await run_command(api, "accounts add bob roller")
+        args, _ = called(api, "accounts_add")
+        self.assertNotIn("profiles", args[0])
+        self.assertEqual(args[0]["plugins"], ["roller"])
+
     async def test_info_renders_sections(self) -> None:
         api = FakeApi()
         text = await run_command(api, "accounts info alpha")
         self.assertTrue(called(api, "accounts_info"))
         for needle in ("Status", "Identity", "Runtime", "client cache", "Plugins",
-                       "Profile", "Rate Limit", "inherited from global"):
+                       "Profiles (informational)", "not the capability mechanism",
+                       "Rate Limit", "inherited from global"):
             self.assertIn(needle, text)
 
     async def test_enable_on_off(self) -> None:
@@ -368,6 +398,112 @@ class TestAccountsGroup(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_subcommand(self) -> None:
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), "accounts frobnicate")
+
+
+class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
+    """accounts plugins|plugin-add|plugin-remove (direct capabilities)."""
+
+    async def test_plugins_list_happy(self) -> None:
+        api = FakeApi()
+        text = await run_command(api, "accounts plugins alpha")
+        self.assertEqual(called(api, "accounts_plugins_list")[0], ("alpha",))
+        self.assertIn("roll", text)
+        self.assertIn("soulcopy", text)
+        # sorted rendering
+        self.assertLess(text.index("roll"), text.index("soulcopy"))
+
+    async def test_plugins_list_empty(self) -> None:
+        class EmptyApi(FakeApi):
+            async def accounts_plugins_list(self, account):
+                self._record("accounts_plugins_list", account)
+                return []
+
+        text = await run_command(EmptyApi(), "accounts plugins alpha")
+        self.assertIn("no plugins assigned", text)
+        self.assertIn("plugin-add", text)
+
+    async def test_plugins_list_unknown_account_error(self) -> None:
+        from core.errors import AccountError
+
+        class GhostApi(FakeApi):
+            async def accounts_plugins_list(self, account):
+                raise AccountError(f"unknown account {account!r}")
+
+        # the engine bubbles domain errors; the surface renders one line
+        with self.assertRaises(AccountError):
+            await run_command(GhostApi(), "accounts plugins ghost")
+        out = io.StringIO()
+        code = await run_once(GhostApi(), ["accounts", "plugins", "ghost"],
+                              stdout=out)
+        self.assertEqual(code, 1)
+        self.assertIn("error: unknown account 'ghost'", out.getvalue())
+        self.assertNotIn("Traceback", out.getvalue())
+
+    async def test_plugin_add_happy(self) -> None:
+        api = FakeApi()
+        text = await run_command(api, "accounts plugin-add alpha roll")
+        args, kwargs = called(api, "accounts_plugin_assign")
+        self.assertEqual(args, ("alpha", "roll"))
+        self.assertEqual(kwargs.get("surface"), "cli")
+        self.assertIn("plugin added", text)
+        self.assertIn("plugin=roll", text)
+
+    async def test_plugin_add_unknown_plugin_error(self) -> None:
+        class TypoApi(FakeApi):
+            async def accounts_plugin_assign(self, account, plugin, surface="api"):
+                raise ValueError(
+                    f"unknown plugin(s) [{plugin!r}] (known plugins: ['roll'])")
+
+        with self.assertRaises(ValueError) as ctx:
+            await run_command(TypoApi(), "accounts plugin-add alpha nosuch")
+        self.assertIn("known plugins", str(ctx.exception))
+        out = io.StringIO()
+        code = await run_once(TypoApi(), ["accounts", "plugin-add", "alpha",
+                                          "nosuch"], stdout=out)
+        self.assertEqual(code, 1)
+        self.assertIn("error: unknown plugin", out.getvalue())
+
+    async def test_plugin_remove_happy(self) -> None:
+        api = FakeApi()
+        text = await run_command(api, "accounts plugin-remove alpha roll")
+        args, kwargs = called(api, "accounts_plugin_unassign")
+        self.assertEqual(args, ("alpha", "roll"))
+        self.assertEqual(kwargs.get("surface"), "cli")
+        self.assertIn("plugin removed", text)
+        self.assertIn("existed=true", text)
+
+    async def test_plugin_remove_idempotent_message(self) -> None:
+        class GoneApi(FakeApi):
+            async def accounts_plugin_unassign(self, account, plugin, surface="api"):
+                self._record("accounts_plugin_unassign", account, plugin,
+                             surface=surface)
+                return {"account": account, "plugin": plugin, "existed": False}
+
+        api = GoneApi()
+        text = await run_command(api, "accounts plugin-remove alpha roll")
+        self.assertTrue(called(api, "accounts_plugin_unassign"))
+        self.assertIn("was not assigned to alpha", text)
+        self.assertIn("nothing to do", text)
+        self.assertNotIn("existed=false", text)
+
+    async def test_usage_errors(self) -> None:
+        for line in ("accounts plugins", "accounts plugins a b",
+                     "accounts plugin-add alpha", "accounts plugin-add a b c",
+                     "accounts plugin-remove alpha",
+                     "accounts plugin-remove a b c"):
+            with self.subTest(line=line):
+                with self.assertRaises(UsageError) as ctx:
+                    await run_command(FakeApi(), line)
+                self.assertIn("usage: accounts plugin", str(ctx.exception))
+
+    async def test_help_documents_new_commands(self) -> None:
+        text = help_text()
+        self.assertIn("add <name> [plugin ...]", text)
+        self.assertIn("plugins <account>", text)
+        self.assertIn("plugin-add <account> <plugin>", text)
+        self.assertIn("plugin-remove <account> <plugin>", text)
+        focused = await run_command(FakeApi(), "help accounts")
+        self.assertIn("plugin-add", focused)
 
 
 class TestPluginsGroup(unittest.IsolatedAsyncioTestCase):
@@ -654,6 +790,21 @@ class TestFormatters(unittest.TestCase):
     def test_format_accounts_empty(self) -> None:
         self.assertIn("no accounts", format_accounts([]))
 
+    def test_format_accounts_renders_assigned_plugins(self) -> None:
+        text = format_accounts([{"name": "alpha", "status": "running",
+                                 "user_id": 42, "enabled": True,
+                                 "assigned_plugins": ["roll", "soulcopy"],
+                                 "profiles": ["roller"]}])
+        self.assertIn("plugins: roll, soulcopy", text)
+        self.assertNotIn("profiles:", text)  # legacy profiles stay out
+
+    def test_format_account_plugins_sorted_and_empty(self) -> None:
+        text = format_account_plugins("alpha", ["soulcopy", "roll"])
+        self.assertEqual(text.splitlines(), ["  roll", "  soulcopy"])
+        empty = format_account_plugins("alpha", [])
+        self.assertIn("no plugins assigned", empty)
+        self.assertIn("accounts plugin-add alpha", empty)
+
     def test_format_account_info_marks_runtime_cache(self) -> None:
         text = format_account_info(FakeApi().accounts_info.__wrapped__ if False else {
             "name": "alpha",
@@ -669,6 +820,8 @@ class TestFormatters(unittest.TestCase):
         })
         self.assertIn("client cache", text)
         self.assertIn("inherited from global", text)
+        self.assertIn("Profiles (informational)", text)
+        self.assertIn("not the capability mechanism", text)
 
     def test_format_warnings_icons(self) -> None:
         text = format_warnings([{"level": "warn", "code": "aggressive", "message": "m"}])
@@ -835,6 +988,9 @@ class TestHostileParsing(unittest.IsolatedAsyncioTestCase):
         "accounts credential a b c", "accounts enable a",
         "accounts enable a on extra", "accounts enable a maybe",
         "accounts start a b", "accounts estop", "accounts frobnicate",
+        "accounts plugins", "accounts plugins a b", "accounts plugin-add a",
+        "accounts plugin-add a b c", "accounts plugin-remove",
+        "accounts plugin-remove a b c d",
         "ratelimit set message abc", "ratelimit set message 2.5 0.2",
         "ratelimit set message nan", "ratelimit set message inf",
         "ratelimit set message 1e999", "ratelimit set message -inf",
@@ -889,7 +1045,7 @@ class TestHostileParsing(unittest.IsolatedAsyncioTestCase):
         api = FakeApi()
         await run_command(api, 'accounts add "my acc" roller')
         args, _ = called(api, "accounts_add")
-        self.assertEqual(args[0], {"name": "my acc", "profiles": ["roller"]})
+        self.assertEqual(args[0], {"name": "my acc", "plugins": ["roller"]})
         await run_command(api, "accounts add 'bob two'")
         args, _ = called(api, "accounts_add")
         self.assertEqual(args[0], {"name": "bob two"})

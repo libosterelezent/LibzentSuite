@@ -45,10 +45,14 @@ Settings & config
 .. automodule:: core.config
    :members: load_config, ProjectConfig
 
-Profiles
---------
+Profiles (retained future infrastructure)
+-----------------------------------------
 .. automodule:: core.profile_manager.manager
    :members: ProfileManager
+
+Profiles no longer decide which plugins an account runs — that is the
+direct account→plugin assignment (``account_plugins`` table; see
+``ControlAPI.accounts_plugin_assign`` / ``accounts_plugins_set``).
 
 Plugins
 -------

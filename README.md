@@ -95,7 +95,7 @@ python3 main.py accounts list          # one-shot command mode
 | **Overview** | live fleet status, pressure, uptime, latency |
 | **Accounts** | add/remove, start/stop, store tokens, sync groups |
 | **Plugins** | enable/disable per account, change settings |
-| **Profiles** | bundle plugins into named capability sets |
+| **Profiles** | retained future infrastructure (records only — capabilities are direct account→plugin assignments) |
 | **Rate Limits** | pacing policies, the sequential lane, effective rates |
 | **Tasks** | the outbound queue, history, wait times |
 | **Logs / Audit** | live log stream + every Discord interaction |
@@ -110,7 +110,9 @@ lines (reconnect/close codes), DB worker timings, scheduler pressure.
 ## Setting up accounts
 
 1. **Add the account** — dashboard → Accounts → Add (or
-   `python3 main.py accounts add myaccount --sync-group roll`)
+   `python3 main.py accounts add myaccount roll` — name plus the plugin(s)
+   it should run; assign more later with `accounts plugin-add`). Put it in
+   a **sync group** with `groups set-account myaccount roll`.
 2. **Store its token** — Accounts → credential (or
    `python3 main.py accounts credential myaccount <token>`). The token is
    Fernet-encrypted at rest; the key lives in `state/credentials.key`
@@ -127,8 +129,10 @@ rolling; whoever isn't cooldown-blocked rolls, automatically.
 
 **Setup once:**
 ```bash
-python3 main.py accounts add alpha --sync-group roll
-python3 main.py accounts add beta  --sync-group roll
+python3 main.py accounts add alpha roll   # name + the plugins it runs
+python3 main.py groups set-account alpha rollers
+python3 main.py accounts add beta roll
+python3 main.py groups set-account beta rollers
 # store tokens for both, start both (dashboard or CLI)
 ```
 
@@ -223,7 +227,9 @@ core/                  framework managers + shared contracts
                        lifecycle governor + waiter registry
   plugin_manager/      discovery, per-account instances, event dispatch
   plugin_base.py       the plugin contract (PluginBase/Context/Services)
-  profile_manager/     capability profiles (plugin bundles per account)
+  profile_manager/     retained future infrastructure: profile records
+                       (NOT the capability model — accounts get plugins
+                       directly via account_plugins assignments)
   settings_manager.py  ONE settings schema consumed by CLI + GUI alike
   rate_limit_manager/  policies (global/account/plugin/pair), pacing, 429s,
                        effective-config cache, group clocks

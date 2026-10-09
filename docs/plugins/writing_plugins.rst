@@ -44,4 +44,5 @@ apply automatically. Catch :class:`core.errors.FlowBlocked` around
 multi-step flows and log ONE clean abort line (see soulcopy).
 
 Drop the package under ``plugins/``; it is discovered automatically and
-becomes assignable through profiles.
+runs on any account it is assigned to (``accounts plugin-add <account>
+<plugin>`` — direct assignment, applied immediately).

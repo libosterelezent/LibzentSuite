@@ -51,11 +51,30 @@ token ref, enabled, sync group, settings, profiles) from runtime state
 supervisor). The details page (spec §8) draws runtime data EXCLUSIVELY from
 the live client's cached snapshot — zero extra fetches.
 
-## Profiles / capabilities (spec §4)
+## Capability model (revises spec §4)
 
-A profile names a bundle of permitted plugins; accounts get profiles; the
-union gates the plugin set at account start (no roles = unrestricted). All
-CRUD + assignments persist in SQLite and are reachable from both surfaces.
+**Current (implemented): `Account → Plugins`, direct assignment.** Which
+plugins an account runs is decided by rows in the `account_plugins` table
+(`AccountPluginsRepository`), mutated through `AccountManager.
+assign_plugin` / `unassign_plugin` / `set_account_plugins` and surfaced by
+`ControlAPI.accounts_plugin_*`. Every assignment mutation persists, then
+re-attaches the account's plugins **immediately** — there are no
+"applies on next start" semantics. Assignment is *not* enablement: the
+assignment says which plugins attach to the account; the per-account
+enabled/disabled flag (`plugins enable|disable`, `plugin_states` table)
+says whether an attached plugin actually runs. An account with no
+assignments runs zero plugins (fail-closed).
+
+**Profiles: retained future infrastructure, no capability effect.**
+`ProfileManager` and the `profiles` / `profile_plugins` / `account_profiles`
+tables still exist and their CRUD + assignment bookkeeping still works from
+both surfaces, but nothing consults them when attaching plugins — assigning
+a profile never changes which plugins an account runs.
+
+**Future (NOT implemented):** plugin-specific profiles / multiple saved
+configurations per plugin. When that lands, profiles will describe
+per-plugin configuration sets; until then they are records only.
+
 Profiles and sync groups are ORTHOGONAL: changing one never touches the
 other.
 

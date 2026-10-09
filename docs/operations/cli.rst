@@ -13,14 +13,23 @@ strictly finite: ``nan``/``inf`` (and non-numeric) tokens are usage
 errors, never values.
 
 Groups: ``status`` · ``accounts
-list|add|remove|info|credential|enable|start|stop|estop`` · ``credentials
+list|add|plugins|plugin-add|plugin-remove|remove|info|credential|enable|
+start|stop|estop`` · ``credentials
 status|import-env`` · ``cooldowns [account]|clear`` · ``plugins
 list|state|enable|disable|settings|set`` · ``profiles
-list|create|delete|assign|unassign`` · ``ratelimit show|stats|set|clear|effective|
+list|create|delete|assign|unassign`` (retained future infrastructure —
+no capability effect) · ``ratelimit show|stats|set|clear|effective|
 warnings|floor|lane`` · ``tasks list|cancel|history|cancel-matching`` ·
 ``simulation list|run`` · ``logs [n] [account] [severity]`` · ``audit`` ·
 ``estop [resume]`` · ``help`` · ``quit``. Bare ``cooldowns [account]``
 lists every account's active persistent cooldowns (soonest first).
+
+Capabilities are DIRECT account→plugin assignments:
+``accounts add <name> [plugin ...]`` stores the initial set,
+``accounts plugins <account>`` lists it, ``accounts plugin-add`` /
+``accounts plugin-remove`` mutate it (idempotent; applied immediately).
+Assignment is not enablement — ``plugins enable|disable`` toggles a
+plugin per account independently.
 
 Full signatures and strict-parsing rules: ``knowledgebase/CLI.md`` (if
 you maintain a local knowledgebase — not shipped in a fresh clone).

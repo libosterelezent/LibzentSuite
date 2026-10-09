@@ -7,6 +7,8 @@ database — persistence
    :members: AccountRecord, ProfileRecord, PluginMetadata, RatePolicyRecord
 .. automodule:: database.repositories.accounts
    :members: AccountsRepository
+.. automodule:: database.repositories.account_plugins
+   :members: AccountPluginsRepository
 .. automodule:: database.repositories.cache
    :members: CacheRepository
 .. automodule:: database.repositories.logs

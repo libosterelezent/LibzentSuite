@@ -19,6 +19,17 @@ Decisions for things INTEGRATION.md left open (documented per the contract):
     level ``global`` is ``-`` or ``none`` (passed as ``owner=None``).
   * ``simulation run`` without a name raises ``UsageError`` listing the
     available scenarios instead of guessing one.
+  * ``accounts add <name> [plugin ...]`` assigns plugins DIRECTLY (payload
+    ``{"name": ..., "plugins": [...]}``; the key is omitted when none are
+    given). Profile-mediated capabilities were removed from the backend —
+    ``profiles`` is never sent (it is rejected as an unknown payload key).
+  * ``accounts plugins|plugin-add|plugin-remove`` manage the direct
+    account→plugin assignments through the facade; removal is idempotent
+    (``existed=false`` renders a "nothing to do" message, never an error).
+    Assignments apply immediately — there are no next-start semantics.
+  * The ``profiles`` group stays (retained future infrastructure: profile
+    CRUD + bookkeeping assignments), but its help text says plainly that
+    profiles do NOT control which plugins an account runs.
   * ``accounts enable <name> <on|off>`` also accepts true/false; a real bool
     is passed down (ControlAPI.parse_bool re-validates on its side anyway).
   * ``accounts credential <name> <token>`` prints a shell-history warning:
@@ -42,8 +53,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 __all__ = [
     "HELP", "QuitRequested", "UsageError", "help_text", "run_command",
-    "format_status", "format_accounts", "format_account_info", "format_plugins",
-    "format_plugin_state", "format_profiles", "format_groups",
+    "format_status", "format_accounts", "format_account_info",
+    "format_account_plugins",
+    "format_plugins", "format_plugin_state", "format_profiles",
+    "format_groups",
     "format_group_snapshot", "format_policies",
     "format_effective", "format_tasks", "format_history", "format_logs",
     "format_audit", "format_warnings", "format_simulation_report",
@@ -66,11 +79,15 @@ HELP: Dict[str, Tuple[str, str]] = {
     "help": ("[command]", "show this help (or help for one command)"),
     "status": ("", "overview: accounts, tasks, rate limits, warnings"),
     "accounts": (
-        "list|add <name> [profile ...]|remove <name>|info <name>"
+        "list|add <name> [plugin ...]|plugins <account>"
+        "|plugin-add <account> <plugin>|plugin-remove <account> <plugin>"
+        "|remove <name>|info <name>"
         "|credential <name> <token>|enable <name> <on|off>"
         "|start [name|all]|stop [name|all]|estop <name>",
-        "account management (credentials: dashboard or 'accounts credential'"
-        " — CAUTION: the token lands in your shell history)",
+        "account management (capabilities: direct account→plugin"
+        " assignment, applied immediately; credentials: dashboard or"
+        " 'accounts credential' — CAUTION: the token lands in your shell"
+        " history)",
     ),
     "credentials": (
         "status|import-env [--overwrite]",
@@ -90,7 +107,8 @@ HELP: Dict[str, Tuple[str, str]] = {
     "profiles": (
         "list|create <name> <plugin ...>|delete <name>"
         "|assign <account> <profile>|unassign <account> <profile>",
-        "capability profiles",
+        "profile records — RETAINED FUTURE INFRASTRUCTURE; they do NOT"
+        " control which plugins an account runs (use 'accounts plugin-add')",
     ),
     "groups": (
         "list|show <group>|create <name> [description]"
@@ -229,7 +247,10 @@ async def run_command(api: Any, line: str) -> Optional[str]:
 # ------------------------------------------------------------- sub-usages
 _ACCOUNTS_USAGE = {
     "list": "accounts list",
-    "add": "accounts add <name> [profile ...]",
+    "add": "accounts add <name> [plugin ...]",
+    "plugins": "accounts plugins <account>",
+    "plugin-add": "accounts plugin-add <account> <plugin>",
+    "plugin-remove": "accounts plugin-remove <account> <plugin>",
     "remove": "accounts remove <name>",
     "info": "accounts info <name>",
     "credential": "accounts credential <name> <token>",
@@ -403,7 +424,8 @@ def _tail_args(cmd: str, args: Sequence[str]) -> Tuple[int, Optional[str]]:
 
 # ------------------------------------------------------------ group impls
 async def _accounts_group(api: Any, args: List[str]) -> str:
-    """accounts list|add|remove|info|credential|enable|start|stop|estop."""
+    """accounts list|add|plugins|plugin-add|plugin-remove|remove|info|
+    credential|enable|start|stop|estop."""
     sub, rest = _sub(_ACCOUNTS_USAGE, args, "accounts")
     ctx = f"accounts {sub}"
     if sub == "list":
@@ -418,8 +440,31 @@ async def _accounts_group(api: Any, args: List[str]) -> str:
             )
         payload: Dict[str, Any] = {"name": rest[0]}
         if rest[1:]:
-            payload["profiles"] = rest[1:]
+            # direct account→plugin assignment (the capability model);
+            # 'profiles' is deliberately NOT sent — the backend rejects it
+            payload["plugins"] = rest[1:]
         return _result(await api.accounts_add(payload, surface="cli"), verb="added")
+    if sub == "plugins":
+        account = _exact(rest, 1, ctx)
+        return format_account_plugins(
+            account, await api.accounts_plugins_list(account)
+        )
+    if sub == "plugin-add":
+        account, plugin = _exact(rest, 2, ctx)
+        return _result(
+            await api.accounts_plugin_assign(account, plugin, surface="cli"),
+            verb="plugin added",
+        )
+    if sub == "plugin-remove":
+        account, plugin = _exact(rest, 2, ctx)
+        out = await api.accounts_plugin_unassign(account, plugin, surface="cli")
+        if isinstance(out, dict) and out.get("existed") is False:
+            # idempotent removal: the assignment was already gone
+            return (
+                f"plugin removed: {plugin} was not assigned to {account}"
+                " — nothing to do"
+            )
+        return _result(out, verb="plugin removed")
     if sub == "credential":
         name, token = _exact(rest, 2, ctx)
         out = await api.accounts_set_credential(name, token, surface="cli")
@@ -531,7 +576,12 @@ async def _plugins_group(api: Any, args: List[str]) -> str:
 
 
 async def _profiles_group(api: Any, args: List[str]) -> str:
-    """profiles list|create|delete|assign|unassign."""
+    """profiles list|create|delete|assign|unassign.
+
+    Retained future infrastructure: profile CRUD + assignment bookkeeping
+    persist, but they have NO capability effect — plugins are assigned
+    directly per account (``accounts plugin-add`` / ``plugin-remove``).
+    """
     sub, rest = _sub(_PROFILES_USAGE, args, "profiles")
     ctx = f"profiles {sub}"
     if sub == "list":
@@ -804,7 +854,12 @@ def format_status(status: dict) -> str:
 
 
 def format_accounts(accounts: List[dict]) -> str:
-    """Account list payload (api.accounts_list) -> one block per account."""
+    """Account list payload (api.accounts_list) -> one block per account.
+
+    Capabilities render from ``assigned_plugins`` (the direct account→plugin
+    assignment); legacy ``profiles`` stay out of this view — they no longer
+    gate anything.
+    """
     if not accounts:
         return "  (no accounts registered — 'accounts add <name>')"
     lines: List[str] = []
@@ -819,9 +874,9 @@ def format_accounts(accounts: List[dict]) -> str:
         lines.append(
             f"  {name:<16}{state:<14}id={_fmt_val(uid) if uid is not None else '-'}{flag}"
         )
-        profiles = account.get("profiles") or []
-        if profiles:
-            lines.append(f"      profiles: {', '.join(str(p) for p in profiles)}")
+        plugins = account.get("assigned_plugins") or []
+        if plugins:
+            lines.append(f"      plugins: {', '.join(str(p) for p in plugins)}")
     return "\n".join(lines)
 
 
@@ -830,7 +885,9 @@ def format_account_info(details: dict) -> str:
 
     Sections: Status / Identity / Runtime (clearly marked as CLIENT CACHE —
     runtime data only ever comes from the live client's cached state) /
-    Plugins / Profile / Rate Limit (sources like 'inherited from global').
+    Plugins (the assigned set + enabled flags) / Profiles (informational
+    retained infrastructure — NOT capabilities) / Rate Limit (sources like
+    'inherited from global').
     """
     name = details.get("name", "?")
     status = details.get("status") or {}
@@ -871,10 +928,11 @@ def format_account_info(details: dict) -> str:
             flag = "enabled" if state else "disabled" if state is not None else "-"
             lines.append(f"{str(plugin.get('name', '?')):<14}{flag}")
     else:
-        lines.append("(none)")
-    section("Profile")
+        lines.append("(none assigned — 'accounts plugin-add <account> <plugin>')")
+    section("Profiles (informational)")
     profiles = details.get("profiles") or []
     lines.append(", ".join(str(p) for p in profiles) if profiles else "(none)")
+    lines.append("(retained future infrastructure — not the capability mechanism)")
     section("Rate Limit")
     rate = details.get("rate_limit") or {}
     if rate:
@@ -888,6 +946,21 @@ def format_account_info(details: dict) -> str:
     else:
         lines.append("(no actions paced)")
     return "\n".join(lines)
+
+
+def format_account_plugins(account: str, plugins: Sequence[str]) -> str:
+    """Assigned-plugin list (api.accounts_plugins_list) -> sorted lines.
+
+    The assignment (not the plugin's enabled flag) is what renders here —
+    see ``plugins state <account>`` for enabled/disabled detail.
+    """
+    names = sorted(str(p) for p in plugins or [])
+    if not names:
+        return (
+            f"  (no plugins assigned to {account} —"
+            f" 'accounts plugin-add {account} <plugin>')"
+        )
+    return "\n".join(f"  {name}" for name in names)
 
 
 def format_plugins(manifests: List[dict]) -> str:

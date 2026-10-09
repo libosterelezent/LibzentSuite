@@ -2,7 +2,8 @@ SlaughterMudae — Documentation
 ==============================
 
 Multi-account Discord automation framework: plugins that request services
-from a central core, first-class accounts, capability profiles, a
+from a central core, first-class accounts with direct account→plugin
+assignments (the capability model), a
 four-scope rate-limiting stack, a centralized task pipeline, SQLite
 persistence, and two parity'd management surfaces (CLI + dashboard) over
 ONE Core API.

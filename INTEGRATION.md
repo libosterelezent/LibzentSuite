@@ -69,7 +69,9 @@ core/                    framework (managers + shared contracts)
   logging_service.py     (spine)  structured LogService
   settings_manager.py    (spine)  Setting schema + SettingsManager
   account_manager/       (A6)     Account (first-class), AccountManager, DiscordCache
-  profile_manager/       (A6)     ProfileManager (profiles/capabilities)
+  profile_manager/       (A6)     ProfileManager — RETAINED future infrastructure
+                                   (profile records; NOT the capability model:
+                                   accounts get plugins directly)
   plugin_base.py         (A3)     PluginBase, PluginContext, PluginServices protocol
   plugin_manager/        (A3)     discovery, per-account instances, dispatch
   rate_limit_manager/    (A4)     policies (4 levels), pacing engine, server limits, warnings
@@ -308,10 +310,18 @@ class ProfileManager:
     def assign(self, account, profile) -> dict    # validates profile AND account exist
     def unassign(self, account, profile) -> dict
     def assigned(self, account) -> list[str]
-    def allowed_plugins(self, account) -> set | None   # union; None = unrestricted
+    def allowed_plugins(self, account) -> set | None   # retained; NOT consulted by attach
 ```
 Port semantics from `git show HEAD:core/roles.py` (name regex, non-empty
 plugin list, unknown-role warning behavior).
+
+STATUS: retained future infrastructure. Profile CRUD and assignment
+bookkeeping persist, but profiles NO LONGER control which plugins an
+account runs — that is the direct account→plugin assignment
+(`account_plugins` table; `AccountManager.assign_plugin` /
+`unassign_plugin` / `set_account_plugins` via `ControlAPI.
+accounts_plugin_*`). Future (NOT implemented): plugin-specific profiles /
+multiple saved configurations.
 
 ### core/account_manager (A6)
 ```python
@@ -328,10 +338,10 @@ class AccountManager:
                  api_cache_repo=None, credential_service=None, cooldowns=None,
                  plugin_state=None): ...
     def add_account(self, name, *, token_ref=None, enabled=True, sync_group=None,
-                    profiles=None) -> dict          # validates + persists
+                    plugins=None) -> dict       # validates + persists; 'profiles' REJECTED
     def remove_account(self, name) -> dict          # must be stopped; cascades
     def get(self, name) -> Account                  # AccountError when unknown
-    def accounts(self) -> list[dict]                # status list (names + ids + roles)
+    def accounts(self) -> list[dict]                # status list (names + ids + assigned plugins)
     def set_enabled(self, name, enabled) -> dict
     async def start(self, name) -> dict ; async def stop(self, name) -> dict
     async def start_all(self, *, stagger=5.0) -> dict
@@ -352,8 +362,9 @@ class AccountManager:
   (`client.cached_snapshot()`); mark it clearly.
 - `start()`: client = `client_factory(name, token)`; connect; ingest
   `cached_snapshot()` into `runtime.cache`; publish `AccountConnected`;
-  `plugin_manager.activate_account(name, services)` with allowed plugins from
-  profiles; start reconnect supervisor (policy from
+  `plugin_manager.activate_account(name, services)` with the account's
+  DIRECTLY assigned plugins (`account_plugins` rows — profiles are not
+  consulted); start reconnect supervisor (policy from
   `settings.account_settings(name)`; exponential backoff; port from
   `git show HEAD:core/container.py` supervise logic).
 - `send_hook`: resolve runtime; not running -> `ConnectionError("account ...
@@ -421,15 +432,17 @@ latency_ms/user_id/on_message/on_disconnect), `ClientFactory` protocol
 - `interfaces/cli/commands.py`: `run_command(api, line) -> str | None`
   (raises `QuitRequested`, `UsageError`), `HELP` registry, pure `format_*`
   helpers.   Command groups (spec §13 — subcommand style):
-  `accounts list|add <name> [profiles...]|remove <name>|info <name>|
-  credential <name> <token>|enable <name> <on|off>|start [name|all]|
-  stop [name|all]|estop <name>`,
+  `accounts list|add <name> [plugins...]|plugins <account>|
+  plugin-add <acct> <plugin>|plugin-remove <acct> <plugin>|remove <name>|
+  info <name>|credential <name> <token>|enable <name> <on|off>|
+  start [name|all]|stop [name|all]|estop <name>`,
   `credentials status|import-env [--overwrite]`,
   `cooldowns [account]|clear <account> <plugin> [key]`,
   `plugins list|state <account>|enable <acct> <plugin>|disable <acct> <plugin>|
   settings <account>|set <account> <plugin> <key> <value>`,
   `profiles list|create <name> <plugin...>|delete <name>|assign <acct> <profile>|
-  unassign <acct> <profile>`,
+  unassign <acct> <profile>` (retained infrastructure — profile commands
+  are bookkeeping only, no capability effect),
   `ratelimit show|stats|set <action> <interval> [jitter_min jitter_max] [level owner]|
   clear <level> <owner> <action>|effective <action> [account] [plugin]|warnings|
   floor <seconds>|lane [on [rate]|off|rate <s>]`,

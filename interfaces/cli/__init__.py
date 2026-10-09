@@ -9,6 +9,7 @@ from .commands import (
     QuitRequested,
     UsageError,
     format_account_info,
+    format_account_plugins,
     format_accounts,
     format_audit,
     format_effective,
