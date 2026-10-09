@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Dict, List, Type
 
 from ..errors import PluginError
-from ..plugin_base import PluginBase
+from ..plugin_base import CommandSpec, PluginBase
 
 LOG = logging.getLogger("slaughtermudae.loader")
 
@@ -48,6 +48,10 @@ _PARENT_SEQ = itertools.count()
 
 #: the only legal plugin slugs: lowercase ascii, digits, underscore, dash
 from ..names import PLUGIN_NAME_RE as _NAME_RE
+
+#: the only legal self-command names: lowercase ascii, digits, underscore
+#: (Discord command names; no dash, no spaces, bounded length)
+COMMAND_NAME_RE = re.compile(r"[a-z0-9_]{1,32}")
 
 
 @dataclass(frozen=True)
@@ -201,12 +205,53 @@ class PluginLoader:
                     f"plugin {name!r} declares duplicate setting key {setting.name!r}"
                 )
             seen_keys.add(setting.name)
+        self._validate_commands(cls, name, path)
         if name in self._records:
             raise PluginError(
                 f"duplicate plugin name {name!r} "
                 f"({path} vs {self._records[name].source})"
             )
         self._records[name] = PluginRecord(name=name, cls=cls, source=path)
+
+    def _validate_commands(self, cls: Type[PluginBase], name: str,
+                           path: Path) -> None:
+        """Validate a plugin's declared self-commands at discovery.
+
+        Fail-fast (same convention as duplicate setting keys): an invalid
+        command name, a missing handler, a missing/blank help line or a
+        duplicate name WITHIN one plugin is a PluginError — a broken
+        declaration must never boot. Cross-plugin collisions are NOT
+        checked here (the plugin manager resolves them at collection with
+        first-registered-wins, deterministic manifest order).
+        """
+        commands = getattr(cls, "COMMANDS", ()) or ()
+        if not isinstance(commands, tuple):
+            raise PluginError(
+                f"plugin {name!r}: COMMANDS must be a tuple of CommandSpec"
+                f" (got {type(commands).__name__}) in {path}")
+        seen: set = set()
+        for spec in commands:
+            if not isinstance(spec, CommandSpec):
+                raise PluginError(
+                    f"plugin {name!r}: COMMANDS entries must be CommandSpec"
+                    f" (got {type(spec).__name__}) in {path}")
+            if not COMMAND_NAME_RE.fullmatch(spec.name or ""):
+                raise PluginError(
+                    f"plugin {name!r}: command name {spec.name!r} must be"
+                    f" lowercase [a-z0-9_] (max 32) in {path}")
+            if spec.name in seen:
+                raise PluginError(
+                    f"plugin {name!r} declares duplicate command"
+                    f" {spec.name!r} in {path}")
+            if not callable(spec.handler):
+                raise PluginError(
+                    f"plugin {name!r}: command {spec.name!r} has no callable"
+                    f" handler in {path}")
+            if not (spec.help or "").strip():
+                raise PluginError(
+                    f"plugin {name!r}: command {spec.name!r} needs a help"
+                    f" line in {path}")
+            seen.add(spec.name)
 
     # ------------------------------------------------------------- accessors
     def names(self) -> List[str]:
@@ -245,4 +290,4 @@ class PluginLoader:
         ]
 
 
-__all__ = ["PluginLoader", "PluginRecord"]
+__all__ = ["PluginLoader", "PluginRecord", "COMMAND_NAME_RE"]

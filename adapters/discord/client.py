@@ -30,8 +30,9 @@ import json
 import logging
 import math
 import sys
+import time
 import uuid
-from typing import Any, Callable, Optional
+from typing import Any, Callable, FrozenSet, Optional
 
 from adapters.base import DiscordMessage
 from adapters.model import _emoji_repr
@@ -45,6 +46,7 @@ from core.errors import (
     ServerRateLimit,
     TargetGone,
 )
+from core.plugin_manager.commands import COMMAND_HUB
 
 LOG = logging.getLogger("slaughtermudae.adapter")
 
@@ -258,6 +260,7 @@ class RealDiscordClient:
         logger: Optional[logging.Logger] = None,
         identify_gate: Optional["IdentifyGate"] = None,
         command_prefix: Optional[str] = None,
+        owner_ids: FrozenSet[int] = frozenset(),
     ) -> None:
         self._token = token
         self._discord: Any = None          # the discord module (set in connect)
@@ -273,9 +276,19 @@ class RealDiscordClient:
         #: mode: the account's OWN messages become invocable commands,
         #: other users' messages are skipped by the library's check.
         self._command_prefix = command_prefix or ""
+        #: owner gate for self-commands (OWNER_USER_IDS from .env, threaded
+        #: through the factory's credentials): the account's own Discord
+        #: user id must be an owner — exactly the trigger-word path's gate.
+        self._owner_ids = frozenset(owner_ids or ())
         self._identify_gate = identify_gate  # shared per process (factory-owned)
         #: best-effort account label for domain error messages (set by factory)
         self._account = ""
+        #: self-command registry state: name -> spec (latest published set)
+        #: and the names currently registered on the Bot (rebuild diffing)
+        self._self_command_specs: dict = {}
+        self._self_command_names: set = set()
+        #: wall-clock anchor for the `pg` uptime stat (set at READY)
+        self._connected_since: Optional[float] = None
         #: callbacks assigned by the account manager BEFORE connect()
         self.on_message: Optional[Callable[[DiscordMessage], None]] = None
         self.on_disconnect: Optional[Callable[[str], None]] = None
@@ -669,6 +682,7 @@ class RealDiscordClient:
             raise
         self._connect_aborted = False
         self.connected = True
+        self._connected_since = time.monotonic()  # `pg` uptime anchor
         self._logger.info("live client connected as user %s", self.user_id)
 
     async def _close_library_client(self) -> None:
@@ -716,28 +730,31 @@ class RealDiscordClient:
         """Register the self-command surface on the ext.commands Bot.
 
         Commands run ONLY for the account's OWN messages (self_bot=True +
-        the library's _skip_check). Each command is a thin pass-through:
-        it re-publishes its stripped content as a synthetic MessageReceived
-        through the adapter's normal event callback, so the ROLL/STOP/SOULCOPY
-        trigger words work exactly as if an owner had typed them — same
-        plugin path, same owner check (the account's own Discord user id
-        must be in OWNER_USER_IDS in .env), same paced pipeline.
+        the library's _skip_check), gated additionally on the account's
+        user id being an OWNER_USER_IDS owner (the same gate the plugin
+        trigger path applies downstream).
 
-        Unknown commands (anything after the prefix that isn't registered
-        below) are silently ignored — they do NOT reach the event bus.
+        The concrete verb set comes from the process-wide self-command
+        registry (:data:`core.plugin_manager.commands.COMMAND_HUB`): the
+        plugin manager publishes an account's (assigned ∧ enabled)
+        commands there and this layer rebuilds its Bot registrations from
+        whatever is current — framework verbs (help/pg/say) plus every
+        plugin-declared command (roll's six, and anything later plugins
+        add as a one-liner ``COMMANDS`` entry).
+
+        The legacy trigger pass-throughs remain ONLY for plugins that
+        have not migrated to command declarations (slcopy → soulcopy);
+        the old ``sm!roll``/``sm!rollstop`` triggers are SUBSUMED by the
+        registry's ``rollstart``/``rollstop`` commands.
+
+        Unknown commands (anything after the prefix that isn't registered)
+        are silently ignored — they do NOT reach the event bus.
         """
         from discord.ext import commands as ext_commands
         bot = self._client
         adapter = self
 
-        @bot.command(name="roll")
-        async def _roll(ctx):
-            adapter._publish_self_trigger(ctx, "roll")
-
-        @bot.command(name="rollstop")
-        async def _rollstop(ctx):
-            adapter._publish_self_trigger(ctx, "rollstop")
-
+        # legacy trigger bridge (soulcopy has no COMMANDS yet)
         @bot.command(name="slcopy")
         async def _slcopy(ctx):
             adapter._publish_self_trigger(ctx, "slcopy")
@@ -749,6 +766,116 @@ class RealDiscordClient:
             if not isinstance(error, ext_commands.errors.CommandNotFound):
                 adapter._logger.debug(
                     "self-command error: %s", error, exc_info=True)
+
+        # registry-driven verbs: subscribe delivers the CURRENT set and
+        # every later publish (assignment/enable mutations) rebuilds us
+        COMMAND_HUB.subscribe(
+            self._account, self.set_plugin_commands,
+            stats_provider=self._self_command_stats,
+        )
+
+    # ------------------------------------------------------- self-commands
+    def set_plugin_commands(self, specs: Any) -> None:
+        """Adopt a newly published command set (hub → client).
+
+        Stores the specs and (once the Bot + command layer exist) rebuilds
+        the Bot registrations by DIFF: names that disappeared are removed,
+        names that appeared are registered — assignment/enable mutations
+        take effect on the live account without a reconnect.
+        """
+        self._self_command_specs = {
+            getattr(spec, "name", ""): spec for spec in (specs or ())
+            if getattr(spec, "name", "")
+        }
+        self._rebuild_self_commands()
+
+    def _rebuild_self_commands(self) -> None:
+        """Sync the Bot's registered registry commands with the stored set."""
+        bot = self._client
+        register = getattr(bot, "command", None)
+        if bot is None or not callable(register):
+            return  # no Bot (no prefix / pre-connect): specs stay stored
+        wanted = set(self._self_command_specs)
+        for stale in sorted(self._self_command_names - wanted):
+            try:
+                bot.remove_command(stale)
+            except Exception:
+                pass
+        for fresh in sorted(wanted - self._self_command_names):
+            self._register_self_command(fresh)
+        self._self_command_names = wanted
+
+    def _register_self_command(self, name: str) -> None:
+        """Register ONE registry command as a thin Bot pass-through."""
+        bot = self._client
+        adapter = self
+
+        async def _invoke(ctx):
+            await adapter._dispatch_self_command(ctx, name)
+
+        try:
+            bot.command(name=name)(_invoke)
+        except Exception:
+            self._logger.exception("self-command registration failed: %s", name)
+
+    def self_command_allowed(self) -> bool:
+        """The owner gate, mirroring the plugin trigger path exactly.
+
+        self_bot mode already restricts invocation to the account's OWN
+        messages; the account's user id must ALSO be an owner
+        (OWNER_USER_IDS) or every command is ignored — non-owners get no
+        reply, exactly like a trigger word from a non-owner today.
+        Fail-closed when the owner set is empty or the user id unknown.
+        """
+        if not self._owner_ids or self.user_id is None:
+            return False
+        return self.user_id in self._owner_ids
+
+    def _self_command_stats(self) -> dict:
+        """Runtime stats for the framework ``pg`` verb (hub-pulled)."""
+        uptime = ((time.monotonic() - self._connected_since)
+                  if self._connected_since is not None else None)
+        return {"latency_ms": self.latency_ms, "uptime_s": uptime}
+
+    @staticmethod
+    def _parse_invocation(content: Any, name: str) -> tuple:
+        """``"sm!rollstart 123"`` + ``rollstart`` -> ``(["123"], "123")``.
+
+        Token-based: the first token ENDING with the command name is the
+        invocation word (works for every prefix form — plain, @me-mention
+        and case variants); everything after it is the argument list
+        (whitespace-normalized raw). Library-parsed views are avoided on
+        purpose so this helper stays unit-testable without the library.
+        """
+        tokens = (content or "").split()
+        lowered = name.lower()
+        for index, token in enumerate(tokens):
+            if token.lower().endswith(lowered):
+                args = tokens[index + 1:]
+                return args, " ".join(args)
+        return [], ""
+
+    async def _dispatch_self_command(self, ctx: Any, name: str) -> None:
+        """One invocation: owner gate, parse, hub dispatch (contained)."""
+        try:
+            if not self.self_command_allowed():
+                self._logger.debug(
+                    "self-command %s ignored: account user %s is not an owner",
+                    name, self.user_id)
+                return
+            args, raw = self._parse_invocation(
+                getattr(ctx, "message", None) and ctx.message.content, name)
+            channel = ctx.channel
+            guild = getattr(channel, "guild", None)
+            guild_id = getattr(guild, "id", None) if guild is not None else None
+            await COMMAND_HUB.invoke(
+                self._account, name, args, channel.id,
+                guild_id=guild_id, invoker_id=self.user_id, raw=raw)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # a broken dispatch must never kill the Bot's command task
+            self._logger.exception("self-command dispatch failed: %s", name)
 
     def _publish_self_trigger(self, ctx: Any, trigger: str) -> None:
         """Re-publish a self-command as a synthetic MessageReceived event.
@@ -792,6 +919,14 @@ class RealDiscordClient:
             except Exception as exc:  # closing a half-open client can throw
                 self._logger.warning("live client close raised %s", exc)
         self.connected = False
+        self._connected_since = None
+        if self._command_prefix:
+            # drop this client's registry subscription (a reconnect's fresh
+            # client re-subscribes with its own rebuild callback)
+            try:
+                COMMAND_HUB.unsubscribe(self._account)
+            except Exception:
+                pass
         await self._cancel_run_task()
 
     # ------------------------------------------------------------- messaging
@@ -1367,7 +1502,10 @@ class RealClientFactory:
         logger = self._logger.getChild(name) if name else self._logger
         client = RealDiscordClient(
             token=token, logger=logger, identify_gate=self._identify_gate,
-            command_prefix=self._command_prefix)
+            command_prefix=self._command_prefix,
+            owner_ids=frozenset(
+                getattr(self._credentials, "owner_user_ids", ()) or ()),
+        )
         client.account = name  # enrich AccessDenied reasons, best effort
         return client
 

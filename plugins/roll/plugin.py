@@ -24,11 +24,17 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from core.errors import FlowBlocked, PluginError, SettingsValidationError
 from core.event_bus import Event, MessageReceived
-from core.plugin_base import PluginBase, PluginContext
+from core.plugin_base import (
+    CommandContext,
+    CommandSpec,
+    PluginBase,
+    PluginContext,
+)
+from core.plugin_scopes import channel_allowed
 from core.priority import Priority
 from core.settings_manager import Setting
 
@@ -144,9 +150,14 @@ class RollPlugin(PluginBase):
     def __init__(self) -> None:
         self._rolling: Dict[str, bool] = {}   # account -> is currently rolling
         self._tasks: Dict[str, asyncio.Task] = {}
+        #: the live PluginContext of the current activation — command
+        #: handlers reuse it to drive the SAME internals (roll loop,
+        #: settings view) the trigger-word path uses
+        self._ctx: Optional[PluginContext] = None
 
     # ------------------------------------------------------------ lifecycle
     async def on_load(self, ctx: PluginContext) -> None:
+        self._ctx = ctx
         # restore persisted userstack availability (disabled when the
         # account ran out of kakeraloots in a previous session).
         #
@@ -170,6 +181,11 @@ class RollPlugin(PluginBase):
         ctx.logger.info("roll v%s loaded (command=%r userstack=%s)",
                         self.version, ctx.settings["command"],
                         ctx.settings["userstack"])
+
+    async def on_enable(self, ctx: PluginContext) -> None:
+        # every (re)activation hands the plugin its live context — command
+        # handlers stash-restore it so verbs always drive fresh services
+        self._ctx = ctx
 
     async def on_disable(self, ctx: PluginContext) -> None:
         await self._stop_all(ctx)
@@ -432,6 +448,182 @@ class RollPlugin(PluginBase):
             ctx.logger.info("userstack unavailable — disabling")
             ctx.settings["userstack"] = False
             await ctx.services.state_set("userstack_available", False)
+
+    # -------------------------------------------------------- self-commands
+    #: the Mudae-style verb set (<plugin><verb>). Handlers are the plain
+    #: methods below — the plugin manager binds them to this per-account
+    #: instance, so they drive the SAME internals (roll loop, live
+    #: settings) as the trigger-word path. Replies flow through the paced
+    #: pipeline via the executor; ValueError renders the usage line.
+    #: (The tuple sits AFTER the handler definitions: a class body is a
+    #: sequential namespace — bare names must exist by then.)
+
+    @staticmethod
+    def _scope_summary(scope: Optional[Dict[str, Any]]) -> str:
+        """One-line channel-scope description for replies."""
+        if not scope or not isinstance(scope, dict):
+            return "all channels"
+        mode = scope.get("mode") or "all"
+        if mode == "all":
+            return "all channels"
+        rules = [r for r in (scope.get("rules") or []) if isinstance(r, dict)]
+        channels = sum(len(r.get("channel_ids") or []) for r in rules)
+        return f"{mode}-list, {channels} channel(s) in {len(rules)} guild(s)"
+
+    async def _cmd_rollstart(self, ctx: CommandContext,
+                             args: List[str]) -> str:
+        """Start the roll loop — subsumes the old ``sm!roll`` trigger.
+
+        Target channel = the invoking channel, or an explicit id. The
+        effective channel scope (the bound profile's reserved ``channels``
+        key) is checked FIRST: a forbidden target gets an explaining
+        refusal, never a silent no-op.
+        """
+        target = ctx.channel_id
+        if args:
+            try:
+                target = int(args[0])
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"channel id must be a number — rollstart [channel_id]"
+                ) from None
+        try:
+            info = ctx.services.validate_channel(target)
+        except FlowBlocked as exc:
+            reason = getattr(exc, "reason", None) or str(exc)
+            raise ValueError(f"channel {target} is unusable: {reason}") from None
+        guild_id = getattr(info, "guild_id", None)
+        if guild_id is None and target == ctx.channel_id:
+            guild_id = ctx.guild_id
+        scope: Optional[Dict[str, Any]] = None
+        if ctx.settings_api is not None:
+            try:
+                scope = (await ctx.settings_api.effective()).get("channels")
+            except Exception:
+                ctx.logger.debug("effective settings unavailable", exc_info=True)
+        if scope and not channel_allowed(scope, guild_id, target):
+            return (f"refused: channel {target} is outside the roll channel "
+                    f"scope ({self._scope_summary(scope)}) — the bound "
+                    "profile's channels decide where roll may act")
+        if self._rolling.get(ctx.account):
+            return (f"already rolling on {ctx.account} — use rollstop first")
+        plugin_ctx = self._ctx
+        if plugin_ctx is None:
+            raise ValueError("roll is not active on this account "
+                             "(re-enable the plugin and retry)")
+        self._start(plugin_ctx, ctx.account, target)
+        label = ctx.services.describe_channel(target) or str(target)
+        return (f"rolling started in {label} "
+                f"({plugin_ctx.settings['command']})")
+
+    async def _cmd_rollstop(self, ctx: CommandContext,
+                            args: List[str]) -> str:
+        """Stop the roll loop (same path as the ``rollstop`` trigger)."""
+        was_rolling = bool(self._rolling.get(ctx.account))
+        if self._ctx is not None:
+            await self._stop(self._ctx, ctx.account)
+        else:  # never activated here: just clear the bookkeeping
+            self._rolling[ctx.account] = False
+            task = self._tasks.pop(ctx.account, None)
+            if task is not None and not task.done():
+                task.cancel()
+        return "rolling stopped" if was_rolling else "not rolling"
+
+    async def _cmd_rollinfo(self, ctx: CommandContext,
+                            args: List[str]) -> str:
+        """Effective settings + profile binding + scope summary."""
+        if ctx.settings_api is not None:
+            effective = await ctx.settings_api.effective()
+            profile = await ctx.settings_api.binding()
+            scope = effective.pop("channels", None)
+            source = "merged (defaults <- profile <- account overrides)"
+        else:  # stripped stack: the live view only
+            effective = dict(ctx.services.settings or {})
+            profile = None
+            scope = None
+            source = "live view (profile storage unavailable)"
+        lines = [f"roll on {ctx.account} — {source}",
+                 f"profile: {profile if profile else 'none'}"]
+        for key in sorted(effective):
+            lines.append(f"  {key} = {effective[key]!r}")
+        lines.append(f"scope: {self._scope_summary(scope)}")
+        lines.append(f"rolling: {'yes' if self._rolling.get(ctx.account) else 'no'}")
+        return "\n".join(lines)
+
+    async def _cmd_rolllist(self, ctx: CommandContext,
+                            args: List[str]) -> str:
+        """The plugin's settings profiles (reference for binding)."""
+        if ctx.settings_api is None:
+            return "profile storage is unavailable on this stack"
+        profiles = await ctx.settings_api.profiles()
+        if not profiles:
+            return "no roll profiles defined (create one in the dashboard)"
+        return "roll profiles:\n" + "\n".join(
+            f"  {row['name']} — {row['description'] or '-'}"
+            for row in profiles)
+
+    async def _cmd_rollset(self, ctx: CommandContext,
+                           args: List[str]) -> str:
+        """Set one per-account override — the SAME validated path as the
+        dashboard's set-setting surface (bad keys/values render usage)."""
+        if len(args) < 2:
+            raise ValueError("rollset <key> <value> — e.g. rollset command $wg")
+        if ctx.settings_api is None:
+            return "settings storage is unavailable on this stack"
+        key, value = args[0], " ".join(args[1:])
+        effective = await ctx.settings_api.effective()
+        old = effective.get(key)
+        new = await ctx.settings_api.set(key, value)  # SettingsValidationError
+        return f"set roll.{key} = {new!r} (was {old!r})"
+
+    async def _cmd_rollremove(self, ctx: CommandContext,
+                              args: List[str]) -> str:
+        """Clear one per-account override (falls back to profile/default)."""
+        if not args:
+            raise ValueError("rollremove <key>")
+        if ctx.settings_api is None:
+            return "settings storage is unavailable on this stack"
+        key = args[0]
+        effective = await ctx.settings_api.clear(key)
+        return f"cleared roll.{key} override — now {effective!r}"
+
+    #: declared LAST: every handler name above already exists in the
+    #: class namespace (a class body is sequential)
+    COMMANDS = (
+        CommandSpec(
+            name="rollinfo",
+            help="Show effective roll settings, profile binding and scope",
+            handler=_cmd_rollinfo,
+        ),
+        CommandSpec(
+            name="rolllist",
+            help="List the roll plugin's settings profiles",
+            handler=_cmd_rolllist,
+        ),
+        CommandSpec(
+            name="rollremove",
+            help="Clear one per-account roll setting override",
+            usage="<key>",
+            handler=_cmd_rollremove,
+        ),
+        CommandSpec(
+            name="rollset",
+            help="Set one per-account roll setting override",
+            usage="<key> <value>",
+            handler=_cmd_rollset,
+        ),
+        CommandSpec(
+            name="rollstart",
+            help="Start rolling (current or given channel, scope-checked)",
+            usage="[channel_id]",
+            handler=_cmd_rollstart,
+        ),
+        CommandSpec(
+            name="rollstop",
+            help="Stop rolling",
+            handler=_cmd_rollstop,
+        ),
+    )
 
 
 __all__ = ["RollPlugin", "parse_pause_minutes", "VALID_ROULETTES",

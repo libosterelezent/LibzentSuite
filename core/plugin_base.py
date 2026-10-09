@@ -24,6 +24,16 @@ CONTRACT NOTE (A3 decision, documented for A6): the pinned PluginServices
 protocol gained ``open_dm(user_id) -> int`` — soulcopy needs the Mudae DM
 channel id to filter collected pages. The account manager implements it
 (the underlying DiscordClient protocol already exposes ``open_dm``).
+
+SELF-COMMAND DECLARATION (per-account command interface): a plugin may
+declare a ``COMMANDS`` class attribute — a tuple of :class:`CommandSpec` —
+making its verbs available as ``<prefix><name>`` self-commands on every
+account it is ASSIGNED to and ENABLED on (e.g. ``sm!rollstart``). Handlers
+run through the SAME paced/isolated pipeline as plugin code: replies go
+through ``ctx.services.send_message`` (never a raw client), a crashing
+handler is contained by the executor, and the plugin manager binds each
+declared handler to the per-account plugin instance before invocation
+(handlers may be plain methods — see CommandSpec).
 """
 from __future__ import annotations
 
@@ -41,6 +51,7 @@ from typing import (
     Optional,
     Protocol,
     Sequence,
+    Tuple,
     runtime_checkable,
 )
 
@@ -70,6 +81,11 @@ class PluginBase(abc.ABC):
     description: ClassVar[str] = ""
     #: everything the plugin supports; resolved per account by SettingsManager
     settings: ClassVar[Sequence["Setting"]] = ()
+    #: self-commands the plugin declares (per-account command interface).
+    #: Declared ONCE on the class — the loader validates the tuple at
+    #: discovery and the plugin manager binds each handler to the
+    #: per-(account, plugin) instance. See :class:`CommandSpec`.
+    COMMANDS: ClassVar[Tuple["CommandSpec", ...]] = ()
 
     # ------------------------------------------------------------- lifecycle
     async def on_load(self, ctx: "PluginContext") -> None:
@@ -127,6 +143,111 @@ class PluginContext:
 
     def __repr__(self) -> str:
         return f"<PluginContext {self.account}:{self.plugin} settings={sorted(self.settings)}>"
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    """One plugin-declared self-command (Mudae-style grammar).
+
+    Declared on the plugin class as part of ``COMMANDS`` (the ONE
+    declaration mechanism — there is no runtime/on_load registration; the
+    class attribute keeps the registry static, discoverable and sortable
+    by manifest order).
+
+    ``name`` is the BARE name without the account's command prefix
+    (``rollstart``, not ``sm!rollstart``) and must match ``[a-z0-9_]+``.
+    ``handler`` is ``async def handler(ctx: CommandContext, args) -> str``
+    — the string it returns is sent back through the paced pipeline as a
+    normal self-message in the invoking channel. Raising ``ValueError``
+    (which includes :class:`core.errors.SettingsValidationError`) renders
+    the usage line back to the invoker instead. The handler may be a
+    PLAIN METHOD of the plugin class: the plugin manager binds it to the
+    per-(account, plugin) instance, so handlers reach the plugin's own
+    state and internals exactly like lifecycle hooks do.
+
+    An empty ``category`` defaults to the plugin's display name at
+    collection time; the auto-help groups commands by it.
+    """
+
+    #: bare command name WITHOUT prefix, e.g. "rollstart"
+    name: str
+    #: one-liner for the categorized help
+    help: str
+    #: argument usage, e.g. "<key> <value>"
+    usage: str = ""
+    #: defaults to the plugin's display name
+    category: str = ""
+    #: async def handler(ctx: CommandContext, args: List[str]) -> str
+    handler: Optional[Callable] = None
+
+
+@runtime_checkable
+class CommandSettingsApi(Protocol):
+    """Validated settings surface for self-command handlers.
+
+    Implemented by the plugin manager per (account, plugin) pair and
+    handed to handlers as ``ctx.settings_api`` (None on stripped-down
+    test stacks — handlers must degrade gracefully). This is the SAME
+    validation path as the dashboard/CLI ``set-setting`` surface
+    (:meth:`core.plugin_manager.PluginManager.set_setting`) and the SAME
+    effective-settings merge as the Phase-1 account view (plugin Setting
+    defaults <- bound profile (minus the reserved ``channels`` key) <-
+    per-account overrides, with the profile's channel scope riding along
+    under ``"channels"``).
+    """
+
+    def schema(self) -> Sequence["Setting"]:
+        """The plugin's setting schema (declared order)."""
+
+    async def effective(self) -> Dict[str, Any]:
+        """Merged effective settings incl. the reserved ``channels`` scope."""
+
+    async def set(self, key: str, value: Any) -> Any:
+        """Validate + persist one per-account override; returns typed value.
+
+        Raises SettingsValidationError for unknown keys / bad values.
+        """
+
+    async def clear(self, key: str) -> Any:
+        """Remove one per-account override; returns the newly-effective value."""
+
+    async def binding(self) -> Optional[str]:
+        """Name of the account's bound profile for this plugin (None = none)."""
+
+    async def profiles(self) -> List[Dict[str, Any]]:
+        """The plugin's available profiles (``name``/``description`` rows)."""
+
+
+@dataclass(frozen=True)
+class CommandContext:
+    """Everything a self-command handler may touch at runtime.
+
+    Built per invocation by the plugin manager. ``services`` is the SAME
+    per-(account, plugin) facade plugin code uses, so a handler's sends
+    flow through the paced pipeline with identical guarantees — there is
+    deliberately NO raw client access here. ``channel_id``/``guild_id``
+    describe where the command was invoked (DM commands have
+    ``guild_id=None``); ``raw`` is the verbatim argument remainder after
+    the command word.
+    """
+
+    #: account name the command was invoked on
+    account: str
+    #: plugin name the command belongs to ("selfcmd" for framework verbs)
+    plugin: str
+    #: per-(account, plugin) services facade (paced sends, credentials...)
+    services: "PluginServices"
+    #: pre-scoped logger: slaughtermudae.<account>.<plugin>
+    logger: logging.Logger
+    #: channel the command was invoked in
+    channel_id: int = 0
+    #: guild of the invoking channel (None for DMs)
+    guild_id: Optional[int] = None
+    #: validated settings surface (None on stripped stacks)
+    settings_api: Optional[CommandSettingsApi] = None
+    #: verbatim argument remainder (whitespace-normalized by the parser)
+    raw: str = ""
+
 
 
 @runtime_checkable
@@ -261,4 +382,5 @@ class PluginServices(Protocol):
         """Resolved settings of this (account, plugin) pair."""
 
 
-__all__ = ["PluginBase", "PluginContext", "PluginServices"]
+__all__ = ["PluginBase", "PluginContext", "PluginServices", "CommandSpec",
+           "CommandContext", "CommandSettingsApi"]

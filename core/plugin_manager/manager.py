@@ -22,10 +22,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set
+import types
+from dataclasses import dataclass, field, replace
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
-from core.errors import PluginError
+from core.errors import PluginError, SettingsValidationError
 from core.event_bus import (
     EventBus,
     Event,
@@ -37,8 +38,12 @@ from core.event_bus import (
     PluginLoaded,
     PluginUnloaded,
 )
+from core.plugin_base import CommandContext, CommandSpec
+from core.priority import Priority
 from core.settings_manager import SettingsManager
 
+from .commands import COMMAND_HUB, MAX_REPLY_CHARS
+from .commands import RegisteredCommand
 from .loader import PluginLoader
 
 
@@ -109,6 +114,11 @@ class PluginManager:
         self._unsub_deleted = bus.subscribe(MessageDeleted, self._on_message)
         self._unsub_reaction = bus.subscribe(ReactionAdded, self._on_message)
         self._discovered = False
+        # self-command registry: this manager is the process's registry
+        # source (last-wins across test-built managers — see commands.py).
+        # The attribute form lets tests substitute a private hub.
+        self.command_hub = COMMAND_HUB
+        COMMAND_HUB.bind(self)
 
     # ------------------------------------------------------------- discovery
     def discover(self) -> Dict[str, Any]:
@@ -234,6 +244,10 @@ class PluginManager:
             "attached %d plugin(s) to %s (allowed=%s)",
             len(runtimes), account, sorted(allowed) if allowed is not None else "all",
         )
+        # self-command registry tracks the (assigned ∧ enabled) set — the
+        # same hook covers assignment mutations (the account manager
+        # re-attaches on every one) and plain (re)attaches
+        self._sync_commands(account)
 
     def detach_account(self, account: str) -> None:
         """Drop the account's instances WITHOUT firing unload hooks.
@@ -246,6 +260,8 @@ class PluginManager:
         # dispatch bookkeeping: any task still queued dies at the services
         # gate in _dispatch (the account's services are gone)
         self._pending_by_account.pop(account, None)
+        # the account's self-command surface is gone with it
+        self.command_hub.forget(account)
 
     async def activate_account(self, account: str, services: Any) -> None:
         """Resolve settings + fire on_load/on_enable for enabled plugins.
@@ -342,6 +358,7 @@ class PluginManager:
         for task in [t for t in list(self._pending) if not t.done()]:
             task.cancel()
         self._pending_by_account.clear()
+        COMMAND_HUB.unbind(self)  # self-command invocations route nowhere now
 
     async def deactivate_account(self, account: str) -> None:
         """Fire on_disable + on_unload for the account's active plugins.
@@ -429,6 +446,8 @@ class PluginManager:
                 account=account, plugin=plugin, enabled=runtime.enabled
             )
         )
+        # enabled state is part of command visibility — re-publish
+        self._sync_commands(account)
 
     async def set_setting(self, account: str, plugin: str, key: str, value: Any) -> Any:
         """Validate + persist + apply one plugin setting for one account."""
@@ -486,6 +505,193 @@ class PluginManager:
         """
         runtime = self._accounts.get(account, {}).get(plugin)
         return runtime.settings if runtime is not None else None
+
+    # ---------------------------------------------------------- self-commands
+    def command_entries(self, account: str) -> List[Tuple[CommandSpec, str]]:
+        """``(CommandSpec, plugin name)`` pairs for the account's plugins.
+
+        Collection rule (visibility = assigned ∧ enabled): every runtime
+        the account holds that is enabled and instantiated contributes its
+        class's ``COMMANDS``. Handlers declared as plain plugin-class
+        methods are BOUND to the per-account instance here (one instance
+        per (account, plugin) pair — handlers reach plugin internals like
+        any lifecycle hook); an empty ``category`` defaults to the plugin's
+        display name.
+
+        Collision policy: deterministic manifest order (plugin name sort);
+        the FIRST registration of a command name wins, later collisions
+        are dropped with a warning naming both plugins.
+        """
+        runtimes = self._accounts.get(account, {})
+        out: List[Tuple[CommandSpec, str]] = []
+        taken: Dict[str, str] = {}
+        for plugin_name in sorted(runtimes):  # manifest-sort determinism
+            runtime = runtimes[plugin_name]
+            if not runtime.enabled or runtime.instance is None:
+                continue
+            specs = getattr(type(runtime.instance), "COMMANDS", ()) or ()
+            for declared in specs:
+                if declared.name in taken:
+                    self._logger.warning(
+                        "self-command %r declared by plugin %r collides with "
+                        "%r — first registration wins, the later one is dropped",
+                        declared.name, plugin_name, taken[declared.name])
+                    continue
+                taken[declared.name] = plugin_name
+                spec = replace(
+                    declared,
+                    handler=self._bind_handler(declared.handler,
+                                               runtime.instance),
+                    category=declared.category or plugin_name,
+                )
+                out.append((spec, plugin_name))
+        return out
+
+    def commands_for(self, account: str) -> List[CommandSpec]:
+        """The account's plugin-declared CommandSpecs (bound handlers,
+        defaulted categories, collisions resolved) — spec-only view of
+        :meth:`command_entries`."""
+        return [spec for spec, _plugin in self.command_entries(account)]
+
+    @staticmethod
+    def _bind_handler(handler: Any, instance: Any) -> Any:
+        """Bind a plain plugin-class method to the per-account instance.
+
+        A handler declared as a method (``async def _cmd(self, ctx, args)``
+        referenced bare in the class-level ``COMMANDS`` tuple) arrives as
+        an unbound function; descriptor-binding gives it ``self`` so it
+        reaches the plugin's own state like a lifecycle hook. The class-
+        body provenance check (walking the MRO) keeps FREE functions and
+        lambdas — which already have the right signature — untouched.
+        """
+        if isinstance(handler, types.FunctionType):
+            for klass in type(instance).__mro__:
+                if handler in vars(klass).values():
+                    return handler.__get__(instance, klass)
+        return handler
+
+    def _sync_commands(self, account: str) -> None:
+        """Re-publish the account's self-command surface (hub → client)."""
+        try:
+            self.command_hub.refresh(account)
+        except Exception:  # registry sync must never fail an attach/toggle
+            self._logger.exception("self-command sync failed for %s", account)
+
+    # ------------------------------------------------------------ execution
+    async def execute_self_command(
+        self,
+        account: str,
+        name: str,
+        args: List[str],
+        channel_id: int,
+        *,
+        guild_id: Optional[int] = None,
+        invoker_id: Optional[int] = None,
+        raw: str = "",
+    ) -> None:
+        """Run one self-command and reply in-channel through the pipeline.
+
+        Fully error-contained (a crashing handler must never kill the
+        account or its Bot): the handler's string return value, its usage
+        errors (``ValueError`` — including ``SettingsValidationError``)
+        and the internal-error fallback are ALL sent back through the
+        per-plugin services facade — the same paced pipeline plugin sends
+        use — never a raw client send.
+
+        The owner gate mirrors the trigger-word path exactly: the invoking
+        Discord user id must be in ``credentials.owner_user_ids`` (the
+        adapter layer gates first; this is the defense-in-depth check) —
+        non-owners are ignored with no reply, like today.
+        """
+        entry = self._find_command(account, name)
+        if entry is None:
+            self._logger.debug("unknown self-command %r on %s", name, account)
+            return
+        spec, plugin = entry.spec, entry.plugin
+        factory = self._services.get(account)
+        if factory is None:
+            self._logger.warning(
+                "self-command %r on %s dropped: plugins not activated",
+                name, account)
+            return
+        services = factory(plugin)
+        if services is None:
+            self._logger.warning(
+                "self-command %r on %s dropped: no services facade", name, account)
+            return
+        # owner gate (same semantics as the plugin trigger-word path)
+        if invoker_id is not None:
+            owners = getattr(
+                getattr(services, "credentials", None), "owner_user_ids", ()) or ()
+            if invoker_id not in set(owners):
+                self._logger.info(
+                    "self-command %r on %s ignored: invoker %s is not an owner",
+                    name, account, invoker_id)
+                return
+        ctx = CommandContext(
+            account=account,
+            plugin=plugin,
+            services=services,
+            logger=logging.getLogger(
+                f"slaughtermudae.{account}.{plugin}.command"),
+            channel_id=int(channel_id or 0),
+            guild_id=guild_id,
+            settings_api=self._settings_api(account, plugin),
+            raw=raw,
+        )
+        try:
+            if spec.handler is None:
+                raise PluginError(f"command {spec.name!r} declares no handler")
+            reply = await spec.handler(ctx, list(args or []))
+        except asyncio.CancelledError:
+            raise
+        except (ValueError, SettingsValidationError) as exc:
+            # usage error: render the usage line + the reason back
+            usage = f"{spec.name} {spec.usage}".strip()
+            reply = f"usage: {usage}\n{exc}" if str(exc) else f"usage: {usage}"
+        except Exception:
+            ctx.logger.exception("self-command %s crashed on %s", name, account)
+            reply = f"error: {name} failed internally (see logs)"
+        if not reply:
+            return
+        await self._send_reply(services, channel_id, str(reply), ctx.logger)
+
+    async def _send_reply(self, services: Any, channel_id: int, text: str,
+                          logger: logging.Logger) -> None:
+        """One paced reply (NORMAL priority — interactive, single message)."""
+        if len(text) > MAX_REPLY_CHARS:
+            text = text[: MAX_REPLY_CHARS - 20] + "\n… (truncated)"
+        try:
+            await services.send_message(
+                int(channel_id), text, priority=Priority.NORMAL)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # the reply is best-effort exactly like the remote-control
+            # bridge: log it loudly so the operator's answer survives
+            logger.error("self-command reply undeliverable — reply was: %s",
+                         text)
+
+    def _find_command(self, account: str,
+                      name: str) -> Optional[RegisteredCommand]:
+        """Registry lookup from THIS manager's own view (never the hub's —
+        the hub may be rebound by a newer manager in tests): framework
+        verbs (reserved) first, then the account's plugin-declared specs."""
+        from .commands import FRAMEWORK_COMMANDS, FRAMEWORK_PLUGIN
+
+        for spec in FRAMEWORK_COMMANDS:
+            if spec.name == name:
+                return RegisteredCommand(spec=spec, plugin=FRAMEWORK_PLUGIN)
+        for spec, plugin in self.command_entries(account):
+            if spec.name == name:
+                return RegisteredCommand(spec=spec, plugin=plugin)
+        return None
+
+    # ------------------------------------------------- command settings api
+    def _settings_api(self, account: str, plugin: str) -> Any:
+        """The validated settings surface for command handlers (cached
+        per call site is unnecessary — construction is trivial)."""
+        return _ManagerSettingsApi(self, account, plugin)
 
     # -------------------------------------------------------------- routing
     def _on_message(self, event: Event) -> None:
@@ -626,6 +832,130 @@ class PluginManager:
             logger=logging.getLogger(f"slaughtermudae.{account}.{runtime.name}"),
             explicit_settings=explicit,
         )
+
+
+class _ManagerSettingsApi:
+    """CommandSettingsApi over the plugin manager's own surfaces.
+
+    ``set``/``clear`` go through :meth:`PluginManager.set_setting` /
+    ``clear_setting` — the SAME validation path the ControlAPI's
+    ``plugins_set_setting`` uses (parity by construction). ``effective``
+    reproduces the Phase-1 account view (``accounts_effective_settings``)
+    through the managers, never HTTP: plugin Setting defaults <- the
+    bound profile's settings (minus the reserved ``channels`` key) <- the
+    account's per-plugin overrides, with the profile's channel scope
+    riding along under ``"channels"``.
+
+    Profile/binding repositories are reached duck-typed through the
+    plugin repository's owning database (``BaseRepository._db`` — the
+    documented back-reference every repository holds); stacks without
+    profile storage degrade to the settings-manager view with
+    ``channels = None``.
+    """
+
+    def __init__(self, manager: "PluginManager", account: str,
+                 plugin: str) -> None:
+        self._manager = manager
+        self._account = account
+        self._plugin = plugin
+
+    # ------------------------------------------------------------- repos
+    @staticmethod
+    def _repos(manager: "PluginManager") -> tuple:
+        """(plugin_profiles repo, account_plugins repo) — either None."""
+        database = getattr(manager._repo, "_db", None)  # BaseRepository
+        return (getattr(database, "plugin_profiles", None),
+                getattr(database, "account_plugins", None))
+
+    # -------------------------------------------------------------- api
+    def schema(self) -> tuple:
+        return tuple(self._manager._schema_for(self._plugin))
+
+    async def binding(self) -> Optional[str]:
+        profile_repo, binding_repo = self._repos(self._manager)
+        reader = getattr(binding_repo, "bindings", None)
+        if not callable(reader):
+            return None
+        try:
+            return (await reader(self._account) or {}).get(self._plugin)
+        except Exception:
+            return None
+
+    async def profiles(self) -> List[Dict[str, Any]]:
+        profile_repo, _binding_repo = self._repos(self._manager)
+        lister = getattr(profile_repo, "list", None)
+        if not callable(lister):
+            return []
+        try:
+            records = await lister(self._plugin) or []
+        except Exception:
+            return []
+        return [
+            {
+                "name": getattr(r, "name", "?"),
+                "description": getattr(r, "description", "") or "",
+            }
+            for r in records
+        ]
+
+    async def effective(self) -> Dict[str, Any]:
+        from core import plugin_scopes
+
+        schema = self.schema()
+        defs = {s.name: s for s in schema}
+        merged: Dict[str, Any] = {s.name: s.validate(s.default) for s in schema}
+        reserved = plugin_scopes.CHANNELS_KEY
+        profile_name: Optional[str] = None
+        scope: Optional[Dict[str, Any]] = None
+        # bound profile layer (defaults <- profile)
+        profile_repo, binding_repo = self._repos(self._manager)
+        reader = getattr(binding_repo, "bindings", None)
+        if callable(reader):
+            try:
+                profile_name = (await reader(self._account) or {}).get(self._plugin)
+            except Exception:
+                profile_name = None
+        getter = getattr(profile_repo, "get", None)
+        if profile_name is not None and callable(getter):
+            try:
+                record = await getter(self._plugin, profile_name)
+            except Exception:
+                record = None
+            if record is not None:  # dangling binding: skip (parity)
+                for key, value in (getattr(record, "settings", None) or {}).items():
+                    if key != reserved and key in defs:
+                        merged[key] = value
+                raw_scope = (getattr(record, "settings", None) or {}).get(reserved)
+                try:
+                    scope = plugin_scopes.validate(raw_scope) \
+                        if raw_scope is not None else None
+                except ValueError:
+                    scope = None
+        # account overrides (highest); the scope is profile-owned
+        try:
+            layers = self._manager._settings.layers_view()
+            overrides = (layers.get("accounts", {}).get(self._account, {})
+                         .get(self._plugin, {}))
+        except Exception:
+            overrides = {}
+        for key, value in overrides.items():
+            if key == reserved or key not in defs:
+                continue
+            try:
+                merged[key] = defs[key].validate(value)
+            except SettingsValidationError:
+                merged[key] = value  # parity: the API layer applies raw
+        merged[reserved] = scope
+        return merged
+
+    async def set(self, key: str, value: Any) -> Any:
+        """Same validation path as /api/plugins/set-setting."""
+        return await self._manager.set_setting(self._account, self._plugin,
+                                               key, value)
+
+    async def clear(self, key: str) -> Any:
+        return await self._manager.clear_setting(self._account, self._plugin,
+                                                 key)
 
 
 __all__ = ["PluginManager", "PluginRuntime"]
