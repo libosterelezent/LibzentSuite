@@ -35,8 +35,8 @@ const token = () => secretStore.getItem("dash_token") || "";
 
 /* ── Application state ────────────────────────────────────────────────────── */
 let lastStats = null, lastSig = "";
-let manifests = [], profilesList = [], groupsList = [], taskList = [], taskHistory = [], cooldownList = [];
-let manifestsFailed = false, profilesFailed = false, groupsFailed = false;
+let manifests = [], groupsList = [], taskList = [], taskHistory = [], cooldownList = [];
+let manifestsFailed = false, groupsFailed = false;
 let ws = null, wsRetries = 0, wsWatchdog = null;
 let selectedAccounts = new Set();
 let currentView = "home", currentFleetTab = "accounts", currentActivityTab = "tasks", currentToolsTab = "sim";

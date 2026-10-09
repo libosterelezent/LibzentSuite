@@ -1,6 +1,6 @@
 """Dashboard v2 SPA regression tests: startup safety, Groups integration
-with the real /api/groups backend, API compatibility with the real server,
-and static validation.
+with the real /api/groups backend, the direct account→plugin capability
+model, API compatibility with the real server, and static validation.
 
 The dashboard is a build-free static SPA split across index.html (shell),
 styles/*.css and js/*.js (no bundler — plain script tags in dependency
@@ -8,6 +8,10 @@ order). Its contract with the backend is verifiable statically:
 
 * every ``/api/...`` endpoint the SPA calls must exist in the route table
   of interfaces/dashboard/server.py (startup can never 404),
+* capabilities are DIRECT account→plugin assignments: no Profiles page,
+  no profile pickers/state, the SPA never calls /api/profiles (the
+  server keeps those routes for the retained backend), and the plugin
+  flows drive the real /api/accounts/plugins* endpoints,
 * the Groups UI drives the REAL SyncGroupManager backend
   (``/api/groups/*``): the obsolete read-only-era assumptions must stay
   gone, group moves must use the group endpoints — and NEVER fake groups
@@ -178,6 +182,150 @@ class TestGroupsIntegration(unittest.TestCase):
                          "exactly one render per group mutation")
 
 
+class TestAccountPluginsModel(unittest.TestCase):
+    """Capabilities are DIRECT account→plugin assignments (the
+    profile-mediated model is gone from the UI). The Profiles page, nav
+    entry, pickers, dialog and state must be fully removed — and the
+    plugin flows must drive the real /api/accounts/plugins* backend."""
+
+    def test_profiles_page_and_nav_gone(self):
+        html = _spa()
+        js = _js()
+        for gone in ('id="panel-profiles"', 'id="prof-grid"',
+                     'id="btn-create-prof"', 'id="dlg-create-prof"',
+                     'id="prof-list"', 'id="aa-profiles"',
+                     'id="cp-plugins"', 'id="cp-name"'):
+            self.assertNotIn(gone, html, f"{gone} must be removed from the shell")
+        nav = re.search(r"const NAV = \[(.*?)\];", js, re.S)
+        self.assertIsNotNone(nav, "NAV array missing")
+        self.assertNotIn('"profiles"', nav.group(0),
+                         "NAV must not carry a profiles entry")
+        titles = re.search(r"const TITLES = \{(.*?)\};", js, re.S)
+        self.assertIsNotNone(titles, "TITLES map missing")
+        self.assertNotIn("profiles", titles.group(0))
+        self.assertNotIn("renderProfiles", js)
+        self.assertNotIn("openProfilePicker", js)
+        self.assertNotIn("effectiveCaps", js, "profile-derived caps are gone")
+        self.assertNotIn("Effective Capabilities", js)
+
+    def test_no_profiles_state_or_loader(self):
+        js = _js()
+        for token in ("profilesList", "profilesFailed", "loadProfiles"):
+            self.assertNotIn(token, js,
+                             f"profile state '{token}' must be removed")
+
+    def test_spa_never_calls_profiles_api(self):
+        """The /api/profiles routes stay on the server (backend-retained)
+        but the SPA must not call them anymore — explicitly absent from
+        the endpoint set the existence test whitelists."""
+        self.assertNotIn("/api/profiles", _spa())
+        self.assertNotIn("/api/profiles", _js())
+        self.assertNotIn("/api/profiles", _spa_endpoints())
+
+    def test_account_menu_assign_plugins(self):
+        js = _js_file("accounts.js")
+        self.assertIn('data-act="plugins"', js,
+                      "account menu needs the Assign Plugins action")
+        self.assertIn("Assign Plugins…", js)
+        self.assertNotIn('data-act="profile"', js)
+        self.assertNotIn("Assign profile", js)
+        self.assertIn("function openPluginPicker", js)
+        # tile and list share the SAME wiring (no duplicated flows)
+        for view in ("acctTile", "acctRow"):
+            body = re.search(rf"function {view}\(.*?\n}}", js, re.S)
+            self.assertIsNotNone(body, f"{view} missing")
+            self.assertIn("wireAccountActions", body.group(0))
+
+    def test_plugin_picker_from_manifests_desired_state_save(self):
+        """The picker's checkbox choices come from the discovered
+        manifests (no hardcoded plugin list), current assignments are
+        pre-checked, and Save is the desired-state whole-set POST — an
+        unknown name 400s and keeps the dialog open with the error."""
+        js = _js_file("accounts.js")
+        picker = re.search(r"async function openPluginPicker.*?\n}", js, re.S)
+        self.assertIsNotNone(picker, "openPluginPicker missing")
+        body = picker.group(0)
+        # checkbox list built from the discovered manifests via the
+        # shared builder (never a hardcoded plugin list)
+        self.assertIn("fillPluginChecks(list, current)", body)
+        self.assertIn("assignedPlugins(a)", body,
+                      "current assignments pre-checked from the account's"
+                      " assigned_plugins field (via the helper)")
+        self.assertIn("/api/accounts/plugins?account=", body,
+                      "picker loads the authoritative assignment list")
+        self.assertIn('post("/api/accounts/plugins/set"', body,
+                      "Save must POST the desired state")
+        self.assertIn('setFb(list, "error", e.message)', body,
+                      "server-side rejection keeps the dialog open + inline")
+        checks = re.search(r"function fillPluginChecks.*?\n}", js, re.S)
+        self.assertIsNotNone(checks, "fillPluginChecks missing")
+        self.assertIn("checkbox", checks.group(0))
+        self.assertIn("manifests", checks.group(0))
+        self.assertIn("current.has(m.name)", checks.group(0),
+                      "current assignments must pre-check the boxes")
+        helper = re.search(r"function assignedPlugins\(.*?\n}", js, re.S)
+        self.assertIsNotNone(helper, "assignedPlugins helper missing")
+        self.assertIn("assigned_plugins", helper.group(0),
+                      "the helper must read the direct assignment field")
+
+    def test_add_account_sends_plugins_checkboxes(self):
+        """The add-account dialog must send plugins:[checked] from the
+        /api/plugins manifests — the old 'profiles' text input 400s on
+        the new backend."""
+        html = _spa()
+        js = _js_file("app.js")
+        self.assertIn('id="aa-plugins"', html,
+                      "add-account dialog needs the plugins checkbox host")
+        self.assertNotIn("aa-profiles", _js())
+        self.assertIn('fillPluginChecks($("aa-plugins"), null)', js,
+                      "dialog open must rebuild the checkbox list")
+        submit = re.search(r"\$\(\"aa-submit\"\)\.onclick.*?\n  };", js, re.S)
+        self.assertIsNotNone(submit, "aa-submit wiring missing")
+        body = submit.group(0)
+        self.assertIn("body.plugins", body,
+                      "payload must carry the checked plugin names")
+        self.assertNotIn("profiles", body)
+        # the shared builder iterates manifests (never a hardcoded list)
+        checks = re.search(r"function fillPluginChecks.*?\n}", _js(), re.S)
+        self.assertIsNotNone(checks, "fillPluginChecks missing")
+        self.assertIn("manifests", checks.group(0))
+
+    def test_cards_and_details_use_assigned_plugins(self):
+        js = _js_file("accounts.js")
+        self.assertIn("assigned_plugins", js,
+                      "cards/details read the direct assignment field")
+        self.assertIn("Assigned Plugins", js,
+                      "details popup needs an Assigned Plugins card")
+        self.assertNotIn("a.profiles", js)
+        self.assertNotIn("chip profile", js)
+
+    def test_search_covers_accounts_groups_plugins_only(self):
+        js = _js_file("app.js")
+        search = re.search(r"\$\(\"search\"\)\.oninput.*?\n  };", js, re.S)
+        self.assertIsNotNone(search, "search wiring missing")
+        body = search.group(0)
+        for scope in ("accounts()", "groupsList", "manifests"):
+            self.assertIn(scope, body, f"search must cover {scope}")
+        self.assertNotIn("profilesList", body)
+
+    def test_plugin_endpoint_routes_exist_on_server(self):
+        routes = _server_routes()
+        for method, path in (
+            ("GET", "/api/accounts/plugins"),
+            ("POST", "/api/accounts/plugins/assign"),
+            ("POST", "/api/accounts/plugins/unassign"),
+            ("POST", "/api/accounts/plugins/set"),
+        ):
+            self.assertIn((method, path), routes,
+                          f"server must implement {method} {path}")
+
+    def test_plugin_endpoints_used_by_spa(self):
+        endpoints = _spa_endpoints()
+        for ep in ("/api/accounts/plugins", "/api/accounts/plugins/set",
+                   "/api/accounts/plugins/unassign"):
+            self.assertIn(ep, endpoints, f"the SPA must exercise {ep}")
+
+
 class TestStartupRobustness(unittest.TestCase):
     """One uncaught init error must not be possible from static causes."""
 
@@ -231,8 +379,7 @@ class TestStartupRobustness(unittest.TestCase):
 
     def test_startup_loaders_catch_own_failures(self):
         js = _js()
-        for loader in ("loadManifests", "loadProfiles", "loadGroups",
-                       "loadScenarios"):
+        for loader in ("loadManifests", "loadGroups", "loadScenarios"):
             # every loader definition contains a try/catch -> showErr path
             body = re.search(
                 rf"async function {loader}\([^)]*\) {{(.*?)\n}}", js, re.S)
@@ -501,7 +648,7 @@ class _ZeroAccountAPI:
     async def plugins_manifests(self):
         return []
 
-    async def profiles_list(self):
+    async def accounts_plugins_list(self, account):
         return []
 
     async def groups_list(self):
@@ -585,7 +732,7 @@ class TestStartupEndpointsLive(unittest.IsolatedAsyncioTestCase):
 
     async def test_startup_endpoints_answer(self) -> None:
         for path in ("/api/status", "/api/accounts", "/api/plugins",
-                     "/api/profiles", "/api/groups",
+                     "/api/groups",
                      "/api/simulation/list", "/api/tasks",
                      "/api/tasks/history", "/api/cooldowns",
                      "/api/logs", "/api/audit"):

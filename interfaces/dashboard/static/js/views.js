@@ -1,8 +1,8 @@
 "use strict";
 /* ═══════════════════════════════════════════════════════════════════════════
-   views.js — page renderers that are not Accounts/Groups: Home, Profiles,
-   Plugins, Policies, and the Activity streams (tasks, cooldowns, logs,
-   audit). Group flows live in groups.js; accounts in accounts.js.
+   views.js — page renderers that are not Accounts/Groups: Home, Plugins,
+   Policies, and the Activity streams (tasks, cooldowns, logs, audit).
+   Group flows live in groups.js; accounts in accounts.js.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ── Home ──────────────────────────────────────────────────────────────────── */
@@ -55,44 +55,13 @@ function renderHome() {
   if (!gr.children.length) gr.innerHTML='<span class="dim">no groups yet</span>';
 }
 
-/* ── Profiles ──────────────────────────────────────────────────────────────── */
-function renderProfiles() {
-  const grid = $("prof-grid"); grid.innerHTML = "";
-  if (profilesFailed) { grid.innerHTML=emptyState("Profiles Unavailable","The profiles list could not be loaded — see the error toasts. The rest of the dashboard remains usable."); return; }
-  if (!profilesList.length) { grid.innerHTML=emptyState("No Profiles","Profiles bundle plugin capabilities for accounts.","+ Create Profile");
-    const cta = grid.querySelector("button"); if (cta) cta.onclick = () => $("btn-create-prof").click();
-    return; }
-  for (const p of profilesList) {
-    const users = accounts().filter(a=>(a.profiles||[]).includes(p.name));
-    const card = document.createElement("div"); card.className="prof-card";
-    card.innerHTML = `
-      <div class="hdr"><span class="name trunc">${esc(p.name)}</span></div>
-      ${p.description?`<p class="desc" style="overflow-wrap:anywhere">${esc(p.description)}</p>`:""}
-      <div class="caps">${(manifests||[]).map(m=>{
-        const has = (p.plugins||[]).includes(m.name);
-        return `<div class="cap-row"><span class="${has?"granted":"denied"}">${has?"✓":"○"} ${esc(m.name)}</span></div>`;
-      }).join("")}</div>
-      <div class="used-by"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/></svg>Used by ${users.length} account${users.length!==1?"s":""}</div>
-      <div class="actions" style="display:flex;gap:6px;margin-top:auto">
-        <button class="btn btn-ghost btn-sm" data-del-profile="${esc(p.name)}">Delete</button>
-      </div>`;
-    card.querySelector("[data-del-profile]").onclick = () =>
-      confirmAction("Delete Profile", `Delete profile "${p.name}"?`,
-        () => post("/api/profiles/delete", {name:p.name}).then(loadProfiles).catch(e=>toast(e.message)));
-    grid.appendChild(card);
-  }
-}
-
 /* ── Plugins ───────────────────────────────────────────────────────────────── */
 function renderPlugins() {
   const grid = $("plugin-grid"); grid.innerHTML = "";
   if (manifestsFailed) { grid.innerHTML=emptyState("Plugins Unavailable","The plugins list could not be loaded — see the error toasts. The rest of the dashboard remains usable."); return; }
   if (!manifests.length) { grid.innerHTML=emptyState("No Plugins","No plugins discovered in the plugins directory."); return; }
   for (const m of manifests) {
-    const usingProfiles = profilesList.filter(p=>(p.plugins||[]).includes(m.name));
-    const usingAccounts = accounts().filter(a=>{
-      const caps = effectiveCaps(a); return caps===null||caps.has(m.name);
-    });
+    const usingAccounts = accounts().filter(a=>assignedPlugins(a).includes(m.name));
     const card = document.createElement("div"); card.className="card";
     card.innerHTML = `
       <div class="row" style="margin-bottom:6px">
@@ -101,8 +70,7 @@ function renderPlugins() {
       </div>
       <p class="sub" style="margin-bottom:var(--sp-2);overflow-wrap:anywhere">${esc(m.description||"")}</p>
       <div class="row" style="gap:var(--sp-3);font-size:12px;color:var(--dim)">
-        <span>${usingProfiles.length} profiles</span>
-        <span>${usingAccounts.length} accounts</span>
+        <span>${usingAccounts.length} account${usingAccounts.length!==1?"s":""}</span>
       </div>`;
     grid.appendChild(card);
   }

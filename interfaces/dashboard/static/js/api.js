@@ -3,9 +3,10 @@
    api.js — REST client and every data loader. Mutations live next to the
    components that own them; this file only reads (plus the one shared
    post-mutation refresh used by the group flows).
-   The REST/WS contract: persisted identity (groups, profiles, plugins)
-   comes from REST here; live runtime state (accounts/tasks/cooldowns)
-   streams over the WebSocket. See app.js connectWS().
+   The REST/WS contract: persisted identity (groups, plugins) comes from
+   REST here; live runtime state (accounts/tasks/cooldowns) streams over
+   the WebSocket. Capabilities are direct account→plugin assignments
+   (see accounts.js openPluginPicker). See app.js connectWS().
    ═══════════════════════════════════════════════════════════════════════════ */
 
 function api(path, opts={}) {
@@ -23,7 +24,6 @@ function post(path, body={}) { return api(path, {method:"POST", body:JSON.string
 /* ── Loaders (each swallows its own failure — one dead endpoint must never
       block the Promise.all startup batch) ─────────────────────────────────── */
 async function loadManifests() { try { manifests = await api("/api/plugins")||[]; manifestsFailed = false; } catch(e) { manifestsFailed = true; showErr(e.message); } }
-async function loadProfiles() { try { profilesList = await api("/api/profiles")||[]; profilesFailed = false; } catch(e) { profilesFailed = true; showErr(e.message); } }
 
 async function loadGroups(thenRender=true) {
   try { groupsList = await api("/api/groups")||[]; groupsFailed = false; }

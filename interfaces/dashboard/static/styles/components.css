@@ -20,7 +20,7 @@
 
 /* ══════════════════════════════ Account card (tile) ════════════════════════
    Dense by design: identity+status+group first, one meta line, compact
-   actions. Profiles/capabilities live in the details dialog. */
+   actions. Plugin assignment chips live here and in the details dialog. */
 .acct-card { background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--r); padding: var(--sp-2) var(--sp-3); display: flex;
   flex-direction: column; gap: 6px; transition: border-color .2s; position: relative; min-width: 0; }
@@ -80,17 +80,6 @@
 /* groups: [identity][state][members][meta][actions] */
 .lrow.grp { grid-template-columns: minmax(100px, 1.2fr) minmax(76px, auto) minmax(90px, .8fr) minmax(120px, 1.6fr) auto; }
 .lrow input[type="checkbox"] { width: 14px; height: 14px; }
-
-/* Profile card */
-.prof-card { background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--r); padding: var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
-.prof-card .name { font-size: 14px; font-weight: 600; color: var(--accent); }
-.prof-card .desc { font-size: 12px; color: var(--dim); }
-.prof-card .caps { display: flex; flex-direction: column; gap: 3px; }
-.prof-card .cap-row { display: flex; align-items: center; gap: var(--sp-2); font-size: 12.5px; }
-.prof-card .cap-row .granted { color: var(--ok); font-weight: 500; }
-.prof-card .cap-row .denied { color: var(--faint); }
-.prof-card .used-by { font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 4px; }
 
 /* Attention strip */
 .attn { display: flex; flex-direction: column; gap: 6px; }

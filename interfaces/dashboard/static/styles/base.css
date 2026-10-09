@@ -102,7 +102,6 @@ input[type="checkbox"] { accent-color: var(--accent2); }
 .chip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px;
   padding: 1px 8px; border-radius: 99px; background: var(--surface3); color: var(--dim);
   white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-.chip.profile { background: rgba(91,163,245,.1); color: var(--accent); cursor: pointer; }
 .chip.group { background: rgba(251,191,36,.1); color: var(--warn); cursor: pointer; }
 .chip.plugin { background: rgba(52,211,153,.1); color: var(--ok); }
 .chip.grant { color: var(--ok); }

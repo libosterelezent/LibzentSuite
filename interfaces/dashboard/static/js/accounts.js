@@ -1,9 +1,10 @@
 "use strict";
 /* ═══════════════════════════════════════════════════════════════════════════
    accounts.js — Accounts page: tile cards, list rows, the account details
-   popup and the profile picker. Tile and List render the SAME data with
-   the SAME action wiring (wireAccountActions) — only the markup differs,
-   so business logic is never duplicated between views.
+   popup and the plugin picker (direct account→plugin assignments). Tile and
+   List render the SAME data with the SAME action wiring (wireAccountActions)
+   — only the markup differs, so business logic is never duplicated between
+   views.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 function accounts() { return (lastStats&&lastStats.accounts)||[]; }
@@ -15,15 +16,7 @@ function groupMap() {
   }
   return m;
 }
-function effectiveCaps(acct, profs) {
-  const set = new Set(); let hasKnown = false;
-  for (const pn of acct.profiles||[]) {
-    const p = (profs||profilesList).find(x=>x.name===pn);
-    if (!p) continue; hasKnown = true;
-    for (const pl of p.plugins||[]) set.add(pl);
-  }
-  return hasKnown ? set : null; // null = unrestricted
-}
+function assignedPlugins(a) { return (a&&a.assigned_plugins)||[]; }
 
 function renderAccounts() {
   const host = $("acct-view"); if (!host) return;
@@ -32,7 +25,6 @@ function renderAccounts() {
   fillSelect($("log-acct"), accounts().map(a=>a.name), "all accounts");
   fillSelect($("audit-acct"), accounts().map(a=>a.name), "all accounts");
   fillDatalist("group-list", groupsList.map(g=>g.name));
-  fillDatalist("prof-list", profilesList.map(p=>p.name));
   renderViewSel("vm-acct", acctViewMode);
   host.innerHTML = "";
   if (!accounts().length) {
@@ -68,6 +60,7 @@ function acctTile(a) {
       ${a.latency_ms!=null?`<span class="item">⚡ ${fmtLatency(a.latency_ms)}</span>`:""}
       ${a.cooldowns?`<span class="item" style="color:var(--warn)">⏳ ${a.cooldowns}</span>`:""}
       ${a.sync_group?`<span class="item"><span class="chip group" data-group-chip="${esc(a.sync_group)}" title="Open group">${esc(a.sync_group)}</span></span>`:""}
+      ${assignedPlugins(a).length?`<span class="item" style="gap:4px">${assignedPlugins(a).map(p=>`<span class="chip plugin">${esc(p)}</span>`).join("")}</span>`:""}
     </div>
     <div class="actions">
       ${a.status==="running"
@@ -111,7 +104,7 @@ function accountMenuHTML() {
     <div class="menu">
       <button data-act="cred">Set credential</button>
       <button data-act="group">Move to group…</button>
-      <button data-act="profile">Assign profile…</button>
+      <button data-act="plugins">Assign Plugins…</button>
       <div class="sep"></div>
       <button data-act="estop" class="danger">Emergency stop</button>
       <button data-act="remove" class="danger">Remove account</button>
@@ -123,7 +116,7 @@ function acctMetaText(a) {
   if (a.uptime_s) bits.push("⏱ "+fmtDur(a.uptime_s));
   if (a.latency_ms!=null) bits.push("⚡ "+fmtLatency(a.latency_ms));
   if (a.cooldowns) bits.push("⏳ "+a.cooldowns);
-  if (a.profiles&&a.profiles.length) bits.push(a.profiles.join(","));
+  if (assignedPlugins(a).length) bits.push(assignedPlugins(a).join(","));
   return bits.join(" · ");
 }
 
@@ -150,7 +143,7 @@ function wireAccountActions(root, a) {
         ()=>post("/api/accounts/remove",{name:a.name})
           .then(()=>{ clearFb(root); afterAccountsRest(); })
           .catch(e=>setFb(root,"error",e.message)));
-      if (act==="profile") openProfilePicker(a.name);
+      if (act==="plugins") openPluginPicker(a.name);
       if (act==="group") openGroupPicker(`Move to group — ${a.name}`, a.sync_group||null,
         g=>moveAccountGroup(a.name,g,root));
     });
@@ -193,7 +186,7 @@ async function afterAccountsRest() {
 function openAcctDetails(name) {
   const a = accounts().find(x=>x.name===name); if (!a) return;
   const body = openDetailsPopup(name);
-  const caps = effectiveCaps(a);
+  const plugins = assignedPlugins(a);
   body.innerHTML = `
     <div class="row" style="margin-bottom:var(--sp-3)">${statusBadge(a.status)}
       <span class="dim mono trunc" style="font-size:11px">${esc(a.user_id||a.discord_id||"")}</span></div>
@@ -204,61 +197,86 @@ function openAcctDetails(name) {
         <div class="sub">${esc(credLbl(a.credential))}</div></div>
       <div class="card2"><b style="font-size:11px;color:var(--dim);text-transform:uppercase">Sync Group</b>
         <div class="sub row">${a.sync_group?`<span class="chip group">${esc(a.sync_group)}</span> <button class="btn btn-ghost btn-sm" data-open-group="${esc(a.sync_group)}">Open Group</button>`:"Independent"}</div></div>
-      <div class="card2"><b style="font-size:11px;color:var(--dim);text-transform:uppercase">Profiles</b>
-        <div class="sub" style="display:flex;flex-wrap:wrap;gap:4px">${(a.profiles||[]).map(p=>`<span class="chip profile">${esc(p)}</span>`).join(" ")||"None"}</div></div>
-      <div class="card2"><b style="font-size:11px;color:var(--dim);text-transform:uppercase">Effective Capabilities</b>
-        <div class="sub" style="display:flex;flex-wrap:wrap;gap:4px">${caps===null?'<span class="chip grant">unrestricted</span>':[...caps].map(c=>`<span class="chip plugin">${esc(c)}</span>`).join(" ")||"none"}</div></div>
+      <div class="card2"><b style="font-size:11px;color:var(--dim);text-transform:uppercase">Assigned Plugins</b>
+        <div class="sub row" style="gap:4px">${plugins.length?plugins.map(p=>`<span class="chip plugin">${esc(p)}<button data-unassign-plugin="${esc(p)}" title="Unassign ${esc(p)}" aria-label="Unassign ${esc(p)}" style="background:none;border:none;color:var(--faint);cursor:pointer;font-size:11px;padding:0 0 0 2px">✕</button></span>`).join(""):'<span class="faint">None assigned</span>'}
+          <button class="btn btn-ghost btn-sm" data-assign-plugins="1">Assign Plugins…</button></div></div>
       <div class="card2"><b style="font-size:11px;color:var(--dim);text-transform:uppercase">Enabled</b>
         <div class="sub">${a.enabled?"Yes":"No"}</div></div>
     </div>`;
   const og = body.querySelector("[data-open-group]");
   if (og) og.onclick = () => { const gname = og.dataset.openGroup; $("dlg-details").close(); openGroupDetails(gname); };
+  const ap = body.querySelector("[data-assign-plugins]");
+  if (ap) ap.onclick = () => openPluginPicker(a.name);
+  // per-plugin quick unassign (same pattern as group-member remove)
+  body.querySelectorAll("[data-unassign-plugin]").forEach(b => b.onclick = () => {
+    if (b.disabled) return; b.disabled = true;
+    clearFb(body);
+    post("/api/accounts/plugins/unassign",{account:a.name,plugin:b.dataset.unassignPlugin})
+      .then(()=>afterAccountsRest().then(()=>openAcctDetails(a.name)))
+      .catch(e=>{ setFb(body,"error",e.message); b.disabled=false; });
+  });
   $("dlg-details").showModal();
 }
 
-/* ── Profile picker (real /api/profiles/assign + unassign) ─────────────────── */
-function openProfilePicker(acctName) {
-  const a = accounts().find(x=>x.name===acctName); if (!a) return;
-  const body = openDetailsPopup(`Assign profiles — ${a.name}`);
-  if (!profilesList.length) {
-    body.innerHTML = '<p class="dim">No profiles defined yet — create one on the Profiles page first.</p>';
+/* ── Plugin picker (direct account→plugin assignment) ──────────────────────── */
+
+/* Build a checkbox list of every discovered plugin (manifests — no
+   hardcoding), pre-checking the names in `current` (a Set or null). */
+function fillPluginChecks(host, current) {
+  host.innerHTML = "";
+  if (!(manifests||[]).length) {
+    const p = document.createElement("span");
+    p.className = "faint"; p.style.fontSize = "11px";
+    p.textContent = "No plugins discovered yet — the account will run none.";
+    host.appendChild(p);
     return;
   }
-  const current = new Set(a.profiles||[]);
+  for (const m of manifests) {
+    const l = document.createElement("label");
+    l.style.cssText = "display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px;cursor:pointer";
+    l.innerHTML = `<input type="checkbox" value="${esc(m.name)}"${current&&current.has(m.name)?" checked":""}> ${esc(m.name)} <span class="faint trunc" style="font-size:11px">${esc(m.description||"")}</span>`;
+    host.appendChild(l);
+  }
+}
+
+/* Desired-state editor: checkboxes from the manifests with the account's
+   current assignments pre-checked; Save POSTs the WHOLE set to
+   /api/accounts/plugins/set (all-or-nothing — the server validates every
+   name before writing anything, so an unknown name 400s and this dialog
+   stays open with the error). */
+async function openPluginPicker(acctName) {
+  const a = accounts().find(x=>x.name===acctName); if (!a) return;
+  const body = openDetailsPopup(`Assign Plugins — ${a.name}`);
+  if (!(manifests||[]).length) {
+    body.innerHTML = '<p class="dim">No plugins discovered — install a plugin package first.</p>';
+    return;
+  }
+  // Prefer the authoritative assignment list; the WS snapshot field is the
+  // fallback when the fetch fails.
+  let current = new Set(assignedPlugins(a));
+  try {
+    const fresh = await api("/api/accounts/plugins?account="+encodeURIComponent(a.name));
+    if (Array.isArray(fresh)) current = new Set(fresh);
+  } catch { /* keep the WS-snapshot fallback */ }
   const list = document.createElement("div");
   list.className = "form";
-  for (const p of profilesList) {
-    const l = document.createElement("label");
-    l.style.cssText = "display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;cursor:pointer";
-    const cb = document.createElement("input");
-    cb.type = "checkbox"; cb.checked = current.has(p.name); cb.dataset.profile = p.name;
-    l.appendChild(cb);
-    l.appendChild(document.createTextNode(p.name));
-    if (p.description) { const s=document.createElement("span"); s.className="faint"; s.style.fontSize="11px"; s.textContent=" — "+p.description; l.appendChild(s); }
-    list.appendChild(l);
-  }
+  fillPluginChecks(list, current);
   const actions = document.createElement("div");
   actions.className = "form-actions";
+  const cancel = document.createElement("button");
+  cancel.className = "btn btn-secondary"; cancel.textContent = "Cancel";
+  cancel.dataset.dlgClose = "1";
   const save = document.createElement("button");
   save.className = "btn btn-primary"; save.textContent = "Save";
   save.onclick = async () => {
-    const chosen = new Set([...list.querySelectorAll("input[data-profile]:checked")].map(i=>i.dataset.profile));
+    clearFb(list);
+    const chosen = [...list.querySelectorAll("input:checked")].map(i=>i.value);
     try {
-      const ops = [];
-      for (const p of profilesList) {
-        if (chosen.has(p.name) && !current.has(p.name)) ops.push(post("/api/profiles/assign",{account:a.name,profile:p.name}));
-        if (!chosen.has(p.name) && current.has(p.name)) ops.push(post("/api/profiles/unassign",{account:a.name,profile:p.name}));
-      }
-      const rs = await withBusy(save, Promise.allSettled(ops));
-      const failed = rs.filter(r=>r.status==="rejected");
-      if (failed.length) { setFb(list, "error", failed.map(r=>r.reason&&r.reason.message||String(r.reason)).join("; ")); return; }
+      await withBusy(save, post("/api/accounts/plugins/set",{account:a.name,plugins:chosen}));
       $("dlg-details").close();
       await afterAccountsRest();
     } catch(e) { setFb(list, "error", e.message); }
   };
-  const cancel = document.createElement("button");
-  cancel.className = "btn btn-secondary"; cancel.textContent = "Cancel";
-  cancel.dataset.dlgClose = "1";
   actions.append(cancel, save);
   list.appendChild(actions);
   body.appendChild(list);

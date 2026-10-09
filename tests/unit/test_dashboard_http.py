@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 
 import interfaces.dashboard.server as server_module
+from core.errors import AccountError
 from interfaces.dashboard.server import DashboardServer
 
 TOKEN = "s3cret-token"
@@ -26,12 +27,12 @@ ACCOUNTS = [
     {
         "name": "alpha", "status": "running", "enabled": True, "sync_group": None,
         "discord_id": "111000222", "user_id": "111000222", "latency_ms": 62.0,
-        "uptime_s": 300.0, "profiles": ["roll"],
+        "uptime_s": 300.0, "profiles": ["roll"], "assigned_plugins": ["roll"],
     },
     {
         "name": "beta", "status": "stopped", "enabled": True, "sync_group": "farm",
         "discord_id": None, "user_id": None, "latency_ms": None,
-        "uptime_s": 0.0, "profiles": [],
+        "uptime_s": 0.0, "profiles": [], "assigned_plugins": [],
     },
 ]
 
@@ -328,6 +329,23 @@ class FakeControlAPI:
     async def accounts_emergency_stop(self, name):
         self._record("accounts_emergency_stop", name)
         return {"account": name, "cancelled": 2, "stopped": True}
+
+    # ------------------------------------------------- account plugin assignment
+    async def accounts_plugins_list(self, account):
+        self._record("accounts_plugins_list", account)
+        return ["roll", "soulcopy"]
+
+    async def accounts_plugin_assign(self, account, plugin, surface="api"):
+        self._record("accounts_plugin_assign", account, plugin, surface=surface)
+        return {"account": account, "plugin": plugin}
+
+    async def accounts_plugin_unassign(self, account, plugin, surface="api"):
+        self._record("accounts_plugin_unassign", account, plugin, surface=surface)
+        return {"account": account, "plugin": plugin, "existed": True}
+
+    async def accounts_plugins_set(self, account, plugins, surface="api"):
+        self._record("accounts_plugins_set", account, plugins, surface=surface)
+        return {"account": account, "plugins": sorted(plugins)}
 
     # --------------------------------------------------------------- plugins
     async def plugins_manifests(self):
@@ -675,14 +693,14 @@ class TestDashboardHTTP(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fake.called("accounts_list"), ())
 
     async def test_accounts_add_passes_payload(self) -> None:
-        payload = {"name": "gamma", "sync_group": "farm", "profiles": ["roll"]}
+        payload = {"name": "gamma", "sync_group": "farm", "plugins": ["roll"]}
         status, _ = await asyncio.to_thread(
             http_post, self.url("/api/accounts/add"), payload
         )
         self.assertEqual(status, 200)
         args = self.fake.called("accounts_add")
         self.assertEqual(args[0]["name"], "gamma")
-        self.assertEqual(args[0]["profiles"], ["roll"])
+        self.assertEqual(args[0]["plugins"], ["roll"])
 
     async def test_accounts_info_requires_query(self) -> None:
         status, body = await asyncio.to_thread(http_get, self.url("/api/accounts/info"))
@@ -728,6 +746,105 @@ class TestDashboardHTTP(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(self.fake.called("accounts_emergency_stop"), ("alpha",))
+
+    # -------------------------------------------- account plugin assignment
+    async def test_accounts_plugins_list(self) -> None:
+        status, body = await asyncio.to_thread(
+            http_get, self.url("/api/accounts/plugins?account=alpha")
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(get_json(body)["data"], ["roll", "soulcopy"])
+        self.assertEqual(self.fake.called("accounts_plugins_list"), ("alpha",))
+
+    async def test_accounts_plugins_list_requires_account(self) -> None:
+        status, body = await asyncio.to_thread(
+            http_get, self.url("/api/accounts/plugins")
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("account", get_json(body)["error"])
+
+    async def test_accounts_plugin_assign_and_unassign(self) -> None:
+        status, body = await asyncio.to_thread(
+            http_post, self.url("/api/accounts/plugins/assign"),
+            {"account": "alpha", "plugin": "soulcopy"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(get_json(body)["data"],
+                         {"account": "alpha", "plugin": "soulcopy"})
+        self.assertEqual(
+            self.fake.called("accounts_plugin_assign"), ("alpha", "soulcopy")
+        )
+        self.assertEqual(self.fake.called_kwargs("accounts_plugin_assign"),
+                         {"surface": "dashboard"},
+                         "mutations must audit through the dashboard surface")
+        status, body = await asyncio.to_thread(
+            http_post, self.url("/api/accounts/plugins/unassign"),
+            {"account": "alpha", "plugin": "soulcopy"},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(get_json(body)["data"]["existed"])
+        self.assertEqual(
+            self.fake.called("accounts_plugin_unassign"), ("alpha", "soulcopy")
+        )
+
+    async def test_accounts_plugin_assign_missing_fields(self) -> None:
+        for payload in ({"account": "alpha"}, {"plugin": "roll"}, {}):
+            status, body = await asyncio.to_thread(
+                http_post, self.url("/api/accounts/plugins/assign"), payload
+            )
+            self.assertEqual(status, 400, payload)
+            error = get_json(body)["error"]
+            self.assertIn("required", error)
+            self.assertIn("/api/accounts/plugins/assign", error)
+
+    async def test_accounts_plugins_set_happy_path(self) -> None:
+        status, body = await asyncio.to_thread(
+            http_post, self.url("/api/accounts/plugins/set"),
+            {"account": "alpha", "plugins": ["soulcopy", "roll"]},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(get_json(body)["data"]["plugins"],
+                         ["roll", "soulcopy"])
+        self.assertEqual(self.fake.called("accounts_plugins_set"),
+                         ("alpha", ["soulcopy", "roll"]))
+        self.assertEqual(self.fake.called_kwargs("accounts_plugins_set"),
+                         {"surface": "dashboard"})
+
+    async def test_accounts_plugins_set_validates_list_of_strings(self) -> None:
+        for payload in (
+            {"account": "alpha", "plugins": "roll"},          # not a list
+            {"account": "alpha", "plugins": ["roll", 3]},     # non-string entry
+            {"account": "alpha"},                              # plugins missing
+            {"plugins": ["roll"]},                             # account missing
+        ):
+            status, body = await asyncio.to_thread(
+                http_post, self.url("/api/accounts/plugins/set"), payload
+            )
+            self.assertEqual(status, 400, payload)
+            self.assertFalse(get_json(body)["ok"])
+
+    async def test_accounts_plugins_unknown_plugin_maps_to_400(self) -> None:
+        # all-or-nothing: an unknown name rejects the whole set
+        self.fake.fail_with["accounts_plugins_set"] = ValueError(
+            "unknown plugin(s) ['nope'] (known plugins: ['roll', 'soulcopy'])"
+        )
+        status, body = await asyncio.to_thread(
+            http_post, self.url("/api/accounts/plugins/set"),
+            {"account": "alpha", "plugins": ["roll", "nope"]},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("unknown plugin", get_json(body)["error"])
+
+    async def test_accounts_plugins_unknown_account_maps_to_400(self) -> None:
+        self.fake.fail_with["accounts_plugin_assign"] = AccountError(
+            "unknown account: zeta"
+        )
+        status, body = await asyncio.to_thread(
+            http_post, self.url("/api/accounts/plugins/assign"),
+            {"account": "zeta", "plugin": "roll"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("unknown account", get_json(body)["error"])
 
     # ----------------------------------------------------------------- plugins
     async def test_plugins_manifests(self) -> None:

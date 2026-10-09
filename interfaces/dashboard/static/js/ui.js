@@ -103,6 +103,7 @@ function openDetailsPopup(title) {
   const body = $("dt-body");
   body.innerHTML = "";               // fresh content every open
   clearFb(body);
-  $("dlg-details").showModal();
-  return body;
+  const dlg = $("dlg-details");
+  if (!dlg.open) dlg.showModal();    // re-entrant opens (picker from the
+  return body;                       // details card) just swap the body
 }

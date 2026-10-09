@@ -948,6 +948,53 @@ class DashboardServer:
                     ),
                 }
 
+            # ------------------------------------------------ account plugins
+            # Direct account→plugin capability assignment (the profile-
+            # mediated model is gone from the UI; these are the surfaces
+            # the dashboard drives). Unknown account/plugin names are
+            # domain errors from the api -> honest 400s below.
+            if (method, path) == ("GET", "/api/accounts/plugins"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_plugins_list(
+                        q_str(query, "account", path)
+                    ),
+                }
+            if (method, path) == ("POST", "/api/accounts/plugins/assign"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_plugin_assign(
+                        require_str(body, "account", path),
+                        require_str(body, "plugin", path),
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("POST", "/api/accounts/plugins/unassign"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_plugin_unassign(
+                        require_str(body, "account", path),
+                        require_str(body, "plugin", path),
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("POST", "/api/accounts/plugins/set"):
+                plugins = require_field(body, "plugins", path)
+                if not isinstance(plugins, list) or not all(
+                        isinstance(p, str) for p in plugins):
+                    raise ValueError(
+                        f"field 'plugins' in POST {path} must be a list"
+                        " of plugin names"
+                    )
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_plugins_set(
+                        require_str(body, "account", path),
+                        plugins,
+                        surface="dashboard",
+                    ),
+                }
+
             # ------------------------------------------------------- credentials
             if (method, path) == ("GET", "/api/credentials/status"):
                 return 200, {"ok": True, "data": await api.accounts_credential_status()}

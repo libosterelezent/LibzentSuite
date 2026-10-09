@@ -3,8 +3,8 @@
      Page shell only: styling lives in styles/, behaviour in js/ (no build
      step — plain files served by interfaces/dashboard/server.py).
 
-     IA: Home · Accounts & Groups · Profiles · Plugins · Activity · Policies · Tools
-     All REST/WS integrations preserved (20 endpoints, 4 WS message types). -->
+     IA: Home · Accounts & Groups · Plugins · Activity · Policies · Tools
+     All REST/WS integrations preserved (4 WS message types). -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -52,7 +52,7 @@
             <div class="step"><div class="num">1</div><div class="txt">
               <h4>Add an account</h4><p>Each account is a Discord user the framework operates.</p></div></div>
             <div class="step"><div class="num">2</div><div class="txt">
-              <h4>Assign capabilities</h4><p>Profiles control what each account can do (which plugins run).</p></div></div>
+              <h4>Assign plugins</h4><p>Pick which plugins each account can run — capabilities are assigned per account.</p></div></div>
             <div class="step"><div class="num">3</div><div class="txt">
               <h4>Group for coordination</h4><p>Accounts in a sync group share pacing, taking turns naturally.</p></div></div>
           </div>
@@ -107,14 +107,6 @@
           </div>
           <div id="group-view"></div>
         </div>
-      </div>
-
-      <!-- Profiles -->
-      <div class="panel" id="panel-profiles">
-        <div class="toolbar">
-          <button class="btn btn-primary" id="btn-create-prof">+ Create Profile</button>
-        </div>
-        <div class="grid grid-2" id="prof-grid"></div>
       </div>
 
       <!-- Plugins -->
@@ -236,28 +228,14 @@
       <div class="field"><label>Account name</label><input id="aa-name" placeholder="alpha"><span class="hint">Lowercase letters, digits, dashes (max 32)</span></div>
       <div class="field"><label>Sync Group <span class="faint">(optional)</span></label>
         <input id="aa-group" placeholder="farm" list="group-list"><span class="hint">Accounts in the same group coordinate their pacing</span></div>
-      <div class="field"><label>Profiles <span class="faint">(optional, space-separated)</span></label>
-        <input id="aa-profiles" placeholder="grinder" list="prof-list"><span class="hint">Profiles control what this account can do</span></div>
+      <div class="field"><label>Plugins <span class="faint">(optional — none is valid)</span></label>
+        <div id="aa-plugins"></div><span class="hint">Choose which plugins this account can run</span></div>
       <div class="field"><label>Credential <span class="faint">(optional now)</span></label>
         <input id="aa-cred" type="password" placeholder="Discord token"><span class="hint">Stored encrypted — never displayed back</span></div>
     </div>
   </div>
   <div class="dlg-foot"><button class="btn btn-secondary" data-dlg-close>Cancel</button>
   <button class="btn btn-primary" id="aa-submit">Create Account</button></div>
-</dialog>
-
-<dialog id="dlg-create-prof">
-  <div class="dlg-hdr"><span class="dlg-title">Create Profile</span><button type="button" class="dlg-close" data-dlg-close aria-label="Close">✕</button></div>
-  <div class="dlg-body">
-    <div class="form">
-      <div class="field"><label>Profile name</label><input id="cp-name" placeholder="grinder"></div>
-      <div class="field"><label>Description <span class="faint">(optional)</span></label><input id="cp-desc" placeholder="Roll-focused capability set"></div>
-      <div class="field"><label>Capabilities</label><div id="cp-plugins" class="caps"></div>
-        <span class="hint">What should accounts using this profile be able to do?</span></div>
-    </div>
-  </div>
-  <div class="dlg-foot"><button class="btn btn-secondary" data-dlg-close>Cancel</button>
-  <button class="btn btn-primary" id="cp-submit">Create Profile</button></div>
 </dialog>
 
 <dialog id="dlg-cred">
@@ -299,7 +277,6 @@
 </dialog>
 
 <datalist id="group-list"></datalist>
-<datalist id="prof-list"></datalist>
 
 <dialog id="dlg-policy">
   <div class="dlg-hdr"><span class="dlg-title" id="rp-title">Add Policy</span><button type="button" class="dlg-close" data-dlg-close aria-label="Close">✕</button></div>
