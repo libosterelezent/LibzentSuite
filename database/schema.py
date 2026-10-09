@@ -234,6 +234,35 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         );
         """,
     ),
+    (
+        7,
+        "plugin profiles",
+        """
+        -- Per-plugin named setting profiles: a reusable bundle of setting
+        -- values (validated against the plugin's Setting schema by the
+        -- ControlAPI layer, NEVER by the repository) that an account can
+        -- bind to per plugin. settings_json may carry the RESERVED
+        -- top-level key "channels" (the channel-scope convention
+        -- documented in core/plugin_scopes.py); every other key must be
+        -- a plugin setting name.
+        CREATE TABLE IF NOT EXISTS plugin_profiles (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            plugin       TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            description  TEXT NOT NULL DEFAULT '',
+            settings_json TEXT NOT NULL DEFAULT '{}',
+            created_at   REAL NOT NULL,
+            updated_at   REAL NOT NULL,
+            UNIQUE (plugin, name)
+        );
+        -- The binding lives ON the assignment row: NULL (or absent) =
+        -- plugin defaults, no profile in between. ALTER (not a table
+        -- rebuild): the column is appended like the migration-runner
+        -- convention — plain ADD COLUMN inside the per-migration
+        -- transaction, run exactly once (schema_migrations guards it).
+        ALTER TABLE account_plugins ADD COLUMN profile TEXT;
+        """,
+    ),
 ]
 
 

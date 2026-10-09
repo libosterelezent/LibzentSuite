@@ -253,7 +253,9 @@ class Account:
     ``assigned_plugins`` is the in-memory mirror of the ``account_plugins``
     table rows (the CAPABILITY source of truth): loaded in bulk at boot,
     rewritten at every assignment mutation, read by the attach path — never
-    a per-attach repository roundtrip.
+    a per-attach repository roundtrip. ``plugin_profiles`` mirrors the
+    same rows' ``profile`` column (the bound settings profile per plugin,
+    None = defaults) for the status poll and profile-binding reads.
     """
 
     record: AccountRecord
@@ -261,6 +263,10 @@ class Account:
     plugins: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     credential_source: Optional[str] = None
     assigned_plugins: List[str] = field(default_factory=list)
+    #: in-memory mirror of the ``account_plugins.profile`` column:
+    #: plugin -> bound profile name (None = plugin defaults). Loaded in
+    #: bulk at boot, rewritten at every assignment/binding mutation.
+    plugin_profiles: Dict[str, Optional[str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Every account owns exactly one DiscordCache for its whole life."""
@@ -285,6 +291,7 @@ class Account:
             "sync_group": self.record.sync_group,
             "profiles": list(self.record.profiles),
             "assigned_plugins": list(self.assigned_plugins),
+            "plugin_profiles": dict(self.plugin_profiles),
             "latency_ms": latency,
             "uptime_s": uptime,
             "last_error": rt.last_error,
@@ -293,6 +300,26 @@ class Account:
                 name: dict(info) for name, info in sorted(self.plugins.items())
             },
         }
+
+    def channels_snapshot(self) -> List[Dict[str, Any]]:
+        """Text-channel snapshot from the LIVE client ([] when offline).
+
+        Read-only over what the client already holds in memory (the
+        READY cache) — zero API calls. Never raises: an unstarted
+        account, a client without the method (duck-typed doubles) or a
+        snapshot failure all read as [] (the caller offers manual
+        channel-ID entry instead — picker UX, Phase 2).
+        """
+        client = self.runtime.client
+        if client is None:
+            return []
+        getter = getattr(client, "channels_snapshot", None)
+        if not callable(getter):
+            return []
+        try:
+            return list(getter() or [])
+        except Exception:  # a broken client view must never take a read down
+            return []
 
 
 class AccountManager:
@@ -480,11 +507,13 @@ class AccountManager:
             self._logger.exception("could not load accounts from repository")
             return
         assignments = await self._load_assignments()
+        bindings = await self._load_bindings()
         for record in records:
             try:
                 account = Account(
                     record=record,
                     assigned_plugins=list(assignments.get(record.name, [])),
+                    plugin_profiles=dict(bindings.get(record.name, {})),
                 )
                 self._refresh_credential_source(account)
                 self._accounts[record.name] = account
@@ -925,12 +954,17 @@ class AccountManager:
 
         Runs after EVERY assignment mutation so ``Account.assigned_plugins``
         stays authoritative for both the attach path and the status poll.
+        The profile-binding mirror refreshes in the same pass: a
+        replacement/unassign DELETES rows (taking their ``profile``
+        column with them), so the binding view must never outlive the
+        assignment it belonged to.
         """
         account = self._accounts.get(name)
         if account is None:
             return []
         stored = await self._plugins_of(name)
         account.assigned_plugins = stored
+        await self._refresh_bindings(name)
         return stored
 
     async def _load_assignments(self) -> Dict[str, List[str]]:
@@ -952,6 +986,65 @@ class AccountManager:
                 "recovers and they are restarted)"
             )
             return {}
+
+    async def _load_bindings(self) -> Dict[str, Dict[str, Optional[str]]]:
+        """ONE bulk boot read of every account's profile bindings.
+
+        Same conventions as :meth:`_load_assignments` (omitted-empty,
+        fail-soft {} on a repository failure — a binding lost to a read
+        hiccup reads as "plugin defaults" and is re-written on the next
+        binding mutation; profiles never gate CAPABILITY, only settings).
+        """
+        if self._account_plugins is None:
+            return {}
+        reader = getattr(self._account_plugins, "all_bindings", None)
+        if not callable(reader):  # older stub doubles: no bindings column
+            return {}
+        try:
+            return dict(await reader() or {})
+        except Exception:
+            self._logger.exception(
+                "could not load account plugin profile bindings "
+                "(accounts boot with plugin defaults until rebound)")
+            return {}
+
+    async def _refresh_bindings(self, name: str) -> None:
+        """Repository → in-memory mirror for one account's bindings."""
+        account = self._accounts.get(name)
+        if account is None or self._account_plugins is None:
+            return
+        reader = getattr(self._account_plugins, "bindings", None)
+        if not callable(reader):
+            return
+        try:
+            account.plugin_profiles = dict(
+                await self._account_plugins.bindings(name) or {})
+        except Exception:
+            self._logger.exception(
+                "could not refresh plugin profile bindings for %r", name)
+
+    # --------------------------------------------------------- profile views
+    async def plugin_profiles(self, name: str) -> Dict[str, Optional[str]]:
+        """``{plugin: profile name or None}`` for every assigned plugin.
+
+        Memory-first (the in-memory mirror the boot load and every
+        assignment/binding mutation rewrite), so the status poll and the
+        profile picker never query the repository per read.
+        """
+        account = self._get(name)
+        return {
+            plugin: account.plugin_profiles.get(plugin)
+            for plugin in sorted(set(account.assigned_plugins or []))
+        }
+
+    def channels_snapshot(self, name: str) -> List[Dict[str, Any]]:
+        """Text-channel snapshot of the account's LIVE client.
+
+        [] for offline/unstarted accounts — never raises (see
+        :meth:`Account.channels_snapshot`). Unknown accounts raise
+        AccountError like every name-addressed accessor.
+        """
+        return self._get(name).channels_snapshot()
 
     # ------------------------------------------------------------- lifecycle
     async def start(self, name: str) -> Dict[str, Any]:

@@ -25,8 +25,9 @@ from tests.unit.helpers import (
 )
 
 STATUS_KEYS = {"id", "name", "status", "user_id", "enabled", "sync_group",
-               "profiles", "assigned_plugins", "latency_ms", "uptime_s",
-               "last_error", "credential", "plugins"}
+               "profiles", "assigned_plugins", "plugin_profiles",
+               "latency_ms", "uptime_s", "last_error", "credential",
+               "plugins"}
 DETAILS_KEYS = {"name", "status", "identity", "runtime", "plugins",
                 "profiles", "rate_limit", "credential"}
 

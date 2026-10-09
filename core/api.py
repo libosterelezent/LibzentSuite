@@ -13,7 +13,17 @@ Method map (grouped like the dashboard navigation, spec §12):
                     framework per-account knobs, and
                     accounts_plugins_list/plugin_assign/plugin_unassign/
                     plugins_set — the DIRECT account→plugin capability
-                    assignments, persisted through db.account_plugins)
+                    assignments, persisted through db.account_plugins;
+                    accounts_plugin_profile(s) bind an ASSIGNED plugin
+                    to a settings profile, accounts_effective_settings
+                    merges defaults <- profile <- account overrides, and
+                    accounts_channels snapshots the live client's text
+                    channels)
+  plugin_profiles_* list/create/update/delete of per-plugin setting
+                    profiles (db.plugin_profiles, migration v7) with
+                    settings validated against the plugin's Setting
+                    schema and the reserved "channels" scope against
+                    core/plugin_scopes
   credentials       set_credential / credential_status / import_env over the
                     encrypted CredentialService (values NEVER echoed back)
   cooldowns_*       list/clear persistent cooldowns (CooldownService)
@@ -60,7 +70,8 @@ from .rate_limit_manager import (
     KV_REMOVED_KEY,
     MAX_PREFIXRATE,
 )
-from .errors import SyncGroupError
+from .errors import DatabaseError, SyncGroupError
+from . import plugin_scopes
 
 if TYPE_CHECKING:  # duck-typed at runtime — no manager imports here
     from .account_manager import AccountManager
@@ -448,6 +459,388 @@ class ControlAPI:
         except Exception:
             LOG.exception("could not list discovered plugins")
             return []
+
+    def _plugin_schema(self, plugin: str) -> tuple:
+        """Setting schema of one plugin, duck-typed over the manager.
+
+        Prefers the plugin manager's ``_schema_for`` (the SAME source the
+        set-setting path validates against — parity by construction); a
+        stub manager without it falls back to rebuilding Setting objects
+        from the manifests. Unknown plugins raise PluginError.
+        """
+        getter = getattr(self._plugins, "_schema_for", None)
+        if callable(getter):
+            return tuple(getter(plugin))
+        from .settings_manager import Setting
+        for manifest in self._plugins.manifests():
+            if not (isinstance(manifest, dict) and manifest.get("name") == plugin):
+                continue
+            settings = []
+            for entry in manifest.get("settings") or []:
+                if not isinstance(entry, dict) or not entry.get("name"):
+                    continue
+                settings.append(Setting(
+                    entry["name"], entry.get("type", "str"),
+                    entry.get("default"), entry.get("description", ""),
+                    min_value=entry.get("min"), max_value=entry.get("max"),
+                ))
+            return tuple(settings)
+        raise ValueError(f"unknown plugin {plugin!r} (no schema available)")
+
+    def _validate_profile_settings(
+        self, plugin: str, settings: Any
+    ) -> Dict[str, Any]:
+        """Validate a profile's settings dict against the plugin's schema.
+
+        Same validation path as /api/plugins/set-setting: unknown keys
+        are rejected (typo trap, the known keys listed), values are
+        type-checked through each Setting's own ``validate``. The
+        RESERVED ``channels`` key (the channel-scope convention) is
+        validated by core.plugin_scopes instead and stored normalized.
+        Returns the cleaned settings dict ({} for None).
+        """
+        if settings is None:
+            return {}
+        if not isinstance(settings, dict):
+            raise ValueError(f"'settings' must be an object, got {settings!r}")
+        defs = {s.name: s for s in self._plugin_schema(plugin)}
+        reserved = plugin_scopes.CHANNELS_KEY
+        unknown = sorted(k for k in settings if k != reserved and k not in defs)
+        if unknown:
+            raise ValueError(
+                f"unknown setting key(s) {unknown} for plugin {plugin!r} "
+                f"(known: {sorted(defs)}; reserved: [{reserved!r}])"
+            )
+        cleaned: Dict[str, Any] = {}
+        for key, value in settings.items():
+            if key == reserved:
+                continue
+            cleaned[key] = defs[key].validate(value)  # SettingsValidationError
+        if reserved in settings:
+            # the single scope validator (later phases reuse it verbatim)
+            cleaned[reserved] = plugin_scopes.validate(settings.get(reserved))
+        return cleaned
+
+    # ----------------------------------------------------- plugin profiles
+    # Per-plugin named setting bundles (migration v7) + the account-side
+    # bindings. Persistence is schema-agnostic; THIS layer validates
+    # settings against the plugin's Setting schema (plugin_profiles_*)
+    # and enforces "binding requires assignment" (accounts_plugin_profile).
+    def _profile_repo(self) -> Any:
+        """PluginProfilesRepository, or None on stacks without a database."""
+        return getattr(self._database, "plugin_profiles", None) \
+            if self._database is not None else None
+
+    def _require_profile_repo(self) -> Any:
+        """Honest failure on stacks built without profile storage."""
+        repo = self._profile_repo()
+        if repo is None:
+            raise RuntimeError(
+                "plugin profiles are not configured on this api")
+        return repo
+
+    def _binding_repo(self) -> Any:
+        """AccountPluginsRepository (bindings), or None without a database."""
+        return getattr(self._database, "account_plugins", None) \
+            if self._database is not None else None
+
+    async def plugin_profiles_list(
+        self, plugin: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Every profile (or one plugin's), plugin-then-name order.
+
+        Each row: plugin, name, description, settings, created_at,
+        updated_at (plus the row id).
+        """
+        repo = self._profile_repo()
+        if repo is None:
+            return []
+        return [record.to_dict()
+                for record in await _resolved(repo.list(plugin))]
+
+    async def plugin_profile_create(
+        self,
+        plugin: str,
+        name: str,
+        description: str = "",
+        settings: Optional[Dict[str, Any]] = None,
+        surface: str = "api",
+    ) -> Dict[str, Any]:
+        """Create one plugin profile (settings validated against schema).
+
+        Raises:
+            ValueError: unknown plugin (discovered set listed), bad
+                name/description, unknown settings key, bad value type,
+                or a malformed channels scope.
+            DatabaseError: the (plugin, name) pair already exists.
+        """
+        repo = self._require_profile_repo()
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("profile name must be a non-empty string")
+        if not isinstance(description, str):
+            raise ValueError("field 'description' must be a string")
+        self._validate_plugins_known([plugin])
+        cleaned = self._validate_profile_settings(plugin, settings)
+        record = await repo.create(plugin, name.strip(), description, cleaned)
+        self._audit_mgmt(
+            "system", "mgmt:plugin_profile.created", surface,
+            extra=f"plugin={plugin} profile={record.name}")
+        return record.to_dict()
+
+    async def plugin_profile_update(
+        self,
+        plugin: str,
+        name: str,
+        *,
+        name_new: Optional[str] = None,
+        description: Optional[str] = None,
+        settings: Optional[Dict[str, Any]] = None,
+        surface: str = "api",
+    ) -> Dict[str, Any]:
+        """Update name/description/settings of one profile.
+
+        At least one field is required; a rename refuses an existing
+        (plugin, name) pair, rewrites bound accounts' binding pointers in
+        the SAME transaction (repository cascade) and refreshes the
+        account manager's memory records afterwards.
+        """
+        repo = self._require_profile_repo()
+        if name_new is None and description is None and settings is None:
+            raise ValueError(
+                "profile update needs at least one of "
+                "{'name_new', 'description', 'settings'}"
+            )
+        if name_new is not None and (
+            not isinstance(name_new, str) or not name_new.strip()
+        ):
+            raise ValueError("field 'name_new' must be a non-empty string")
+        if description is not None and not isinstance(description, str):
+            raise ValueError("field 'description' must be a string")
+        self._validate_plugins_known([plugin])
+        current = await repo.get(plugin, name)
+        if current is None:
+            known = [record.name for record in await repo.list(plugin)]
+            raise ValueError(
+                f"unknown profile {name!r} for plugin {plugin!r} "
+                f"(known: {known})")
+        cleaned = None if settings is None \
+            else self._validate_profile_settings(plugin, settings)
+        try:
+            updated = await repo.update(
+                plugin, name, name_new=name_new, description=description,
+                settings=cleaned)
+        except DatabaseError as exc:
+            if "already exists" in str(exc):
+                raise ValueError(str(exc)) from exc  # 400, not a db fault
+            raise
+        if updated is None:  # vanished mid-update (never silent)
+            raise ValueError(
+                f"profile {name!r} of plugin {plugin!r} disappeared mid-update")
+        if updated.name != current.name:
+            # the rename cascade moved every bound account's pointer in
+            # the DB — the in-memory records must follow (F3 pattern)
+            await self._refresh_all_plugin_profiles()
+        self._audit_mgmt(
+            "system", "mgmt:plugin_profile.updated", surface,
+            extra=f"plugin={plugin} profile={updated.name}")
+        return updated.to_dict()
+
+    async def plugin_profile_delete(
+        self, plugin: str, name: str, surface: str = "api"
+    ) -> Dict[str, Any]:
+        """Delete one profile; its account bindings cascade to NULL.
+
+        Idempotent: deleting a missing profile reports ``existed=False``
+        and raises nothing.
+        """
+        repo = self._require_profile_repo()
+        existed = bool(await repo.delete(plugin, name))
+        if existed:  # the cascade NULLed bound accounts' bindings in the DB
+            await self._refresh_all_plugin_profiles()
+        self._audit_mgmt(
+            "system", "mgmt:plugin_profile.deleted", surface,
+            extra=f"plugin={plugin} profile={name} existed={existed}")
+        return {"plugin": plugin, "profile": name, "existed": existed}
+
+    async def accounts_plugin_profile(
+        self,
+        account: str,
+        plugin: str,
+        profile: Optional[str],
+        surface: str = "api",
+    ) -> Dict[str, Any]:
+        """Bind (or clear: profile=None) the account's profile for a plugin.
+
+        Binding REQUIRES the plugin to be assigned to the account (an
+        assignment-less binding could never take effect); the profile
+        must belong to that plugin. The assignment is unchanged, so NO
+        plugin re-attach happens — only the in-memory binding record and
+        an audit row are written.
+        """
+        repo = self._require_profile_repo()
+        if self._binding_repo() is None:
+            raise RuntimeError(
+                "plugin profile storage is not configured on this api")
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        if profile is not None and (
+            not isinstance(profile, str) or not profile.strip()
+        ):
+            raise ValueError("field 'profile' must be a non-empty string or null")
+        assigned = await self._assigned_plugins(account)
+        if plugin not in assigned:
+            raise ValueError(
+                f"plugin {plugin!r} is not assigned to account {account!r} "
+                f"(assigned: {assigned}; bind a profile only for an "
+                f"assigned plugin)"
+            )
+        if profile is not None:
+            record = await repo.get(plugin, profile)
+            if record is None:
+                known = [row.name for row in await repo.list(plugin)]
+                raise ValueError(
+                    f"unknown profile {profile!r} for plugin {plugin!r} "
+                    f"(known: {known})")
+        await self._binding_repo().set_profile(account, plugin, profile)
+        self._set_account_plugin_profile(account, plugin, profile)
+        self._audit_mgmt(
+            account, "mgmt:account.plugin_profile", surface,
+            extra=f"plugin={plugin} profile={profile or '-'}")
+        return {"account": account, "plugin": plugin, "profile": profile}
+
+    async def accounts_plugin_profiles(
+        self, account: str
+    ) -> Dict[str, Optional[str]]:
+        """``{plugin: profile name or None}`` for every ASSIGNED plugin."""
+        self._validate_account_known(account)
+        assigned = await self._assigned_plugins(account)
+        bindings: Dict[str, Optional[str]] = {}
+        binding_repo = self._binding_repo()
+        reader = getattr(binding_repo, "bindings", None)
+        if callable(reader):
+            bindings = dict(await reader(account) or {})
+        return {plugin: bindings.get(plugin) for plugin in assigned}
+
+    async def accounts_effective_settings(
+        self, account: str, plugin: str
+    ) -> Dict[str, Any]:
+        """Effective settings for one (account, plugin), fully merged.
+
+        Merge order (highest wins): plugin Setting defaults <- the bound
+        profile's settings (minus the reserved ``channels`` key) <- the
+        account's per-plugin overrides (plugin_settings rows). The
+        profile's channel scope rides along under ``"channels"`` (None =
+        no restriction). Requires the plugin to be assigned to the
+        account, like every account-scoped plugin setting surface.
+        """
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        assigned = await self._assigned_plugins(account)
+        if plugin not in assigned:
+            raise ValueError(
+                f"plugin {plugin!r} is not assigned to account {account!r} "
+                f"(assigned: {assigned})"
+            )
+        reserved = plugin_scopes.CHANNELS_KEY
+        merged: Dict[str, Any] = {
+            setting.name: setting.validate(setting.default)
+            for setting in self._plugin_schema(plugin)
+        }
+        profile_name: Optional[str] = None
+        scope: Optional[Dict[str, Any]] = None
+        binding_repo = self._binding_repo()
+        profile_repo = self._profile_repo()
+        bindings_reader = getattr(binding_repo, "bindings", None)
+        if callable(bindings_reader):
+            profile_name = (await bindings_reader(account) or {}).get(plugin)
+        if profile_name is not None and profile_repo is not None:
+            record = await profile_repo.get(plugin, profile_name)
+            if record is not None:  # dangling binding (out-of-band edit): skip
+                for key, value in (record.settings or {}).items():
+                    if key != reserved:
+                        merged[key] = value
+                raw_scope = (record.settings or {}).get(reserved)
+                scope = plugin_scopes.validate(raw_scope) \
+                    if raw_scope is not None else None
+        if self._database is not None:  # per-account overrides (highest)
+            overrides = await self._database.plugins.settings(account, plugin) \
+                or {}
+            for key, value in overrides.items():
+                if key != reserved:  # the scope is profile-owned
+                    merged[key] = value
+        merged[reserved] = scope
+        return merged
+
+    async def accounts_channels(self, account: str) -> List[Dict[str, Any]]:
+        """The account's visible TEXT channels, from the live client cache.
+
+        ``[{"guild_id", "guild_name", "channels": [{"id", "name",
+        "type"}]}]`` (guild name then channel name order, ids as
+        strings). [] for offline/unstarted accounts — never raises; the
+        UI offers manual channel-ID entry as the fallback (Phase 2).
+        Memory-only read of the client's READY cache: zero API calls.
+        """
+        self._validate_account_known(account)
+        snapshot = getattr(self._accounts, "channels_snapshot", None)
+        if not callable(snapshot):
+            return []
+        try:
+            return list(await _resolved(snapshot(account)) or [])
+        except Exception:
+            LOG.exception("channel snapshot failed for %r", account)
+            return []
+
+    async def _assigned_plugins(self, account: str) -> List[str]:
+        """Sorted assigned plugins, memory-first via the account manager
+        (repository bindings' keys as the duck-typed fallback)."""
+        reader = getattr(self._accounts, "assigned_plugins", None)
+        if callable(reader):
+            return sorted(set(await _resolved(reader(account)) or []))
+        binding_repo = self._binding_repo()
+        fallback = getattr(binding_repo, "bindings", None)
+        if not callable(fallback):
+            return []
+        return sorted((await fallback(account) or {}))
+
+    def _set_account_plugin_profile(
+        self, account: str, plugin: str, profile: Optional[str]
+    ) -> None:
+        """Propagate ONE binding change into the manager's memory record
+        (FINAL-PHASE F3 pattern, same as _refresh_account_group): the
+        status poll serves Account.plugin_profiles, but the repository
+        owns the persisted value."""
+        try:
+            account_obj = getattr(self._accounts, "_accounts", {}).get(account)
+            if account_obj is not None and hasattr(account_obj, "plugin_profiles"):
+                account_obj.plugin_profiles[plugin] = profile
+        except Exception:
+            LOG.debug("plugin profile memory refresh failed for %r", account,
+                      exc_info=True)
+
+    async def _refresh_all_plugin_profiles(self) -> None:
+        """Re-read EVERY account's bindings into the memory records.
+
+        Rename/delete cascades rewrite MANY accounts' binding pointers in
+        one repository transaction; one bulk re-read afterwards keeps the
+        memory-first status poll honest without per-account queries.
+        """
+        binding_repo = self._binding_repo()
+        reader = getattr(binding_repo, "all_bindings", None)
+        if not callable(reader):
+            return
+        try:
+            bindings = await reader() or {}
+        except Exception:
+            LOG.debug("plugin profile binding re-read failed", exc_info=True)
+            return
+        for name, bound in bindings.items():
+            try:
+                account_obj = getattr(self._accounts, "_accounts", {}).get(name)
+                if account_obj is not None and hasattr(account_obj, "plugin_profiles"):
+                    account_obj.plugin_profiles = dict(bound)
+            except Exception:
+                LOG.debug("plugin profile memory refresh failed for %r", name,
+                          exc_info=True)
 
     # ------------------------------------------------------ account settings
     async def account_setting_get(self, name: str) -> Dict[str, Any]:

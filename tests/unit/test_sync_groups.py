@@ -470,7 +470,8 @@ class LegacyMigrationTests(unittest.IsolatedAsyncioTestCase):
 
         db = Database(self.path)
         applied = await db.connect()
-        self.assertEqual(applied, 2)  # migration 5 (backfill) + 6 (account_plugins)
+        self.assertEqual(applied, 3)  # migration 5 (backfill) + 6
+        # (account_plugins) + 7 (plugin_profiles + bindings column)
         groups = sorted(
             (g.name, g.enabled) for g in await db.sync_groups.list())
         self.assertEqual(groups, [("Alpha", True), ("Beta", True)])

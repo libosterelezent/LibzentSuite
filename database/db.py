@@ -36,6 +36,7 @@ from .repositories.credentials import CredentialsRepository
 from .repositories.kv import KvRepository
 from .repositories.logs import AuditRepository, LogRepository
 from .repositories.plugins import PluginRepository
+from .repositories.plugin_profiles import PluginProfilesRepository
 from .repositories.profiles import ProfilesRepository
 from .repositories.rate_policies import RatePolicyRepository
 from .repositories.settings import AccountSettingsRepository
@@ -60,6 +61,7 @@ class Database:
         self.profiles = ProfilesRepository(self)
         self.sync_groups = SyncGroupsRepository(self)
         self.plugins = PluginRepository(self)
+        self.plugin_profiles = PluginProfilesRepository(self)
         self.policies = RatePolicyRepository(self)
         self.audit = AuditRepository(self, keep=self._audit_keep)
         self.logs = LogRepository(self, keep=self._log_keep)

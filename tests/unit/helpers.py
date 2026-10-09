@@ -149,10 +149,15 @@ class FakeAccountPluginsRepo:
     Mirrors the persisted contract: sorted/deduped lists, idempotent
     assign/unassign, replace-all set_plugins, and all_assignments() that
     OMITS accounts with zero plugins (consumers use .get(name, [])).
+    Profile bindings follow the real v7 column: one OPTIONAL profile per
+    assignment row (None = plugin defaults), wiped by replacement, never
+    created without an assignment.
     """
 
     def __init__(self) -> None:
         self.rows: Dict[str, List[str]] = {}
+        #: (account, plugin) -> bound profile name or None
+        self.profile_of: Dict[tuple, Optional[str]] = {}
         self.fail_on: Optional[str] = None  # method name that raises
 
     def _maybe_fail(self, what: str) -> None:
@@ -170,6 +175,7 @@ class FakeAccountPluginsRepo:
         plugins = set(self.rows.get(account, []))
         plugins.discard(plugin)
         self.rows[account] = sorted(plugins)
+        self.profile_of.pop((account, plugin), None)
 
     async def plugins_of(self, account) -> List[str]:
         self._maybe_fail("plugins_of")
@@ -178,12 +184,36 @@ class FakeAccountPluginsRepo:
     async def set_plugins(self, account, plugins) -> List[str]:
         self._maybe_fail("set_plugins")
         cleaned = sorted({p for p in (plugins or [])})
+        kept = set(cleaned)
+        for plugin in list(self.rows.get(account, [])):
+            if plugin not in kept:  # delete+insert drops the binding column
+                self.profile_of.pop((account, plugin), None)
         self.rows[account] = cleaned
         return list(cleaned)
 
     async def all_assignments(self) -> Dict[str, List[str]]:
         self._maybe_fail("all_assignments")
         return {a: list(ps) for a, ps in sorted(self.rows.items()) if ps}
+
+    async def set_profile(self, account, plugin, profile) -> bool:
+        self._maybe_fail("set_profile")
+        if plugin not in set(self.rows.get(account, [])):
+            return False  # no assignment row: binding never creates one
+        self.profile_of[(account, plugin)] = profile
+        return True
+
+    async def bindings(self, account) -> Dict[str, Optional[str]]:
+        self._maybe_fail("bindings")
+        return {plugin: self.profile_of.get((account, plugin))
+                for plugin in self.rows.get(account, [])}
+
+    async def all_bindings(self) -> Dict[str, Dict[str, Optional[str]]]:
+        self._maybe_fail("all_bindings")
+        return {
+            account: {plugin: self.profile_of.get((account, plugin))
+                      for plugin in plugins}
+            for account, plugins in sorted(self.rows.items()) if plugins
+        }
 
 
 # ------------------------------------------------------------- collaborators

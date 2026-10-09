@@ -83,6 +83,33 @@ class ProfileRecord:
 
 
 @dataclass
+class PluginProfileRecord:
+    """A named per-plugin settings profile (migration v7).
+
+    ``settings`` is the DECODED settings_json payload. Persistence never
+    schema-validates it (the ControlAPI does, against the plugin's
+    Setting schema); the reserved ``"channels"`` key (channel scope,
+    see core/plugin_scopes.py) passes through like any other key.
+    """
+
+    id: int
+    plugin: str
+    name: str
+    description: str = ""
+    settings: Dict[str, Any] = field(default_factory=dict)
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id, "plugin": self.plugin, "name": self.name,
+            "description": self.description, "settings": dict(self.settings),
+            "created_at": round(self.created_at, 3),
+            "updated_at": round(self.updated_at, 3),
+        }
+
+
+@dataclass
 class PluginMetadata:
     """A discovered plugin's manifest as persisted for the UI."""
 
@@ -134,4 +161,5 @@ class RatePolicyRecord:
 
 
 __all__ = ["AccountRecord", "SyncGroupRecord", "ProfileRecord",
-           "PluginMetadata", "RatePolicyRecord", "POLICY_LEVELS"]
+           "PluginProfileRecord", "PluginMetadata", "RatePolicyRecord",
+           "POLICY_LEVELS"]

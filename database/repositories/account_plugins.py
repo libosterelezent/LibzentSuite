@@ -102,3 +102,59 @@ class AccountPluginsRepository(BaseRepository):
         ):
             assignments.setdefault(row["account"], []).append(row["plugin"])
         return assignments
+
+    # ------------------------------------------------------- profile bindings
+    # account_plugins.profile (migration v7) binds an assignment to a
+    # plugin setting profile: NULL = plugin defaults. Kept SEPARATE from
+    # the assignment methods above so their return shapes stay frozen —
+    # profile-aware consumers use bindings()/all_bindings() instead.
+    async def set_profile(
+        self, account: str, plugin: str, profile: Optional[str]
+    ) -> bool:
+        """Bind the assignment to a profile (None = clear, back to defaults).
+
+        UPDATE-only and idempotent: setting the same binding again writes
+        the same row-state, and an assignment row that does not exist is
+        a clean no-op returning False — this layer never CREATES an
+        assignment implicitly (binding requires assignment is the calling
+        manager's rule). Whether the profile NAME exists is not checked
+        here either: profile rows belong to PluginProfilesRepository.
+        """
+        async with self._tx(
+            f"set plugin profile of {account!r}/{plugin!r} to {profile!r}"
+        ) as conn:
+            async with conn.execute(
+                "UPDATE account_plugins SET profile = ?"
+                " WHERE account = ? AND plugin = ?",
+                (profile, account, plugin),
+            ) as cur:
+                return cur.rowcount > 0
+
+    async def bindings(self, account: str) -> Dict[str, Optional[str]]:
+        """``{plugin: profile name or None}`` for every plugin assigned to
+        the account ({} when none — including when the account itself is
+        unknown to the accounts table, which this layer never consults)."""
+        return {
+            row["plugin"]: row["profile"]
+            for row in await self._fetch_all(
+                "SELECT plugin, profile FROM account_plugins"
+                " WHERE account = ? ORDER BY plugin",
+                (account,),
+            )
+        }
+
+    async def all_bindings(self) -> Dict[str, Dict[str, Optional[str]]]:
+        """Every binding as ``{account: {plugin: profile or None}}``.
+
+        One bulk read for boot restore, shaped like all_assignments but
+        carrying the profile column; accounts with zero plugins are
+        OMITTED by the same convention (``bindings.get(account, {})``).
+        Keys iterate in sorted order.
+        """
+        out: Dict[str, Dict[str, Optional[str]]] = {}
+        for row in await self._fetch_all(
+            "SELECT account, plugin, profile FROM account_plugins"
+            " ORDER BY account, plugin"
+        ):
+            out.setdefault(row["account"], {})[row["plugin"]] = row["profile"]
+        return out

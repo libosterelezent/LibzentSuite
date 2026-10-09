@@ -255,6 +255,49 @@ class RestartTests(unittest.IsolatedAsyncioTestCase):
                 await db.close()
 
 
+# ---------------------------------------------------------- profile bindings
+class BindingMirrorTests(unittest.IsolatedAsyncioTestCase):
+    """The plugin_profiles in-memory mirror: boot restore, status poll,
+    and the assignment mutations that implicitly rewrite it."""
+
+    async def test_bindings_restore_at_boot_and_mirror_status(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sm-core-bindings-") as tmp:
+            db = Database(Path(tmp) / "bindings.db")
+            await db.connect()
+            try:
+                first, _ = _manager_over(db)
+                await first.add_account("alpha", plugins=[ROLL, SOULCOPY])
+                await db.plugin_profiles.create(ROLL, "grind")
+                await db.account_plugins.set_profile("alpha", ROLL, "grind")
+
+                second, _ = _manager_over(db)
+                await second.load()
+                # memory-first read: {plugin: profile or None} for every
+                # ASSIGNED plugin
+                self.assertEqual(await second.plugin_profiles("alpha"),
+                                 {ROLL: "grind", SOULCOPY: None})
+                rows = await second.accounts()
+                self.assertEqual(rows[0]["plugin_profiles"],
+                                 {ROLL: "grind", SOULCOPY: None})
+            finally:
+                await db.close()
+
+    async def test_unassign_clears_the_binding_mirror(self) -> None:
+        h = make_manager()
+        await h.manager.add_account("alpha", plugins=[ROLL, SOULCOPY])
+        await h.account_plugins.set_profile("alpha", ROLL, "grind")
+        await h.manager._refresh_assignment("alpha")
+        self.assertEqual(
+            h.manager.get("alpha").plugin_profiles,
+            {ROLL: "grind", SOULCOPY: None})
+        await h.manager.unassign_plugin("alpha", ROLL)  # row (and its
+        # profile column) is gone — the mirror must not keep the name
+        self.assertEqual(
+            h.manager.get("alpha").plugin_profiles, {SOULCOPY: None})
+        self.assertEqual(await h.manager.plugin_profiles("alpha"),
+                         {SOULCOPY: None})
+
+
 # --------------------------------------------------------------- ControlAPI
 class _LogsStub:
     def info(self, *args, **kwargs) -> None:

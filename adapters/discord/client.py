@@ -222,6 +222,11 @@ _MESSAGE_DEDUP_MAX = 512
 #: 5s is generous and never suppresses distinct rapid gateway bursts).
 _RICH_EVENT_DEDUP_WINDOW_S = 5.0
 
+#: ChannelType names (lowercased) that count as TEXT channels for the
+#: picker snapshot: regular text + announcement/news channels (both are
+#: message surfaces); categories/voice/stage/forum are skipped.
+_TEXT_CHANNEL_TYPES = ("text", "news")
+
 
 def _header(headers: Any, name: str) -> Optional[str]:
     """Case-tolerant header lookup (library header dicts vary in casing)."""
@@ -1169,6 +1174,43 @@ class RealDiscordClient:
             "dm_channels": dms,
             "latency_ms": self.latency_ms,
         }
+
+    def channels_snapshot(self) -> list:
+        """Picker-shaped text-channel snapshot — memory only, NO fetches.
+
+        ``[{"guild_id": str, "guild_name": str, "channels": [{"id": str,
+        "name": str, "type": str}]}]`` — TEXT channels only (text/news;
+        categories, voice, stage and forum rows are skipped), sorted by
+        guild name then channel name, ids as STRINGS. [] before connect.
+        Source of :meth:`ControlAPI.accounts_channels` (the Phase-2
+        channel picker); read-only over exactly what the live client
+        holds after READY, same discipline as cached_snapshot.
+        """
+        client = self._client
+        if client is None or not self.connected:
+            return []
+        out: list = []
+        for guild in getattr(client, "guilds", []) or []:
+            channels: list = []
+            for channel in getattr(guild, "channels", []) or []:
+                ctype = getattr(channel, "type", None)
+                type_name = (getattr(ctype, "name", None)
+                             or str(ctype)).lower()
+                if type_name not in _TEXT_CHANNEL_TYPES:
+                    continue
+                channels.append({
+                    "id": str(getattr(channel, "id", "")),
+                    "name": getattr(channel, "name", None) or "",
+                    "type": type_name,
+                })
+            channels.sort(key=lambda c: c["name"])
+            out.append({
+                "guild_id": str(getattr(guild, "id", "")),
+                "guild_name": getattr(guild, "name", None) or "",
+                "channels": channels,
+            })
+        out.sort(key=lambda g: g["guild_name"])
+        return out
 
 
 class IdentifyGate:

@@ -995,6 +995,49 @@ class DashboardServer:
                     ),
                 }
 
+            # -------------------------------------------- account plugin profiles
+            # Profile bindings + merged settings + the channel picker's
+            # data source (the profile CRUD lives under /api/plugins/*).
+            # 'profile' may be null = clear the binding (plugin defaults).
+            if (method, path) == ("GET", "/api/accounts/plugin-profiles"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_plugin_profiles(
+                        q_str(query, "account", path)
+                    ),
+                }
+            if (method, path) == ("POST", "/api/accounts/plugin-profile"):
+                profile = body.get("profile")
+                if profile is not None and (not isinstance(profile, str)
+                                            or not profile):
+                    raise ValueError(
+                        f"field 'profile' in POST {path} must be a non-empty"
+                        " string or null")
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_plugin_profile(
+                        require_str(body, "account", path),
+                        require_str(body, "plugin", path),
+                        profile,
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("GET", "/api/accounts/effective-settings"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_effective_settings(
+                        q_str(query, "account", path),
+                        q_str(query, "plugin", path),
+                    ),
+                }
+            if (method, path) == ("GET", "/api/accounts/channels"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_channels(
+                        q_str(query, "account", path)
+                    ),
+                }
+
             # ------------------------------------------------------- credentials
             if (method, path) == ("GET", "/api/credentials/status"):
                 return 200, {"ok": True, "data": await api.accounts_credential_status()}
@@ -1059,6 +1102,59 @@ class DashboardServer:
                         require_str(body, "plugin", path),
                         require_str(body, "key", path),
                         require_field(body, "value", path),
+                    ),
+                }
+
+            # -------------------------------------------------- plugin profiles
+            # Per-plugin named setting bundles (migration v7). 'settings'
+            # flows through raw: schema + channels-scope validation is the
+            # api's job and 400s with the offending field named.
+            if (method, path) == ("GET", "/api/plugins/profiles"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.plugin_profiles_list(
+                        q_opt(query, "plugin")
+                    ),
+                }
+            if (method, path) == ("POST", "/api/plugins/profiles/create"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.plugin_profile_create(
+                        require_str(body, "plugin", path),
+                        require_str(body, "name", path),
+                        body.get("description", ""),
+                        body.get("settings"),
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("POST", "/api/plugins/profiles/update"):
+                # at least one NON-null field (nulls mean "keep" below)
+                if not any(body.get(key) is not None for key in
+                           ("name_new", "description", "settings")):
+                    raise ValueError(
+                        f"POST {path} needs at least one of "
+                        "'name_new', 'description', 'settings'"
+                    )
+                return 200, {
+                    "ok": True,
+                    "data": await api.plugin_profile_update(
+                        require_str(body, "plugin", path),
+                        require_str(body, "name", path),
+                        name_new=body_opt_str(body, "name_new", path),
+                        description=body.get("description")
+                        if "description" in body else None,
+                        settings=body.get("settings")
+                        if "settings" in body else None,
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("POST", "/api/plugins/profiles/delete"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.plugin_profile_delete(
+                        require_str(body, "plugin", path),
+                        require_str(body, "name", path),
+                        surface="dashboard",
                     ),
                 }
 
