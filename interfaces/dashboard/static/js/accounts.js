@@ -224,6 +224,7 @@ function openAcctDetails(name) {
    hardcoding), pre-checking the names in `current` (a Set or null). */
 function fillPluginChecks(host, current) {
   host.innerHTML = "";
+  host.classList.add("picklist");
   if (!(manifests||[]).length) {
     const p = document.createElement("span");
     p.className = "faint"; p.style.fontSize = "11px";
@@ -233,8 +234,12 @@ function fillPluginChecks(host, current) {
   }
   for (const m of manifests) {
     const l = document.createElement("label");
-    l.style.cssText = "display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px;cursor:pointer";
-    l.innerHTML = `<input type="checkbox" value="${esc(m.name)}"${current&&current.has(m.name)?" checked":""}> ${esc(m.name)} <span class="faint trunc" style="font-size:11px">${esc(m.description||"")}</span>`;
+    l.className = "pick-row";
+    // structured grid: fixed 18px checkbox | non-shrinking name | ellipsized
+    // description — a long description can never squeeze the name/checkbox
+    l.innerHTML = `<input type="checkbox" value="${esc(m.name)}"${current&&current.has(m.name)?" checked":""}>
+      <span class="pl-name" title="${esc(m.name)}">${esc(m.name)}</span>
+      <span class="pl-desc" title="${esc(m.description||"")}">${esc(m.description||"")}</span>`;
     host.appendChild(l);
   }
 }
@@ -259,7 +264,7 @@ async function openPluginPicker(acctName) {
     if (Array.isArray(fresh)) current = new Set(fresh);
   } catch { /* keep the WS-snapshot fallback */ }
   const list = document.createElement("div");
-  list.className = "form";
+  list.className = "picklist";
   fillPluginChecks(list, current);
   const actions = document.createElement("div");
   actions.className = "form-actions";

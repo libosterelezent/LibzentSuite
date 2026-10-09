@@ -65,8 +65,8 @@ function renderPlugins() {
     const card = document.createElement("div"); card.className="card";
     card.innerHTML = `
       <div class="row" style="margin-bottom:6px">
-        <b class="trunc" style="font-size:14px;color:var(--ok)">${esc(m.name)}</b>
-        <span class="dim mono trunc" style="font-size:11px">v${esc(m.version||"?")}</span>
+        <b class="trunc" style="font-size:14px;color:var(--ok);flex-shrink:1;min-width:0">${esc(m.name)}</b>
+        <span class="dim mono" style="font-size:11px;flex-shrink:0">v${esc(m.version||"?")}</span>
       </div>
       <p class="sub" style="margin-bottom:var(--sp-2);overflow-wrap:anywhere">${esc(m.description||"")}</p>
       <div class="row" style="gap:var(--sp-3);font-size:12px;color:var(--dim)">

@@ -167,9 +167,11 @@ function openGroupPicker(title, currentGroup, onPick) {
   const list = document.createElement("div"); list.className = "form";
   const row = (label, value, hint, active) => {
     const l = document.createElement("label");
-    l.style.cssText = "display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;font-size:13px;cursor:pointer;border:1px solid "+(active?"var(--accent2)":"transparent")+";background:"+(active?"rgba(91,163,245,.12)":"var(--surface2)");
+    // structured pick-row: fixed radio | non-shrinking name | ellipsized hint
+    l.className = "pick-row" + (active ? " active" : "");
     l.innerHTML = `<input type="radio" name="gpick" ${active?"checked":""} data-group="${esc(value||"")}">
-      <b>${esc(label)}</b>${hint?`<span class="faint trunc" style="font-size:11px">${esc(hint)}</span>`:""}`;
+      <span class="pl-name" title="${esc(label)}">${esc(label)}</span>
+      ${hint?`<span class="pl-desc" title="${esc(hint)}">${esc(hint)}</span>`:""}`;
     list.appendChild(l);
   };
   row("Independent / No Group", "", "per-account pacing", !currentGroup);
@@ -277,12 +279,15 @@ function openMemberPicker(groupName) {
   const note = document.createElement("p"); note.className = "sub";
   note.textContent = "Adding an account REPLACES its previous group membership.";
   body.appendChild(note);
-  const list = document.createElement("div"); list.className = "form";
+  const list = document.createElement("div"); list.className = "picklist";
   for (const a of candidates) {
     const l = document.createElement("label");
-    l.style.cssText = "display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface2);border-radius:6px;font-size:13px;cursor:pointer;flex-wrap:wrap";
-    l.innerHTML = `<input type="checkbox" data-member="${esc(a.name)}"> <b>${esc(a.name)}</b> ${statusBadge(a.status)}
-      ${a.sync_group?`<span class="chip group" style="margin-left:auto">${esc(a.sync_group)}</span>`:'<span class="faint" style="margin-left:auto;font-size:11px">independent</span>'}`;
+    // structured pick-row: fixed checkbox | non-shrinking name | trailing
+    // status badge + group chip in the meta column (never squeezed)
+    l.className = "pick-row";
+    l.innerHTML = `<input type="checkbox" data-member="${esc(a.name)}">
+      <span class="pl-name" title="${esc(a.name)}">${esc(a.name)}</span>
+      <span class="pl-meta">${statusBadge(a.status)}${a.sync_group?`<span class="chip group">${esc(a.sync_group)}</span>`:'<span class="faint" style="font-size:11px">independent</span>'}</span>`;
     list.appendChild(l);
   }
   const actions = document.createElement("div"); actions.className = "form-actions";

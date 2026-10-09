@@ -584,6 +584,28 @@ class TestUiStructure(unittest.TestCase):
         # edit must go through the SAME set endpoint as add
         self.assertEqual(js.count('post("/api/ratelimit/set"'), 1)
 
+    def test_picker_rows_are_structured(self):
+        """Regression: picker rows (plugin/member/group) were inline
+        flex+text-node lists — a long description squeezed the checkbox and
+        the name. All three builders must use the .pick-row grid (fixed
+        checkbox column, non-shrinking .pl-name, ellipsized .pl-desc)."""
+        js = _js()
+        css = _css()
+        for builder in ("fillPluginChecks", "openMemberPicker", "openGroupPicker"):
+            body = re.search(rf"function {builder}\(.*?\n}}", js, re.S)
+            self.assertIsNotNone(body, f"{builder} missing")
+            self.assertIn("pick-row", body.group(0),
+                          f"{builder} must use the structured .pick-row grid")
+        self.assertIn("pl-name", js)
+        self.assertIn("pl-desc", js)
+        self.assertRegex(
+            css, r"\.pick-row \{[^}]*grid-template-columns: 18px auto minmax\(0, 1fr\)",
+            "pick-row must fix the checkbox column and let only the "
+            "description absorb overflow")
+        self.assertRegex(
+            css, r"\.pick-row input\[type=\"checkbox\"\][^{]*\{[^}]*width: 15px",
+            "picker checkboxes must have a fixed size")
+
     def test_custom_scrollbar_theme(self):
         css = _css()
         self.assertIn("::-webkit-scrollbar", css,
