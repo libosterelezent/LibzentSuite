@@ -129,6 +129,21 @@ input[type="checkbox"] { accent-color: var(--accent2); }
 .fb-ok { color: var(--ok); background: rgba(52,211,153,.09); border: 1px solid rgba(52,211,153,.28); }
 .fb-busy { color: var(--accent); background: rgba(91,163,245,.08); border: 1px solid rgba(91,163,245,.25); }
 
+/* Placement guards — an inline error is appended as the LAST CHILD of its
+   scope, so the scope's layout decides its box: inside a list-row GRID it
+   must span every column (it would otherwise land in the 18px checkbox
+   column as an unreadable sliver), and inside a flex ROW (bulk bar) it
+   must force its own full-width line instead of a squeezed flex item. */
+.lrow .fb { grid-column: 1 / -1; margin-top: 4px; }
+#bulkbar .fb, .row > .fb { flex: 1 1 100%; }
+
+/* Spacing normalization: parents with their own gaps must not also pay
+   the generic margin — .field (4px gap) and .form (12px gap) position the
+   message directly under the field/action; a picklist gets a little air
+   above the message row. */
+.field .fb, .form .fb { margin-top: 0; }
+.picklist .fb { margin-top: 6px; }
+
 /* Toasts — the ONLY global error surface (WS/render/startup errors that have
    no natural component). Bottom-right, auto-dismiss, never sandwich the body. */
 #toasts { position: fixed; right: var(--sp-3); bottom: var(--sp-3); z-index: 300;

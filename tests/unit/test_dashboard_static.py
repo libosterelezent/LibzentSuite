@@ -606,6 +606,21 @@ class TestUiStructure(unittest.TestCase):
             css, r"\.pick-row input\[type=\"checkbox\"\][^{]*\{[^}]*width: 15px",
             "picker checkboxes must have a fixed size")
 
+    def test_feedback_placement_guards(self):
+        """Regression: inline errors are appended as the last child of
+        their scope, so the scope's layout decides their box — inside a
+        list-row GRID they landed in the 18px checkbox column as an
+        unreadable sliver, and inside the bulk bar's flex ROW they were a
+        squeezed content-width item. Guards must force full placement, and
+        gapped parents (.field/.form) must not double-space the message."""
+        css = _css()
+        self.assertRegex(css, r"\.lrow \.fb \{[^}]*grid-column: 1 / -1",
+                         "list-row errors must span every grid column")
+        self.assertRegex(css, r"#bulkbar \.fb[^{]*\{[^}]*flex: 1 1 100%",
+                         "bulk-bar errors must take a full-width line")
+        self.assertRegex(css, r"\.field \.fb, \.form \.fb \{[^}]*margin-top: 0",
+                         "gapped parents position the message themselves")
+
     def test_custom_scrollbar_theme(self):
         css = _css()
         self.assertIn("::-webkit-scrollbar", css,
