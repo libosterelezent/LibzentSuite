@@ -3,7 +3,7 @@
      Page shell only: styling lives in styles/, behaviour in js/ (no build
      step — plain files served by interfaces/dashboard/server.py).
 
-     IA: Home · Accounts & Groups · Plugins · Activity · Policies · Tools
+     IA: Home · Accounts & Groups · Plugins · Profiles · Activity · Policies · Tools
      All REST/WS integrations preserved (4 WS message types). -->
 <html lang="en">
 <head>
@@ -109,9 +109,19 @@
         </div>
       </div>
 
-      <!-- Plugins -->
+      <!-- Plugins (cards carry the per-plugin profile library + quick binds) -->
       <div class="panel" id="panel-plugins">
         <div class="grid grid-2" id="plugin-grid"></div>
+      </div>
+
+      <!-- Profiles (per-account plugin-profile bindings) -->
+      <div class="panel" id="panel-profiles">
+        <div class="toolbar">
+          <label for="pp-acct" class="dim" style="font-size:12px;font-weight:500">Account</label>
+          <select id="pp-acct" style="min-width:180px"></select>
+          <button class="btn btn-ghost btn-sm" id="pp-refresh" title="Reload the profile library and this account's bindings">refresh</button>
+        </div>
+        <div id="pp-host"></div>
       </div>
 
       <!-- Activity -->
@@ -308,6 +318,7 @@
 <script src="js/accounts.js"></script>
 <script src="js/groups.js"></script>
 <script src="js/views.js"></script>
+<script src="js/plugins-ui.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

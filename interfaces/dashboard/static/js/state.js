@@ -37,6 +37,11 @@ const token = () => secretStore.getItem("dash_token") || "";
 let lastStats = null, lastSig = "";
 let manifests = [], groupsList = [], taskList = [], taskHistory = [], cooldownList = [];
 let manifestsFailed = false, groupsFailed = false;
+/* plugin-profile model (Phase 2): the per-plugin profile library
+   (GET /api/plugins/profiles) + the Profiles tab's selected account and
+   its last-fetched {plugin: profile|null} binding map. */
+let pluginProfiles = [], pluginProfilesFailed = false;
+let ppAccount = "", ppBindings = null;
 let ws = null, wsRetries = 0, wsWatchdog = null;
 let selectedAccounts = new Set();
 let currentView = "home", currentFleetTab = "accounts", currentActivityTab = "tasks", currentToolsTab = "sim";

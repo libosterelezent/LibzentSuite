@@ -8,10 +8,13 @@ order). Its contract with the backend is verifiable statically:
 
 * every ``/api/...`` endpoint the SPA calls must exist in the route table
   of interfaces/dashboard/server.py (startup can never 404),
-* capabilities are DIRECT account→plugin assignments: no Profiles page,
-  no profile pickers/state, the SPA never calls /api/profiles (the
-  server keeps those routes for the retained backend), and the plugin
-  flows drive the real /api/accounts/plugins* endpoints,
+* capabilities are DIRECT account→plugin assignments: the Phase-2
+  plugin-profile model adds a Profiles tab and a per-plugin profile
+  library over /api/plugins/profiles*, /api/accounts/plugin-profile[s],
+  /api/accounts/channels and /api/accounts/effective-settings — while
+  the LEGACY global profile system (/api/profiles) stays server-retained
+  and is NEVER called by the SPA, and the plugin flows drive the real
+  /api/accounts/plugins* endpoints,
 * the Groups UI drives the REAL SyncGroupManager backend
   (``/api/groups/*``): the obsolete read-only-era assumptions must stay
   gone, group moves must use the group endpoints — and NEVER fake groups
@@ -46,7 +49,7 @@ TOKEN = "static-test-token"
 
 #: JS modules in the exact dependency order index.html loads them.
 JS_FILES = ["state.js", "api.js", "ui.js", "accounts.js", "groups.js",
-            "views.js", "app.js"]
+            "views.js", "plugins-ui.js", "app.js"]
 #: every stylesheet index.html links.
 CSS_FILES = ["base.css", "layout.css", "components.css", "responsive.css"]
 
@@ -183,30 +186,37 @@ class TestGroupsIntegration(unittest.TestCase):
 
 
 class TestAccountPluginsModel(unittest.TestCase):
-    """Capabilities are DIRECT account→plugin assignments (the
-    profile-mediated model is gone from the UI). The Profiles page, nav
-    entry, pickers, dialog and state must be fully removed — and the
+    """Capabilities are DIRECT account→plugin assignments (the legacy
+    profile-mediated model is gone from the UI). Phase 2 re-added a
+    Profiles tab over the NEW per-plugin profile model — so the LEGACY
+    global-profile UI (prof-grid cards, create dialog, global pickers,
+    effectiveCaps) must stay gone, but a "profiles" nav entry now exists
+    by design (see TestPluginProfilesUI for the new model's pins). The
     plugin flows must drive the real /api/accounts/plugins* backend."""
 
-    def test_profiles_page_and_nav_gone(self):
+    def test_legacy_global_profile_ui_gone_new_tab_present(self):
         html = _spa()
         js = _js()
-        for gone in ('id="panel-profiles"', 'id="prof-grid"',
-                     'id="btn-create-prof"', 'id="dlg-create-prof"',
-                     'id="prof-list"', 'id="aa-profiles"',
-                     'id="cp-plugins"', 'id="cp-name"'):
-            self.assertNotIn(gone, html, f"{gone} must be removed from the shell")
+        for gone in ('id="prof-grid"', 'id="btn-create-prof"',
+                     'id="dlg-create-prof"', 'id="prof-list"',
+                     'id="aa-profiles"', 'id="cp-plugins"', 'id="cp-name"'):
+            self.assertNotIn(gone, html, f"legacy {gone} must stay removed")
+        for gone in ("openProfilePicker", "effectiveCaps",
+                     "Effective Capabilities"):
+            self.assertNotIn(gone, js, f"legacy {gone} must stay removed")
+        # the NEW tab: nav entry between Plugins and Activity + title
         nav = re.search(r"const NAV = \[(.*?)\];", js, re.S)
         self.assertIsNotNone(nav, "NAV array missing")
-        self.assertNotIn('"profiles"', nav.group(0),
-                         "NAV must not carry a profiles entry")
+        ids = re.findall(r'id:"([a-z]+)"', nav.group(0))
+        self.assertEqual(ids.count("profiles"), 1,
+                         "NAV must carry exactly one profiles entry")
+        self.assertEqual(ids.index("profiles"), ids.index("plugins") + 1,
+                         "Profiles sits between Plugins and Activity")
+        self.assertEqual(ids.index("activity"), ids.index("profiles") + 1,
+                         "Profiles sits between Plugins and Activity")
         titles = re.search(r"const TITLES = \{(.*?)\};", js, re.S)
         self.assertIsNotNone(titles, "TITLES map missing")
-        self.assertNotIn("profiles", titles.group(0))
-        self.assertNotIn("renderProfiles", js)
-        self.assertNotIn("openProfilePicker", js)
-        self.assertNotIn("effectiveCaps", js, "profile-derived caps are gone")
-        self.assertNotIn("Effective Capabilities", js)
+        self.assertIn('profiles:"Profiles"', titles.group(0))
 
     def test_no_profiles_state_or_loader(self):
         js = _js()
@@ -324,6 +334,175 @@ class TestAccountPluginsModel(unittest.TestCase):
         for ep in ("/api/accounts/plugins", "/api/accounts/plugins/set",
                    "/api/accounts/plugins/unassign"):
             self.assertIn(ep, endpoints, f"the SPA must exercise {ep}")
+
+
+class TestPluginProfilesUI(unittest.TestCase):
+    """Phase 2: the Plugins/Profiles tabs drive ONLY the plugin-profile
+    backend — library CRUD (/api/plugins/profiles*), bindings
+    (/api/accounts/plugin-profile[s]) and the channels/effective-settings
+    reads — never the retained legacy /api/profiles system. The editor is
+    schema-driven off the plugin manifests and carries the reserved
+    channel-scope section (nested guild→channel picker + manual fallback).
+    """
+
+    PHASE1_EIGHT = {
+        "/api/plugins/profiles", "/api/plugins/profiles/create",
+        "/api/plugins/profiles/update", "/api/plugins/profiles/delete",
+        "/api/accounts/plugin-profiles", "/api/accounts/plugin-profile",
+        "/api/accounts/effective-settings", "/api/accounts/channels",
+    }
+
+    def _fn(self, name):
+        body = re.search(rf"function {name}\(.*?\n}}", _js_file("plugins-ui.js"), re.S)
+        self.assertIsNotNone(body, f"{name} missing from plugins-ui.js")
+        return body.group(0)
+
+    def test_module_registered_and_owns_both_renderers(self):
+        self.assertIn("plugins-ui.js", JS_FILES)
+        html = _spa()
+        # script tag loads it between views.js and app.js (exact order is
+        # separately enforced by test_every_script_tag_resolves)
+        self.assertIn('<script src="js/views.js"></script>\n'
+                      '<script src="js/plugins-ui.js"></script>\n'
+                      '<script src="js/app.js"></script>', html)
+        js = _js()
+        self.assertEqual(js.count("function renderPlugins"), 1)
+        self.assertEqual(js.count("function renderProfiles"), 1)
+        self.assertIn("function renderPlugins", _js_file("plugins-ui.js"))
+        self.assertIn("function renderProfiles", _js_file("plugins-ui.js"))
+        self.assertNotIn("function renderPlugins", _js_file("views.js"),
+                         "the Plugins tab renderer lives in plugins-ui.js")
+        # shell + dispatch + first-visit loader
+        self.assertIn('id="panel-profiles"', html)
+        self.assertIn('id="pp-acct"', html)
+        self.assertIn('id="pp-host"', html)
+        appjs = _js_file("app.js")
+        self.assertIn('if (currentView==="profiles") renderProfiles();', appjs)
+        self.assertIn("LOADERS.profiles =", appjs)
+        self.assertIn("LOADERS.plugins =", appjs)
+        # the loader swallows its own failure (fire-and-forget from LOADERS)
+        self.assertIn("catch", self._fn("loadPluginProfiles"))
+
+    def test_endpoint_set_is_exactly_the_phase1_eight(self):
+        used = set(re.findall(r'["`](/api/[A-Za-z0-9_/-]+)',
+                              _js_file("plugins-ui.js")))
+        self.assertEqual(used, self.PHASE1_EIGHT,
+                         "plugins-ui.js may call ONLY the Phase-1 endpoints")
+        endpoints = _spa_endpoints()
+        for ep in self.PHASE1_EIGHT:
+            self.assertIn(ep, endpoints, f"the SPA must exercise {ep}")
+        routes = _server_routes()
+        for method, path in (
+                ("GET", "/api/plugins/profiles"),
+                ("POST", "/api/plugins/profiles/create"),
+                ("POST", "/api/plugins/profiles/update"),
+                ("POST", "/api/plugins/profiles/delete"),
+                ("GET", "/api/accounts/plugin-profiles"),
+                ("POST", "/api/accounts/plugin-profile"),
+                ("GET", "/api/accounts/effective-settings"),
+                ("GET", "/api/accounts/channels")):
+            self.assertIn((method, path), routes,
+                          f"server must implement {method} {path}")
+        self.assertNotIn("/api/profiles", endpoints)
+
+    def test_plugins_tab_library_and_quick_bind(self):
+        render = self._fn("renderPlugins")
+        # profile library rows: name, channel-mode badge, edit + delete
+        self.assertIn("profilesOf(m.name)", render)
+        self.assertIn('data-prof=', render)
+        self.assertIn("channelModeOf(p)", render)
+        self.assertIn('data-pact="edit"', render)
+        self.assertIn('data-pact="del"', render)
+        self.assertIn('data-pact="new"', render)
+        # quick binds exist ONLY for accounts the plugin is assigned to
+        self.assertIn("assignedPlugins(a).includes(m.name)", render)
+        self.assertIn('data-qb-sel', render)
+        wire = self._fn("wirePluginCard")
+        self.assertIn('post("/api/plugins/profiles/delete"', wire)
+        self.assertIn("confirmAction", wire)
+        self.assertIn('post("/api/accounts/plugin-profile"', wire)
+        self.assertIn("sel.value || null", wire,
+                      "empty selection posts profile:null (defaults)")
+        self.assertIn("setFb(qb,", wire,
+                      "quick-bind errors render inline next to the row")
+
+    def test_profiles_tab_binding_flows(self):
+        render = self._fn("renderProfiles")
+        self.assertIn('$("pp-acct")', render)
+        self.assertIn("assignedPlugins(a)", render,
+                      "one section per ASSIGNED plugin")
+        self.assertIn("a.plugin_profiles", render,
+                      "bindings read the account status dict")
+        self.assertIn('data-bb="unbind"', render)
+        self.assertIn('data-bb="bind"', render)
+        self.assertIn('data-bb="edit"', render)
+        # unbind posts profile:null; errors stay inline in the card
+        self.assertIn("profile:null", render)
+        self.assertIn('setFb(card,"error",e.message)', render)
+        # no bound profile yet: Edit offers the picker (pick or create)
+        self.assertIn("openBindPicker(ppAccount, pname)", render)
+        picker = self._fn("openBindPicker")
+        self.assertIn('post("/api/accounts/plugin-profile"', picker)
+        self.assertIn("selOpt.dataset.val || null", picker,
+                      "picker binds a profile STRING or null for default")
+        self.assertIn("openProfileEditor(plugin, null, {account, bind:true})",
+                      picker, "create-new path binds after creating")
+
+    def test_editor_is_schema_driven(self):
+        editor = self._fn("openProfileEditor")
+        self.assertIn("m.settings", editor,
+                      "settings form comes from the manifest schema")
+        self.assertIn('data-pf="extras"', editor,
+                      "unknown-to-schema keys ride as a raw JSON textarea")
+        self.assertIn('input[name="ppmode"]', editor)
+        self.assertIn('"/api/accounts/channels?account="', editor)
+        self.assertIn('post("/api/plugins/profiles/create"', editor)
+        self.assertIn('post("/api/plugins/profiles/update"', editor)
+        self.assertIn("payload.name_new", editor,
+                      "rename sent only when the name changed")
+        # channels is NOT a schema input: scope rides the reserved key
+        self.assertIn('settingsOut.channels = scope.mode==="all"', editor)
+        field = self._fn("schemaFieldHTML")
+        for t in ("bool", "int", "float"):
+            self.assertIn(f's.type==="{t}"', field,
+                          f"schema field builder must dispatch {t}")
+        # str is the fallback branch: input tagged data-t="str"
+        self.assertIn('data-t="str"', field)
+        self.assertIn('type="checkbox"', field)
+        self.assertIn('type="number"', field)
+        self.assertIn("s.default", field, "unset keys prefill the default")
+        collect = self._fn("collectProfileSettings")
+        self.assertIn("JSON.parse", collect)
+
+    def test_channel_picker_nested_guild_channel_tree(self):
+        tree = self._fn("renderChannelTree")
+        self.assertIn("pp-guild", tree, "guild groups render")
+        self.assertIn("pp-ghead", tree, "collapsible guild headers")
+        self.assertIn('classList.toggle("open")', tree)
+        self.assertIn('type="checkbox"', tree, "one checkbox per channel")
+        self.assertIn('data-cid=', tree)
+        self.assertIn("scope.rules.find", tree,
+                      "current selections pre-check from channels.rules")
+        self.assertIn("toggleScopeChannel", tree,
+                      "toggling updates the local scope model")
+
+    def test_channel_picker_manual_fallback_and_preview(self):
+        box = self._fn("renderScopeBox")
+        # channels==[] (offline account) -> notice + manual textarea,
+        # always-available manual add alongside the tree
+        self.assertIn("enter channel IDs manually", box)
+        self.assertIn('data-pf="mtext"', box)
+        self.assertIn("Add manually", box)
+        self.assertIn("parseScopeText", box)
+        self.assertIn('data-pf="preview"', box)
+        self.assertIn("scopeCounts(scope)", box,
+                      "live N/M preview derives from the scope model")
+        parse = self._fn("parseScopeText")
+        self.assertIn('indexOf(":")', parse,
+                      "manual lines are guild_id:channel_id pairs")
+        scope = self._fn("renderScopeBox")
+        self.assertIn("guilds.length", scope,
+                      "offline branch keyed on the empty channels list")
 
 
 class TestStartupRobustness(unittest.TestCase):

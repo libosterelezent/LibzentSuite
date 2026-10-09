@@ -1,8 +1,9 @@
 "use strict";
 /* ═══════════════════════════════════════════════════════════════════════════
-   views.js — page renderers that are not Accounts/Groups: Home, Plugins,
-   Policies, and the Activity streams (tasks, cooldowns, logs, audit).
-   Group flows live in groups.js; accounts in accounts.js.
+   views.js — page renderers that are not Accounts/Groups: Home, Policies,
+   and the Activity streams (tasks, cooldowns, logs, audit). Group flows
+   live in groups.js; accounts in accounts.js; the Plugins and Profiles
+   tabs (plugin-profile library, bindings, editor) in plugins-ui.js.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ── Home ──────────────────────────────────────────────────────────────────── */
@@ -53,27 +54,6 @@ function renderHome() {
       d.style.cssText="display:block;margin:3px 0;padding:6px 10px;background:var(--surface2);border-radius:6px;font-size:12px;color:var(--dim);width:100%;text-align:left";
     d.textContent=`${indep.length} independent account${indep.length!==1?"s":""}`; d.onclick=()=>{UI.go("fleet");UI.tab("groups")}; gr.appendChild(d); }
   if (!gr.children.length) gr.innerHTML='<span class="dim">no groups yet</span>';
-}
-
-/* ── Plugins ───────────────────────────────────────────────────────────────── */
-function renderPlugins() {
-  const grid = $("plugin-grid"); grid.innerHTML = "";
-  if (manifestsFailed) { grid.innerHTML=emptyState("Plugins Unavailable","The plugins list could not be loaded — see the error toasts. The rest of the dashboard remains usable."); return; }
-  if (!manifests.length) { grid.innerHTML=emptyState("No Plugins","No plugins discovered in the plugins directory."); return; }
-  for (const m of manifests) {
-    const usingAccounts = accounts().filter(a=>assignedPlugins(a).includes(m.name));
-    const card = document.createElement("div"); card.className="card";
-    card.innerHTML = `
-      <div class="row" style="margin-bottom:6px">
-        <b class="trunc" style="font-size:14px;color:var(--ok);flex-shrink:1;min-width:0">${esc(m.name)}</b>
-        <span class="dim mono" style="font-size:11px;flex-shrink:0">v${esc(m.version||"?")}</span>
-      </div>
-      <p class="sub" style="margin-bottom:var(--sp-2);overflow-wrap:anywhere">${esc(m.description||"")}</p>
-      <div class="row" style="gap:var(--sp-3);font-size:12px;color:var(--dim)">
-        <span>${usingAccounts.length} account${usingAccounts.length!==1?"s":""}</span>
-      </div>`;
-    grid.appendChild(card);
-  }
 }
 
 /* ── Policies ──────────────────────────────────────────────────────────────── */

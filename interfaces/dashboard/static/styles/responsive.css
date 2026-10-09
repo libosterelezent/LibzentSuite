@@ -74,3 +74,12 @@
   #content { padding-bottom: 64px; }
   .metrics { grid-template-columns: repeat(4, 1fr); }
 }
+
+/* Plugin-profile rows: drop the description column, let the quick-bind
+   select take the full row; the channel picker is already single-column. */
+@media (max-width: 767px) {
+  .pp-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .pp-row .pp-desc { display: none; }
+  .pp-qb .pp-qb-name { min-width: 0; flex: 1 1 100%; }
+  .pp-qb select { max-width: none; }
+}

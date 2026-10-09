@@ -8,11 +8,12 @@ const NAV = [
   {id:"home", label:"Home", icon:"M3 12l9-9 9 9v9a2 2 0 0 1-2 2h-4v-7h-6v7H5a2 2 0 0 1-2-2z"},
   {id:"fleet", label:"Accounts & Groups", icon:"M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"},
   {id:"plugins", label:"Plugins", icon:"M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94z"},
+  {id:"profiles", label:"Profiles", icon:"M12 2L2 7l10 5 10-5-10-5zM2 12l10 5 10-5M2 17l10 5 10-5"},
   {id:"activity", label:"Activity", icon:"M22 12h-4l-3 9L9 3l-3 9H2"},
   {id:"policies", label:"Policies", icon:"M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"},
   {id:"tools", label:"Tools", icon:"M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94z"},
 ];
-const TITLES = {home:"Home",fleet:"Accounts & Groups",plugins:"Plugins",activity:"Activity",policies:"Policies",tools:"Tools"};
+const TITLES = {home:"Home",fleet:"Accounts & Groups",plugins:"Plugins",profiles:"Profiles",activity:"Activity",policies:"Policies",tools:"Tools"};
 
 function buildNav() {
   const nav = $("snav"); nav.innerHTML = "";
@@ -25,6 +26,8 @@ function buildNav() {
     nav.appendChild(a);
   }
   const bn = $("bottomnav"); bn.innerHTML = "";
+  // Mobile keeps the existing five items — Profiles stays reachable via
+  // the full sidebar / drawer (a sixth item squeezes the bar past 400px).
   const bnItems = NAV.filter(x=>["home","fleet","activity","policies","tools"].includes(x.id));
   for (const item of bnItems) {
     const a = document.createElement("button");
@@ -94,6 +97,7 @@ function render() {
   if (currentView==="home") renderHome();
   if (currentView==="fleet") { renderAccounts(); renderGroups(); }
   if (currentView==="plugins") renderPlugins();
+  if (currentView==="profiles") renderProfiles();
   if (currentView==="policies") renderPolicies();
   updateNavBadges();
 }
@@ -145,13 +149,15 @@ function connectWS() {
         const sig = JSON.stringify((msg.accounts||[]).map(a=>[
           a.name,a.status,a.enabled,a.credential,a.sync_group,
           (a.assigned_plugins||[]).join(","),
+          JSON.stringify(a.plugin_profiles||{}),
           a.latency_ms!=null?Math.round(a.latency_ms/10):null,
           Math.floor((a.uptime_s??0)/60), a.cooldowns??0]));
         lastStats = msg;
         // Only full-render when the STRUCTURAL signature changed (status
         // flip, account add/remove, credential change, plugin assignment,
-        // minute-level uptime, latency bucket, cooldown count). Per-second
-        // cosmetic ticks don't rebuild the DOM — the v1 pattern, preserved.
+        // PROFILE BINDING change, minute-level uptime, latency bucket,
+        // cooldown count). Per-second cosmetic ticks don't rebuild the
+        // DOM — the v1 pattern, preserved.
         if (sig !== lastSig) { lastSig = sig; render(); }
         else renderTick();
       }
@@ -194,6 +200,13 @@ function wire() {
   $$("#panel-fleet .tabbar .tab").forEach(t=>t.onclick=()=>UI.tab(t.dataset.tab));
   bindViewSel("vm-acct", setAcctViewMode, ()=>{ renderAccounts(); });
   bindViewSel("vm-group", setGroupViewMode, ()=>{ renderGroups(); });
+
+  // Profiles tab: account selector + library/binding refresh
+  $("pp-acct").onchange = () => { ppAccount = $("pp-acct").value; loadAccountBindings(); };
+  $("pp-refresh").onclick = async () => {
+    await loadPluginProfiles(false);
+    if (ppAccount) await loadAccountBindings(); else render();
+  };
 
   // Activity + Tools tabs
   $$("#panel-activity .tabbar .tab").forEach(t=>t.onclick=()=>UI.activityTab(t.dataset.atab));
@@ -392,6 +405,9 @@ try {
   LOADERS.fleet = ()=>{ loadGroups(); };
   LOADERS.activity = ()=>{ loadTasks(); loadCooldowns(); };
   LOADERS.policies = ()=>{ loadPolicies(); };
+  // both profile surfaces read the same per-plugin profile library
+  LOADERS.plugins = ()=>{ loadPluginProfiles(); };
+  LOADERS.profiles = ()=>{ loadPluginProfiles(); };
   setInterval(()=>{ if(currentView==="activity"&&currentActivityTab==="cooldowns") loadCooldowns(); },5000);
   $("side-foot").textContent = "v2 · " + new Date().getFullYear();
 } catch (e) {
