@@ -500,6 +500,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         plugin_state=plugin_state,
         lifecycle=LifecycleGovernor(),  # PHASE-4 (S4): anti-thrash defaults
         sync_groups=sync_groups,
+        account_plugins=database.account_plugins,  # capability source
     )
     cleanups.append(("accounts", accounts.stop_all))
     await accounts.load()  # restore persisted accounts (attach their plugins)
@@ -517,17 +518,31 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     await cooldowns.restore()
 
     # config-dir account files (DB rows were restored by accounts.load())
+    # ``plugins`` is the capability key; a legacy ``profiles`` key in a
+    # config file is deliberately IGNORED (profiles no longer decide
+    # capabilities — nothing is assigned, nothing breaks)
+    discovered_plugins = set(plugins.names())
     for payload in config.accounts:
         try:
             raw_enabled = payload.get("enabled", True)
             if isinstance(raw_enabled, str):
                 raw_enabled = raw_enabled.strip().lower() in ("true", "1", "yes", "on")
+            config_plugins = payload.get("plugins") or []
+            unknown = [p for p in config_plugins if p not in discovered_plugins]
+            if unknown:
+                # typo trap (same convention as the api layer): refuse the
+                # whole file, loudly — a silently-unmatched plugin name
+                # would read as "created" while attaching nothing
+                raise ValueError(
+                    f"unknown plugin(s) {unknown} (known plugins: "
+                    f"{sorted(discovered_plugins)})"
+                )
             await accounts.add_account(
                 payload["name"],
                 token_ref=payload.get("token_ref"),
                 enabled=bool(raw_enabled),
                 sync_group=payload.get("sync_group"),
-                profiles=payload.get("profiles") or None,
+                plugins=config_plugins,
             )
         except Exception:
             logs.error("config", "could not register account from config dir",

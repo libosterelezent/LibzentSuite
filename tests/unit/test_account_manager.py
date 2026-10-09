@@ -25,8 +25,8 @@ from tests.unit.helpers import (
 )
 
 STATUS_KEYS = {"id", "name", "status", "user_id", "enabled", "sync_group",
-               "profiles", "latency_ms", "uptime_s", "last_error",
-               "credential", "plugins"}
+               "profiles", "assigned_plugins", "latency_ms", "uptime_s",
+               "last_error", "credential", "plugins"}
 DETAILS_KEYS = {"name", "status", "identity", "runtime", "plugins",
                 "profiles", "rate_limit", "credential"}
 
@@ -75,7 +75,9 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(out), STATUS_KEYS)
         self.assertIsNotNone(await h.repo.get("alpha"))          # persisted
         self.assertEqual(h.manager.names(), ["alpha"])     # memory
-        self.assertEqual(h.plugins.attached, [("alpha", None)])  # unrestricted
+        # capability model: no assignments -> an EMPTY allowed set (the
+        # old "no profile = unrestricted (None)" default is gone)
+        self.assertEqual(h.plugins.attached, [("alpha", set())])
 
     async def test_add_account_invalid_name(self) -> None:
         h = make_manager()
@@ -99,19 +101,30 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(h.manager.names(), [])  # memory clean
         self.assertEqual(len(h.repo.records), 0)
 
-    async def test_add_with_profiles_assigns_and_gates(self) -> None:
+    async def test_add_with_plugins_assigns_and_gates(self) -> None:
         h = make_manager()
-        await h.add_profile("basic", "soulcopy")
-        out = await h.manager.add_account("alpha", profiles=["basic"])
-        self.assertEqual(out["profiles"], ["basic"])
+        out = await h.manager.add_account("alpha", plugins=["soulcopy"])
+        self.assertEqual(out["assigned_plugins"], ["soulcopy"])
         self.assertEqual(h.plugins.attached[-1], ("alpha", {"soulcopy"}))
+        self.assertEqual(await h.account_plugins.plugins_of("alpha"),
+                         ["soulcopy"])  # persisted capability rows
 
-    async def test_add_with_unknown_profile_rejected_before_persist(self) -> None:
+    async def test_add_with_bad_plugins_type_rejected_before_persist(self) -> None:
         h = make_manager()
-        with self.assertRaises(ProfileError):
-            await h.manager.add_account("alpha", profiles=["nope"])
+        for bad in ("soulcopy", 7, ["soulcopy", 3], {"soulcopy"}):
+            with self.assertRaises(AccountError):
+                await h.manager.add_account("alpha", plugins=bad)
         self.assertEqual(h.manager.names(), [])
         self.assertEqual(len(h.repo.records), 0)
+        self.assertEqual(h.account_plugins.rows, {})
+
+    async def test_add_rejects_legacy_profiles_argument(self) -> None:
+        h = make_manager()
+        with self.assertRaises(ValueError) as ctx:
+            await h.manager.add_account("alpha", profiles=["basic"])
+        self.assertIn("profiles", str(ctx.exception))
+        self.assertEqual(h.manager.names(), [])     # nothing created
+        self.assertEqual(h.account_plugins.rows, {})
 
     async def test_get_unknown_and_names_sorted(self) -> None:
         h = make_manager()
@@ -161,12 +174,11 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("soulcopy", rows[0]["plugins"])  # last known kept
 
     async def test_fail_closed_reattach_clears_stale_plugin_view(self) -> None:
-        """Round-3: an account re-attached with ZERO plugins (fail-closed
-        profile-resolution failure) must not keep showing its previous
-        plugin rows as if they were still attached."""
+        """Round-3: an account re-attached with ZERO plugins (its
+        assignments emptied) must not keep showing its previous plugin
+        rows as if they were still attached."""
         h = make_manager()
-        await h.add_profile("basic", "soulcopy")
-        await h.manager.add_account("alpha", profiles=["basic"])
+        await h.manager.add_account("alpha", plugins=["soulcopy"])
         h.plugins.states_map["alpha"] = [
             {"name": "soulcopy", "enabled": True, "settings": {},
              "last_error": None, "error_count": 0},
@@ -174,18 +186,16 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         rows = await h.manager.accounts()
         self.assertIn("soulcopy", rows[0]["plugins"])  # truthful view
 
-        # a transient profile-repo failure: the next attach (the one every
-        # start() performs) resolves the grant to NOTHING (fail-closed)
-        original = h.profile_manager.allowed_plugins
-
-        def explode(name):
-            raise RuntimeError("profile repo down")
-
-        h.profile_manager.allowed_plugins = explode
+        # a transient assignment-repo failure: the refresh fail-closes to
+        # ZERO assignments, so the next attach (the one every start()
+        # performs) resolves the grant to NOTHING
+        h.account_plugins.fail_on = "plugins_of"
         try:
-            await h.manager._attach_plugins("alpha")
+            await h.manager._refresh_assignment("alpha")
         finally:
-            h.profile_manager.allowed_plugins = original
+            h.account_plugins.fail_on = None
+        self.assertEqual(h.manager.get("alpha").assigned_plugins, [])
+        await h.manager._attach_plugins("alpha")
         self.assertEqual(h.plugins.attached[-1], ("alpha", set()))
 
         # the plugin manager now HAS the account — with zero plugins
@@ -638,8 +648,7 @@ class DetailsTests(unittest.IsolatedAsyncioTestCase):
              "interval": 4.0, "jitter": [0.1, 0.3]},
         ]
         h = make_manager(limiter=limiter)
-        await h.add_profile("basic", "soulcopy")
-        await h.manager.add_account("alpha", profiles=["basic"])
+        await h.manager.add_account("alpha", plugins=["soulcopy"])
         h.plugins.states_map["alpha"] = [
             {"name": "soulcopy", "enabled": True, "settings": {},
              "last_error": None, "error_count": 0},
@@ -661,7 +670,7 @@ class DetailsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(d["runtime"]["cached_dms"], 1)
         self.assertEqual(d["runtime"]["cache_source"], "client cache (READY)")
         self.assertEqual(d["plugins"], [{"name": "soulcopy", "enabled": True}])
-        self.assertEqual(d["profiles"], ["basic"])
+        self.assertEqual(d["profiles"], [])  # retained field, decoupled
         self.assertEqual(d["rate_limit"], {
             "message": {"interval": 5.0, "jitter": [0.0, 0.0],
                         "source": "global, account:alpha"},

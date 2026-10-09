@@ -142,22 +142,72 @@ class FakeAccountsRepo:
         return AccountRecord(**record.to_dict())
 
 
+class FakeAccountPluginsRepo:
+    """Dict-backed AccountPluginsRepository (async methods, like the real one
+    in database/repositories/account_plugins.py).
+
+    Mirrors the persisted contract: sorted/deduped lists, idempotent
+    assign/unassign, replace-all set_plugins, and all_assignments() that
+    OMITS accounts with zero plugins (consumers use .get(name, [])).
+    """
+
+    def __init__(self) -> None:
+        self.rows: Dict[str, List[str]] = {}
+        self.fail_on: Optional[str] = None  # method name that raises
+
+    def _maybe_fail(self, what: str) -> None:
+        if self.fail_on == what:
+            raise RuntimeError(f"injected repository failure: {what}")
+
+    async def assign_plugin(self, account, plugin) -> None:
+        self._maybe_fail("assign_plugin")
+        plugins = set(self.rows.get(account, []))
+        plugins.add(plugin)
+        self.rows[account] = sorted(plugins)
+
+    async def unassign_plugin(self, account, plugin) -> None:
+        self._maybe_fail("unassign_plugin")
+        plugins = set(self.rows.get(account, []))
+        plugins.discard(plugin)
+        self.rows[account] = sorted(plugins)
+
+    async def plugins_of(self, account) -> List[str]:
+        self._maybe_fail("plugins_of")
+        return list(self.rows.get(account, []))
+
+    async def set_plugins(self, account, plugins) -> List[str]:
+        self._maybe_fail("set_plugins")
+        cleaned = sorted({p for p in (plugins or [])})
+        self.rows[account] = cleaned
+        return list(cleaned)
+
+    async def all_assignments(self) -> Dict[str, List[str]]:
+        self._maybe_fail("all_assignments")
+        return {a: list(ps) for a, ps in sorted(self.rows.items()) if ps}
+
+
 # ------------------------------------------------------------- collaborators
 class FakePluginManager:
     """Records attach/detach/activate/deactivate; serves canned states().
 
     ``attach_account`` is async like the real plugin manager (it reads
     persisted enabled state); the account manager also tolerates a sync
-    return for duck-typed doubles.
+    return for duck-typed doubles. ``known_names`` feeds the optional
+    ``names()`` surface the ControlAPI validates plugin names against.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, known_names: Optional[List[str]] = None) -> None:
         self.attached: List[Any] = []       # (account, allowed)
         self.detached: List[str] = []
         self.activated: List[Any] = []      # (account, services_factory)
         self.deactivated: List[str] = []
         self.states_map: Dict[str, List[Dict[str, Any]]] = {}
         self.fail_states = False
+        self.known_names: List[str] = list(known_names or [])
+
+    def names(self) -> List[str]:
+        """Discovered-plugin surface (ControlAPI typo trap)."""
+        return list(self.known_names)
 
     async def attach_account(self, account, allowed) -> None:
         self.attached.append((account, allowed))
@@ -442,6 +492,7 @@ class ManagerHarness:
     audit: FakeAudit
     factory: FakeClientFactory
     credentials: Credentials
+    account_plugins: FakeAccountPluginsRepo
     collector: EventCollector = field(default_factory=lambda: EventCollector(EventBus()))
 
     def add_profile(self, name: str, *plugin_names: str) -> Any:
@@ -456,6 +507,7 @@ def make_manager(
     limiter: Any = None,
     client_kwargs: Optional[Dict[str, Any]] = None,
     supervisor_tick: float = 0.02,
+    account_plugins: Optional[FakeAccountPluginsRepo] = None,
 ) -> ManagerHarness:
     """Build an AccountManager wired to fakes (fresh bus/repos per call)."""
     bus = EventBus()
@@ -512,6 +564,8 @@ def make_manager(
         bus, LOG, repo, plugins, profile_manager, scheduler, settings, audit,
         factory, credentials, limiter=limiter, supervisor_tick=supervisor_tick,
         credential_service=credential_service,
+        account_plugins=account_plugins
+        if account_plugins is not None else FakeAccountPluginsRepo(),
     )
     collector = EventCollector(bus)
     from core.event_bus import (
@@ -525,6 +579,7 @@ def make_manager(
         profile_manager=profile_manager, plugins=plugins, scheduler=scheduler,
         settings=settings, audit=audit, factory=factory,
         credentials=credentials, collector=collector,
+        account_plugins=manager._account_plugins,
     )
 
 
@@ -541,8 +596,8 @@ def make_task(**overrides: Any) -> SimpleNamespace:
 
 
 __all__ = [
-    "FakeProfilesRepo", "FakeAccountsRepo", "FakePluginManager",
-    "FakeScheduler", "FakeSettings", "FakeAudit", "FakeDetailsLimiter",
-    "FakeClient", "FakeClientFactory", "EventCollector", "ManagerHarness",
-    "make_manager", "make_task", "default_snapshot",
+    "FakeProfilesRepo", "FakeAccountsRepo", "FakeAccountPluginsRepo",
+    "FakePluginManager", "FakeScheduler", "FakeSettings", "FakeAudit",
+    "FakeDetailsLimiter", "FakeClient", "FakeClientFactory", "EventCollector",
+    "ManagerHarness", "make_manager", "make_task", "default_snapshot",
 ]

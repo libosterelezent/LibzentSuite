@@ -73,7 +73,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
 from ..credentials import Credentials
-from ..errors import AccountError, CredentialsError, ProfileError, SchedulerError
+from ..errors import AccountError, CredentialsError, SchedulerError
 from ..event_bus import (
     AccountConnected,
     AccountDisconnected,
@@ -250,12 +250,17 @@ class Account:
     plugin manager has the account, and keeps the last known values otherwise.
     ``credential_source`` mirrors ``CredentialService.status(name)`` ("db" /
     "env", None when no credential service is wired) for display snapshots.
+    ``assigned_plugins`` is the in-memory mirror of the ``account_plugins``
+    table rows (the CAPABILITY source of truth): loaded in bulk at boot,
+    rewritten at every assignment mutation, read by the attach path — never
+    a per-attach repository roundtrip.
     """
 
     record: AccountRecord
     runtime: AccountRuntime = field(default_factory=AccountRuntime)
     plugins: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     credential_source: Optional[str] = None
+    assigned_plugins: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Every account owns exactly one DiscordCache for its whole life."""
@@ -279,6 +284,7 @@ class Account:
             "enabled": self.record.enabled,
             "sync_group": self.record.sync_group,
             "profiles": list(self.record.profiles),
+            "assigned_plugins": list(self.assigned_plugins),
             "latency_ms": latency,
             "uptime_s": uptime,
             "last_error": rt.last_error,
@@ -313,6 +319,7 @@ class AccountManager:
         plugin_state: Any = None,
         lifecycle: Any = None,
         sync_groups: Any = None,
+        account_plugins: Any = None,
     ) -> None:
         """``limiter`` (optional) enriches details() with effective rate data;
         ``supervisor_tick`` is the supervisor's poll granularity in seconds;
@@ -329,7 +336,12 @@ class AccountManager:
         ``sync_groups`` (optional SyncGroupManager) owns group membership:
         when wired, the group-scope plumbing of add/remove/restore is
         delegated to it (AccountManager -> SyncGroupManager ->
-        RateLimitManager); unwired stacks keep the legacy direct plumbing.
+        RateLimitManager); unwired stacks keep the legacy direct plumbing;
+        ``account_plugins`` (optional AccountPluginsRepository,
+        ``db.account_plugins``) is the CAPABILITY source of truth: the
+        account_plugins table rows decide which plugins an account runs
+        (ProfileManager no longer does). Unwired stacks degrade to ZERO
+        attached plugins (fail-closed), never to "all plugins".
 
         The constructor does NO repository I/O — persisted accounts are
         restored by awaiting :meth:`load` (the bootstrap does, right after
@@ -339,6 +351,9 @@ class AccountManager:
         self._logger = logger or logging.getLogger("slaughtermudae.accounts")
         self._accounts_repo = accounts_repo
         self._plugin_manager = plugin_manager
+        # RETAINED for its own bookkeeping only (profile cache cascade,
+        # future plugin-specific profile system) — the capability path
+        # never consults it anymore (direct account→plugin assignments).
         self._profile_manager = profile_manager
         self._scheduler = scheduler
         self._settings = settings
@@ -385,6 +400,10 @@ class AccountManager:
         # membership. When present, every group-scope touch below delegates
         # to it; when absent, the legacy direct limiter plumbing runs.
         self._sync_groups = sync_groups
+        # AccountPluginsRepository (optional): direct account→plugin
+        # assignments — THE capability source. None (unwired test stacks)
+        # behaves like "no assignments": zero plugins, never unrestricted.
+        self._account_plugins = account_plugins
 
         # inbound audit trail (spec §10): every message seen by any account
         bus.subscribe(MessageReceived, self._audit_inbound)
@@ -442,6 +461,14 @@ class AccountManager:
         right after construction — the constructor itself does no I/O.
         Best-effort: a repository failure must not break the boot.
 
+        Plugin assignments are bulk-loaded FIRST (ONE
+        ``account_plugins.all_assignments()`` read feeds every record —
+        no per-account queries in this loop), so each
+        ``_attach_plugins`` below attaches exactly the persisted set. A
+        failed bulk read logs loudly and leaves every account with ZERO
+        attached plugins (fail-closed: a repository hiccup must never
+        widen capability to "all plugins" — the old no-profile default).
+
         Group restoration is owned by SyncGroupManager when wired: ONE
         delegated ``sync_runtime()`` pass after the accounts are restored
         (no per-record group logic here). Unwired stacks keep the legacy
@@ -452,9 +479,13 @@ class AccountManager:
         except Exception:
             self._logger.exception("could not load accounts from repository")
             return
+        assignments = await self._load_assignments()
         for record in records:
             try:
-                account = Account(record=record)
+                account = Account(
+                    record=record,
+                    assigned_plugins=list(assignments.get(record.name, [])),
+                )
                 self._refresh_credential_source(account)
                 self._accounts[record.name] = account
                 await self._attach_plugins(record.name)
@@ -478,17 +509,25 @@ class AccountManager:
         token_ref: Optional[str] = None,
         enabled: bool = True,
         sync_group: Optional[str] = None,
-        profiles: Optional[List[str]] = None,
+        plugins: Optional[List[str]] = None,
+        profiles: Any = None,
     ) -> Dict[str, Any]:
         """Register + persist an account; returns its status dict.
 
         Persists to the repository FIRST (a failed write leaves memory
-        untouched), then builds the in-memory Account and assigns profiles.
-        The token VALUE never enters the database — only the .env key ref.
+        untouched), then builds the in-memory Account and stores its
+        plugin assignments (``plugins`` — the capability source since the
+        profile-mediated model was removed). The token VALUE never enters
+        the database — only the .env key ref.
+
+        ``profiles`` is deliberately still a named (rejected) parameter so
+        a legacy caller gets an explanatory ValueError instead of a bare
+        TypeError: profiles no longer control account capabilities.
 
         Raises:
-            AccountError: invalid name (must match NAME_RE) or duplicate.
-            ProfileError: any requested profile is unknown.
+            AccountError: invalid name (must match NAME_RE), duplicate, or
+                a non-list/non-strings ``plugins`` argument.
+            ValueError: ``profiles`` was passed (removed architecture).
         """
         if isinstance(name, str) and name.lower() == "all":
             # reserved by 'accounts start all': an account so named could
@@ -502,32 +541,43 @@ class AccountManager:
         if name in self._accounts:
             raise AccountError(f"account {name!r} already exists")
         if profiles is not None:
-            if not isinstance(profiles, (list, tuple)) or not all(
-                isinstance(p, str) for p in profiles
+            raise ValueError(
+                "account creation no longer accepts 'profiles': profiles do "
+                "not control capabilities anymore — pass plugins=[...] "
+                "(direct account→plugin assignments) instead"
+            )
+        if plugins is not None:
+            if not isinstance(plugins, (list, tuple)) or not all(
+                isinstance(p, str) for p in plugins
             ):
-                raise AccountError("'profiles' must be a list of profile names")
-            await self._validate_profiles_known(profiles)
+                raise AccountError("'plugins' must be a list of plugin names")
         record = await self._accounts_repo.add(
             name, token_ref=token_ref, enabled=bool(enabled), sync_group=sync_group
         )
         account = Account(record=record)
         self._refresh_credential_source(account)
         self._accounts[name] = account
-        for profile in dict.fromkeys(profiles or []):
+        # persist the capability rows, THEN mirror them into the record the
+        # attach path reads (a failed write keeps the account fail-closed:
+        # zero plugins until an explicit assignment lands)
+        if self._account_plugins is not None:
             try:
-                await self._profile_manager.assign(name, profile)
+                await self._account_plugins.set_plugins(
+                    name, list(dict.fromkeys(plugins or [])))
             except Exception:
                 self._logger.exception(
-                    "could not assign profile %r to new account %r", profile, name
+                    "could not persist plugin assignments for new account %r",
+                    name,
                 )
+        account.assigned_plugins = sorted({p for p in (plugins or [])})
         fresh = await self._repo_get(name)
         if fresh is not None:
             account.record = fresh
         await self._attach_plugins(name)
         await self._sync_group_apply(name, sync_group)
         self._logger.info(
-            "account %s added (enabled=%s sync_group=%s profiles=%s)",
-            name, enabled, sync_group, account.record.profiles or "-",
+            "account %s added (enabled=%s sync_group=%s plugins=%s)",
+            name, enabled, sync_group, account.assigned_plugins or "-",
         )
         return account.status_dict()
 
@@ -536,9 +586,10 @@ class AccountManager:
 
         Cascades every account-scoped persistent state: the stored
         credential (when a credential service is wired), every cooldown row
-        (when a cooldown service is wired) and every kv-backed plugin-state
-        row (when a plugin state service is wired) — nothing survives for a
-        future same-named account to inherit.
+        (when a cooldown service is wired), every kv-backed plugin-state
+        row (when a plugin state service is wired) and every plugin
+        ASSIGNMENT row (when the account-plugins repository is wired) —
+        nothing survives for a future same-named account to inherit.
 
         Raises:
             AccountError: unknown account, or still running/reconnecting
@@ -661,6 +712,12 @@ class AccountManager:
                 await self._plugin_state.cascade_account(name)
             except Exception:
                 self._logger.exception("plugin-state cascade failed for %s", name)
+        if self._account_plugins is not None:
+            try:  # capability rows must not survive into a re-created
+                await self._account_plugins.set_plugins(name, [])  # same-named
+            except Exception:  # account (it would inherit the grants)
+                self._logger.exception(
+                    "plugin-assignment cascade failed for %s", name)
         # K14/K15: in-memory mirrors and engine residue must not outlive the
         # account either, or a re-created same-named account silently
         # inherits its settings, profile grants, pacing stamps and 429
@@ -767,6 +824,134 @@ class AccountManager:
         await self._accounts_repo.set_enabled(name, bool(enabled))  # persist first
         account.record.enabled = bool(enabled)
         return account.status_dict()
+
+    # ---------------------------------------------------- plugin assignments
+    async def assigned_plugins(self, name: str) -> List[str]:
+        """Sorted plugin names assigned to the account (capability read).
+
+        Memory-first: answers from the in-memory mirror every mutation
+        rewrites, so the 1 Hz status poll never queries the repository.
+        """
+        return sorted(set(self._get(name).assigned_plugins or []))
+
+    async def assign_plugin(self, name: str, plugin: str) -> None:
+        """Assign ONE plugin to an account (idempotent; re-attaches NOW).
+
+        Repository first, then the in-memory mirror, then
+        ``_attach_plugins`` — a running account's plugin set follows the
+        assignment immediately, not on its next start.
+
+        Raises:
+            AccountError: unknown account.
+            RuntimeError: no account-plugins repository is wired.
+        """
+        self._get(name)
+        self._require_account_plugins()
+        await self._account_plugins.assign_plugin(name, plugin)
+        await self._refresh_assignment(name)
+        await self._attach_plugins(name)
+        self._logger.info("plugin %r assigned to account %r", plugin, name)
+
+    async def unassign_plugin(self, name: str, plugin: str) -> bool:
+        """Remove ONE plugin assignment (idempotent; re-attaches NOW).
+
+        Returns whether the plugin WAS assigned (pre-state via the
+        repository, like the profile unassign contract) — removing a
+        missing assignment is not an error.
+
+        Raises:
+            AccountError: unknown account.
+            RuntimeError: no account-plugins repository is wired.
+        """
+        self._get(name)
+        self._require_account_plugins()
+        existed = plugin in set(await self._plugins_of(name))
+        await self._account_plugins.unassign_plugin(name, plugin)
+        await self._refresh_assignment(name)
+        await self._attach_plugins(name)
+        self._logger.info(
+            "plugin %r unassigned from account %r (was assigned: %s)",
+            plugin, name, existed,
+        )
+        return existed
+
+    async def set_account_plugins(self, name: str, plugins: List[str]) -> List[str]:
+        """REPLACE the account's whole assignment set (re-attaches NOW).
+
+        Returns the stored sorted list (canonical form on disk). The
+        repository's delete-then-insert is one transaction, so concurrent
+        readers never observe a half-replaced set.
+
+        Raises:
+            AccountError: unknown account.
+            RuntimeError: no account-plugins repository is wired.
+        """
+        self._get(name)
+        self._require_account_plugins()
+        stored = list(await self._account_plugins.set_plugins(name, plugins or []))
+        await self._refresh_assignment(name)
+        await self._attach_plugins(name)
+        self._logger.info("account %s plugin set replaced (%d)", name, len(stored))
+        return stored
+
+    def _require_account_plugins(self) -> None:
+        """Honest failure on stacks built without the assignment repo."""
+        if self._account_plugins is None:
+            raise RuntimeError(
+                "account plugin assignments are not configured on this "
+                "account manager (db.account_plugins was not wired)")
+
+    async def _plugins_of(self, name: str) -> List[str]:
+        """Sorted assignments of one account from the repository.
+
+        FAIL-CLOSED: a repository failure reads as "no assignments"
+        (never as unrestricted), loudly logged.
+        """
+        if self._account_plugins is None:
+            return []
+        try:
+            return sorted({p for p in
+                           (await self._account_plugins.plugins_of(name) or [])
+                           if isinstance(p, str)})
+        except Exception:
+            self._logger.exception(
+                "could not read plugin assignments for %r (fail-closed: none)",
+                name,
+            )
+            return []
+
+    async def _refresh_assignment(self, name: str) -> List[str]:
+        """Repository → in-memory mirror for one account's assignments.
+
+        Runs after EVERY assignment mutation so ``Account.assigned_plugins``
+        stays authoritative for both the attach path and the status poll.
+        """
+        account = self._accounts.get(name)
+        if account is None:
+            return []
+        stored = await self._plugins_of(name)
+        account.assigned_plugins = stored
+        return stored
+
+    async def _load_assignments(self) -> Dict[str, List[str]]:
+        """ONE bulk boot read of every account's assignments.
+
+        Accounts with zero plugins are omitted by the repository — callers
+        must ``.get(name, [])``. A failure logs loudly and returns {} (every
+        account then boots fail-closed with zero attached plugins, never
+        unrestricted).
+        """
+        if self._account_plugins is None:
+            return {}
+        try:
+            return dict(await self._account_plugins.all_assignments() or {})
+        except Exception:
+            self._logger.exception(
+                "could not load account plugin assignments (fail-closed: "
+                "accounts boot with zero plugins until the repository "
+                "recovers and they are restarted)"
+            )
+            return {}
 
     # ------------------------------------------------------------- lifecycle
     async def start(self, name: str) -> Dict[str, Any]:
@@ -1987,13 +2172,17 @@ class AccountManager:
 
     # --------------------------------------------------------------- plugins
     async def _attach_plugins(self, name: str) -> None:
-        """attach_account with the CURRENT profile grants (None = all).
+        """attach_account with the account's CURRENT plugin assignments.
 
-        The plugin manager's attach is async (it reads persisted enabled
-        state from the repository); a collaborator returning plain None
-        (sync duck-typed doubles) is accepted unchanged. A SUCCESSFUL attach
-        marks the account as plugin-manager-attached (manager-side view used
-        by ``_refresh_plugins``); a failed attach leaves it unmarked so the
+        The allowed set is ALWAYS concrete now (a direct read of the
+        in-memory assignment mirror — zero assignments attach zero
+        plugins); the old ``None = unrestricted`` profile default is gone
+        from this path. The plugin manager's attach is async (it reads
+        persisted enabled state from the repository); a collaborator
+        returning plain None (sync duck-typed doubles) is accepted
+        unchanged. A SUCCESSFUL attach marks the account as
+        plugin-manager-attached (manager-side view used by
+        ``_refresh_plugins``); a failed attach leaves it unmarked so the
         last known plugin view is kept rather than cleared.
         """
         try:
@@ -2007,35 +2196,20 @@ class AccountManager:
             return
         self._plugin_attached.add(name)
 
-    def _allowed_plugins(self, name: str) -> Optional[set]:
-        """Profile-derived plugin grant (None = unrestricted).
+    def _allowed_plugins(self, name: str) -> set:
+        """The account's DIRECT plugin assignments — NEVER None.
 
-        FAIL-CLOSED: a profile-resolution error grants NOTHING (empty set)
-        rather than everything — an automation framework must not escalate
-        capabilities because a repository read hiccupped.
-
-        Recovery (round-3 decision, documented): the fail-closed grant is
-        NOT permanent — ``_attach_plugins`` re-runs ``_allowed_plugins`` on
-        every account start (and on remove+re-add), so once the profile
-        repository recovers, a stop+start of the account restores the real
-        grant. Until then the account stays closed (each re-attach simply
-        re-fails and re-logs). Lazy re-resolution at dispatch time would
-        live in the plugin manager (outside this subsystem), so the
-        manager's contract is: warn loudly + recover on restart.
+        Source of truth: ``Account.assigned_plugins`` (the in-memory mirror
+        of the ``account_plugins`` table, bulk-loaded at boot and rewritten
+        at every assignment mutation). ProfileManager is NOT consulted:
+        profiles no longer mediate capabilities, and "no assignment =
+        unrestricted" is gone — an unknown account or an empty assignment
+        set attaches ZERO plugins by construction (fail-closed).
         """
-        try:
-            return self._profile_manager.allowed_plugins(name)
-        except Exception:
-            self._logger.exception(
-                "could not resolve allowed plugins for %s (no plugins granted)", name
-            )
-            self._logger.warning(
-                "account %s: plugins stay disabled (fail-closed) until "
-                "profile resolution succeeds; the grant is re-attempted on "
-                "every account start — stop+start the account (or remove and "
-                "re-add it) once the profile repository is healthy", name,
-            )
+        account = self._accounts.get(name)
+        if account is None:
             return set()
+        return {p for p in (account.assigned_plugins or []) if isinstance(p, str)}
 
     def _refresh_plugins(self, account: Account) -> None:
         """Refresh Account.plugins from plugin_manager.states (keep last known).
@@ -2216,18 +2390,6 @@ class AccountManager:
             }
         except (TypeError, ValueError):
             return {"enabled": True, **_DEFAULT_RECONNECT}
-
-    async def _validate_profiles_known(self, profiles: List[str]) -> None:
-        """Reject unknown profile names up front (typo trap) with the known list."""
-        try:
-            known = sorted(p["name"] for p in (await self._profile_manager.profiles()))
-        except Exception:
-            known = []
-        unknown = [p for p in profiles if p not in known]
-        if unknown:
-            raise ProfileError(
-                f"unknown profile(s) {unknown} (known profiles: {known})"
-            )
 
 
 __all__ = ["Account", "AccountManager", "AccountRuntime", "AccountStatus", "NAME_RE"]

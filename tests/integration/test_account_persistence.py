@@ -108,15 +108,21 @@ class AccountPersistenceTestBase(unittest.IsolatedAsyncioTestCase):
         await fw.shutdown()
 
     async def add_account_with_credential(self, api: Any, name: str,
-                                          token: str) -> None:
+                                          token: str,
+                                          plugins: list | None = None) -> None:
         """Register an account and give it a stored credential.
 
         Pinned contract: the credential string rides the accounts_add
         payload ({name, credential}) — stored encrypted via the manager's
         CredentialService; accounts_set_credential is the explicit fallback.
+        ``plugins`` (optional) assigns capabilities directly (the profile
+        era's "new account = every plugin" default is gone).
         """
+        payload = {"name": name, "credential": token}
+        if plugins is not None:
+            payload["plugins"] = plugins
         try:
-            await api.accounts_add({"name": name, "credential": token})
+            await api.accounts_add(payload)
         except Exception:
             await api.accounts_add({"name": name})
 
@@ -210,7 +216,8 @@ class TestFullRestartMatrix(AccountPersistenceTestBase):
         # ---------------------------------------------------------- boot 1
         fw = await self.build(env=False)
         api = fw.api
-        await self.add_account_with_credential(api, "alpha", TOKEN_ALPHA)
+        await self.add_account_with_credential(
+            api, "alpha", TOKEN_ALPHA, plugins=["spy"])
         await api.plugins_set_setting("alpha", "spy", "greeting", "hola")
         await api.ratelimit_set("message", 12.0, 0.1, 0.4,
                                 level="account", owner="alpha")
@@ -225,6 +232,14 @@ class TestFullRestartMatrix(AccountPersistenceTestBase):
             # account restored
             names = [a.get("name") for a in await api2.accounts_list()]
             self.assertIn("alpha", names)
+            # ... with its plugin ASSIGNMENTS restored (capability rows)
+            rows = {a.get("name"): a for a in await api2.accounts_list()}
+            self.assertEqual(rows["alpha"].get("assigned_plugins"), ["spy"])
+            self.assertEqual(await api2.accounts_plugins_list("alpha"), ["spy"])
+            self.assertEqual(
+                {p["name"] for p in await api2.plugins_state("alpha")},
+                {"spy"},  # re-attached from the assignment rows at load()
+            )
 
             # credential resolves to the STORED plaintext; status 'db'
             creds = self.credential_service(fw2)

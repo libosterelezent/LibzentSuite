@@ -3,7 +3,8 @@
 Component layout (see INTEGRATION.md and ARCHITECTURE.md):
   core.account_manager    Account (first-class), AccountManager, DiscordCache
   core.plugin_manager     plugin discovery/lifecycle/dispatch (+ core.plugin_base)
-  core.profile_manager    profiles/capabilities assigned to accounts
+  core.profile_manager    profile bookkeeping (retained infra — capabilities
+                          are DIRECT account→plugin assignments now)
   core.settings_manager   shared settings schema + layered resolution
   core.rate_limit_manager 4-level rate policies, pacing, server limits, warnings
   core.task_scheduler     centralized task pipeline (priority/retry/timeout)

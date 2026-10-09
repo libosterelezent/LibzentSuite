@@ -10,7 +10,10 @@ Method map (grouped like the dashboard navigation, spec §12):
                     + limits + tasks + warnings
   accounts_*        list/add/remove/info/enable/start/stop/emergency-stop
                     (+ account_setting_get/account_setting_set for the
-                    framework per-account knobs)
+                    framework per-account knobs, and
+                    accounts_plugins_list/plugin_assign/plugin_unassign/
+                    plugins_set — the DIRECT account→plugin capability
+                    assignments, persisted through db.account_plugins)
   credentials       set_credential / credential_status / import_env over the
                     encrypted CredentialService (values NEVER echoed back)
   cooldowns_*       list/clear persistent cooldowns (CooldownService)
@@ -18,7 +21,10 @@ Method map (grouped like the dashboard navigation, spec §12):
                     (set-setting value null = plugins_clear_setting: the
                     account-layer override is DELETED, unmasking the lower
                     layers — not pinned to the schema default)
-  profiles_*        list/create/delete/assign/unassign
+  profiles_*        list/create/delete/assign/unassign (RETAINED profile
+                    infrastructure — bookkeeping only, NO effect on which
+                    plugins an account runs; capability assignment lives
+                    in accounts_plugin_*)
   groups_*          sync groups: list/get/create/update/delete + membership
                     (add/remove account, set/clear account) + snapshot;
                     membership persists through SyncGroupManager and the
@@ -234,8 +240,10 @@ class ControlAPI:
         """Register + persist an account; optionally store its credential.
 
         payload: {name (required), token_ref?, sync_group?, enabled?,
-                  profiles?: [names], credential?: str}. Unknown keys are
-        rejected (typo trap).
+                  plugins?: [names], credential?: str}. Unknown keys are
+        rejected (typo trap) — ``profiles`` is no longer accepted: profile
+        assignment stopped controlling account capabilities, so the key is
+        gone rather than silently ignored.
 
         ``credential`` (the token VALUE) is handed to the encrypted
         CredentialService AFTER the account row exists — never into the
@@ -245,14 +253,15 @@ class ControlAPI:
         """
         if not isinstance(payload, dict) or not payload.get("name"):
             raise ValueError("account payload needs at least {'name': ...}")
-        allowed = {"name", "token_ref", "sync_group", "enabled", "profiles",
+        allowed = {"name", "token_ref", "sync_group", "enabled", "plugins",
                    "credential"}
         unknown = set(payload) - allowed
         if unknown:
             raise ValueError(f"unknown account payload keys: {sorted(unknown)}")
-        profiles = payload.get("profiles") or []
-        if not isinstance(profiles, list) or not all(isinstance(p, str) for p in profiles):
-            raise ValueError(f"'profiles' must be a list of strings, got {profiles!r}")
+        plugins = payload.get("plugins") or []
+        if not isinstance(plugins, list) or not all(isinstance(p, str) for p in plugins):
+            raise ValueError(f"'plugins' must be a list of strings, got {plugins!r}")
+        self._validate_plugins_known(plugins)
         enabled = payload.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ValueError("field 'enabled' must be a boolean")
@@ -271,7 +280,7 @@ class ControlAPI:
             token_ref=payload.get("token_ref"),
             enabled=enabled,
             sync_group=payload.get("sync_group"),
-            profiles=profiles or None,
+            plugins=plugins or None,
         ))
         name = out.get("name", payload["name"]) if isinstance(out, dict) else payload["name"]
         self._audit_mgmt(name, "mgmt:account.created", surface)
@@ -347,6 +356,98 @@ class ControlAPI:
         out = await _resolved(self._accounts.emergency_stop(name))
         self._audit_mgmt(name, "mgmt:account.estop", surface)
         return out
+
+    # ----------------------------------------------------- account plugins
+    # Direct account→plugin assignments (the capability source since the
+    # profile-mediated model was removed). Every mutation persists through
+    # the account manager (which keeps its in-memory record authoritative
+    # and re-runs the attach), so a RUNNING account's plugin set follows
+    # instantly — no next-start semantics.
+    async def accounts_plugins_list(self, account: str) -> List[str]:
+        """Sorted plugin names assigned to the account."""
+        return await _resolved(self._accounts.assigned_plugins(account))
+
+    async def accounts_plugin_assign(
+        self, account: str, plugin: str, surface: str = "api"
+    ) -> Dict[str, Any]:
+        """Assign ONE plugin to an account (idempotent; re-attaches NOW).
+
+        Raises:
+            AccountError: unknown account.
+            ValueError: unknown plugin (the discovered set is listed —
+                typo trap, same convention as the sync-group managers).
+        """
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        await _resolved(self._accounts.assign_plugin(account, plugin))
+        self._audit_mgmt(account, "mgmt:account.plugin_assigned", surface,
+                         extra=f"plugin={plugin}")
+        return {"account": account, "plugin": plugin}
+
+    async def accounts_plugin_unassign(
+        self, account: str, plugin: str, surface: str = "api"
+    ) -> Dict[str, Any]:
+        """Remove ONE plugin assignment (idempotent; re-attaches NOW).
+
+        ``existed`` reports the pre-state (False when the plugin was not
+        assigned — not an error).
+        """
+        self._validate_account_known(account)
+        existed = bool(await _resolved(
+            self._accounts.unassign_plugin(account, plugin)))
+        self._audit_mgmt(account, "mgmt:account.plugin_unassigned", surface,
+                         extra=f"plugin={plugin} existed={existed}")
+        return {"account": account, "plugin": plugin, "existed": existed}
+
+    async def accounts_plugins_set(
+        self, account: str, plugins: List[str], surface: str = "api"
+    ) -> Dict[str, Any]:
+        """REPLACE the account's whole assignment set (re-attaches NOW).
+
+        ALL names are validated BEFORE anything is written: an unknown
+        name rejects the whole call (all-or-nothing), never a partial set.
+        """
+        if not isinstance(plugins, (list, tuple)) or not all(
+                isinstance(p, str) for p in plugins):
+            raise ValueError(f"'plugins' must be a list of strings, got {plugins!r}")
+        self._validate_account_known(account)
+        self._validate_plugins_known(list(plugins))
+        stored = list(await _resolved(
+            self._accounts.set_account_plugins(account, list(plugins))))
+        self._audit_mgmt(account, "mgmt:account.plugin_set", surface,
+                         extra=f"plugins={len(stored)}")
+        return {"account": account, "plugins": stored}
+
+    def _validate_account_known(self, account: str) -> None:
+        """AccountError when the account is not registered (typo trap)."""
+        self._accounts.get(account)
+
+    def _validate_plugins_known(self, plugins: List[str]) -> None:
+        """Reject unknown plugin names up front with the discovered list.
+
+        The discovered/installed set comes from the plugin manager (the
+        same source ``plugins_manifests`` serves); a failure listing it
+        fails CLOSED (every name unknown) — capability assignment must
+        not degrade into accepting typos.
+        """
+        known = self._known_plugin_names()
+        unknown = [p for p in plugins if p not in known]
+        if unknown:
+            raise ValueError(
+                f"unknown plugin(s) {unknown} (known plugins: {known})"
+            )
+
+    def _known_plugin_names(self) -> List[str]:
+        """Sorted discovered plugin names (typo-trap source of truth)."""
+        try:
+            names = getattr(self._plugins, "names", None)
+            if callable(names):
+                return sorted(set(names() or []))
+            return sorted({m.get("name") for m in self._plugins.manifests()
+                           if isinstance(m, dict) and m.get("name")})
+        except Exception:
+            LOG.exception("could not list discovered plugins")
+            return []
 
     # ------------------------------------------------------ account settings
     async def account_setting_get(self, name: str) -> Dict[str, Any]:
@@ -620,12 +721,20 @@ class ControlAPI:
         return await _resolved(self._profiles.delete_profile(name))
 
     async def profiles_assign(self, account: str, profile: str) -> Dict[str, Any]:
-        """Grant a profile (applies on the account's next start)."""
+        """Grant a profile (bookkeeping ONLY — no capability effect).
+
+        Profiles no longer decide which plugins an account runs: that is
+        the direct account→plugin assignment (accounts_plugin_assign /
+        accounts_plugins_set). The grant is persisted and mirrored into
+        the account record, and nothing re-attaches.
+        """
         out = await _resolved(self._profiles.assign(account, profile))
         self._refresh_account_profiles(account)  # FINAL-PHASE (F3)
         return out
 
     async def profiles_unassign(self, account: str, profile: str) -> Dict[str, Any]:
+        """Revoke a profile grant (bookkeeping ONLY — no capability effect;
+        assignment-based attachment is untouched by profile changes)."""
         out = await _resolved(self._profiles.unassign(account, profile))
         self._refresh_account_profiles(account)  # FINAL-PHASE (F3)
         return out

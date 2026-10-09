@@ -538,7 +538,12 @@ class SimulationRunner:
                 await bus.publish(ScenarioStarted(account="", name=name))
                 scheduler.start()
                 scheduler_started = True
-                await accounts.add_account(ACCOUNT_NAME)
+                # capability model: the sim account gets EVERY discovered
+                # plugin assigned explicitly — the old stack attached all
+                # plugins by default, but zero assignments now means zero
+                # plugins, so the unrestricted default is spelled out here
+                await accounts.add_account(
+                    ACCOUNT_NAME, plugins=list(plugins_mgr.names()))
                 await accounts.start(ACCOUNT_NAME)
                 account_started = True
 
@@ -760,6 +765,7 @@ class SimulationRunner:
                 api_cache_repo=db.cache,
                 credential_service=credential_service, cooldowns=cooldowns,
                 plugin_state=plugin_state, sync_groups=sync_groups,
+                account_plugins=db.account_plugins,
             )
         except TypeError:
             try:

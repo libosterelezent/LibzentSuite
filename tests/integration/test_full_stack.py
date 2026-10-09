@@ -107,8 +107,13 @@ class Stack:
         return SimClient(self.world, self.user_ids[name], seed=hash(name) % 1000)
 
     async def start(self) -> None:
+        # capability model: attach every DISCOVERED plugin explicitly (the
+        # old stack attached all plugins by default; zero assignments now
+        # means zero plugins, so these whole-stack flow tests spell it out)
+        names = [m["name"] for m in await self.framework.api.plugins_manifests()]
         for name in self._extra or ["alpha"]:
-            await self.framework.api.accounts_add({"name": name})
+            await self.framework.api.accounts_add(
+                {"name": name, "plugins": names})
         await self.framework.api.accounts_start()
 
     async def stop(self) -> None:
@@ -180,19 +185,37 @@ class TestFullStackSoulcopy(unittest.IsolatedAsyncioTestCase):
             await stack.stop()
 
 
-class TestProfilesGating(unittest.IsolatedAsyncioTestCase):
-    async def test_profile_limits_plugin_set(self) -> None:
+class TestPluginAssignmentGating(unittest.IsolatedAsyncioTestCase):
+    """Direct account→plugin assignments gate the attached set (the
+    profile-mediated model is gone; profiles are retained bookkeeping)."""
+
+    async def test_assignment_limits_plugin_set(self) -> None:
         stack = await Stack(extra_accounts=["alpha", "beta"]).boot()
         api = stack.framework.api
-        await api.profiles_create("copier", ["soulcopy"], "copy duty")
-        await api.accounts_add({"name": "alpha", "profiles": ["copier"]})
-        await api.accounts_add({"name": "beta"})
+        await api.accounts_add({"name": "alpha", "plugins": ["soulcopy"]})
+        await api.accounts_add({"name": "beta"})  # zero assignments
         await api.accounts_start()
         try:
             alpha_plugins = {p["name"] for p in await api.plugins_state("alpha")}
             beta_plugins = {p["name"] for p in await api.plugins_state("beta")}
-            self.assertEqual(alpha_plugins, {"soulcopy"})  # profile-filtered
-            self.assertIn("roll", beta_plugins)            # unrestricted
+            self.assertEqual(alpha_plugins, {"soulcopy"})  # assigned only
+            self.assertEqual(beta_plugins, set())  # zero = ZERO (not "all")
+            self.assertEqual(await api.accounts_plugins_list("beta"), [])
+        finally:
+            await stack.stop()
+
+    async def test_profile_grant_does_not_widen_attachment(self) -> None:
+        stack = await Stack(extra_accounts=["beta"]).boot()
+        api = stack.framework.api
+        await api.accounts_add({"name": "beta"})
+        await api.accounts_start()
+        try:
+            await api.profiles_create("copier", ["soulcopy", "roll"])
+            await api.profiles_assign("beta", "copier")  # retained infra
+            # ... and attachment is UNCHANGED by the grant
+            self.assertEqual({p["name"] for p in await api.plugins_state("beta")},
+                             set())
+            self.assertEqual(await api.accounts_plugins_list("beta"), [])
         finally:
             await stack.stop()
 
@@ -203,8 +226,12 @@ class TestPersistenceRoundtrip(unittest.IsolatedAsyncioTestCase):
             db_path = str(Path(tmp) / "slaughter.db")
             stack = await Stack(db_path=db_path).boot()
             api = stack.framework.api
+            # capability: DIRECT plugin assignment (the old "profiles" key
+            # no longer exists on accounts_add)
+            await api.accounts_add({"name": "alpha", "plugins": ["soulcopy"]})
+            # profile bookkeeping (retained infra) survives alongside
             await api.profiles_create("copier", ["soulcopy"])
-            await api.accounts_add({"name": "alpha", "profiles": ["copier"]})
+            await api.profiles_assign("alpha", "copier")
             await api.ratelimit_set("message", 4.0, 0.1, 0.9, level="account", owner="alpha")
             await api.plugins_set_enabled("alpha", "soulcopy", False)
             await api.plugins_set_setting("alpha", "soulcopy", "trigger", "go")
@@ -217,6 +244,7 @@ class TestPersistenceRoundtrip(unittest.IsolatedAsyncioTestCase):
                 accounts = await api2.accounts_list()
                 self.assertEqual([a["name"] for a in accounts], ["alpha"])
                 self.assertEqual(accounts[0]["profiles"], ["copier"])
+                self.assertEqual(accounts[0]["assigned_plugins"], ["soulcopy"])
                 policies = await api2.ratelimit_policies()
                 override = [p for p in policies
                             if p["level"] == "account" and p["owner"] == "alpha"]

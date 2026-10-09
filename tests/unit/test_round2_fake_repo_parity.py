@@ -57,7 +57,11 @@ class TestHarnessWiring(unittest.IsolatedAsyncioTestCase):
         harness = make_manager()
         await harness.add_profile("gone", "soulcopy")
         await harness.add_profile("kept", "roll")
-        await harness.manager.add_account("alpha", profiles=["gone", "kept"])
+        await harness.manager.add_account("alpha")
+        # profiles are assigned through the (retained) profile manager —
+        # pure bookkeeping now, capabilities come from plugin assignments
+        await harness.profile_manager.assign("alpha", "gone")
+        await harness.profile_manager.assign("alpha", "kept")
         self.assertEqual(
             await harness.repo.profiles_of("alpha"), ["gone", "kept"])
 

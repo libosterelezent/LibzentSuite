@@ -108,12 +108,12 @@ class FakeAccountsManager:
                  "profiles": []} for n in self._names]
 
     async def add_account(self, name, *, token_ref=None, enabled=True,
-                          sync_group=None, profiles=None):
+                          sync_group=None, plugins=None):
         if name in self._names:
             raise AccountError(f"account {name!r} already exists")
         self._names.append(name)
         payload = {"name": name, "status": "created", "enabled": enabled,
-                   "sync_group": sync_group, "profiles": profiles or []}
+                   "sync_group": sync_group, "plugins": plugins or []}
         self.added.append(payload)
         return dict(payload)
 
