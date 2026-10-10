@@ -10,7 +10,6 @@ import unittest
 from core.event_bus import EventBus
 from core.rate_limit_manager import MIN_ACTION_INTERVAL, RatePolicy, RateLimitManager
 from core.rate_limit_manager.warnings import (
-    AGGRESSIVE_INTERVAL,
     NARROW_JITTER_SPREAD,
     describe_scope,
     evaluate_policy,
@@ -47,19 +46,29 @@ def codes(warnings, level=None):
 class TestEvaluatePolicy(unittest.TestCase):
     """Pure-function verdicts for one policy."""
 
-    def test_aggressive_below_3s(self):
-        policy = RatePolicy("m", 2.0, 0.5, 2.0)  # sane jitter: only pacing is risky
-        out = evaluate_policy(policy, "global", None, MIN_ACTION_INTERVAL)
-        self.assertEqual([w["code"] for w in out], ["aggressive"])
-        self.assertEqual(out[0]["level"], "warn")
-        self.assertIn("2.00s", out[0]["message"])
+    def test_below_floor_is_danger(self):
+        policy = RatePolicy("m", 0.2, 0.5, 2.0)  # hand-edited below the floor
+        out = evaluate_policy(policy, "global", None, 0.5)
+        self.assertEqual(codes(out), ["below_floor"])
+        self.assertEqual(out[0]["level"], "danger")
+        self.assertIn("0.20s", out[0]["message"])
+        self.assertIn("0.50s", out[0]["message"])
 
-    def test_aggressive_boundary_is_strict(self):
+    def test_at_floor_is_clean(self):
+        # at the floor exactly is legal (the setter enforces >= floor)
         self.assertEqual(
-            evaluate_policy(RatePolicy("m", 3.0, 0.5, 2.0), "global", None, 0.05), []
+            evaluate_policy(RatePolicy("m", 0.5, 0.5, 2.0), "global", None, 0.5), []
         )
-        out = evaluate_policy(RatePolicy("m", 2.99, 0.5, 2.0), "global", None, 0.05)
-        self.assertEqual(codes(out), ["aggressive"])
+
+    def test_fast_but_above_floor_is_clean(self):
+        """Discord-driven pacing: intervals between the floor and 3s are a
+        LEGITIMATE configuration — the old 'aggressive' lint fired on them
+        forever (residual noise). Only below-floor is a warning now."""
+        for interval in (0.05, 0.5, 1.0, 2.0, 2.99):
+            self.assertEqual(
+                evaluate_policy(RatePolicy("m", interval, 0.5, 2.0),
+                                "global", None, 0.05), [],
+                f"interval {interval}s above floor must be clean")
 
     def test_no_jitter(self):
         out = evaluate_policy(RatePolicy("m", 4.0), "account", "alpha", 0.05)
@@ -80,9 +89,9 @@ class TestEvaluatePolicy(unittest.TestCase):
             evaluate_policy(RatePolicy("m", 4.0, 0.5, 2.0), "global", None, 0.05), []
         )
 
-    def test_aggressive_and_narrow_jitter_coexist(self):
-        out = evaluate_policy(RatePolicy("m", 2.0, 0.1, 0.2), "global", None, 0.05)
-        self.assertEqual(codes(out), ["aggressive", "narrow_jitter"])
+    def test_below_floor_and_narrow_jitter_coexist(self):
+        out = evaluate_policy(RatePolicy("m", 0.2, 0.1, 0.2), "global", None, 0.5)
+        self.assertEqual(codes(out), ["below_floor", "narrow_jitter"])
 
     def test_entry_shape(self):
         out = evaluate_policy(RatePolicy("m", 2.0), "global", None, 0.05)
@@ -99,6 +108,14 @@ class TestFloorAndSorting(unittest.TestCase):
         self.assertEqual(entry["level"], "info")
         self.assertEqual(entry["code"], "floor")
         self.assertIn("0.05s", entry["message"])
+
+    def test_floor_not_prepended_to_evaluation(self):
+        """No residual always-on entries: a clean configuration evaluates
+        to an EMPTY list (the floor lives in the Safety Floor card)."""
+        self.assertEqual(evaluate_policies([], 0.05), [])
+        self.assertEqual(
+            evaluate_policies(
+                [(RatePolicy("m", 1.0, 0.5, 2.0), "global", None)], 0.05), [])
 
     def test_sort_warnings_danger_first(self):
         entries = [
@@ -118,9 +135,6 @@ class TestFloorAndSorting(unittest.TestCase):
         ])
         self.assertEqual(ordered[-1]["level"], "bizarre")
 
-    def test_evaluate_policies_empty_is_just_the_floor(self):
-        self.assertEqual(evaluate_policies([], 0.05), [floor_warning(0.05)])
-
     def test_describe_scope(self):
         self.assertEqual(describe_scope("global", None), "global")
         self.assertEqual(describe_scope("account", "alpha"), "account alpha")
@@ -131,37 +145,32 @@ class TestFloorAndSorting(unittest.TestCase):
 class TestManagerWarnings(unittest.TestCase):
     """RateLimitManager.warnings(): stored policies reviewed + sorted."""
 
-    def test_empty_manager_shows_only_floor(self):
-        warnings = make_manager().warnings()
-        self.assertEqual(codes(warnings), ["floor"])
-        self.assertIn("0.05s", warnings[0]["message"])
+    def test_empty_manager_is_clean(self):
+        """No residual entries — an empty policy set yields no warnings
+        (the floor is documented by the Safety Floor card, not here)."""
+        self.assertEqual(make_manager().warnings(), [])
 
     def test_one_entry_per_stored_policy(self):
         manager = make_manager()
-        manager.set_policy_values("message", 2.0)                       # aggressive + no_jitter
+        manager.set_policy_values("message", 2.0)                       # no_jitter
         manager.set_policy_values("poke", 4.0, 0.5, 2.0)                # clean
         manager.set_policy_values("dm", 2.5, 0.5, 0.6, level="account", owner="alpha")
         warnings = manager.warnings()
-        self.assertEqual(
-            codes(warnings),
-            ["aggressive", "aggressive", "floor", "narrow_jitter", "no_jitter"],
-        )
-        # warn entries sort before info entries
+        self.assertEqual(codes(warnings), ["narrow_jitter", "no_jitter"])
+        # entries sort danger > warn > info
         levels = [w["level"] for w in warnings]
-        self.assertEqual(levels, sorted(levels, key={"warn": 0, "info": 1}.get))
+        self.assertEqual(levels, ["info", "info"])
         # the message identifies the owning scope
-        scoped = [w for w in warnings if w["code"] == "aggressive" and "alpha" in w["message"]]
+        scoped = [w for w in warnings if "alpha" in w["message"]]
         self.assertEqual(len(scoped), 1)
 
-    def test_thresholds_exposed_as_constants(self):
-        self.assertEqual(AGGRESSIVE_INTERVAL, 3.0)
-        self.assertEqual(NARROW_JITTER_SPREAD, 0.3)
-
-    def test_floor_entry_reflects_raised_floor(self):
+    def test_hand_edited_below_floor_surfaces_as_danger(self):
         manager = make_manager()
-        manager.set_floor(2.5)
+        manager.set_policy_values("message", 1.0, 0.5, 2.0)   # legal at the 0.05s floor
+        manager.set_floor(2.5)                                 # then the floor rises above it
         warnings = manager.warnings()
-        self.assertEqual(codes(warnings), ["floor"])
+        self.assertEqual(codes(warnings), ["below_floor"])
+        self.assertEqual(warnings[0]["level"], "danger")
         self.assertIn("2.50s", warnings[0]["message"])
 
 

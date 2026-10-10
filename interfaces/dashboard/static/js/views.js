@@ -116,9 +116,19 @@ function renderPolicies() {
   }
   const warn = $("rl-warnings");
   if (warn) {
+    // Formatted entries: message text + level/code chips (never raw JSON).
     const ws = (lastStats&&lastStats.warnings)||[];
     warn.innerHTML = ws.length
-      ? `<div class="attn">${ws.map(w=>`<div class="attn-item warn"><span class="icon">⚠</span><div class="txt"><div class="detail" style="overflow-wrap:anywhere">${esc(typeof w==="string"?w:JSON.stringify(w))}</div></div></div>`).join("")}</div>`
+      ? `<div class="attn">${ws.map(w=>{
+          const msg = typeof w==="string" ? w : (w.message||String(w));
+          const lvl = (w&&w.level)||"warn";
+          const code = (w&&w.code)||"";
+          const cls = lvl==="danger"?"error":lvl==="warn"?"warn":"";
+          const icon = lvl==="danger"?"⛔":lvl==="warn"?"⚠":"ℹ";
+          return `<div class="attn-item ${cls}"><span class="icon">${icon}</span>
+            <div class="txt"><div class="detail" style="overflow-wrap:anywhere">${esc(msg)}</div></div>
+            ${code?`<span class="chip" style="flex-shrink:0">${esc(code)}</span>`:""}</div>`;
+        }).join("")}</div>`
       : '<span class="dim">No rate-limit warnings.</span>';
   }
 }

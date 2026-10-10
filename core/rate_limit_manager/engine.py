@@ -1160,11 +1160,11 @@ class RateLimitManager:
         }
 
     def warnings(self) -> List[dict]:
-        """Advisory safety review: every stored policy, the floor entry, and
-        the sequential lane state (a paused lane holds ALL outbound traffic).
+        """Advisory safety review of every stored policy.
 
         Entries are ``{"level", "code", "message"}`` sorted danger > warn >
-        info; see core/rate_limit_manager/warnings.py for the taxonomy.
+        info — an EMPTY list for a clean configuration (no residual
+        always-on entries); see core/rate_limit_manager/warnings.py.
         """
         stored = (
             (policy, level, owner)
