@@ -8,7 +8,9 @@ import unittest
 from types import SimpleNamespace as NS
 
 from core.credentials import Credentials
-from core.event_bus import EventBus, MessageEdited, MessageReceived
+from core.event_bus import (
+    EventBus, MessageEdited, MessageReceived, ReactionAdded,
+)
 from core.errors import AccessDenied, PluginError, SettingsValidationError, TargetGone
 from core.plugin_manager import PluginManager
 from core.priority import Priority
@@ -27,6 +29,8 @@ class RollServices:
         self.sent = []
         self.account = "alpha"
         self.plugin = "roll"
+        #: the account's own Discord username (services.account_username)
+        self.account_username = "alpha"
         self._responses = list(mudae_responses or [])
         self._state = {}
         self._cooldowns = {}
@@ -168,6 +172,13 @@ class TestParsePauseMinutes(unittest.TestCase):
         self.assertIsNone(parse_pause_minutes("limited to min"))
         self.assertIsNone(parse_pause_minutes("**** min"))
         self.assertEqual(parse_pause_minutes("**0045** min"), 45)
+
+    def test_hour_minute_form(self) -> None:
+        """Original CooldownManager parsed '**2h 45** min' too."""
+        self.assertEqual(parse_pause_minutes("**2h 45** min"), 165)
+        self.assertEqual(parse_pause_minutes("**1h 0** min"), 60)
+        self.assertEqual(parse_pause_minutes("**3h 5** min"), 185)
+        self.assertIsNone(parse_pause_minutes("**2h** min"))
         self.assertEqual(parse_pause_minutes("**45**min"), 45)
         self.assertEqual(parse_pause_minutes("**45**   MIN"), 45)
         self.assertEqual(parse_pause_minutes("**999999999999** min"), 999999999999)
@@ -207,6 +218,81 @@ class TestEditedResponses(unittest.IsolatedAsyncioTestCase):
         count_before = len(services.sent)
         await plugin.handle_event(plugin._ctx, edit)
         self.assertEqual(len(services.sent), count_before)
+
+
+class TestOriginalParityBehaviors(unittest.IsolatedAsyncioTestCase):
+    """Wave-1 parity with MudaeScript/roll_profile.py (no locales)."""
+
+    async def test_other_users_limit_does_not_park_us(self) -> None:
+        """Original is_username_in_content: in a shared channel, another
+        user's roulette limit must not set OUR cooldown."""
+        services, manager = await flow(
+            responses=[{"content":
+                        "**someoneelse**, the roulette is limited to **45** min"}],
+            overrides={"roll_interval": 1.5}, wait=2.6)
+        self.assertNotIn("roulette", services._cooldowns)
+        # rolling continues — more than one send went out
+        self.assertGreater(sum(1 for _, c, _ in services.sent
+                               if c.startswith("$w")), 1)
+
+    async def test_us_confirmation_reaction_clears_cooldown(self) -> None:
+        """Original us_confirmation: Mudae's ✅ reaction on our $us
+        message CONFIRMS the stack and clears the roulette cooldown."""
+        services, manager = await flow(
+            responses=[{"content":
+                        "**alpha**, the roulette is limited to **45** min"}],
+            wait=0.5)
+        # the limit set a cooldown AND started the $us flow
+        self.assertEqual(services._cooldowns.get("roulette"), 2700)
+        self.assertIn("$us 20", [c for _, c, _ in services.sent])
+        # Mudae reacts ✅ on our $us message → confirmed → cleared
+        manager._bus.publish_nowait(ReactionAdded(
+            account="alpha", message_id=99, channel_id=CHANNEL,
+            user_id=MUDAE_ID, emoji="\u2705"))
+        await asyncio.sleep(0.3)
+        self.assertNotIn("roulette", services._cooldowns)
+        # userstack NOT disabled by a confirmation
+        self.assertIs(manager.live_settings("alpha", "roll")["userstack"], True)
+
+    async def test_us_retries_then_gives_up(self) -> None:
+        """No verdict → retry up to US_MAX_ATTEMPTS, then give up without
+        disabling userstack (the original's bounded handleUS loop)."""
+        import sys
+        # no responses: no live flow is triggered — the direct call below
+        # is the ONLY flow, so the attempt count is deterministic
+        services, manager = await flow(wait=0.2)
+        plugin = manager._accounts["alpha"]["roll"].instance
+        # patch the module the PLUGIN actually runs from (loader-resolved)
+        plugin_mod = sys.modules[type(plugin).__module__]
+        saved = (plugin_mod.US_REPLY_TIMEOUT, plugin_mod.US_MAX_ATTEMPTS)
+        plugin_mod.US_REPLY_TIMEOUT, plugin_mod.US_MAX_ATTEMPTS = 0.05, 3
+        try:
+            await plugin._us_flow(plugin._ctx, "alpha", CHANNEL)
+        finally:
+            plugin_mod.US_REPLY_TIMEOUT, plugin_mod.US_MAX_ATTEMPTS = saved
+        self.assertEqual(
+            sum(1 for _, c, _ in services.sent if c == "$us 20"), 3)
+        self.assertIs(manager.live_settings("alpha", "roll")["userstack"], True)
+
+    async def test_ru_retry_resolves_on_parsed_reply(self) -> None:
+        """Original handleRU: an unparsable first reply retries; a parsable
+        one sets the cooldown and stops the flow."""
+        embed = NS(
+            description="Some character\n(You reached the limit of 1000 keys per hour!)",
+            footer_text="alpha · #30",
+        )
+        services, manager = await flow(
+            responses=[
+                {"content": "", "message": NS(embeds=[embed], content="")},
+                {"content": "not the reply"},
+                {"content": "You have **10** keys | reset in **37** min"},
+            ],
+            overrides={"roll_interval": 1.5}, wait=4.6)
+        plugin = manager._accounts["alpha"]["roll"].instance
+        # the parsed reply resolved the flow (cooldown set, waiter cleared)
+        self.assertEqual(services._cooldowns.get("roulette"), 37 * 60)
+        self.assertIsNone(plugin._ru_waiters.get("alpha"))
+        self.assertTrue(plugin._ru_tasks["alpha"].done())
 
 
 class TestRollStart(unittest.IsolatedAsyncioTestCase):
@@ -377,7 +463,10 @@ class TestHostileResponses(unittest.IsolatedAsyncioTestCase):
             wait=4.5,
         )
         commands = [c for _, c, _ in services.sent]
-        self.assertEqual(commands.count("$us 20"), 2)
+        # ONE $us flow per account: while the first attempt's verdict
+        # window is open, the second low-rolls detection is covered by
+        # the flow's own retries (no duplicate $us spam)
+        self.assertEqual(commands.count("$us 20"), 1)
         self.assertNotIn("userstack_available", services._state)
         self.assertIs(manager.live_settings("alpha", "roll")["userstack"], True)
 

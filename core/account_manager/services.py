@@ -336,6 +336,21 @@ class AccountPluginServices:
         """The account's live client (None before start / after stop)."""
         return self._client_getter() if self._client_getter is not None else None
 
+    @property
+    def account_username(self) -> Optional[str]:
+        """The account's own Discord username (None offline/pre-connect).
+
+        Used to attribute Mudae's per-user limit messages ("**name**,
+        the roulette is limited...") — a shared channel must not park OUR
+        rolling on ANOTHER user's limit. Read defensively through the
+        adapter's underlying library client.
+        """
+        client = self._client()
+        user = getattr(client, "user", None)
+        if user is None:
+            user = getattr(getattr(client, "_client", None), "user", None)
+        return getattr(user, "name", None)
+
     # ---------------------------------------------------------------- sends
     async def send_message(
         self, channel_id: int, content: str, *, priority: Priority = Priority.LOW

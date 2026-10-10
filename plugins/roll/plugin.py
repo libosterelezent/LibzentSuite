@@ -30,7 +30,9 @@ import re
 from typing import Any, Dict, List, Optional
 
 from core.errors import FlowBlocked, PluginError, SettingsValidationError
-from core.event_bus import Event, MessageEdited, MessageReceived
+from core.event_bus import (
+    Event, MessageEdited, MessageReceived, ReactionAdded,
+)
 from core.plugin_base import (
     CommandContext,
     CommandSpec,
@@ -48,6 +50,17 @@ VALID_ROULETTES = ("wa", "wg", "wx", "w", "ha", "hg", "hx", "h",
 #: transient-retry backoff bounds (seconds): starts at 5, doubles up to 60
 TRANSIENT_BACKOFF_START = 5.0
 TRANSIENT_BACKOFF_MAX = 60.0
+
+#: $us retry flow (original handleUS semantics): attempts and the
+#: per-attempt window for Mudae's verdict — the refusal text or the ✅
+#: reaction on our message. Module-level so tests can tighten timing.
+US_MAX_ATTEMPTS = 5
+US_REPLY_TIMEOUT = 5.0
+
+#: $ru retry flow (original handleRU): attempts and the per-attempt window
+#: for Mudae's "You have **N** keys | reset in **M** min" reply.
+RU_MAX_ATTEMPTS = 5
+RU_REPLY_TIMEOUT = 8.0
 
 #: error-text markers of a transient transport/pacing failure (fallback for
 #: errors that arrive untyped — see :func:`is_transient_failure`)
@@ -99,6 +112,9 @@ COOLDOWN_KEY = "roulette"
 #: regex for Mudae's "**N** min" cooldown messages
 _PAUSE_TIME_RE = re.compile(r"\*\*(\d+)\*\*\s*min\s*", re.IGNORECASE)
 
+#: regex for Mudae's hour+minute cooldown form: "**2h 45** min"
+_PAUSE_FULL_RE = re.compile(r"\*\*(\d+)h\s*(\d+)\*\*\s*min\s*", re.IGNORECASE)
+
 #: Mudae messages that indicate userstack is unavailable
 _USERSTACK_FAIL = ("You need to buy kakeraloots",
                    "You don't have enough rolls stacked!")
@@ -111,7 +127,14 @@ _KEY_LIMIT_MARKER = "(You reached the limit of 1000 keys per hour!)"
 
 
 def parse_pause_minutes(text: str) -> Optional[int]:
-    """Extract '**N** min' from a Mudae message; None when absent."""
+    """Extract cooldown minutes from a Mudae message; None when absent.
+
+    Both forms parse (original CooldownManager semantics): the plain
+    '**45** min' and the hour+minute '**2h 45** min'.
+    """
+    full = _PAUSE_FULL_RE.search(text or "")
+    if full:
+        return int(full.group(1)) * 60 + int(full.group(2))
     match = _PAUSE_TIME_RE.search(text or "")
     return int(match.group(1)) if match else None
 
@@ -150,6 +173,15 @@ class RollPlugin(PluginBase):
         #: channel_id) — responses are parsed by handle_event ONLY for the
         #: rolling channel (the roll profile's target)
         self._roll_channels: Dict[str, int] = {}
+        #: pending $us flows (original handleUS): per-account waiter
+        #: {"event","outcome","channel"} + the retry task. ONE flow per
+        #: account — a new low-rolls response while a flow is pending is
+        #: already covered by its own retries (no duplicate $us spam).
+        self._us_waiters: Dict[str, Dict[str, Any]] = {}
+        self._us_tasks: Dict[str, asyncio.Task] = {}
+        #: pending $ru flows (original handleRU), same shape
+        self._ru_waiters: Dict[str, Dict[str, Any]] = {}
+        self._ru_tasks: Dict[str, asyncio.Task] = {}
         #: the live PluginContext of the current activation — command
         #: handlers reuse it to drive the SAME internals (roll loop,
         #: settings view) the event path once used
@@ -206,6 +238,18 @@ class RollPlugin(PluginBase):
         logs one line and never touches the roll loop.
         """
         account = ctx.account
+        if isinstance(event, ReactionAdded):
+            # Mudae's ✅ reaction on our $us message CONFIRMS the stack
+            # (original us_confirmation semantics)
+            if (event.emoji == "\u2705"
+                    and self._rolling.get(account)
+                    and event.channel_id == self._roll_channels.get(account)
+                    and event.user_id == ctx.services.credentials.mudae_bot_id):
+                waiter = self._us_waiters.get(account)
+                if waiter is not None and waiter["outcome"] is None:
+                    waiter["outcome"] = "confirmed"
+                    waiter["event"].set()
+            return
         if isinstance(event, MessageEdited):
             # edits carry no author/content on the DTO — read them from
             # the rich post-edit handle and normalize into the parse shape
@@ -254,6 +298,15 @@ class RollPlugin(PluginBase):
     async def _stop(self, ctx: PluginContext, account: str) -> None:
         self._rolling[account] = False
         self._roll_channels.pop(account, None)
+        # cancel pending $us/$ru flows and release their waiters
+        for tasks in (self._us_tasks, self._ru_tasks):
+            flow = tasks.pop(account, None)
+            if flow is not None and not flow.done():
+                flow.cancel()
+        for waiters in (self._us_waiters, self._ru_waiters):
+            waiter = waiters.pop(account, None)
+            if waiter is not None:
+                waiter["event"].set()
         task = self._tasks.pop(account, None)
         if task is not None and not task.done():
             task.cancel()
@@ -387,7 +440,12 @@ class RollPlugin(PluginBase):
         # (event-driven: the refusal arrives here as Mudae's reply —
         #  _try_userstack only SENDS '$us 20' and returns)
         if any(msg in content for msg in _USERSTACK_FAIL):
-            if ctx.settings["userstack"]:
+            waiter = self._us_waiters.get(ctx.account)
+            if waiter is not None and waiter["outcome"] is None:
+                waiter["outcome"] = "refused"   # the flow disables
+                waiter["event"].set()
+            elif ctx.settings["userstack"]:
+                # stray refusal with no pending flow (e.g. manual $us)
                 ctx.logger.info("userstack unavailable — disabling")
                 ctx.settings["userstack"] = False
                 await ctx.services.state_set("userstack_available", False)
@@ -403,10 +461,19 @@ class RollPlugin(PluginBase):
                     reason=f"key reset in {minutes} min",
                 )
                 ctx.logger.info("cooldown set from $ru: %d min", minutes)
+                waiter = self._ru_waiters.get(ctx.account)
+                if waiter is not None:
+                    waiter["event"].set()   # resolved — stop retrying
             return
 
         # ── "the roulette is limited to **N** min" → cooldown ──
-        if "the roulette is limited to" in content:
+        if "the roulette is limited" in content:
+            # attribute the limit to THIS account (original
+            # is_username_in_content): in a shared channel another user's
+            # limit must not park our rolling (unknown name → no filter)
+            username = getattr(ctx.services, "account_username", None)
+            if username is not None and username not in content:
+                return
             minutes = parse_pause_minutes(content)
             if minutes is not None:
                 await ctx.services.cooldown_set(
@@ -415,11 +482,10 @@ class RollPlugin(PluginBase):
                     reason=f"roulette limited for {minutes} min",
                 )
                 ctx.logger.info("cooldown set: %d min (persistent)", minutes)
-                return
-
-        # ── "the roulette is limited" (no specific time) + userstack ──
-        if "the roulette is limited" in content and ctx.settings["userstack"]:
-            await self._try_userstack(ctx, channel_id, mudae_id)
+            # original parity: a roulette pass ALSO attempts $us when
+            # enabled — Mudae's ✅ confirmation CLEARS the cooldown
+            if ctx.settings["userstack"]:
+                self._try_userstack(ctx, channel_id)
             return
 
         # ── embed responses (character rolls) ──
@@ -437,32 +503,102 @@ class RollPlugin(PluginBase):
 
         # ── "2 ROLLS LEFT" in footer + userstack → $us 20 ──
         if _LOW_ROLLS_MARKER in footer_text and ctx.settings["userstack"]:
-            ctx.logger.info("low rolls detected — sending $us 20")
-            await self._try_userstack(ctx, channel_id, mudae_id)
+            ctx.logger.info("low rolls detected — $us flow")
+            self._try_userstack(ctx, channel_id)
 
         # ── key limit reached → $ru + cooldown ──
         if (not ctx.settings["ignore_keys"]
                 and _KEY_LIMIT_MARKER in description):
-            ctx.logger.info("key limit reached — sending $ru")
-            await ctx.services.send_message(
-                channel_id, "$ru", priority=Priority.NORMAL)
-            # Mudae's reply ("You have **N** keys | reset in **M** min")
-            # arrives as an event and is parsed by _parse_response — no
-            # blocking wait.
+            ctx.logger.info("key limit reached — $ru flow")
+            self._try_ru(ctx, channel_id)
 
-    async def _try_userstack(self, ctx: PluginContext, channel_id: int,
-                             mudae_id: int) -> None:
-        """Send '$us 20' (the refusal arrives as an event, see below).
+    def _try_userstack(self, ctx: PluginContext, channel_id: int,
+                       mudae_id: int = None) -> None:
+        """Spawn the $us retry flow (ONE per account — a pending flow's
+        own retries already cover new low-rolls responses, so a second
+        detection never doubles the $us sends)."""
+        account = ctx.account
+        current = self._us_tasks.get(account)
+        if current is not None and not current.done():
+            return
+        self._us_tasks[account] = asyncio.get_running_loop().create_task(
+            self._us_flow(ctx, account, channel_id))
 
-        Mudae's refusal ("You need to buy kakeraloots" / "You don't have
-        enough rolls stacked!") is parsed EVENT-DRIVEN in _parse_response,
-        which flips BOTH the persisted state (survives restarts via
-        on_load) and the live settings view — without the live flip every
-        later low-rolls response would repeat the doomed '$us 20' send
-        until the next restart.
+    async def _us_flow(self, ctx: PluginContext, account: str,
+                       channel_id: int) -> None:
+        """Send '$us 20' and watch for the verdict, retrying (the
+        original's handleUS): Mudae's ✅ reaction on our message CONFIRMS
+        the stack and CLEARS the roulette cooldown; a refusal text
+        disables userstack (live + persisted). No verdict → retry, up to
+        US_MAX_ATTEMPTS, then give up (next detection starts fresh).
         """
-        await ctx.services.send_message(
-            channel_id, "$us 20", priority=Priority.NORMAL)
+        try:
+            for _ in range(US_MAX_ATTEMPTS):
+                waiter = {"event": asyncio.Event(), "outcome": None,
+                          "channel": channel_id}
+                self._us_waiters[account] = waiter
+                await ctx.services.send_message(
+                    channel_id, "$us 20", priority=Priority.NORMAL)
+                try:
+                    await asyncio.wait_for(waiter["event"].wait(),
+                                           US_REPLY_TIMEOUT)
+                except asyncio.TimeoutError:
+                    continue
+                if waiter["outcome"] == "confirmed":
+                    await ctx.services.cooldown_clear(COOLDOWN_KEY)
+                    ctx.logger.info(
+                        "$us confirmed (✅) — roulette cooldown cleared")
+                    return
+                if waiter["outcome"] == "refused":
+                    ctx.logger.info("userstack unavailable — disabling")
+                    ctx.settings["userstack"] = False
+                    await ctx.services.state_set("userstack_available", False)
+                    return
+            ctx.logger.warning("$us unresolved after %d attempts — giving up",
+                               US_MAX_ATTEMPTS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            ctx.logger.exception("$us flow failed on %s", account)
+        finally:
+            self._us_waiters.pop(account, None)
+
+    def _try_ru(self, ctx: PluginContext, channel_id: int) -> None:
+        """Spawn the $ru retry flow (one per account, deduped like $us)."""
+        account = ctx.account
+        current = self._ru_tasks.get(account)
+        if current is not None and not current.done():
+            return
+        self._ru_tasks[account] = asyncio.get_running_loop().create_task(
+            self._ru_flow(ctx, account, channel_id))
+
+    async def _ru_flow(self, ctx: PluginContext, account: str,
+                       channel_id: int) -> None:
+        """Send '$ru' and wait for the parsable reply, retrying (the
+        original's handleRU): "You have **N** keys | reset in **M** min"
+        sets the cooldown (parsed by _parse_response, which also resolves
+        the waiter). Unparsable/absent → retry after the window.
+        """
+        try:
+            for _ in range(RU_MAX_ATTEMPTS):
+                waiter = {"event": asyncio.Event()}
+                self._ru_waiters[account] = waiter
+                await ctx.services.send_message(
+                    channel_id, "$ru", priority=Priority.NORMAL)
+                try:
+                    await asyncio.wait_for(waiter["event"].wait(),
+                                           RU_REPLY_TIMEOUT)
+                except asyncio.TimeoutError:
+                    continue
+                return   # resolved — cooldown already set by the parser
+            ctx.logger.warning("$ru unresolved after %d attempts — giving up",
+                               RU_MAX_ATTEMPTS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            ctx.logger.exception("$ru flow failed on %s", account)
+        finally:
+            self._ru_waiters.pop(account, None)
 
     # -------------------------------------------------------- self-commands
     #: the Mudae-style verb set (<plugin><verb>). Handlers are the plain
