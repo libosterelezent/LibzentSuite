@@ -1,11 +1,13 @@
-"""Self-command layer: the framework account commands ITSELF via a prefix.
+"""Self-command layer: ANY owner commands the account via a prefix.
 
-discord.py-self's ext.commands Bot in self_bot=True mode processes only
-the account's OWN messages (other users are skipped by _skip_check).
+discord.py-self's ext.commands Bot runs in user_bot=True mode: dispatch
+receives messages from everyone, and each invocation is gated on the
+TYPER being an OWNER_USER_IDS owner (any owner — including a different
+framework account — can command this account; strangers fail closed).
 This test suite pins the adapter's integration without needing the real
 library: the factory wiring, the prefix routing, the synthetic DTO that
-re-enters the plugin pipeline, and the isolation invariants (other
-users' commands never fire; commands never become events).
+re-enters the plugin pipeline, and the isolation invariants (commands
+never become events).
 """
 from __future__ import annotations
 
@@ -48,20 +50,33 @@ class SelfTriggerTests(unittest.IsolatedAsyncioTestCase):
     async def test_publish_self_trigger_routes_through_on_message(self):
         """A self-command re-publishes as a synthetic DiscordMessage via
         the adapter callback — the plugin pipeline sees it as a normal
-        owner-typed message with the account's own id as author."""
+        owner-typed message. The DTO carries the TYPER's id as author
+        (any owner can command the account; the fallback keeps the
+        account's own id for author-less contexts)."""
         client = _make_client()
         seen: list = []
         client.on_message = seen.append
         client.user_id = 555
         channel = NS(id=42, guild=NS(id=10))
-        ctx = NS(message=NS(id=99), channel=channel)
+        ctx = NS(message=NS(id=99), channel=channel,
+                 author=NS(id=777))  # a DIFFERENT owner typed the command
         client._publish_self_trigger(ctx, "roll")
         self.assertEqual(len(seen), 1)
         dto = seen[0]
-        self.assertEqual(dto.author_id, 555)      # self as author
+        self.assertEqual(dto.author_id, 777)      # the TYPER as author
         self.assertEqual(dto.content, "roll")     # stripped content
         self.assertEqual(dto.channel_id, 42)      # real channel
         self.assertEqual(dto.guild_id, 10)
+
+    async def test_publish_self_trigger_author_fallback(self):
+        """Author-less contexts (legacy) fall back to the account's id."""
+        client = _make_client()
+        seen: list = []
+        client.on_message = seen.append
+        client.user_id = 555
+        ctx = NS(message=NS(id=1), channel=NS(id=2, guild=None))
+        client._publish_self_trigger(ctx, "roll")
+        self.assertEqual(seen[0].author_id, 555)
 
     async def test_publish_without_callback_is_noop(self):
         client = _make_client()

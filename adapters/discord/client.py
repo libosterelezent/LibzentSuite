@@ -414,9 +414,14 @@ class RealDiscordClient:
         # http.py:637); the TypeError fallback covers only exotic/test
         # layouts without it.
         # SELF-COMMAND layer (upstream): with a prefix configured,
-        # construct the ext.commands Bot (self_bot=True) instead of a
-        # plain Client — own messages become invocable commands, other
-        # users' are skipped by the library's own check. With no prefix,
+        # construct the ext.commands Bot (user_bot=True) instead of a
+        # plain Client. user_bot is the correct mode for this framework:
+        # ANY owner in OWNER_USER_IDS may command the account (the
+        # multi-account model — one owner typing, every framework account
+        # responding), whereas self_bot=True would dispatch only the
+        # account's OWN messages. user_bot's _skip_check lets every
+        # message reach dispatch, so ownership is enforced by OUR
+        # invoker gate (allowed_invoker) — fail-closed. With no prefix,
         # behavior is exactly today's (plain Client, no command
         # machinery).
         if self._command_prefix:
@@ -426,7 +431,8 @@ class RealDiscordClient:
                 prefix = _ext_commands.when_mentioned
             try:
                 self._client = _ext_commands.Bot(
-                    command_prefix=prefix, self_bot=True,
+                    command_prefix=prefix, user_bot=True,
+                    owner_ids=set(self._owner_ids),
                     help_command=None,
                     max_ratelimit_timeout=MAX_RATELIMIT_TIMEOUT_S,
                 )
@@ -435,7 +441,8 @@ class RealDiscordClient:
                     "discord client library ignores max_ratelimit_timeout — "
                     "in-request 429 sleeps are UNBOUNDED on this layout")
                 self._client = _ext_commands.Bot(
-                    command_prefix=prefix, self_bot=True,
+                    command_prefix=prefix, user_bot=True,
+                    owner_ids=set(self._owner_ids),
                     help_command=None,
                 )
         else:
@@ -454,11 +461,12 @@ class RealDiscordClient:
             self._client.before_identify_hook = self._identify_gate.acquire
         _install_headers_fetch_cache(discord)
         # SELF-COMMAND layer: when a prefix is configured, use the
-        # library's ext.commands Bot in self_bot mode — the account's OWN
-        # messages become invocable commands (typed by the user logged in
-        # as this account), while every other user's messages are skipped
-        # by the library's own _skip_check. The plugin EVENT path keeps
-        # the self-echo filter below: a command never becomes a plugin
+        # library's ext.commands Bot in user_bot mode — ANY owner from
+        # OWNER_USER_IDS (including a different framework account's
+        # user) can invoke commands on this account; the adapter's
+        # allowed_invoker gate enforces ownership fail-closed (non-owners
+        # get no reply at all). The plugin EVENT path keeps the
+        # self-echo filter below: a command never becomes a plugin
         # event, and a plugin's own output never re-triggers anything.
         if self._command_prefix:
             self._install_command_layer(discord)
@@ -507,10 +515,11 @@ class RealDiscordClient:
         @self._client.event
         async def on_message(message: Any) -> None:
             # SELF-COMMAND path: when the command layer is active, route
-            # every message through process_commands — with self_bot=True,
-            # the library's _skip_check means ONLY the account's OWN
-            # messages reach command dispatch (other users' are silently
-            # dropped by get_context, so random users can't fire commands).
+            # every message through process_commands — user_bot mode lets
+            # the library hand EVERY message to dispatch (its _skip_check
+            # never skips), and ownership is enforced per-invocation by
+            # _dispatch_self_command's allowed_invoker gate, so random
+            # users can never fire a command (fail-closed).
             # This runs BEFORE the self-echo filter: commands and events
             # are SEPARATE paths (a command never becomes a plugin event,
             # and the account's own output never re-triggers plugins).
@@ -729,10 +738,11 @@ class RealDiscordClient:
     def _install_command_layer(self, discord: Any) -> None:
         """Register the self-command surface on the ext.commands Bot.
 
-        Commands run ONLY for the account's OWN messages (self_bot=True +
-        the library's _skip_check), gated additionally on the account's
-        user id being an OWNER_USER_IDS owner (the same gate the plugin
-        trigger path applies downstream).
+        The Bot runs in user_bot mode: dispatch receives messages from
+        EVERYONE, and each invocation is gated on the actual TYPER being
+        an OWNER_USER_IDS owner (allowed_invoker — fail-closed on an
+        empty owner set or an unknown invoker). Any owner can command
+        any framework account; non-owners get no reply at all.
 
         The concrete verb set comes from the process-wide self-command
         registry (:data:`core.plugin_manager.commands.COMMAND_HUB`): the
@@ -818,18 +828,24 @@ class RealDiscordClient:
         except Exception:
             self._logger.exception("self-command registration failed: %s", name)
 
-    def self_command_allowed(self) -> bool:
-        """The owner gate, mirroring the plugin trigger path exactly.
-
-        self_bot mode already restricts invocation to the account's OWN
-        messages; the account's user id must ALSO be an owner
-        (OWNER_USER_IDS) or every command is ignored — non-owners get no
-        reply, exactly like a trigger word from a non-owner today.
-        Fail-closed when the owner set is empty or the user id unknown.
+    def allowed_invoker(self, invoker_id: Optional[int]) -> bool:
+        """The ownership gate for one invocation: the TYPER must be an
+        OWNER_USER_IDS owner. user_bot mode lets every message reach
+        dispatch, so this is the only thing standing between a stranger
+        and a command — fail-closed when the owner set is empty or the
+        invoker is unknown.
         """
-        if not self._owner_ids or self.user_id is None:
+        if not self._owner_ids or invoker_id is None:
             return False
-        return self.user_id in self._owner_ids
+        return invoker_id in self._owner_ids
+
+    def self_command_allowed(self) -> bool:
+        """Account-level view of the gate: is the ACCOUNT'S OWN user id
+        an owner? Kept for callers that ask whether the account may
+        command ITSELF (typing as this account) — actual dispatch gates
+        on the real invoker via allowed_invoker(ctx.author.id).
+        """
+        return self.allowed_invoker(self.user_id)
 
     def _self_command_stats(self) -> dict:
         """Runtime stats for the framework ``pg`` verb (hub-pulled)."""
@@ -858,10 +874,14 @@ class RealDiscordClient:
     async def _dispatch_self_command(self, ctx: Any, name: str) -> None:
         """One invocation: owner gate, parse, hub dispatch (contained)."""
         try:
-            if not self.self_command_allowed():
+            # user_bot mode delivers every message — gate on the REAL
+            # typer (any owner may command this account; the account's
+            # own id passes too when the account itself is an owner)
+            invoker = getattr(getattr(ctx, "author", None), "id", None)
+            if not self.allowed_invoker(invoker):
                 self._logger.debug(
-                    "self-command %s ignored: account user %s is not an owner",
-                    name, self.user_id)
+                    "self-command %s ignored: invoker %s is not an owner",
+                    name, invoker)
                 return
             args, raw = self._parse_invocation(
                 getattr(ctx, "message", None) and ctx.message.content, name)
@@ -870,7 +890,7 @@ class RealDiscordClient:
             guild_id = getattr(guild, "id", None) if guild is not None else None
             await COMMAND_HUB.invoke(
                 self._account, name, args, channel.id,
-                guild_id=guild_id, invoker_id=self.user_id, raw=raw)
+                guild_id=guild_id, invoker_id=invoker, raw=raw)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -882,8 +902,9 @@ class RealDiscordClient:
 
         Routes through ``self.on_message`` (the account-manager callback),
         which publishes to the bus with the account's identity. The plugin
-        owner check then applies normally: the framework account's own
-        Discord user id must be in OWNER_USER_IDS (documented requirement).
+        owner check then applies normally against the TYPER: the synthetic
+        DTO carries the invoking user's id (an owner — the dispatch gate
+        already enforced it).
         """
         if self.on_message is None:
             return
@@ -893,13 +914,15 @@ class RealDiscordClient:
             guild_id = getattr(guild, "id", None) if guild else None
             # DM = no guild on the channel (works before connect() too,
             # where self._discord is not yet imported)
-            # synthetic DTO: the account's own id as author, the real
-            # channel, the trigger as content — indistinguishable from a
-            # real owner-typed message to every downstream consumer
+            # synthetic DTO: the TYPER's id as author (the dispatch gate
+            # guarantees they're an owner), the real channel, the trigger
+            # as content — indistinguishable from a real owner-typed
+            # message to every downstream consumer
             dto = DiscordMessage(
                 id=getattr(ctx.message, "id", 0),
                 channel_id=channel.id,
-                author_id=self.user_id,
+                author_id=getattr(getattr(ctx, "author", None), "id", None)
+                          or self.user_id,
                 content=trigger,
                 dm=guild_id is None,
                 guild_id=guild_id,

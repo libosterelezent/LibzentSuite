@@ -745,7 +745,8 @@ class AdapterLayerTests(unittest.IsolatedAsyncioTestCase):
     def _bot(self, client):
         from discord.ext import commands as ext_commands
         client._client = ext_commands.Bot(
-            command_prefix="sm!", self_bot=True, help_command=None)
+            command_prefix="sm!", user_bot=True,
+            owner_ids=set(client._owner_ids), help_command=None)
         return client._client
 
     def test_owner_gate(self) -> None:
@@ -758,6 +759,21 @@ class AdapterLayerTests(unittest.IsolatedAsyncioTestCase):
         # no owners configured: fail closed
         closed = self._client(owner_ids=frozenset())
         self.assertFalse(closed.self_command_allowed())
+
+    def test_invoker_gate_any_owner_may_command(self) -> None:
+        """user_bot dispatch: the gate is the TYPER, not the account —
+        any OWNER_USER_IDS owner can command this account, strangers
+        cannot, and unknown/absent invokers fail closed. (Regression:
+        self_bot=True made the library drop other owners' commands
+        before this gate could ever run.)"""
+        client = self._client(owner_ids=frozenset({1, 2}))
+        client.user_id = 1  # the account itself is one of the owners
+        self.assertTrue(client.allowed_invoker(1))   # the account itself
+        self.assertTrue(client.allowed_invoker(2))   # a DIFFERENT owner
+        self.assertFalse(client.allowed_invoker(999))  # a stranger
+        self.assertFalse(client.allowed_invoker(None))  # unknown invoker
+        closed = self._client(owner_ids=frozenset())
+        self.assertFalse(closed.allowed_invoker(1))
 
     def test_parse_invocation(self) -> None:
         parse = self._client()._parse_invocation
@@ -800,13 +816,21 @@ class AdapterLayerTests(unittest.IsolatedAsyncioTestCase):
         import core.plugin_manager.commands as commands_mod
         commands_mod.COMMAND_HUB.invoke = fake_invoke
         try:
+            # an OWNER typer (the account itself or any other owner)
             ctx = NS(message=NS(content="sm!pg 1"),
-                     channel=NS(id=42, guild=NS(id=GUILD)))
+                     channel=NS(id=42, guild=NS(id=GUILD)),
+                     author=NS(id=OWNER_ID))
             await client._dispatch_self_command(ctx, "pg")
             self.assertEqual(invoked, [("alpha", "pg")])
-            client.user_id = 999  # not an owner anymore
-            await client._dispatch_self_command(ctx, "pg")
-            self.assertEqual(len(invoked), 1)  # silently ignored
+            # a stranger typer: silently ignored before the hub
+            await client._dispatch_self_command(
+                NS(message=NS(content="sm!pg"), channel=ctx.channel,
+                   author=NS(id=999)), "pg")
+            self.assertEqual(len(invoked), 1)  # only the owner's invocation
+            # author-less context: fail closed
+            await client._dispatch_self_command(
+                NS(message=NS(content="sm!pg"), channel=ctx.channel), "pg")
+            self.assertEqual(len(invoked), 1)
         finally:
             commands_mod.COMMAND_HUB.invoke = original
 
