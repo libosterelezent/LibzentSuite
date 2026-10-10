@@ -52,16 +52,9 @@ class RollServices:
         return 1
 
     async def wait_for_message(self, check, timeout):
-        if self._responses:
-            resp = self._responses.pop(0)
-            event = MessageReceived(
-                account=self.account, message_id=resp.get("id", 1),
-                channel_id=CHANNEL, author_id=MUDAE_ID,
-                content=resp.get("content", ""),
-                message=resp.get("message"),
-            )
-            if check(event):
-                return event
+        # Roll parses responses EVENT-DRIVEN (handle_event) — the fake
+        # never needs to hand one over. Method kept: the services backend
+        # (and future plugins) still support wait-based flows.
         return None
 
     async def collect_messages(self, check, idle_timeout):
@@ -102,10 +95,38 @@ class RollServices:
         self._state[key] = value
 
 
+async def _deliver_mudae(bus, services, responses, channel=CHANNEL):
+    """Publish Mudae's responses as bus events (event-driven parsing).
+
+    Lockstep with the loop's ROLL sends only (the confirmation reply and
+    $us/$ru reactions are not roll sends) — one response per roll,
+    mirroring how Mudae actually replies in the channel.
+    """
+    loop = asyncio.get_running_loop()
+
+    def roll_count():
+        return sum(1 for _, c, _ in services.sent
+                   if c.startswith("$") and not c.startswith(("$us", "$ru")))
+
+    seen = 0
+    for resp in responses or []:
+        deadline = loop.time() + 5.0
+        while roll_count() <= seen and loop.time() < deadline:
+            await asyncio.sleep(0.02)
+        seen = roll_count()
+        await asyncio.sleep(0.05)
+        bus.publish_nowait(MessageReceived(
+            account="alpha", message_id=resp.get("id", 1),
+            channel_id=channel, author_id=MUDAE_ID,
+            content=resp.get("content", ""), message=resp.get("message")))
+
+
 async def flow(args=None, invoker=OWNER_ID, overrides=None, responses=None,
               wait=0.3, channel=CHANNEL):
     """Start rolling through the self-command layer (the production path:
-    rollstart, owner-gated and scope-checked) and let it run `wait` seconds."""
+    rollstart, owner-gated and scope-checked) and let it run `wait`
+    seconds. Mudae's responses are delivered as MessageReceived events —
+    the plugin parses them in handle_event for the rolling channel."""
     bus = EventBus()
     manager = PluginManager(
         bus, logging.getLogger("t"),
@@ -117,11 +138,14 @@ async def flow(args=None, invoker=OWNER_ID, overrides=None, responses=None,
     await manager.attach_account("alpha", allowed={"roll"})
     services = RollServices(responses)
     await manager.activate_account("alpha", services)
+    deliverer = asyncio.get_running_loop().create_task(
+        _deliver_mudae(bus, services, responses or [], channel=channel))
     await manager.execute_self_command(
         "alpha", "rollstart",
         [str(channel)] if (args is None and channel != CHANNEL) else (args or []),
         CHANNEL, invoker_id=invoker)
     await asyncio.sleep(wait)
+    deliverer.cancel()
     return services, manager
 
 
@@ -215,7 +239,7 @@ class TestCooldownParsing(unittest.IsolatedAsyncioTestCase):
         ]
         services, manager = await flow(
             responses=responses,
-            overrides={"roll_interval": 1.5, "response_timeout": 2.0},
+            overrides={"roll_interval": 1.5},
             wait=5.5,
         )
         self.assertEqual(sum(1 for _, c, _ in services.sent if c == "$us 20"), 1)
@@ -276,7 +300,7 @@ class TestHostileResponses(unittest.IsolatedAsyncioTestCase):
         ]
         services, manager = await flow(
             responses=responses,
-            overrides={"roll_interval": 1.5, "response_timeout": 2.0},
+            overrides={"roll_interval": 1.5},
             wait=15.0,
         )
         commands = [c for _, c, _ in services.sent]
@@ -299,7 +323,7 @@ class TestHostileResponses(unittest.IsolatedAsyncioTestCase):
         ]
         services, _ = await flow(
             responses=responses,
-            overrides={"roll_interval": 1.5, "response_timeout": 2.0},
+            overrides={"roll_interval": 1.5},
             wait=2.5,
         )
         commands = [c for _, c, _ in services.sent]
@@ -314,7 +338,7 @@ class TestHostileResponses(unittest.IsolatedAsyncioTestCase):
         ]
         services, manager = await flow(
             responses=responses,
-            overrides={"roll_interval": 1.5, "response_timeout": 2.0},
+            overrides={"roll_interval": 1.5},
             wait=4.5,
         )
         commands = [c for _, c, _ in services.sent]
@@ -458,7 +482,7 @@ class TestHostileSettingsAndReload(unittest.IsolatedAsyncioTestCase):
 
     async def test_command_hot_reload_mid_roll(self) -> None:
         services, manager = await flow(
-            overrides={"roll_interval": 1.5, "response_timeout": 2.0},
+            overrides={"roll_interval": 1.5},
             wait=0.1)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 2.0
@@ -510,7 +534,7 @@ class TestRound3Hardening(unittest.IsolatedAsyncioTestCase):
         ]
         services, manager = await flow(
             responses=responses,
-            overrides={"roll_interval": 1.5, "response_timeout": 2.0},
+            overrides={"roll_interval": 1.5},
             wait=2.0,
         )
         # session 1: Mudae refused $us -> the one-way latch engaged

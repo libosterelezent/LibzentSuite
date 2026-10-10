@@ -16,8 +16,11 @@ settings — the ROLLING LOGIC is preserved exactly:
   * every send flows through the paced pipeline (per-task + group +
     lane + floor + jitter) — the plugin NEVER self-throttles.
 
-The plugin uses the rich event model (DiscordMessage.embeds) to parse
-Mudae's embed responses, and PluginStateService to persist runtime
+Responses are parsed EVENT-DRIVEN: handle_event receives Mudae's replies
+(new and edited) for the rolling channel — the loop never blocks on a
+response wait. The plugin uses the rich event model
+(DiscordMessage.embeds) to parse Mudae's embed responses, and
+PluginStateService to persist runtime
 state (userstack availability) across restarts.
 """
 from __future__ import annotations
@@ -27,7 +30,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from core.errors import FlowBlocked, PluginError, SettingsValidationError
-from core.event_bus import Event, MessageReceived
+from core.event_bus import Event, MessageEdited, MessageReceived
 from core.plugin_base import (
     CommandContext,
     CommandSpec,
@@ -138,14 +141,15 @@ class RollPlugin(PluginBase):
                 "Minimum seconds between roulette sends (the pipeline's "
                 "rate limiter adds its own pacing on top).",
                 min_value=1.5, max_value=120.0),
-        Setting("response_timeout", "float", 8.0,
-                "Seconds to wait for Mudae's response before assuming "
-                "the roll went through.", min_value=2.0, max_value=30.0),
     )
 
     def __init__(self) -> None:
         self._rolling: Dict[str, bool] = {}   # account -> is currently rolling
         self._tasks: Dict[str, asyncio.Task] = {}
+        #: the channel each account is currently rolling in (account ->
+        #: channel_id) — responses are parsed by handle_event ONLY for the
+        #: rolling channel (the roll profile's target)
+        self._roll_channels: Dict[str, int] = {}
         #: the live PluginContext of the current activation — command
         #: handlers reuse it to drive the SAME internals (roll loop,
         #: settings view) the event path once used
@@ -190,14 +194,56 @@ class RollPlugin(PluginBase):
         await self._stop_all(ctx)
 
     # ------------------------------------------------------------ events
-    # No handle_event: rolling is no longer started/stopped by watching for
-    # owner trigger words — the per-account self-command layer owns control
-    # (rollstart/rollstop, scope-checked and owner-gated). The roll loop's
-    # responses are read through the paced send pipeline, not events.
+    async def handle_event(self, ctx: PluginContext, event: Event) -> None:
+        """Parse Mudae's RESPONSES for the rolling channel (event-driven).
+
+        No trigger words and no blocking wait_for_message: the loop paces
+        the sends, and every Mudae reply for the channel the account is
+        rolling in arrives here (new OR edited — Mudae often populates
+        the result embed via an edit), gets parsed immediately
+        (cooldown / userstack / key-limit), and any reaction ($us/$ru)
+        flows through the paced pipeline. Contained: a parse failure
+        logs one line and never touches the roll loop.
+        """
+        account = ctx.account
+        if isinstance(event, MessageEdited):
+            # edits carry no author/content on the DTO — read them from
+            # the rich post-edit handle and normalize into the parse shape
+            rich = getattr(event, "message", None)
+            response = MessageReceived(
+                account=account,
+                message_id=event.message_id,
+                channel_id=event.channel_id,
+                author_id=getattr(getattr(rich, "author", None), "id", None),
+                content=(getattr(rich, "content", "") or ""),
+                message=rich,
+                guild_id=event.guild_id,
+            )
+        elif isinstance(event, MessageReceived):
+            response = event
+        else:
+            return
+        if not self._rolling.get(account):
+            return
+        if response.channel_id != self._roll_channels.get(account):
+            return  # not the channel this account rolls in
+        mudae_id = ctx.services.credentials.mudae_bot_id
+        if response.author_id != mudae_id:
+            return  # not Mudae
+        try:
+            await self._parse_response(
+                ctx, account, response.channel_id, response, mudae_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            ctx.logger.exception(
+                "response parse failed on %s (channel %s) — ignored",
+                account, response.channel_id)
 
     # ------------------------------------------------------------ rolling
     def _start(self, ctx: PluginContext, account: str, channel_id: int) -> None:
         self._rolling[account] = True
+        self._roll_channels[account] = channel_id
         task = asyncio.get_running_loop().create_task(
             self._roll_loop(ctx, account, channel_id))
         self._tasks[account] = task
@@ -206,6 +252,7 @@ class RollPlugin(PluginBase):
 
     async def _stop(self, ctx: PluginContext, account: str) -> None:
         self._rolling[account] = False
+        self._roll_channels.pop(account, None)
         task = self._tasks.pop(account, None)
         if task is not None and not task.done():
             task.cancel()
@@ -228,11 +275,12 @@ class RollPlugin(PluginBase):
                          channel_id: int) -> None:
         """The rolling loop — one iteration per roulette send.
 
-        Each iteration: check cooldown → send the command → read the
-        response → parse for cooldown/userstack/key-limit → act → sleep.
+        Each iteration: check cooldown → send the command → sleep. Mudae's
+        responses are NOT awaited — handle_event parses them for the
+        rolling channel as they arrive (event-driven; a late or edited
+        reply can no longer stall the loop).
         Cancellation-safe: rollstop or on_disable cancels this task.
         """
-        mudae_id = ctx.services.credentials.mudae_bot_id
         retry_backoff = TRANSIENT_BACKOFF_START
         try:
             while self._rolling.get(account):
@@ -262,22 +310,10 @@ class RollPlugin(PluginBase):
                         channel_id, ctx.settings["command"],
                         priority=Priority.NORMAL,
                     )
-
-                    # ── read Mudae's response ──
-                    response = await ctx.services.wait_for_message(
-                        check=lambda e: (e.author_id == mudae_id
-                                         and e.channel_id == channel_id),
-                        timeout=ctx.settings["response_timeout"],
-                    )
-                    if response is None:
-                        ctx.logger.debug("no response from Mudae — retrying")
-                        await asyncio.sleep(ctx.settings["roll_interval"])
-                        continue
-
-                    # ── parse the response for cooldowns/limits ──
-                    await self._parse_response(ctx, account, channel_id,
-                                               response, mudae_id)
-
+                    # Mudae's response is NOT awaited here: it arrives as a
+                    # MessageReceived event and handle_event parses it for
+                    # this channel (event-driven — a missed/edited reply
+                    # can no longer stall the loop for response_timeout).
                     await asyncio.sleep(ctx.settings["roll_interval"])
                     retry_backoff = TRANSIENT_BACKOFF_START  # healthy: reset
                 except asyncio.CancelledError:
@@ -346,6 +382,28 @@ class RollPlugin(PluginBase):
         """
         content = response.content or ""
 
+        # ── $us refusal ("no kakeraloots / not enough stacked") → disable ──
+        # (event-driven: the refusal arrives here as Mudae's reply —
+        #  _try_userstack only SENDS '$us 20' and returns)
+        if any(msg in content for msg in _USERSTACK_FAIL):
+            if ctx.settings["userstack"]:
+                ctx.logger.info("userstack unavailable — disabling")
+                ctx.settings["userstack"] = False
+                await ctx.services.state_set("userstack_available", False)
+            return
+
+        # ── $ru reply ("You have **N** keys | reset in **M** min") ──
+        if content.startswith("You have"):
+            minutes = parse_pause_minutes(content)
+            if minutes:
+                await ctx.services.cooldown_set(
+                    COOLDOWN_KEY, minutes * 60,
+                    source="mudae:key_reset",
+                    reason=f"key reset in {minutes} min",
+                )
+                ctx.logger.info("cooldown set from $ru: %d min", minutes)
+            return
+
         # ── "the roulette is limited to **N** min" → cooldown ──
         if "the roulette is limited to" in content:
             minutes = parse_pause_minutes(content)
@@ -387,43 +445,23 @@ class RollPlugin(PluginBase):
             ctx.logger.info("key limit reached — sending $ru")
             await ctx.services.send_message(
                 channel_id, "$ru", priority=Priority.NORMAL)
-            ru_reply = await ctx.services.wait_for_message(
-                check=lambda e: (e.author_id == mudae_id
-                                 and e.channel_id == channel_id
-                                 and (e.content or "").startswith("You have")),
-                timeout=5.0,
-            )
-            if ru_reply:
-                minutes = parse_pause_minutes(ru_reply.content or "")
-                if minutes:
-                    await ctx.services.cooldown_set(
-                        COOLDOWN_KEY, minutes * 60,
-                        source="mudae:key_reset",
-                        reason=f"key reset in {minutes} min",
-                    )
-                    ctx.logger.info("cooldown set from $ru: %d min", minutes)
+            # Mudae's reply ("You have **N** keys | reset in **M** min")
+            # arrives as an event and is parsed by _parse_response — no
+            # blocking wait.
 
     async def _try_userstack(self, ctx: PluginContext, channel_id: int,
                              mudae_id: int) -> None:
-        """Send '$us 20'; on Mudae's refusal disable userstack NOW.
+        """Send '$us 20' (the refusal arrives as an event, see below).
 
-        The disable flips BOTH the persisted state (survives restarts via
+        Mudae's refusal ("You need to buy kakeraloots" / "You don't have
+        enough rolls stacked!") is parsed EVENT-DRIVEN in _parse_response,
+        which flips BOTH the persisted state (survives restarts via
         on_load) and the live settings view — without the live flip every
         later low-rolls response would repeat the doomed '$us 20' send
         until the next restart.
         """
         await ctx.services.send_message(
             channel_id, "$us 20", priority=Priority.NORMAL)
-        us_reply = await ctx.services.wait_for_message(
-            check=lambda e: (e.author_id == mudae_id
-                             and e.channel_id == channel_id),
-            timeout=5.0,
-        )
-        if us_reply and any(msg in (us_reply.content or "")
-                            for msg in _USERSTACK_FAIL):
-            ctx.logger.info("userstack unavailable — disabling")
-            ctx.settings["userstack"] = False
-            await ctx.services.state_set("userstack_available", False)
 
     # -------------------------------------------------------- self-commands
     #: the Mudae-style verb set (<plugin><verb>). Handlers are the plain
