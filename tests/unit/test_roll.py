@@ -8,7 +8,7 @@ import unittest
 from types import SimpleNamespace as NS
 
 from core.credentials import Credentials
-from core.event_bus import EventBus, MessageReceived
+from core.event_bus import EventBus, MessageEdited, MessageReceived
 from core.errors import AccessDenied, PluginError, SettingsValidationError, TargetGone
 from core.plugin_manager import PluginManager
 from core.priority import Priority
@@ -172,6 +172,41 @@ class TestParsePauseMinutes(unittest.TestCase):
         self.assertEqual(parse_pause_minutes("**45**   MIN"), 45)
         self.assertEqual(parse_pause_minutes("**999999999999** min"), 999999999999)
         self.assertIsNone(parse_pause_minutes(None))
+
+
+class TestEditedResponses(unittest.IsolatedAsyncioTestCase):
+    """MessageEdited normalization — Mudae often populates result embeds
+    via an edit, so handle_event must accept edits without crashing and
+    parse them exactly like new messages."""
+
+    async def test_edited_message_parses_like_a_response(self) -> None:
+        services, manager = await flow(
+            responses=[{"content": "", "message": NS(embeds=[NS(
+                description="Some character",
+                footer_text="alpha · 2 ROLLS LEFT")], content="")}],
+            wait=0.4)
+        plugin = manager._accounts["alpha"]["roll"].instance
+        ctx = plugin._ctx
+        # an EDIT arrives: rich post-edit handle with author + embeds
+        rich = NS(author=NS(id=MUDAE_ID),
+                  content="",
+                  embeds=[NS(description="Some character",
+                             footer_text="alpha · 2 ROLLS LEFT")])
+        edit = MessageEdited(account="alpha", message_id=7,
+                             channel_id=CHANNEL, message=rich)
+        await plugin.handle_event(ctx, edit)   # must not raise
+        # the low-rolls footer engaged userstack → $us was sent
+        self.assertTrue(any(c == "$us 20" for _, c, _ in services.sent))
+
+    async def test_edited_message_from_stranger_ignored(self) -> None:
+        services, manager = await flow(wait=0.3)
+        plugin = manager._accounts["alpha"]["roll"].instance
+        rich = NS(author=NS(id=4242), content="hello", embeds=[])
+        edit = MessageEdited(account="alpha", message_id=8,
+                             channel_id=CHANNEL, message=rich)
+        count_before = len(services.sent)
+        await plugin.handle_event(plugin._ctx, edit)
+        self.assertEqual(len(services.sent), count_before)
 
 
 class TestRollStart(unittest.IsolatedAsyncioTestCase):

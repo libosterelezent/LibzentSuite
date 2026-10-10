@@ -209,6 +209,8 @@ class RollPlugin(PluginBase):
         if isinstance(event, MessageEdited):
             # edits carry no author/content on the DTO — read them from
             # the rich post-edit handle and normalize into the parse shape
+            # (MessageReceived has no guild_id field — the guild travels
+            #  inside the rich handle when a consumer needs it)
             rich = getattr(event, "message", None)
             response = MessageReceived(
                 account=account,
@@ -217,7 +219,6 @@ class RollPlugin(PluginBase):
                 author_id=getattr(getattr(rich, "author", None), "id", None),
                 content=(getattr(rich, "content", "") or ""),
                 message=rich,
-                guild_id=event.guild_id,
             )
         elif isinstance(event, MessageReceived):
             response = event
