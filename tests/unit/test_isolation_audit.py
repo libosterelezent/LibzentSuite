@@ -490,10 +490,9 @@ class RollAckTimeoutTests(unittest.IsolatedAsyncioTestCase):
         await manager.attach_account("alpha", allowed={"roll"})
         services = _AckTimeoutServices()
         await manager.activate_account("alpha", services)
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=1, channel_id=CHANNEL,
-            author_id=OWNER_ID, content="roll",
-        ))
+        # start via the command layer (the trigger-word path is gone)
+        await manager.execute_self_command(
+            "alpha", "rollstart", [], CHANNEL, invoker_id=OWNER_ID)
         await asyncio.sleep(0.3)
         runtime = manager._accounts["alpha"]["roll"]
         # the loop survived the ack-timeout (K11) and is still rolling

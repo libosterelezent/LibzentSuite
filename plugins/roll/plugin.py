@@ -1,9 +1,9 @@
 """Roll plugin: Mudae roulette automation with cooldowns, userstack and key limits.
 
 Ported from MudaeScript/cogs/roll_profile.py onto the SlaughterMudae
-plugin architecture. The Discord command interface (rollset/rollstart/
-rollstop etc.) is replaced by the framework's trigger-word model and
-persistent settings — the ROLLING LOGIC is preserved exactly:
+plugin architecture. Rolling is controlled by the framework's per-account
+self-command layer (rollstart/rollstop/rollset/...) with persistent
+settings — the ROLLING LOGIC is preserved exactly:
 
   * sends the configured roulette command ($wa/$wg/$m/...) in a loop,
   * parses Mudae's responses (plain text + embeds) for:
@@ -125,10 +125,6 @@ class RollPlugin(PluginBase):
     )
 
     settings = (
-        Setting("trigger", "str", "roll",
-                "Word that starts rolling in the channel it's typed in (owners only)."),
-        Setting("stop_trigger", "str", "rollstop",
-                "Word that stops rolling (owners only)."),
         RouletteCommandSetting("command", "str", "$wa",
                                "Roulette command: $wa/$wg/$wx/$w/$ha/$hg/$hx/$h/$ma/$mg/"
                                "$mx/$m (validated; anything else is rejected)."),
@@ -152,7 +148,7 @@ class RollPlugin(PluginBase):
         self._tasks: Dict[str, asyncio.Task] = {}
         #: the live PluginContext of the current activation — command
         #: handlers reuse it to drive the SAME internals (roll loop,
-        #: settings view) the trigger-word path uses
+        #: settings view) the event path once used
         self._ctx: Optional[PluginContext] = None
 
     # ------------------------------------------------------------ lifecycle
@@ -194,30 +190,10 @@ class RollPlugin(PluginBase):
         await self._stop_all(ctx)
 
     # ------------------------------------------------------------ events
-    async def handle_event(self, ctx: PluginContext, event: Event) -> None:
-        if not isinstance(event, MessageReceived):
-            return
-        if event.author_id not in ctx.services.credentials.owner_user_ids:
-            return
-        text = (event.content or "").strip()
-
-        if text == ctx.settings["stop_trigger"]:
-            await self._stop(ctx, event.account)
-            return
-        if text != ctx.settings["trigger"]:
-            return
-
-        if self._rolling.get(event.account):
-            ctx.logger.info("already rolling on %s — ignored", event.account)
-            return
-
-        # validate BEFORE acting (flow-abort contract)
-        try:
-            ctx.services.validate_channel(event.channel_id)
-        except FlowBlocked as exc:
-            ctx.logger.warning("flow aborted for %s: %s", ctx.account, exc.reason)
-            return
-        self._start(ctx, event.account, event.channel_id)
+    # No handle_event: rolling is no longer started/stopped by watching for
+    # owner trigger words — the per-account self-command layer owns control
+    # (rollstart/rollstop, scope-checked and owner-gated). The roll loop's
+    # responses are read through the paced send pipeline, not events.
 
     # ------------------------------------------------------------ rolling
     def _start(self, ctx: PluginContext, account: str, channel_id: int) -> None:
@@ -254,7 +230,7 @@ class RollPlugin(PluginBase):
 
         Each iteration: check cooldown → send the command → read the
         response → parse for cooldown/userstack/key-limit → act → sleep.
-        Cancellation-safe: the stop trigger or on_disable cancels this task.
+        Cancellation-safe: rollstop or on_disable cancels this task.
         """
         mudae_id = ctx.services.credentials.mudae_bot_id
         retry_backoff = TRANSIENT_BACKOFF_START
@@ -305,7 +281,7 @@ class RollPlugin(PluginBase):
                     await asyncio.sleep(ctx.settings["roll_interval"])
                     retry_backoff = TRANSIENT_BACKOFF_START  # healthy: reset
                 except asyncio.CancelledError:
-                    raise  # stop trigger / shutdown — outer handler logs it
+                    raise  # stop / shutdown — outer handler logs it
                 except PluginError as exc:
                     # framework services (cooldowns/state) not wired: this
                     # roll loop cannot work at all — name it precisely
@@ -453,7 +429,7 @@ class RollPlugin(PluginBase):
     #: the Mudae-style verb set (<plugin><verb>). Handlers are the plain
     #: methods below — the plugin manager binds them to this per-account
     #: instance, so they drive the SAME internals (roll loop, live
-    #: settings) as the trigger-word path. Replies flow through the paced
+    #: settings view). Replies flow through the paced
     #: pipeline via the executor; ValueError renders the usage line.
     #: (The tuple sits AFTER the handler definitions: a class body is a
     #: sequential namespace — bare names must exist by then.)
@@ -472,7 +448,7 @@ class RollPlugin(PluginBase):
 
     async def _cmd_rollstart(self, ctx: CommandContext,
                              args: List[str]) -> str:
-        """Start the roll loop — subsumes the old ``sm!roll`` trigger.
+        """Start the roll loop — subsumes the old ``sm!roll`` command.
 
         Target channel = the invoking channel, or an explicit id. The
         effective channel scope (the bound profile's reserved ``channels``
@@ -518,7 +494,7 @@ class RollPlugin(PluginBase):
 
     async def _cmd_rollstop(self, ctx: CommandContext,
                             args: List[str]) -> str:
-        """Stop the roll loop (same path as the ``rollstop`` trigger)."""
+        """Stop the roll loop (same path as the ``rollstop`` command)."""
         was_rolling = bool(self._rolling.get(ctx.account))
         if self._ctx is not None:
             await self._stop(self._ctx, ctx.account)

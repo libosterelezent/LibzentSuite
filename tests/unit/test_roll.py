@@ -102,9 +102,10 @@ class RollServices:
         self._state[key] = value
 
 
-async def flow(content, author=OWNER_ID, overrides=None, responses=None,
+async def flow(args=None, invoker=OWNER_ID, overrides=None, responses=None,
               wait=0.3, channel=CHANNEL):
-    """Trigger the plugin and let it run for `wait` seconds."""
+    """Start rolling through the self-command layer (the production path:
+    rollstart, owner-gated and scope-checked) and let it run `wait` seconds."""
     bus = EventBus()
     manager = PluginManager(
         bus, logging.getLogger("t"),
@@ -116,10 +117,10 @@ async def flow(content, author=OWNER_ID, overrides=None, responses=None,
     await manager.attach_account("alpha", allowed={"roll"})
     services = RollServices(responses)
     await manager.activate_account("alpha", services)
-    bus.publish_nowait(MessageReceived(
-        account="alpha", message_id=1, channel_id=channel,
-        author_id=author, content=content,
-    ))
+    await manager.execute_self_command(
+        "alpha", "rollstart",
+        [str(channel)] if (args is None and channel != CHANNEL) else (args or []),
+        CHANNEL, invoker_id=invoker)
     await asyncio.sleep(wait)
     return services, manager
 
@@ -149,29 +150,27 @@ class TestParsePauseMinutes(unittest.TestCase):
         self.assertIsNone(parse_pause_minutes(None))
 
 
-class TestRollTriggers(unittest.IsolatedAsyncioTestCase):
-    async def test_trigger_starts_rolling(self) -> None:
-        services, _ = await flow("roll", wait=0.2)
+class TestRollStart(unittest.IsolatedAsyncioTestCase):
+    async def test_rollstart_starts_rolling(self) -> None:
+        services, _ = await flow(wait=0.2)
         # at least one roll command was sent
         self.assertTrue(any(cmd.startswith("$") for _, cmd, _ in services.sent))
 
-    async def test_non_owner_ignored(self) -> None:
-        services, _ = await flow("roll", author=4242, wait=0.2)
-        self.assertEqual(services.sent, [])
-
-    async def test_other_content_ignored(self) -> None:
-        services, _ = await flow("hello", wait=0.2)
-        self.assertEqual(services.sent, [])
+    async def test_non_owner_refused(self) -> None:
+        services, _ = await flow(invoker=4242, wait=0.2)
+        # the owner gate blocks the start: no roll commands go out
+        self.assertFalse(any(cmd.startswith("$") for _, cmd, _ in services.sent))
 
     async def test_custom_command(self) -> None:
-        services, _ = await flow("roll", overrides={"command": "$wg"}, wait=0.2)
+        services, _ = await flow(overrides={"command": "$wg"}, wait=0.2)
         self.assertTrue(any(cmd == "$wg" for _, cmd, _ in services.sent))
 
     async def test_target_gone_aborts_clean(self) -> None:
-        """A trigger in a vanished channel aborts with ONE clean line —
+        """rollstart into a vanished channel refuses with ONE clean reply —
         never as a plugin crash (error counter must stay at zero)."""
-        services, manager = await flow("roll", channel=987, wait=0.2)
-        self.assertEqual(services.sent, [])
+        services, manager = await flow(channel=987, wait=0.2)
+        # the refusal reply may be sent, but NO roulette command was
+        self.assertFalse(any(cmd.startswith("$") for _, cmd, _ in services.sent))
         state = {s["name"]: s for s in manager.states("alpha")}["roll"]
         self.assertEqual(state["error_count"], 0)
         self.assertIsNone(state["last_error"])
@@ -182,7 +181,7 @@ class TestCooldownParsing(unittest.IsolatedAsyncioTestCase):
         responses = [
             {"content": "**alpha**, the roulette is limited to **45** min"},
         ]
-        services, _ = await flow("roll", responses=responses, wait=0.3)
+        services, _ = await flow(responses=responses, wait=0.3)
         # cooldown was set for 45 minutes = 2700 seconds
         self.assertIn("roulette", services._cooldowns)
         self.assertEqual(services._cooldowns["roulette"], 2700)
@@ -195,7 +194,7 @@ class TestCooldownParsing(unittest.IsolatedAsyncioTestCase):
         responses = [
             {"content": "", "message": NS(embeds=[embed], content="")},
         ]
-        services, _ = await flow("roll", responses=responses, wait=0.3)
+        services, _ = await flow(responses=responses, wait=0.3)
         # $us 20 was sent (low rolls) or $ru (key limit)
         commands = [cmd for _, cmd, _ in services.sent]
         self.assertTrue(any("$us" in c or "$ru" in c for c in commands),
@@ -215,7 +214,7 @@ class TestCooldownParsing(unittest.IsolatedAsyncioTestCase):
             low,                                            # roll 3 response
         ]
         services, manager = await flow(
-            "roll", responses=responses,
+            responses=responses,
             overrides={"roll_interval": 1.5, "response_timeout": 2.0},
             wait=5.5,
         )
@@ -224,8 +223,8 @@ class TestCooldownParsing(unittest.IsolatedAsyncioTestCase):
         self.assertIs(manager.live_settings("alpha", "roll")["userstack"], False)
 
 
-class TestStopTrigger(unittest.IsolatedAsyncioTestCase):
-    async def test_stop_trigger_stops(self) -> None:
+class TestRollStop(unittest.IsolatedAsyncioTestCase):
+    async def test_rollstop_stops(self) -> None:
         bus = EventBus()
         manager = PluginManager(
             bus, logging.getLogger("t"),
@@ -237,17 +236,15 @@ class TestStopTrigger(unittest.IsolatedAsyncioTestCase):
         services = RollServices()
         await manager.activate_account("alpha", services)
 
-        # start rolling
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=1, channel_id=CHANNEL,
-            author_id=OWNER_ID, content="roll"))
+        # start rolling via the command layer
+        await manager.execute_self_command(
+            "alpha", "rollstart", [], CHANNEL, invoker_id=OWNER_ID)
         await asyncio.sleep(0.2)
         self.assertTrue(any(c.startswith("$") for _, c, _ in services.sent))
 
-        # stop
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=2, channel_id=CHANNEL,
-            author_id=OWNER_ID, content="rollstop"))
+        # stop via the command layer
+        await manager.execute_self_command(
+            "alpha", "rollstop", [], CHANNEL, invoker_id=OWNER_ID)
         await asyncio.sleep(0.2)
 
         count_before = len(services.sent)
@@ -278,7 +275,7 @@ class TestHostileResponses(unittest.IsolatedAsyncioTestCase):
             {"content": "You don't have enough rolls stacked!"},
         ]
         services, manager = await flow(
-            "roll", responses=responses,
+            responses=responses,
             overrides={"roll_interval": 1.5, "response_timeout": 2.0},
             wait=15.0,
         )
@@ -301,7 +298,7 @@ class TestHostileResponses(unittest.IsolatedAsyncioTestCase):
             {"content": "You have **10** keys | reset in **37** min"},
         ]
         services, _ = await flow(
-            "roll", responses=responses,
+            responses=responses,
             overrides={"roll_interval": 1.5, "response_timeout": 2.0},
             wait=2.5,
         )
@@ -316,7 +313,7 @@ class TestHostileResponses(unittest.IsolatedAsyncioTestCase):
             low_rolls_response(),
         ]
         services, manager = await flow(
-            "roll", responses=responses,
+            responses=responses,
             overrides={"roll_interval": 1.5, "response_timeout": 2.0},
             wait=4.5,
         )
@@ -337,9 +334,8 @@ class TestHostileResponses(unittest.IsolatedAsyncioTestCase):
         services = RollServices([low_rolls_response()])
         services._state["userstack_available"] = False
         await manager.activate_account("alpha", services)
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=1, channel_id=CHANNEL,
-            author_id=OWNER_ID, content="roll"))
+        await manager.execute_self_command(
+            "alpha", "rollstart", [], CHANNEL, invoker_id=OWNER_ID)
         await asyncio.sleep(2.0)
         commands = [c for _, c, _ in services.sent]
         self.assertNotIn("$us 20", commands)
@@ -369,11 +365,12 @@ class TestHostileMidFlow(unittest.IsolatedAsyncioTestCase):
         manager.discover()
         await manager.attach_account("alpha", allowed={"roll"})
         await manager.activate_account("alpha", services)
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=1, channel_id=CHANNEL,
-            author_id=OWNER_ID, content="roll"))
+        await manager.execute_self_command(
+            "alpha", "rollstart", [], CHANNEL, invoker_id=OWNER_ID)
         await asyncio.sleep(2.5)
-        commands = [c for _, c, _ in services.sent]
+        # rollstart's confirmation reply rides the same pipeline — the
+        # assertion counts only the roulette commands themselves
+        commands = [c for _, c, _ in services.sent if c.startswith("$")]
         self.assertEqual(commands, ["$wa"])
         plugin = manager._accounts["alpha"]["roll"].instance
         self.assertFalse(plugin._rolling.get("alpha"))
@@ -390,7 +387,9 @@ class TestHostileMidFlow(unittest.IsolatedAsyncioTestCase):
             async def send_message(self, channel_id, content, *,
                                    priority=Priority.LOW):
                 self.sends += 1
-                if self.sends > 1:
+                # send 1 = rollstart's confirmation reply, send 2 = the
+                # first roulette command; everything after is refused
+                if self.sends > 2:
                     raise AccessDenied("alpha", "missing permissions")
                 return await super().send_message(
                     channel_id, content, priority=priority)
@@ -406,11 +405,12 @@ class TestHostileMidFlow(unittest.IsolatedAsyncioTestCase):
         manager.discover()
         await manager.attach_account("alpha", allowed={"roll"})
         await manager.activate_account("alpha", services)
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=1, channel_id=CHANNEL,
-            author_id=OWNER_ID, content="roll"))
+        await manager.execute_self_command(
+            "alpha", "rollstart", [], CHANNEL, invoker_id=OWNER_ID)
         await asyncio.sleep(2.5)
-        commands = [c for _, c, _ in services.sent]
+        # rollstart's confirmation reply rides the same pipeline — the
+        # assertion counts only the roulette commands themselves
+        commands = [c for _, c, _ in services.sent if c.startswith("$")]
         self.assertEqual(commands, ["$wa"])
         plugin = manager._accounts["alpha"]["roll"].instance
         self.assertFalse(plugin._rolling.get("alpha"))
@@ -432,13 +432,11 @@ class TestHostileMidFlow(unittest.IsolatedAsyncioTestCase):
         await manager.activate_account("alpha", services)
         plugin = manager._accounts["alpha"]["roll"].instance
         for i in range(3):
-            bus.publish_nowait(MessageReceived(
-                account="alpha", message_id=10 + i * 2, channel_id=CHANNEL,
-                author_id=OWNER_ID, content="roll"))
+            await manager.execute_self_command(
+                "alpha", "rollstart", [], CHANNEL, invoker_id=OWNER_ID)
             await asyncio.sleep(0.2)
-            bus.publish_nowait(MessageReceived(
-                account="alpha", message_id=11 + i * 2, channel_id=CHANNEL,
-                author_id=OWNER_ID, content="rollstop"))
+            await manager.execute_self_command(
+                "alpha", "rollstop", [], CHANNEL, invoker_id=OWNER_ID)
             await asyncio.sleep(0.2)
         self.assertEqual(plugin._tasks, {})
         self.assertLessEqual(set(plugin._rolling), {"alpha"})
@@ -452,22 +450,15 @@ class TestHostileSettingsAndReload(unittest.IsolatedAsyncioTestCase):
         for value in ("20", 20, "twenty", -1, 2.5):
             with self.subTest(value=value):
                 services, manager = await flow(
-                    "roll", overrides={"userstack": value}, wait=0.15)
+                    overrides={"userstack": value}, wait=0.15)
                 self.assertEqual(services.sent, [])
                 state = {s["name"]: s for s in manager.states("alpha")}["roll"]
                 self.assertFalse(state["enabled"])
                 self.assertTrue(state["last_error"].startswith("settings:"))
 
-    async def test_none_content_trigger_ignored(self) -> None:
-        services, manager = await flow(None, wait=0.15)
-        self.assertEqual(services.sent, [])
-        state = {s["name"]: s for s in manager.states("alpha")}["roll"]
-        self.assertEqual(state["error_count"], 0)
-        self.assertIsNone(state["last_error"])
-
     async def test_command_hot_reload_mid_roll(self) -> None:
         services, manager = await flow(
-            "roll", overrides={"roll_interval": 1.5, "response_timeout": 2.0},
+            overrides={"roll_interval": 1.5, "response_timeout": 2.0},
             wait=0.1)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 2.0
@@ -490,7 +481,7 @@ class TestRound3Hardening(unittest.IsolatedAsyncioTestCase):
         command disables the plugin at resolution with an error listing
         the valid roulette commands (nothing ever sends it)."""
         services, manager = await flow(
-            "roll", overrides={"command": "$spin"}, wait=0.15)
+            overrides={"command": "$spin"}, wait=0.15)
         self.assertEqual(services.sent, [])
         state = roll_state(manager)
         self.assertFalse(state["enabled"])
@@ -499,7 +490,7 @@ class TestRound3Hardening(unittest.IsolatedAsyncioTestCase):
         self.assertIn("$m", state["last_error"])
 
     async def test_invalid_command_rejected_at_set_setting(self) -> None:
-        services, manager = await flow("roll", wait=0.1)
+        services, manager = await flow(wait=0.1)
         with self.assertRaises(SettingsValidationError) as ctx:
             await manager.set_setting("alpha", "roll", "command", "$spin")
         self.assertIn("$wa", str(ctx.exception))
@@ -518,7 +509,7 @@ class TestRound3Hardening(unittest.IsolatedAsyncioTestCase):
             {"content": "You don't have enough rolls stacked!"},  # $us reply
         ]
         services, manager = await flow(
-            "roll", responses=responses,
+            responses=responses,
             overrides={"roll_interval": 1.5, "response_timeout": 2.0},
             wait=2.0,
         )
@@ -552,9 +543,8 @@ class TestRound3Hardening(unittest.IsolatedAsyncioTestCase):
         await manager.attach_account("alpha", allowed={"roll"})
         await manager.activate_account("alpha", services)
         with self.assertLogs("slaughtermudae.alpha.roll", level="ERROR") as cm:
-            bus.publish_nowait(MessageReceived(
-                account="alpha", message_id=1, channel_id=CHANNEL,
-                author_id=OWNER_ID, content="roll"))
+            await manager.execute_self_command(
+                "alpha", "rollstart", [], CHANNEL, invoker_id=OWNER_ID)
             await asyncio.sleep(0.5)
         self.assertTrue(
             any("plugin services unavailable" in line for line in cm.output),
@@ -594,9 +584,8 @@ class TestRound3Hardening(unittest.IsolatedAsyncioTestCase):
         saved = (module.TRANSIENT_BACKOFF_START, module.TRANSIENT_BACKOFF_MAX)
         module.TRANSIENT_BACKOFF_START, module.TRANSIENT_BACKOFF_MAX = 0.05, 0.2
         try:
-            bus.publish_nowait(MessageReceived(
-                account="alpha", message_id=1, channel_id=CHANNEL,
-                author_id=OWNER_ID, content="roll"))
+            await manager.execute_self_command(
+                "alpha", "rollstart", [], CHANNEL, invoker_id=OWNER_ID)
             await asyncio.sleep(1.5)
             self.assertTrue(plugin._rolling.get("alpha"))  # loop survived
             self.assertGreaterEqual(services.attempts, 3)  # still retrying
