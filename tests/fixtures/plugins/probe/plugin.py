@@ -18,6 +18,9 @@ from typing import Any, Dict, List, Optional
 from core.event_bus import Event
 from core.plugin_base import (
     ArgSpec,
+    PanelSection,
+    StatCard,
+    UIPanel,
     CommandContext,
     CommandSpec,
     PluginBase,
@@ -63,6 +66,37 @@ class ProbePlugin(PluginBase):
     # ---------------------------------------------------------------- events
     async def handle_event(self, ctx: PluginContext, event: Event) -> None:
         return  # no-op: the fixture never reacts to traffic
+
+    # ------------------------------------------------------- UI extension
+    async def ui_stats(self, ctx: "PluginContext"):
+        return (
+            StatCard(label="fixture load", value="ok", sub="probe alive",
+                     level="ok"),
+            StatCard(label="trigger", value=str(ctx.settings.get("trigger", "?"))),
+        )
+
+    async def ui_panels(self, ctx: "PluginContext") :
+        return (
+            UIPanel(
+                id="probe:overview",
+                title="Probe Overview",
+                icon="",
+                sections=(
+                    PanelSection(kind="metrics", title="Live", data=[
+                        {"label": "account", "value": ctx.account},
+                        {"label": "trigger", "value": str(ctx.settings.get("trigger", "?"))},
+                    ]),
+                    PanelSection(kind="list", title="Settings", data=[
+                        {"label": "factor", "value": str(ctx.settings.get("factor", "?"))},
+                    ]),
+                    PanelSection(kind="text", title="About", data=(
+                        "This panel is contributed by the probe fixture "
+                        "through the safe UI extension API (structured "
+                        "data, never HTML)."),
+                    ),
+                ),
+            ),
+        )
 
     # -------------------------------------------------------- self-commands
     async def _cmd_probeinfo(self, ctx: CommandContext,

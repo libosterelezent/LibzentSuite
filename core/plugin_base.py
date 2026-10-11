@@ -65,6 +65,46 @@ if TYPE_CHECKING:  # runtime duck-typing avoids import cycles / hard deps
     from adapters.base import DiscordMessage
 
 
+@dataclass(frozen=True)
+class StatCard:
+    """One metric card on the Home tab (plugin-contributed).
+
+    The dashboard renders these in its own metric-card template —
+    plugins provide structured values, never HTML.
+    """
+    label: str
+    value: str
+    sub: str = ""
+    level: str = ""          # "" | "ok" | "warn" | "err" (color)
+
+
+@dataclass(frozen=True)
+class PanelSection:
+    """One section of a plugin sidebar panel (structured data only).
+
+    kind: "metrics"  -> data = [{"label","value","sub","level"}]
+          "table"    -> data = {"columns": [...], "rows": [[...], ...]}
+          "list"     -> data = [{"label","value"}] (key-value list)
+          "text"     -> data = str (rendered as a paragraph, escaped)
+    """
+    kind: str
+    title: str = ""
+    data: Any = None
+
+
+@dataclass(frozen=True)
+class UIPanel:
+    """A plugin's sidebar panel — appears as a nav entry + content area.
+
+    The dashboard renders each panel with its own templates; plugin
+    values are esc()'d at render time (structured data, never raw HTML).
+    """
+    id: str                     # unique: "plugin_name:panel_id"
+    title: str
+    icon: str = ""              # SVG path data (24x24 viewBox); empty = default
+    sections: Tuple[PanelSection, ...] = ()
+
+
 class PluginBase(abc.ABC):
     """Contract every plugin module must fulfil.
 
@@ -87,6 +127,25 @@ class PluginBase(abc.ABC):
     #: discovery and the plugin manager binds each handler to the
     #: per-(account, plugin) instance. See :class:`CommandSpec`.
     COMMANDS: ClassVar[Tuple["CommandSpec", ...]] = ()
+
+    # ---------------------------------------------------------- UI extension
+    async def ui_stats(self, ctx: "PluginContext") -> Sequence["StatCard"]:
+        """Stat cards this plugin contributes to the Home tab.
+
+        Called when the dashboard fetches /api/ui/stats. Return a list
+        of StatCard(label, value, sub, level) — the dashboard renders
+        them in its own metric template (structured data, never HTML).
+        """
+        return ()
+
+    async def ui_panels(self, ctx: "PluginContext") -> Sequence["UIPanel"]:
+        """Sidebar panels this plugin contributes.
+
+        Called when the dashboard fetches /api/ui/panels. Each UIPanel
+        becomes a nav entry + content area rendered from its structured
+        sections (metrics/table/list/text) — never raw HTML.
+        """
+        return ()
 
     # ------------------------------------------------------------- lifecycle
     async def on_load(self, ctx: "PluginContext") -> None:
@@ -490,4 +549,5 @@ class PluginServices(Protocol):
 
 
 __all__ = ["PluginBase", "PluginContext", "PluginServices", "CommandSpec",
-           "CommandContext", "CommandSettingsApi"]
+           "CommandContext", "CommandSettingsApi",
+           "StatCard", "PanelSection", "UIPanel"]

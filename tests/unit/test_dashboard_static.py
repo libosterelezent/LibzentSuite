@@ -49,7 +49,7 @@ TOKEN = "static-test-token"
 
 #: JS modules in the exact dependency order index.html loads them.
 JS_FILES = ["state.js", "api.js", "ui.js", "accounts.js", "groups.js",
-            "views.js", "plugins-ui.js", "admin-ui.js", "app.js"]
+            "views.js", "plugins-ui.js", "admin-ui.js", "plugin-ui.js", "app.js"]
 #: every stylesheet index.html links.
 CSS_FILES = ["base.css", "layout.css", "components.css", "responsive.css"]
 
@@ -365,6 +365,7 @@ class TestPluginProfilesUI(unittest.TestCase):
         self.assertIn('<script src="js/views.js"></script>\n'
                       '<script src="js/plugins-ui.js"></script>\n'
                       '<script src="js/admin-ui.js"></script>\n'
+                      '<script src="js/plugin-ui.js"></script>\n'
                       '<script src="js/app.js"></script>', html)
         js = _js()
         self.assertEqual(js.count("function renderPlugins"), 1)

@@ -49,6 +49,24 @@ function renderHome() {
     d.onclick=()=>openGroupDetails(g.name);
     gr.appendChild(d);
   }
+  // plugin-contributed stat cards (structured data, esc()'d templates)
+  const statAccount = accounts().length ? accounts()[0].name : "";
+  if (statAccount) {
+    loadPluginStats(statAccount).then(cards => {
+      if (cards.length) {
+        const wrap = document.createElement("div");
+        wrap.className = "metrics";
+        wrap.style.marginBottom = "var(--sp-3)";
+        wrap.innerHTML = pluginStatsHTML(cards);
+        const metricsEl = $("home-metrics");
+        if (metricsEl && metricsEl.nextSibling) {
+          metricsEl.parentNode.insertBefore(wrap, metricsEl.nextSibling);
+        } else if (metricsEl) {
+          metricsEl.parentNode.appendChild(wrap);
+        }
+      }
+    }).catch(() => {});
+  }
   const indep = byAcct[""]||[];
   if (indep.length) { const d=btn("","","chip");
       d.style.cssText="display:block;margin:3px 0;padding:6px 10px;background:var(--surface2);border-radius:6px;font-size:12px;color:var(--dim);width:100%;text-align:left";

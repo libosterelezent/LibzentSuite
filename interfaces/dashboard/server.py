@@ -953,6 +953,13 @@ class DashboardServer:
             # mediated model is gone from the UI; these are the surfaces
             # the dashboard drives). Unknown account/plugin names are
             # domain errors from the api -> honest 400s below.
+            # ------------------------------------------------------- UI extension
+            if (method, path) == ("GET", "/api/ui/stats"):
+                return 200, {"ok": True, "data": await api.ui_stats(
+                    q_str(query, "account", path))}
+            if (method, path) == ("GET", "/api/ui/panels"):
+                return 200, {"ok": True, "data": await api.ui_panels()}
+
             # ------------------------------------------------------------ admin access
             if (method, path) == ("GET", "/api/admin/overview"):
                 return 200, {"ok": True, "data": await api.admin_overview()}

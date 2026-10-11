@@ -401,7 +401,7 @@ try {
   UI.go("home");
   // Every loader catches its own failures (toast + per-page fallback
   // state), so one dead endpoint can never block the others or the render.
-  Promise.all([loadManifests(),loadGroups(),loadScenarios()])
+  Promise.all([loadManifests(),loadGroups(),loadScenarios(),loadPluginUI()])
     .then(()=>render())
     .catch(e=>{ showErr("startup: "+(e&&e.message||e)); render(); });
   LOADERS.fleet = ()=>{ loadGroups(); };

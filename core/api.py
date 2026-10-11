@@ -1335,6 +1335,15 @@ class ControlAPI:
             LOG.debug("group memory refresh failed for %r", account,
                       exc_info=True)
 
+    # ------------------------------------------------------- UI extension
+    async def ui_stats(self, account: str) -> List[Dict[str, Any]]:
+        """Per-account Home-tab stat cards from every enabled plugin."""
+        return await _resolved(self._plugins.ui_stats(account))
+
+    async def ui_panels(self) -> List[Dict[str, Any]]:
+        """Plugin-contributed sidebar panels (framework-level)."""
+        return await _resolved(self._plugins.ui_panels())
+
     # ------------------------------------------------------ admin access
     async def admin_overview(self) -> Dict[str, Any]:
         """The admin panel's full view: admin ids, mudae bot id, and every

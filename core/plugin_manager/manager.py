@@ -476,6 +476,82 @@ class PluginManager:
         return effective
 
     # ---------------------------------------------------------------- state
+    async def ui_stats(self, account: str) -> List[Dict[str, Any]]:
+        """Collect every enabled plugin's Home-tab stat cards (JSON-safe).
+
+        Each card is {"plugin", "label", "value", "sub", "level"} — the
+        dashboard renders them in its own metric template. A crashing
+        provider contributes nothing (isolation).
+        """
+        cards: List[Dict[str, Any]] = []
+        runtime = self._accounts.get(account)
+        if not runtime:
+            return cards
+        services = self._services.get(account)
+        for plugin_name, entry in runtime.items():
+            instance = getattr(entry, "instance", None)
+            provider = getattr(instance, "ui_stats", None)
+            if provider is None or not callable(provider):
+                continue
+            ctx = getattr(instance, "_ctx", None)
+            if ctx is None:
+                continue
+            try:
+                for card in (await provider(ctx)) or ():
+                    cards.append({
+                        "plugin": plugin_name,
+                        "label": str(getattr(card, "label", "")),
+                        "value": str(getattr(card, "value", "")),
+                        "sub": str(getattr(card, "sub", "")),
+                        "level": str(getattr(card, "level", "")),
+                    })
+            except Exception:
+                self._logger.warning(
+                    "ui_stats failed for %s on %s — skipped",
+                    plugin_name, account, exc_info=True)
+        return cards
+
+    async def ui_panels(self) -> List[Dict[str, Any]]:
+        """Collect every plugin's sidebar panels (JSON-safe, deduped by id).
+
+        Panels are framework-level (not per-account): the first instance
+        of each plugin that provides a panel wins (deterministic).
+        """
+        panels: Dict[str, Dict[str, Any]] = {}
+        for account, runtime in self._accounts.items():
+            for plugin_name, entry in runtime.items():
+                instance = getattr(entry, "instance", None)
+                provider = getattr(instance, "ui_panels", None)
+                if provider is None or not callable(provider):
+                    continue
+                ctx = getattr(instance, "_ctx", None)
+                if ctx is None:
+                    continue
+                try:
+                    for panel in (await provider(ctx)) or ():
+                        pid = str(getattr(panel, "id", ""))
+                        if not pid or pid in panels:
+                            continue
+                        sections = []
+                        for sec in (getattr(panel, "sections", ()) or ()):
+                            sections.append({
+                                "kind": str(getattr(sec, "kind", "text")),
+                                "title": str(getattr(sec, "title", "")),
+                                "data": getattr(sec, "data", None),
+                            })
+                        panels[pid] = {
+                            "id": pid,
+                            "plugin": plugin_name,
+                            "title": str(getattr(panel, "title", "")),
+                            "icon": str(getattr(panel, "icon", "")),
+                            "sections": sections,
+                        }
+                except Exception:
+                    self._logger.warning(
+                        "ui_panels failed for %s — skipped",
+                        plugin_name, exc_info=True)
+        return sorted(panels.values(), key=lambda p: p["id"])
+
     def states(self, account: str) -> List[Dict[str, Any]]:
         """Per-account plugin state for both UIs (sorted by name)."""
         runtimes = self._accounts.get(account, {})
