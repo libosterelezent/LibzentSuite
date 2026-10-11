@@ -38,7 +38,9 @@ from core.event_bus import (
     PluginLoaded,
     PluginUnloaded,
 )
-from core.plugin_base import CommandContext, CommandSpec
+from core.plugin_base import (
+    CommandContext, CommandSpec, parse_command_args, usage_line,
+)
 from core.priority import Priority
 from core.settings_manager import SettingsManager
 
@@ -638,16 +640,22 @@ class PluginManager:
             guild_id=guild_id,
             settings_api=self._settings_api(account, plugin),
             raw=raw,
+            parsed={},
         )
         try:
             if spec.handler is None:
                 raise PluginError(f"command {spec.name!r} declares no handler")
+            if spec.args:
+                # declarative ArgSpecs: parse/convert/validate BEFORE the
+                # handler — failures render the auto-usage line below
+                ctx.parsed.update(
+                    parse_command_args(spec, list(args or [])))
             reply = await spec.handler(ctx, list(args or []))
         except asyncio.CancelledError:
             raise
         except (ValueError, SettingsValidationError) as exc:
             # usage error: render the usage line + the reason back
-            usage = f"{spec.name} {spec.usage}".strip()
+            usage = f"{spec.name} {spec.usage or usage_line(spec)}".strip()
             reply = f"usage: {usage}\n{exc}" if str(exc) else f"usage: {usage}"
         except Exception:
             ctx.logger.exception("self-command %s crashed on %s", name, account)

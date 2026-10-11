@@ -41,7 +41,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from ..plugin_base import CommandContext, CommandSpec
+from ..plugin_base import CommandContext, CommandSpec, usage_line
 
 LOG = logging.getLogger("slaughtermudae.selfcommands")
 
@@ -92,24 +92,31 @@ async def _say_handler(ctx: CommandContext, args: List[str]) -> str:
 
 
 async def _help_handler(ctx: CommandContext, args: List[str]) -> str:
-    """Categorized listing of every registered command (dynamic)."""
+    """Plugin-grouped listing of every registered command (dynamic,
+    paginated). ``help`` -> page 1, ``help <N>`` -> page N,
+    ``help <command>`` -> usage + description."""
     specs = COMMAND_HUB.specs(ctx.account)
-
-    specs = COMMAND_HUB.specs(ctx.account)
+    if args and args[0].isdigit():            # help 2 -> page 2
+        pages = _paginate_help(_render_help_body(specs))
+        n = int(args[0])
+        if not 1 <= n <= len(pages):
+            raise ValueError(f"help has {len(pages)} page(s)")
+        suffix = f"\n(help {n + 1} for more…)" if n < len(pages) else ""
+        return pages[n - 1] + suffix
     if args:  # help <command>: usage + description
         wanted = args[0].lower()
         for spec in specs:
             if spec.name == wanted:
                 lines = [f"{spec.name} — {spec.help}"]
-                if spec.usage:
-                    lines.append(f"usage: {spec.name} {spec.usage}")
-                else:
-                    lines.append(f"usage: {spec.name}")
+                generated = spec.usage or usage_line(spec)
+                lines.append(f"usage: {spec.name} {generated}".rstrip())
                 lines.append(f"category: {spec.category or NO_CATEGORY}")
                 return "\n".join(lines)
         known = " ".join(sorted(s.name for s in specs))
         raise ValueError(f"no command {wanted!r} (known: {known})")
-    return render_help(specs)
+    pages = _paginate_help(_render_help_body(specs))
+    suffix = "\n(help 2 for more…)" if len(pages) > 1 else ""
+    return pages[0] + suffix
 
 
 #: framework-declared commands (reserved names; collision policy: a
@@ -171,10 +178,68 @@ def render_help(specs: Sequence[CommandSpec]) -> str:
     width = max(width, 10)
     lines: List[str] = []
     for category in ordered:
-        header = category if category == NO_CATEGORY else category.title()
-        lines.append(f"{header}:")
+        header = category if category == NO_CATEGORY else category.upper()
+        lines.append(header)
         for spec in sorted(groups[category], key=lambda s: s.name):
-            lines.append(f"  {spec.name.ljust(width)}{spec.help}")
+            desc = spec.help
+            if len(desc) > HELP_DESC_WIDTH:
+                desc = desc[: HELP_DESC_WIDTH - 1].rstrip() + "…"
+            lines.append(f"    {spec.name.ljust(width)}{desc}")
+    body = "\n".join(lines) if lines else "no commands registered"
+    pages = _paginate_help(body)
+    return pages[0] if len(pages) == 1 else pages[0] + f"\n(help 2 for more…)"
+
+
+#: max description width in the help listing (25 chars + ellipsis)
+HELP_DESC_WIDTH = 25
+#: soft page budget for the paginated help (Discord limit is 2000)
+HELP_PAGE_CHARS = 1750
+
+
+def _paginate_help(body: str) -> List[str]:
+    """Split the rendered help on GROUP boundaries into <=page-budget
+    chunks (never mid-group; a single oversized group stays whole)."""
+    groups = [g for g in body.split("\n\n") if g.strip()]
+    pages: List[str] = []
+    current: List[str] = []
+    used = 0
+    for g in groups:
+        if current and used + len(g) + 2 > HELP_PAGE_CHARS:
+            pages.append("\n\n".join(current))
+            current, used = [], 0
+        current.append(g)
+        used += len(g) + 2
+    if current:
+        pages.append("\n\n".join(current))
+    return pages or ["no commands registered"]
+
+
+def help_page_count(specs: Sequence[CommandSpec]) -> int:
+    """How many pages the current registry's help renders into."""
+    return len(_paginate_help(_render_help_body(specs)))
+
+
+def _render_help_body(specs: Sequence[CommandSpec]) -> str:
+    """Full unpaginated help body (grouped, aligned, truncated)."""
+    groups: Dict[str, List[CommandSpec]] = {}
+    for spec in specs:
+        category = spec.category or NO_CATEGORY
+        groups.setdefault(category, []).append(spec)
+    plugin_categories = sorted(
+        c for c in groups if c not in (UTILITIES_CATEGORY, NO_CATEGORY))
+    ordered = plugin_categories + [
+        c for c in (UTILITIES_CATEGORY, NO_CATEGORY) if c in groups]
+    width = max((len(s.name) for s in specs), default=0) + 2
+    width = max(width, 10)
+    lines: List[str] = []
+    for category in ordered:
+        header = category if category == NO_CATEGORY else category.upper()
+        lines.append(header)
+        for spec in sorted(groups[category], key=lambda s: s.name):
+            desc = spec.help
+            if len(desc) > HELP_DESC_WIDTH:
+                desc = desc[: HELP_DESC_WIDTH - 1].rstrip() + "…"
+            lines.append(f"    {spec.name.ljust(width)}{desc}")
     return "\n".join(lines) if lines else "no commands registered"
 
 

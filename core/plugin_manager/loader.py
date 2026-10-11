@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Dict, List, Type
 
 from ..errors import PluginError
-from ..plugin_base import CommandSpec, PluginBase
+from ..plugin_base import ArgSpec, CommandSpec, PluginBase
 
 LOG = logging.getLogger("slaughtermudae.loader")
 
@@ -251,6 +251,19 @@ class PluginLoader:
                 raise PluginError(
                     f"plugin {name!r}: command {spec.name!r} needs a help"
                     f" line in {path}")
+            for arg in spec.args:
+                if not isinstance(arg, ArgSpec):
+                    raise PluginError(
+                        f"plugin {name!r}: command {spec.name!r} args must"
+                        f" be ArgSpec (got {type(arg).__name__}) in {path}")
+                if not (arg.name or "").strip():
+                    raise PluginError(
+                        f"plugin {name!r}: command {spec.name!r} declares"
+                        f" an ArgSpec with an empty name in {path}")
+                if arg.greedy and arg is not spec.args[-1]:
+                    raise PluginError(
+                        f"plugin {name!r}: command {spec.name!r} greedy"
+                        f" ArgSpec {arg.name!r} must be LAST in {path}")
             seen.add(spec.name)
 
     # ------------------------------------------------------------- accessors

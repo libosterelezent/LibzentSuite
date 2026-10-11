@@ -28,7 +28,9 @@ from typing import Any, Dict, List, Optional
 from core.credentials import Credentials
 from core.errors import PluginError, TargetGone
 from core.event_bus import EventBus
-from core.plugin_base import CommandSpec
+from core.plugin_base import (
+    ArgSpec, CommandSpec, parse_command_args, usage_line,
+)
 from core.plugin_manager import PluginManager
 from core.plugin_manager.commands import (
     COMMAND_HUB,
@@ -40,6 +42,68 @@ from core.plugin_manager.commands import (
 from core.plugin_manager.loader import PluginLoader
 from core.priority import Priority
 from core.settings_manager import SettingsManager
+
+class TestArgSpecParsing(unittest.TestCase):
+    """Declarative positional grammar (the rollset-style endpoint)."""
+
+    def _spec(self, **kw):
+        return CommandSpec(name="t", help="h", handler=None, **kw)
+
+    def test_positional_choice_int_optional(self):
+        spec = self._spec(args=(
+            ArgSpec("name"),
+            ArgSpec("mode", choices=("fast", "slow")),
+            ArgSpec("count", kind=int),
+            ArgSpec("note", required=False, default="-"),
+        ))
+        out = parse_command_args(spec, ["farm", "fast", "3", "hi"])
+        self.assertEqual(out, {"name": "farm", "mode": "fast",
+                               "count": 3, "note": "hi"})
+        out2 = parse_command_args(spec, ["farm", "slow", "10"])
+        self.assertEqual(out2["note"], "-")
+        self.assertIsInstance(out2["count"], int)
+
+    def test_missing_required_names_the_arg(self):
+        spec = self._spec(args=(ArgSpec("a"), ArgSpec("b")))
+        with self.assertRaises(ValueError) as cm:
+            parse_command_args(spec, ["only-one"])
+        self.assertIn("missing <b>", str(cm.exception))
+
+    def test_bad_int_renders_reason(self):
+        spec = self._spec(args=(ArgSpec("count", kind=int),))
+        with self.assertRaises(ValueError) as cm:
+            parse_command_args(spec, ["ten"])
+        self.assertIn("<count> must be a valid int", str(cm.exception))
+
+    def test_choice_rejection_lists_allowed(self):
+        spec = self._spec(args=(ArgSpec("mode", choices=("a", "b")),))
+        with self.assertRaises(ValueError) as cm:
+            parse_command_args(spec, ["zzz"])
+        self.assertIn("a/b", str(cm.exception))
+
+    def test_greedy_consumes_rest(self):
+        spec = self._spec(args=(ArgSpec("names", greedy=True),))
+        out = parse_command_args(spec, ["p1", "p2", "p3"])
+        self.assertEqual(out["names"], ["p1", "p2", "p3"])
+        with self.assertRaises(ValueError):
+            parse_command_args(spec, [])
+
+    def test_extras_rejected(self):
+        spec = self._spec(args=(ArgSpec("a"),))
+        with self.assertRaises(ValueError) as cm:
+            parse_command_args(spec, ["one", "two"])
+        self.assertIn("unexpected argument", str(cm.exception))
+
+    def test_usage_line_generated(self):
+        spec = self._spec(args=(
+            ArgSpec("name"), ArgSpec("mode", choices=("a",)),
+            ArgSpec("count", kind=int, required=False),
+            ArgSpec("rest", greedy=True),
+        ))
+        self.assertEqual(usage_line(spec), "<name> <mode> [count] <rest...>")
+
+
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 #: fixture plugins (the framework bundles none; probe carries the
@@ -312,22 +376,27 @@ class HelpRenderingTests(unittest.TestCase):
         width = max(max((len(s.name) for s in specs), default=0) + 2, 10)
         return width
 
-    def test_mudae_layout(self) -> None:
+    def test_plugin_grouped_layout(self) -> None:
+        """Operator-specified format: PLUGIN (uppercase) header, 4-space
+        indented commands, aligned descriptions, 25-char truncation."""
         specs = self.ROLL_SPECS
         text = render_help(specs)
         width = self._col(specs)
         lines = text.splitlines()
-        self.assertEqual(lines[0], "Roll:")           # plugin category, titled
-        self.assertEqual(lines[1], f"  {'rollinfo'.ljust(width)}"
-                                   "Show effective roll settings")
-        self.assertIn("Utilities:", text)
-        self.assertTrue(text.index("Roll:") < text.index("Utilities:")
-                        < text.index("No Category:"))
-        self.assertIn(f"  {'help'.ljust(width)}Shows this message", text)
-        self.assertIn(f"  {'say'.ljust(width)}Repeats the user's message.",
-                      text)
-        # inside a category, commands are name-sorted
-        roll_block = text.split("Roll:")[1].split("Utilities:")[0]
+        self.assertEqual(lines[0], "ROLL")            # plugin, UPPERCASE
+        self.assertEqual(lines[1], f"    {'rollinfo'.ljust(width)}"
+                                   "Show effective roll sett…")
+        self.assertIn("UTILITIES", text)
+        self.assertTrue(text.index("ROLL") < text.index("UTILITIES")
+                        < text.index("No Category"))
+        # 25-char truncation with ellipsis on EVERY long description
+        for line in lines:
+            if line.startswith("    ") and line.strip():
+                self.assertLessEqual(
+                    len(line.strip()[len(line.strip().split()[0]):].strip()),
+                    25, f"description over 25 chars: {line!r}")
+        # inside a group, commands are name-sorted
+        roll_block = text.split("ROLL")[1].split("UTILITIES")[0]
         self.assertLess(roll_block.index("rollinfo"),
                         roll_block.index("rolllist"))
 
@@ -340,12 +409,13 @@ class HelpRenderingTests(unittest.TestCase):
         ]
         text = render_help(specs)
         width = self._col(specs)
-        self.assertIn(f"  {'rollset'.ljust(width)}Set an override", text)
+        self.assertIn(f"    {'rollset'.ljust(width)}Set an override", text)
         # usage surfaces through `help <command>` (executor-level below)
         framework_text = render_help(list(FRAMEWORK_COMMANDS))
         fwidth = self._col(list(FRAMEWORK_COMMANDS))
-        self.assertIn(f"  {'pg'.ljust(fwidth)}Gateway latency and uptime",
-                      framework_text)
+        # 25-char truncation applies to framework verbs too
+        self.assertIn(f"    {'pg'.ljust(fwidth)}"
+                      "Gateway latency and upti…", framework_text)
 
     def test_long_names_widen_the_column(self) -> None:
         text = render_help([
@@ -353,7 +423,7 @@ class HelpRenderingTests(unittest.TestCase):
             CommandSpec(name="pg", help="y", category="Utilities"),
         ])
         # width = len("rollremove") + 2 = 12 > 10 floor
-        self.assertIn(f"  {'pg'.ljust(12)}y", text)
+        self.assertIn(f"    {'pg'.ljust(12)}y", text)
 
     def test_empty_registry(self) -> None:
         self.assertEqual(render_help([]), "no commands registered")
@@ -480,12 +550,14 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
     async def test_help_lists_framework_and_plugin_categories(self) -> None:
         await self._boot()
         reply = await self._run("help", [])
-        self.assertIn("Probe:", reply)          # fixture's declared category
+        self.assertIn("PROBE", reply)           # plugin group, UPPERCASE
         self.assertIn("probeinfo", reply)       # its declared verb
-        self.assertIn("Utilities:", reply)
-        self.assertIn("Gateway latency and uptime", reply)
-        self.assertIn("Repeats the user's message.", reply)
-        self.assertIn("No Category:", reply)
+        self.assertIn("probeset", reply)        # ArgSpec grammar demo verb
+        self.assertIn("probestart", reply)      # greedy grammar demo verb
+        self.assertIn("UTILITIES", reply)
+        self.assertIn("Gateway latency and upti", reply)  # truncated @25
+        self.assertIn("Repeats the user's messa", reply)  # truncated @25
+        self.assertIn("No Category", reply)
         self.assertIn("Shows this message", reply)
 
     async def test_help_for_one_command_shows_usage(self) -> None:

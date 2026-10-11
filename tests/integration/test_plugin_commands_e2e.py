@@ -133,7 +133,7 @@ class CommandE2EBase(unittest.IsolatedAsyncioTestCase):
 class RegistryWiringTests(CommandE2EBase):
     """Assignment/enabled axes drive commands_for through the real stack."""
 
-    PROBE_VERBS = {"probeinfo"}
+    PROBE_VERBS = {"probeinfo", "probeset", "probestart"}
 
     async def test_assign_unassign_disable_drive_commands_for(self):
         fw = await self.boot()

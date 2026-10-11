@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import abc
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -147,6 +147,100 @@ class PluginContext:
 
 
 @dataclass(frozen=True)
+class ArgSpec:
+    """One declarative positional argument of a self-command.
+
+    This is the ENDPOINT for original-MudaeScript-style grammar:
+    ``rollset <profile_name> <roulette> <channel_id> <userstack>
+    <ignore_keys>`` is five ArgSpecs — the executor parses, converts and
+    validates them BEFORE the handler runs, filling ``ctx.parsed``;
+    failures render the auto-generated usage line back to the invoker
+    (exactly like the original's MissingRequiredArgument handlers).
+    """
+    #: placeholder name — renders as ``<name>`` in usage lines
+    name: str
+    #: str | int | float, or any callable(text) -> value (raises
+    #: ValueError on bad input)
+    kind: Any = str
+    required: bool = True
+    default: Any = None
+    #: consume the REMAINING tokens as a list (``rollstop <p...>``)
+    greedy: bool = False
+    #: allowed values (checked AFTER conversion)
+    choices: Optional[Tuple[Any, ...]] = None
+
+
+def _convert_arg(spec: "ArgSpec", token: str) -> Any:
+    if spec.kind is str or callable(spec.kind) is False and spec.kind is None:
+        value: Any = token
+    elif spec.kind in (int, float):
+        try:
+            value = spec.kind(token)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"<{spec.name}> must be a valid "
+                f"{spec.kind.__name__}, got {token!r}") from None
+    elif callable(spec.kind):
+        try:
+            value = spec.kind(token)
+        except ValueError:
+            raise ValueError(f"<{spec.name}>: {token!r} is not valid") from None
+    else:
+        value = token
+    if spec.choices is not None and value not in spec.choices:
+        allowed = "/".join(str(c) for c in spec.choices)
+        raise ValueError(
+            f"<{spec.name}> must be one of: {allowed} (got {token!r})")
+    return value
+
+
+def parse_command_args(spec: "CommandSpec", argv: List[str]) -> Dict[str, Any]:
+    """Parse ``argv`` against the command's declared ArgSpecs.
+
+    Returns the name->value dict for ``ctx.parsed``. Raises ValueError
+    with a one-line reason on: missing required args, failed type
+    conversion, disallowed choices, or leftover tokens.
+    """
+    out: Dict[str, Any] = {}
+    rest = list(argv or [])
+    for arg in spec.args:
+        if arg.greedy:
+            taken = list(rest)
+            rest = []
+            if not taken:
+                if arg.required:
+                    raise ValueError(f"missing <{arg.name}> (one or more)")
+                taken = list(arg.default or [])
+            out[arg.name] = taken
+            continue
+        if not rest:
+            if arg.required:
+                raise ValueError(f"missing <{arg.name}>")
+            out[arg.name] = arg.default
+            continue
+        out[arg.name] = _convert_arg(arg, rest.pop(0))
+    if rest:
+        raise ValueError(
+            f"unexpected argument {rest[0]!r} — this command takes "
+            f"{len(spec.args)} argument(s)")
+    return out
+
+
+def usage_line(spec: "CommandSpec") -> str:
+    """Auto-generated usage: ``<a> <b> [c...]`` from the ArgSpecs
+    (empty when the command declares none — falls back to spec.usage)."""
+    parts = []
+    for arg in spec.args:
+        if arg.greedy:
+            parts.append(f"[{arg.name}...]" if not arg.required
+                         else f"<{arg.name}...>")
+        else:
+            parts.append(f"<{arg.name}>" if arg.required
+                         else f"[{arg.name}]")
+    return " ".join(parts)
+
+
+@dataclass(frozen=True)
 class CommandSpec:
     """One plugin-declared self-command (Mudae-style grammar).
 
@@ -174,8 +268,12 @@ class CommandSpec:
     name: str
     #: one-liner for the categorized help
     help: str
-    #: argument usage, e.g. "<key> <value>"
+    #: argument usage, e.g. "<key> <value>" (display-only hint; the
+    #: declarative ArgSpecs below are the enforced contract)
     usage: str = ""
+    #: declarative positional arguments — when present the executor
+    #: parses/validates them and fills ``ctx.parsed`` before the handler
+    args: Tuple[ArgSpec, ...] = ()
     #: defaults to the plugin's display name
     category: str = ""
     #: async def handler(ctx: CommandContext, args: List[str]) -> str
@@ -248,6 +346,10 @@ class CommandContext:
     settings_api: Optional[CommandSettingsApi] = None
     #: verbatim argument remainder (whitespace-normalized by the parser)
     raw: str = ""
+    #: PARSED arguments when the spec declares ArgSpecs (name -> typed
+    #: value; greedy args are lists). Empty dict for spec-less commands
+    #: (they read the raw ``args`` list instead).
+    parsed: Dict[str, Any] = field(default_factory=dict)
 
 
 
