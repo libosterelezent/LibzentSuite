@@ -18,11 +18,12 @@ Plugin contract (unchanged from the audited original):
   * catch :class:`core.errors.FlowBlocked` around any multi-step flow, log
     ONE clean abort line and return — per-account isolation is the
     dispatcher's job, failing clean and quiet is the plugin's (reference:
-    ``plugins/soulcopy/plugin.py``).
+    ``tests/fixtures/sim_plugins/soulcopy/plugin.py``, a test-only
+    workload fixture).
 
 CONTRACT NOTE (A3 decision, documented for A6): the pinned PluginServices
-protocol gained ``open_dm(user_id) -> int`` — soulcopy needs the Mudae DM
-channel id to filter collected pages. The account manager implements it
+protocol gained ``open_dm(user_id) -> int`` — flow plugins need the Mudae
+DM channel id to filter collected pages. The account manager implements it
 (the underlying DiscordClient protocol already exposes ``open_dm``).
 
 SELF-COMMAND DECLARATION (per-account command interface): a plugin may
@@ -137,7 +138,7 @@ class PluginContext:
     #: unknown / not computed). A resolved value equal to the schema
     #: default is ambiguous — it may be the default itself OR an explicit
     #: choice that happens to match it. Plugins that force a setting at
-    #: runtime (e.g. roll's userstack auto-disable) consult this to avoid
+    #: runtime (e.g. an auto-disable latch) consult this to avoid
     #: clobbering an explicit user re-enable on the next load.
     explicit_settings: Optional[FrozenSet[str]] = None
 
@@ -259,8 +260,9 @@ class PluginServices(Protocol):
     LOW by default) — pacing/queueing happens behind this facade, so plugins
     never sleep to self-throttle.
 
-    NOTE: ``open_dm`` was added by A3 (see module docstring) — soulcopy uses
-    it to learn the Mudae DM channel id before collecting pages.
+    NOTE: ``open_dm`` was added by A3 (see module docstring) — flow
+    plugins use it to learn the Mudae DM channel id before collecting
+    pages.
 
     PERSISTENT PLUGIN API (public, documented): ``cooldown_*`` and ``state_*``
     give plugins durable, account-scoped persistence without touching SQL

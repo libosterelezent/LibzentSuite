@@ -7,7 +7,7 @@ Each :class:`Scenario` bundles everything the runner needs:
   * ``world_setup`` — builds the synthetic topology (users, the trigger
     channel, the scripted Mudae responder and its pages),
   * ``script``     — drives the built stack (usually: the owner types the
-    soulcopy trigger, then the world settles),
+    soulcopy fixture's trigger, then the world settles),
   * ``checks``     — pure post-mortem over (audit dicts, world) returning
     human-readable failure strings ([] == pass).
 
@@ -43,11 +43,11 @@ from adapters.simulator.world import (
 
 #: the single account every scenario runs (synthetic ids only)
 ACCOUNT_NAME = "alpha"
-#: Mudae command the soulcopy plugin sends to request the export
+#: Mudae command the soulcopy workload fixture sends to request the export
 EXPORT_COMMAND = "$slud-s"
-#: prefix the plugin puts on every produced chunk (soulcopy textutils)
+#: prefix the fixture puts on every produced chunk (soulcopy textutils)
 IMPORT_PREFIX = "$soulcopy "
-#: owner trigger word that starts the soulcopy flow (plugin default)
+#: owner trigger word that starts the fixture's flow (its default)
 TRIGGER_WORD = "slcopy"
 #: pacing used by pacing_respected and its verification tolerance (seconds)
 PACING_INTERVAL = 1.6
@@ -203,7 +203,12 @@ def _delivered_chunks(world: SimWorld) -> List[WorldMessage]:
 
 
 def _checks_basic(audit: List[dict], world: SimWorld) -> List[str]:
-    """soulcopy_basic: 2 pages -> >= 2 outbound sends and one prefixed chunk."""
+    """soulcopy_basic: 2 pages -> >= 2 outbound sends and one prefixed chunk.
+
+    The workload plugin is the tests/fixtures/sim_plugins/soulcopy
+    fixture (the framework bundles no plugins); the checks only read
+    world/audit observables, so they are unchanged by the move.
+    """
     failures: List[str] = []
     outbound = _outbound(audit)
     if len(outbound) < 2:

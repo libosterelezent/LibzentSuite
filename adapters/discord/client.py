@@ -749,13 +749,9 @@ class RealDiscordClient:
         plugin manager publishes an account's (assigned ∧ enabled)
         commands there and this layer rebuilds its Bot registrations from
         whatever is current — framework verbs (help/pg/say) plus every
-        plugin-declared command (roll's six, and anything later plugins
-        add as a one-liner ``COMMANDS`` entry).
-
-        The legacy trigger pass-throughs remain ONLY for plugins that
-        have not migrated to command declarations (slcopy → soulcopy);
-        the old ``sm!roll``/``sm!rollstop`` triggers are SUBSUMED by the
-        registry's ``rollstart``/``rollstop`` commands.
+        plugin-declared command (a one-liner ``COMMANDS`` entry). There
+        are no legacy trigger pass-throughs: every verb is a registry
+        command.
 
         Unknown commands (anything after the prefix that isn't registered)
         are silently ignored — they do NOT reach the event bus.
@@ -763,11 +759,6 @@ class RealDiscordClient:
         from discord.ext import commands as ext_commands
         bot = self._client
         adapter = self
-
-        # legacy trigger bridge (soulcopy has no COMMANDS yet)
-        @bot.command(name="slcopy")
-        async def _slcopy(ctx):
-            adapter._publish_self_trigger(ctx, "slcopy")
 
         @bot.event
         async def on_command_error(ctx, error):
@@ -896,43 +887,6 @@ class RealDiscordClient:
         except Exception:
             # a broken dispatch must never kill the Bot's command task
             self._logger.exception("self-command dispatch failed: %s", name)
-
-    def _publish_self_trigger(self, ctx: Any, trigger: str) -> None:
-        """Re-publish a self-command as a synthetic MessageReceived event.
-
-        Routes through ``self.on_message`` (the account-manager callback),
-        which publishes to the bus with the account's identity. The plugin
-        owner check then applies normally against the TYPER: the synthetic
-        DTO carries the invoking user's id (an owner — the dispatch gate
-        already enforced it).
-        """
-        if self.on_message is None:
-            return
-        try:
-            channel = ctx.channel
-            guild = getattr(channel, "guild", None)
-            guild_id = getattr(guild, "id", None) if guild else None
-            # DM = no guild on the channel (works before connect() too,
-            # where self._discord is not yet imported)
-            # synthetic DTO: the TYPER's id as author (the dispatch gate
-            # guarantees they're an owner), the real channel, the trigger
-            # as content — indistinguishable from a real owner-typed
-            # message to every downstream consumer
-            dto = DiscordMessage(
-                id=getattr(ctx.message, "id", 0),
-                channel_id=channel.id,
-                author_id=getattr(getattr(ctx, "author", None), "id", None)
-                          or self.user_id,
-                content=trigger,
-                dm=guild_id is None,
-                guild_id=guild_id,
-            )
-            self.on_message(dto)
-            self._logger.info(
-                "self-command %r dispatched in channel %s", trigger,
-                channel.id)
-        except Exception:
-            self._logger.exception("self-command dispatch failed")
 
     async def disconnect(self) -> None:
         """Close the underlying client; safe when never started."""

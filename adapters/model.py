@@ -187,7 +187,7 @@ class DiscordMessage:
 
     COMPATIBILITY (§23): the five original fields keep their exact order
     and names; every rich addition is defaulted, so all existing
-    constructions and consumers (soulcopy, roll, remote control, scheduler
+    constructions and consumers (flow plugins, remote control, scheduler
     summaries, sim scenarios) are untouched.
 
     Rich data is captured once at conversion (§15) — plugins never re-fetch

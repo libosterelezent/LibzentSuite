@@ -184,7 +184,7 @@ class RegisteredCommand:
     """One registry entry: the (bound) spec + the plugin it came from."""
 
     spec: CommandSpec
-    #: plugin name ("roll"...) or FRAMEWORK_PLUGIN for pg/say/help
+    #: plugin name (e.g. "probe") or FRAMEWORK_PLUGIN for pg/say/help
     plugin: str
 
 

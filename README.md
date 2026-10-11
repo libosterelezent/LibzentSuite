@@ -3,8 +3,8 @@
 A multi-account Discord automation framework designed around one principle:
 **your accounts should behave like well-paced humans, not bots.**
 
-Built for Mudae farming with any number of accounts that take turns rolling,
-share a pacing clock so they look like one user, back off instantly when
+Built for Mudae farming with any number of accounts that share a pacing
+clock so they look like one user, back off instantly when
 Discord says so, and never make an unnecessary API call — all managed from
 a local dashboard.
 
@@ -23,7 +23,7 @@ a local dashboard.
 3. [Quick start](#quick-start)
 4. [The dashboard](#the-dashboard)
 5. [Setting up accounts](#setting-up-accounts)
-6. [Rolling with multiple accounts](#rolling-with-multiple-accounts)
+6. [Plugins](#plugins)
 7. [Everyday commands](#everyday-commands)
 8. [Safety model](#safety-model)
 9. [Troubleshooting](#troubleshooting)
@@ -33,15 +33,14 @@ a local dashboard.
 
 ## What it does
 
-- **Roll automation** (`$wa`, `$wg`, `$ha`, …) — continuous rolling with
-  cooldown detection, `$us` userstack when rolls run low, `$ru` on key limits
-- **Turn-taking across accounts** — when one account hits its roulette
-  limit, the next one automatically takes over; cooldowns persist across
-  restarts
-- **Anti-detection pacing** — three composing rate layers make N accounts
-  emit the cadence of ONE careful user
-- **Soulmate export** (`soulcopy` plugin) — dump your soulmate list as
-  `$soulcopy`-ready chunks
+- **Plugin framework** — self-describing plugins (settings manifest,
+  lifecycle, declared self-commands) discovered from a directory; the
+  framework ships with NONE bundled, so `plugins/` may stay empty
+- **Turn-taking across accounts** — shared sync-group clocks make N
+  accounts emit the cadence of ONE careful user; cooldowns persist
+  across restarts
+- **Anti-detection pacing** — three composing rate layers compose into
+  one human-like cadence
 - **Everything from one dashboard** — accounts, tokens (encrypted),
   plugins, rate policies, live logs, audit trail, simulation
 - **Fully offline-testable** — a complete Discord simulator runs the whole
@@ -110,63 +109,45 @@ lines (reconnect/close codes), DB worker timings, scheduler pressure.
 ## Setting up accounts
 
 1. **Add the account** — dashboard → Accounts → Add (or
-   `python3 main.py accounts add myaccount roll` — name plus the plugin(s)
-   it should run; assign more later with `accounts plugin-add`). Put it in
-   a **sync group** with `groups set-account myaccount roll`.
+   `python3 main.py accounts add myaccount` — name plus optionally the
+   plugin(s) it should run; assign more later with `accounts plugin-add`).
+   Put it in a **sync group** with `groups set-account myaccount <group>`.
 2. **Store its token** — Accounts → credential (or
    `python3 main.py accounts credential myaccount <token>`). The token is
    Fernet-encrypted at rest; the key lives in `state/credentials.key`
    (back that file up — losing it means re-entering tokens).
 3. **Start it** — the ▶ button (or `accounts start myaccount`)
 
-Put every rolling account in the same **sync group** — that's what makes
-them share a pacing clock.
+Put every account that shares work in the same **sync group** — that's
+what makes them share a pacing clock.
 
-## Rolling with multiple accounts
+## Plugins
 
-This is the core pattern. Two (or five, or ten) accounts take turns
-rolling; whoever isn't cooldown-blocked rolls, automatically.
+The framework itself ships with **no bundled plugins** — `plugins/` can
+stay empty and everything still boots (the loader simply discovers zero
+plugins). Plugins are self-describing packages: a `PluginBase` subclass
+with metadata, a `Setting` manifest, lifecycle hooks and optional declared
+self-commands (`COMMANDS`). See `docs/plugins/writing_plugins.rst` and
+`core/plugin_base.py`.
 
-**Setup once:**
 ```bash
-python3 main.py accounts add alpha roll   # name + the plugins it runs
-python3 main.py groups set-account alpha rollers
-python3 main.py accounts add beta roll
-python3 main.py groups set-account beta rollers
-# store tokens for both, start both (dashboard or CLI)
+python3 main.py plugins list               # nothing until you add one
+# drop a package under plugins/ (or pass --plugins <dir>), then:
+python3 main.py accounts add alpha <plugin>   # name + the plugin it runs
+python3 main.py accounts plugin-add alpha <plugin>
 ```
 
-**Start rolling:** type `roll` (the trigger word) in a channel your
-accounts can see, from the owner account. Each account that sees it starts
-its rolling loop. Type `rollstop` to stop.
-
-**What happens:**
-
-```
-alpha: $wa ─┐
-beta:  $wa ─┤   interleaved — spaced by the SHARED group clock
-alpha: $wa ─┤   (Discord sees one user's cadence, not two)
-beta:  $wa ─┘
-...
-alpha hits "roulette is limited to **60** min"
-        └─► alpha parks (cooldown persisted, survives restarts)
-            beta keeps rolling — and now gets the FULL pacing interval
-...
-beta hits its limit ──► parks
-alpha's cooldown expired ──► already rolling again
-```
-
-Nobody hands off a shift token — each account's limit is its own, the
-shared clock keeps the combined rate constant, and the rotation just
-happens. Add a third account to the group tomorrow and it joins with zero
-extra config.
+The test suite exercises the framework through fixture plugins
+(`tests/fixtures/plugins/probe` for the loader/manager/command registry;
+`tests/fixtures/sim_plugins/soulcopy` as the full-stack simulation
+workload) — those are tests-only, never discovered by a production boot.
 
 ## Everyday commands
 
 From your owner account in Discord (mention the bot account as prefix):
 
 ```
-@account status            @account plugins alpha roll off
+@account status            @account plugins alpha <plugin> off
 @account estop             @account help
 ```
 
@@ -245,7 +226,9 @@ database/              SQLite: models, ordered migrations, repositories,
 adapters/              Discord boundary: discord/ (live, lazy import) +
                        simulator/ (complete offline world)
 interfaces/            cli/ (REPL + one-shot) + dashboard/ (SPA + REST + WS)
-plugins/               roll (roulette automation) + soulcopy (export)
+plugins/               your plugins (the framework ships with none — the
+                       directory may be empty; test fixtures live under
+                       tests/fixtures/)
 benchmark/             the benchmark subsystem (scenarios, profiling modes)
 tests/unit|integration|simulation|stress   1264-test offline suite
 config/                global settings, rate policies, account files

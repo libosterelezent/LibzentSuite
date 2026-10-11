@@ -29,6 +29,14 @@ from core.logging_service import LogService, ServiceLogger
 from database.connection import DatabaseError as ConnDatabaseError
 from database.db import Database
 
+from pathlib import Path
+
+#: fixture plugins (the framework ships none; the fixture keeps the boot
+#: path exercising plugin discovery/attachment)
+FIXTURE_PLUGINS = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "plugins"
+)
+
 
 class _TmpCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -381,7 +389,8 @@ class TestBootstrapRobustness(_TmpCase):
         db = Database(self.dir / "b.db")
         creds = Credentials.from_values({"MUDAE_BOT_ID": "1"})
         with self.assertRaises(ValueError):
-            await build(config_dir=str(self._config(True)), plugin_dir="plugins",
+            await build(config_dir=str(self._config(True)),
+                        plugin_dir=str(FIXTURE_PLUGINS),
                         client_factory=lambda n, t: None, credentials=creds,
                         database=db, quiet=True)
         self.assertFalse(db.connection.connected)
@@ -392,7 +401,8 @@ class TestBootstrapRobustness(_TmpCase):
     async def test_shutdown_survives_failing_step_and_closes_db(self) -> None:
         db = Database(self.dir / "s.db")
         creds = Credentials.from_values({"MUDAE_BOT_ID": "1"})
-        fw = await build(config_dir=str(self._config(False)), plugin_dir="plugins",
+        fw = await build(config_dir=str(self._config(False)),
+                         plugin_dir=str(FIXTURE_PLUGINS),
                          client_factory=lambda n, t: None, credentials=creds,
                          database=db, quiet=True)
 
@@ -407,7 +417,8 @@ class TestBootstrapRobustness(_TmpCase):
     async def test_boot_logs_are_persisted(self) -> None:
         db = Database(self.dir / "l.db")
         creds = Credentials.from_values({"MUDAE_BOT_ID": "1"})
-        fw = await build(config_dir=str(self._config(False)), plugin_dir="plugins",
+        fw = await build(config_dir=str(self._config(False)),
+                         plugin_dir=str(FIXTURE_PLUGINS),
                          client_factory=lambda n, t: None, credentials=creds,
                          database=db, quiet=True)
         await fw.logs.stop_persistence()

@@ -1,7 +1,7 @@
 """End-to-end integration of the direct Account→Plugins capability model.
 
 Boots the REAL production stack (``core.bootstrap.build`` — the boot path
-of main.py) over the REAL plugins (roll + soulcopy) and a temporary
+of main.py) over the fixture plugins (probe + spy) and a temporary
 database, following the harness style of tests/integration/
 test_account_persistence.py. Accounts are never STARTED (no Discord
 client is needed): attachment happens at add/load time, which is exactly
@@ -51,9 +51,11 @@ from core.errors import AccountError
 from interfaces.dashboard.server import DashboardServer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-REAL_PLUGINS = REPO_ROOT / "plugins"  # the production plugin dir (roll, soulcopy)
+#: fixture plugins — the framework bundles none; probe/spy/echo carry the
+#: capability-model assertions below (probe has the "trigger" setting)
+REAL_PLUGINS = REPO_ROOT / "tests" / "fixtures" / "plugins"
 
-ROLL, SOULCOPY = "roll", "soulcopy"
+PROBE, SPY = "probe", "spy"
 DASH_TOKEN = "e2e-dash-token"
 
 
@@ -161,17 +163,17 @@ class TestAssignmentBootSemantics(AccountPluginsE2EBase):
         fw, attach_calls = await self.boot()
         api = fw.api
         out = await api.accounts_add(
-            {"name": "alpha", "plugins": [SOULCOPY, ROLL, SOULCOPY]})
+            {"name": "alpha", "plugins": [SPY, PROBE, SPY]})
         # add_account's own answer carries the canonical (sorted, deduped) set
-        self.assertEqual(out["assigned_plugins"], [ROLL, SOULCOPY])
+        self.assertEqual(out["assigned_plugins"], [PROBE, SPY])
         # rows persist in the account_plugins table (queried DIRECTLY)
         self.assertEqual(
             await fw.database.account_plugins.plugins_of("alpha"),
-            [ROLL, SOULCOPY],
+            [PROBE, SPY],
         )
         # and the surfaced account row serves them sorted
         row = await self.account_row(api, "alpha")
-        self.assertEqual(row["assigned_plugins"], [ROLL, SOULCOPY])
+        self.assertEqual(row["assigned_plugins"], [PROBE, SPY])
 
     async def test_2_zero_assignments_attach_zero_plugins(self) -> None:
         fw, attach_calls = await self.boot()
@@ -194,20 +196,20 @@ class TestAssignmentBootSemantics(AccountPluginsE2EBase):
         fw, attach_calls = await self.boot()
         api = fw.api
         discovered = {m["name"] for m in await api.plugins_manifests()}
-        self.assertEqual(discovered, {ROLL, SOULCOPY})  # fixture sanity
+        self.assertEqual(discovered, {"probe", "spy", "echo"})  # fixture sanity
 
         await api.accounts_add(
-            {"name": "alpha", "plugins": [ROLL, SOULCOPY]})
-        await api.accounts_add({"name": "gamma", "plugins": [ROLL]})
+            {"name": "alpha", "plugins": [PROBE, SPY]})
+        await api.accounts_add({"name": "gamma", "plugins": [PROBE]})
 
         # alpha: exactly its two; gamma: exactly its one — a STRICT subset
         # of the discovered set, so attachment is assignment-driven, not
         # discovery-driven (the "all plugins" default is gone)
-        self.assertEqual(await self.attached(api, "alpha"), {ROLL, SOULCOPY})
+        self.assertEqual(await self.attached(api, "alpha"), {PROBE, SPY})
         self.assertEqual(self.last_attach(attach_calls, "alpha"),
-                         {ROLL, SOULCOPY})
-        self.assertEqual(await self.attached(api, "gamma"), {ROLL})
-        self.assertEqual(self.last_attach(attach_calls, "gamma"), {ROLL})
+                         {PROBE, SPY})
+        self.assertEqual(await self.attached(api, "gamma"), {PROBE})
+        self.assertEqual(self.last_attach(attach_calls, "gamma"), {PROBE})
         self.assertNotEqual(await self.attached(api, "gamma"), discovered)
 
 
@@ -218,37 +220,37 @@ class TestMutationFlows(AccountPluginsE2EBase):
         fw, attach_calls = await self.boot()
         api = fw.api
         await api.accounts_add(
-            {"name": "alpha", "plugins": [ROLL, SOULCOPY]})
+            {"name": "alpha", "plugins": [PROBE, SPY]})
         await api.accounts_add({"name": "beta", "plugins": []})
 
-        # assign soulcopy to beta -> beta attached set grows NOW
-        out = await api.accounts_plugin_assign("beta", SOULCOPY)
-        self.assertEqual(out, {"account": "beta", "plugin": SOULCOPY})
-        self.assertEqual(await self.assigned(api, "beta"), [SOULCOPY])
-        self.assertEqual(await self.attached(api, "beta"), {SOULCOPY})
+        # assign spy to beta -> beta attached set grows NOW
+        out = await api.accounts_plugin_assign("beta", SPY)
+        self.assertEqual(out, {"account": "beta", "plugin": SPY})
+        self.assertEqual(await self.assigned(api, "beta"), [SPY])
+        self.assertEqual(await self.attached(api, "beta"), {SPY})
 
-        # unassign roll from alpha -> alpha attached set shrinks NOW
-        out = await api.accounts_plugin_unassign("alpha", ROLL)
+        # unassign probe from alpha -> alpha attached set shrinks NOW
+        out = await api.accounts_plugin_unassign("alpha", PROBE)
         self.assertTrue(out["existed"])
-        self.assertEqual(await self.assigned(api, "alpha"), [SOULCOPY])
-        self.assertEqual(await self.attached(api, "alpha"), {SOULCOPY})
+        self.assertEqual(await self.assigned(api, "alpha"), [SPY])
+        self.assertEqual(await self.attached(api, "alpha"), {SPY})
 
         # unassign a relationship that does not exist: existed=False, no
         # error, nothing else moves
-        out = await api.accounts_plugin_unassign("alpha", ROLL)
+        out = await api.accounts_plugin_unassign("alpha", PROBE)
         self.assertFalse(out["existed"])
-        self.assertEqual(await self.assigned(api, "alpha"), [SOULCOPY])
-        self.assertEqual(await self.attached(api, "alpha"), {SOULCOPY})
+        self.assertEqual(await self.assigned(api, "alpha"), [SPY])
+        self.assertEqual(await self.attached(api, "alpha"), {SPY})
 
-        # re-assign roll: back to the full set
-        await api.accounts_plugin_assign("alpha", ROLL)
-        self.assertEqual(await self.assigned(api, "alpha"), [ROLL, SOULCOPY])
-        self.assertEqual(await self.attached(api, "alpha"), {ROLL, SOULCOPY})
+        # re-assign probe: back to the full set
+        await api.accounts_plugin_assign("alpha", PROBE)
+        self.assertEqual(await self.assigned(api, "alpha"), [PROBE, SPY])
+        self.assertEqual(await self.attached(api, "alpha"), {PROBE, SPY})
 
         # repository truth matches the api view at every step's end
         self.assertEqual(
             await fw.database.account_plugins.all_assignments(),
-            {"alpha": [ROLL, SOULCOPY], "beta": [SOULCOPY]},
+            {"alpha": [PROBE, SPY], "beta": [SPY]},
         )
 
 
@@ -263,31 +265,31 @@ class TestAssignedVersusEnabled(AccountPluginsE2EBase):
         fw, attach_calls = await self.boot()
         api = fw.api
         await api.accounts_add(
-            {"name": "alpha", "plugins": [ROLL, SOULCOPY]})
+            {"name": "alpha", "plugins": [PROBE, SPY]})
 
         # (a) disabling a plugin never touches its assignment...
-        await api.plugins_set_enabled("alpha", SOULCOPY, False)
+        await api.plugins_set_enabled("alpha", SPY, False)
         states = self._enabled_map(await api.plugins_state("alpha"))
-        self.assertFalse(states[SOULCOPY])
-        self.assertEqual(await self.assigned(api, "alpha"), [ROLL, SOULCOPY])
+        self.assertFalse(states[SPY])
+        self.assertEqual(await self.assigned(api, "alpha"), [PROBE, SPY])
         # ...and re-enabling neither
-        await api.plugins_set_enabled("alpha", SOULCOPY, True)
+        await api.plugins_set_enabled("alpha", SPY, True)
         states = self._enabled_map(await api.plugins_state("alpha"))
-        self.assertTrue(states[SOULCOPY])
-        self.assertEqual(await self.assigned(api, "alpha"), [ROLL, SOULCOPY])
+        self.assertTrue(states[SPY])
+        self.assertEqual(await self.assigned(api, "alpha"), [PROBE, SPY])
 
-        # (b) an assignment change never touches the enabled axis: roll's
+        # (b) an assignment change never touches the enabled axis: probe's
         # persisted disabled state survives an unassign → re-assign cycle
-        await api.plugins_set_enabled("alpha", ROLL, False)
-        await api.accounts_plugin_unassign("alpha", ROLL)
-        self.assertEqual(await self.assigned(api, "alpha"), [SOULCOPY])
+        await api.plugins_set_enabled("alpha", PROBE, False)
+        await api.accounts_plugin_unassign("alpha", PROBE)
+        self.assertEqual(await self.assigned(api, "alpha"), [SPY])
         # persisted per-(account, plugin) state kept the disabled flag
-        self.assertFalse(await fw.database.plugins.state("alpha", ROLL))
-        await api.accounts_plugin_assign("alpha", ROLL)
+        self.assertFalse(await fw.database.plugins.state("alpha", PROBE))
+        await api.accounts_plugin_assign("alpha", PROBE)
         states = self._enabled_map(await api.plugins_state("alpha"))
-        self.assertEqual(set(states), {ROLL, SOULCOPY})
-        self.assertFalse(states[ROLL])     # still disabled after round-trip
-        self.assertTrue(states[SOULCOPY])  # untouched by any of this
+        self.assertEqual(set(states), {PROBE, SPY})
+        self.assertFalse(states[PROBE])     # still disabled after round-trip
+        self.assertTrue(states[SPY])  # untouched by any of this
 
 
 # ------------------------------------------------------------ 6 (restart)
@@ -298,17 +300,17 @@ class TestRestartRestoresAssignments(AccountPluginsE2EBase):
         fw, _ = await self.boot()
         api = fw.api
         await api.accounts_add(
-            {"name": "alpha", "plugins": [ROLL, SOULCOPY]})
+            {"name": "alpha", "plugins": [PROBE, SPY]})
         await api.accounts_add({"name": "beta", "plugins": []})
         # mutate past the initial state so restore cannot pass by luck
-        await api.accounts_plugin_assign("beta", SOULCOPY)
-        await api.accounts_plugin_unassign("alpha", ROLL)
+        await api.accounts_plugin_assign("beta", SPY)
+        await api.accounts_plugin_unassign("alpha", PROBE)
         before_assigned = {"alpha": await self.assigned(api, "alpha"),
                            "beta": await self.assigned(api, "beta")}
         before_attached = {"alpha": await self.attached(api, "alpha"),
                            "beta": await self.attached(api, "beta")}
         self.assertEqual(before_assigned,
-                         {"alpha": [SOULCOPY], "beta": [SOULCOPY]})
+                         {"alpha": [SPY], "beta": [SPY]})
         await fw.shutdown()
 
         # ---------------------------------------------------------- boot 2
@@ -334,7 +336,7 @@ class TestRestartRestoresAssignments(AccountPluginsE2EBase):
                              before_attached["beta"])
             self.assertEqual(
                 await fw2.database.account_plugins.all_assignments(),
-                {"alpha": [SOULCOPY], "beta": [SOULCOPY]},
+                {"alpha": [SPY], "beta": [SPY]},
             )
             # the in-memory mirror the attach path feeds from was bulk-
             # restored with CONCRETE sets (the spy wraps only after
@@ -343,7 +345,7 @@ class TestRestartRestoresAssignments(AccountPluginsE2EBase):
                 mirror = fw2.accounts.get(name).assigned_plugins
                 self.assertEqual(sorted(mirror), before_assigned[name])
             # any post-boot mutation re-attaches from that mirror alone
-            await api2.accounts_plugin_unassign("beta", SOULCOPY)
+            await api2.accounts_plugin_unassign("beta", SPY)
             self.assertEqual(self.last_attach(attach_calls2, "beta"), set())
             self.assertIsNotNone(self.last_attach(attach_calls2, "beta"))
         finally:
@@ -356,33 +358,33 @@ class TestProfileDecoupling(AccountPluginsE2EBase):
     async def test_7_profile_grants_never_move_attachment(self) -> None:
         fw, attach_calls = await self.boot()
         api = fw.api
-        await api.accounts_add({"name": "alpha", "plugins": [ROLL]})
+        await api.accounts_add({"name": "alpha", "plugins": [PROBE]})
 
         # profile CRUD works (retained infrastructure)
-        await api.profiles_create("copier", [ROLL, SOULCOPY], "both")
+        await api.profiles_create("copier", [PROBE, SPY], "both")
         listed = await api.profiles_list()
         self.assertEqual([p["name"] for p in listed], ["copier"])
-        self.assertEqual(listed[0]["plugins"], [ROLL, SOULCOPY])
+        self.assertEqual(listed[0]["plugins"], [PROBE, SPY])
 
         # granting the profile to alpha is bookkeeping ONLY
         await api.profiles_assign("alpha", "copier")
         row = await self.account_row(api, "alpha")
         self.assertEqual(row["profiles"], ["copier"])  # grant recorded
         # ...and attachment is UNCHANGED by the grant
-        self.assertEqual(await self.attached(api, "alpha"), {ROLL})
-        self.assertEqual(await self.assigned(api, "alpha"), [ROLL])
-        self.assertEqual(self.last_attach(attach_calls, "alpha"), {ROLL})
+        self.assertEqual(await self.attached(api, "alpha"), {PROBE})
+        self.assertEqual(await self.assigned(api, "alpha"), [PROBE])
+        self.assertEqual(self.last_attach(attach_calls, "alpha"), {PROBE})
 
         # the retained ProfileManager.allowed_plugins still answers (and
         # would grant BOTH) — the account capability path just never asks
         self.assertEqual(fw.profiles.allowed_plugins("alpha"),
-                         {ROLL, SOULCOPY})
+                         {PROBE, SPY})
 
         # unassigning the profile works and moves nothing either
         await api.profiles_unassign("alpha", "copier")
         row = await self.account_row(api, "alpha")
         self.assertEqual(row["profiles"], [])
-        self.assertEqual(await self.attached(api, "alpha"), {ROLL})
+        self.assertEqual(await self.attached(api, "alpha"), {PROBE})
 
 
 # -------------------------------------------------- 8 (sync group isolation)
@@ -392,22 +394,22 @@ class TestSyncGroupIsolation(AccountPluginsE2EBase):
         fw, attach_calls = await self.boot()
         api = fw.api
         await api.accounts_add(
-            {"name": "alpha", "plugins": [ROLL, SOULCOPY]})
+            {"name": "alpha", "plugins": [PROBE, SPY]})
 
         # group move does not change assignments
         await api.groups_create({"name": "grinders"})
         await api.groups_set_account("alpha", "grinders")
         row = await self.account_row(api, "alpha")
         self.assertEqual(row["sync_group"], "grinders")
-        self.assertEqual(row["assigned_plugins"], [ROLL, SOULCOPY])
+        self.assertEqual(row["assigned_plugins"], [PROBE, SPY])
         self.assertEqual(await self.attached(api, "alpha"),
-                         {ROLL, SOULCOPY})
+                         {PROBE, SPY})
 
         # assignment change does not change the group
-        await api.accounts_plugins_set("alpha", [ROLL])
+        await api.accounts_plugins_set("alpha", [PROBE])
         row = await self.account_row(api, "alpha")
         self.assertEqual(row["sync_group"], "grinders")
-        self.assertEqual(row["assigned_plugins"], [ROLL])
+        self.assertEqual(row["assigned_plugins"], [PROBE])
         snapshot = await api.groups_snapshot("grinders")
         self.assertEqual([m["name"] for m in snapshot["members"]], ["alpha"])
         self.assertEqual(snapshot["member_count"], 1)
@@ -420,31 +422,31 @@ class TestPluginSettingsIndependence(AccountPluginsE2EBase):
         fw, attach_calls = await self.boot()
         api = fw.api
         await api.accounts_add(
-            {"name": "alpha", "plugins": [ROLL, SOULCOPY]})
-        await api.plugins_set_setting("alpha", SOULCOPY, "trigger", "$go")
+            {"name": "alpha", "plugins": [PROBE, SPY]})
+        await api.plugins_set_setting("alpha", PROBE, "trigger", "$go")
 
         # a DIFFERENT plugin's assignment churn leaves this setting alone
-        await api.accounts_plugin_unassign("alpha", ROLL)
-        await api.accounts_plugin_assign("alpha", ROLL)
+        await api.accounts_plugin_unassign("alpha", PROBE)
+        await api.accounts_plugin_assign("alpha", PROBE)
         settings = {p["name"]: p["settings"]
                     for p in await api.plugins_settings("alpha")}
-        self.assertEqual(settings[SOULCOPY]["trigger"], "$go")
+        self.assertEqual(settings[PROBE]["trigger"], "$go")
         self.assertEqual(
-            await fw.database.plugins.setting("alpha", SOULCOPY, "trigger"),
+            await fw.database.plugins.setting("alpha", PROBE, "trigger"),
             "$go",
         )
 
         # even the plugin's OWN assignment round-trip keeps it (settings
         # are keyed (account, plugin, key), independently of assignments)
-        await api.accounts_plugin_unassign("alpha", SOULCOPY)
+        await api.accounts_plugin_unassign("alpha", SPY)
         self.assertEqual(
-            await fw.database.plugins.setting("alpha", SOULCOPY, "trigger"),
+            await fw.database.plugins.setting("alpha", PROBE, "trigger"),
             "$go",
         )
-        await api.accounts_plugin_assign("alpha", SOULCOPY)
+        await api.accounts_plugin_assign("alpha", SPY)
         settings = {p["name"]: p["settings"]
                     for p in await api.plugins_settings("alpha")}
-        self.assertEqual(settings[SOULCOPY]["trigger"], "$go")
+        self.assertEqual(settings[PROBE]["trigger"], "$go")
 
 
 # ---------------------------------------------------------- 10 (validation)
@@ -453,7 +455,7 @@ class TestValidationErrors(AccountPluginsE2EBase):
     async def test_10_unknown_plugin_account_and_profiles_key(self) -> None:
         fw, attach_calls = await self.boot()
         api = fw.api
-        await api.accounts_add({"name": "alpha", "plugins": [ROLL]})
+        await api.accounts_add({"name": "alpha", "plugins": [PROBE]})
 
         # unknown plugin: ValueError LISTS the known plugins (typo trap)
         with self.assertRaises(ValueError) as ctx:
@@ -461,16 +463,16 @@ class TestValidationErrors(AccountPluginsE2EBase):
         message = str(ctx.exception)
         self.assertIn("nosuchplugin", message)
         self.assertIn("known plugins", message)
-        self.assertIn(ROLL, message)
-        self.assertIn(SOULCOPY, message)
+        self.assertIn(PROBE, message)
+        self.assertIn(SPY, message)
         # nothing was written by the failed call
-        self.assertEqual(await self.assigned(api, "alpha"), [ROLL])
+        self.assertEqual(await self.assigned(api, "alpha"), [PROBE])
 
         # unknown account: the AccountError family (typo trap)
         for call in (
-            lambda: api.accounts_plugin_assign("ghost", ROLL),
-            lambda: api.accounts_plugin_unassign("ghost", ROLL),
-            lambda: api.accounts_plugins_set("ghost", [ROLL]),
+            lambda: api.accounts_plugin_assign("ghost", PROBE),
+            lambda: api.accounts_plugin_unassign("ghost", PROBE),
+            lambda: api.accounts_plugins_set("ghost", [PROBE]),
             lambda: api.accounts_plugins_list("ghost"),
         ):
             with self.assertRaises(AccountError):
@@ -492,7 +494,7 @@ class TestDashboardPluginRoutes(AccountPluginsE2EBase):
         self.fw, self.attach_calls = await self.boot()
         self.api = self.fw.api
         await self.api.accounts_add(
-            {"name": "alpha", "plugins": [ROLL, SOULCOPY]})
+            {"name": "alpha", "plugins": [PROBE, SPY]})
         await self.api.accounts_add({"name": "beta", "plugins": []})
         self.server = DashboardServer(
             self.api, token=DASH_TOKEN, port=0).start()
@@ -510,26 +512,26 @@ class TestDashboardPluginRoutes(AccountPluginsE2EBase):
         status, body = await asyncio.to_thread(
             http_get, self.url(f"/api/accounts/plugins?account=alpha"))
         self.assertEqual(status, 200)
-        self.assertEqual(get_json(body)["data"], [ROLL, SOULCOPY])
+        self.assertEqual(get_json(body)["data"], [PROBE, SPY])
 
-        # assign: beta gains roll NOW (through the whole stack)
+        # assign: beta gains probe NOW (through the whole stack)
         status, body = await asyncio.to_thread(
             http_post, self.url("/api/accounts/plugins/assign"),
-            {"account": "beta", "plugin": ROLL})
+            {"account": "beta", "plugin": PROBE})
         self.assertEqual(status, 200)
         self.assertTrue(get_json(body)["ok"])
-        self.assertEqual(await self.attached(self.api, "beta"), {ROLL})
+        self.assertEqual(await self.attached(self.api, "beta"), {PROBE})
 
         # unassign: existed=True the first time...
         status, body = await asyncio.to_thread(
             http_post, self.url("/api/accounts/plugins/unassign"),
-            {"account": "beta", "plugin": ROLL})
+            {"account": "beta", "plugin": PROBE})
         self.assertEqual(status, 200)
         self.assertTrue(get_json(body)["data"]["existed"])
         # ...existed=False (still 200) when the relationship is absent
         status, body = await asyncio.to_thread(
             http_post, self.url("/api/accounts/plugins/unassign"),
-            {"account": "beta", "plugin": ROLL})
+            {"account": "beta", "plugin": PROBE})
         self.assertEqual(status, 200)
         self.assertFalse(get_json(body)["data"]["existed"])
         self.assertEqual(await self.attached(self.api, "beta"), set())
@@ -537,10 +539,10 @@ class TestDashboardPluginRoutes(AccountPluginsE2EBase):
         # set: whole-set replacement (all-or-nothing)
         status, body = await asyncio.to_thread(
             http_post, self.url("/api/accounts/plugins/set"),
-            {"account": "alpha", "plugins": [SOULCOPY]})
+            {"account": "alpha", "plugins": [SPY]})
         self.assertEqual(status, 200)
-        self.assertEqual(get_json(body)["data"]["plugins"], [SOULCOPY])
-        self.assertEqual(await self.attached(self.api, "alpha"), {SOULCOPY})
+        self.assertEqual(get_json(body)["data"]["plugins"], [SPY])
+        self.assertEqual(await self.attached(self.api, "alpha"), {SPY})
 
     async def test_plugin_routes_400_on_unknown_names(self) -> None:
         # unknown plugin -> honest 400 listing the known plugins
@@ -550,22 +552,22 @@ class TestDashboardPluginRoutes(AccountPluginsE2EBase):
         self.assertEqual(status, 400)
         error = get_json(body)["error"]
         self.assertIn("known plugins", error)
-        self.assertIn(SOULCOPY, error)
+        self.assertIn(SPY, error)
 
         # unknown account -> honest 400 (AccountError family)
         status, body = await asyncio.to_thread(
             http_post, self.url("/api/accounts/plugins/assign"),
-            {"account": "ghost", "plugin": ROLL})
+            {"account": "ghost", "plugin": PROBE})
         self.assertEqual(status, 400)
         self.assertIn("ghost", get_json(body)["error"])
 
         # set with ONE unknown name rejects the WHOLE call (all-or-nothing)
         status, body = await asyncio.to_thread(
             http_post, self.url("/api/accounts/plugins/set"),
-            {"account": "alpha", "plugins": [ROLL, "nosuchplugin"]})
+            {"account": "alpha", "plugins": [PROBE, "nosuchplugin"]})
         self.assertEqual(status, 400)
         self.assertEqual(await self.assigned(self.api, "alpha"),
-                         [ROLL, SOULCOPY])  # untouched
+                         [PROBE, SPY])  # untouched
 
         # missing required field -> 400 naming the field
         status, body = await asyncio.to_thread(
@@ -579,18 +581,18 @@ class TestDashboardPluginRoutes(AccountPluginsE2EBase):
             http_get, self.url("/api/status"))
         self.assertEqual(status, 200)
         rows = {a["name"]: a for a in get_json(body)["data"]["accounts"]}
-        self.assertEqual(rows["alpha"]["assigned_plugins"], [ROLL, SOULCOPY])
+        self.assertEqual(rows["alpha"]["assigned_plugins"], [PROBE, SPY])
         self.assertEqual(rows["beta"]["assigned_plugins"], [])
 
     async def test_add_account_plugins_ok_profiles_rejected(self) -> None:
         # plugins payload accepted end-to-end (row + attachment)
         status, body = await asyncio.to_thread(
             http_post, self.url("/api/accounts/add"),
-            {"name": "gamma", "plugins": [ROLL]})
+            {"name": "gamma", "plugins": [PROBE]})
         self.assertEqual(status, 200)
         self.assertTrue(get_json(body)["ok"])
-        self.assertEqual(await self.attached(self.api, "gamma"), {ROLL})
-        self.assertEqual(await self.assigned(self.api, "gamma"), [ROLL])
+        self.assertEqual(await self.attached(self.api, "gamma"), {PROBE})
+        self.assertEqual(await self.assigned(self.api, "gamma"), [PROBE])
 
         # profiles payload rejected with 400 (unknown key — the profile
         # era's payload shape is gone, not silently ignored)

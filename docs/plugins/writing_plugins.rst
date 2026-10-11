@@ -1,7 +1,8 @@
 Writing a plugin
 ================
 
-Structure (see ``plugins/roll/`` for the real minimal example):
+Structure (see ``tests/fixtures/plugins/probe/`` for a minimal real
+example — the framework itself ships with no bundled plugins):
 
 .. code-block:: python
 
@@ -41,7 +42,8 @@ Structure (see ``plugins/roll/`` for the real minimal example):
 Every send/react/click flows through the centralized scheduler and rate
 limiter — pacing, the 1.5s floor, serialization, audit and cancellation
 apply automatically. Catch :class:`core.errors.FlowBlocked` around
-multi-step flows and log ONE clean abort line (see soulcopy).
+multi-step flows and log ONE clean abort line (see the soulcopy workload
+fixture under ``tests/fixtures/sim_plugins/``).
 
 Drop the package under ``plugins/``; it is discovered automatically and
 runs on any account it is assigned to (``accounts plugin-add <account>

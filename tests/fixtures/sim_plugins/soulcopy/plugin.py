@@ -1,4 +1,10 @@
-"""Soulcopy plugin: mirrors your Mudae soulmate list between accounts.
+"""Soulcopy workload plugin — SIMULATION FIXTURE (tests/fixtures/sim_plugins).
+
+Removed from the production ``plugins/`` tree; retained here ONLY as the
+multi-step workload the full-stack simulation scenarios drive (paced
+chunked sends over the real scheduler/limiter pipeline). It is never
+discovered by production boots — only stacks pointed at this fixture
+directory load it.
 
 Flow (behavior ported from the audited original onto the task pipeline):
   1. an OWNER sends the trigger word (default 'slcopy') in any channel,

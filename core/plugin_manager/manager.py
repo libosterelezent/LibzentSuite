@@ -773,9 +773,9 @@ class PluginManager:
 
         A resolved value equal to the schema default is ambiguous: it may
         be the default OR an explicit user choice that happens to match it
-        (roll's userstack auto-disable vs. an explicit re-enable, round-3).
-        The layer VIEWS carry the distinction; None when the settings
-        manager exposes no views (stripped-down test stacks).
+        (a plugin's runtime auto-disable vs. an explicit re-enable,
+        round-3). The layer VIEWS carry the distinction; None when the
+        settings manager exposes no views (stripped-down test stacks).
         """
         views = getattr(self._settings, "layers_view", None)
         if not callable(views):

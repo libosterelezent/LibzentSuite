@@ -163,9 +163,9 @@ class Credentials:
         (the account's own mention). When set, each live client runs the
         library's ext.commands layer in self_bot mode — messages typed by
         the account itself (from the user's Discord client) that match
-        the prefix become framework commands (roll/rollstop/slcopy
-        pass-throughs to the plugin trigger pipeline). Empty/unset keeps
-        today's behavior exactly (no command layer).
+        the prefix become framework commands (registry dispatch to the
+        plugin command handlers). Empty/unset keeps today's behavior
+        exactly (no command layer).
 
         Requirement: the account's own Discord user id must also be in
         OWNER_USER_IDS for the triggers to pass the owner check.

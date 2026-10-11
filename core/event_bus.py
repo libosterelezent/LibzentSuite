@@ -141,7 +141,7 @@ class RateLimitTriggered(Event):
 class SettingChanged(Event):
     """One setting changed somewhere (plugin default layer, account layer...)."""
 
-    scope: str = ""       # e.g. "account:alpha/plugin:soulcopy/key:trigger"
+    scope: str = ""       # e.g. "account:alpha/plugin:probe/key:trigger"
     key: str = ""
     old_value: Any = None
     new_value: Any = None
@@ -153,7 +153,7 @@ class MessageReceived(Event):
     """A Discord message seen by an account (never the account's own sends).
 
     COMPATIBILITY: the five flat fields are the original surface every
-    existing consumer uses (soulcopy, roll, remote control, collect/wait).
+    existing consumer uses (flow plugins, remote control, collect/wait).
     ``message`` carries the RICH adapters.model.DiscordMessage (embeds,
     components, attachments, reactions, reference, author/channel/guild,
     created_at, and the runtime-only ``raw`` escape hatch) — typed ``Any``

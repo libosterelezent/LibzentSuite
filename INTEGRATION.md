@@ -88,7 +88,10 @@ adapters/
 interfaces/
   cli/                   (A1)     REPL + one-shot command groups
   dashboard/             (A8)     HTTP+WS server + SPA
-plugins/                 (A3: soulcopy migrated + roll example)
+plugins/                 (A3 delivered soulcopy + roll; both were later
+                          REMOVED — the framework now ships with no
+                          bundled plugins; test fixtures live under
+                          tests/fixtures/)
 tests/unit|integration|simulation/
 config/  main.py  scripts/ (run_tests.sh, gen_knowledgebase.py, bench_db.py, bench_hot.py)
 ```
@@ -285,7 +288,10 @@ visible in `states()`). Port loader from `git show HEAD:core/plugin_loader.py`
 (strict name validation, duplicate detection, synthetic module names) and
 plugin_base from `git show HEAD:core/plugin_base.py`.
 
-Plugins to deliver (A3):
+Plugins to deliver (A3) — HISTORICAL: both were delivered and have
+since been REMOVED from the production tree (the framework ships with
+no bundled plugins; a soulcopy workload copy remains as the simulation
+fixture under tests/fixtures/sim_plugins/):
 - `plugins/soulcopy/` — migrate from `git show HEAD:plugins/soulcopy/plugin.py`
   and `git show HEAD:plugins/soulcopy/textutils.py` (+ `__init__.py`). Same
   behavior/flow-safety, but sends go through `ctx.services.send_message /

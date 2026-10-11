@@ -1,5 +1,10 @@
 """Plugins directory — each subdir is a framework plugin.
 
+The framework ships with NO bundled plugins: this directory may be empty
+(a lone ``__init__.py``) and everything still boots — the loader simply
+discovers zero plugins. Drop a plugin package here (or point
+``--plugins`` at any directory) to add one.
+
 Plugin contract recap (see core/plugin_base.py for the base class):
   * declare metadata + a settings manifest; reach Discord ONLY through
     ctx.session (rate-limited, audited, cache-aware);
@@ -7,5 +12,6 @@ Plugin contract recap (see core/plugin_base.py for the base class):
     core.errors.FlowBlocked subclass (TargetGone / AccessDenied). Catch
     FlowBlocked around your WHOLE flow, log one clean abort line and return —
     other accounts keep running (container isolation). Reference
-    implementation: plugins/soulcopy/plugin.py.
+    implementation: tests/fixtures/sim_plugins/soulcopy/plugin.py (a
+    test-only workload fixture).
 """

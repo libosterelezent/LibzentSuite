@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace as NS
 from typing import Any, Awaitable, Callable, Dict, List
 
@@ -26,6 +27,13 @@ from database.db import Database
 
 OWNER = 1001
 CHANNEL = 500
+
+#: fixture plugins for the dispatch benchmark (the framework itself ships
+#: with no bundled plugins, so the production plugins/ dir would attach
+#: nothing and the fan-out measurement would lose its plugin leg)
+FIXTURE_PLUGINS = (
+    Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "plugins"
+)
 
 
 @dataclass
@@ -270,7 +278,7 @@ async def message_burst(session: SamplerSession, perf: PerfCollector,
     plugins = PluginManager(
         bus, __import__("logging").getLogger("bench"),
         SettingsManager(bus, __import__("logging").getLogger("bench")),
-        plugin_dir="plugins",
+        plugin_dir=str(FIXTURE_PLUGINS),
     )
     plugins.discover()
     await plugins.attach_account("bench", allowed=None)

@@ -1,46 +1,39 @@
 """Per-account command interface over the REAL production stack (Phase 3).
 
-Boots ``core.bootstrap.build`` over the REAL plugins (roll + soulcopy)
-and a temporary database (the harness style of
+Boots ``core.bootstrap.build`` over the fixture plugins (probe) and a
+temporary database (the harness style of
 tests/integration/test_account_plugins_e2e.py). Accounts are never
 STARTED — no Discord client is needed:
 
-  * registry wiring  — assignment drives commands_for: assign roll →
-                       the six roll verbs appear; unassign → gone;
-                       disable → gone (assignment = visibility, enabled
-                       also required),
+  * registry wiring  — assignment drives commands_for: assign probe →
+                        its declared verb appears; unassign → gone;
+                        disable → gone (assignment = visibility, enabled
+                        also required),
   * executor + DB    — the full execution path against the REAL database
-                       (profiles, bindings, per-account setting rows):
-                       a bound profile's channel scope REFUSES an
-                       out-of-scope rollstart, permits an in-scope one
-                       (the loop runs against fake services), rollset
-                       validates + persists through the same path as the
-                       dashboard's set-setting surface, rollinfo shows
-                       the profile binding, help lists everything.
+                        (plugin profiles, bindings, per-account setting
+                        rows): the declared probeinfo handler runs over
+                        the real settings api, a profile-bound setting
+                        rides into the effective view, and help lists
+                        everything.
 """
 from __future__ import annotations
 
-import asyncio
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.bootstrap import build
-from core.errors import TargetGone
 from core.priority import Priority
 from core.credentials import Credentials
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-REAL_PLUGINS = REPO_ROOT / "plugins"
-ROLL = "roll"
+REAL_PLUGINS = REPO_ROOT / "tests" / "fixtures" / "plugins"
+PROBE = "probe"
 
 OWNER_ID = 555
 GUILD = 7
-CHANNEL_OK = 42          # inside the profile's allow-scope
-CHANNEL_BLOCKED = 43     # exists, outside the allow-scope
-
-LOG_SCHEDULED = []
+CHANNEL_OK = 42
 
 
 class ChannelInfo:
@@ -51,16 +44,15 @@ class ChannelInfo:
 
 
 class E2EServices:
-    """PluginServices double good enough for the REAL roll plugin's
-    lifecycle (state_get), roll loop (cooldown/wait) and command replies."""
+    """PluginServices double good enough for the probe fixture's
+    lifecycle (ctx stash) and command replies."""
 
     def __init__(self, account: str = "alpha") -> None:
         self.account = account
-        self.plugin = "roll"
+        self.plugin = "probe"
         self.sent: List[tuple] = []
         self.channels = {
             CHANNEL_OK: ChannelInfo(CHANNEL_OK, GUILD),
-            CHANNEL_BLOCKED: ChannelInfo(CHANNEL_BLOCKED, GUILD),
         }
         self.settings: Dict[str, Any] = {}
         self._state: Dict[str, Any] = {}
@@ -91,10 +83,7 @@ class E2EServices:
         pass
 
     def validate_channel(self, channel_id: int):
-        info = self.channels.get(int(channel_id))
-        if info is None:
-            raise TargetGone(self.account, f"channel {channel_id} vanished")
-        return info
+        return self.channels.get(int(channel_id))
 
     def describe_channel(self, channel_id: int) -> str:
         return f"#chan-{channel_id}"
@@ -144,29 +133,29 @@ class CommandE2EBase(unittest.IsolatedAsyncioTestCase):
 class RegistryWiringTests(CommandE2EBase):
     """Assignment/enabled axes drive commands_for through the real stack."""
 
-    ROLL_VERBS = {"rollinfo", "rolllist", "rollremove", "rollset",
-                  "rollstart", "rollstop"}
+    PROBE_VERBS = {"probeinfo"}
 
     async def test_assign_unassign_disable_drive_commands_for(self):
         fw = await self.boot()
         api = fw.api
-        await api.accounts_add({"name": "alpha", "plugins": [ROLL]})
+        await api.accounts_add({"name": "alpha", "plugins": [PROBE]})
 
-        # assigned -> the six verbs are collected (bound + categorized)
+        # assigned -> the declared verbs are collected (bound + categorized)
         names = {s.name for s in fw.plugins.commands_for("alpha")}
-        self.assertTrue(self.ROLL_VERBS <= names)
-        self.assertTrue({s.category for s in fw.plugins.commands_for("alpha")}
-                        <= {ROLL})  # category defaults to the plugin name
+        self.assertTrue(self.PROBE_VERBS <= names)
+        # probe declares its category explicitly ("Probe")
+        self.assertEqual(
+            {s.category for s in fw.plugins.commands_for("alpha")}, {"Probe"})
 
         # disabled -> gone (assignment = visibility; enabled also required)
-        await api.plugins_set_enabled("alpha", ROLL, False)
+        await api.plugins_set_enabled("alpha", PROBE, False)
         self.assertEqual(fw.plugins.commands_for("alpha"), [])
-        await api.plugins_set_enabled("alpha", ROLL, True)
+        await api.plugins_set_enabled("alpha", PROBE, True)
         self.assertEqual({s.name for s in fw.plugins.commands_for("alpha")},
-                         self.ROLL_VERBS)
+                         self.PROBE_VERBS)
 
         # unassigned -> gone
-        await api.accounts_plugin_unassign("alpha", ROLL)
+        await api.accounts_plugin_unassign("alpha", PROBE)
         self.assertEqual(fw.plugins.commands_for("alpha"), [])
 
 
@@ -176,18 +165,18 @@ class ExecutorOverRealDatabaseTests(CommandE2EBase):
     async def asyncSetUp(self) -> None:
         self.fw = await self.boot()
         self.api = self.fw.api
-        await self.api.accounts_add({"name": "alpha", "plugins": [ROLL]})
-        # a profile whose allow-scope permits ONLY CHANNEL_OK in GUILD
+        await self.api.accounts_add({"name": "alpha", "plugins": [PROBE]})
+        # a profile whose settings shape the plugin's effective view
         await self.api.plugin_profile_create(
-            ROLL, "grind-only",
+            PROBE, "grind-only",
             description="only the grind channel",
             settings={
-                "command": "$wg",
+                "trigger": "spin",
                 "channels": {"mode": "allow", "rules": [
                     {"guild_id": str(GUILD),
                      "channel_ids": [str(CHANNEL_OK)]}]},
             })
-        await self.api.accounts_plugin_profile("alpha", ROLL, "grind-only")
+        await self.api.accounts_plugin_profile("alpha", PROBE, "grind-only")
         # the account is never STARTED: activate with fake services so the
         # executor + handlers run against the REAL database layer
         self.services = E2EServices()
@@ -202,66 +191,23 @@ class ExecutorOverRealDatabaseTests(CommandE2EBase):
             "alpha", name, args, channel, guild_id=GUILD, invoker_id=invoker)
         return self.services.sent[-1][1] if self.services.sent else None
 
-    async def test_rollstart_outside_scope_is_refused_with_reason(self):
-        reply = await self._run("rollstart", [str(CHANNEL_BLOCKED)])
-        self.assertIsNotNone(reply)
-        self.assertIn(f"refused: channel {CHANNEL_BLOCKED}", reply)
-        self.assertIn("outside the roll channel scope", reply)
+    async def test_declared_command_runs_over_the_real_db(self):
+        """probeinfo executes through the executor, and its reply flows
+        back through the per-plugin services facade."""
+        reply = await self._run("probeinfo", [])
+        self.assertEqual(reply, "probe ok")
 
-    async def test_rollstart_inside_scope_starts_the_loop(self):
-        reply = await self._run("rollstart", [])
-        self.assertIn("rolling started", reply)
-        # the SCOPE verdict came from the merged effective settings (the
-        # bound profile's channels); the command the loop will actually
-        # send is the RUNTIME live view's value — Phase-1 profiles shape
-        # the effective view, the settings-manager resolution (defaults
-        # <- global <- account overrides) still feeds the plugin runtime
-        self.assertIn("($wa)", reply)
-        instance = self.fw.plugins._accounts["alpha"][ROLL].instance
-        self.assertTrue(instance._rolling.get("alpha"))
-        await self._run("rollstop", [])
-
-    async def test_rollinfo_shows_binding_and_profile_settings(self):
-        reply = await self._run("rollinfo", [])
-        self.assertIn("profile: grind-only", reply)
-        self.assertIn("command = '$wg'", reply)          # from the profile
-        self.assertIn("scope: allow-list, 1 channel(s)", reply)
-
-    async def test_rolllist_lists_profiles(self):
-        reply = await self._run("rolllist", [])
-        self.assertIn("grind-only", reply)
-        self.assertIn("only the grind channel", reply)
-
-    async def test_rollset_validates_and_persists_the_real_row(self):
-        # invalid value -> the usage error names the valid commands
-        bad = await self._run("rollset", ["command", "nope"])
-        self.assertIn("usage: rollset <key> <value>", bad)
-        self.assertIn("is not a Mudae roulette command", bad)
-        # valid value -> persisted through the same path as the dashboard
-        good = await self._run("rollset", ["command", "$wg"])
-        self.assertIn("set roll.command = '$wg'", good)
-        self.assertEqual(
-            await self.fw.database.plugins.setting("alpha", ROLL, "command"),
-            "$wg",
-        )
-        # and the account override BEATS the profile (highest layer)
-        await self._run("rollset", ["command", "$ha"])
-        info = await self._run("rollinfo", [])
-        self.assertIn("command = '$ha'", info)
-        # clearing the override falls back to the profile's value
-        cleared = await self._run("rollremove", ["command"])
-        self.assertIn("cleared roll.command override", cleared)
-        self.assertEqual(
-            await self.fw.database.plugins.setting("alpha", ROLL, "command"),
-            None,
-        )
-        info2 = await self._run("rollinfo", [])
-        self.assertIn("command = '$wg'", info2)  # profile layer again
+    async def test_profile_settings_reach_the_live_view(self):
+        """The bound profile's settings ride into the runtime effective
+        view (the merge path the executor's settings api serves)."""
+        api = self.fw.plugins._settings_api("alpha", PROBE)
+        effective = await api.effective()
+        self.assertEqual(effective.get("trigger"), "spin")
+        self.assertEqual(await api.binding(), "grind-only")
 
     async def test_help_and_framework_verbs_over_the_real_stack(self):
         reply = await self._run("help", [])
-        for verb in ("rollinfo", "rolllist", "rollremove", "rollset",
-                     "rollstart", "rollstop", "pg", "say", "help"):
+        for verb in ("probeinfo", "pg", "say", "help"):
             self.assertIn(verb, reply)
         say = await self._run("say", ["integration", "echo"])
         self.assertEqual(say, "integration echo")

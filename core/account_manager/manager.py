@@ -654,7 +654,7 @@ class AccountManager:
             supervisor.cancel()
         try:
             # K6 (S1-C7/S5-C3/S10-C3): a FAILED account was never stop()ed,
-            # so its plugins may still be ACTIVE (roll's recovery loop,
+            # so its plugins may still be ACTIVE (recovery loops,
             # on_load resources). detach fires no lifecycle hooks —
             # deactivate first or they outlive the account's removal.
             #
@@ -1149,9 +1149,9 @@ class AccountManager:
             )
         if rt.stop_requested or rt.generation != gen:
             # PHASE-4 (S1-F1): stop() raced the ACTIVATION await. Without
-            # this, freshly activated plugins (roll's loop!) keep running
-            # on a stopped, supervisor-less account. Clean up everything
-            # this start created: hooks, services, client.
+            # this, freshly activated plugins (their background loops!)
+            # keep running on a stopped, supervisor-less account. Clean up
+            # everything this start created: hooks, services, client.
             self._abort_stale_start(name, rt)
             return account.status_dict()
         self._bus.publish_nowait(AccountConnected(account=name))

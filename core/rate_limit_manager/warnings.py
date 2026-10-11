@@ -38,7 +38,7 @@ _LEVEL_RANK: Dict[str, int] = {"danger": 0, "warn": 1, "info": 2}
 
 
 def describe_scope(level: str, owner: Optional[str]) -> str:
-    """Human description of a policy scope, e.g. ``"global"`` or ``"alpha/soulcopy"``."""
+    """Human description of a policy scope, e.g. ``"global"`` or ``"alpha/probe"``."""
     if level == "global" or not owner:
         return "global"
     return owner if level == "account_plugin" else f"{level} {owner}"

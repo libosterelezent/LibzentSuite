@@ -26,6 +26,14 @@ MUDAE_ID = 999_999
 ALPHA_ID = 2001
 GUILD_CHANNEL = 500
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+#: framework fixture plugins (probe/spy/echo) — the framework bundles none
+FIXTURE_PLUGINS = REPO_ROOT / "tests" / "fixtures" / "plugins"
+#: the full-stack WORKLOAD fixture (a soulcopy-like paced flow) driving
+#: the pacing/estop e2e scenarios below
+SIM_PLUGINS = REPO_ROOT / "tests" / "fixtures" / "sim_plugins"
+PROBE = "probe"
+
 FAST_SETTINGS = {
     "soulcopy": {
         "inter_chunk_delay": 0.0,
@@ -53,7 +61,8 @@ class Stack:
     """A fully wired production framework over one simulated world
     (``stack = await Stack(...).boot()`` — build is async now)."""
 
-    def __init__(self, db_path: str | None = None, extra_accounts: list = ()) -> None:
+    def __init__(self, db_path: str | None = None, extra_accounts: list = (),
+                 plugin_dir: Path = FIXTURE_PLUGINS) -> None:
         self.world = SimWorld(
             responder_id=MUDAE_ID,
             responses={"$slud-s": [
@@ -78,12 +87,13 @@ class Stack:
         self.db = Database(db_path if db_path is not None else ":memory:")
         self.framework = None
         self._extra = extra_accounts
+        self._plugin_dir = plugin_dir
 
     async def boot(self) -> "Stack":
         """``build()`` is async now (aiosqlite database layer)."""
         self.framework = await build(
             config_dir=str(self.config_dir),
-            plugin_dir="plugins",
+            plugin_dir=str(self._plugin_dir),
             client_factory=self._client_factory,
             credentials=self.credentials,
             database=self.db,
@@ -123,9 +133,13 @@ class Stack:
         self.world.deliver(GUILD_CHANNEL, OWNER_ID, content)
 
 
-class TestFullStackSoulcopy(unittest.IsolatedAsyncioTestCase):
+class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
+    """The production boot path driving the WORKLOAD fixture (a paced
+    multi-step flow plugin under tests/fixtures/sim_plugins — the
+    framework itself bundles no plugins)."""
+
     async def test_flow_end_to_end(self) -> None:
-        stack = await Stack().boot()
+        stack = await Stack(plugin_dir=SIM_PLUGINS).boot()
         await stack.start()
         try:
             await stack.owner_says("slcopy")
@@ -150,7 +164,6 @@ class TestFullStackSoulcopy(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(len(outs), 2)
             self.assertTrue(all("plugin=soulcopy" in (e.get("note") or "")
                                 for e in outs))
-
             # task history persisted with statuses
             hist = await stack.framework.api.tasks_history(limit=10)
             self.assertTrue(hist)
@@ -165,7 +178,7 @@ class TestFullStackSoulcopy(unittest.IsolatedAsyncioTestCase):
             await stack.stop()
 
     async def test_pacing_enforced_between_sends(self) -> None:
-        stack = await Stack().boot()
+        stack = await Stack(plugin_dir=SIM_PLUGINS).boot()
         await stack.start()
         try:
             await stack.owner_says("slcopy")
@@ -192,13 +205,13 @@ class TestPluginAssignmentGating(unittest.IsolatedAsyncioTestCase):
     async def test_assignment_limits_plugin_set(self) -> None:
         stack = await Stack(extra_accounts=["alpha", "beta"]).boot()
         api = stack.framework.api
-        await api.accounts_add({"name": "alpha", "plugins": ["soulcopy"]})
+        await api.accounts_add({"name": "alpha", "plugins": [PROBE]})
         await api.accounts_add({"name": "beta"})  # zero assignments
         await api.accounts_start()
         try:
             alpha_plugins = {p["name"] for p in await api.plugins_state("alpha")}
             beta_plugins = {p["name"] for p in await api.plugins_state("beta")}
-            self.assertEqual(alpha_plugins, {"soulcopy"})  # assigned only
+            self.assertEqual(alpha_plugins, {PROBE})  # assigned only
             self.assertEqual(beta_plugins, set())  # zero = ZERO (not "all")
             self.assertEqual(await api.accounts_plugins_list("beta"), [])
         finally:
@@ -210,7 +223,7 @@ class TestPluginAssignmentGating(unittest.IsolatedAsyncioTestCase):
         await api.accounts_add({"name": "beta"})
         await api.accounts_start()
         try:
-            await api.profiles_create("copier", ["soulcopy", "roll"])
+            await api.profiles_create("copier", [PROBE, "spy"])
             await api.profiles_assign("beta", "copier")  # retained infra
             # ... and attachment is UNCHANGED by the grant
             self.assertEqual({p["name"] for p in await api.plugins_state("beta")},
@@ -228,13 +241,13 @@ class TestPersistenceRoundtrip(unittest.IsolatedAsyncioTestCase):
             api = stack.framework.api
             # capability: DIRECT plugin assignment (the old "profiles" key
             # no longer exists on accounts_add)
-            await api.accounts_add({"name": "alpha", "plugins": ["soulcopy"]})
+            await api.accounts_add({"name": "alpha", "plugins": [PROBE]})
             # profile bookkeeping (retained infra) survives alongside
-            await api.profiles_create("copier", ["soulcopy"])
+            await api.profiles_create("copier", [PROBE])
             await api.profiles_assign("alpha", "copier")
             await api.ratelimit_set("message", 4.0, 0.1, 0.9, level="account", owner="alpha")
-            await api.plugins_set_enabled("alpha", "soulcopy", False)
-            await api.plugins_set_setting("alpha", "soulcopy", "trigger", "go")
+            await api.plugins_set_enabled("alpha", PROBE, False)
+            await api.plugins_set_setting("alpha", PROBE, "trigger", "go")
             await stack.stop()
 
             # second boot on the same DB restores everything
@@ -244,15 +257,15 @@ class TestPersistenceRoundtrip(unittest.IsolatedAsyncioTestCase):
                 accounts = await api2.accounts_list()
                 self.assertEqual([a["name"] for a in accounts], ["alpha"])
                 self.assertEqual(accounts[0]["profiles"], ["copier"])
-                self.assertEqual(accounts[0]["assigned_plugins"], ["soulcopy"])
+                self.assertEqual(accounts[0]["assigned_plugins"], [PROBE])
                 policies = await api2.ratelimit_policies()
                 override = [p for p in policies
                             if p["level"] == "account" and p["owner"] == "alpha"]
                 self.assertEqual(len(override), 1)
                 self.assertEqual(override[0]["interval"], 4.0)
                 states = {p["name"]: p for p in await api2.plugins_state("alpha")}
-                self.assertFalse(states["soulcopy"]["enabled"])   # plugin state
-                self.assertEqual(states["soulcopy"]["settings"]["trigger"], "go")
+                self.assertFalse(states[PROBE]["enabled"])   # plugin state
+                self.assertEqual(states[PROBE]["settings"]["trigger"], "go")
                 profiles = await api2.profiles_list()
                 self.assertEqual(profiles[0]["name"], "copier")
             finally:
@@ -285,7 +298,7 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
             await api.accounts_start()
             try:
                 # resolve the Mudae DM twice in this boot: ONE client call
-                services = stack.framework.accounts.services_for("alpha", "soulcopy")
+                services = stack.framework.accounts.services_for("alpha", PROBE)
                 cid1 = await services.open_dm(MUDAE_ID)
                 cid2 = await services.open_dm(MUDAE_ID)
                 self.assertEqual(cid1, cid2)
@@ -302,7 +315,7 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
             self.assertIn("alpha", names)
             await api2.accounts_start()
             try:
-                services2 = stack2.framework.accounts.services_for("alpha", "soulcopy")
+                services2 = stack2.framework.accounts.services_for("alpha", PROBE)
                 cid3 = await services2.open_dm(MUDAE_ID)
                 self.assertEqual(cid3, cid1)
                 client2 = stack2.framework.accounts.get("alpha").runtime.client
@@ -364,14 +377,14 @@ class TestEmergencyStopResume(unittest.IsolatedAsyncioTestCase):
             # halted: every submit is rejected
             from core.errors import SchedulerError
             with self.assertRaises(SchedulerError):
-                stack.framework.scheduler.submit("alpha", "roll", "message",
+                stack.framework.scheduler.submit("alpha", PROBE, "message",
                                                  channel_id=GUILD_CHANNEL, content="x")
             # resume: scheduler re-armed, sends flow again
             resumed = await api.system_resume()
             self.assertTrue(resumed["resumed"])
             await api.accounts_start()  # accounts restart is explicit
             scheduler = stack.framework.scheduler
-            scheduler.submit("alpha", "roll", "message",
+            scheduler.submit("alpha", PROBE, "message",
                              channel_id=GUILD_CHANNEL, content="back")
             for _ in range(100):
                 await asyncio.sleep(0.05)
@@ -400,7 +413,7 @@ class TestGroupRateScope(unittest.IsolatedAsyncioTestCase):
             scheduler = stack.framework.scheduler
             for account in ("alpha", "beta", "alpha", "beta"):
                 scheduler.submit(
-                    account, "roll", "message",
+                    account, PROBE, "message",
                     channel_id=GUILD_CHANNEL, content=f"hi-{account}",
                 )
             for _ in range(200):  # 4 sends on a 2.0s group clock land ~t=6s

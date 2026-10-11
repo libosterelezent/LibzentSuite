@@ -89,7 +89,7 @@ class TaskAckRegistry:
             future.set_result(event.summary)
 
     #: FlowBlocked family, reconstructed across the task-ack seam so the
-    #: plugin-side catch (soulcopy's flow-abort contract) actually fires
+    #: plugin-side catch (the flow-abort contract) actually fires
     _FLOW_CLASSES = {
         "FlowBlocked": FlowBlocked,
         "CacheInvalid": CacheInvalid,

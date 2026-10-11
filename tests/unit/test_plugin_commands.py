@@ -9,15 +9,15 @@ Covers the contract end to end WITHOUT the Discord library:
     back as the usage line, crash isolation, owner-gate behavior,
   * framework verbs — pg (hub stats), say, the dynamic categorized help
     (Mudae layout, built from the registry, never hand-written),
-  * the roll plugin's six handlers against fakes — scope refusal,
-    validation path, profile binding display,
+  * the probe fixture plugin's declared handler against fakes — the
+    plugin-declared surface end to end (discovery binds it, the executor
+    runs it, the reply flows through the fake services),
   * the adapter-side layer — the owner gate, invocation parsing, the
     registration rebuild diff over a REAL ext.commands Bot (the pinned
     discord.py-self is a dev dependency; nothing connects).
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import tempfile
 import unittest
@@ -26,9 +26,9 @@ from types import SimpleNamespace as NS
 from typing import Any, Dict, List, Optional
 
 from core.credentials import Credentials
-from core.errors import PluginError, SettingsValidationError, TargetGone
-from core.event_bus import EventBus, MessageReceived
-from core.plugin_base import CommandContext, CommandSpec
+from core.errors import PluginError, TargetGone
+from core.event_bus import EventBus
+from core.plugin_base import CommandSpec
 from core.plugin_manager import PluginManager
 from core.plugin_manager.commands import (
     COMMAND_HUB,
@@ -42,7 +42,10 @@ from core.priority import Priority
 from core.settings_manager import SettingsManager
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-REAL_PLUGINS = REPO_ROOT / "plugins"
+#: fixture plugins (the framework bundles none; probe carries the
+#: declared-command surface these suites exercise)
+REAL_PLUGINS = REPO_ROOT / "tests" / "fixtures" / "plugins"
+PROBE = "probe"
 OWNER_ID = 555
 CHANNEL = 42
 GUILD = 7
@@ -65,7 +68,7 @@ class FakeServices:
     def __init__(self, channels: Optional[Dict[int, FakeChannelInfo]] = None,
                  settings: Optional[Dict[str, Any]] = None) -> None:
         self.account = "alpha"
-        self.plugin = "roll"
+        self.plugin = "probe"
         self.sent: List[tuple] = []
         self.channels = channels if channels is not None else {
             CHANNEL: FakeChannelInfo(CHANNEL),
@@ -148,45 +151,6 @@ class FakeServices:
         return f"#chan-{channel_id}"
 
 
-class FakeSettingsApi:
-    """CommandSettingsApi double the roll handlers tests steer."""
-
-    def __init__(self, effective: Optional[Dict[str, Any]] = None,
-                 binding: Optional[str] = None,
-                 profiles: Optional[List[Dict[str, Any]]] = None) -> None:
-        self.effective_view = dict(effective or {})
-        self.binding_name = binding
-        self.profiles_rows = list(profiles or [])
-        self.set_calls: List[tuple] = []
-        self.clear_calls: List[str] = []
-
-    def schema(self):
-        return ()
-
-    async def effective(self):
-        return dict(self.effective_view)
-
-    async def set(self, key: str, value: Any) -> Any:
-        self.set_calls.append((key, value))
-        if key == "__raise__":
-            raise SettingsValidationError(
-                "roll.__raise__", "planned validation failure")
-        old = self.effective_view.get(key)
-        self.effective_view[key] = value
-        return value if old is None else value
-
-    async def clear(self, key: str) -> Any:
-        self.clear_calls.append(key)
-        self.effective_view.pop(key, None)
-        return "$wa"
-
-    async def binding(self):
-        return self.binding_name
-
-    async def profiles(self):
-        return list(self.profiles_rows)
-
-
 def _plugin_src(body: str) -> str:
     return (
         "from core.plugin_base import PluginBase, CommandSpec\n"
@@ -199,9 +163,6 @@ def _plugin_src(body: str) -> str:
 
 #: a minimal valid handler for generated test plugins
 _HANDLER = 'handler=lambda ctx, args: "ok"'
-
-#: sentinel distinguishing "no api override" from "install api=None"
-_UNSET = object()
 
 
 # ----------------------------------------------------- registry collection
@@ -400,7 +361,7 @@ class HelpRenderingTests(unittest.TestCase):
 
 # ------------------------------------------------------------- execution
 class ExecutorTests(unittest.IsolatedAsyncioTestCase):
-    """PluginManager.execute_self_command over the REAL roll plugin."""
+    """PluginManager.execute_self_command over the REAL fixture plugin."""
 
     def setUp(self) -> None:
         bus = EventBus()
@@ -417,32 +378,18 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
     async def _boot(self, account: str = "alpha",
                     allowed: Optional[set] = None) -> None:
         await self.manager.attach_account(
-            account, {"roll"} if allowed is None else allowed)
+            account, {PROBE} if allowed is None else allowed)
         await self.manager.activate_account(
             account, lambda plugin: self.services)
 
     async def _run(self, name: str, args: List[str], *,
                    account: str = "alpha", channel: int = CHANNEL,
-                   invoker: Optional[int] = OWNER_ID,
-                   api: Any = _UNSET,  # None installs NO settings api
-                   services: Optional[FakeServices] = None) -> Optional[str]:
-        services = services or self.services
-        original = self.manager._settings_api
-
-        def _api(acct, plugin):
-            if api is _UNSET:
-                return original(acct, plugin)
-            return api  # None => handlers must degrade gracefully
-        self.manager._settings_api = _api
-        try:
-            await self.manager.execute_self_command(
-                account, name, args, channel, guild_id=GUILD,
-                invoker_id=invoker)
-        finally:
-            self.manager._settings_api = original
-        if not services.sent:
+                   invoker: Optional[int] = OWNER_ID) -> Optional[str]:
+        await self.manager.execute_self_command(
+            account, name, args, channel, guild_id=GUILD, invoker_id=invoker)
+        if not self.services.sent:
             return None
-        return services.sent[-1][1]
+        return self.services.sent[-1][1]
 
     # ------------------------------------------------------------ basics
     async def test_reply_flows_through_paced_pipeline(self) -> None:
@@ -452,6 +399,17 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
         channel, content, priority = self.services.sent[-1]
         self.assertEqual(channel, CHANNEL)
         self.assertEqual(priority, int(Priority.NORMAL))  # interactive
+
+    async def test_probeinfo_declared_command_runs_end_to_end(self) -> None:
+        """The fixture plugin's declared handler: discovery collects it,
+        the executor binds it to the per-account instance and its reply
+        flows through the paced pipeline."""
+        await self._boot()
+        reply = await self._run("probeinfo", [])
+        self.assertEqual(reply, "probe ok")
+        channel, _content, priority = self.services.sent[-1]
+        self.assertEqual(channel, CHANNEL)
+        self.assertEqual(priority, int(Priority.NORMAL))
 
     async def test_unknown_command_is_silent(self) -> None:
         await self._boot()
@@ -471,22 +429,22 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
         await self._boot()
         # swap ONE declared handler for a crasher (collection reads the
         # class's COMMANDS tuple, so the swap must live there)
-        runtime = self.manager._accounts["alpha"]["roll"]
+        runtime = self.manager._accounts["alpha"][PROBE]
         cls = type(runtime.instance)
 
         async def boom(ctx, args):
             raise RuntimeError("planned crash")
 
-        crashing = CommandSpec(name="rollstop", help="h", handler=boom)
+        crashing = CommandSpec(name="probeinfo", help="h", handler=boom)
         original = cls.COMMANDS
         cls.COMMANDS = tuple(
-            crashing if spec.name == "rollstop" else spec
+            crashing if spec.name == "probeinfo" else spec
             for spec in original)
         try:
-            reply = await self._run("rollstop", [])
+            reply = await self._run("probeinfo", [])
         finally:
             cls.COMMANDS = original
-        self.assertIn("error: rollstop failed internally", reply)
+        self.assertIn("error: probeinfo failed internally", reply)
 
     async def test_reply_truncation(self) -> None:
         await self._boot()
@@ -522,10 +480,8 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
     async def test_help_lists_framework_and_plugin_categories(self) -> None:
         await self._boot()
         reply = await self._run("help", [])
-        self.assertIn("Roll:", reply)
-        for verb in ("rollinfo", "rolllist", "rollremove", "rollset",
-                     "rollstart", "rollstop"):
-            self.assertIn(verb, reply)
+        self.assertIn("Probe:", reply)          # fixture's declared category
+        self.assertIn("probeinfo", reply)       # its declared verb
         self.assertIn("Utilities:", reply)
         self.assertIn("Gateway latency and uptime", reply)
         self.assertIn("Repeats the user's message.", reply)
@@ -534,143 +490,27 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_help_for_one_command_shows_usage(self) -> None:
         await self._boot()
-        reply = await self._run("help", ["rollset"])
-        self.assertIn("rollset — Set one per-account roll setting override",
-                      reply)
-        self.assertIn("usage: rollset <key> <value>", reply)
+        reply = await self._run("help", ["say"])
+        self.assertIn("say — Repeats the user's message.", reply)
+        self.assertIn("usage: say <text>", reply)
         unknown = await self._run("help", ["zzz"])
         self.assertIn("usage: help [command]", unknown)
         self.assertIn("no command 'zzz'", unknown)
 
     async def test_help_is_dynamic_only_registered_verbs(self) -> None:
-        # roll unassigned: its verbs must not appear
+        # probe unassigned: its verb must not appear
         await self._boot(allowed=set())
         reply = await self._run("help", [])
-        self.assertNotIn("rollstart", reply)
+        self.assertNotIn("probeinfo", reply)
         self.assertIn("pg", reply)  # framework verbs remain
 
-    # ------------------------------------------------------------ roll verbs
-    async def test_rollset_validation_error_lists_valid_commands(self) -> None:
-        await self._boot()
-        reply = await self._run("rollset", ["command", "bogus"])
-        self.assertIn("usage: rollset <key> <value>", reply)
-        self.assertIn("is not a Mudae roulette command", reply)
-        self.assertIn("$wa", reply)  # the valid list rides along
-
-    async def test_rollset_unknown_key_is_a_usage_error(self) -> None:
-        await self._boot()
-        reply = await self._run("rollset", ["nope", "1"])
-        self.assertIn("usage: rollset <key> <value>", reply)
-        self.assertIn("unknown setting", reply)
-
-    async def test_rollset_missing_args_is_a_usage_error(self) -> None:
-        await self._boot()
-        reply = await self._run("rollset", ["onlykey"])
-        self.assertIn("rollset <key> <value>", reply)
-
-    async def test_rollset_persists_and_reports(self) -> None:
-        await self._boot()
-        api = FakeSettingsApi(effective={"command": "$wa"})
-        reply = await self._run("rollset", ["command", "$wg"], api=api)
-        self.assertIn("set roll.command = '$wg'", reply)
-        self.assertIn("(was '$wa')", reply)
-        self.assertEqual(api.set_calls, [("command", "$wg")])
-
-    async def test_rollremove(self) -> None:
-        await self._boot()
-        api = FakeSettingsApi(effective={"command": "$wg"})
-        reply = await self._run("rollremove", ["command"], api=api)
-        self.assertIn("cleared roll.command override", reply)
-        self.assertEqual(api.clear_calls, ["command"])
-
-    async def test_rollinfo_includes_profile_binding_and_scope(self) -> None:
-        await self._boot()
-        api = FakeSettingsApi(
-            effective={"command": "$wa", "userstack": True,
-                       "channels": {"mode": "allow",
-                                    "rules": [{"guild_id": "7",
-                                               "channel_ids": ["42"]}]}},
-            binding="grind-only")
-        reply = await self._run("rollinfo", [], api=api)
-        self.assertIn("profile: grind-only", reply)
-        self.assertIn("command = '$wa'", reply)
-        self.assertIn("userstack = True", reply)
-        self.assertIn("scope: allow-list, 1 channel(s) in 1 guild(s)", reply)
-
-    async def test_rollinfo_falls_back_without_profile_storage(self) -> None:
-        await self._boot()
-        self.services._settings = {"command": "$ha"}
-        reply = await self._run("rollinfo", [], api=None)
-        self.assertIn("live view", reply)
-        self.assertIn("command = '$ha'", reply)
-
-    async def test_rolllist(self) -> None:
-        await self._boot()
-        api = FakeSettingsApi(
-            profiles=[{"name": "grind-only", "description": "fast"}])
-        reply = await self._run("rolllist", [], api=api)
-        self.assertIn("roll profiles:", reply)
-        self.assertIn("grind-only — fast", reply)
-        empty = await self._run(
-            "rolllist", [], api=FakeSettingsApi(profiles=[]))
-        self.assertIn("no roll profiles", empty)
-
-    async def test_rollstart_scope_refusal_explains_why(self) -> None:
-        await self._boot()
-        api = FakeSettingsApi(effective={
-            "channels": {"mode": "allow",
-                         "rules": [{"guild_id": "7",
-                                    "channel_ids": ["42"]}]}})
-        reply = await self._run("rollstart", ["43"], api=api)
-        self.assertIn("refused: channel 43", reply)
-        self.assertIn("outside the roll channel scope", reply)
-        self.assertIn("allow-list", reply)
-
-    async def test_rollstart_bad_channel_argument(self) -> None:
-        await self._boot()
-        reply = await self._run("rollstart", ["notanumber"])
-        self.assertIn("channel id must be a number", reply)
-
-    async def test_rollstart_unusable_channel(self) -> None:
-        await self._boot()
-        reply = await self._run("rollstart", ["777"])  # unknown channel
-        self.assertIn("unusable", reply)
-
-    async def test_rollstart_starts_the_loop_and_rollstop_stops(self) -> None:
-        await self._boot()
-        reply = await self._run("rollstart", [])
-        self.assertIn("rolling started", reply)
-        instance = self.manager._accounts["alpha"]["roll"].instance
-        self.assertTrue(instance._rolling.get("alpha"))
-        already = await self._run("rollstart", [])
-        self.assertIn("already rolling", already)
-        stopped = await self._run("rollstop", [])
-        self.assertIn("rolling stopped", stopped)
-        self.assertFalse(instance._rolling.get("alpha"))
-        again = await self._run("rollstop", [])
-        self.assertIn("not rolling", again)
-        # let any stray loop task settle before teardown
-        await asyncio.sleep(0)
-
-    async def test_rollstart_refuses_when_plugin_never_activated(self) -> None:
-        # attached + enabled, but the live plugin context is missing
-        await self.manager.attach_account("alpha", {"roll"})
-        await self.manager.activate_account(
-            "alpha", lambda plugin: self.services)
-        instance = self.manager._accounts["alpha"]["roll"].instance
-        instance._ctx = None  # simulate the missing-ctx corner
-        reply = await self._run("rollstart", [])
-        self.assertIn("roll is not active", reply)
-
-    async def test_rollstart_inside_scope_starts(self) -> None:
-        await self._boot()
-        api = FakeSettingsApi(effective={
-            "channels": {"mode": "allow",
-                         "rules": [{"guild_id": "7",
-                                    "channel_ids": ["42"]}]}})
-        reply = await self._run("rollstart", [], api=api)  # channel 42 allowed
-        self.assertIn("rolling started", reply)
-        await self._run("rollstop", [])
+    # NOTE: the roll plugin's verb-specific executor tests (rollset
+    # validation/persistence, rollstart scope refusals, rollinfo/rolllist
+    # profile display) were removed with the plugin — those behaviors had
+    # no fixture equivalent. The executor's usage-error, containment,
+    # pacing and owner-gate paths stay covered above, and the
+    # settings-through-commands path survives in
+    # tests/integration/test_plugin_commands_e2e.py over the real DB.
 
 
 # ------------------------------------------------------------- hub behavior
@@ -687,16 +527,16 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(manager.close)
         self.hub.bind(manager)
         manager.command_hub = self.hub  # this manager's syncs → the test hub
-        await manager.attach_account("alpha", {"roll"})
+        await manager.attach_account("alpha", {PROBE})
         delivered: List[List[str]] = []
         self.hub.subscribe("alpha",
                            lambda specs: delivered.append(
                                [s.name for s in specs]))
-        self.assertIn("rollstart", delivered[-1])  # framework + roll verbs
+        self.assertIn("probeinfo", delivered[-1])  # framework + fixture verb
         self.assertIn("pg", delivered[-1])
         # a disable re-publishes through the same wire
-        await manager.set_enabled("alpha", "roll", False)
-        self.assertNotIn("rollstart", delivered[-1])
+        await manager.set_enabled("alpha", PROBE, False)
+        self.assertNotIn("probeinfo", delivered[-1])
         self.hub.forget("alpha")
 
     async def test_invoke_routes_to_bound_manager(self) -> None:
