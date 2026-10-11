@@ -953,6 +953,58 @@ class DashboardServer:
             # mediated model is gone from the UI; these are the surfaces
             # the dashboard drives). Unknown account/plugin names are
             # domain errors from the api -> honest 400s below.
+            # ------------------------------------------------------------ admin access
+            if (method, path) == ("GET", "/api/admin/overview"):
+                return 200, {"ok": True, "data": await api.admin_overview()}
+            if (method, path) == ("POST", "/api/admin/ids/set"):
+                return 200, {"ok": True, "data": await api.admin_set_ids(
+                    [int(x) for x in require_json_list(
+                        body, "admins", path)],
+                    surface="dashboard")}
+            if (method, path) == ("POST", "/api/admin/ids/add"):
+                return 200, {"ok": True, "data": await api.admin_add_id(
+                    require_int(body, "user_id", path), surface="dashboard")}
+            if (method, path) == ("POST", "/api/admin/ids/remove"):
+                return 200, {"ok": True, "data": await api.admin_remove_id(
+                    require_int(body, "user_id", path), surface="dashboard")}
+            if (method, path) == ("POST", "/api/admin/account-flag"):
+                return 200, {"ok": True, "data": await api.admin_account_flag(
+                    require_str(body, "account", path),
+                    parse_json_bool(body.get("is_admin"), "is_admin"),
+                    surface="dashboard")}
+            if (method, path) == ("GET", "/api/admin/perms"):
+                return 200, {"ok": True, "data": await api.admin_perms(
+                    q_str(query, "account", path))}
+            if (method, path) == ("POST", "/api/admin/perms/set"):
+                return 200, {"ok": True, "data": await api.admin_perms_set(
+                    require_str(body, "account", path),
+                    [int(x) for x in require_json_list(
+                        body, "allowed_user_ids", path)],
+                    surface="dashboard")}
+            if (method, path) == ("POST", "/api/admin/perms/add"):
+                return 200, {"ok": True, "data": await api.admin_perms_add(
+                    require_str(body, "account", path),
+                    require_int(body, "user_id", path), surface="dashboard")}
+            if (method, path) == ("POST", "/api/admin/perms/remove"):
+                return 200, {"ok": True, "data": await api.admin_perms_remove(
+                    require_str(body, "account", path),
+                    require_int(body, "user_id", path), surface="dashboard")}
+            if (method, path) == ("GET", "/api/admin/prefix"):
+                return 200, {"ok": True, "data": await api.admin_prefix(
+                    q_str(query, "account", path))}
+            if (method, path) == ("POST", "/api/admin/prefix/set"):
+                return 200, {"ok": True, "data": await api.admin_prefix_set(
+                    require_str(body, "account", path),
+                    require_str(body, "mode", path),
+                    str(body.get("symbol") or ""),
+                    surface="dashboard")}
+            if (method, path) == ("GET", "/api/admin/mudae-id"):
+                return 200, {"ok": True, "data": await api.admin_mudae_id()}
+            if (method, path) == ("POST", "/api/admin/mudae-id/set"):
+                raw = body.get("mudae_bot_id", None)
+                return 200, {"ok": True, "data": await api.admin_mudae_id_set(
+                    raw, surface="dashboard")}
+
             if (method, path) == ("GET", "/api/accounts/plugins"):
                 return 200, {
                     "ok": True,

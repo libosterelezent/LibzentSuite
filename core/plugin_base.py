@@ -346,6 +346,9 @@ class CommandContext:
     settings_api: Optional[CommandSettingsApi] = None
     #: verbatim argument remainder (whitespace-normalized by the parser)
     raw: str = ""
+    #: the invoking Discord user id (None when unknown) — admin-gated
+    #: handlers check it against the AccessManager
+    invoker_id: Optional[int] = None
     #: PARSED arguments when the spec declares ArgSpecs (name -> typed
     #: value; greedy args are lists). Empty dict for spec-less commands
     #: (they read the raw ``args`` list instead).

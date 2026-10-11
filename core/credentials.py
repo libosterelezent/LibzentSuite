@@ -9,12 +9,31 @@ Design rules enforced by this module:
     the sole source; this module keeps fleet-level ids/flags and the
     DISCORD_TOKEN_* keys are read only by the one-shot `import-env`
     migration.
+
+ADMIN-PANEL MIGRATION (this file's second job): the authorization model
+moved OFF the env and INTO the database. :class:`AccessManager` is the
+DB-backed store for
+
+  * the framework ADMIN user-id list (the replacement for the global
+    ``OWNER_USER_IDS`` grant — see the security note on
+    :meth:`AccessManager.migrate_from_credentials`),
+  * per-account COMMAND PERMISSIONS (the Discord user ids allowed to
+    invoke that one account's self-commands),
+  * per-account ADMIN flags and PREFIX configurations,
+  * the framework-level ``MUDAE_BOT_ID`` setting (DB value with the env
+    value as a read-only fallback),
+
+and :class:`FrameworkCredentials` is the DB-first view handed to plugin
+services as ``services.credentials`` (plugins keep reading
+``.owner_user_ids`` / ``.mudae_bot_id``; the values now come from the
+admin-managed store, falling back to env when the DB value is unset).
 """
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Mapping, Optional
+from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Set
 
 from .errors import CredentialsError  # ONE class (was defined twice)
 
@@ -113,7 +132,14 @@ class Credentials:
     # ------------------------------------------------------------- aggregates
     @property
     def mudae_bot_id(self) -> int:
-        """Mudae bot user id (required int; plugins read it, never hardcode it)."""
+        """Mudae bot user id (env value — LEGACY fallback).
+
+        The authoritative source is the admin-panel setting served by
+        :class:`AccessManager.mudae_bot_id` (DB first, this env value as
+        the fallback when the DB value is unset). Plugins never read this
+        property directly — they see the DB-first view through
+        ``services.credentials`` (:class:`FrameworkCredentials`).
+        """
         raw = self.require("MUDAE_BOT_ID")
         try:
             return int(raw)
@@ -123,6 +149,13 @@ class Credentials:
     @property
     def owner_user_ids(self) -> frozenset[int]:
         """Comma-separated OWNER_USER_IDS -> frozenset of ints (empty if unset).
+
+        DEPRECATED for authorization: this list is read ONCE at boot by
+        :meth:`AccessManager.migrate_from_credentials` to seed the DB
+        admin list (first boot only) and is then IGNORED — command
+        authorization lives in the per-account permission lists + the
+        admin list. It remains the `Credentials` object's parsed view for
+        diagnostics and legacy unwired stacks.
 
         Parsed once and cached (this is read on EVERY inbound message by
         the remote-control gate; the values are immutable after load). A

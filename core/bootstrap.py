@@ -468,6 +468,14 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     # an account's send pacing (registered once; tests may stub it)
     from .plugin_manager.commands import COMMAND_HUB, PacingBackend
     COMMAND_HUB.pacing = PacingBackend(limiter)
+    # AccessManager: the admin panel's store (admins, per-account command
+    # perms, prefixes, mudae id) over the kv repo; one-time env migration
+    # seeds admins from OWNER_USER_IDS when the stored list is empty.
+    from .access_manager import AccessManager
+    access = AccessManager(database.kv, credentials=credentials)
+    await access.migrate_from_credentials()
+    await access.warm_prefix_cache()
+    COMMAND_HUB.access = access
     # task ids continue after the archived ones (they used to restart at 1
     # every boot, colliding with old rows; the swallowed insert error meant
     # a restarted process archived none of its tasks)
@@ -493,7 +501,8 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
 
         client_factory = RealClientFactory(
             credentials,
-            command_prefix=getattr(credentials, "self_command_prefix", ""))
+            command_prefix=getattr(credentials, "self_command_prefix", ""),
+            access_manager=access)
 
     accounts = AccountManager(
         bus, ServiceLogger(logs, "accounts"), database.accounts,
@@ -564,6 +573,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
 
     api = ControlAPI(
         accounts=accounts, plugins=plugins, profiles=profiles, settings=settings,
+        access=access,
         limiter=limiter, scheduler=scheduler, logs=logs, audit=audit,
         simulation=simulation_runner, credentials=credentials, database=database,
         credentials_svc=credential_service, cooldowns=cooldowns,

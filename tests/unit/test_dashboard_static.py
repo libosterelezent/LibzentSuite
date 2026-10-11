@@ -49,7 +49,7 @@ TOKEN = "static-test-token"
 
 #: JS modules in the exact dependency order index.html loads them.
 JS_FILES = ["state.js", "api.js", "ui.js", "accounts.js", "groups.js",
-            "views.js", "plugins-ui.js", "app.js"]
+            "views.js", "plugins-ui.js", "admin-ui.js", "app.js"]
 #: every stylesheet index.html links.
 CSS_FILES = ["base.css", "layout.css", "components.css", "responsive.css"]
 
@@ -364,6 +364,7 @@ class TestPluginProfilesUI(unittest.TestCase):
         # separately enforced by test_every_script_tag_resolves)
         self.assertIn('<script src="js/views.js"></script>\n'
                       '<script src="js/plugins-ui.js"></script>\n'
+                      '<script src="js/admin-ui.js"></script>\n'
                       '<script src="js/app.js"></script>', html)
         js = _js()
         self.assertEqual(js.count("function renderPlugins"), 1)
@@ -544,7 +545,9 @@ class TestStartupRobustness(unittest.TestCase):
         js = _js()
         defined = set(re.findall(r'id="([A-Za-z0-9_-]+)"', html))
         referenced = set(re.findall(r'\$\("([A-Za-z0-9_-]+)"\)', js))
-        dynamic = {"nav-badge-"}  # built by buildNav(), guarded at use
+        dynamic = {"nav-badge-",  # built by buildNav(), guarded at use
+                   "admin-id-",    # admin-ui builds these via innerHTML
+                   "mudae-id-"}
         missing = sorted(
             rid for rid in referenced - defined
             if not any(rid.startswith(p) for p in dynamic))

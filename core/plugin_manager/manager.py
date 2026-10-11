@@ -621,13 +621,29 @@ class PluginManager:
             self._logger.warning(
                 "self-command %r on %s dropped: no services facade", name, account)
             return
-        # owner gate (same semantics as the plugin trigger-word path)
+        # THE command gate: AccessManager.can_invoke (per-account
+        # permission list + admin bypass, fail-closed) when wired; the
+        # credentials view's owner ids are the LEGACY fallback for
+        # direct-construction stacks without an access manager.
         if invoker_id is not None:
-            owners = getattr(
-                getattr(services, "credentials", None), "owner_user_ids", ()) or ()
-            if invoker_id not in set(owners):
+            access = getattr(self, "_access_manager", None)
+            allowed = False
+            if access is not None:
+                try:
+                    allowed = await access.can_invoke(account, invoker_id)
+                except Exception:
+                    self._logger.exception(
+                        "access check failed for %r on %s — failing closed",
+                        invoker_id, account)
+                    allowed = False
+            else:
+                owners = getattr(
+                    getattr(services, "credentials", None),
+                    "owner_user_ids", ()) or ()
+                allowed = invoker_id in set(owners)
+            if not allowed:
                 self._logger.info(
-                    "self-command %r on %s ignored: invoker %s is not an owner",
+                    "self-command %r on %s ignored: invoker %s not allowed",
                     name, account, invoker_id)
                 return
         ctx = CommandContext(
@@ -641,6 +657,7 @@ class PluginManager:
             settings_api=self._settings_api(account, plugin),
             raw=raw,
             parsed={},
+            invoker_id=invoker_id,
         )
         try:
             if spec.handler is None:

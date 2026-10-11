@@ -11,9 +11,10 @@ const NAV = [
   {id:"profiles", label:"Profiles", icon:"M12 2L2 7l10 5 10-5-10-5zM2 12l10 5 10-5M2 17l10 5 10-5"},
   {id:"activity", label:"Activity", icon:"M22 12h-4l-3 9L9 3l-3 9H2"},
   {id:"policies", label:"Policies", icon:"M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"},
+  {id:"admin", label:"Admin", icon:"M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"},
   {id:"tools", label:"Tools", icon:"M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94z"},
 ];
-const TITLES = {home:"Home",fleet:"Accounts & Groups",plugins:"Plugins",profiles:"Profiles",activity:"Activity",policies:"Policies",tools:"Tools"};
+const TITLES = {home:"Home",fleet:"Accounts & Groups",plugins:"Plugins",profiles:"Profiles",activity:"Activity",policies:"Policies",admin:"Admin",tools:"Tools"};
 
 function buildNav() {
   const nav = $("snav"); nav.innerHTML = "";
@@ -99,6 +100,7 @@ function render() {
   if (currentView==="plugins") renderPlugins();
   if (currentView==="profiles") renderProfiles();
   if (currentView==="policies") renderPolicies();
+  if (currentView==="admin") renderAdmin();
   updateNavBadges();
 }
 
@@ -405,6 +407,7 @@ try {
   LOADERS.fleet = ()=>{ loadGroups(); };
   LOADERS.activity = ()=>{ loadTasks(); loadCooldowns(); };
   LOADERS.policies = ()=>{ loadPolicies(); };
+  LOADERS.admin = ()=>{ loadAdmin(); };
   // both profile surfaces read the same per-plugin profile library
   LOADERS.plugins = ()=>{ loadPluginProfiles(); };
   LOADERS.profiles = ()=>{ loadPluginProfiles(); };

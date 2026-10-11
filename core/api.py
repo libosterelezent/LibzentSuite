@@ -139,6 +139,7 @@ class ControlAPI:
         credentials_svc: Optional["CredentialService"] = None,
         cooldowns: Optional["CooldownService"] = None,
         sync_groups: Any = None,
+        access: Any = None,              # core.access_manager.AccessManager
         started_at: float = 0.0,
         reconcile_interval_s: float = 30.0,
     ) -> None:
@@ -156,6 +157,7 @@ class ControlAPI:
         self._credentials_svc = credentials_svc
         self._cooldowns = cooldowns
         self._sync_groups = sync_groups
+        self._access = access
         self._started_at = started_at
         self._booted_at = _time.time()
         # FINAL-PHASE (F3): authoritative reconciliation cadence (bounds
@@ -1332,6 +1334,124 @@ class ControlAPI:
         except Exception:
             LOG.debug("group memory refresh failed for %r", account,
                       exc_info=True)
+
+    # ------------------------------------------------------ admin access
+    async def admin_overview(self) -> Dict[str, Any]:
+        """The admin panel's full view: admin ids, mudae bot id, and every
+        account's access row."""
+        access = self._require_access()
+        rows = await access.all_account_rows()
+        return {
+            "admins": await access.admin_ids(),
+            "mudae_bot_id": await access.mudae_bot_id(),
+            "accounts": rows,
+        }
+
+    async def admin_set_ids(self, ids: List[int],
+                            surface: str = "api") -> Dict[str, Any]:
+        access = self._require_access()
+        out = {"admins": await access.set_admin_ids(ids)}
+        self._audit_mgmt("system", "mgmt:admin.ids_set", surface,
+                         extra=f"count={len(out['admins'])}")
+        return out
+
+    async def admin_add_id(self, user_id: int,
+                           surface: str = "api") -> Dict[str, Any]:
+        access = self._require_access()
+        out = {"admins": await access.add_admin(user_id)}
+        self._audit_mgmt("system", "mgmt:admin.added", surface,
+                         extra=f"user_id={user_id}")
+        return out
+
+    async def admin_remove_id(self, user_id: int,
+                              surface: str = "api") -> Dict[str, Any]:
+        access = self._require_access()
+        out = {"admins": await access.remove_admin(user_id)}
+        self._audit_mgmt("system", "mgmt:admin.removed", surface,
+                         extra=f"user_id={user_id}")
+        return out
+
+    async def admin_account_flag(self, account: str, is_admin: bool,
+                                 surface: str = "api") -> Dict[str, Any]:
+        self._require_access()
+        out = await _resolved(self._access.set_admin_flag(account, is_admin))
+        self._audit_mgmt(account, "mgmt:admin.flag_set", surface,
+                         extra=f"is_admin={is_admin}")
+        return out
+
+    async def admin_perms(self, account: str,
+                          surface: str = "api") -> Dict[str, Any]:
+        access = self._require_access()
+        return {"account": account,
+                "allowed_user_ids": await access.allowed_user_ids(account)}
+
+    async def admin_perms_set(self, account: str, ids: List[int],
+                              surface: str = "api") -> Dict[str, Any]:
+        access = self._require_access()
+        out = {"account": account,
+               "allowed_user_ids": await access.set_allowed_user_ids(
+                   account, ids)}
+        self._audit_mgmt(account, "mgmt:admin.perms_set", surface,
+                         extra=f"count={len(out['allowed_user_ids'])}")
+        return out
+
+    async def admin_perms_add(self, account: str, user_id: int,
+                              surface: str = "api") -> Dict[str, Any]:
+        access = self._require_access()
+        out = {"account": account,
+               "allowed_user_ids": await access.add_allowed(account, user_id)}
+        self._audit_mgmt(account, "mgmt:admin.perm_added", surface,
+                         extra=f"user_id={user_id}")
+        return out
+
+    async def admin_perms_remove(self, account: str, user_id: int,
+                                 surface: str = "api") -> Dict[str, Any]:
+        access = self._require_access()
+        out = {"account": account,
+               "allowed_user_ids": await access.remove_allowed(
+                   account, user_id)}
+        self._audit_mgmt(account, "mgmt:admin.perm_removed", surface,
+                         extra=f"user_id={user_id}")
+        return out
+
+    async def admin_prefix(self, account: str,
+                           surface: str = "api") -> Dict[str, Any]:
+        access = self._require_access()
+        return {"account": account,
+                **await access.prefix_config(account)}
+
+    async def admin_prefix_set(self, account: str, mode: str,
+                               symbol: str = "",
+                               surface: str = "api") -> Dict[str, Any]:
+        access = self._require_access()
+        out = {"account": account,
+               **await access.set_prefix_config(account, mode, symbol)}
+        self._audit_mgmt(account, "mgmt:admin.prefix_set", surface,
+                         extra=f"mode={mode} symbol={symbol!r}")
+        return out
+
+    async def admin_mudae_id(self,
+                             surface: str = "api") -> Dict[str, Any]:
+        access = self._require_access()
+        return {"mudae_bot_id": await access.mudae_bot_id()}
+
+    async def admin_mudae_id_set(self, user_id,
+                                 surface: str = "api") -> Dict[str, Any]:
+        access = self._require_access()
+        if user_id is not None and not str(user_id).strip().lstrip("-").isdigit():
+            raise ValueError("mudae bot id must be an integer (or null)")
+        await access.set_mudae_bot_id(
+            int(user_id) if user_id is not None else None)
+        self._audit_mgmt("system", "mgmt:admin.mudae_id_set", surface,
+                         extra=f"value={user_id}")
+        return {"mudae_bot_id": await access.mudae_bot_id()}
+
+    def _require_access(self) -> Any:
+        access = getattr(self, "_access", None)
+        if access is None:
+            raise RuntimeError(
+                "admin access store not wired on this api")
+        return access
 
     # ------------------------------------------------------------- rate limits
     async def ratelimit_policies(self) -> List[Dict[str, Any]]:

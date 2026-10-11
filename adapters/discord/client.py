@@ -261,6 +261,9 @@ class RealDiscordClient:
         identify_gate: Optional["IdentifyGate"] = None,
         command_prefix: Optional[str] = None,
         owner_ids: FrozenSet[int] = frozenset(),
+        prefix_mode: str = "mention",
+        prefix_symbol: str = "",
+        access_checker: Optional[Any] = None,
     ) -> None:
         self._token = token
         self._discord: Any = None          # the discord module (set in connect)
@@ -276,10 +279,19 @@ class RealDiscordClient:
         #: mode: the account's OWN messages become invocable commands,
         #: other users' messages are skipped by the library's check.
         self._command_prefix = command_prefix or ""
-        #: owner gate for self-commands (OWNER_USER_IDS from .env, threaded
-        #: through the factory's credentials): the account's own Discord
-        #: user id must be an owner — exactly the trigger-word path's gate.
+        #: owner gate for self-commands (LEGACY env path — kept for
+        #: unwired stacks; the authoritative gate is access_checker)
         self._owner_ids = frozenset(owner_ids or ())
+        #: per-account prefix configuration from the admin panel:
+        #: mode "mention" | "symbol" | "both" (default mention). Resolved
+        #: against the env default: symbol/both REQUIRE a symbol; when
+        #: the mode is mention (or unset) the env/@me default applies.
+        self._prefix_mode = prefix_mode or "mention"
+        self._prefix_symbol = prefix_symbol or ""
+        #: async (account, invoker_id) -> bool — the AccessManager's
+        #: can_invoke (per-account list + admin bypass, fail-closed).
+        #: When wired it REPLACES the env owner-ids gate entirely.
+        self._access_checker = access_checker
         self._identify_gate = identify_gate  # shared per process (factory-owned)
         #: best-effort account label for domain error messages (set by factory)
         self._account = ""
@@ -388,6 +400,22 @@ class RealDiscordClient:
         self._account = str(name or "")
 
     # ------------------------------------------------------------- lifecycle
+    def _resolve_prefix(self, _ext_commands: Any):
+        """Resolve THIS account's command prefix from the admin-panel
+        config (mode mention/symbol/both) over the env default."""
+        mode = (self._prefix_mode or "mention").lower()
+        env_prefix = self._command_prefix
+        when_mentioned = _ext_commands.when_mentioned
+        if mode == "symbol" and self._prefix_symbol:
+            return self._prefix_symbol
+        if mode == "both" and self._prefix_symbol:
+            return _ext_commands.when_mentioned_or(
+                self._prefix_symbol)
+        # mention (default) or unresolvable custom -> mentionable form
+        if env_prefix == "@me":
+            return when_mentioned
+        return env_prefix if env_prefix else when_mentioned
+
     async def connect(self) -> None:
         """Import the library, wire callbacks, start the client, await ready.
 
@@ -413,6 +441,7 @@ class RealDiscordClient:
         # discord.py-self 2.1.0 accepts the kwarg (min-clamped at 30 by
         # http.py:637); the TypeError fallback covers only exotic/test
         # layouts without it.
+        # placeholder — replaced below
         # SELF-COMMAND layer (upstream): with a prefix configured,
         # construct the ext.commands Bot (user_bot=True) instead of a
         # plain Client. user_bot is the correct mode for this framework:
@@ -426,9 +455,7 @@ class RealDiscordClient:
         # machinery).
         if self._command_prefix:
             from discord.ext import commands as _ext_commands
-            prefix = self._command_prefix
-            if prefix == "@me":
-                prefix = _ext_commands.when_mentioned
+            prefix = self._resolve_prefix(_ext_commands)
             try:
                 self._client = _ext_commands.Bot(
                     command_prefix=prefix, user_bot=True,
@@ -820,15 +847,33 @@ class RealDiscordClient:
             self._logger.exception("self-command registration failed: %s", name)
 
     def allowed_invoker(self, invoker_id: Optional[int]) -> bool:
-        """The ownership gate for one invocation: the TYPER must be an
-        OWNER_USER_IDS owner. user_bot mode lets every message reach
-        dispatch, so this is the only thing standing between a stranger
-        and a command — fail-closed when the owner set is empty or the
-        invoker is unknown.
+        """The gate for one invocation (LEGACY sync view).
+
+        The AUTHORITATIVE gate is :meth:`allowed_invoker_async`: the
+        AccessManager's per-account list + admin bypass (fail-closed on
+        an empty list). This sync view exists for paths that cannot
+        await; when an access_checker is wired it returns the env-set
+        answer ONLY as a pre-filter — dispatch always re-checks async.
         """
-        if not self._owner_ids or invoker_id is None:
+        if invoker_id is None:
             return False
         return invoker_id in self._owner_ids
+
+    async def allowed_invoker_async(self, invoker_id: Optional[int]) -> bool:
+        """THE command gate: AccessManager.can_invoke (per-account
+        permission list, admin bypass, fail-closed). Falls back to the
+        legacy env owner-ids view only on stacks with no access
+        manager wired (direct-construction tests)."""
+        if self._access_checker is not None:
+            try:
+                return bool(await self._access_checker(
+                    self._account or "", invoker_id))
+            except Exception:
+                self._logger.exception(
+                    "access check failed for %r — failing closed",
+                    invoker_id)
+                return False
+        return self.allowed_invoker(invoker_id)
 
     def self_command_allowed(self) -> bool:
         """Account-level view of the gate: is the ACCOUNT'S OWN user id
@@ -869,7 +914,7 @@ class RealDiscordClient:
             # typer (any owner may command this account; the account's
             # own id passes too when the account itself is an owner)
             invoker = getattr(getattr(ctx, "author", None), "id", None)
-            if not self.allowed_invoker(invoker):
+            if not await self.allowed_invoker_async(invoker):
                 self._logger.debug(
                     "self-command %s ignored: invoker %s is not an owner",
                     name, invoker)
@@ -1396,14 +1441,19 @@ class RealClientFactory:
         logger: Optional[logging.Logger] = None,
         identify_interval: float = 5.0,
         command_prefix: str = "",
+        access_manager: Any = None,
     ) -> None:
         self._credentials = credentials  # kept for metadata only (mudae id, owner ids)
         self._logger = logger or LOG
         # ONE gate per process (the factory is built once in bootstrap):
         # every client this factory produces IDENTIFYs through it.
         self._identify_gate = IdentifyGate(identify_interval)
-        #: self-command prefix shared by every client (from SELF_COMMAND_PREFIX)
+        #: self-command prefix shared by every client (from SELF_COMMAND_PREFIX;
+        #: the DEFAULT — each account's admin-panel prefix config overrides)
         self._command_prefix = command_prefix or ""
+        #: AccessManager (admin panel store) — per-account prefix +
+        #: command-permission wiring; None = legacy env-only stack
+        self._access_manager = access_manager
         #: distinct accounts this factory has EVER built a client for —
         #: reconnects rebuild already-counted accounts, so the gate's
         #: ``expected`` never ratchets down through reconnect cycles
@@ -1429,11 +1479,29 @@ class RealClientFactory:
         # (connected/terminated/close-failed) attributable — the bridge
         # maps slaughtermudae.adapter.<name> to source "adapter:<name>".
         logger = self._logger.getChild(name) if name else self._logger
+        # per-account access configuration (admin panel; defaults when
+        # no manager is wired: mention mode + legacy env owner ids)
+        prefix_mode, prefix_symbol = "mention", ""
+        if self._access_manager is not None:
+            try:
+                cfg = self._access_manager.prefix_config_sync(name)
+            except AttributeError:
+                cfg = None
+            if cfg:
+                prefix_mode = cfg.get("prefix_mode", "mention")
+                prefix_symbol = cfg.get("prefix_symbol", "")
+        checker = None
+        if self._access_manager is not None:
+            async def _checker(acct: str, invoker_id):
+                return await self._access_manager.can_invoke(acct, invoker_id)
+            checker = _checker
         client = RealDiscordClient(
             token=token, logger=logger, identify_gate=self._identify_gate,
             command_prefix=self._command_prefix,
             owner_ids=frozenset(
                 getattr(self._credentials, "owner_user_ids", ()) or ()),
+            prefix_mode=prefix_mode, prefix_symbol=prefix_symbol,
+            access_checker=checker,
         )
         client.account = name  # enrich AccessDenied reasons, best effort
         return client

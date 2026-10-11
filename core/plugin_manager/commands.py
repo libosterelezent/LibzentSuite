@@ -186,9 +186,92 @@ async def _prefixrate_handler(ctx: CommandContext, args: List[str]) -> str:
             f"(prefixrate <seconds> to change)")
 
 
+async def _require_admin(ctx: CommandContext) -> Any:
+    """Admin-only guard for admin* verbs: raises ValueError (renders the
+    usage line) when the invoker is not an admin."""
+    access = COMMAND_HUB.access
+    if access is None:
+        raise ValueError("admin commands unavailable on this stack")
+    if not await access.is_admin_id(ctx.invoker_id):
+        raise ValueError("admins only")
+    return access
+
+
+async def _adminlist_handler(ctx: CommandContext, args: List[str]) -> str:
+    access = await _require_admin(ctx)
+    admins = await access.admin_ids()
+    lines = [f"admins: {', '.join(str(a) for a in admins) or '(none)'}"]
+    rows = await access.all_account_rows()
+    for name in sorted(rows):
+        row = rows[name]
+        perms = ", ".join(str(x) for x in row.get("allowed_user_ids", []))
+        lines.append(
+            f"{name}: {'ADMIN ' if row.get('is_admin') else ''}"
+            f"prefix={row.get('prefix_mode', 'mention')}"
+            f"{row.get('prefix_symbol', '') and repr(row['prefix_symbol']) or ''} "
+            f"perms=[{perms}]")
+    return "\n".join(lines)
+
+
+async def _adminperms_handler(ctx: CommandContext, args: List[str]) -> str:
+    access = await _require_admin(ctx)
+    if len(args) < 2 or args[1] not in ("add", "remove", "list"):
+        raise ValueError("usage: adminperms <account> <add|remove|list> "
+                         "[user_id]")
+    account, op = args[0], args[1]
+    if op == "list":
+        ids = await access.allowed_user_ids(account)
+        return f"{account} command perms: " + (
+            ", ".join(str(x) for x in ids) if ids else "(empty — admins only)")
+    if len(args) < 3 or not args[2].isdigit():
+        raise ValueError("usage: adminperms <account> <add|remove> <user_id>")
+    user_id = int(args[2])
+    if op == "add":
+        await access.add_allowed(account, user_id)
+    else:
+        await access.remove_allowed(account, user_id)
+    ids = await access.allowed_user_ids(account)
+    return f"{account} command perms -> " + (
+        ", ".join(str(x) for x in ids) if ids else "(empty — admins only)")
+
+
+async def _adminprefix_handler(ctx: CommandContext, args: List[str]) -> str:
+    access = await _require_admin(ctx)
+    if len(args) < 2 or args[1] not in ("mention", "symbol", "both"):
+        raise ValueError("usage: adminprefix <account> "
+                         "<mention|symbol|both> [symbol]")
+    account, mode = args[0], args[1]
+    symbol = args[2] if len(args) > 2 else ""
+    await access.set_prefix_config(account, mode, symbol)
+    return (f"{account} prefix -> {mode}"
+            f"{f' {symbol!r}' if symbol else ''} "
+            f"(applies on next connect/rebuild)")
+
+
 #: framework-declared commands (reserved names; collision policy: a
 #: plugin re-declaring one of these is dropped with a warning)
 FRAMEWORK_COMMANDS: Sequence[CommandSpec] = (
+    CommandSpec(
+        name="adminlist",
+        help="list admins and per-account access",
+        usage="",
+        category=SETTINGS_CATEGORY,
+        handler=_adminlist_handler,
+    ),
+    CommandSpec(
+        name="adminperms",
+        help="manage per-account command perms",
+        usage="<account> <add|remove|list> [user_id]",
+        category=SETTINGS_CATEGORY,
+        handler=_adminperms_handler,
+    ),
+    CommandSpec(
+        name="adminprefix",
+        help="set an account's command prefix",
+        usage="<account> <mention|symbol|both> [symbol]",
+        category=SETTINGS_CATEGORY,
+        handler=_adminprefix_handler,
+    ),
     CommandSpec(
         name="prefixrate",
         help="show or set send pacing",
@@ -351,6 +434,8 @@ class SelfCommandHub:
         self._stats: Dict[str, Callable[[], Dict[str, Any]]] = {}
         #: optional PacingBackend (bootstrap registers; prefixrate uses)
         self.pacing: Any = None
+        #: optional AccessManager (bootstrap registers; admin* verbs use)
+        self.access: Any = None
 
     # ---------------------------------------------------------- bindings
     def bind(self, manager: Any) -> None:
