@@ -914,7 +914,6 @@ class RemoveLaneIsolationTests(unittest.IsolatedAsyncioTestCase):
             # (no parked zombie lane until the global stop)
             self.assertNotIn("ghost", scheduler._lanes)
             self.assertNotIn("ghost", scheduler._lane_events)
-            self.assertNotIn("ghost", scheduler._backoff_wakers)
             self.assertNotIn("ghost", scheduler._queues)
         finally:
             try:

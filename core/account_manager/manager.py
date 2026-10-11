@@ -2067,22 +2067,6 @@ class AccountManager:
                 f"unsupported action {action!r} "
                 "(supported: 'message', 'dm', 'reaction', 'button')"
             )
-        # BUCKET-AWARE PACING: after every successful send, harvest the
-        # library's per-route X-RateLimit state and report it to the
-        # engine. The NEXT acquire() for this (account, action) checks
-        # remaining == 0 and blocks until reset — pre-emptive, before
-        # Discord sends a 429. Only write routes produce headers; when
-        # the bucket state is empty the engine's policy pacing applies.
-        report = getattr(self._limiter, "report_bucket", None)
-        if callable(report):
-            get_state = getattr(client, "get_bucket_state", None)
-            if callable(get_state):
-                for bucket_key, state in (get_state() or {}).items():
-                    try:
-                        report(name, action, bucket_key, state)
-                    except Exception:
-                        pass  # pacing must never break the send path
-
         # NOTE: outbound AUDIT is written by the scheduler at task-terminal
         # (exactly-once, with attempts context) — recording here too would
         # duplicate every send in the trail (found at integration).

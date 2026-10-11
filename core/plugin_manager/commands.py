@@ -50,9 +50,43 @@ LOG = logging.getLogger("slaughtermudae.selfcommands")
 FRAMEWORK_PLUGIN = "selfcmd"
 
 #: category headers, in the order Mudae uses: plugin categories (sorted,
-#: from the specs) come first, then Utilities, then No Category.
+#: from the specs) come first, then Settings, then Utilities, then No
+#: Category.
 UTILITIES_CATEGORY = "Utilities"
+SETTINGS_CATEGORY = "Settings"
 NO_CATEGORY = "No Category"
+
+
+class PacingBackend:
+    """Bridge the ``prefixrate`` framework verb to the rate limiter.
+
+    Registered ONCE by the bootstrap (which owns the limiter) —
+    ``COMMAND_HUB.pacing = PacingBackend(limiter)``. Duck-typed so tests
+    can stub it; when unregistered, prefixrate answers honestly that
+    pacing control is unavailable on this stack.
+    """
+
+    def __init__(self, limiter: Any) -> None:
+        self._limiter = limiter
+
+    def get(self, account: str) -> Optional[float]:
+        try:
+            return float(self._limiter.effective_interval("message", account))
+        except Exception:
+            return None
+
+    def set(self, account: str, seconds: float) -> Optional[float]:
+        """Set the ACCOUNT's message interval; returns the previous
+        effective interval (None on failure)."""
+        try:
+            previous = float(
+                self._limiter.effective_interval("message", account))
+            self._limiter.set_policy_values(
+                "message", seconds, 0.1, 0.5,
+                level="account", owner=account)
+            return previous
+        except Exception:
+            return None
 
 #: hard cap on one command reply (Discord's own limit is 2000; the same
 #: headroom convention as core.remote_control)
@@ -119,9 +153,49 @@ async def _help_handler(ctx: CommandContext, args: List[str]) -> str:
     return pages[0] + suffix
 
 
+async def _prefixrate_handler(ctx: CommandContext, args: List[str]) -> str:
+    """Show or set THIS account's send pacing (message-action interval).
+
+    ``prefixrate`` -> the current effective interval; ``prefixrate 2.0``
+    -> set it (float seconds; per-account policy override, persists).
+    """
+    backend = COMMAND_HUB.pacing
+    if backend is None:
+        raise ValueError("pacing control unavailable on this stack")
+    if args:
+        try:
+            seconds = float(args[0])
+        except (TypeError, ValueError):
+            raise ValueError(f"prefixrate needs a number of seconds "
+                             f"(got {args[0]!r})") from None
+        if seconds <= 0:
+            raise ValueError("prefixrate must be > 0 seconds")
+        previous = backend.set(ctx.account, seconds)
+        if previous is None:
+            raise ValueError("the limiter rejected the value")
+        note = ""
+        if seconds < 2.6:
+            note = ("\n⚠ below the measured safe rate (~2.6s) — expect "
+                    "429s under sustained sending")
+        return (f"prefixrate: {previous:.2f}s → {seconds:.2f}s "
+                f"for {ctx.account}{note}")
+    current = backend.get(ctx.account)
+    if current is None:
+        raise ValueError("could not read the current pacing")
+    return (f"prefixrate for {ctx.account}: {current:.2f}s between sends "
+            f"(prefixrate <seconds> to change)")
+
+
 #: framework-declared commands (reserved names; collision policy: a
 #: plugin re-declaring one of these is dropped with a warning)
 FRAMEWORK_COMMANDS: Sequence[CommandSpec] = (
+    CommandSpec(
+        name="prefixrate",
+        help="show or set send pacing",
+        usage="[seconds]",
+        category=SETTINGS_CATEGORY,
+        handler=_prefixrate_handler,
+    ),
     CommandSpec(
         name="pg",
         help="Gateway latency and uptime",
@@ -256,6 +330,9 @@ class RegisteredCommand:
 class SelfCommandHub:
     """Process-wide account → command-surface registry.
 
+    ``pacing`` is the optional PacingBackend registered by the bootstrap
+    (prefixrate command); None until the limiter is wired.
+
     The plugin manager publishes; each account's live client subscribes;
     invocations route back to the manager. All state is guarded for the
     reconnect cycle (a new client replaces the old subscriber) and for
@@ -272,6 +349,8 @@ class SelfCommandHub:
         #: account -> zero-arg stats provider (latency/uptime, set by the
         #: client when it subscribes)
         self._stats: Dict[str, Callable[[], Dict[str, Any]]] = {}
+        #: optional PacingBackend (bootstrap registers; prefixrate uses)
+        self.pacing: Any = None
 
     # ---------------------------------------------------------- bindings
     def bind(self, manager: Any) -> None:

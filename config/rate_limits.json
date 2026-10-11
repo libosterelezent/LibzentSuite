@@ -1,18 +1,32 @@
 {
-  "_comment": "Rate-limit policies. global applies to every account; accounts.<name> overrides per account. interval = minimum seconds between actions; jitter = [min, max] random extra pause. Floor: 1.5s/action enforced everywhere.",
+  "_comment": "Rate-limit policies (learned defaults from the live rate study \u2014 see TIMING derivation): message sends 2.6s account-global (sustained zero-throttle), dm 2.6s, reaction 2.5s (shared account bucket \u2014 serial only), component 3.0s. accounts.<name> overrides per account; prefixrate command sets the account's message interval at runtime.",
   "global": {
     "message": {
-      "interval": 0,
+      "interval": 2.6,
       "jitter": [
         0.1,
         0.5
       ]
     },
     "dm": {
-      "interval": 0,
+      "interval": 2.6,
       "jitter": [
         0.1,
         0.5
+      ]
+    },
+    "reaction": {
+      "interval": 2.5,
+      "jitter": [
+        0.1,
+        0.4
+      ]
+    },
+    "component": {
+      "interval": 3.0,
+      "jitter": [
+        0.1,
+        0.4
       ]
     }
   },

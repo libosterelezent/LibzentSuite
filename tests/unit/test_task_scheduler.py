@@ -426,7 +426,7 @@ class TestRetry(SchedulerTestBase):
         self.assertEqual(len(self.sender.calls), 2)   # failed once, retried, succeeded
         self.assertEqual(task.status, "completed")
         self.assertEqual(task.attempts, 1)
-        self.assertEqual(self.sleeps, [0.5])           # first backoff = retry_backoff
+        self.assertEqual(self.sleeps, [])             # delay-free retries
         self.assertEqual(len(self.audit.calls), 1)     # audited exactly once (terminal)
         self.assertEqual(self.audit.calls[0]["note"], "plugin=p task=1 attempts=2")
 
@@ -436,10 +436,13 @@ class TestRetry(SchedulerTestBase):
         await self.settle(0.2)
         self.assertEqual(task.status, "completed")
         self.assertEqual(task.attempts, 1)
-        self.assertEqual(self.sleeps, [0.5])
+        self.assertEqual(self.sleeps, [])  # NO scheduler delay — limiter paces
         self.assertEqual(len(self.sender.calls), 2)
 
-    async def test_backoff_doubles_and_caps(self) -> None:
+    async def test_retries_carry_no_scheduler_delay(self) -> None:
+        """Delay-free scheduling: retries re-enter limiter.acquire
+        immediately; pacing comes exclusively from the limiter (cooldown +
+        action interval), never from a scheduler sleep."""
         task = self.scheduler.submit("alpha", "p", "message", retries=3)
         self.sender.outcomes.extend([
             ("raise", ConnectionError("boom 1")),
@@ -447,7 +450,7 @@ class TestRetry(SchedulerTestBase):
             ("raise", ConnectionError("boom 3")),
         ])
         await self.settle(0.2)
-        self.assertEqual(self.sleeps, [0.5, 1.0, 2.0])
+        self.assertEqual(self.sleeps, [])   # zero scheduler sleeps
         self.assertEqual(task.attempts, 3)
         self.assertEqual(task.status, "completed")
         self.assertEqual(len(self.sender.calls), 4)
@@ -490,7 +493,7 @@ class TestRetry(SchedulerTestBase):
         self.assertEqual(task.status, "timed_out")
         self.assertEqual(len(self.sender.calls), 2)
         self.assertEqual(task.attempts, 1)
-        self.assertEqual(self.sleeps, [0.5])
+        self.assertEqual(self.sleeps, [])
 
     async def test_server_rate_limit_retries_once_even_with_retries_zero(self) -> None:
         """429 contract: server-provided limits ALWAYS earn one retry even
@@ -502,7 +505,7 @@ class TestRetry(SchedulerTestBase):
         self.assertEqual(task.status, "completed")
         self.assertEqual(len(self.sender.calls), 2)  # failed once, retried
         self.assertEqual(task.attempts, 1)
-        self.assertEqual(self.sleeps, [0.5])
+        self.assertEqual(self.sleeps, [])  # the limiter cooldown paces it
         self.assertEqual(self.limiter.reports, [("alpha", "message", 1.0, True)])
 
 
@@ -725,60 +728,9 @@ class TestExactlyOnceRaces(SchedulerTestBase):
 
 
 # ------------------------------------------- backoff cancel latency (round 2)
-class TestBackoffInterruption(SchedulerTestBase):
-    async def test_cancel_during_backoff_interrupts_sleep(self) -> None:
-        async def flaky(task):
-            raise ConnectionError("net down")
-
-        self.scheduler._sender = flaky
-        self.scheduler._retry_backoff = 5.0
-        del self.scheduler._sleep  # real sleep: prove the wake, not the seam
-        task = self.scheduler.submit("alpha", "p", "message", retries=3)
-        self.assertTrue(await self.wait_until(lambda: task.attempts == 1))
-        loop = asyncio.get_running_loop()
-        t0 = loop.time()
-        self.assertTrue(self.scheduler.cancel(task.id))
-        self.assertTrue(
-            await self.wait_until(lambda: task.status == "cancelled", timeout=1.0)
-        )
-        self.assertLess(loop.time() - t0, 1.0)  # NOT the remaining ~5s backoff
-        self.assertTrue(  # row + terminal event land via the detached tail
-            await self.wait_until(
-                lambda: self.repo.add_calls
-                and self.repo.add_calls[0]["status"] == "cancelled"
-                and self.recorder.of(TaskCancelled),
-                timeout=2.0,
-            )
-        )
-
-    async def test_cancel_matching_during_backoff_interrupts_sleep(self) -> None:
-        async def flaky(task):
-            raise ConnectionError("net down")
-
-        self.scheduler._sender = flaky
-        self.scheduler._retry_backoff = 5.0
-        del self.scheduler._sleep
-        task = self.scheduler.submit("alpha", "p", "message", retries=3)
-        self.assertTrue(await self.wait_until(lambda: task.attempts == 1))
-        loop = asyncio.get_running_loop()
-        t0 = loop.time()
-        self.assertEqual(self.scheduler.cancel_matching(account="alpha"), 1)
-        self.assertTrue(
-            await self.wait_until(lambda: task.status == "cancelled", timeout=1.0)
-        )
-        self.assertLess(loop.time() - t0, 1.0)
-
-    async def test_backoff_without_cancel_still_sleeps_the_full_delay(self) -> None:
-        self.scheduler._retry_backoff = 0.02
-        del self.scheduler._sleep
-        task = self.scheduler.submit("alpha", "p", "message", retries=1)
-        self.sender.outcomes.append(("raise", ConnectionError("x")))
-        await self.settle(0.1)
-        self.assertEqual(task.status, "completed")
-        self.assertEqual(len(self.sender.calls), 2)  # retry happened after backoff
-
-
-# ------------------------------------------------ worker death (round 2)
+# (TestBackoffInterruption removed: retries carry no scheduler
+# delay anymore — there is no backoff sleep to interrupt. Cancel
+# lands at the standard checkpoints after the grant/sender.)
 class TestWorkerDeath(SchedulerTestBase):
     async def test_lane_death_orphans_queue_but_submit_respawns(self) -> None:
         """A lane task dying outside stop() (crash shape): the in-flight task
@@ -1010,10 +962,9 @@ class TestValidation(SchedulerTestBase):
         bus, logger, limiter, sender = self.bus, FakeLogger(), FakeLimiter(), FakeSender()
         with self.assertRaises(ValueError):
             TaskScheduler(bus, logger, limiter, sender, default_timeout=-1)
-        with self.assertRaises(ValueError):
-            TaskScheduler(bus, logger, limiter, sender, retry_backoff=-0.5)
-        with self.assertRaises(ValueError):
-            TaskScheduler(bus, logger, limiter, sender, max_backoff=float("nan"))
+        # retry_backoff/max_backoff kept for API compat (unused now —
+        # pacing is exclusively the limiter's), so they are no longer
+        # validated as pacing parameters
 
 
 # ------------------------------------------- stop hardening (round 3)
@@ -1323,3 +1274,49 @@ class TestRestoreSequence(SchedulerTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+# ----------------------------------------------- delay-free scheduling
+class TestDelayFreeScheduling(unittest.TestCase):
+    """Scheduler owns NO pacing: retries re-enter the limiter immediately
+    (its cooldown + interval own every delay), and bucket capture is gone
+    (429 counters instead)."""
+
+    def test_scheduler_has_no_backoff_machinery(self) -> None:
+        from core.task_scheduler.scheduler import TaskScheduler
+        import inspect
+        src = inspect.getsource(TaskScheduler)
+        self.assertNotIn("_sleep_backoff", src)
+        self.assertNotIn("_backoff_wakers", src)
+
+    def test_engine_counts_429_per_account(self) -> None:
+        from core.event_bus import EventBus
+        from core.rate_limit_manager import RateLimitManager
+        lim = RateLimitManager(EventBus(), _StubLogger(), None)
+        self.assertEqual(lim.stats()["hits_429"], {"accounts": {}, "total": 0})
+        lim.report_server_limit("alpha", "message", 1.0, False)
+        lim.report_server_limit("alpha", "message", 1.0, False)
+        lim.report_server_limit("beta", "message", 1.0, True)
+        s = lim.stats()["hits_429"]
+        self.assertEqual(s["accounts"], {"alpha": 2, "beta": 1})
+        self.assertEqual(s["total"], 3)
+
+    def test_engine_has_no_bucket_capture(self) -> None:
+        from core.rate_limit_manager import RateLimitManager
+        self.assertFalse(hasattr(RateLimitManager, "report_bucket"))
+        self.assertFalse(hasattr(RateLimitManager, "_bucket_block"))
+
+    def test_effective_interval_reads_policy_layers(self) -> None:
+        from core.event_bus import EventBus
+        from core.rate_limit_manager import RateLimitManager
+        lim = RateLimitManager(EventBus(), _StubLogger(), None)
+        lim.set_policy_values("message", 2.6)
+        self.assertAlmostEqual(lim.effective_interval("message"), 2.6)
+        lim.set_policy_values("message", 4.0, level="account", owner="a1")
+        self.assertAlmostEqual(lim.effective_interval("message", "a1"), 4.0)
+        self.assertAlmostEqual(lim.effective_interval("message", "a2"), 2.6)
+
+
+class _StubLogger:
+    def info(self, *a, **k): pass
+    def warning(self, *a, **k): pass
+    def error(self, *a, **k): pass

@@ -25,7 +25,7 @@ from core.rate_limit_manager.engine import (
     _Entry,
 )
 
-ACTION = "message"
+ACTION = "poke"  # no learned default — floor semantics testable
 
 
 class StubLogger:
@@ -177,7 +177,7 @@ class PacingKeys(unittest.IsolatedAsyncioTestCase):
         beta = await manager.acquire(ACTION, account="beta")
         self.assertAlmostEqual(second.wait_s, 2.0, places=6)
         self.assertEqual(beta.wait_s, 0.0)  # beta has its own key
-        self.assertIn("alpha:message", manager.stats()["last_fire_ages"])
+        self.assertIn("alpha:ACTION", manager.stats()["last_fire_ages"].keys().__class__()) if False else self.assertIn(f"alpha:{ACTION}", manager.stats()["last_fire_ages"])
 
     async def test_account_none_uses_global_key(self):
         manager = make_manager(interval=2.0)
@@ -401,12 +401,12 @@ class ServerCooldowns(unittest.IsolatedAsyncioTestCase):
     async def test_cooldown_remaining_filters(self):
         manager = make_manager()
         manager.report_server_limit("alpha", ACTION, 2.0)
-        manager.report_server_limit("beta", "poke", 3.0)
+        manager.report_server_limit("beta", "other", 3.0)
         self.assertAlmostEqual(manager.cooldown_remaining(), 3.0, places=6)
         self.assertAlmostEqual(manager.cooldown_remaining("alpha"), 2.0, places=6)
-        self.assertAlmostEqual(manager.cooldown_remaining(action="poke"), 3.0, places=6)
-        self.assertAlmostEqual(manager.cooldown_remaining("beta", "poke"), 3.0, places=6)
-        self.assertAlmostEqual(manager.cooldown_remaining("alpha", "poke"), 0.0, places=6)
+        self.assertAlmostEqual(manager.cooldown_remaining(action="other"), 3.0, places=6)
+        self.assertAlmostEqual(manager.cooldown_remaining("beta", "other"), 3.0, places=6)
+        self.assertAlmostEqual(manager.cooldown_remaining("alpha", "other"), 0.0, places=6)
 
     async def test_negative_retry_after_clamped_nonfinite_rejected(self):
         manager = make_manager()
@@ -720,7 +720,7 @@ class StatsShape(unittest.IsolatedAsyncioTestCase):
         stats = manager.stats()
         self.assertEqual(
             set(stats),
-            {"floor", "lane", "groups", "policies", "cooldowns", "discord_buckets", "last_fire_ages",
+            {"floor", "lane", "groups", "policies", "cooldowns", "hits_429", "last_fire_ages",
              "grants", "waits", "avg_wait_s"},
         )
         self.assertEqual(stats["floor"], 0.05)

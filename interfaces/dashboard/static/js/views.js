@@ -100,14 +100,14 @@ function renderPolicies() {
     const rl = lastStats.ratelimit;
     eff.innerHTML = `<div class="rl-effective"><div class="value">${rl.floor||"—"}s</div><div class="label">Safety Floor</div></div>
       <p class="sub" style="margin-top:var(--sp-2);text-align:center">Discord bucket limits are the primary constraint.</p>`;
-    const bk = $("rl-buckets"); bk.innerHTML = "";
-    const buckets = rl.discord_buckets||{};
-    const keys = Object.keys(buckets);
-    if (!keys.length) { bk.innerHTML='<span class="dim">No bucket data yet — populates from Discord headers on first send.</span>'; }
-    else for (const k of keys) { const b = buckets[k];
-      const d = document.createElement("div"); d.className="bucket-row";
-      d.innerHTML=`<span class="trunc" style="color:var(--dim)">${esc(k)}</span><span class="remaining ${b.remaining===0?"zero":b.remaining<=2?"low":""}" style="margin-left:auto">${b.remaining}/${b.limit}</span><span class="dim">resets ${b.resets_in_s}s</span>`;
-      bk.appendChild(d);
+    const hk = $("rl-429"); if (hk) {
+      const hits = rl.hits_429||{accounts:{},total:0};
+      const accts = Object.entries(hits.accounts||{});
+      hk.innerHTML = (hits.total||accts.length)
+        ? `<div class="rl-block"><span class="label">Fleet total throttles (429)</span><span class="value" style="color:${hits.total?"var(--warn)":"var(--dim)"}">${hits.total??0}</span></div>` +
+          (accts.length ? accts.map(([a,n]) =>
+            `<div class="bucket-row"><span class="trunc" style="color:var(--dim)">${esc(a)}</span><span class="remaining ${n>=10?"zero":n>=3?"low":""}" style="margin-left:auto">${n}</span><span class="dim">hit${n!==1?"s":""}</span></div>`).join("") : "")
+        : '<span class="dim">No 429 throttles recorded — every send stayed under Discord limits.</span>';
     }
     const floor = $("rl-floor");
     if (floor) floor.innerHTML = `<div class="rl-block"><span class="label">Minimum enforced interval</span>

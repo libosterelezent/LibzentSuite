@@ -42,7 +42,7 @@ reported to the limiter then retried; ``ConnectionError`` /
 ``TimeoutError`` / ``asyncio.TimeoutError`` retry (timeout marks the final
 status "timed_out"); ``FlowBlocked`` and everything else fail immediately
 with the reason.
-Retries sleep ``min(retry_backoff * 2 ** (attempts - 1), max_backoff)``
+Retries carry NO scheduler delay — they re-enter limiter.acquire immediately; the limiter's cooldown + interval own every delay (pacing is exclusively the limiter's job)
 through the ``_sleep`` seam (deterministic tests) and are capped at
 ``1 + max_retries`` total attempts.
 """
@@ -170,7 +170,7 @@ class TaskScheduler:
         audit: optional AuditRecorder; terminal 'message'/'dm' tasks are
             recorded exactly once with their grant wait/jitter.
         default_timeout: sender budget per attempt when submit() omits one.
-        retry_backoff / max_backoff: exponential backoff between attempts.
+        # (retry pacing moved to the rate limiter — no scheduler delays)
         history_repo: duck-typed TaskHistoryRepository (async
             add/update/recent); one row per terminal task, best-effort —
             written via ``await`` on the worker/stop paths and via a
@@ -193,8 +193,8 @@ class TaskScheduler:
     ) -> None:
         for label, value in (
             ("default_timeout", default_timeout),
-            ("retry_backoff", retry_backoff),
-            ("max_backoff", max_backoff),
+            # retry_backoff/max_backoff retained for API compat — the
+            # scheduler no longer sleeps between retries (limiter paces)
         ):
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(f"{label} must be a number of seconds, got {value!r}")
@@ -223,7 +223,6 @@ class TaskScheduler:
         }
         self._queues: Dict[str, list] = {}  # account -> heap of (prio, id, task)
         self._lane_events: Dict[str, asyncio.Event] = {}
-        self._backoff_wakers: Dict[str, asyncio.Event] = {}  # cancel->wake retry sleeps
         self._lanes: Dict[str, asyncio.Task] = {}
         self._worker_refs: set = set()  # strong refs to spawned lane tasks
         self._tail_refs: set = set()  # strong refs to scheduled finish tails
@@ -502,7 +501,6 @@ class TaskScheduler:
         """
         lane = self._lanes.pop(account, None)
         self._lane_events.pop(account, None)
-        self._backoff_wakers.pop(account, None)
         self._queues.pop(account, None)
         if lane is None or lane.done():
             return
@@ -609,8 +607,6 @@ class TaskScheduler:
         if event is None:
             event = asyncio.Event()
             self._lane_events[account] = event
-        if account not in self._backoff_wakers:
-            self._backoff_wakers[account] = asyncio.Event()
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError as exc:  # pragma: no cover - sync-context misuse
@@ -625,15 +621,6 @@ class TaskScheduler:
         event.set()  # there is work by construction
 
     # ------------------------------------------------------------- cancel
-    def _wake_backoff(self, task: Task) -> None:
-        """Interrupt the task's retry backoff (if it is sleeping) so a
-        cooperative cancel lands at the next checkpoint NOW, not after the
-        remaining backoff delay. No-op when the account is not mid-backoff
-        (sticky Event state is cleared before each sleep)."""
-        waker = self._backoff_wakers.get(task.account)
-        if waker is not None:
-            waker.set()
-
     def cancel(self, task_id: int) -> bool:
         """Cancel one task by id.
 
@@ -652,8 +639,7 @@ class TaskScheduler:
             self._finish_sync(task, STATUS_CANCELLED)
             return True
         if task.status == STATUS_RUNNING:
-            task.cancelled = True
-            self._wake_backoff(task)
+            task.cancelled = True  # caught at the next checkpoint
             return True
         return False
 
@@ -682,7 +668,7 @@ class TaskScheduler:
                 self._finish_sync(task, STATUS_CANCELLED)
             elif task.status == STATUS_RUNNING:
                 task.cancelled = True
-                self._wake_backoff(task)
+                # checkpoint catches the flag (no backoff sleeps remain)
             else:
                 continue
             count += 1
@@ -873,37 +859,6 @@ class TaskScheduler:
         """Retry-backoff seam (patched to instant in unit tests)."""
         await asyncio.sleep(seconds)
 
-    async def _sleep_backoff(self, task: Task, delay: float) -> None:
-        """Retry backoff, interruptible by a cooperative cancel of this task.
-
-        Races the ``_sleep`` seam against the account's wake event: a
-        cancel()/cancel_matching() that flags the task mid-backoff wakes the
-        sleeper early (the retry loop's next checkpoint then drives the
-        terminal transition), instead of the cancel landing only after the
-        whole backoff delay. The event is cleared BEFORE the cancelled-flag
-        check and cancel() sets the flag BEFORE the event, so every
-        interleaving is caught either by the flag re-check or by a set event
-        (a lane runs one task at a time, so the waker is unambiguous).
-        """
-        waker = self._backoff_wakers.get(task.account)
-        if waker is None:
-            await self._sleep(delay)  # no lane bookkeeping (defensive)
-            return
-        waker.clear()  # drop stale wakes from earlier cancels on this account
-        if task.cancelled or self._sweeping:
-            return
-        sleep_task = asyncio.ensure_future(self._sleep(delay))
-        wake_task = asyncio.ensure_future(waker.wait())
-        try:
-            await asyncio.wait(
-                {sleep_task, wake_task}, return_when=asyncio.FIRST_COMPLETED
-            )
-        finally:
-            for fut in (sleep_task, wake_task):
-                if not fut.done():
-                    fut.cancel()
-            await asyncio.gather(sleep_task, wake_task, return_exceptions=True)
-
     def _outer_cancelled(self) -> bool:
         """Distinguish worker cancellation from sender-internal cancellation.
 
@@ -1069,15 +1024,13 @@ class TaskScheduler:
                 if isinstance(retryable, ServerRateLimit):
                     retry_budget = max(task.max_retries, 1)
                 if task.attempts < retry_budget:
-                    task.attempts += 1  # retries used (drives note + backoff)
-                    delay = min(self._retry_backoff * (2 ** (task.attempts - 1)), self._max_backoff)
-                    try:
-                        await self._sleep_backoff(task, delay)
-                    except asyncio.CancelledError:
-                        if self._outer_cancelled():
-                            raise
-                        await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
-                        return
+                    task.attempts += 1  # retries used (drives the note)
+                    # NO scheduler-owned delay: the retry loops straight
+                    # back through gate -> limiter.acquire, and the LIMITER
+                    # owns every delay — the 429 cooldown registered by
+                    # report_server_limit (ServerRateLimit) and the action
+                    # interval pace the retry. Scheduling is pure queue +
+                    # lifecycle; pacing is exclusively the limiter's job.
                     continue
 
                 # retries exhausted -> terminal

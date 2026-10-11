@@ -275,9 +275,10 @@ class TestSetPolicy(unittest.TestCase):
         self.assertEqual(manager.policies(), [])  # nothing stored on refusal
 
     def test_interval_exactly_at_floor_allowed(self):
+        # "poke" carries no learned default — floor semantics in isolation
         manager = make_manager()
-        manager.set_policy_values("message", MIN_ACTION_INTERVAL)
-        self.assertEqual(manager.effective("message")["interval"], MIN_ACTION_INTERVAL)
+        manager.set_policy_values("poke", MIN_ACTION_INTERVAL)
+        self.assertEqual(manager.effective("poke")["interval"], MIN_ACTION_INTERVAL)
 
     def test_floor_applies_at_every_level(self):
         manager = make_manager()
@@ -414,13 +415,13 @@ class TestEffectiveComposition(unittest.TestCase):
 
     def setUp(self):
         self.manager = make_manager()
-        self.manager.set_policy_values("message", 2.0, 0.0, 1.0)                    # global
-        self.manager.set_policy_values("message", 3.0, 0.5, 0.5, level="account", owner="alpha")
-        self.manager.set_policy_values("message", 2.5, 0.2, 0.9, level="plugin", owner="soulcopy")
-        self.manager.set_policy_values("message", 4.0, 0.1, 0.4, level="account_plugin", owner="alpha/soulcopy")
+        self.manager.set_policy_values("poke", 2.0, 0.0, 1.0)                    # global
+        self.manager.set_policy_values("poke", 3.0, 0.5, 0.5, level="account", owner="alpha")
+        self.manager.set_policy_values("poke", 2.5, 0.2, 0.9, level="plugin", owner="soulcopy")
+        self.manager.set_policy_values("poke", 4.0, 0.1, 0.4, level="account_plugin", owner="alpha/soulcopy")
 
     def test_all_four_levels_compose_to_max(self):
-        eff = self.manager.effective("message", account="alpha", plugin="soulcopy")
+        eff = self.manager.effective("poke", account="alpha", plugin="soulcopy")
         self.assertEqual(eff["interval"], 4.0)
         self.assertEqual(eff["jitter"], [0.5, 1.0])  # max of mins, max of maxes
         self.assertEqual([s["level"] for s in eff["sources"]],
@@ -430,15 +431,16 @@ class TestEffectiveComposition(unittest.TestCase):
 
     def test_partial_matches_compose(self):
         # alpha + a different plugin: global + account only
-        eff = self.manager.effective("message", account="alpha", plugin="roll")
+        eff = self.manager.effective("poke", account="alpha", plugin="roll")
         self.assertEqual(eff["interval"], 3.0)
         self.assertEqual(len(eff["sources"]), 2)
         # another account + soulcopy: global + plugin
+        # (on "poke": no learned default — stored values compose alone)
         self.assertEqual(
-            self.manager.effective("message", account="beta", plugin="soulcopy")["interval"], 2.5
+            self.manager.effective("poke", account="beta", plugin="soulcopy")["interval"], 2.5
         )
         # bare action: global only
-        self.assertEqual(self.manager.effective("message")["interval"], 2.0)
+        self.assertEqual(self.manager.effective("poke")["interval"], 2.0)
 
     def test_empty_case_falls_back_to_floor(self):
         eff = self.manager.effective("unknown-action")
@@ -448,10 +450,21 @@ class TestEffectiveComposition(unittest.TestCase):
         self.assertEqual(eff["action"], "unknown-action")
 
     def test_unknown_action_for_account_with_no_policy_is_floor(self):
+        # "poke" now has a LEARNED default (rate study); a genuinely
+        # unconfigured action still paces at the floor
         fresh = make_manager()
-        eff = fresh.effective("message", account="alpha", plugin="soulcopy")
+        eff = fresh.effective("poke", account="alpha", plugin="soulcopy")
         self.assertEqual(eff["interval"], 0.05)
         self.assertEqual(eff["sources"], [])
+
+    def test_learned_default_applies_without_policy(self):
+        # "message" carries the LEARNED default (rate study); "poke" (an
+        # unconfigured action) stays at the floor
+        fresh = make_manager()
+        eff = fresh.effective("message")
+        self.assertEqual(eff["interval"], 2.6)   # rate-study derived
+        self.assertEqual(eff["sources"], [])     # a default, not a policy
+        self.assertEqual(fresh.effective("poke")["interval"], 0.05)
 
     def test_losing_level_jitter_cannot_speed_up_winner(self):
         """MAX-across-levels: account_plugin LOSES to global on interval,
@@ -514,10 +527,10 @@ class TestJitterCountsIntoPacingStamps(unittest.IsolatedAsyncioTestCase):
         manager = make_manager(
             interval=interval, jitter=(1.0, 4.0), jitter_seed=123
         )
-        first = await manager.acquire("message")
+        first = await manager.acquire("poke")
         grant1 = manager._clock.now() - first.jitter_s
         wire1 = manager._clock.now()
-        second = await manager.acquire("message")
+        second = await manager.acquire("poke")
         grant2 = manager._clock.now() - second.jitter_s
         wire2 = manager._clock.now()
         self.assertGreaterEqual(second.jitter_s, 1.0)

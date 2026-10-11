@@ -33,11 +33,7 @@ from core.plugin_base import (
 )
 from core.plugin_manager import PluginManager
 from core.plugin_manager.commands import (
-    COMMAND_HUB,
-    FRAMEWORK_COMMANDS,
-    MAX_REPLY_CHARS,
-    SelfCommandHub,
-    render_help,
+    COMMAND_HUB, FRAMEWORK_COMMANDS, MAX_REPLY_CHARS, SelfCommandHub, _prefixrate_handler, render_help,
 )
 from core.plugin_manager.loader import PluginLoader
 from core.priority import Priority
@@ -774,3 +770,60 @@ class AdapterLayerTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPrefixRateCommand(unittest.IsolatedAsyncioTestCase):
+    """prefixrate: show/set send pacing (per-account message interval)."""
+
+    async def test_show_without_args(self) -> None:
+        from core.plugin_manager.commands import COMMAND_HUB, PacingBackend
+        from core.rate_limit_manager import RateLimitManager
+        from core.event_bus import EventBus
+        import logging
+        lim = RateLimitManager(EventBus(), logging.getLogger("t"), None)
+        lim.set_policy_values("message", 2.6)
+        COMMAND_HUB.pacing = PacingBackend(lim)
+        reply = await _prefixrate_handler(_ctx("alpha"), [])
+        self.assertIn("2.60s", reply)
+        self.assertIn("alpha", reply)
+
+    async def test_set_then_show(self) -> None:
+        from core.plugin_manager.commands import COMMAND_HUB, PacingBackend
+        from core.rate_limit_manager import RateLimitManager
+        from core.event_bus import EventBus
+        import logging
+        lim = RateLimitManager(EventBus(), logging.getLogger("t"), None)
+        # NO stored global policy: the learned default (2.6) is the
+        # fallback baseline the command reports; the set then stores the
+        # ONLY policy (account level), replacing the default
+        COMMAND_HUB.pacing = PacingBackend(lim)
+        reply = await _prefixrate_handler(_ctx("alpha"), ["1.5"])
+        self.assertIn("2.60s → 1.50s", reply)
+        self.assertIn("⚠", reply)          # below the safe rate warning
+        reply2 = await _prefixrate_handler(_ctx("alpha"), [])
+        self.assertIn("1.50s", reply2)
+
+    async def test_rejects_bad_values(self) -> None:
+        for bad in (["abc"], ["-1"], ["0"]):
+            with self.assertRaises(ValueError):
+                await _prefixrate_handler(_ctx("alpha"), bad)
+
+    async def test_no_backend_answers_honestly(self) -> None:
+        from core.plugin_manager.commands import COMMAND_HUB
+        saved = COMMAND_HUB.pacing
+        COMMAND_HUB.pacing = None
+        try:
+            with self.assertRaises(ValueError) as cm:
+                await _prefixrate_handler(_ctx("alpha"), [])
+            self.assertIn("unavailable", str(cm.exception))
+        finally:
+            COMMAND_HUB.pacing = saved
+
+
+def _ctx(account="alpha"):
+    import types
+    from core.plugin_base import CommandContext
+    import logging
+    return CommandContext(
+        account=account, plugin="selfcmd", services=None,
+        logger=logging.getLogger("t"), channel_id=1, guild_id=1)

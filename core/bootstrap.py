@@ -464,6 +464,10 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         bus, ServiceLogger(logs, "scheduler"), limiter, _sender,
         audit=audit, history_repo=database.tasks,
     )
+    # prefixrate command bridge: the hub needs the limiter for get/set of
+    # an account's send pacing (registered once; tests may stub it)
+    from .plugin_manager.commands import COMMAND_HUB, PacingBackend
+    COMMAND_HUB.pacing = PacingBackend(limiter)
     # task ids continue after the archived ones (they used to restart at 1
     # every boot, colliding with old rows; the swallowed insert error meant
     # a restarted process archived none of its tasks)

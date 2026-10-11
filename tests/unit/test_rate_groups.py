@@ -17,7 +17,7 @@ from core.rate_limit_manager import RateLimitManager
 
 from tests.unit.test_rate_engine import SleepAdvanceManager, StubLogger, make_manager
 
-ACTION = "message"
+ACTION = "poke"  # no learned default — floor semantics testable
 
 
 def make_group_manager():
@@ -99,8 +99,8 @@ class TestGroupScope(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["groups"], {"alpha": "grinders"})
         await manager.acquire(ACTION, account="alpha")
         stats = manager.stats()
-        self.assertIn("group:grinders:message", stats["last_fire_ages"])
-        self.assertIn("alpha:message", stats["last_fire_ages"])
+        self.assertIn(f"group:grinders:{ACTION}", stats["last_fire_ages"])
+        self.assertIn(f"alpha:{ACTION}", stats["last_fire_ages"])
 
     async def test_interleaved_concurrent_group_members(self) -> None:
         """True interleaving: both members pending at once still serialize

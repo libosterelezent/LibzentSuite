@@ -117,7 +117,8 @@ class EffectiveCacheTests(unittest.IsolatedAsyncioTestCase):
         m.set_policy_values("message", 5.0, 0.1, 0.5, "account", "alpha")
         self.assertEqual(m.effective("message", "alpha")["interval"], 5.0)
         m.clear_policy("account", "alpha", "message")
-        self.assertEqual(m.effective("message", "alpha")["interval"], 0.05)
+        # cleared → LEARNED default for message applies (rate study)
+        self.assertEqual(m.effective("message", "alpha")["interval"], 2.6)
         m.set_floor(4.0)
         self.assertEqual(m.effective("message", "alpha")["interval"], 4.0)
         await m.prune_account("alpha")
@@ -149,7 +150,8 @@ class EffectiveCacheTests(unittest.IsolatedAsyncioTestCase):
         m.set_policy_values("message", 3.0, 0.1, 0.5, "account", "a/b")
         # the delimiter trap: ("a/b", "c") must NOT collide with ("a", "b/c")
         self.assertEqual(m.effective("message", "a/b", "c")["interval"], 3.0)
-        self.assertEqual(m.effective("message", "a", "b/c")["interval"], 0.05)
+        # no stored policy matches → the learned message default (2.6)
+        self.assertEqual(m.effective("message", "a", "b/c")["interval"], 2.6)
 
 
 class MemoryFirstStatusTests(unittest.IsolatedAsyncioTestCase):
