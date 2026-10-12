@@ -1,7 +1,7 @@
 # Module `interfaces.dashboard.server`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `interfaces/dashboard/server.py`
 
@@ -119,6 +119,8 @@ pass the real bus explicitly.
   - Reject NaN/inf numbers (NaN slips past plain comparisons).
 - `def require_int(body: Dict[str, Any], key: str, route: str) -> int`
   - Required integer field (bools excluded; integral floats tolerated).
+- `def require_json_list(body: Dict[str, Any], key: str, route: str) -> List[Any]`
+  - Required list field whose items must all be integers.
 - `def q_str(query: Dict[str, List[str]], key: str, route: str) -> str`
   - Required non-empty query-string parameter (actionable 400 when absent).
 - `def q_opt(query: Dict[str, List[str]], key: str) -> Optional[str]`

@@ -11,7 +11,6 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace as NS
 from typing import Any, Dict, List, Optional
 
 from core.event_bus import EventBus
@@ -351,7 +350,7 @@ class _ClockAdvanceManager(RateLimitManager):
         if seconds > 0:
             self._clock.advance(seconds)
 
-    async def _wait_either(self, seconds: float) -> None:
+    async def _wait_either(self, seconds: float, key=None) -> None:
         await self._sleep(seconds)
 
 

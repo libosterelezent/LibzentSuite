@@ -22,7 +22,7 @@ from __future__ import annotations
 import random
 import time
 from types import SimpleNamespace
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Optional
 
 from adapters.base import DiscordMessage
 from adapters.simulator.world import SimWorld, WorldMessage, to_discord_message
@@ -261,22 +261,59 @@ class SimClient:
         DTO untouched — same contract as the live adapter, and now the
         SAME builder the world uses for edit events (to_discord_message)
         so every sim crossing is shape-identical.
+
+        DM parity: a DM is delivered only to the two members of its pair
+        (non-creating world lookup) — every client used to receive every
+        DM, so account B's on_message fired for pages between A and Mudae.
         """
-        if self.on_message is not None and message.author_id != self.user_id:
+        if message.author_id == self.user_id:
+            return
+        if message.dm:
+            pairs = self._world.dm_pairs_of(message.channel_id)
+            if pairs and self.user_id not in pairs[0]:
+                return  # someone else's DM conversation
+        if self.on_message is not None:
             self.on_message(to_discord_message(self._world, message))
+
+    def reaction_event(
+        self, kind: str, message_id: int, channel_id: int,
+        guild_id: "int | None", user_id: int, emoji: str, raw: Any,
+    ) -> None:
+        """World reaction dispatch -> on_reaction. The world pushes EVERY
+        reaction (gateway truth, reactor included); the CLIENT drops the
+        session's own reactions — mirroring the live adapter's
+        _publish_raw_reaction self-filter (adapters/discord/client.py)."""
+        if self.on_reaction is None or user_id == self.user_id:
+            return
+        self.on_reaction(
+            kind, message_id, channel_id, guild_id, user_id, emoji, raw)
 
     # ------------------------------------------------- capability actions
     async def add_reaction(self, channel_id: int, message_id: int, emoji: str) -> Any:
         """React via the world (echoes a ReactionAdded to other subscribers).
 
-        TargetGone for a vanished message — matching click_button and the
-        live adapter's contract (a generic error cannot be reconstructed
-        into FlowBlocked by the services layer).
+        Raises ConnectionError when offline, ServerRateLimit for a queued
+        one-shot 429 (consumed exactly like send_message — an armed limit
+        now BLOCKS the reaction instead of being silently spent by an
+        unrelated later message), TargetGone for a vanished channel or
+        message — matching the live adapter's contract (a generic error
+        cannot be reconstructed into FlowBlocked by the services layer).
         """
         if not self.connected:
             raise ConnectionError("client not connected")
         if channel_id not in self._world.channels:
             raise TargetGone("", f"channel {channel_id} vanished")
+        if not any(
+            m.id == message_id
+            for messages in self._world.history.values()
+            for m in messages
+        ):
+            # resolve the target BEFORE consuming the one-shot limit (a
+            # 429 is never spent on a send whose target is already gone)
+            raise TargetGone("", f"message {message_id} vanished")
+        limit = self._world.take_server_limit(self.user_id, channel_id)
+        if limit is not None:
+            raise limit
         try:
             self._world.react(self.user_id, message_id, emoji, kind="add")
         except KeyError:
@@ -284,9 +321,13 @@ class SimClient:
         return None
 
     async def click_button(self, channel_id: int, message_id: int, custom_id: str) -> Any:
-        """Click a button the world still holds (TargetGone when vanished)."""
+        """Click a button the world still holds (TargetGone when vanished).
+
+        ServerRateLimit for a queued one-shot 429, consumed exactly like
+        send_message — only after the target (message + custom_id) is
+        resolved, never on a dead click.
+        """
         from adapters.model import DiscordComponent
-        from core.errors import TargetGone
 
         if not self.connected:
             raise ConnectionError("client not connected")
@@ -297,6 +338,10 @@ class SimClient:
                         for component in (top.walk() if isinstance(
                                 top, DiscordComponent) else ()):
                             if component.custom_id == custom_id:
+                                limit = self._world.take_server_limit(
+                                    self.user_id, channel_id)
+                                if limit is not None:
+                                    raise limit
                                 self.button_clicks.append(
                                     (message_id, custom_id))
                                 return None

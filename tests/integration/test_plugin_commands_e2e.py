@@ -166,6 +166,10 @@ class ExecutorOverRealDatabaseTests(CommandE2EBase):
         self.fw = await self.boot()
         self.api = self.fw.api
         await self.api.accounts_add({"name": "alpha", "plugins": [PROBE]})
+        # the executor's command gate is the DB-backed AccessManager
+        # (fail-closed on empty rows): allow the fixture's owner id so
+        # the production authorization path is the one under test
+        await self.fw.plugins._access_manager.add_allowed("alpha", OWNER_ID)
         # a profile whose settings shape the plugin's effective view
         await self.api.plugin_profile_create(
             PROBE, "grind-only",

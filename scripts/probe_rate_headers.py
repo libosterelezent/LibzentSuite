@@ -15,11 +15,14 @@ What it reports per route:
     limit, remaining, reset_at, lock state — what the library paces by
 
 Usage:
+  SM_PROBE_TOKEN=<token> python3 scripts/probe_rate_headers.py
   python3 scripts/probe_rate_headers.py --token <token>
   python3 scripts/probe_rate_headers.py --token <token> --burst 5
   python3 scripts/probe_rate_headers.py --token <token> --json out.json
   python3 scripts/probe_rate_headers.py --token <token> --channel <id>
 
+The token is read from the SM_PROBE_TOKEN environment variable when set
+(preferred — keeps it out of process tables); --token is the fallback.
 The token is used ONLY for the Authorization header; it is never logged.
 All probe requests are read-only GETs (nothing sent/deleted/modified).
 """
@@ -28,6 +31,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 from typing import Any, Dict, List, Optional
@@ -107,13 +111,18 @@ async def probe(token: str, routes: List[Dict[str, Any]],
                         resp = await http.request(route_obj)
 
                     elapsed = (time.monotonic() - t0) * 1000
-                    headers = resp.headers if hasattr(resp, "headers") else {}
+                    # discord.py-self's HTTPClient.request returns the
+                    # PARSED JSON body (dict/list/str), never a response
+                    # object: headers/status are never real on this leg,
+                    # and a non-2xx raises HTTPException (handled below) —
+                    # so an absent status is marked "?" instead of 200.
+                    headers = getattr(resp, "headers", None) or {}
 
                     entry: Dict[str, Any] = {
                         "route": label,
                         "url": url,
                         "attempt": attempt + 1,
-                        "status": resp.status if hasattr(resp, "status") else 200,
+                        "status": getattr(resp, "status", "?"),
                         "elapsed_ms": round(elapsed, 1),
                     }
                     # extract rate-limit headers (case-tolerant)
@@ -122,17 +131,6 @@ async def probe(token: str, routes: List[Dict[str, Any]],
                         if val is not None:
                             entry[key.replace("X-RateLimit-", "")
                                   .replace("-", "_").lower()] = val
-
-                    # on 429, also read the JSON body
-                    if entry.get("status") == 429:
-                        try:
-                            body = json.loads(
-                                resp.text if hasattr(resp, "text") else "{}")
-                            entry["retry_after_ms"] = body.get("retry_after")
-                            entry["is_global"] = body.get("global", False)
-                            entry["message"] = body.get("message", "")
-                        except Exception:
-                            pass
 
                     results.append(entry)
                     status = entry["status"]
@@ -145,13 +143,29 @@ async def probe(token: str, routes: List[Dict[str, Any]],
                         break  # don't hammer past a 429
 
                 except discord.HTTPException as exc:
-                    results.append({
+                    elapsed = (time.monotonic() - t0) * 1000
+                    entry: Dict[str, Any] = {
                         "route": label, "url": url, "attempt": attempt + 1,
-                        "status": exc.status, "error": str(exc),
-                        "elapsed_ms": round((time.monotonic() - t0) * 1000, 1),
-                    })
+                        "status": getattr(exc, "status", "?"),
+                        "error": str(exc),
+                        "elapsed_ms": round(elapsed, 1),
+                    }
+                    # the raised exception carries the real HTTPResponse:
+                    # rate-limit headers/status live on exc.response
+                    resp = getattr(exc, "response", None)
+                    exc_headers = getattr(resp, "headers", None) or {}
+                    for key in HEADER_KEYS:
+                        val = (exc_headers.get(key)
+                               or exc_headers.get(key.lower()))
+                        if val is not None:
+                            entry[key.replace("X-RateLimit-", "")
+                                  .replace("-", "_").lower()] = val
+                    results.append(entry)
+                    rem = entry.get("remaining", "-")
+                    lim = entry.get("limit", "-")
                     print(f"  {label:<18} attempt {attempt+1}: "
-                          f"HTTP {exc.status} — {exc}")
+                          f"HTTP {entry['status']} — {exc} "
+                          f"limit={lim} remaining={rem}")
                     break
 
         # the library's internal state after all probing
@@ -181,7 +195,9 @@ def print_report(results: List[Dict[str, Any]]) -> None:
 
     for r in results:
         if "error" in r:
-            print(f"{r['route']:<18} ERROR: {r['error'][:60]}")
+            extra = (f"  Retry-After={r['retry_after']}s"
+                     if r.get("retry_after") else "")
+            print(f"{r['route']:<18} ERROR: {r['error'][:60]}{extra}")
             continue
         status = r.get("status", "?")
         status_str = "429!" if status == 429 else str(status)
@@ -299,8 +315,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Discord per-route rate-limit header inspector "
                     "(uses discord.py-self's own HTTP client)")
-    parser.add_argument("--token", required=True,
-                        help="the Discord account token")
+    parser.add_argument("--token", default=None,
+                        help="the Discord account token (fallback when "
+                             "SM_PROBE_TOKEN is not set; the environment "
+                             "variable is preferred so the token never "
+                             "appears in process tables)")
     parser.add_argument("--route", default="all",
                         help="me | channels | guilds | gateway | notes | "
                              "messages (needs --channel)")
@@ -314,6 +333,10 @@ def main() -> int:
     parser.add_argument("--json", default=None,
                         help="write a JSON report to this path")
     args = parser.parse_args()
+    args.token = args.token or os.environ.get("SM_PROBE_TOKEN")
+    if not args.token:
+        parser.error("a token is required: set SM_PROBE_TOKEN or pass "
+                     "--token")
     return asyncio.run(run(args))
 
 

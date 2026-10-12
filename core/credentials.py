@@ -31,9 +31,10 @@ admin-managed store, falling back to env when the DB value is unset).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import os
+import stat
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Set
+from typing import Dict, Mapping, Optional
 
 from .errors import CredentialsError  # ONE class (was defined twice)
 
@@ -43,6 +44,10 @@ LOG = logging.getLogger("slaughtermudae.credentials")
 SENSITIVE_KEYS = ("token", "secret", "password")
 #: prefix that marks an env entry as an account token
 TOKEN_PREFIX = "DISCORD_TOKEN_"
+
+#: guards the one-time unrecognized-REMOTE_CONTROL warning (module logger,
+#: once per process — the gate itself stays non-raising on every read)
+_remote_control_warned = False
 
 
 class Credentials:
@@ -69,17 +74,21 @@ class Credentials:
                 continue
             key, _, value = line.partition("=")
             key = key.strip()
-            value = value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-                value = value[1:-1]
-            elif value[:1] not in ("\"", "'"):
+            # cut inline comments on the UNSTRIPPED value: strip() first
+            # would eat the very space that marks ' #' as a comment, so
+            # 'KEY= # disabled' parsed as '# disabled' instead of ''
+            cut = -1
+            if value.lstrip()[:1] not in ("\"", "'"):
                 # unquoted value: ' # comment' ends it (a '#' with no space
                 # before it is part of the value, e.g. tokens/passwords)
                 cut = value.find(" #")
                 if cut == -1:
                     cut = value.find("\t#")
-                if cut != -1:
-                    value = value[:cut].rstrip()
+            if cut != -1:
+                value = value[:cut].rstrip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
             if key:
                 out[key] = value
         return out
@@ -91,6 +100,16 @@ class Credentials:
         if not p.is_file():
             LOG.warning("credentials file %s not found; using empty credentials", p)
             return cls({}, p)
+        try:
+            # lstat does NOT follow the link: a symlinked .env (a classic
+            # exfil pivot — point the framework at an attacker-chosen
+            # file) is rejected BEFORE any read happens
+            if stat.S_ISLNK(os.lstat(p).st_mode):
+                raise CredentialsError(
+                    f"credentials file {p} is a symlink — refusing to "
+                    "follow it (remove the link or use a real file)")
+        except OSError as exc:
+            raise CredentialsError(f"cannot read credentials file {p}: {exc}") from exc
         try:
             text = p.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
@@ -144,7 +163,11 @@ class Credentials:
         try:
             return int(raw)
         except ValueError as exc:
-            raise CredentialsError(f"MUDAE_BOT_ID is not an integer: {raw!r}") from exc
+            # truncated repr: the raw value can be arbitrarily long and
+            # must not be echoed wholesale into logs/errors
+            shown = raw if len(raw) <= 40 else raw[:37] + "..."
+            raise CredentialsError(
+                f"MUDAE_BOT_ID is not an integer: {shown!r}") from exc
 
     @property
     def owner_user_ids(self) -> frozenset[int]:
@@ -207,9 +230,28 @@ class Credentials:
 
     @property
     def remote_control_enabled(self) -> bool:
-        """Mention-prefix management from Discord (REMOTE_CONTROL=0 opts out)."""
-        raw = (self._values.get("REMOTE_CONTROL") or "1").strip().lower()
-        return raw not in ("0", "false", "no", "off")
+        """Mention-prefix management from Discord (REMOTE_CONTROL=0 opts out).
+
+        FAIL CLOSED: an absent key keeps the documented default (on);
+        a present-but-empty or unrecognized value DISABLES the gate —
+        the old parse failed OPEN (anything unrecognized meant enabled).
+        """
+        global _remote_control_warned
+        raw = self._values.get("REMOTE_CONTROL")
+        if raw is None:
+            return True  # documented default: enabled
+        value = raw.strip().lower()
+        if value in ("1", "true", "yes", "on"):
+            return True
+        if value in ("0", "false", "no", "off", ""):
+            return False
+        if not _remote_control_warned:
+            _remote_control_warned = True
+            LOG.warning(
+                "REMOTE_CONTROL=%r is not a recognized value (expected "
+                "1/true/yes/on or 0/false/no/off) — remote control is "
+                "DISABLED (fail closed)", raw[:40])
+        return False
 
     # ---------------------------------------------------------------- display
     def redacted(self) -> Dict[str, str]:

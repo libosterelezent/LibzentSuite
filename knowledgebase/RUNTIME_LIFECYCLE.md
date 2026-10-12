@@ -81,14 +81,13 @@ credentials=None, database=None, quiet=False) -> Framework`:
 21. **`ControlAPI(accounts=…, plugins=…, profiles=…, settings=…, limiter=…,
     scheduler=…, logs=…, audit=…, simulation=…, credentials=…, database=…,
     started_at=…)`**.
-22. **`RemoteControl(bus, scheduler, accounts, lambda: api, credentials,
-    ServiceLogger(logs,"remote-control")).start()`** — ONLY when
-    `credentials.remote_control_enabled` (`REMOTE_CONTROL=0` disables the
-    wiring entirely). Note the real order: ControlAPI is built BEFORE
-    RemoteControl (it receives a late-bound `api` provider).
+22. **`COMMAND_HUB.api_provider = lambda: api`** — the self-command
+    layer's Framework verbs bridge to the ONE ControlAPI. (The retired
+    `RemoteControl` bus handler is no longer wired here; the class
+    survives only in the simulator stack, for `control_mention`.)
 23. **`Framework(...)`** returned — a plain holder of api/bus/logs/limiter/
     scheduler/accounts/plugins/profiles/settings/audit/database/credentials/
-    config/remote_control.
+    config.
 
 ## `main.run_app` — surfaces and their lifecycle
 

@@ -26,17 +26,10 @@ import asyncio
 import logging
 import shlex
 import time
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional
 
 from .credentials import Credentials
-from .errors import (
-    AccountError,
-    CredentialsError,
-    PluginError,
-    ProfileError,
-    RatePolicyError,
-    SettingsValidationError,
-)
+from .errors import DOMAIN_ERRORS
 from .event_bus import Event, EventBus, MessageReceived
 from .priority import Priority
 
@@ -45,10 +38,7 @@ from .priority import Priority
 #: NOTE: bare RuntimeError is deliberately NOT domain — internal failures
 #: (boom-style) mask to "internal (see logs)"; typed domain errors that
 #: subclass RuntimeError (AccountError etc.) still render bare.
-_DOMAIN_ERRORS = (
-    AccountError, CredentialsError, PluginError, ProfileError,
-    RatePolicyError, SettingsValidationError, ValueError,
-)
+_DOMAIN_ERRORS = DOMAIN_ERRORS
 
 LOG = logging.getLogger("slaughtermudae.remote_control")
 

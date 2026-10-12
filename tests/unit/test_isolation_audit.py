@@ -33,6 +33,7 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest import mock
 
+from adapters.discord import client as client_module
 from adapters.discord.client import IdentifyGate, RealClientFactory, RealDiscordClient
 from core.account_manager import AccountStatus
 from core.errors import AccountError
@@ -449,10 +450,18 @@ class EnginePruneTests(unittest.IsolatedAsyncioTestCase):
 
 # ------------------------------------------------------- M1: close codes
 class DisconnectReasonTests(unittest.IsolatedAsyncioTestCase):
+    """M1 pins, adapted to the audit's debounced-forward design: transient
+    'disconnect' dispatches forward only after the resume window elapses
+    (no on_resumed), and the reason carries the machine-parseable
+    'close=NNNN' sentinel. The session is marked live first — a dispatch
+    while not connected is a startup failure owned by connect()."""
+
     async def test_close_code_surfaces_in_disconnect_reason(self) -> None:
         """M1: 'gateway closed' alone can't discriminate cull vs network."""
         mod = _fake_discord_module()
-        with mock.patch.dict(sys.modules, {"discord": mod}):
+        with mock.patch.dict(sys.modules, {"discord": mod}), \
+                mock.patch.object(
+                    client_module, "_DISCONNECT_FORWARD_DELAY_S", 0.05):
             client = RealDiscordClient("token-tok")
             seen: list = []
             client.on_disconnect = seen.append
@@ -460,18 +469,22 @@ class DisconnectReasonTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
             lib = _FakeLibClient.last_built
             self.assertIsNotNone(lib)
+            client.connected = True  # session live: the debounce owns it
             lib.ws = NS(close_code=4007)
             await lib.on_disconnect()
+            await asyncio.sleep(0.15)  # no resume landed: window elapsed
             connect_task.cancel()
             try:
                 await connect_task
             except asyncio.CancelledError:
                 pass
-        self.assertEqual(seen, ["gateway closed (code=4007)"])
+        self.assertEqual(seen, ["gateway closed (close=4007)"])
 
     async def test_missing_close_code_keeps_plain_reason(self) -> None:
         mod = _fake_discord_module()
-        with mock.patch.dict(sys.modules, {"discord": mod}):
+        with mock.patch.dict(sys.modules, {"discord": mod}), \
+                mock.patch.object(
+                    client_module, "_DISCONNECT_FORWARD_DELAY_S", 0.05):
             client = RealDiscordClient("token-tok")
             seen: list = []
             client.on_disconnect = seen.append
@@ -479,7 +492,9 @@ class DisconnectReasonTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
             lib = _FakeLibClient.last_built
             lib.ws = NS()  # no close_code attribute at all
+            client.connected = True
             await lib.on_disconnect()
+            await asyncio.sleep(0.15)  # debounce window elapsed
             connect_task.cancel()
             try:
                 await connect_task

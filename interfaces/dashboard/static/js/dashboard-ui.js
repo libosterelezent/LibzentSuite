@@ -510,9 +510,19 @@ function wireDashboardUI(root, pluginName) {
     if (!btn) return;
     btn.onclick = async () => {
       const payload = {};
+      formEl.querySelectorAll("[data-dui-field] .fb").forEach(fb => fb.remove());
       for (const field of (comp.children || [])) {
         if (!DUI_INPUT_TYPES.includes(field.type) || !field.id) continue;
-        payload[field.id] = duiFieldValue(field, formEl);
+        const value = duiFieldValue(field, formEl);
+        // client-side validation (collectProfileSettings style): flag the
+        // offending field inline and abort before the POST
+        const err = duiValidateField(field, value);
+        if (err) {
+          const slot = formEl.querySelector('[data-dui-field="' + field.id + '"]');
+          if (slot) setFb(slot, "error", err);
+          return;
+        }
+        payload[field.id] = value;
       }
       try {
         const res = await withBusy(btn, dispatchUIAction(pluginName, id, payload));
@@ -557,4 +567,26 @@ function duiFieldValue(comp, scope) {
     return Number.isFinite(n) ? n : null;
   }
   return input.value;
+}
+
+/* Client-side form validation (mirrors collectProfileSettings in
+   plugins-ui.js): required/non-empty, number bounds, text length.
+   Returns "" when the value is acceptable, else the inline message. */
+function duiValidateField(field, value) {
+  if (field.required) {
+    const empty = (field.type === "checkbox" || field.type === "toggle")
+      ? value !== true
+      : value == null || value === "" || (Array.isArray(value) && !value.length);
+    if (empty) return `${field.label || field.id} is required.`;
+  }
+  if (field.type === "number-input" && value != null) {
+    if (field.min_value != null && value < +field.min_value)
+      return `${field.label || field.id} must be at least ${field.min_value}.`;
+    if (field.max_value != null && value > +field.max_value)
+      return `${field.label || field.id} must be at most ${field.max_value}.`;
+  }
+  if ((field.type === "text-input" || field.type === "textarea") && field.max_length &&
+      String(value ?? "").length > +field.max_length)
+    return `${field.label || field.id} must be at most ${field.max_length} characters.`;
+  return "";
 }

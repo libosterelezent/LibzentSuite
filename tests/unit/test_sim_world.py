@@ -454,7 +454,11 @@ class TestRichEventParity(unittest.IsolatedAsyncioTestCase):
         })()
         world.subscribers.append(subscriber)  # the author's own client
         world.edit_message(1, "self edit")
-        self.assertEqual(seen, [])  # own edits never echo back (live parity)
+        # own edits never echo back — AUDIT FIX: the live adapter's rich
+        # edit/delete/reaction handlers were flipped to this same
+        # others-only polarity (raw+sim parity); previously they were
+        # inverted and published ONLY self-authored cached events.
+        self.assertEqual(seen, [])
 
     async def test_reaction_raw_is_handle_tuple_like_live(self) -> None:
         """Live pushes ``(reaction, user)`` library handles — never None."""

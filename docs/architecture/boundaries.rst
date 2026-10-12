@@ -21,7 +21,9 @@ Hard rules enforced by review and tests:
 * ``core`` never imports adapters at runtime (event DTOs are typed
   ``Any`` on the core side).
 * Interfaces mutate state exclusively through :class:`core.api.ControlAPI`
-  — CLI and dashboard are 1:1 wrappers (parity by construction).
+  — CLI and dashboard both wrap it (near-parity by construction; a few
+  dashboard surfaces — admin-panel management, profile editing, channel
+  lists, effective-settings view, bulk plugin-set — have no CLI verb).
 * Plugins never touch clients, SQLite, or the limiter directly; everything
   goes through the ``PluginServices`` protocol.
 * Account tokens are stored as Fernet **ciphertext in the database** —

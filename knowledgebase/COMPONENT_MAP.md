@@ -117,22 +117,15 @@ consumes, the persistence it touches, and how it isolates failures. Read
   admits nobody but admins; unknown/absent rows behave as empty; the
   adapter and the plugin manager both swallow checker errors as denial.
 
-## core.framework_credentials (DB-first credentials view — NEW)
+## core.framework_credentials (REMOVED)
 
-* **Module**: `core.framework_credentials`.
-* **Purpose**: the duck-typed `Credentials` replacement plugins are meant
-  to see as `services.credentials` — `owner_user_ids` means the ADMIN ids
-  and `mudae_bot_id` resolves DB-first (env fallback), so legacy plugin
-  code keeps working unchanged over the new access store. The
-  self-command prefix itself moved to the per-account access row.
-  *Status: defined as the contract/seam and referenced by
-  `core.credentials` docstrings; the bootstrap still hands the env
-  `Credentials` object through the services wiring — adopted by the
-  access model, not yet constructed per-check.*
-* **Key symbols**: `core.framework_credentials.FrameworkCredentials`
-  (`owner_user_ids`, `mudae_bot_id`, `self_command_prefix`, `require`).
-* **Persistence**: none (constructed per-access-check with
-  already-resolved values; no I/O).
+* **Module**: deleted — the class was defined as a contract/seam but had
+  ZERO construction sites repo-wide, and the bootstrap hands the env
+  `Credentials` object through the services wiring unchanged.
+* **Reality**: `AccountPluginServices.credentials`
+  (`core/account_manager/services.py`) returns the injected credentials
+  view; DB-first admin ids / Mudae id / prefix live in
+  `core.access_manager` (`AccessManager`), not in a credentials wrapper.
 
 ## core.plugin_scopes (channel scopes — NEW)
 
@@ -476,15 +469,20 @@ frozen `DiscordMessage` + entity projections, pure converters
   `wait_for_quiet` with real quiet-window semantics);
   `SimClient` (full protocol, idempotent connect/disconnect, `drop(reason)`
   for unexpected-loss tests, observability lists: `typing_calls`,
-  `open_dm_calls`, `button_clicks`); `SCENARIOS` (6 registered scenarios);
+  `open_dm_calls`, `button_clicks`); `SCENARIOS` (7 registered scenarios);
   `SimulationRunner` (see below). All ids are synthetic constants — real ids
   live in `.env` only.
 
-## core.remote_control (mention-prefix management)
+## core.remote_control (RETIRED mention-prefix bridge)
 
 * **Module**: `core.remote_control`.
-* **Purpose**: owners manage the fleet FROM Discord by mentioning a running
-  account (`@<account> <command>`); commands run through ControlAPI and
+* **Purpose**: RETIRED from production — the bootstrap no longer wires
+  it; mention-prefix commands ride the self-command layer
+  (`core/plugin_manager/commands.py`, gated by `AccessManager`). The
+  class survives only because the simulator stack constructs it for the
+  `control_mention` scenario: owners manage the fleet FROM Discord by
+  mentioning a running account (`@<account> <command>`); commands run
+  through ControlAPI and
   replies are submitted at NORMAL priority through the full paced pipeline
   (`scheduler.submit(account, "control", "message", ...)`).
 * **Owns**: the command allowlist (`help/status/accounts/plugins/ratelimit/
@@ -564,9 +562,10 @@ frozen `DiscordMessage` + entity projections, pure converters
   `EventBus`, `LogService` without a DB sink, `SettingsManager`,
   `RateLimitManager`, `AuditRecorder`, `TaskScheduler` with the SAME
   late-bound sender seam, `PluginManager` + discover, `ProfileManager`,
-  `AccountManager` over a `SimClient` factory) plus a real `ControlAPI` and
-  `RemoteControl` so scenarios exercise Discord-side management exactly like
-  production. Produces `{"name", "passed", "duration_s", "failures",
+  `AccountManager` over a `SimClient` factory) plus a real `ControlAPI`
+  and `RemoteControl` (the retired bridge — exercised by the
+  `control_mention` scenario) so scenarios exercise Discord-side
+  management. Produces `{"name", "passed", "duration_s", "failures",
   "log_lines", "interactions", "summary"}`.
 * **Key symbols**: `adapters.simulator.runner.SimulationRunner`
   (`list`, `scenario`, `run`).

@@ -19,6 +19,7 @@ Fail-closed semantics:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -62,6 +63,10 @@ class AccessManager:
         #: per-account prefix cache for the sync factory read (warmed by
         #: the bootstrap + every prefix mutation)
         self._prefix_cache: Dict[str, Dict[str, Any]] = {}
+        #: serializes every read-modify-write mutation: concurrent
+        #: add/remove pairs used to race across the kv awaits and lose
+        #: updates (a revoked admin could reappear authorized)
+        self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------- helpers
     async def _row(self, name: str) -> Dict[str, Any]:
@@ -83,23 +88,30 @@ class AccessManager:
             return []
         return [int(x) for x in raw if str(x).strip().lstrip("-").isdigit()]
 
-    async def set_admin_ids(self, ids: List[int]) -> List[int]:
+    async def _write_admin_ids(self, ids: List[int]) -> List[int]:
+        """Unlocked write core (callers hold ``self._lock``)."""
         clean = sorted({int(x) for x in ids})
         await self._kv.set(KEY_ADMINS, clean)
         self._log.info("admin id list set (%d id(s))", len(clean))
         return clean
 
+    async def set_admin_ids(self, ids: List[int]) -> List[int]:
+        async with self._lock:
+            return await self._write_admin_ids(ids)
+
     async def add_admin(self, user_id: int) -> List[int]:
-        ids = await self.admin_ids()
-        if int(user_id) not in ids:
-            ids.append(int(user_id))
-            ids = await self.set_admin_ids(ids)
-        return ids
+        async with self._lock:
+            ids = await self.admin_ids()
+            if int(user_id) not in ids:
+                ids.append(int(user_id))
+                ids = await self._write_admin_ids(ids)
+            return ids
 
     async def remove_admin(self, user_id: int) -> List[int]:
-        ids = await self.admin_ids()
-        ids = [x for x in ids if x != int(user_id)]
-        return await self.set_admin_ids(ids)
+        async with self._lock:
+            ids = await self.admin_ids()
+            ids = [x for x in ids if x != int(user_id)]
+            return await self._write_admin_ids(ids)
 
     # ------------------------------------------------- one-time migration
     async def migrate_from_credentials(self) -> int:
@@ -137,9 +149,10 @@ class AccessManager:
         return await self._row(name)
 
     async def set_admin_flag(self, name: str, is_admin: bool) -> Dict[str, Any]:
-        row = await self._row(name)
-        row["is_admin"] = bool(is_admin)
-        await self._write(name, row)
+        async with self._lock:
+            row = await self._row(name)
+            row["is_admin"] = bool(is_admin)
+            await self._write(name, row)
         self._log.info("account %s admin flag -> %s", name, is_admin)
         return row
 
@@ -147,25 +160,32 @@ class AccessManager:
     async def allowed_user_ids(self, name: str) -> List[int]:
         return list((await self._row(name))["allowed_user_ids"])
 
-    async def set_allowed_user_ids(self, name: str,
-                                   ids: List[int]) -> List[int]:
+    async def _write_allowed(self, name: str, ids: List[int]) -> List[int]:
+        """Unlocked read-modify-write core (callers hold ``self._lock``)."""
         row = await self._row(name)
         clean = sorted({int(x) for x in ids})
         row["allowed_user_ids"] = clean
         await self._write(name, row)
         return clean
 
+    async def set_allowed_user_ids(self, name: str,
+                                    ids: List[int]) -> List[int]:
+        async with self._lock:
+            return await self._write_allowed(name, ids)
+
     async def add_allowed(self, name: str, user_id: int) -> List[int]:
-        ids = await self.allowed_user_ids(name)
-        if int(user_id) not in ids:
-            ids.append(int(user_id))
-            ids = await self.set_allowed_user_ids(name, ids)
-        return ids
+        async with self._lock:
+            ids = await self.allowed_user_ids(name)
+            if int(user_id) not in ids:
+                ids.append(int(user_id))
+                ids = await self._write_allowed(name, ids)
+            return ids
 
     async def remove_allowed(self, name: str, user_id: int) -> List[int]:
-        ids = [x for x in await self.allowed_user_ids(name)
-               if x != int(user_id)]
-        return await self.set_allowed_user_ids(name, ids)
+        async with self._lock:
+            ids = [x for x in await self.allowed_user_ids(name)
+                   if x != int(user_id)]
+            return await self._write_allowed(name, ids)
 
     # ---------------------------------------------------------- prefixes
     async def prefix_config(self, name: str) -> Dict[str, Any]:
@@ -215,10 +235,11 @@ class AccessManager:
                 raise CredentialsError(
                     f"prefix symbol {symbol!r} must be 1-4 chars with no "
                     f"whitespace")
-        row = await self._row(name)
-        row["prefix_mode"] = mode
-        row["prefix_symbol"] = symbol
-        await self._write(name, row)
+        async with self._lock:
+            row = await self._row(name)
+            row["prefix_mode"] = mode
+            row["prefix_symbol"] = symbol
+            await self._write(name, row)
         self._prefix_cache[name] = {"prefix_mode": mode,
                                     "prefix_symbol": symbol}
         self._log.info("account %s prefix -> mode=%s symbol=%r",
@@ -267,7 +288,6 @@ class AccessManager:
     async def forget_account(self, name: str) -> None:
         """Removal cascade: delete the account's access row (admin flag,
         perms, prefix) so the Admin page doesn't show deleted accounts."""
-        import asyncio
         await self._kv.delete(account_key(name))
         self._prefix_cache.pop(name, None)
         self._log.info("access row cleared for removed account %s", name)
@@ -302,9 +322,10 @@ class AccessManager:
                                   user_id: Optional[int]) -> None:
         """Record the account's Discord user id in its access row (the
         account manager calls this on connect) so admin flags gate."""
-        row = await self._row(name)
-        row["user_id"] = int(user_id) if user_id else None
-        await self._write(name, row)
+        async with self._lock:
+            row = await self._row(name)
+            row["user_id"] = int(user_id) if user_id else None
+            await self._write(name, row)
 
     async def can_invoke(self, account: str,
                          user_id: Optional[int]) -> bool:

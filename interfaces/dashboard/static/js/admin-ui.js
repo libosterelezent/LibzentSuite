@@ -18,6 +18,10 @@ async function loadAdmin() {
 function renderAdmin() {
   const host = $("admin-content"); if (!host) return;
   if (!adminOverview) { host.innerHTML = emptyState("Admin Unavailable", "The access store could not be loaded."); return; }
+  // Skip the rebuild while an admin input/select has focus — a WS
+  // structural tick would otherwise wipe half-typed ids mid-entry; the
+  // next render after focus leaves catches the data up.
+  if (host.querySelector("input:focus, select:focus, textarea:focus")) return;
   const ov = adminOverview;
   host.innerHTML = "";
 

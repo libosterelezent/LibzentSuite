@@ -8,7 +8,7 @@ import unittest
 
 from adapters.base import DiscordMessage
 from core.account_manager import AccountStatus
-from core.errors import AccountError, CredentialsError, ProfileError, SchedulerError, TargetGone
+from core.errors import AccountError, CredentialsError, SchedulerError, TargetGone
 from core.event_bus import AccountConnected, AccountDisconnected, AccountFailed
 from core.task_scheduler import (
     STATUS_COMPLETED,
@@ -445,7 +445,10 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         # FAILED (not wedged RECONNECTING): start() stays usable for automation
         self.assertEqual(runtime.status, AccountStatus.FAILED)
         self.assertEqual(len(h.factory.clients), 1)  # never retried
-        self.assertFalse(runtime.lost.is_set())  # no stale wake-ups
+        # stale-start audit: lost is SET on the no-supervisor FAILED path —
+        # the recovery signal for a supervisor spawned later in the same
+        # generation (start() clears it before connecting, so no stale wake)
+        self.assertTrue(runtime.lost.is_set())
         # and the account can be started again
         await h.manager.start("alpha")
         self.assertEqual(runtime.status, AccountStatus.RUNNING)
@@ -497,11 +500,15 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         runtime = h.manager.get("alpha").runtime
         h.factory.client_kwargs["fail_connect"] = True  # reconnects fail
         runtime.client.drop("socket closed")
-        await asyncio.sleep(0.4)  # several overflowing attempts elapse
+        # bounded POLL for the retry evidence (stale-start audit: the old
+        # fixed 0.4s sleep was marginally flaky under suite load — jittered
+        # backoff of ~0.24s worst-case plus event-loop contention)
+        await _poll_until(lambda: len(h.factory.clients) >= 4, timeout=2.0)
         supervisor = runtime.supervisor
         self.assertIsNotNone(supervisor)
         self.assertFalse(supervisor.done())  # alive, still driving retries
-        self.assertEqual(runtime.status, AccountStatus.RECONNECTING)
+        await _poll_until(
+            lambda: runtime.status == AccountStatus.RECONNECTING, timeout=2.0)
         self.assertGreaterEqual(len(h.factory.clients), 4)  # kept retrying
         await h.manager.stop("alpha")
         self.assertEqual(runtime.status, AccountStatus.STOPPED)

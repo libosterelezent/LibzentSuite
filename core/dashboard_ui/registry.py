@@ -472,7 +472,6 @@ class DashboardUIRegistry:
         if isinstance(raw, str):
             return ActionResult(success=True, message=raw)
         if isinstance(raw, dict):
-            keys = {"success", "message", "data", "field_errors", "refresh"}
             if "success" in raw or "message" in raw:
                 try:
                     return ActionResult(

@@ -54,7 +54,7 @@ from .settings_manager import SettingsManager
 from .sync_group_manager import SyncGroupManager
 from .task_scheduler import TaskScheduler
 from .account_manager import AccountManager
-from .account_manager.lifecycle import LifecycleGovernor, LifecyclePolicy
+from .account_manager.lifecycle import LifecycleGovernor
 
 ROOT_LOGGER = logging.getLogger("slaughtermudae")
 
@@ -115,9 +115,16 @@ async def _seed_config_defaults(limiter: RateLimitManager, config: ProjectConfig
             return  # DB owns this key already
         if removed is not None and removed(level, owner, action):
             return  # user explicitly CLEARED it: never resurrect (tombstone)
-        interval, jmin, jmax = _policy_triple(action, spec, where)
         try:
+            interval, jmin, jmax = _policy_triple(action, spec, where)
             limiter.set_policy_values(action, interval, jmin, jmax, level, owner)
+        except ValueError as exc:
+            # a malformed spec (e.g. interval "fast") must not brick the
+            # boot either — skip THIS policy with a warning, matching the
+            # UnsafePolicyError/RatePolicyError handlers below
+            ROOT_LOGGER.warning(
+                "skipping invalid config default for %s %s (%s)",
+                where, action, exc)
         except UnsafePolicyError as exc:
             # a below-floor config value must not brick the boot — clamp to
             # the floor like load_persisted does for hand-edited DB rows
@@ -175,7 +182,9 @@ class Framework:
                  credential_service: Any = None,
                  cooldowns: Any = None,
                  plugin_state: Any = None,
-                 sync_groups: Any = None) -> None:
+                 sync_groups: Any = None,
+                 cooldown_resync_stop: Optional[Callable[[], Any]] = None,
+                 ) -> None:
         self.api = api
         self.bus = bus
         self.logs = logs
@@ -194,6 +203,8 @@ class Framework:
         self.cooldowns = cooldowns
         self.plugin_state = plugin_state
         self.sync_groups = sync_groups
+        #: stops the periodic cooldown-resync task (set by _assemble)
+        self._cooldown_resync_stop = cooldown_resync_stop
         self._shut_down = False
 
     async def shutdown(self) -> None:
@@ -217,8 +228,14 @@ class Framework:
         self._shut_down = True
         steps = (
             ("scheduler", lambda: self.scheduler.stop(drain=True)),
+            ("cooldown resync", self._stop_cooldown_resync),
             ("bus drain", self.bus.drain),
             ("accounts", self.accounts.stop_all),
+            # SECOND drain: stop_all emits AccountDisconnected (and plugin
+            # teardown emits PluginUnloaded) tail events — dropping them
+            # left the dashboard's Logs page without its own shutdown
+            # narrative and straggling subscribers mid-teardown
+            ("bus drain (tail)", self.bus.drain),
             # QUEUED PERSISTENCE shutdown (agent C contract): drain the log
             # + audit queues BEFORE closing the DB — bounded, never hangs
             ("log persistence", self.logs.stop_persistence),
@@ -255,6 +272,21 @@ class Framework:
         close = getattr(self.plugins, "close", None)
         if close is not None:
             close()
+
+    async def _stop_cooldown_resync(self) -> None:
+        stop = self._cooldown_resync_stop
+        if stop is None:
+            return
+        self._cooldown_resync_stop = None  # idempotent
+        try:
+            outcome = stop()
+            if inspect.iscoroutine(outcome):
+                await outcome
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            ROOT_LOGGER.warning("cooldown resync shutdown failed: %s: %s",
+                                type(exc).__name__, exc)
 
     @staticmethod
     async def _detach_bridge() -> None:
@@ -295,8 +327,12 @@ async def _security_audit(database: Any, credential_service: Any,
     if callable(probe):
         try:
             await probe()
-        except Exception:
-            pass  # the probe warns internally; boot never fails on it
+        except Exception as exc:
+            # the probe handles its own expected failures; anything that
+            # still escapes must be VISIBLE, not double-swallowed
+            ROOT_LOGGER.warning(
+                "boot decrypt canary raised %s: %s (key misconfiguration "
+                "must not be silent)", type(exc).__name__, exc)
 
 
 async def build(
@@ -412,11 +448,21 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     bus = EventBus()
     _wire_event_logging(bus, logs)
 
+    # DEPRECATED: the engine no longer reads the lane constructor kwargs —
+    # runtime lane state comes from load_persisted()'s kv read. Warn once
+    # when a config file still carries a truthy lane section so operators
+    # can clean it up, and stop feeding the dead values forward.
+    lane_cfg = config.policies.get("lane") or {}
+    if lane_cfg.get("enabled") or lane_cfg.get("prefixrate"):
+        ROOT_LOGGER.warning(
+            "config rate_limits.json: the 'lane' section is deprecated "
+            "and ignored by the rate engine (enabled=%r prefixrate=%r) — "
+            "manage the send lane from the dashboard/commands instead; "
+            "remove the section to silence this warning",
+            lane_cfg.get("enabled"), lane_cfg.get("prefixrate"))
     limiter = RateLimitManager(
         bus, ServiceLogger(logs, "ratelimit"), database.policies,
         kv_repo=database.kv,
-        lane_enabled=bool((config.policies.get("lane") or {}).get("enabled", False)),
-        lane_prefixrate=(config.policies.get("lane") or {}).get("prefixrate", 1.5),
     )
     await limiter.load_persisted()  # stored policies + lane config -> memory
     # Config-file policies are FIRST-BOOT DEFAULTS only: they apply solely
@@ -481,6 +527,11 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         credential_service=credential_service, cooldowns=cooldowns,
         plugin_state=plugin_state,
     )
+    # the self-command executor's command gate reads this attribute; it
+    # was never set here, so framework verbs fell back to the RETIRED env
+    # OWNER_USER_IDS grant instead of the DB admin panel
+    plugins._access_manager = access
+    cleanups.append(("plugins", plugins.close))
     plugins.discover()
     # Plugin dashboard UIs register at BOOT (discovery time) so plugin
     # pages are visible in the dashboard immediately — not only after an
@@ -526,6 +577,45 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
             type(exc).__name__, exc)
     await _security_audit(database, credential_service, env_file)
     await cooldowns.restore()
+
+    # lightweight periodic cooldown resync (30s): external edits (a second
+    # process or a manual DB change) heal within one period even in
+    # headless processes where nothing polls ControlAPI.status().
+    # Defensive by design — failures are logged, never fatal, and shutdown
+    # is signalled via the event so the loop never outlives the framework.
+    cooldown_resync_stop_evt = asyncio.Event()
+
+    async def _cooldown_resync_loop() -> None:
+        while not cooldown_resync_stop_evt.is_set():
+            try:
+                await asyncio.wait_for(cooldown_resync_stop_evt.wait(),
+                                       timeout=30.0)
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                await cooldowns.resync()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                ROOT_LOGGER.debug("periodic cooldown resync failed",
+                                  exc_info=True)
+
+    cooldown_resync_task = asyncio.create_task(_cooldown_resync_loop())
+
+    async def _stop_cooldown_resync_task() -> None:
+        cooldown_resync_stop_evt.set()
+        if not cooldown_resync_task.done():
+            cooldown_resync_task.cancel()
+            try:
+                await cooldown_resync_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                ROOT_LOGGER.warning("cooldown resync task teardown failed: "
+                                    "%s: %s", type(exc).__name__, exc)
+
+    cleanups.append(("cooldown resync", _stop_cooldown_resync_task))
 
     # config-dir account files (DB rows were restored by accounts.load())
     # ``plugins`` is the capability key; a legacy ``profiles`` key in a
@@ -592,4 +682,5 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         audit=audit, database=database, credentials=credentials, config=config,
         credential_service=credential_service, cooldowns=cooldowns,
         plugin_state=plugin_state, sync_groups=sync_groups,
+        cooldown_resync_stop=_stop_cooldown_resync_task,
     )

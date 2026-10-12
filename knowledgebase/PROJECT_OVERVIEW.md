@@ -48,11 +48,12 @@ never drift apart in capability:
 | CLI (REPL) | `interfaces.cli.repl.Repl` | prompt `sm> `, `help` for commands; `api.shutdown()` runs on every exit path |
 | CLI (one-shot) | `interfaces.cli.repl.run_once` + `interfaces.cli.commands.run_command` | `python3 main.py <command ...>`; lifecycle owned by `main.py` |
 | Browser dashboard | `interfaces.dashboard.server.DashboardServer` | stdlib `ThreadingHTTPServer` + hand-rolled RFC 6455 WebSocket (`interfaces.dashboard.ws`); SPA at `interfaces/dashboard/static/index.html`; JSON REST maps 1:1 to ControlAPI |
-| Discord mention prefix | `core.remote_control.RemoteControl` | owners type `@<account> status` in any visible channel; owner-only, allowlisted commands, replies go through the SAME paced send pipeline; `REMOTE_CONTROL=0` in `.env` disables the wiring |
+| Discord chat commands | `core/plugin_manager/commands.py` (self-command layer) | users allowed per account (or admins) type the account's prefix (mention/symbol/both, Admin tab) + verb; gated by `AccessManager.can_invoke` (fail-closed), replies go through the SAME paced send pipeline. The retired `core.remote_control.RemoteControl` survives only for the simulator's `control_mention` scenario (`REMOTE_CONTROL` gates that simulator behavior only) |
 
 The command vocabulary (`interfaces.cli.commands.HELP`):
-`status · accounts · plugins · profiles · ratelimit · tasks · simulation ·
-logs · audit · estop [resume] · help · quit`.
+`status · accounts · credentials · plugins · profiles · groups ·
+ratelimit · cooldowns · tasks · simulation · logs · audit ·
+estop [resume] · help · quit`.
 
 ## Safety philosophy
 

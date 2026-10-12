@@ -1,7 +1,7 @@
 # Module `core.plugin_manager.commands`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `core/plugin_manager/commands.py`
 
@@ -23,13 +23,20 @@ bootstrap (both outside this phase's ownership):
     run with plugin-grade pacing (replies go through the per-plugin
     services facade into the task pipeline, NEVER a raw client send).
 
-FRAMEWORK COMMANDS: ``pg`` and ``say`` (category "Utilities") and the
-dynamic ``help`` ("No Category") are declared HERE, not by plugins —
-matching Mudae's layout. They are first-class :class:`CommandSpec`s, so
-the registry treats them exactly like plugin-declared verbs (and the
+FRAMEWORK COMMANDS: the retired RemoteControl mention verbs
+(``status``/``accounts``/``plugins``/``ratelimit``/``lane``/``tasks``/
+``estop``/``simulation``, category "Framework"), the admin* settings
+verbs, ``pg`` and ``say`` (category "Utilities") and the dynamic
+``help`` ("No Category") are declared HERE, not by plugins — matching
+Mudae's layout. They are first-class :class:`CommandSpec`s, so the
+registry treats them exactly like plugin-declared verbs (and the
 ``help`` listing is built dynamically from whatever the registry holds —
 ``snipewatch``-style extras a later plugin declares appear in the help
-with zero framework changes).
+with zero framework changes). The management verbs reach the ControlAPI
+through the hub's ``api_provider`` (bootstrap-registered): ONE command
+layer, one dispatch path, one authorization gate — the separate
+RemoteControl bus handler is retired, so mention-prefix commands no
+longer race the Bot when prefix_mode=mention.
 
 COLLISION POLICY (deterministic): framework names are reserved, then
 plugin specs are collected in manifest order (plugin name sort); the
@@ -62,6 +69,8 @@ the last one (documented last-wins) — executor-level tests can call
   - Bind the process's plugin manager (last-wins; tests rebind).
 - `def unbind(self, manager: Any) -> None`
   - Drop the binding if THIS manager still owns it (shutdown).
+- `def bound_manager(self) -> Any`
+  - The currently bound plugin manager (None when unbound).
 - `def refresh(self, account: str) -> None`
   - Recompute one account's registry and notify its subscriber.
 - `def forget(self, account: str) -> None`
@@ -83,5 +92,3 @@ the last one (documented last-wins) — executor-level tests can call
 
 - `def render_help(specs: Sequence[CommandSpec]) -> str`
   - The categorized ``help`` text for one account's spec list.
-- `def help_page_count(specs: Sequence[CommandSpec]) -> int`
-  - How many pages the current registry's help renders into.

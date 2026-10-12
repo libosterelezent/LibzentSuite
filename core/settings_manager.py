@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 from .event_bus import EventBus, SettingChanged
 from .errors import SettingsValidationError
@@ -252,17 +252,24 @@ class SettingsManager:
         plugin_name: str,
         schema: Sequence[Setting],
         account: Optional[str] = None,
+        *,
+        profile: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Effective, validated settings for one plugin instance.
 
-        Merge order: validated defaults <- global layer <- account layer.
-        Raises SettingsValidationError (with the layer named) for unknown keys
-        or bad values — at boot this fails fast, at runtime it surfaces as a
-        clean error line. Pure memory (call :meth:`load` first at boot).
+        Merge order: validated defaults <- global layer <- bound-profile
+        layer (the optional ``profile`` mapping — the plugin manager
+        threads the account's bound profile settings here) <- account
+        layer. Raises SettingsValidationError (with the layer named) for
+        unknown keys or bad values — at boot this fails fast, at runtime
+        it surfaces as a clean error line. Pure memory (call
+        :meth:`load` first at boot).
         """
         defs = {s.name: s for s in schema}
         values: Dict[str, Any] = {s.name: s.validate(s.default) for s in schema}
         layers = [("global layer", self._global.get(plugin_name, {}))]
+        if profile is not None:
+            layers.append(("profile layer", profile))
         if account is not None:
             layers.append(
                 (f"account '{account}' layer",
@@ -312,13 +319,18 @@ class SettingsManager:
     async def clear_plugin_setting(
         self, account: str, plugin: str, key: str,
         schema: Sequence[Setting] = (),
+        *,
+        profile: Optional[Mapping[str, Any]] = None,
     ) -> Any:
         """DELETE one account-layer plugin setting override (dashboard 'reset').
 
-        The account layer is a MASK over the global layer/defaults: the old
-        reset persisted the schema DEFAULT as an override, permanently
-        shadowing a non-default global value with no unpin path. Deleting
-        the row unmasks the lower layers (defaults <- global).
+        The account layer is a MASK over the profile/global layers/
+        defaults: the old reset persisted the schema DEFAULT as an
+        override, permanently shadowing a non-default global value with
+        no unpin path. Deleting the row unmasks the lower layers
+        (defaults <- global <- ``profile`` when the caller threads the
+        account's bound-profile settings — the plugin manager does, so
+        the recomputed effective value matches attach-time precedence).
 
         Emits SettingChanged on success (``new_value`` = the newly
         effective value when a schema is provided, else None). Raises
@@ -350,7 +362,8 @@ class SettingsManager:
                 plugins.pop(plugin, None)
             if not plugins:
                 self._account_plugin.pop(account, None)
-        effective = self.resolve(plugin, schema, account=account)[key] if defs \
+        effective = self.resolve(plugin, schema, account=account,
+                                 profile=profile)[key] if defs \
             else None
         self._bus.publish_nowait(SettingChanged(
             account=account, scope=f"account:{account}/plugin:{plugin}/key:{key}",

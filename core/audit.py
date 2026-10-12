@@ -84,8 +84,9 @@ def format_audit(entries: Iterable[Any]) -> List[str]:
     """Render entries (dicts or AuditEntry) as compact human-readable lines.
 
     Line shape (inbound rows use ``<-``; a missing channel renders as
-    ``ch=-``; newlines in the preview are escaped and long content
-    truncated)::
+    ``ch=-``; newlines in the preview AND in account/action/note are
+    escaped — a multi-line value must never forge extra log lines — and
+    long content truncated)::
 
         HH:MM:SS -> account action ch=... preview (wait Xms, jitter Yms) note
 
@@ -97,8 +98,8 @@ def format_audit(entries: Iterable[Any]) -> List[str]:
         ts = float(_field(entry, "ts", 0.0) or 0.0)
         clock = time.strftime("%H:%M:%S", time.localtime(ts))
         arrow = "->" if _field(entry, "direction", "") == "out" else "<-"
-        account = str(_field(entry, "account", "") or "")
-        action = str(_field(entry, "action", "") or "")
+        account = str(_field(entry, "account", "") or "").replace("\n", "\\n")
+        action = str(_field(entry, "action", "") or "").replace("\n", "\\n")
         channel = _field(entry, "channel_id", None)
         channel_text = f"ch={channel}" if channel is not None else "ch=-"
         preview = str(_field(entry, "content", "") or "").replace("\n", "\\n")
@@ -112,7 +113,7 @@ def format_audit(entries: Iterable[Any]) -> List[str]:
         if jitter_ms:
             waits.append(f"jitter {jitter_ms:.0f}ms")
         extra = f" ({', '.join(waits)})" if waits else ""
-        note = str(_field(entry, "note", "") or "")
+        note = str(_field(entry, "note", "") or "").replace("\n", "\\n")
         note_text = f" {note}" if note else ""
         lines.append(
             f"{clock} {arrow} {account:<12}{action:<14}{channel_text:<24}{preview}{extra}{note_text}"
@@ -280,6 +281,15 @@ class AuditRecorder:
         rounded so both sources look identical to consumers. Reads are the
         one place audit touches SQLite directly — they run in async
         contexts (dashboard REST / CLI) and never on the record() path.
+
+        Additive partial marker: when the persistence queue has DROPPED or
+        FAILED rows AND the repository returned fewer rows than the ring
+        currently holds, every returned row carries an extra
+        ``'partial': True`` key — the DB view may be short, and consumers
+        (which ignore unknown keys) can surface that instead of silently
+        showing an incomplete history. The DB rows are still returned as-is
+        (never mixed with ring rows: the repository stays authoritative
+        whenever it answers).
         """
         if self._db is not None:
             try:
@@ -290,10 +300,24 @@ class AuditRecorder:
                     row.pop("id", None)
                     row["ts"] = round(float(row.get("ts") or 0.0), 3)
                     normalized.append(row)
+                pstats = self._persist.stats()
+                if (pstats["dropped"] or pstats["db_failures"]) and (
+                    len(normalized) < self._ring_count(account)
+                ):
+                    for row in normalized:
+                        row["partial"] = True
                 return normalized
             except Exception:
                 LOG.exception("audit history read failed; falling back to ring")
         return self.tail(limit, account)
+
+    def _ring_count(self, account: Optional[str] = None) -> int:
+        """Entries currently held by the in-memory ring (optionally one
+        account's) — the partial-marker comparison source."""
+        with self._lock:
+            if not account:
+                return len(self._ring)
+            return sum(1 for entry in self._ring if entry.account == account)
 
 
 __all__ = ["AuditRecorder", "AuditEntry", "format_audit"]

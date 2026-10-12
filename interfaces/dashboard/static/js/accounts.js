@@ -58,7 +58,7 @@ function acctTile(a) {
       ${a.credential?`<span class="item">🔑 ${credLbl(a.credential)}</span>`:'<span class="item" style="color:var(--err)">🔑 missing</span>'}
       ${a.uptime_s?`<span class="item">⏱ ${fmtDur(a.uptime_s)}</span>`:""}
       ${a.latency_ms!=null?`<span class="item">⚡ ${fmtLatency(a.latency_ms)}</span>`:""}
-      ${a.cooldowns?`<span class="item" style="color:var(--warn)">⏳ ${a.cooldowns}</span>`:""}
+      ${a.cooldowns?`<span class="item" style="color:var(--warn)">⏳ ${esc(String(a.cooldowns))}</span>`:""}
       ${a.sync_group?`<span class="item"><span class="chip group" data-group-chip="${esc(a.sync_group)}" title="Open group">${esc(a.sync_group)}</span></span>`:""}
       ${assignedPlugins(a).length?`<span class="item" style="gap:4px">${assignedPlugins(a).map(p=>`<span class="chip plugin">${esc(p)}</span>`).join("")}</span>`:""}
     </div>

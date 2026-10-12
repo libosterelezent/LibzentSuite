@@ -224,6 +224,19 @@ _MESSAGE_DEDUP_MAX = 512
 #: 5s is generous and never suppresses distinct rapid gateway bursts).
 _RICH_EVENT_DEDUP_WINDOW_S = 5.0
 
+#: the fork dispatches 'disconnect' BEFORE its own backoff+RESUME retry —
+#: forwarding those verbatim tears the account down (and burns IDENTIFYs)
+#: for drops the library survives seconds later. A disconnect is only
+#: forwarded to the manager when no on_resumed landed inside this window
+#: (fatal close codes bypass the debounce entirely).
+_DISCONNECT_FORWARD_DELAY_S = 5.0
+
+#: gateway close codes that make reconnecting pointless (auth/intent
+#: class): 4004 authentication failed, 4010/4011/4012 disqualified
+#: intents/bot, 4013 invalid API version, 4014 disallowed intents.
+#: Revoked-token accounts must stand down instead of reconnect-looping.
+_FATAL_CLOSE_CODES = frozenset({4004, 4010, 4011, 4012, 4013, 4014})
+
 #: ChannelType names (lowercased) that count as TEXT channels for the
 #: picker snapshot: regular text + announcement/news channels (both are
 #: message surfaces); categories/voice/stage/forum are skipped.
@@ -322,6 +335,25 @@ class RealDiscordClient:
         #: raw/rich double-dispatch suppression keys (see
         #: _RICH_EVENT_DEDUP_WINDOW_S) — key -> loop-monotonic timestamp
         self._seen_event_keys: dict = {}
+        #: structured gateway close code of the LAST disconnect dispatch
+        #: (int or None) — the parallel-attribute exposure of item 4: the
+        #: reason string stays human text plus a 'close=NNNN' sentinel,
+        #: while this attribute carries the code for future manager
+        #: classification without string parsing
+        self.last_close_code: Optional[int] = None
+        #: True once a close code in _FATAL_CLOSE_CODES was observed: the
+        #: credential/intent class is broken, the account must stand down
+        #: instead of reconnect-looping (manager reads this later)
+        self.fatal_close: bool = False
+        #: debounced disconnect forwarding (see _DISCONNECT_FORWARD_DELAY_S):
+        #: the pending reason and the debounce task (strong ref — the loop
+        #: only weak-references tasks; cancelled by on_resumed/disconnect())
+        self._disconnect_pending_reason: Optional[str] = None
+        self._disconnect_debounce: Optional["asyncio.Task"] = None
+        #: identify-gate slot accounting: counted once at connect(),
+        #: released once at permanent teardown (release-once guard — see
+        #: IdentifyGate.release)
+        self._gate_counted = False
 
     def _message_already_seen(self, message_id: Any) -> bool:
         """True when this inbound id arrived recently (gateway RESUME replay).
@@ -340,7 +372,13 @@ class RealDiscordClient:
             for mid in [m for m, t in seen.items() if t < cutoff]:
                 del seen[mid]
             if len(seen) >= _MESSAGE_DEDUP_MAX:
-                seen.clear()
+                # capacity with all entries still young: evict
+                # OLDEST-BY-TIMESTAMP (keep the newest half). Clearing the
+                # whole window re-published every replayed dispatch after a
+                # >512-message burst RESUME — exactly the burst the window
+                # exists to absorb (audit fix).
+                for mid in sorted(seen, key=seen.get)[:len(seen) // 2]:
+                    del seen[mid]
         if message_id in seen:
             seen[message_id] = now
             return True
@@ -423,6 +461,16 @@ class RealDiscordClient:
             AccountError: library missing, client failed to start, or the
                 client connected without a user id (bad token).
         """
+        # idempotency (audit fix): a second invocation while a first is
+        # pending (live _run_task) or a client is already built would
+        # silently orphan the first run task — its finally then sets the
+        # NEW ready event while the orphan gets garbage-collected mid-run
+        # with unclosed sessions.
+        if ((self._run_task is not None and not self._run_task.done())
+                or self._client is not None):
+            raise AccountError(
+                "live client already connected/connecting — disconnect() "
+                "before starting another session")
         try:
             import discord  # type: ignore[import-untyped]  # discord.py-self fork
         except ImportError as exc:
@@ -439,8 +487,9 @@ class RealDiscordClient:
         # retry_after in-request (http.py:991-1018) and our
         # RateLimited→ServerRateLimit mapping can never fire — the pinned
         # discord.py-self 2.1.0 accepts the kwarg (min-clamped at 30 by
-        # http.py:637); the TypeError fallback covers only exotic/test
-        # layouts without it.
+        # http.py:637); the plain-Client TypeError fallback below covers
+        # only exotic/test layouts without it, while the Bot construction
+        # is fully contained (TypeError -> AccountError, no blind retry).
         # placeholder — replaced below
         # SELF-COMMAND layer (upstream): with a prefix configured,
         # construct the ext.commands Bot (user_bot=True) instead of a
@@ -456,6 +505,11 @@ class RealDiscordClient:
         if self._command_prefix:
             from discord.ext import commands as _ext_commands
             prefix = self._resolve_prefix(_ext_commands)
+            # ONE contained construction (audit fix): the old blind retry
+            # without max_ratelimit_timeout assumed THAT kwarg was the
+            # offender — any other TypeError (prefix resolver, layout
+            # drift) re-raised uncaught and violated the AccountError
+            # contract connect() promises.
             try:
                 self._client = _ext_commands.Bot(
                     command_prefix=prefix, user_bot=True,
@@ -463,15 +517,11 @@ class RealDiscordClient:
                     help_command=None,
                     max_ratelimit_timeout=MAX_RATELIMIT_TIMEOUT_S,
                 )
-            except TypeError:
-                self._logger.warning(
-                    "discord client library ignores max_ratelimit_timeout — "
-                    "in-request 429 sleeps are UNBOUNDED on this layout")
-                self._client = _ext_commands.Bot(
-                    command_prefix=prefix, user_bot=True,
-                    owner_ids=set(self._owner_ids),
-                    help_command=None,
-                )
+            except TypeError as exc:
+                raise AccountError(
+                    f"discord client library rejected the Bot construction "
+                    f"({exc!r}) — incompatible layout or configuration"
+                ) from exc
         else:
             try:
                 self._client = discord.Client(
@@ -499,6 +549,15 @@ class RealDiscordClient:
             self._install_command_layer(discord)
         self._ready = asyncio.Event()
         self._startup_error = None
+        # fresh-session close-code state (a reconnecting client instance
+        # never re-enters connect(), but reset defensively anyway)
+        self.last_close_code = None
+        self.fatal_close = False
+        self._cancel_disconnect_debounce()
+        if self._identify_gate is not None:
+            # this client now occupies one identify-gate slot (released
+            # once at permanent teardown — see _run/disconnect)
+            self._gate_counted = True
 
         @self._client.event
         async def on_ready() -> None:
@@ -521,23 +580,18 @@ class RealDiscordClient:
 
         @self._client.event
         async def on_disconnect() -> None:
-            if self.on_disconnect is not None:
-                # M1/S2-M1 (observability): surface the gateway close code so
-                # "gateway closed" can be told apart (1000 = server-initiated
-                # close, 4007/4015-style = session limits, None = abnormal).
-                # discord.py-self only sets ws._close_code when IT closes;
-                # a remote CLOSE frame lands on the underlying socket —
-                # check that too or Discord-side culls show no code at all.
-                ws = getattr(self._client, "ws", None)
-                code = getattr(ws, "close_code", None)
-                if code is None:
-                    code = getattr(ws, "_close_code", None)
-                if code is None:
-                    code = getattr(getattr(ws, "socket", None),
-                                   "close_code", None)
-                reason = ("gateway closed" if code is None
-                          else f"gateway closed (code={code})")
-                self.on_disconnect(reason)
+            # Debounced + close-code-aware loss handling (audit fixes):
+            # the fork dispatches 'disconnect' BEFORE its own backoff +
+            # RESUME retry, so a verbatim forward tore the manager down
+            # for drops the library itself survives. See
+            # _handle_gateway_disconnect for the classification.
+            self._handle_gateway_disconnect()
+
+        @self._client.event
+        async def on_resumed() -> None:
+            # the fork RESUMED the session inside THIS client: any pending
+            # debounced loss forward is moot (the replay window survived)
+            self._cancel_disconnect_debounce()
 
         @self._client.event
         async def on_message(message: Any) -> None:
@@ -574,7 +628,12 @@ class RealDiscordClient:
 
         @self._client.event
         async def on_message_edit(before: Any, after: Any) -> None:
-            if self.on_message_edit is None or after.author.id != self.user_id:
+            # others-only (audit fix, raw-path parity): self-authored
+            # edits never echo back — the INVERTED old filter published
+            # ONLY self-authored events, leaving the _mark_event_key
+            # dedup guard below dead code (the raw handler already
+            # skips self-authored dispatches).
+            if self.on_message_edit is None or after.author.id == self.user_id:
                 return
             if self._mark_event_key(("edit", after.id)):
                 return  # the raw handler already published this dispatch
@@ -583,7 +642,8 @@ class RealDiscordClient:
 
         @self._client.event
         async def on_message_delete(message: Any) -> None:
-            if self.on_message_delete is None or message.author.id != self.user_id:
+            # others-only (audit fix — see on_message_edit)
+            if self.on_message_delete is None or message.author.id == self.user_id:
                 return
             if self._mark_event_key(("delete", message.id)):
                 return  # the raw handler already published this dispatch
@@ -595,7 +655,8 @@ class RealDiscordClient:
 
         @self._client.event
         async def on_reaction_add(reaction: Any, user: Any) -> None:
-            if self.on_reaction is None or user.id != self.user_id:
+            # others-only (audit fix — see on_message_edit)
+            if self.on_reaction is None or user.id == self.user_id:
                 return
             message = reaction.message
             emoji_text = _emoji_repr(reaction.emoji)
@@ -612,7 +673,8 @@ class RealDiscordClient:
 
         @self._client.event
         async def on_reaction_remove(reaction: Any, user: Any) -> None:
-            if self.on_reaction is None or user.id != self.user_id:
+            # others-only (audit fix — see on_message_edit)
+            if self.on_reaction is None or user.id == self.user_id:
                 return
             message = reaction.message
             emoji_text = _emoji_repr(reaction.emoji)
@@ -731,6 +793,106 @@ class RealDiscordClient:
         except Exception as exc:
             self._logger.debug("library client close raised %s", exc)
 
+    def _handle_gateway_disconnect(self) -> None:
+        """Classify one gateway 'disconnect' dispatch and route it.
+
+        * the close code is sniffed off the websocket (discord.py-self
+          only sets ws._close_code when IT closes; a remote CLOSE frame
+          lands on the underlying socket) and exposed STRUCTURED on
+          ``self.last_close_code`` (the reason string also carries a
+          machine-parseable ``close=NNNN`` sentinel);
+        * fatal codes (4004/4010-4014, the auth/intent class) set
+          ``self.fatal_close`` and forward IMMEDIATELY — the account
+          must stand down, not reconnect-loop a revoked token;
+        * a dispatch while ``not self.connected`` (startup) is dropped:
+          connect()'s AccountError owns reporting startup failures;
+        * everything else is DEBOUNCED: the fork dispatches 'disconnect'
+          before its own backoff+RESUME retry, so the forward only
+          happens when no on_resumed lands inside
+          ``_DISCONNECT_FORWARD_DELAY_S``.
+        """
+        ws = getattr(self._client, "ws", None)
+        code = getattr(ws, "close_code", None)
+        if code is None:
+            code = getattr(ws, "_close_code", None)
+        if code is None:
+            code = getattr(getattr(ws, "socket", None), "close_code", None)
+        self.last_close_code = code if isinstance(code, int) else None
+        fatal = self.last_close_code in _FATAL_CLOSE_CODES
+        if fatal:
+            self.fatal_close = True
+        reason = ("gateway closed" if self.last_close_code is None
+                  else f"gateway closed (close={self.last_close_code})")
+        if fatal:
+            reason += " fatal"
+        if not self.connected:
+            return  # startup failure: connect()'s AccountError reports it
+        if fatal:
+            self._cancel_disconnect_debounce()
+            self._forward_disconnect(reason)
+            return
+        self._schedule_disconnect_debounce(reason)
+
+    def _cancel_disconnect_debounce(self) -> None:
+        """Drop any pending debounced forward (resume landed / teardown)."""
+        task, self._disconnect_debounce = self._disconnect_debounce, None
+        self._disconnect_pending_reason = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _schedule_disconnect_debounce(self, reason: str) -> None:
+        """Arm the loss forward: fire only if no resume lands in time."""
+        self._cancel_disconnect_debounce()
+        self._disconnect_pending_reason = reason
+        # strong ref on self (the loop only weak-references tasks) — the
+        # same discipline as _run_task/_zombie_tasks
+        self._disconnect_debounce = asyncio.get_running_loop().create_task(
+            self._disconnect_debounce_run())
+
+    async def _disconnect_debounce_run(self) -> None:
+        try:
+            await asyncio.sleep(_DISCONNECT_FORWARD_DELAY_S)
+        except asyncio.CancelledError:
+            raise
+        reason, self._disconnect_pending_reason = \
+            self._disconnect_pending_reason, None
+        self._disconnect_debounce = None
+        if reason is not None:
+            self._forward_disconnect(reason)
+
+    def _forward_disconnect(self, reason: str) -> None:
+        if self.on_disconnect is None:
+            return
+        try:
+            self.on_disconnect(reason)
+        except Exception:
+            # a manager-side callback bug must never kill the debounce task
+            self._logger.exception("on_disconnect callback failed")
+
+    def _flush_pending_disconnect(self) -> None:
+        """Forward a pending debounced loss NOW — the client run exited,
+        so no RESUME can land anymore (prompt terminal reporting)."""
+        reason = self._disconnect_pending_reason
+        self._cancel_disconnect_debounce()
+        if reason is not None:
+            self._forward_disconnect(reason)
+
+    def _release_identify_slot(self) -> None:
+        """Return this client's identify-gate slot (permanent teardown).
+
+        Counted once per client in connect(); the guard flag makes the
+        release idempotent across _run's exit and disconnect() so a
+        reconnect cycle (fresh client per attempt) never ratchets the
+        gate's ``expected`` down below the live fleet.
+        """
+        if self._identify_gate is None or not self._gate_counted:
+            return
+        self._gate_counted = False
+        try:
+            self._identify_gate.release()
+        except Exception:
+            self._logger.debug("identify gate release failed", exc_info=True)
+
     async def _run(self) -> None:
         """Run the client until it exits; capture startup errors for connect()."""
         try:
@@ -739,10 +901,17 @@ class RealDiscordClient:
             raise
         except Exception as exc:  # startup failures must surface via connect()
             self._logger.error("live client terminated: %s", exc)
+            if self.fatal_close:
+                self._logger.error(
+                    "terminal gateway close code %s (fatal auth/intent "
+                    "class) — the account must stand down",
+                    self.last_close_code)
             self._startup_error = exc
         finally:
             self.connected = False  # start() returned: the session is over
             self._ready.set()
+            self._release_identify_slot()
+            self._flush_pending_disconnect()
 
     async def _cancel_run_task(self) -> None:
         """Cancel + reap the background client task (idempotent)."""
@@ -890,19 +1059,32 @@ class RealDiscordClient:
         return {"latency_ms": self.latency_ms, "uptime_s": uptime}
 
     @staticmethod
-    def _parse_invocation(content: Any, name: str) -> tuple:
-        """``"sm!rollstart 123"`` + ``rollstart`` -> ``(["123"], "123")``.
+    def _parse_invocation(content: Any, name: str, *, prefix: Any = None) -> tuple:
+        """``"sm!rollstart 123"`` + ``rollstart`` + prefix ``"sm!"`` ->
+        ``(["123"], "123")``.
 
-        Token-based: the first token ENDING with the command name is the
-        invocation word (works for every prefix form — plain, @me-mention
-        and case variants); everything after it is the argument list
-        (whitespace-normalized raw). Library-parsed views are avoided on
-        purpose so this helper stays unit-testable without the library.
+        Re-tokenizes on the content FOLLOWING the parsed prefix (the
+        library-parsed ``ctx.prefix`` — the mention form, a symbol, or
+        whatever when_mentioned_or matched) and takes the first token
+        EQUAL to the command name (case-insensitive) as the invocation
+        word; everything after it is the argument list
+        (whitespace-normalized raw). Matching a token that merely ENDS
+        WITH the name (the old rule) mis-anchors on the mention token
+        itself when a numeric command name is a suffix of the account's
+        own user id — the raw content still contains the mention, so
+        argument parsing shifted by one token (audit fix). Library-parsed
+        views are avoided on purpose so this helper stays unit-testable
+        without the library.
         """
-        tokens = (content or "").split()
+        text = content or ""
+        if prefix:
+            prefix = str(prefix)
+            if text.startswith(prefix):
+                text = text[len(prefix):]
+        tokens = text.split()
         lowered = name.lower()
         for index, token in enumerate(tokens):
-            if token.lower().endswith(lowered):
+            if token.lower() == lowered:
                 args = tokens[index + 1:]
                 return args, " ".join(args)
         return [], ""
@@ -919,8 +1101,12 @@ class RealDiscordClient:
                     "self-command %s ignored: invoker %s is not an owner",
                     name, invoker)
                 return
+            message = getattr(ctx, "message", None)
+            # re-parse on the content FOLLOWING the library-parsed prefix
+            # (ctx.prefix) — see _parse_invocation for the boundary fix
             args, raw = self._parse_invocation(
-                getattr(ctx, "message", None) and ctx.message.content, name)
+                getattr(message, "content", None), name,
+                prefix=getattr(ctx, "prefix", None))
             channel = ctx.channel
             guild = getattr(channel, "guild", None)
             guild_id = getattr(guild, "id", None) if guild is not None else None
@@ -935,13 +1121,18 @@ class RealDiscordClient:
 
     async def disconnect(self) -> None:
         """Close the underlying client; safe when never started."""
+        # drop the debounced loss forward and mark the session dead BEFORE
+        # closing: the close itself dispatches on_disconnect, and a
+        # deliberate teardown must not schedule (let alone forward) a
+        # "loss" the caller is causing
+        self._cancel_disconnect_debounce()
+        self.connected = False
+        self._connected_since = None
         if self._client is not None:
             try:
                 await self._client.close()
             except Exception as exc:  # closing a half-open client can throw
                 self._logger.warning("live client close raised %s", exc)
-        self.connected = False
-        self._connected_since = None
         if self._command_prefix:
             # drop this client's registry subscription (a reconnect's fresh
             # client re-subscribes with its own rebuild callback)
@@ -950,6 +1141,7 @@ class RealDiscordClient:
             except Exception:
                 pass
         await self._cancel_run_task()
+        self._release_identify_slot()
 
     # ------------------------------------------------------------- messaging
     def _require_client(self) -> Any:
@@ -1154,7 +1346,11 @@ class RealDiscordClient:
         try:
             return await asyncio.wait_for(
                 asyncio.shield(task), CLICK_TIMEOUT_S)
-        except TimeoutError:
+        except asyncio.TimeoutError:
+            # asyncio.TimeoutError — NOT the bare builtin: on Python 3.10
+            # the two only alias on 3.11+, and the bare except let the
+            # raw asyncio.TimeoutError escape past the transient
+            # ConnectionError mapping below
             task.cancel()
             await self._reap_click_task(task)
             raise ConnectionError(
@@ -1340,28 +1536,35 @@ class IdentifyGate:
     1020; the hook runs inside DiscordWebSocket.from_client), so a waiter
     queued >= 60s is cancelled into a disconnect dispatch → reconnect
     livelock once a synchronized (re)identify wave exceeds ~60s of
-    queueing (>= ~13 accounts at a flat 5s interval). The gate instead
-    derives its spacing from the EXPECTED fleet size::
+    queueing. The gate therefore derives its spacing from the EXPECTED
+    fleet size::
 
         effective_interval = min(interval,
                                  max(min_interval, wait_budget / expected))
 
-    with ``wait_budget`` 50s (margin under the 60s library ceiling), so
-    the LAST waiter of an N-account wave still clears the hook in <= ~50s.
-    ``expected`` is a settable count (the factory raises it as it builds
-    DISTINCT accounts — reconnects rebuild already-counted accounts and
-    never inflate it; the account manager may also set it directly when
-    the fleet size is known ahead of boot). It is re-read on every
-    release, so a fleet that grows mid-wave tightens spacing dynamically.
+    with ``wait_budget`` 50s (margin under the 60s library ceiling).
+    AUDIT FIX: ``min_interval`` now defaults to 5.0s (MIN_INTERVAL_S) —
+    Discord's per-IP IDENTIFY budget is ~1 identify / 5s, so tightening
+    below that for fleets >= 13 trades a sub-60s wave for per-IP
+    throttling; giant waves are instead handled by the fast-fail
+    projection (> ``wait_budget``). ``expected`` is a settable count
+    (the factory raises it as it builds DISTINCT accounts — reconnects
+    rebuild already-counted accounts and never inflate it) and is
+    PRUNED by :meth:`release` when a client tears down permanently, so
+    a shrinking fleet does not keep production spacing forever. It is
+    re-read on every release, so a fleet that grows mid-wave tightens
+    spacing dynamically (down to the floor).
     """
 
     #: total seconds a synchronized wave may spend inside the hook (< 60)
     WAIT_BUDGET_S = 50.0
-    #: never pace IDENTIFYs tighter than this (Discord per-IP friendliness)
-    MIN_INTERVAL_S = 1.0
+    #: never pace IDENTIFYs tighter than this: Discord's per-IP identify
+    #: budget is ~1/5s — fleets >= 13 must NOT outpace it (the fast-fail
+    #: >50s projection covers genuinely giant waves instead)
+    MIN_INTERVAL_S = 5.0
 
     __slots__ = ("interval", "expected", "min_interval", "wait_budget",
-                 "_lock", "_last", "_depth")
+                 "_lock", "_lock_loop", "_last", "_depth")
 
     def __init__(self, interval: float = 5.0, *, min_interval: float = MIN_INTERVAL_S,
                  wait_budget: float = WAIT_BUDGET_S,
@@ -1374,8 +1577,36 @@ class IdentifyGate:
         self.min_interval = float(min_interval)
         self.wait_budget = float(wait_budget)
         self._lock: Optional[asyncio.Lock] = None  # bound lazily to the loop
+        self._lock_loop: Any = None  # the loop self._lock is bound to
         self._last: float = float("-inf")
         self._depth: int = 0  # FINAL-PHASE (F4): FIFO waiters ahead-of-lock
+
+    def _lock_for(self, loop: Any) -> asyncio.Lock:
+        """A gate lock bound to the CURRENT loop (see _headers_lock_for).
+
+        An asyncio.Lock binds to the first loop that uses it; a gate
+        shared across ``asyncio.run`` boundaries (tests, manager
+        restarts) would raise RuntimeError — or, worse, fast-fail off a
+        stale ``_last`` from the previous loop's monotonic clock. Recreate
+        the primitive (and reset ``_last`` with it) whenever the running
+        loop changes.
+        """
+        if self._lock is None or self._lock_loop is not loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = loop
+            self._last = float("-inf")
+        return self._lock
+
+    def release(self) -> None:
+        """Return one fleet slot (a client's PERMANENT teardown).
+
+        Adapters call this exactly once per client (guarded by their
+        ``_gate_counted`` flag) when their run exits terminally, so
+        removed accounts stop inflating ``expected`` — production
+        spacing recovers as the fleet shrinks. Floors at 1.
+        """
+        if self.expected > 1:
+            self.expected -= 1
 
     async def acquire(self, shard_id=None, *, initial: bool = False) -> None:
         """Space consecutive IDENTIFYs by ``effective_interval`` seconds.
@@ -1386,18 +1617,15 @@ class IdentifyGate:
         the gate into a TypeError). Fast-fails with a retryable
         ConnectionError when the PROJECTED total wait (residual spacing
         + waiters already queued ahead × interval) exceeds the wave
-        budget (FINAL-PHASE F4 + round-3: the effective interval scales
-        with the expected fleet size so a synchronized wave of ANY size
-        clears under the library's 60s identify ceiling — the fast-fail
-        now covers only genuinely pathological saturation, e.g. a
-        min_interval floor met with a huge fleet).
+        budget (FINAL-PHASE F4 + round-3: the effective interval floors
+        at Discord's per-IP budget, so the fast-fail now covers giant
+        synchronized waves the floor alone cannot clear).
         """
-        if self._lock is None:
-            self._lock = asyncio.Lock()
+        loop = asyncio.get_running_loop()
+        lock = self._lock_for(loop)
         interval = self.effective_interval
         # projected wait BEFORE queueing: residual + the queue depth ahead
         # of us each costs a full interval (FIFO under the held lock)
-        loop = asyncio.get_running_loop()
         projected = (self._last + interval * (self._depth + 1)
                      - loop.time()) if self._last != float("-inf") else 0.0
         if projected > self.wait_budget:
@@ -1407,7 +1635,7 @@ class IdentifyGate:
                 "retrying with backoff is cheaper than parking a built client")
         self._depth += 1
         try:
-            async with self._lock:  # FIFO: hold while sleeping so waiters queue
+            async with lock:  # FIFO: hold while sleeping so waiters queue
                 now = loop.time()
                 wait = self._last + self.effective_interval - now
                 if wait > 0:
@@ -1419,7 +1647,12 @@ class IdentifyGate:
 
     @property
     def effective_interval(self) -> float:
-        """Current spacing, derived from the expected fleet size."""
+        """Current spacing, derived from the expected fleet size.
+
+        Never below ``min_interval`` (5.0s by default — Discord's per-IP
+        IDENTIFY budget; explicitly smaller values exist only for the
+        scaled-down unit-test harnesses).
+        """
         expected = max(1, int(self.expected))
         return min(self.interval,
                    max(self.min_interval, self.wait_budget / expected))

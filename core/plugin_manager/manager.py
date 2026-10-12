@@ -26,6 +26,7 @@ import types
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
+from core import plugin_scopes
 from core.errors import PluginError, SettingsValidationError
 from core.dashboard_ui import DashboardUIToolset, DashboardUIRegistry
 from core.event_bus import (
@@ -84,6 +85,7 @@ class PluginManager:
         plugin_state: Any = None,
         dispatch_grace_s: float = 1.0,
         ui_registry: Any = None,
+        dispatch_inflight_limit: int = 100,
     ) -> None:
         """``credential_service``/``cooldowns``/``plugin_state`` accept the
         framework's shared services (CredentialService, CooldownService,
@@ -95,6 +97,10 @@ class PluginManager:
         before cancelling them (round-3 ghost-write finding).
         ``ui_registry`` overrides the plugin dashboard-UI registry (tests);
         a fresh :class:`DashboardUIRegistry` is built by default.
+        ``dispatch_inflight_limit`` caps how many dispatch tasks per
+        account may be in flight at once (flood bound — see
+        :meth:`_on_message`); excess events are dropped-newest and
+        counted (:meth:`dispatch_stats`).
         """
         self._bus = bus
         self._logger = logger
@@ -117,6 +123,18 @@ class PluginManager:
         #: central registry for plugin-attached dashboard UIs (Stage C);
         #: the dashboard routes dispatch through this in Stage D
         self._ui_registry = ui_registry or DashboardUIRegistry()
+        #: plugin ids whose UI registration is BOOT-owned (built from a
+        #: throwaway instance at discovery): exempt from the
+        #: deactivation detach and replaceable by the first LIVE
+        #: per-account instance that activates
+        self._boot_ui_plugins: Set[str] = set()
+        #: per-account cap on in-flight dispatch tasks (flood + slow
+        #: plugins must never grow the live-task set without bound —
+        #: the bus's own 20k bound is recreated one layer up otherwise)
+        self._dispatch_limit = max(1, int(dispatch_inflight_limit))
+        #: account -> dropped-dispatch counter (surfaced via
+        #: :meth:`dispatch_stats`; cleared when the account detaches)
+        self._dispatch_dropped: Dict[str, int] = {}
         # every account-scoped Discord event type routes to plugins; new
         # types are ADDITIVE — plugins filter by isinstance in handle_event
         self._unsubscribe = bus.subscribe(MessageReceived, self._on_message)
@@ -235,11 +253,18 @@ class PluginManager:
                 name=name, instance=instance, enabled=bool(enabled)
             )
         # resolve settings NOW (not just at activate) so bad config fails
-        # fast at attach — ported behavior from the audited original
+        # fast at attach — ported behavior from the audited original.
+        # The account's bound-profile settings ride in as an extra layer
+        # BETWEEN global and account overrides (defaults <- global <-
+        # profile <- account) so the live settings view agrees with the
+        # dashboard's effective-settings surface.
+        profile_layers = await self._bound_profile_settings(account)
         for runtime in runtimes.values():
             try:
                 runtime.settings = self._settings.resolve(
-                    runtime.name, self._schema_for(runtime.name), account=account
+                    runtime.name, self._schema_for(runtime.name),
+                    account=account,
+                    profile=profile_layers.get(runtime.name),
                 )
             except Exception as exc:
                 runtime.enabled = False
@@ -270,6 +295,7 @@ class PluginManager:
         # dispatch bookkeeping: any task still queued dies at the services
         # gate in _dispatch (the account's services are gone)
         self._pending_by_account.pop(account, None)
+        self._dispatch_dropped.pop(account, None)
         # the account's self-command surface is gone with it
         self.command_hub.forget(account)
 
@@ -303,6 +329,12 @@ class PluginManager:
         This makes plugin UI pages visible in the dashboard from boot,
         not only after an account connects. Returns how many UIs were
         registered. Failures are isolated per plugin.
+
+        The registrations are tagged BOOT-owned (``_boot_ui_plugins``):
+        they survive account deactivation, and the first LIVE account
+        instance that activates the plugin REPLACES its boot layout
+        (see :meth:`_init_dashboard_uis`) so dashboard actions bind to
+        the live per-account instance instead of the throwaway.
         """
         registered = 0
         if not self._discovered:
@@ -315,10 +347,7 @@ class PluginManager:
             if getattr(cls, "initialize_dashboard_ui", None)                     is getattr(PluginBase, "initialize_dashboard_ui", None):
                 continue  # base no-op: declares no UI
             try:
-                instance = cls()
-                instance._ui_registry = self._ui_registry
-                from core.dashboard_ui import DashboardUIToolset
-                instance.initialize_dashboard_ui(DashboardUIToolset())
+                self._boot_register_ui(plugin_name)
                 registered += 1
             except Exception:
                 self._logger.warning(
@@ -330,6 +359,20 @@ class PluginManager:
                 "boot dashboard UIs registered: %d plugin(s)", registered)
         return registered
 
+    def _boot_register_ui(self, plugin_name: str) -> None:
+        """(Re-)register one plugin's UI from a THROWAWAY instance.
+
+        Shared by :meth:`init_boot_dashboard_uis` and the failed-takeover
+        restore in :meth:`_init_dashboard_uis`. Raises whatever the
+        plugin's constructor/hook raises (callers isolate); on success
+        the registration is tagged BOOT-owned.
+        """
+        record = self._loader.record(plugin_name)
+        instance = record.cls()
+        instance._ui_registry = self._ui_registry
+        instance.initialize_dashboard_ui(DashboardUIToolset())
+        self._boot_ui_plugins.add(plugin_name)
+
     def _init_dashboard_uis(self, account: str,
                             runtimes: Dict[str, PluginRuntime]) -> None:
         """Offer the dashboard UI toolset to this account's plugins.
@@ -339,9 +382,15 @@ class PluginManager:
         a plugin's UI registers ONCE — the first account to activate it
         wins, later activations of the same plugin on other accounts see
         the registration and skip (one dashboard page per plugin, not per
-        account). Failures are isolated: a crashing hook (or a rejected
-        layout) never fails the account's activation, and any partial
-        registration is detached again.
+        account). The ONE exception: a BOOT-owned registration (the
+        throwaway instance from :meth:`init_boot_dashboard_uis`) is
+        REPLACED by the first live instance — ``registry.attach``
+        validates the fresh layout before dropping the old one, so a
+        failed takeover cannot leave a half-registered plugin, and the
+        boot UI is restored best-effort afterwards. Failures are
+        isolated: a crashing hook (or a rejected layout) never fails the
+        account's activation, and any partial registration is detached
+        again.
         """
         for plugin_name, entry in runtimes.items():
             instance = entry.instance
@@ -355,12 +404,17 @@ class PluginManager:
             if getattr(type(instance), "initialize_dashboard_ui", None) \
                     is PluginBase.initialize_dashboard_ui:
                 continue  # base no-op: this plugin declares no UI
-            if plugin_name in self._ui_registry.list_plugins():
+            boot_owned = plugin_name in self._boot_ui_plugins
+            if plugin_name in self._ui_registry.list_plugins() \
+                    and not boot_owned:
                 continue  # another account already registered this UI
             try:
                 # inject the registry reference attach_dashboard_ui uses
+                # (a boot layout is frozen: the live instance must build a
+                # FRESH tree — attach replaces once the new one validates)
                 instance._ui_registry = self._ui_registry
                 hook(DashboardUIToolset())
+                self._boot_ui_plugins.discard(plugin_name)
             except Exception as exc:
                 entry.error_count += 1
                 entry.last_error = f"ui_init: {type(exc).__name__}: {exc}"
@@ -369,6 +423,18 @@ class PluginManager:
                     plugin_name, account, exc_info=True)
                 # don't fail the activation — clean any partial registration
                 self._ui_registry.detach(plugin_name)
+                self._boot_ui_plugins.discard(plugin_name)
+                if boot_owned:
+                    # the failed takeover killed the boot page: restore the
+                    # throwaway registration best-effort so the dashboard
+                    # keeps the plugin's page until the next activation
+                    try:
+                        self._boot_register_ui(plugin_name)
+                    except Exception:
+                        self._logger.warning(
+                            "boot UI restore failed for %s — page stays "
+                            "unregistered until the next activation",
+                            plugin_name, exc_info=True)
 
     async def _activate_one(self, account: str, runtime: PluginRuntime) -> None:
         """Load + enable one runtime, isolating any hook failure."""
@@ -385,8 +451,11 @@ class PluginManager:
         services = self._services.get(account, lambda _n: None)(runtime.name)
         runtime.ctx = None  # PHASE-4 (S7-L1): new facade -> rebuild cache
         try:
+            profile = (await self._bound_profile_settings(account)).get(
+                runtime.name)
             resolved = self._settings.resolve(
-                runtime.name, self._schema_for(runtime.name), account=account
+                runtime.name, self._schema_for(runtime.name),
+                account=account, profile=profile,
             )
         except Exception as exc:
             runtime.enabled = False
@@ -402,8 +471,12 @@ class PluginManager:
         # fork the documented live-settings view
         runtime.settings.clear()
         runtime.settings.update(resolved)
-        ctx = self._context(account, runtime, services,
-                            explicit=self._explicit_keys(account, runtime.name))
+        # cache the context on the runtime (the PHASE-4 dispatch cache):
+        # ui_stats/ui_panels read it too, and it stays None only until
+        # the first dispatch otherwise
+        ctx = runtime.ctx = self._context(
+            account, runtime, services,
+            explicit=self._explicit_keys(account, runtime.name))
         first_load = not runtime.loaded
         if first_load:
             # DOUBLE-FIRE GUARD (round-3): mark loaded BEFORE awaiting
@@ -448,6 +521,15 @@ class PluginManager:
             task.cancel()
         self._pending_by_account.clear()
         COMMAND_HUB.unbind(self)  # self-command invocations route nowhere now
+        # the bootstrap registers THIS manager's AccessManager on the
+        # process hub; leaving it there after the owning stack shut down
+        # hands every later direct-construction stack (tests, nested
+        # sims) a DEAD gate that fails every invocation closed — drop
+        # the process reference when this manager owns it
+        own_access = getattr(self, "_access_manager", None)
+        if own_access is not None and \
+                getattr(self.command_hub, "access", None) is own_access:
+            self.command_hub.access = None
 
     async def deactivate_account(self, account: str) -> None:
         """Fire on_disable + on_unload for the account's active plugins.
@@ -488,8 +570,13 @@ class PluginManager:
             runtime.active = False
         # UI cleanup: detach this account's plugin UIs — but a plugin's UI
         # is PLUGIN-WIDE, so only detach when NO other account still has
-        # the plugin active (ref-counted by account)
+        # the plugin active (ref-counted by account). BOOT-owned
+        # registrations (init_boot_dashboard_uis) are exempt: they exist
+        # so the dashboard shows plugin pages with no account connected,
+        # and deactivating the last account must not tear them down.
         for plugin_name in list(runtimes.keys()):
+            if plugin_name in self._boot_ui_plugins:
+                continue
             if self._ui_active_elsewhere(plugin_name, excluding=account):
                 continue
             self._ui_registry.detach(plugin_name)
@@ -549,6 +636,11 @@ class PluginManager:
         elif not enabled and runtime.enabled:
             runtime.enabled = False
             if runtime.active:
+                # clear active BEFORE awaiting the hook (mirrors
+                # deactivate_account's ordering): a concurrent
+                # deactivate must not see an active runtime past this
+                # point and fire on_disable a second time
+                runtime.active = False
                 services = self._services.get(account, lambda _n: None)(plugin)
                 ctx = self._context(account, runtime, services)
                 try:
@@ -575,11 +667,15 @@ class PluginManager:
 
     async def clear_setting(self, account: str, plugin: str, key: str) -> Any:
         """Remove one account-layer override; live view falls back to the
-        next layer (global/plugin default) — mirrors :meth:`set_setting`."""
+        next layer (profile/global/plugin default) — mirrors
+        :meth:`set_setting`. The bound profile layer is threaded through
+        so the recomputed effective value respects the same precedence
+        as attach/activate time (defaults <- global <- profile)."""
         runtime = self._runtime(account, plugin)
         schema = self._schema_for(plugin)
+        profile = (await self._bound_profile_settings(account)).get(plugin)
         effective = await self._settings.clear_plugin_setting(
-            account, plugin, key, schema
+            account, plugin, key, schema, profile=profile
         )
         if schema:
             runtime.settings[key] = effective  # live view (shared dict)
@@ -588,24 +684,48 @@ class PluginManager:
         return effective
 
     # ---------------------------------------------------------------- state
+    def _ui_ctx(self, account: str, entry: PluginRuntime) -> Any:
+        """The runtime's cached dispatch context for UI providers.
+
+        Mirrors ``_dispatch``'s lazy rebuild (the PHASE-4 cache): built
+        from the manager's own state, never the plugin-side ``_ctx``
+        convention. Returns None when no services facade can be resolved
+        (account going down) — callers skip, they do not feed None in.
+        """
+        ctx = entry.ctx
+        if ctx is None or ctx.services is None:
+            services = self._services.get(
+                account, lambda _n: None)(entry.name)
+            ctx = entry.ctx = self._context(account, entry, services)
+        return ctx if ctx.services is not None else None
+
     async def ui_stats(self, account: str) -> List[Dict[str, Any]]:
         """Collect every enabled plugin's Home-tab stat cards (JSON-safe).
 
         Each card is {"plugin", "label", "value", "sub", "level"} — the
         dashboard renders them in its own metric template. A crashing
         provider contributes nothing (isolation).
+
+        Gated on the MANAGER's own runtime state (``enabled`` and
+        ``active``) — disabled/deactivated plugins contribute nothing —
+        and the context handed to the provider is the manager's cached
+        dispatch context (``runtime.ctx``), not the plugin-side ``_ctx``
+        convention.
         """
         cards: List[Dict[str, Any]] = []
         runtime = self._accounts.get(account)
         if not runtime:
             return cards
-        services = self._services.get(account)
         for plugin_name, entry in runtime.items():
-            instance = getattr(entry, "instance", None)
+            if not entry.enabled or not entry.active:
+                continue
+            instance = entry.instance
+            if instance is None:
+                continue
             provider = getattr(instance, "ui_stats", None)
             if provider is None or not callable(provider):
                 continue
-            ctx = getattr(instance, "_ctx", None)
+            ctx = self._ui_ctx(account, entry)
             if ctx is None:
                 continue
             try:
@@ -627,16 +747,23 @@ class PluginManager:
         """Collect every plugin's sidebar panels (JSON-safe, deduped by id).
 
         Panels are framework-level (not per-account): the first instance
-        of each plugin that provides a panel wins (deterministic).
+        of each plugin that provides a panel wins (deterministic). As
+        with :meth:`ui_stats`, only ENABLED and ACTIVE runtimes
+        contribute and the provider receives the manager's cached
+        dispatch context.
         """
         panels: Dict[str, Dict[str, Any]] = {}
         for account, runtime in self._accounts.items():
             for plugin_name, entry in runtime.items():
-                instance = getattr(entry, "instance", None)
+                if not entry.enabled or not entry.active:
+                    continue
+                instance = entry.instance
+                if instance is None:
+                    continue
                 provider = getattr(instance, "ui_panels", None)
                 if provider is None or not callable(provider):
                     continue
-                ctx = getattr(instance, "_ctx", None)
+                ctx = self._ui_ctx(account, entry)
                 if ctx is None:
                     continue
                 try:
@@ -678,6 +805,15 @@ class PluginManager:
             }
             for rt in sorted(runtimes.values(), key=lambda r: r.name)
         ]
+
+    def dispatch_stats(self, account: str) -> Dict[str, int]:
+        """Bounded-dispatch health for one account: how many dispatch
+        tasks are in flight and how many events were dropped because
+        the per-account in-flight cap (:meth:`_on_message`) was full."""
+        return {
+            "in_flight": len(self._pending_by_account.get(account, ())),
+            "dropped": self._dispatch_dropped.get(account, 0),
+        }
 
     def allowed_names(self, account: str) -> List[str]:
         """Names currently attached to the account (for error messages)."""
@@ -788,11 +924,15 @@ class PluginManager:
         per-plugin services facade — the same paced pipeline plugin sends
         use — never a raw client send.
 
-        The owner gate mirrors the trigger-word path exactly: the invoking
-        Discord user id must pass AccessManager.can_invoke (when wired)
-        or the credentials view's owner ids (``services.credentials`` —
-        the legacy fallback for direct-construction stacks) — non-owners
-        are ignored with no reply, like today.
+        The command gate mirrors the trigger-word path exactly: the
+        invoking Discord user id must pass AccessManager.can_invoke —
+        the manager's own ``_access_manager`` (bootstrap seam) first,
+        the hub's bootstrap-registered AccessManager second, and the
+        credentials view's owner ids (``services.credentials``) only as
+        the legacy last resort for direct-construction stacks with no
+        access manager anywhere. Non-owners and UNKNOWN invokers
+        (``invoker_id=None``) are ignored with no reply — can_invoke
+        fails closed.
 
         FRAMEWORK commands (plugin="selfcmd": help/pg/estop/…) run even
         when the account's plugins are deactivated — their handlers use
@@ -818,37 +958,37 @@ class PluginManager:
                 else "no services facade")
             return
         # THE command gate: AccessManager.can_invoke (per-account
-        # permission list + admin bypass, fail-closed) when wired; the
-        # credentials view's owner ids are the LEGACY fallback for
-        # direct-construction stacks without an access manager.
-        if invoker_id is not None:
-            access = getattr(self, "_access_manager", None)
-            if access is None and services is None:
-                # framework verb with NO plugin pipeline (estop on a
-                # deactivated account): there are no facade credentials
-                # to read the legacy owner list from — consult the hub's
-                # bootstrap-registered AccessManager instead, so the
-                # safety verbs keep their gate without widening it
-                access = getattr(self.command_hub, "access", None)
-            allowed = False
-            if access is not None:
-                try:
-                    allowed = await access.can_invoke(account, invoker_id)
-                except Exception:
-                    self._logger.exception(
-                        "access check failed for %r on %s — failing closed",
-                        invoker_id, account)
-                    allowed = False
-            else:
-                owners = getattr(
-                    getattr(services, "credentials", None),
-                    "owner_user_ids", ()) or ()
-                allowed = invoker_id in set(owners)
-            if not allowed:
-                self._logger.info(
-                    "self-command %r on %s ignored: invoker %s not allowed",
-                    name, account, invoker_id)
-                return
+        # permission list + admin bypass, fail-closed — an unknown/None
+        # invoker DENIES). The manager's own ``_access_manager``
+        # (bootstrap seam) wins; when it is absent the hub's
+        # bootstrap-registered AccessManager backs it up (covers
+        # framework verbs like estop on a deactivated account, where
+        # there are no facade credentials to read either). The
+        # credentials view's owner ids are the LEGACY last resort for
+        # direct-construction stacks (simulator/tests) with NO access
+        # manager anywhere.
+        access = getattr(self, "_access_manager", None)
+        if access is None:
+            access = getattr(self.command_hub, "access", None)
+        allowed = False
+        if access is not None:
+            try:
+                allowed = await access.can_invoke(account, invoker_id)
+            except Exception:
+                self._logger.exception(
+                    "access check failed for %r on %s — failing closed",
+                    invoker_id, account)
+                allowed = False
+        else:
+            owners = getattr(
+                getattr(services, "credentials", None),
+                "owner_user_ids", ()) or ()
+            allowed = invoker_id in set(owners)
+        if not allowed:
+            self._logger.info(
+                "self-command %r on %s ignored: invoker %s not allowed",
+                name, account, invoker_id)
+            return
         ctx = CommandContext(
             account=account,
             plugin=plugin,
@@ -930,6 +1070,46 @@ class PluginManager:
         per call site is unnecessary — construction is trivial)."""
         return _ManagerSettingsApi(self, account, plugin)
 
+    async def _bound_profile_settings(self, account: str) -> Dict[str, Dict[str, Any]]:
+        """Per-plugin bound-profile settings for one account:
+        ``{plugin: {key: value}}`` with the reserved ``channels`` scope
+        stripped (it rides along separately in the effective views).
+
+        Read through the plugin repository's owning database (the same
+        duck-typed reach :class:`_ManagerSettingsApi` uses); stacks
+        without profile storage degrade to an empty map — resolution
+        falls back to the plain defaults <- global <- account merge
+        exactly as before. Dangling bindings (deleted profile) are
+        skipped, matching the API layer's parity rule.
+        """
+        profile_repo, binding_repo = _ManagerSettingsApi._repos(self)
+        reader = getattr(binding_repo, "bindings", None)
+        if not callable(reader):
+            return {}
+        try:
+            bindings = dict(await reader(account) or {})
+        except Exception:
+            return {}
+        getter = getattr(profile_repo, "get", None)
+        if not callable(getter):
+            return {}
+        reserved = plugin_scopes.CHANNELS_KEY
+        out: Dict[str, Dict[str, Any]] = {}
+        for plugin, profile_name in bindings.items():
+            if profile_name is None:
+                continue
+            try:
+                record = await getter(plugin, profile_name)
+            except Exception:
+                continue
+            if record is None:
+                continue  # dangling binding: skip (parity with api.py)
+            settings = getattr(record, "settings", None) or {}
+            layer = {k: v for k, v in settings.items() if k != reserved}
+            if layer:
+                out[plugin] = layer
+        return out
+
     # -------------------------------------------------------------- routing
     def _on_message(self, event: Event) -> None:
         """Bus handler (sync): fan a MessageReceived out as a fire-and-forget
@@ -939,6 +1119,24 @@ class PluginManager:
             return
         runtimes = self._accounts.get(event.account)
         if not runtimes:
+            return
+        # FLOOD BOUND: cap the per-account in-flight dispatch tasks.
+        # Without this, a burst of events against slow plugins grows the
+        # live-task set without bound (the bus's own 20k queue bound is
+        # recreated one layer up). Over the cap the NEW event is dropped
+        # (drop-newest: in-flight work is never killed mid-flight) and
+        # counted; the WARNING is rate-limited (first drop + every 50th)
+        # so a sustained flood cannot flood the logs too.
+        in_flight = self._pending_by_account.get(event.account)
+        if in_flight is not None and len(in_flight) >= self._dispatch_limit:
+            dropped = self._dispatch_dropped.get(event.account, 0) + 1
+            self._dispatch_dropped[event.account] = dropped
+            if dropped == 1 or dropped % 50 == 0:
+                self._logger.warning(
+                    "dispatch queue full for %s (%d in flight, cap %d) — "
+                    "event dropped (%d dropped so far)",
+                    event.account, len(in_flight), self._dispatch_limit,
+                    dropped)
             return
         task = asyncio.get_running_loop().create_task(self._dispatch(event, runtimes))
         self._pending.add(task)
@@ -1079,9 +1277,9 @@ class _ManagerSettingsApi:
     ``plugins_set_setting`` uses (parity by construction). ``effective``
     reproduces the Phase-1 account view (``accounts_effective_settings``)
     through the managers, never HTTP: plugin Setting defaults <- the
-    bound profile's settings (minus the reserved ``channels`` key) <- the
-    account's per-plugin overrides, with the profile's channel scope
-    riding along under ``"channels"``.
+    global settings layer <- the bound profile's settings (minus the
+    reserved ``channels`` key) <- the account's per-plugin overrides,
+    with the profile's channel scope riding along under ``"channels"``.
 
     Profile/binding repositories are reached duck-typed through the
     plugin repository's owning database (``BaseRepository._db`` — the
@@ -1136,15 +1334,45 @@ class _ManagerSettingsApi:
         ]
 
     async def effective(self) -> Dict[str, Any]:
-        from core import plugin_scopes
+        """Fully merged effective settings for the (account, plugin).
 
+        Merge order (highest wins): plugin Setting defaults <- the
+        global settings layer <- the bound profile's settings (minus
+        the reserved ``channels`` key) <- the account's per-plugin
+        overrides, with the profile's channel scope riding along under
+        ``"channels"``. Same order :meth:`SettingsManager.resolve`
+        enforces at attach/activate time, so every surface agrees (the
+        Phase-1 API view merges defaults <- profile <- account without
+        the global layer — reconciliation is the API owner's task;
+        this manager-side view is the four-layer one).
+
+        A display surface: unknown keys are skipped and values that fail
+        validation fall back to the raw stored value (parity with how
+        the API layer renders), instead of failing the read.
+        """
         schema = self.schema()
         defs = {s.name: s for s in schema}
         merged: Dict[str, Any] = {s.name: s.validate(s.default) for s in schema}
         reserved = plugin_scopes.CHANNELS_KEY
+
+        def _apply(layer: Any) -> None:
+            for key, value in (layer or {}).items():
+                if key == reserved or key not in defs:
+                    continue
+                try:
+                    merged[key] = defs[key].validate(value)
+                except SettingsValidationError:
+                    merged[key] = value  # parity: the API layer applies raw
+
+        # global file layer (lowest of the three override layers)
+        try:
+            _apply(self._manager._settings.layers_view()
+                   .get("global", {}).get(self._plugin, {}))
+        except Exception:
+            pass
+        # bound profile layer
         profile_name: Optional[str] = None
         scope: Optional[Dict[str, Any]] = None
-        # bound profile layer (defaults <- profile)
         profile_repo, binding_repo = self._repos(self._manager)
         reader = getattr(binding_repo, "bindings", None)
         if callable(reader):
@@ -1159,9 +1387,7 @@ class _ManagerSettingsApi:
             except Exception:
                 record = None
             if record is not None:  # dangling binding: skip (parity)
-                for key, value in (getattr(record, "settings", None) or {}).items():
-                    if key != reserved and key in defs:
-                        merged[key] = value
+                _apply(getattr(record, "settings", None))
                 raw_scope = (getattr(record, "settings", None) or {}).get(reserved)
                 try:
                     scope = plugin_scopes.validate(raw_scope) \
@@ -1175,13 +1401,7 @@ class _ManagerSettingsApi:
                          .get(self._plugin, {}))
         except Exception:
             overrides = {}
-        for key, value in overrides.items():
-            if key == reserved or key not in defs:
-                continue
-            try:
-                merged[key] = defs[key].validate(value)
-            except SettingsValidationError:
-                merged[key] = value  # parity: the API layer applies raw
+        _apply(overrides)
         merged[reserved] = scope
         return merged
 

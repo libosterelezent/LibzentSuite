@@ -121,13 +121,23 @@ class FakeServices:
 
 
 class FakeAccess:
-    """AccessManager double for the no-services (estop) path."""
+    """AccessManager double: per-account owners + a separate admin list.
 
-    def __init__(self, *owners: int) -> None:
+    The executor gate (can_invoke) and the mutating-verb admin gate
+    (is_admin_id) are DISTINCT grants — mirrors the real AccessManager."""
+
+    def __init__(self, *owners: int, admins: tuple = ()) -> None:
         self._owners = set(owners)
+        self._admins = set(admins)
+        self.can_invoke_calls: List[tuple] = []
 
     async def can_invoke(self, account: str, user_id: Optional[int]) -> bool:
-        return user_id in self._owners
+        self.can_invoke_calls.append((account, user_id))
+        return user_id is not None and (
+            user_id in self._owners or user_id in self._admins)
+
+    async def is_admin_id(self, user_id: Optional[int]) -> bool:
+        return user_id is not None and user_id in self._admins
 
 
 class PortedCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -142,12 +152,19 @@ class PortedCommandTests(unittest.IsolatedAsyncioTestCase):
         self.manager = PluginManager(
             bus, LOG, SettingsManager(bus), plugin_dir=self.tmp.name)
         # framework handlers read the process hub: bind THIS test's
-        # manager + API bridge, restore the previous state on teardown
+        # manager + API bridge + access manager, restore the previous
+        # state on teardown. OWNER is both allowed AND an admin so the
+        # mutating verbs (accounts start/stop, plugins on/off) pass;
+        # STRANGER is neither.
         COMMAND_HUB.bind(self.manager)
         self._saved_provider = COMMAND_HUB.api_provider
         COMMAND_HUB.api_provider = lambda: self.api
+        self.access = FakeAccess(OWNER, admins=(OWNER,))
+        self._saved_access = COMMAND_HUB.access
+        COMMAND_HUB.access = self.access
 
     def tearDown(self) -> None:
+        COMMAND_HUB.access = self._saved_access
         COMMAND_HUB.api_provider = self._saved_provider
         self.manager.close()
 

@@ -484,7 +484,8 @@ management commands) is DB-backed, fail-closed, and per-account:
 Surfaces: dashboard Admin tab / `/api/admin/*`
 ([API_ENDPOINTS.md](API_ENDPOINTS.md) §6); Discord verbs
 `adminlist`/`adminperms`/`adminprefix` (admin-only self-commands).
-`core.framework_credentials.FrameworkCredentials` is the documented
-DB-first duck-type (`owner_user_ids` = the admin list,
-`mudae_bot_id` DB-first) handed to plugin services in place of the raw
-env view.
+Plugins see credentials through `AccountPluginServices.credentials`,
+which returns the injected credentials view (the env `Credentials`
+object in the live stack); the former
+`core.framework_credentials.FrameworkCredentials` wrapper was never
+constructed anywhere and has been removed.

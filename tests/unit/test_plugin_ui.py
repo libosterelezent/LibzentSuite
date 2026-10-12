@@ -56,13 +56,31 @@ class TestUIStats(unittest.IsolatedAsyncioTestCase):
         mgr.discover()
         await mgr.attach_account("alpha", allowed={"probe"})
         await mgr.activate_account("alpha", FakeServices())
-        # poison one instance's ctx so ui_stats raises inside
-        runtime = mgr._accounts["alpha"]
-        for entry in runtime.values():
-            entry.instance._ctx = None
-            break
+        # poison the provider itself: a crashing ui_stats contributes
+        # nothing (isolation), the error is only logged
+        entry = mgr._accounts["alpha"]["probe"]
+
+        async def boom(ctx):
+            raise RuntimeError("stats exploded")
+
+        entry.instance.ui_stats = boom
         cards = await mgr.ui_stats("alpha")
         self.assertEqual(cards, [])   # silently skipped
+
+    async def test_disabled_plugin_contributes_nothing(self):
+        """The docstring's contract: only ENABLED plugins contribute —
+        the gate is the manager's own runtime state."""
+        mgr = PluginManager(
+            EventBus(), logging.getLogger("t"),
+            SettingsManager(EventBus(), logging.getLogger("t"), global_layer={}),
+            plugin_dir="tests/fixtures/plugins",
+        )
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        await mgr.activate_account("alpha", FakeServices())
+        await mgr.set_enabled("alpha", "probe", False)
+        self.assertEqual(await mgr.ui_stats("alpha"), [])
+        self.assertEqual(await mgr.ui_panels(), [])
 
 
 class TestUIPanels(unittest.IsolatedAsyncioTestCase):

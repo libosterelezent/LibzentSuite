@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -188,13 +187,24 @@ class CredentialService:
             if ciphertext is None:
                 return
             self.fernet.decrypt(ciphertext)  # raises InvalidToken on mismatch
+        except CredentialsError as exc:
+            # master-key LOAD failure (invalid SM_MASTER_KEY / corrupt key
+            # file — the fernet property raises before any decrypt): key
+            # misconfiguration must be VISIBLE at boot, not silent
+            LOG.warning(
+                "credential master key could not be loaded (%s: %s) — "
+                "every stored credential will fail to decrypt until the "
+                "key is fixed", type(exc).__name__, exc)
+        except InvalidToken:
+            LOG.warning(
+                "master key does not decrypt the stored credentials "
+                "(%d account(s)) — they were stored under a different "
+                "key; re-enter them via the dashboard/CLI",
+                len(self._db_accounts))
         except Exception as exc:
-            if type(exc).__name__ in ("InvalidToken", "InvalidSignature"):
-                LOG.warning(
-                    "master key does not decrypt the stored credentials "
-                    "(%d account(s)) — they were stored under a different "
-                    "key; re-enter them via the dashboard/CLI",
-                    len(self._db_accounts))
+            LOG.warning(
+                "boot decrypt canary failed unexpectedly (%s: %s)",
+                type(exc).__name__, exc)
 
     @property
     def fernet(self) -> Fernet:
@@ -223,7 +233,14 @@ class CredentialService:
             raise CredentialsError("credential value must not be empty")
         ciphertext = self.fernet.encrypt(token.encode())
         if self._repo is not None:
+            del_gen = self._delete_generation
             await self._repo.store(account, ciphertext)
+            if self._delete_generation != del_gen:
+                # PHASE-4 (S5-L1): the account's credential was DELETED
+                # while we were parked on the repo write — writing the
+                # caches now would poison memory with a token the
+                # operator just removed (mirror of the resolve() guard)
+                return
             self._db_accounts.add(account)
         self._memory[account] = token
         self._runtime_sources[account] = "db"

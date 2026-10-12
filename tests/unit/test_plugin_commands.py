@@ -685,14 +685,35 @@ class AdapterLayerTests(unittest.IsolatedAsyncioTestCase):
 
     def test_parse_invocation(self) -> None:
         parse = self._client()._parse_invocation
-        self.assertEqual(parse("sm!rollstart 123", "rollstart"),
+        # AUDIT FIX polarity: re-tokenize on the content FOLLOWING the
+        # parsed prefix (ctx.prefix) and match the invocation token by
+        # EQUALITY — the old endswith rule mis-anchored on the mention
+        # token when a numeric command name was a suffix of the account's
+        # own user id (argument parsing shifted by one token).
+        self.assertEqual(parse("sm!rollstart 123", "rollstart", prefix="sm!"),
                          (["123"], "123"))
-        self.assertEqual(parse("sm!say   hello  world", "say"),
+        self.assertEqual(parse("sm!say   hello  world", "say", prefix="sm!"),
                          (["hello", "world"], "hello world"))
         self.assertEqual(parse("<@555> pg", "pg"), ([], ""))
-        self.assertEqual(parse("SM!RollStart 9 8", "rollstart"),
+        self.assertEqual(parse("SM!RollStart 9 8", "rollstart", prefix="SM!"),
                          (["9", "8"], "9 8"))
         self.assertEqual(parse("", "pg"), ([], ""))
+        # mention prefixes strip exactly (the library's ctx.prefix form)
+        self.assertEqual(parse("<@555> rollstart 7", "rollstart",
+                               prefix="<@555>"), (["7"], "7"))
+        # the boundary bug: "9" is a suffix of the mention's user id —
+        # the OLD endswith match consumed the mention token and shifted
+        # the args; equality (with or without the prefix stripped) must
+        # find no invocation for a different command word
+        self.assertEqual(
+            parse("<@11123456789> actualcmd x", "9",
+                  prefix="<@11123456789>"), ([], ""))
+        self.assertEqual(
+            parse("<@11123456789> actualcmd x", "9"), ([], ""))
+        # a genuinely numeric command still parses when actually invoked
+        self.assertEqual(
+            parse("<@11123456789> 9 roll", "9", prefix="<@11123456789>"),
+            (["roll"], "roll"))
 
     async def test_registration_rebuild_diff(self) -> None:
         client = self._client()
@@ -809,7 +830,25 @@ if __name__ == "__main__":
 
 
 class TestPrefixRateCommand(unittest.IsolatedAsyncioTestCase):
-    """prefixrate: show/set send pacing (per-account message interval)."""
+    """prefixrate: show/set send pacing (per-account message interval).
+
+    The SET branch is admin-gated (fleet-wide mutation): these tests
+    wire a permissive admin access on the hub and invoke with a known
+    invoker id, mirroring how the production path runs."""
+
+    def setUp(self) -> None:
+        from core.plugin_manager.commands import COMMAND_HUB
+
+        class AdminAccess:
+            async def is_admin_id(self, user_id):
+                return user_id == 1
+
+            async def can_invoke(self, account, user_id):
+                return user_id == 1
+
+        self._saved_access = COMMAND_HUB.access
+        COMMAND_HUB.access = AdminAccess()
+        self.addCleanup(setattr, COMMAND_HUB, "access", self._saved_access)
 
     async def test_show_without_args(self) -> None:
         from core.plugin_manager.commands import COMMAND_HUB, PacingBackend
@@ -839,6 +878,23 @@ class TestPrefixRateCommand(unittest.IsolatedAsyncioTestCase):
         reply2 = await _prefixrate_handler(_ctx("alpha"), [])
         self.assertIn("1.50s", reply2)
 
+    async def test_set_denied_for_non_admin(self) -> None:
+        """The mutation branch is admin-only: a non-admin invoker is
+        rejected before the limiter is touched (the executor's _ported
+        wrapper renders the ValueError as ``error: admins only``)."""
+        from core.plugin_manager.commands import COMMAND_HUB, PacingBackend
+        from core.rate_limit_manager import RateLimitManager
+        from core.event_bus import EventBus
+        import logging
+        lim = RateLimitManager(EventBus(), logging.getLogger("t"), None)
+        lim.set_policy_values("message", 2.6)
+        COMMAND_HUB.pacing = PacingBackend(lim)
+        with self.assertRaises(ValueError) as cm:
+            await _prefixrate_handler(_ctx("alpha", invoker_id=999),
+                                      ["1.5"])
+        self.assertIn("admins only", str(cm.exception))
+        self.assertIn("2.60s", await _prefixrate_handler(_ctx("alpha"), []))
+
     async def test_rejects_bad_values(self) -> None:
         for bad in (["abc"], ["-1"], ["0"]):
             with self.assertRaises(ValueError):
@@ -856,10 +912,10 @@ class TestPrefixRateCommand(unittest.IsolatedAsyncioTestCase):
             COMMAND_HUB.pacing = saved
 
 
-def _ctx(account="alpha"):
-    import types
+def _ctx(account="alpha", invoker_id=1):
     from core.plugin_base import CommandContext
     import logging
     return CommandContext(
         account=account, plugin="selfcmd", services=None,
-        logger=logging.getLogger("t"), channel_id=1, guild_id=1)
+        logger=logging.getLogger("t"), channel_id=1, guild_id=1,
+        invoker_id=invoker_id)

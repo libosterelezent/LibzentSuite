@@ -322,7 +322,6 @@ class SamplerSession:
         if spike_capture is not None:
             capture = spike_capture
             monitor = self.lag
-            sampler = self.process
 
             def _on_lag(lag_s: float) -> None:
                 capture.on_lag(monitor, lag_s)

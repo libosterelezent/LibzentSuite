@@ -25,16 +25,7 @@ import sys
 import threading
 from typing import Any, Optional, TextIO
 
-from core.errors import (
-    AccountError,
-    CredentialsError,
-    PluginError,
-    ProfileError,
-    RatePolicyError,
-    SchedulerError,
-    SettingsValidationError,
-    UnsafePolicyError,
-)
+from core.errors import DOMAIN_ERRORS, SchedulerError, UnsafePolicyError
 
 from .commands import QuitRequested, UsageError, help_text, run_command
 
@@ -44,19 +35,15 @@ PROMPT = "sm> "
 BANNER = "SlaughterMudae control terminal — 'help' for commands, 'quit' to exit."
 
 #: Domain families already carry a human-readable message: rendered bare.
-#: Everything else keeps its exception type name so bugs stay identifiable.
+#: Everything else keeps its exception type name so bugs stay identifiable
+#: (the shared core vocabulary plus the CLI-only additions; bare
+#: RuntimeError is deliberately NOT domain — internal failures keep
+#: their type name here, logs carry the detail).
 _DOMAIN_ERRORS = (
     UsageError,
-    AccountError,
-    PluginError,
-    ProfileError,
-    SettingsValidationError,
-    RatePolicyError,
-    UnsafePolicyError,
+    *DOMAIN_ERRORS,
     SchedulerError,
-    CredentialsError,
-    ValueError,
-    RuntimeError,
+    UnsafePolicyError,
 )
 
 
@@ -191,7 +178,10 @@ class Repl:
         return True
 
     def _write(self, text: str, end: str = "\n") -> None:
-        print(text, end=end, file=self._out)
+        # flush ALWAYS: the prompt is written with end="" — without a
+        # flush a tty keeps it invisible in the buffer while the reader
+        # thread is already blocked waiting for input
+        print(text, end=end, file=self._out, flush=True)
 
 
 async def run_once(api: Any, argv: list, stdout: Optional[TextIO] = None) -> int:

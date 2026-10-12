@@ -14,9 +14,9 @@ import inspect
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Type
 
-from ._asyncutil import outer_cancel_pending
+from ._asyncutil import cancellation_attributable, outer_cancel_pending
 
 LOG = logging.getLogger("slaughtermudae.events")
 
@@ -258,6 +258,24 @@ class _HandlerList(list):
         return self.snap
 
 
+#: CONTROL-PLANE event names: terminal Task* acks + account lifecycle.
+#: These ride a SEPARATE small queue that is never subject to the main
+#: FIFO's drop-newest overflow: a dropped TaskCompleted/TaskFailed/
+#: TaskCancelled permanently breaks the plugin ack contract (the waiter
+#: hangs for its 30s timeout, reports a false failure, and the plugin's
+#: own retry DUPLICATES the send). Account* state events drive supervisor
+#: reconnect decisions — same class of harm. High-volume telemetry
+#: (TaskQueued/TaskStarted) stays on the main queue deliberately.
+CONTROL_PLANE_EVENTS: FrozenSet[str] = frozenset({
+    "TaskCompleted",
+    "TaskFailed",
+    "TaskCancelled",
+    "AccountConnected",
+    "AccountDisconnected",
+    "AccountFailed",
+})
+
+
 class EventBus:
     """Minimal async pub/sub with subclass-aware dispatch and error isolation.
 
@@ -269,20 +287,30 @@ class EventBus:
     events (or ``_slice_budget_s``), so a burst occupies the loop in
     bounded slices instead of one long callback. Overflow drops the
     NEWEST event (delivered sequences stay FIFO), counts it, and logs
-    burst-limited — today's unbounded ``_background`` growth under a
-    message flood becomes a bounded, observable degradation.
+    burst-limited — today's unbounded background growth under a message
+    flood becomes a bounded, observable degradation.
+
+    CONTROL-PLANE queue: terminal Task*/Account* events (see
+    CONTROL_PLANE_EVENTS) bypass that FIFO into a dedicated bounded deque
+    drained FIRST by the same dispatcher — a message flood can degrade
+    telemetry but must never drop an ack.
     """
 
     #: queue bound — headroom above the 10k PersistQueue cap (messages are
     #: the flood class); at ~150µs/event fully-loaded this is ~1.5s of
     #: sustained maximal burst before drops begin.
     MAX_QUEUE = 20_000
+    #: control-plane queue bound — sized orders of magnitude above the
+    #: terminal-event rate (subscribers are sync; the queue only holds
+    #: events between dispatcher slices). Overflow logs CRITICALLY: it
+    #: means the dispatcher is wedged, not that the load is high.
+    CONTROL_MAX_QUEUE = 1_024
     #: dispatch slice: events per loop turn before yielding
     SLICE_EVENTS = 128
     #: dispatch slice: wall-seconds per loop turn before yielding
     SLICE_BUDGET_S = 0.004
 
-    def __init__(self) -> None:
+    def __init__(self, *, is_control_plane: Optional[Callable[[Event], bool]] = None) -> None:
         self._subs: Dict[Type[Event], List[Handler]] = {}
         # FINAL-PHASE (G6-A′): dispatch-list cache per concrete event type
         # (invalidated wholesale on any subscribe/unsubscribe — rare,
@@ -291,11 +319,17 @@ class EventBus:
         # 10-type shape). Ordering identical: dict insertion order of
         # matching types, list order within a type.
         self._type_cache: Dict[Type[Event], tuple] = {}
-        # strong refs for fire-and-forget tasks (documented create_task hazard)
-        self._background: set = set()
         self._queue: "collections.deque[Event]" = collections.deque()
+        self._control_queue: "collections.deque[Event]" = collections.deque()
+        self._is_control: Callable[[Event], bool] = (
+            is_control_plane
+            if is_control_plane is not None
+            else lambda event: type(event).__name__ in CONTROL_PLANE_EVENTS
+        )
         self._dispatcher: Optional["asyncio.Task[None]"] = None
         self._dropped = 0
+        self._control_dropped = 0
+        self._unattributed_cancels = 0
         self._dispatched = 0
         self._drop_log_gate = 0.0
 
@@ -327,24 +361,34 @@ class EventBus:
         publish_nowait defers dispatch to the coalesced dispatcher; at
         shutdown those orphans would be cancelled by loop close — this
         makes tail-event delivery (AccountDisconnected etc.) contractual,
-        not lucky. Re-checks the queue until stable (a handler publishing
-        during the drain is flushed by the same call).
+        not lucky. Re-checks both queues until stable (a handler
+        publishing during the drain is flushed by the same call).
+
+        A dispatcher that DIED with events still queued (e.g. a 3.10
+        unattributable handler cancellation before that path was made
+        isolating) is respawned here instead of hot-spinning: the old
+        ``await asyncio.sleep(0)`` no-pending branch burned the CPU
+        without making progress.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while True:
-            pending = [t for t in list(self._background) if not t.done()]
-            if self._dispatcher is not None and not self._dispatcher.done():
-                pending.append(self._dispatcher)
-            if not pending and not self._queue:
-                return
-            if pending:
-                await asyncio.wait(pending,
+            dispatcher = self._dispatcher
+            if ((dispatcher is None or dispatcher.done())
+                    and (self._queue or self._control_queue)):
+                # dead dispatcher + backlog: respawn it (bounded by the
+                # caller's timeout — never a hot spin)
+                dispatcher = self._dispatcher = loop.create_task(
+                    self._drain_queue(), name="eventbus-dispatch")
+            if dispatcher is not None and not dispatcher.done():
+                await asyncio.wait({dispatcher},
                                    timeout=max(0.0, deadline - loop.time()))
-            else:
-                await asyncio.sleep(0)
+            elif not self._queue and not self._control_queue:
+                return
+            else:  # pragma: no cover - defensive: never hot-spin
+                await asyncio.sleep(0.005)
             if loop.time() >= deadline:
-                if self._queue:
+                if self._queue or self._control_queue:
                     LOG.warning(
                         "bus drain timeout: %d events undelivered, "
                         "%d dropped-total", len(self._queue), self._dropped)
@@ -353,42 +397,76 @@ class EventBus:
     def publish_nowait(self, event: Event) -> Optional["asyncio.Task[None]"]:
         """Fire-and-forget publish; safe from sync callbacks inside a loop.
 
+        Control-plane events (CONTROL_PLANE_EVENTS) route to the dedicated
+        never-starved deque; everything else uses the drop-newest FIFO.
+
         Returns the shared dispatcher task (or None on drop). No caller
         consumes the return value (verified); the annotation change from
         Task[List[Any]] is interface-level only.
         """
-        if len(self._queue) >= self.MAX_QUEUE:
-            self._dropped += 1
-            now = time.monotonic()
-            if now - self._drop_log_gate > 1.0:  # burst-limited logging
-                self._drop_log_gate = now
-                LOG.error(
-                    "event bus overflow: dropped %s (queued=%d, "
-                    "dropped_total=%d)", type(event).__name__,
-                    len(self._queue), self._dropped)
-            return self._dispatcher
-        self._queue.append(event)
+        if self._is_control(event):
+            if len(self._control_queue) >= self.CONTROL_MAX_QUEUE:
+                # Must never happen (subscribers are sync) — if it does,
+                # the dispatcher is wedged: say so as loudly as we can.
+                self._control_dropped += 1
+                LOG.critical(
+                    "CONTROL-PLANE event bus overflow: dropped %s "
+                    "(control_queued=%d, control_dropped_total=%d) — "
+                    "the dispatcher is wedged, not merely busy",
+                    type(event).__name__, len(self._control_queue),
+                    self._control_dropped)
+                return self._dispatcher
+            self._control_queue.append(event)
+        else:
+            if len(self._queue) >= self.MAX_QUEUE:
+                self._dropped += 1
+                now = time.monotonic()
+                if now - self._drop_log_gate > 1.0:  # burst-limited logging
+                    self._drop_log_gate = now
+                    LOG.error(
+                        "event bus overflow: dropped %s (queued=%d, "
+                        "dropped_total=%d)", type(event).__name__,
+                        len(self._queue), self._dropped)
+                return self._dispatcher
+            self._queue.append(event)
         if self._dispatcher is None or self._dispatcher.done():
             self._dispatcher = asyncio.get_running_loop().create_task(
                 self._drain_queue(), name="eventbus-dispatch")
         return self._dispatcher
 
     async def _drain_queue(self) -> None:
-        """Drain the FIFO in bounded slices (the burst-lag fix)."""
+        """Drain both FIFOs in bounded slices (the burst-lag fix).
+
+        The control-plane deque is drained FIRST at every pop: acks
+        out-rank telemetry under load.
+        """
         slice_start = time.monotonic()
         count_in_slice = 0
-        while self._queue:
+        while self._control_queue or self._queue:
             # empty-check and exit happen in the SAME step (no await between)
             # so a publish racing the exit cannot lose its wakeup
-            event = self._queue.popleft()
+            if self._control_queue:
+                event = self._control_queue.popleft()
+            else:
+                event = self._queue.popleft()
             self._dispatched += 1
             try:
                 await self.publish(event)
             except asyncio.CancelledError:
-                if outer_cancel_pending(unknown=True):
+                if (cancellation_attributable()
+                        and outer_cancel_pending(unknown=True)):
                     self._queue.appendleft(event)  # put it back; we're dying
                     raise
-                continue  # internal handler cancel: already isolated+logged
+                # 3.10 (no Task.cancelling): the cancel is unattributable.
+                # Requeue-and-die here used to WEDGE the bus — every
+                # respawned dispatcher popped the same event and died
+                # again. Drop with accounting instead and keep draining.
+                self._unattributed_cancels += 1
+                LOG.error(
+                    "dispatcher survived an unattributable cancellation; "
+                    "dropped %s (accounted, total=%d)",
+                    type(event).__name__, self._unattributed_cancels)
+                continue
             count_in_slice += 1
             if (count_in_slice >= self.SLICE_EVENTS
                     or time.monotonic() - slice_start >= self.SLICE_BUDGET_S):
@@ -397,9 +475,13 @@ class EventBus:
                 await asyncio.sleep(0)  # yield the loop: bounded occupancy
 
     def stats(self) -> Dict[str, int]:
-        """Queue depth + counters (dashboard/observability)."""
-        return {"queued": len(self._queue), "dispatched": self._dispatched,
-                "dropped": self._dropped}
+        """Queue depth + counters for BOTH queues (dashboard/observability)."""
+        return {"queued": len(self._queue),
+                "control_queued": len(self._control_queue),
+                "dispatched": self._dispatched,
+                "dropped": self._dropped,
+                "control_dropped": self._control_dropped,
+                "unattributed_cancels": self._unattributed_cancels}
 
     async def publish(self, event: Event) -> List[Any]:
         """Invoke all matching handlers (sync or async), isolated per handler.
@@ -426,9 +508,16 @@ class EventBus:
                 except asyncio.CancelledError:
                     # read-only check (the old cancelling()>uncancel() idiom
                     # consumed the very cancellation it was inspecting);
-                    # on 3.10 (no Task.cancelling) re-raising is the safe side
-                    if outer_cancel_pending(unknown=True):
+                    # a TRUE outer cancel re-raises. On 3.10 (no
+                    # Task.cancelling) the cancel is unattributable:
+                    # re-raising skipped the remaining subscribers AND
+                    # killed the dispatcher (total bus wedge) — isolate
+                    # instead (log + record the failure, keep draining).
+                    if (cancellation_attributable()
+                            and outer_cancel_pending(unknown=True)):
                         raise
+                    if not cancellation_attributable():
+                        self._unattributed_cancels += 1
                     LOG.exception(
                         "event handler %r cancelled internally for %s", handler, type(event).__name__
                     )
@@ -448,5 +537,5 @@ __all__ = [
     "TaskStarted", "TaskCompleted", "TaskFailed", "TaskCancelled",
     "RateLimitTriggered", "SettingChanged", "MessageReceived",
     "MessageEdited", "MessageDeleted", "ReactionAdded",
-    "ScenarioStarted", "ScenarioFinished",
+    "ScenarioStarted", "ScenarioFinished", "CONTROL_PLANE_EVENTS",
 ]

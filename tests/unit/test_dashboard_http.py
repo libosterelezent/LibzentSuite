@@ -301,8 +301,8 @@ class FakeControlAPI:
         self._record("status")
         return STATUS
 
-    async def emergency_stop_all(self):
-        self._record("emergency_stop_all")
+    async def emergency_stop_all(self, surface: str = "api"):
+        self._record("emergency_stop_all", surface=surface)
         return {"cancelled_tasks": 3, "accounts": {"stopped": 2}, "halted": True}
 
     async def shutdown(self):
@@ -737,6 +737,10 @@ class TestDashboardHTTP(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertTrue(get_json(body)["data"]["halted"])
         self.assertEqual(self.fake.called("emergency_stop_all"), ())
+        # AUDIT: a dashboard-triggered estop must be audited as such, not
+        # attributed to the default 'api' surface
+        self.assertEqual(self.fake.called_kwargs("emergency_stop_all"),
+                         {"surface": "dashboard"})
 
     async def test_shutdown(self) -> None:
         status, _ = await asyncio.to_thread(http_post, self.url("/api/shutdown"), {})

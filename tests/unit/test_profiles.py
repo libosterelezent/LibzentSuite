@@ -176,12 +176,26 @@ class AllowedPluginsTests(ProfileManagerTestBase):
         await self.manager.set_profile("p1", ["soulcopy"])
         self.assertIsNone(self.manager.allowed_plugins("alpha"))
 
-    async def test_none_when_only_unknown_profiles(self) -> None:
+    async def test_all_unknown_profiles_allow_nothing(self) -> None:
+        """Assignments that ALL reference unknown profiles (typo'd or
+        deleted out-of-band) must DENY (empty set), never widen the
+        grant to the unrestricted None — the warning names them."""
         await self.accounts_repo.assign_profile("alpha", "ghost-profile")
         await self.manager.load()  # sync cache view picks the repo write up
         with self.assertLogs("test.profiles", level="WARNING") as logs:
-            self.assertIsNone(self.manager.allowed_plugins("alpha"))
+            self.assertEqual(self.manager.allowed_plugins("alpha"), set())
         self.assertTrue(any("ghost-profile" in line for line in logs.output))
+        self.assertTrue(any("NONE" in line or "allowing NOTHING" in line
+                            for line in logs.output))
+
+    async def test_mixed_unknown_and_known_keeps_known_union(self) -> None:
+        await self.manager.set_profile("p1", ["soulcopy"])
+        await self.accounts_repo.assign_profile("alpha", "ghost-profile")
+        await self.accounts_repo.assign_profile("alpha", "p1")
+        await self.manager.load()
+        with self.assertLogs("test.profiles", level="WARNING"):
+            self.assertEqual(self.manager.allowed_plugins("alpha"),
+                             {"soulcopy"})
 
     async def test_empty_plugin_profile_restricts_everything(self) -> None:
         # crafted directly in the repo: repo layer permits empty lists

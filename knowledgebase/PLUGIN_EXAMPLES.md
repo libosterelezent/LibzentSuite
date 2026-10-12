@@ -89,7 +89,7 @@ class LootclaimPlugin(PluginBase):
         if event.author_id not in ctx.services.credentials.owner_user_ids:
             ctx.logger.warning(
                 "ignoring trigger from non-owner %s on account %s (if this is "
-                "you, add the id to OWNER_USER_IDS in .env)",
+                "you, add the id to the admin list in the Admin tab)",
                 event.author_id, ctx.account,
             )
             return
@@ -147,7 +147,7 @@ __all__ = ["LootclaimPlugin"]
 |---|---|
 | `isinstance(event, MessageReceived)` first | `PluginManager` also routes `MessageEdited`/`MessageDeleted`/`ReactionAdded` to `handle_event`; the base-class docstring demands a fast prologue (cost is multiplied by plugin count). |
 | `event.content.strip() != ctx.settings["trigger"]` before any `await` | exactly the `roll`/`soulcopy` (test-fixture) trigger check, read from the **live** settings dict at event time. |
-| `ctx.services.credentials.owner_user_ids` | `frozenset[int]` from `.env` `OWNER_USER_IDS` — the only owner gate. |
+| `ctx.services.credentials.owner_user_ids` | `frozenset[int]` — the injected credentials view (`AccountPluginServices.credentials`; env `OWNER_USER_IDS` is the one-time admin-list seed); the plugin-side owner gate. |
 | `ctx.services.validate_channel(...)` as the first flow step | raises `TargetGone` (a `FlowBlocked`) *before* anything is sent — the "no partial output" guarantee. |
 | `rich.button(custom_id)` / `rich.summary()` | real helpers on `adapters.model.DiscordMessage` (frozen DTO, `repr=False` on `raw`). |
 | `add_reaction`/`click_button` with explicit `Priority` | pipeline actions with defaults `NORMAL`; pacing/audit/cancellation come free. |

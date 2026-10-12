@@ -25,8 +25,8 @@ python -m benchmark --scenario log_burst --loop-interval-ms 1  # stall-hunt
 ## Scenarios
 `cold_boot` (real bootstrap+shutdown) · `accounts_startstop` (N-account
 through the real stack) · `restart_churn` (start/stop leak series) ·
-`delete_churn` (tombstone series) · `log_burst` · `db_writes` ·
-`cooldown_heavy` · `message_burst` (bus fan-out flood).
+`log_burst` · `db_writes` · `cooldown_heavy` · `message_burst`
+(bus fan-out + plugin dispatch flood).
 
 ## Metrics
 Process (RSS/CPU/FD via stdlib `resource` + `/proc`), event-loop lag

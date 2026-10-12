@@ -64,7 +64,6 @@ if TYPE_CHECKING:  # runtime duck-typing avoids import cycles / hard deps
     from .dashboard_ui.builders import DashboardUIToolset, Layout
     from .event_bus import Event, MessageReceived
     from .settings_manager import Setting
-    from adapters.base import DiscordMessage
 
 
 @dataclass(frozen=True)
@@ -281,7 +280,12 @@ def _convert_arg(spec: "ArgSpec", token: str) -> Any:
         except ValueError:
             raise ValueError(f"<{spec.name}>: {token!r} is not valid") from None
     else:
-        value = token
+        # unrecognized kind (e.g. kind="int"): silently skipping the
+        # conversion used to leave the value a STRING — fail at parse
+        # time instead so the typo surfaces immediately
+        raise ValueError(
+            f"<{spec.name}> has an unsupported kind {spec.kind!r} "
+            f"(use str, int, float or a callable)")
     if spec.choices is not None and value not in spec.choices:
         allowed = "/".join(str(c) for c in spec.choices)
         raise ValueError(
@@ -294,7 +298,8 @@ def parse_command_args(spec: "CommandSpec", argv: List[str]) -> Dict[str, Any]:
 
     Returns the name->value dict for ``ctx.parsed``. Raises ValueError
     with a one-line reason on: missing required args, failed type
-    conversion, disallowed choices, or leftover tokens.
+    conversion, an unsupported ArgSpec kind, disallowed choices, or
+    leftover tokens.
     """
     out: Dict[str, Any] = {}
     rest = list(argv or [])
@@ -305,7 +310,16 @@ def parse_command_args(spec: "CommandSpec", argv: List[str]) -> Dict[str, Any]:
             if not taken:
                 if arg.required:
                     raise ValueError(f"missing <{arg.name}> (one or more)")
-                taken = list(arg.default or [])
+                # only list/tuple defaults expand element-wise; any other
+                # non-None default becomes a ONE-element list (a scalar
+                # string default used to be char-split by list("...")
+                default = arg.default
+                if default is None:
+                    taken = []
+                elif isinstance(default, (list, tuple)):
+                    taken = list(default)
+                else:
+                    taken = [default]
             out[arg.name] = taken
             continue
         if not rest:

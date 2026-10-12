@@ -1,7 +1,7 @@
 # Module `core.api`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `core/api.py`
 
@@ -171,6 +171,14 @@ through ``_resolved()`` so this facade keeps working at every step.
   - Per-account Home-tab stat cards from every enabled plugin.
 - `async def ui_panels(self) -> List[Dict[str, Any]]`
   - Plugin-contributed sidebar panels (framework-level).
+- `async def dashboard_ui_navigation(self) -> List[Dict[str, Any]]`
+  - Plugin pages for the sidebar: [{plugin, page_id, title, icon,
+- `async def dashboard_ui_page(self, plugin: str, page_id: str) -> Optional[Dict[str, Any]]`
+  - One page's full serialized component tree; None when the
+- `async def dashboard_ui_action(self, plugin: str, component_id: str, payload: Dict[str, Any], surface: str='api') -> Dict[str, Any]`
+  - Dispatch a registered component action (visibility-checked).
+- `async def dashboard_ui_data(self, plugin: str, component_id: str) -> Any`
+  - Fetch a data-provider result (visibility-checked, JSON-safe).
 - `async def admin_overview(self) -> Dict[str, Any]`
   - The admin panel's full view: admin ids, mudae bot id, and every
 - `async def admin_set_ids(self, ids: List[int], surface: str='api') -> Dict[str, Any]`
@@ -178,12 +186,15 @@ through ``_resolved()`` so this facade keeps working at every step.
 - `async def admin_remove_id(self, user_id: int, surface: str='api') -> Dict[str, Any]`
 - `async def admin_account_flag(self, account: str, is_admin: bool, surface: str='api') -> Dict[str, Any]`
 - `async def admin_perms(self, account: str, surface: str='api') -> Dict[str, Any]`
+  - Read the per-account command-permission list.
 - `async def admin_perms_set(self, account: str, ids: List[int], surface: str='api') -> Dict[str, Any]`
 - `async def admin_perms_add(self, account: str, user_id: int, surface: str='api') -> Dict[str, Any]`
 - `async def admin_perms_remove(self, account: str, user_id: int, surface: str='api') -> Dict[str, Any]`
 - `async def admin_prefix(self, account: str, surface: str='api') -> Dict[str, Any]`
+  - Read the per-account self-command prefix configuration.
 - `async def admin_prefix_set(self, account: str, mode: str, symbol: str='', surface: str='api') -> Dict[str, Any]`
 - `async def admin_mudae_id(self, surface: str='api') -> Dict[str, Any]`
+  - Read the framework-level Mudae bot id.
 - `async def admin_mudae_id_set(self, user_id, surface: str='api') -> Dict[str, Any]`
 - `async def ratelimit_policies(self) -> List[Dict[str, Any]]`
   - Every stored policy with its level/owner scope.

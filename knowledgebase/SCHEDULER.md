@@ -184,8 +184,8 @@ account heap.
 ### Callers
 - `core.account_manager.services.AccountPluginServices` (`send_message`,
   `send_dm`, reaction/button submits — the plugin-facing surface);
-- `core.remote_control.RemoteControl` (replies flow through the paced
-  pipeline);
+- the self-command layer (`core/plugin_manager/commands.py` — framework
+  verb replies flow through the paced pipeline);
 - tests (`tests/unit/test_task_scheduler.py`) and simulator scenarios.
 
 ### Callees

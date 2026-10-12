@@ -65,24 +65,33 @@ See [DASHBOARD.md](DASHBOARD.md) for the full route/WS reference.
   actionable 400s naming the field and route, 500s logged with tracebacks,
   504 on main-loop hop timeouts.
 
-## 4. Remote control (mention-prefix management)
+## 4. Chat commands (self-command layer + authorization)
 
-`REMOTE_CONTROL=0` in `.env` disables the wiring entirely
-(`core/remote_control.py` is never constructed). When enabled:
+Framework management from Discord rides the **self-command layer**
+([core/plugin_manager/commands.py](../core/plugin_manager/commands.py) —
+the `SelfCommandHub` registry): each live account runs the library's
+`ext.commands` machinery with its own prefix — `mention`, `symbol` or
+`both`, configured per account from the dashboard's Admin tab. The old
+`RemoteControl` mention bridge is **retired from production**:
+[core/remote_control.py](../core/remote_control.py) survives only
+because the simulator stack wires it for its `control_mention` scenario,
+and the `REMOTE_CONTROL` env now gates that simulator behavior only
+([adapters/simulator/runner.py](../adapters/simulator/runner.py)).
 
 | Control | Detail |
 |---|---|
-| Owner gating | Only `OWNER_USER_IDS`; a non-owner mention is ignored completely — no reply, no log noise beyond a debug line |
-| Per-account mention | Each account answers only its own `<@user_id>` / `<@!user_id>` prefix, so `@alpha status` and `@beta status` are independent |
-| Command allowlist | An explicit handler registry of read-mostly + safe commands; nothing can change secrets or talk to Discord beyond the reply itself |
-| Cooldown | `reply_cooldown_s` (default 1.0 s) self-throttle per account — even owner spam gets one reply per window |
-| Paced replies | Replies flow through the FULL send pipeline (scheduler → lane → pacing → jitter → audit), truncated to `MAX_REPLY_CHARS = 1900` |
+| Authorization gate | `AccessManager.can_invoke` ([core/access_manager.py](../core/access_manager.py)) — THE command gate: the invoking Discord user id must be in the account's per-account allowlist (`allowed_user_ids`) OR be a framework admin (DB-backed admin list / admin-flagged accounts) |
+| Fail-closed | Empty per-account allowlist and no admins → NOBODY can invoke that account's commands; an unknown/absent account row is the same as empty |
+| `OWNER_USER_IDS` | A ONE-TIME migration seed only: on first boot it seeds the DB admin list, after which the env value is IGNORED for authorization (pre-migration it let every env-listed id command every account) |
+| Managing access | Admin list, per-account allowlists and prefix configs are DB-backed kv rows, edited in the dashboard's Admin tab or via the `adminlist` / `adminperms` / `adminprefix` self-command verbs |
+| Command surface | Framework verbs (`status`/`accounts`/`plugins`/`ratelimit`/`lane`/`tasks`/`estop`/`simulation`, the `admin*` settings verbs, `pg`, `say`, dynamic `help`) + every plugin-declared `COMMANDS` verb — one registry, one dispatch path, one gate |
+| Paced replies | Handlers run with plugin-grade pacing: replies go through the services facade into the FULL send pipeline (scheduler → lane → pacing → jitter → audit), never a raw client send; truncated to 1900 chars |
 
 ## 5. ToS / flag-risk posture (mitigations, not authorization)
 
 | Mitigation | Where |
 |---|---|
-| Hard safety floor | `MIN_ACTION_INTERVAL = 1.5 s/action`; no policy can be set faster (`UnsafePolicyError`); the floor is raise-only |
+| Safety floor | `MIN_ACTION_INTERVAL = 0.05 s` hard sanity minimum (zero-delay loop prevention; raise-only, `UnsafePolicyError` below it); the EFFECTIVE safety net is the learned per-action defaults that apply when no policy is stored (message/dm 2.6 s, reaction 2.5 s, component 3.0 s — [core/rate_limit_manager/engine.py](../core/rate_limit_manager/engine.py)) |
 | Human-like jitter | Uniform jitter window sampled after every grant; warning taxonomy flags `no_jitter` / `narrow_jitter` / `aggressive` configurations |
 | Server limits respected | `ServerRateLimit` (429 / Retry-After, route + fleet-global) → cooldowns waited out before anything else; the simulator scenario `server_429_respected` pins the behaviour |
 | Server-wide send lane | Optional GlobalSendLane serializes every outbound action of the whole fleet, spaced by `prefixrate` (0 = pause) |

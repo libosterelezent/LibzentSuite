@@ -136,33 +136,42 @@ class PluginLoader:
                 candidates.append(("package", entry.name, entry / "__init__.py"))
             elif entry.is_file() and entry.suffix == ".py":
                 candidates.append(("file", entry.name, entry))
-        for kind, name, path in candidates:
-            if kind == "package":
-                try:
-                    module = importlib.import_module(f"{parent_name}.{name}")
-                except Exception as exc:
-                    raise PluginError(f"error importing plugin {path}: {exc}") from exc
-            else:
-                module = self._import_file(f"{parent_name}_{Path(name).stem}", path)
-            found_here = 0
-            prefix = module.__name__ + "."
-            for attr in vars(module).values():
-                if (
-                    isinstance(attr, type)
-                    and issubclass(attr, PluginBase)
-                    and attr is not PluginBase
-                    and (
-                        attr.__module__ == module.__name__
-                        or attr.__module__.startswith(prefix)
+        try:
+            for kind, name, path in candidates:
+                if kind == "package":
+                    try:
+                        module = importlib.import_module(f"{parent_name}.{name}")
+                    except Exception as exc:
+                        raise PluginError(f"error importing plugin {path}: {exc}") from exc
+                else:
+                    module = self._import_file(f"{parent_name}_{Path(name).stem}", path)
+                found_here = 0
+                prefix = module.__name__ + "."
+                for attr in vars(module).values():
+                    if (
+                        isinstance(attr, type)
+                        and issubclass(attr, PluginBase)
+                        and attr is not PluginBase
+                        and (
+                            attr.__module__ == module.__name__
+                            or attr.__module__.startswith(prefix)
+                        )
+                    ):
+                        self._register(attr, path)
+                        found_here += 1
+                if found_here == 0:
+                    # a module exporting no plugin used to be silently skipped
+                    LOG.warning(
+                        "%s exports no PluginBase subclass (did you forget to inherit?)", path
                     )
-                ):
-                    self._register(attr, path)
-                    found_here += 1
-            if found_here == 0:
-                # a module exporting no plugin used to be silently skipped
-                LOG.warning(
-                    "%s exports no PluginBase subclass (did you forget to inherit?)", path
-                )
+        except BaseException:
+            # FAILED discover: purge THIS generation's synthetic modules
+            # too (retries would otherwise accumulate a dead parent per
+            # attempt) and drop the partial records — the loader stays
+            # retry-able with a clean slate
+            self._purge_stale_parents()
+            self._records = {}
+            raise
         self._discovered = True
         LOG.info(
             "discovered %d plugin(s) in %s: %s",

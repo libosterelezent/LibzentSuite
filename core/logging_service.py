@@ -32,7 +32,10 @@ does zero extra work and never warns (simulator/headless boots).
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
+import logging.handlers
+import queue
 import sys
 import threading
 import time
@@ -41,7 +44,7 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 from typing import Any, Callable, Deque, Dict, List, Optional
 
-from ._persist_queue import MAX_INFLIGHT as _MAX_INFLIGHT, PersistQueue
+from ._persist_queue import PersistQueue
 
 SEVERITIES = ("DEBUG", "INFO", "WARNING", "ERROR")
 #: per-entry message cap (ring memory + DB row size stay bounded)
@@ -51,6 +54,59 @@ _LEVEL_BY_SEVERITY = {
     "WARNING": logging.WARNING, "ERROR": logging.ERROR,
 }
 _STDERR_CONFIGURED = False
+
+#: NON-BLOCKING stderr pipeline (configure_stderr): the record() mirror
+#: and every raw stdlib emit under the tree hand records to a QueueHandler
+#: (put_nowait only) and ONE listener thread owns the real StreamHandler —
+#: a StreamHandler.emit writes AND FLUSHES synchronously, so attached
+#: directly it let a backed-up stderr pipe stall the event loop thread
+#: that called record()/logger.log().
+_STDERR_QUEUE: "queue.SimpleQueue[logging.LogRecord]" = queue.SimpleQueue()
+_STDERR_PIPELINE_LOCK = threading.Lock()
+_STDERR_LISTENER: Optional[logging.handlers.QueueListener] = None
+_STDERR_QUEUE_HANDLER: Optional[logging.handlers.QueueHandler] = None
+_STDERR_ATEXIT_ARMED = False
+
+
+def _start_stderr_pipeline() -> None:
+    """Create + start the one listener thread and attach its queue handler
+    to the ``slaughtermudae`` logger (idempotent; lock-guarded)."""
+    global _STDERR_LISTENER, _STDERR_QUEUE_HANDLER, _STDERR_ATEXIT_ARMED
+    with _STDERR_PIPELINE_LOCK:
+        if _STDERR_QUEUE_HANDLER is not None:
+            return
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+        _STDERR_QUEUE_HANDLER = logging.handlers.QueueHandler(_STDERR_QUEUE)
+        _STDERR_LISTENER = logging.handlers.QueueListener(
+            _STDERR_QUEUE, handler, respect_handler_level=True)
+        _STDERR_LISTENER.start()
+        if not _STDERR_ATEXIT_ARMED:
+            # abnormal exits (no stop_persistence pass) must not hang on
+            # the listener's non-daemon thread — registered ONCE
+            _STDERR_ATEXIT_ARMED = True
+            atexit.register(stop_stderr_pipeline)
+
+
+def stop_stderr_pipeline() -> None:
+    """Stop the stderr listener thread and detach its queue handler.
+
+    Idempotent and leak-free across repeated start/stop: the handler is
+    removed from the logger (post-stop records stop queueing) and the
+    listener is drained + joined. Called from :meth:`LogService.stop_persistence`
+    (the service shutdown seam) and at process exit.
+    """
+    global _STDERR_LISTENER, _STDERR_QUEUE_HANDLER
+    with _STDERR_PIPELINE_LOCK:
+        listener, qhandler = _STDERR_LISTENER, _STDERR_QUEUE_HANDLER
+        _STDERR_LISTENER = _STDERR_QUEUE_HANDLER = None
+    if qhandler is not None:
+        logging.getLogger("slaughtermudae").removeHandler(qhandler)
+    if listener is not None:
+        listener.stop()  # flushes what already queued, joins the thread
 
 #: logger name -> the propagate value observed when the FIRST bridge was
 #: attached (detach restores it once the last bridge handler is removed —
@@ -91,17 +147,19 @@ class LogEntry:
 
 
 def configure_stderr(level: int = logging.INFO) -> None:
-    """Attach one human-readable stderr handler to the logger tree (idempotent)."""
+    """Attach one human-readable stderr handler to the logger tree (idempotent).
+
+    The StreamHandler runs on a QueueListener thread behind a
+    QueueHandler: callers (including the record() mirror on the event
+    loop) only enqueue — a blocked stderr pipe can never stall them.
+    """
     global _STDERR_CONFIGURED
     if _STDERR_CONFIGURED:
         return
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)-7s %(name)s: %(message)s", datefmt="%H:%M:%S"
-    ))
     root = logging.getLogger("slaughtermudae")
     root.setLevel(level)
-    root.addHandler(handler)
+    _start_stderr_pipeline()
+    root.addHandler(_STDERR_QUEUE_HANDLER)
     root.propagate = False
     _STDERR_CONFIGURED = True
 
@@ -185,9 +243,12 @@ class LogService:
         Records stop being enqueued, the in-flight batch finishes (bounded
         join), a stuck worker is cancelled after the grace window and the
         remaining queue is drained inline in order (bounded by ``timeout``
-        — a hung repo cannot wedge shutdown).
+        — a hung repo cannot wedge shutdown). This is also the service's
+        shutdown seam for the stderr listener thread (Framework.shutdown
+        calls it before database.close), so it stops cleanly here too.
         """
         await self._persist.stop(timeout)
+        stop_stderr_pipeline()
 
     def record(
         self,
@@ -464,8 +525,18 @@ class StdlibBridge(logging.Handler):
             # but future context-based loggers get correct entry fields
             # without another bridge change.
             with self._service.ingest_context():
+                message = record.getMessage()
+                if record.exc_info:
+                    # exception tracebacks must reach the ring/DB/dashboard
+                    # too — the message alone hides WHERE it broke
+                    try:
+                        message = (message + "\n"
+                                   + logging.Formatter().formatException(
+                                       record.exc_info))
+                    except Exception:
+                        pass  # a logging bridge must never raise
                 self._service.record(
-                    severity, source, record.getMessage(),
+                    severity, source, message,
                     account=getattr(record, "account", None),
                     plugin=getattr(record, "plugin", None))
         except Exception:  # a logging bridge must never raise

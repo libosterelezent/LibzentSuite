@@ -155,8 +155,10 @@ never at module/import time.
 
 **Why it breaks.** Any Discord user can type a word in a channel the account can see; without a
 gate the account reacts to strangers — the fastest way to get reported and banned. Both shipped
-plugins gate with `ctx.services.credentials.owner_user_ids` (a `frozenset[int]` from `.env`
-`OWNER_USER_IDS`), and the simulator's `control_mention` scenario explicitly verifies that a
+plugins gate with `ctx.services.credentials.owner_user_ids` (a `frozenset[int]` — the injected
+credentials view `AccountPluginServices.credentials` returns, seeded from `.env`
+`OWNER_USER_IDS`; the DB-first admin list lives in `AccessManager`), and the simulator's
+`control_mention` scenario explicitly verifies that a
 non-owner trigger produces **nothing**.
 
 **Correct pattern.**

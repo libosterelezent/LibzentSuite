@@ -17,15 +17,14 @@ original:
 ```
    emitters (publish_nowait unless noted)                    subscribers
  ┌──────────────────────────────┐   subscribe(EventType, handler)
- │ AccountManager  ─ Account*, Message*, Reaction*          │
- │ TaskScheduler   ─ Task*                                  │─► PluginManager._on_message
- │ RateLimitManager ─ RateLimitTriggered (awaited publish)  │─► RemoteControl._on_message
- │ SettingsManager ─ SettingChanged                          │─► TaskAckRegistry (Task* ×3)
- │ PluginManager   ─ Plugin*                                 │─► AccountManager._audit_inbound
- │ SimulationRunner ─ Scenario* (awaited publish)            │─► AccountPluginServices wait/collect
- └──────────────────────────────┘                            │─► bootstrap._on_event → LogService
-                                                             │─► DashboardServer (Task* → WS)
-                                                             └► unsubscribe() (idempotent)
+  │ AccountManager  ─ Account*, Message*, Reaction*          │
+  │ TaskScheduler   ─ Task*                                  │─► PluginManager._on_message
+  │ RateLimitManager ─ RateLimitTriggered (awaited publish)  │─► TaskAckRegistry (Task* ×3)
+  │ SettingsManager ─ SettingChanged                          │─► AccountManager._audit_inbound
+  │ PluginManager   ─ Plugin*                                 │─► AccountPluginServices wait/collect
+  │ SimulationRunner ─ Scenario* (awaited publish)            │─► bootstrap._on_event → LogService
+  └──────────────────────────────┘                            │─► DashboardServer (Task* → WS)
+                                                              └► unsubscribe() (idempotent)
 ```
 
 ---
@@ -140,7 +139,7 @@ code; tests exercise nearly every type).
 
 | Event | Fields | Emitted by | Consumed by |
 |---|---|---|---|
-| `MessageReceived` | flat: `message_id: int`, `channel_id: int`, `author_id: int`, `content: str`, `dm: bool`; rich: `message: Any` (the `adapters.model.DiscordMessage` DTO, `None` for legacy/synthetic events) | `AccountManager` adapter ingestion (`on_message`); `AccountPluginServices.publish` (synthetic/plugin-side) | `PluginManager._on_message` (dispatch to per-account plugin instances), `RemoteControl._on_message` (mention prefix), `AccountManager._audit_inbound` (direction `'in'` audit row), `AccountPluginServices.wait_for_message` / `collect_messages` (scoped subscribe/unsubscribe) |
+| `MessageReceived` | flat: `message_id: int`, `channel_id: int`, `author_id: int`, `content: str`, `dm: bool`; rich: `message: Any` (the `adapters.model.DiscordMessage` DTO, `None` for legacy/synthetic events) | `AccountManager` adapter ingestion (`on_message`); `AccountPluginServices.publish` (synthetic/plugin-side) | `PluginManager._on_message` (dispatch to per-account plugin instances), `AccountManager._audit_inbound` (direction `'in'` audit row), `AccountPluginServices.wait_for_message` / `collect_messages` (scoped subscribe/unsubscribe). Mention-prefix commands do NOT ride the bus in production — they arrive via the client's `ext.commands` layer into the self-command hub (the retired `RemoteControl._on_message` subscriber survives only in the simulator stack) |
 | `MessageEdited` | `message_id`, `channel_id`, `guild_id: Optional[int]`, `message: Any` (rich post-edit `DiscordMessage`, `raw` = library message) | `AccountManager` adapter ingestion | `PluginManager._on_message` |
 | `MessageDeleted` | `message_id`, `channel_id`, `guild_id: Optional[int]` (ids only — the library gives no payload body) | `AccountManager` adapter ingestion | `PluginManager._on_message` |
 | `ReactionAdded` | `message_id`, `channel_id`, `guild_id`, `user_id: int`, `emoji: str` (printable), `dm: bool`, `raw: Any` (runtime-only library objects, `repr=False`) | `AccountManager` adapter ingestion | `PluginManager._on_message` |

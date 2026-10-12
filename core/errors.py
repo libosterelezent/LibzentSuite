@@ -114,12 +114,31 @@ class SimulationError(RuntimeError):
     """Scenario/runner problem (unknown scenario, broken script)."""
 
 
+#: Domain errors render their (safe, human-written) message bare as an
+#: ``error: …`` reply/line; anything else is an INTERNAL failure the
+#: surface must mask (``failed internally, see logs`` — logs carry the
+#: detail). NOTE: bare RuntimeError is deliberately NOT here — typed
+#: domain errors that subclass RuntimeError (AccountError etc.) still
+#: render. Shared by interfaces/cli/repl.py, core/remote_control.py and
+#: core/plugin_manager/commands.py (each may layer its own additions on
+#: top, but never a bare RuntimeError).
+DOMAIN_ERRORS = (
+    AccountError,
+    CredentialsError,
+    PluginError,
+    ProfileError,
+    RatePolicyError,
+    SettingsValidationError,
+    ValueError,
+)
+
+
 __all__ = [
     "FlowBlocked", "CacheInvalid", "TargetGone", "AccessDenied", "FetchRequired",
     "ServerRateLimit", "AccountError", "PluginError", "ProfileError",
     "SyncGroupError", "SettingsValidationError", "RatePolicyError",
     "UnsafePolicyError", "SchedulerError", "DatabaseError", "CredentialsError",
-    "SimulationError",
+    "SimulationError", "DOMAIN_ERRORS",
 ]
 
 def flow_block_reason(exc: BaseException) -> str:

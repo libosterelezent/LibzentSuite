@@ -19,9 +19,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sqlite3
 import time
 from pathlib import Path
-from typing import Any
 
 from .connection import DatabaseConnection, DatabaseError  # noqa: F401 re-export
 from .schema import MIGRATIONS, latest_version
@@ -137,27 +137,43 @@ class Database:
         rollback of its own, so the script is wrapped in an explicit
         BEGIN..COMMIT together with the schema_migrations insert: a failing
         statement leaves NOTHING half-applied and no bookkeeping row.
+
+        PARALLEL-FIRST-BOOT: ALTER TABLE ... ADD COLUMN has no IF NOT
+        EXISTS form, so when two Database objects first-boot the same
+        file the migration race's LOSER fails with 'duplicate column
+        name' — the winner already committed that column. Exactly that
+        error is tolerated for ALTER-carrying migrations: the aborted
+        script rolls back, then the same WHERE NOT EXISTS-guarded stamp
+        runs (a no-op when the winner's stamp committed together with
+        its column, which the visible column implies).
         """
         safe_name = name.replace("'", "''")
         # stamp only when absent: two Database objects first-booting the
         # same file in parallel both reach here (each saw an empty
         # schema_migrations); the loser's DDL no-ops (IF NOT EXISTS) and
         # stamps nothing instead of failing the boot.
-        script = (f"BEGIN IMMEDIATE;\n{sql}\n"
-                  f"INSERT INTO schema_migrations (version, name, applied_at) "
-                  f"SELECT {int(version)}, '{safe_name}', {time.time()!r} "
-                  f"WHERE NOT EXISTS (SELECT 1 FROM schema_migrations "
-                  f"WHERE version = {int(version)});\n"
-                  f"COMMIT;")
+        stamp = (f"INSERT INTO schema_migrations (version, name, applied_at) "
+                 f"SELECT {int(version)}, '{safe_name}', {time.time()!r} "
+                 f"WHERE NOT EXISTS (SELECT 1 FROM schema_migrations "
+                 f"WHERE version = {int(version)});")
+        script = (f"BEGIN IMMEDIATE;\n{sql}\n{stamp}\nCOMMIT;")
         async with self.connection.serialized() as db:
             await db.rollback()  # no stray open transaction before BEGIN
             try:
                 await db.executescript(script)
             except BaseException as exc:
+                tolerated = (
+                    isinstance(exc, sqlite3.OperationalError)
+                    and "duplicate column name" in str(exc).lower()
+                    and "ALTER TABLE" in sql.upper())
                 try:
                     await db.rollback()
                 except Exception:
                     pass
+                if tolerated:
+                    await db.executescript(
+                        f"BEGIN IMMEDIATE;\n{stamp}\nCOMMIT;")
+                    return
                 if isinstance(exc, Exception):
                     raise DatabaseError(
                         f"migration {version} ({name}) failed: {exc}") from exc

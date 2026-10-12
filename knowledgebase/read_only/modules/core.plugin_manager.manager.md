@@ -1,7 +1,7 @@
 # Module `core.plugin_manager.manager`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `core/plugin_manager/manager.py`
 
@@ -50,10 +50,14 @@ plugin only — the ported discipline from three audit rounds.
   - Drop the account's instances WITHOUT firing unload hooks.
 - `async def activate_account(self, account: str, services: Any) -> None`
   - Resolve settings + fire on_load/on_enable for enabled plugins.
+- `def init_boot_dashboard_uis(self) -> int`
+  - Register plugin dashboard UIs at DISCOVERY time (no account).
 - `def close(self) -> None`
   - Tear the manager down: bus subscriptions off, pending tasks reaped.
 - `async def deactivate_account(self, account: str) -> None` — side effects: `publishes_event`
   - Fire on_disable + on_unload for the account's active plugins.
+- `def ui_registry(self) -> Any`
+  - The plugin dashboard-UI registry (Stage D routes dispatch here).
 - `async def set_enabled(self, account: str, plugin: str, enabled: bool) -> None` — side effects: `publishes_event, db_write`
   - Toggle a plugin at runtime (persisted BEFORE memory mutates).
 - `async def set_setting(self, account: str, plugin: str, key: str, value: Any) -> Any` — side effects: `db_write`
@@ -66,6 +70,8 @@ plugin only — the ported discipline from three audit rounds.
   - Collect every plugin's sidebar panels (JSON-safe, deduped by id).
 - `def states(self, account: str) -> List[Dict[str, Any]]`
   - Per-account plugin state for both UIs (sorted by name).
+- `def dispatch_stats(self, account: str) -> Dict[str, int]`
+  - Bounded-dispatch health for one account: how many dispatch
 - `def allowed_names(self, account: str) -> List[str]`
   - Names currently attached to the account (for error messages).
 - `def live_settings(self, account: str, plugin: str) -> Optional[Dict[str, Any]]`
@@ -83,6 +89,7 @@ plugin only — the ported discipline from three audit rounds.
 - `async def binding(self) -> Optional[str]`
 - `async def profiles(self) -> List[Dict[str, Any]]`
 - `async def effective(self) -> Dict[str, Any]`
+  - Fully merged effective settings for the (account, plugin).
 - `async def set(self, key: str, value: Any) -> Any` — side effects: `db_write`
   - Same validation path as /api/plugins/set-setting.
 - `async def clear(self, key: str) -> Any`

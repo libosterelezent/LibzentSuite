@@ -25,11 +25,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import dataclasses
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.errors import ServerRateLimit
 
@@ -42,6 +44,18 @@ SYNTHETIC_BETA_ID = 2002
 SYNTHETIC_GUILD_CHANNEL = 500
 SYNTHETIC_MUDAE_ID = 999_999
 
+#: custom-emoji repr "<:name:id>" / "<a:name:id>" -> (bare name, id); the
+#: inverse of adapters.model._emoji_repr (unicode emoji pass through)
+_CUSTOM_EMOJI_RE = re.compile(r"^<a?:(.+):(\d+)>$")
+
+
+def _parse_emoji(text: str) -> Tuple[str, Optional[int]]:
+    """Emoji string -> (bare name, custom emoji id or None)."""
+    match = _CUSTOM_EMOJI_RE.match(text or "")
+    if match:
+        return match.group(1), int(match.group(2))
+    return text, None
+
 
 def to_discord_message(world: "SimWorld", message: "WorldMessage"):
     """WorldMessage -> rich frozen DTO (the sim's convert_message).
@@ -51,6 +65,13 @@ def to_discord_message(world: "SimWorld", message: "WorldMessage"):
     matches the live adapter's :func:`adapters.model.convert_message`
     projection: author/channel/guild, embeds, components, attachments,
     reactions and the reply reference all cross untouched.
+
+    Fidelity parity with the live projection: the scripted responder is a
+    BOT (author.bot True for the responder's deliveries — bot-gate plugins
+    behave the same in sim and live; user authors stay False),
+    created_at is a tz-aware UTC datetime built from the world timestamp
+    (the live converter passes the library's aware datetime through), and
+    display_name mirrors the author name.
     """
     from adapters.base import DiscordMessage
     from adapters.model import DiscordChannel, DiscordMessageReference, DiscordUser
@@ -63,7 +84,12 @@ def to_discord_message(world: "SimWorld", message: "WorldMessage"):
         dm=message.dm,
         guild_id=message.guild_id,
         author=DiscordUser(
-            id=message.author_id, name=message.author_name),
+            id=message.author_id,
+            name=message.author_name,
+            display_name=message.author_name,
+            bot=(world.responder_id is not None
+                 and message.author_id == world.responder_id),
+        ),
         channel=DiscordChannel(
             id=message.channel_id,
             name=world.channels.get(message.channel_id, ""),
@@ -81,6 +107,7 @@ def to_discord_message(world: "SimWorld", message: "WorldMessage"):
                 guild_id=message.guild_id)
             if message.reference_message_id else None
         ),
+        created_at=datetime.fromtimestamp(message.ts, tz=timezone.utc),
     )
 
 
@@ -221,6 +248,13 @@ class SimWorld:
             self.add_channel(channel_id, f"dm-{pair[0]}-{pair[1]}", dm=True)
         return self._dm_pairs[pair]
 
+    def peek_dm_channel(self, user_a: int, user_b: int) -> Optional[int]:
+        """Non-creating DM channel lookup: the pair's channel id, or None
+        when the pair never opened one. For post-mortem checks that must
+        not mutate the world (dm_channel_for CREATES the channel)."""
+        pair = (min(user_a, user_b), max(user_a, user_b))
+        return self._dm_pairs.get(pair)
+
     def add_response(self, command: str, pages: List[str]) -> None:
         """Register a scripted response: exact command string -> DM pages."""
         self.responses[command] = list(pages)
@@ -326,13 +360,22 @@ class SimWorld:
     def react(self, user_id: int, message_id: int, emoji: str,
               kind: str = "add") -> None:
         """Push a reaction event for a known message to every subscriber
-        except the reactor (mirrors the gateway: no fetch involved)."""
+        (mirrors the gateway, which dispatches reaction events to every
+        connected session INCLUDING the reactor; SimClient.reaction_event
+        applies the live adapter's self-filter for its own reactions).
+
+        'add' increments (or creates) the aggregate entry, 'remove'
+        decrements (or deletes) it; the raw payload's count is recomputed
+        AFTER the mutation so subscribers never see stale counts, and
+        ``me`` is computed per subscriber (True for the reactor).
+        """
         for channel_id, messages in self.history.items():
             for message in messages:
                 if message.id == message_id:
                     if kind == "add":
                         from adapters.model import DiscordReaction
 
+                        name, emoji_id = _parse_emoji(emoji)
                         for index, existing in enumerate(message.reactions):
                             if existing.emoji == emoji:
                                 # rebuild, never mutate: the frozen DTO may
@@ -347,31 +390,56 @@ class SimWorld:
                                 break
                         else:
                             message.reactions = message.reactions + (
-                                DiscordReaction(emoji=emoji, name=emoji, count=1),)
+                                DiscordReaction(
+                                    emoji=emoji, name=name, id=emoji_id,
+                                    count=1),)
+                    elif kind == "remove":
+                        for index, existing in enumerate(message.reactions):
+                            if existing.emoji != emoji:
+                                continue
+                            if existing.count <= 1:
+                                message.reactions = (
+                                    message.reactions[:index]
+                                    + message.reactions[index + 1:])
+                            else:
+                                replacement = dataclasses.replace(
+                                    existing, count=existing.count - 1)
+                                message.reactions = (
+                                    message.reactions[:index]
+                                    + (replacement,)
+                                    + message.reactions[index + 1:])
+                            break
                     # RAW PARITY (live pushes ``(reaction, user)`` handles,
                     # never None): synthetic library-shaped stand-ins built
-                    # from what the world already knows — no fetch.
+                    # from what the world already knows — no fetch. The
+                    # count is read AFTER the mutation above, and me is
+                    # per subscriber (the reactor's own view is True).
                     count = 0
                     for reaction in message.reactions:
                         if reaction.emoji == emoji:
                             count = reaction.count
                     user_ns = SimpleNamespace(
                         id=user_id, name=self.users.get(user_id, ""))
-                    reaction_ns = SimpleNamespace(
-                        emoji=emoji, count=count, me=False,
-                        message_id=message_id, channel_id=channel_id)
                     for client in list(self.subscribers):
-                        if client.user_id != user_id and client.on_reaction is not None:
-                            try:
-                                client.on_reaction(
-                                    kind, message_id, channel_id,
-                                    message.guild_id,
-                                    user_id, emoji, (reaction_ns, user_ns),
-                                )
-                            except Exception:
-                                LOG.exception(
-                                    "world subscriber %r failed on reaction %s",
-                                    client, message_id)
+                        handler = getattr(client, "reaction_event", None)
+                        if handler is None:
+                            handler = getattr(client, "on_reaction", None)
+                        if handler is None:
+                            continue
+                        reaction_ns = SimpleNamespace(
+                            emoji=emoji, count=count,
+                            me=(getattr(client, "user_id", None) == user_id),
+                            message_id=message_id, channel_id=channel_id)
+                        try:
+                            handler(
+                                kind, message_id, channel_id,
+                                message.guild_id,
+                                user_id, emoji, (reaction_ns, user_ns),
+                            )
+                        except Exception:
+                            LOG.exception(
+                                "world subscriber %r failed on reaction %s",
+                                client, message_id)
                     return
         raise KeyError(f"unknown message {message_id}")
 

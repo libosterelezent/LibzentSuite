@@ -36,7 +36,6 @@ import argparse
 import ast
 import hashlib
 import json
-import os
 import subprocess
 import sys
 import time
@@ -494,8 +493,6 @@ def drift_check(new_flat: List[Dict[str, Any]]) -> int:
         print(f"  - {q}")
     for q in changed[:40]:
         print(f"  ~ {q}")
-    write_json(KB / "generated" / "drift_report.json",
-               {"added": added, "removed": removed, "changed": changed})
     return 0 if not (added or removed or changed) else 2
 
 

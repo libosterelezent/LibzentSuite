@@ -438,10 +438,20 @@ class AccountPluginServices:
             return None
         user = await client.fetch_user(user_id)
         if user is not None and self._api_cache is not None:
+            # UPSERT the fresh row (stale-start audit): the repository's
+            # set() is INSERT .. ON CONFLICT DO UPDATE, so every
+            # successful LIVE fetch refreshes the persisted row — a
+            # renamed user heals on the next live fetch instead of
+            # serving the stale name forever. (The read-through fast
+            # path above is unchanged: a hit still costs zero API calls.)
+            if isinstance(user, dict):
+                fresh_name = str(user.get("name") or "")
+            else:
+                fresh_name = str(getattr(user, "name", "") or "")
             try:
                 await self._api_cache.set(self._account, "user", str(user_id), {
                     "id": user_id,
-                    "name": getattr(user, "name", "") or "",
+                    "name": fresh_name,
                 })
             except Exception:
                 pass
@@ -601,6 +611,11 @@ class AccountPluginServices:
             except Exception as exc:
                 if not failure:
                     failure.append(exc)
+                    # stale-start audit: wake the collector NOW — it is
+                    # parked inside queue.get() and would otherwise sit
+                    # out the full idle window despite the failure. The
+                    # sentinel is discarded by the post-get failure check.
+                    queue.put_nowait(None)
                 return
             if match:
                 queue.put_nowait(event)
@@ -612,12 +627,17 @@ class AccountPluginServices:
         collected: List[MessageReceived] = []
         try:
             while True:
+                if failure:
+                    # stale-start audit: checked BEFORE parking on
+                    # queue.get — a raising check must surface
+                    # immediately, not after the idle window.
+                    break
                 try:  # each match restarts the idle window
                     event = await asyncio.wait_for(queue.get(), timeout=idle_timeout)
                 except asyncio.TimeoutError:
                     break
                 if failure:
-                    break
+                    break  # woken by the failure sentinel, not a match
                 collected.append(event)
             if failure:
                 exc = failure[0]

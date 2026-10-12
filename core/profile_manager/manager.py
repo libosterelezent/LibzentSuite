@@ -20,7 +20,6 @@ lists, unknown-role warning behaviour) with the new repository API names.
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, Dict, List, Optional, Set
 
 from ..errors import ProfileError
@@ -120,12 +119,14 @@ class ProfileManager:
                 "(got an empty list)"
             )
         await self._profiles.upsert(name, cleaned, description)
-        try:  # cache the canonical persisted form (best-effort)
-            record = await self._profiles.get(name)
-            if record is not None:
-                self._profile_cache[name] = record
-        except Exception:
-            pass
+        # cache the CANONICAL locally computed record: the old re-read
+        # was best-effort inside except-pass, so a failed re-read left
+        # the STALE previous definition in the cache while the
+        # repository already held the new one
+        from database.models import ProfileRecord
+
+        self._profile_cache[name] = ProfileRecord(
+            name=name, plugins=list(cleaned), description=description)
         self._logger.info("profile %s set (plugins=%s)", name, cleaned)
         return {"name": name, "description": description, "plugins": cleaned}
 
@@ -244,28 +245,47 @@ class ProfileManager:
     def allowed_plugins(self, account: str) -> Optional[Set[str]]:
         """UNION of plugin grants across the account's KNOWN profiles.
 
-        Returns ``None`` when the account has no KNOWN profile — meaning
-        "no restriction" (backwards-compatible default, ported from the
-        audited roles code). Unknown profile names are logged and skipped:
-        a typo must never widen or silently narrow the grant.
+        Returns ``None`` when the account has NO profile assigned at
+        all — meaning "no restriction" (backwards-compatible default,
+        ported from the audited roles code). When the account DOES have
+        assignments but they are ALL unknown profile names (typo'd or
+        deleted out-of-band), an EMPTY set is returned instead: the
+        grant must never widen to "unrestricted" just because every
+        name failed to resolve, and the condition is warned about
+        loudly. Mixed known/unknown assignments keep the union of the
+        known ones (an unknown name is logged and skipped).
 
         SYNC by design: answers from the in-memory cache populated by
         :meth:`load` and kept fresh by assign/unassign/delete (the account
         manager calls this from its attach path).
         """
+        assigned = self._assignment_cache.get(account, [])
+        if not assigned:
+            return None  # no assignments at all: unrestricted (legacy)
         allowed: Set[str] = set()
-        seen_known = False
-        for name in self._assignment_cache.get(account, []):
+        unknown: List[str] = []
+        for name in assigned:
             record = self._profile_cache.get(name)
             if record is None:
-                self._logger.warning(
-                    "account %r references unknown profile %r (ignored)",
-                    account, name,
-                )
+                unknown.append(name)
                 continue
-            seen_known = True
             allowed.update(record.plugins)
-        return allowed if seen_known else None
+        if unknown:
+            if not allowed:
+                self._logger.warning(
+                    "account %r has %d profile assignment(s) but NONE of "
+                    "them is a known profile (%s) — allowing NOTHING "
+                    "(empty grant); fix or remove the dangling "
+                    "assignments",
+                    account, len(assigned), ", ".join(map(repr, unknown)),
+                )
+                return set()
+            self._logger.warning(
+                "account %r references unknown profile(s) %s (ignored; "
+                "the known profiles' union still applies)",
+                account, ", ".join(map(repr, unknown)),
+            )
+        return allowed
 
     # -------------------------------------------------------------- helpers
     async def _known_profile_names(self) -> List[str]:

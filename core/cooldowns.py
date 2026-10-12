@@ -88,12 +88,32 @@ class CooldownService:
                "cooldown_key": cooldown_key, "started_at": now,
                "expires_at": expires_at, "source": source,
                "reason": reason, "metadata": metadata or {}}
+        key = (account, plugin, cooldown_key)
         if self._repo is not None:
             await self._repo.upsert(
                 account=account, plugin=plugin, cooldown_key=cooldown_key,
                 started_at=now, expires_at=expires_at, source=source,
                 reason=reason, metadata=metadata)
-        self._active[(account, plugin, cooldown_key)] = row
+            # AWAIT-RACE guard: a concurrent clear() completing while we
+            # were parked on the upsert would be RESURRECTED in memory by
+            # the mirror write below (the cleared cooldown lived on in
+            # _active until the periodic resync). Re-read the row and
+            # mirror only what the repository still holds — adopting the
+            # fresh row also picks up same-key extensions by other
+            # processes, matching resync()'s DB-wins rule.
+            try:
+                fresh = await self._repo.get(account, plugin, cooldown_key,
+                                             now=self._now())
+            except Exception:
+                LOG.debug("cooldown post-upsert re-read failed",
+                          exc_info=True)
+                fresh = row  # repo unreachable: keep the pre-race behavior
+            if fresh is not None:
+                # COPY, not alias: the repo owns its row objects (a test
+                # double or in-process cache may hand back the stored dict)
+                self._active[key] = dict(fresh)
+        else:
+            self._active[key] = row
         # log the COERCED duration: the raw argument may be a numeric
         # string ("60"), which printf's %f rejects with a TypeError
         LOG.info("cooldown set %s/%s/%s for %.0fs (source=%s)",

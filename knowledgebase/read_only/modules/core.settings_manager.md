@@ -1,7 +1,7 @@
 # Module `core.settings_manager`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `core/settings_manager.py`
 
@@ -39,11 +39,11 @@ Design:
   - Pull the persisted account layers into memory (boot path).
 - `def forget_account(self, account: str) -> None`
   - Drop an account's in-memory mirror layers (removal cascade).
-- `def resolve(self, plugin_name: str, schema: Sequence[Setting], account: Optional[str]=None) -> Dict[str, Any]`
+- `def resolve(self, plugin_name: str, schema: Sequence[Setting], account: Optional[str]=None, *, profile: Optional[Mapping[str, Any]]=None) -> Dict[str, Any]`
   - Effective, validated settings for one plugin instance.
 - `async def set_plugin_setting(self, account: str, plugin: str, key: str, value: Any, schema: Sequence[Setting]) -> Any` — side effects: `publishes_event, db_write`
   - Validate + persist one account-layer plugin setting; returns typed value.
-- `async def clear_plugin_setting(self, account: str, plugin: str, key: str, schema: Sequence[Setting]=()) -> Any` — side effects: `publishes_event`
+- `async def clear_plugin_setting(self, account: str, plugin: str, key: str, schema: Sequence[Setting]=(), *, profile: Optional[Mapping[str, Any]]=None) -> Any` — side effects: `publishes_event`
   - DELETE one account-layer plugin setting override (dashboard 'reset').
 - `def account_settings(self, account: str) -> Dict[str, Any]`
   - Resolved framework account settings (reconnect policy...).

@@ -1,7 +1,7 @@
 # Module `core.event_bus`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `core/event_bus.py`
 
@@ -56,11 +56,11 @@ Guarantees (ported from the audited original):
 
 - `def subscribe(self, event_type: Type[Event], handler: Handler) -> Callable[[], None]`
   - Register handler for event_type (and its subclasses).
-- `async def drain(self, timeout: float=2.0) -> None` — side effects: `sleeps`
+- `async def drain(self, timeout: float=2.0) -> None` — side effects: `creates_tasks, sleeps`
   - Await the fire-and-forget dispatch backlog (shutdown tail).
 - `def publish_nowait(self, event: Event) -> Optional['asyncio.Task[None]']` — side effects: `creates_tasks, publishes_event`
   - Fire-and-forget publish; safe from sync callbacks inside a loop.
 - `def stats(self) -> Dict[str, int]`
-  - Queue depth + counters (dashboard/observability).
+  - Queue depth + counters for BOTH queues (dashboard/observability).
 - `async def publish(self, event: Event) -> List[Any]` — side effects: `publishes_event`
   - Invoke all matching handlers (sync or async), isolated per handler.

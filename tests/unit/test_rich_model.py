@@ -980,19 +980,26 @@ class TestForwardHydrationRound3(unittest.TestCase):
 class TestIdentifyGateScaling(unittest.TestCase):
     """Round-3 F4-2: the gate derives its interval from the expected fleet
     size so a synchronized (re)identify wave clears the library's 60s
-    hook ceiling (client.py:1020 wait_for around IDENTIFY)."""
+    hook ceiling (client.py:1020 wait_for around IDENTIFY).
+
+    AUDIT FIX polarity: the spacing now FLOORS at Discord's per-IP
+    IDENTIFY budget (~1/5s, MIN_INTERVAL_S=5.0) — the old sub-5s scaling
+    for fleets >= 13 traded the 60s wave ceiling for per-IP throttling;
+    giant waves are the fast-fail projection's job instead."""
 
     def test_interval_scales_with_expected_fleet(self) -> None:
         from adapters.discord.client import IdentifyGate
 
         gate = IdentifyGate(5.0)
         self.assertEqual(gate.effective_interval, 5.0)  # single account
+        # corrected polarity: fleets >= 13 hold the per-IP floor (the
+        # old pins 50/13 and the 1.0s floor outpaced 1 identify / 5s/IP)
         gate.expected = 13
-        self.assertAlmostEqual(gate.effective_interval, 50.0 / 13, places=4)
+        self.assertEqual(gate.effective_interval, 5.0)  # per-IP floor
         gate.expected = 60
-        self.assertEqual(gate.effective_interval, 1.0)  # floor
+        self.assertEqual(gate.effective_interval, 5.0)  # floor holds
         gate.expected = 1000
-        self.assertEqual(gate.effective_interval, 1.0)  # floor holds
+        self.assertEqual(gate.effective_interval, 5.0)  # floor holds
 
     def test_base_interval_below_formula_is_kept(self) -> None:
         from adapters.discord.client import IdentifyGate
@@ -1016,12 +1023,16 @@ class TestIdentifyGateScaling(unittest.TestCase):
     def test_expected_is_dynamic_between_releases(self) -> None:
         from adapters.discord.client import IdentifyGate
 
-        gate = IdentifyGate(5.0)
+        # interval above the floor so the fleet scaling stays observable
+        # (a default 5.0s gate is already AT the per-IP floor for every
+        # fleet size — corrected polarity)
+        gate = IdentifyGate(30.0)
         gate.expected = 2
         first = gate.effective_interval
+        self.assertEqual(first, 25.0)  # budget/expected under the base
         gate.expected = 50  # fleet grew mid-wave
         self.assertLess(gate.effective_interval, first)
-        self.assertEqual(gate.effective_interval, 1.0)
+        self.assertEqual(gate.effective_interval, 5.0)  # per-IP floor
 
 
 class TestIdentifyGateWaveBudget(unittest.IsolatedAsyncioTestCase):
@@ -1105,7 +1116,14 @@ class TestRawEventMappingRound3(unittest.IsolatedAsyncioTestCase):
     """Round-3 F4-3: raw payload events (which the fork dispatches for
     EVERY dispatch, cached or not — state.py:1848/1877/1927) map onto the
     existing callbacks; the cached-only rich handlers (state.py:1850/1882/
-    1937) suppress as duplicates of the raw publication."""
+    1937) suppress as duplicates of the raw publication.
+
+    AUDIT FIX polarity: the rich handlers now publish OTHERS' cached
+    events (others-only, matching the raw handlers + the sim world) —
+    under the old inverted filter the "rich suppresses" sequences below
+    passed VACUOUSLY (the rich copy returned before ever reaching the
+    dedup mark); they now exercise _mark_event_key for real. Explicit
+    rich-polarity coverage lives in tests/unit/test_discord_adapter_fixes.py."""
 
     async def _connected_client(self):
         from adapters.discord.client import RealDiscordClient

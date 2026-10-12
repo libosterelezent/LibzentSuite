@@ -33,7 +33,7 @@ Costs (defaults derived from measured behavior, not magic):
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 __all__ = [
@@ -147,6 +147,22 @@ class _TokenBucket:
             return True, 0.0
         return False, (1.0 - self._tokens) * self.refill_s
 
+    def peek(self) -> Tuple[bool, float]:
+        """(ok, retry_after_s) WITHOUT consuming a token (no state write).
+
+        Observability mirror of :meth:`try_acquire`: same verdict for a
+        hypothetical acquisition, but the bucket's token count and clock
+        stamp are left untouched — a read must never poison the rate
+        state it reports on.
+        """
+        now = self._clock()
+        tokens = min(
+            float(self.capacity),
+            self._tokens + (now - self._last) / self.refill_s)
+        if tokens >= 1.0:
+            return True, 0.0
+        return False, (1.0 - tokens) * self.refill_s
+
 
 @dataclass
 class _Pacer:
@@ -249,9 +265,52 @@ class LifecycleGovernor:
         self._pacers.pop(account, None)
 
     def retry_after(self, account: str, op: str) -> float:
-        """Seconds until the next legal ``op`` (0 when legal now)."""
-        decision = self.precheck(account, op)
+        """Seconds until the next legal ``op`` (0 when legal now).
+
+        Observability read: side-effect-free (see :meth:`_peek`) — it
+        never consumes a bucket token and never writes a counter, so a
+        dashboard poll cannot poison the rate state it reports on.
+        """
+        decision = self._peek(account, op)
         return decision.retry_after_s if not decision.allowed else 0.0
+
+    def _peek(self, account: str, op: str) -> LifecycleDecision:
+        """Side-effect-free mirror of :meth:`precheck` for observability.
+
+        Same verdicts as precheck would return (with ``status`` unknown —
+        cooldowns are evaluated from the pacer history alone, exactly
+        like the status-less ``retry_after`` calls this serves) but with
+        NO token acquisition and NO counter writes. ``stats`` also
+        evaluates each account exactly once.
+        """
+        if not self.enabled:
+            return LifecycleDecision(
+                True, OUTCOME_STARTED if op == "start" else OUTCOME_STOPPED)
+        now = self._clock()
+        pacer = self._pacers.get(account)
+        if op == "start":
+            cooldown, since = self._start_cooldown(pacer, None)
+            ready = (since + cooldown) if since else 0.0
+            if ready > now:
+                return LifecycleDecision(
+                    False, OUTCOME_RATE_LIMITED, ready - now,
+                    "account_cooldown")
+            ok, retry = self._start_bucket.peek()
+        elif op == "stop":
+            if self.policy.stop_cooldown_s > 0 and pacer:
+                ready = pacer.last_stop + self.policy.stop_cooldown_s
+                if ready > now:
+                    return LifecycleDecision(
+                        False, OUTCOME_RATE_LIMITED, ready - now,
+                        "account_cooldown")
+            ok, retry = self._stop_bucket.peek()
+        else:  # pragma: no cover - internal misuse
+            raise ValueError(f"unknown lifecycle op {op!r}")
+        if not ok:
+            return LifecycleDecision(
+                False, OUTCOME_RATE_LIMITED, retry, "global_bucket")
+        return LifecycleDecision(
+            True, OUTCOME_STARTED if op == "start" else OUTCOME_STOPPED)
 
     def stats(self) -> Dict[str, Any]:
         return {
@@ -269,9 +328,9 @@ class LifecycleGovernor:
             },
             "counters": dict(self.counters),
             "cooldowns": {
-                name: self.retry_after(name, "start")
+                name: delay
                 for name in sorted(self._pacers)
-                if self.retry_after(name, "start") > 0
+                if (delay := self._peek(name, "start").retry_after_s) > 0
             },
         }
 
