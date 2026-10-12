@@ -539,6 +539,14 @@ class FleetStubAPI(StubAPI):
     async def accounts_effective_settings(self, account, plugin):
         return {"trigger": "go", "channels": {"allow": ["1"]}}
 
+    async def _plugin_schema(self, plugin):
+        from core.settings_manager import Setting
+        if plugin != "probe":
+            return ()
+        return (Setting("trigger", "str", "go", "fixture trigger word"),
+                Setting("factor", "float", 2.0, "multiplier",
+                        min_value=0.1, max_value=10.0))
+
 
 def make_fleet_registry():
     api = FleetStubAPI()
@@ -672,13 +680,39 @@ class TestProfilesPage(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.success)
         self.assertIn(("p-create", "probe", "fast2"), api.fleet_calls)
 
-    async def test_editor_rejects_bad_json(self):
+    async def test_editor_fields_come_from_schema(self):
         from core import framework_ui
         reg, api = make_fleet_registry()
-        framework_ui._profiles_state["editor"] = {"plugin": "probe", "name": None}
+        framework_ui._profiles_state["editor"] = {
+            "plugin": "probe", "name": None,
+            "settings": {"trigger": "custom", "factor": 3.5}}
+        data = await reg.get_data(FRAMEWORK_PLUGIN, "editor-form", None)
+        by_id = {f["id"]: f for f in data["fields"]}
+        self.assertEqual(by_id["trigger"]["type"], "text")
+        self.assertEqual(by_id["trigger"]["value"], "custom")
+        self.assertEqual(by_id["factor"]["type"], "number")
+        self.assertEqual(by_id["factor"]["value"], "3.5")
+
+    async def test_editor_submit_typed_settings(self):
+        from core import framework_ui
+        reg, api = make_fleet_registry()
+        framework_ui._profiles_state["editor"] = {"plugin": "probe", "name": None,
+                                                  "settings": {}}
         ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="editor-form")
         result = await reg.dispatch_action(
             FRAMEWORK_PLUGIN, "editor-form",
-            {"pe-name": "x", "pe-settings": "{not json"}, ctx)
+            {"pe-name": "typed", "trigger": "go", "factor": 2.5}, ctx)
+        self.assertTrue(result.success, result.message)
+        self.assertIn(("p-create", "probe", "typed"), api.fleet_calls)
+
+    async def test_editor_rejects_bad_channels_json(self):
+        from core import framework_ui
+        reg, api = make_fleet_registry()
+        framework_ui._profiles_state["editor"] = {"plugin": "probe", "name": None,
+                                                  "settings": {}}
+        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="editor-form")
+        result = await reg.dispatch_action(
+            FRAMEWORK_PLUGIN, "editor-form",
+            {"pe-name": "x", "pe-channels": "{not json"}, ctx)
         self.assertFalse(result.success)
-        self.assertIn("pe-settings", result.field_errors)
+        self.assertIn("pe-channels", result.field_errors)

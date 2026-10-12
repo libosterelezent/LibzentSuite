@@ -807,6 +807,7 @@ class Form(UIContainer):
         self._client_action: str | None = None
         self._field_columns: int | str | None = None
         self._close_on_submit: bool | None = None
+        self._data_source = None      # fields provider (schema-driven)
 
     def set_submit_action(self, action) -> "Form":
         self._check_frozen("set the submit action")
@@ -824,6 +825,21 @@ class Form(UIContainer):
         field errors, success not False)."""
         self._check_frozen("set close_on_submit")
         self._close_on_submit = _require_bool(close, "close_on_submit")
+        return self
+
+    def set_fields_provider(self, provider) -> "Form":
+        """DYNAMIC fields: a callable returning ``{"fields": [def, …]}``
+        where each def is ``{id, type, label, value?, placeholder?,
+        description?, required?, options?, min?, max?, step?}`` and type
+        is one of text/number/textarea/select/checkbox. Fetched lazily —
+        the form adapts to live schema (the profile editor pattern:
+        fields come from the plugin's setting schema, values from the
+        profile being edited). May not be combined with static fields.
+        """
+        self._check_frozen("set the fields provider")
+        # static fields may coexist: the dynamic block renders ABOVE them
+        # (schema settings first, then identity fields like name/desc)
+        self._data_source = _require_callable(provider, "fields provider")
         return self
 
     def set_columns(self, columns) -> "Form":
@@ -900,6 +916,8 @@ class Form(UIContainer):
             props["columns"] = self._field_columns
         if self._close_on_submit is not None:
             props["close_on_submit"] = self._close_on_submit
+        if self._data_source is not None:
+            props["fields_live"] = True
         return props
 
     def _validate(self) -> list[str]:

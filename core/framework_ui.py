@@ -80,6 +80,17 @@ def _fmt_uptime(seconds: float) -> str:
     return f"{s // 86400}d{(s % 86400) // 3600}h"
 
 
+async def _schema_for(api: Any, plugin: str) -> tuple:
+    """Plugin setting schema — sync or async duck-typed, failure-tolerant."""
+    try:
+        raw = api._plugin_schema(plugin)
+        if hasattr(raw, "__await__"):
+            raw = await raw
+        return tuple(raw or ())
+    except Exception:
+        return ()
+
+
 async def _status(api: Any) -> Dict[str, Any]:
     """status() with a hard fallback — pages must render even when the
     managers are mid-reconcile."""
@@ -1101,23 +1112,21 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
                         "missing_credential": "warn"}.get(status, "info")
                 if not a.get("credential") and tone not in ("err", "warn"):
                     tone = "warn"   # missing credential always flags
-                lines = []
-                lines.append(["Credential",
-                              ("ok (" + a.get("credential") + ")")
-                              if a.get("credential") else "missing"])
+                meta = [["🔑", a.get("credential") or "missing"]]
                 if a.get("uptime_s"):
-                    lines.append(["Uptime", _fmt_uptime(a["uptime_s"])])
+                    meta.append(["⏱", _fmt_uptime(a["uptime_s"])])
                 if a.get("latency_ms") is not None:
-                    lines.append(["Latency", f"{a['latency_ms']:.0f}ms"])
+                    meta.append(["⚡", f"{a['latency_ms']:.0f}ms"])
                 if a.get("cooldowns"):
-                    lines.append(["Cooldowns", str(a["cooldowns"])])
-                lines.append(["Group", a.get("sync_group") or "independent"])
-                lines.append(["Plugins",
-                              ", ".join(a.get("assigned_plugins") or [])
-                              or "none"])
+                    meta.append(["⏳", str(a["cooldowns"])])
+                chips = []
+                if a.get("sync_group"):
+                    chips.append({"text": a["sync_group"], "kind": "group"})
+                for pname in (a.get("assigned_plugins") or []):
+                    chips.append({"text": pname, "kind": "plugin"})
                 tiles.append({"key": a.get("name", "?"), "title": a.get("name", "?"),
                               "status": status, "tone": tone,
-                              "lines": lines})
+                              "meta": meta, "chips": chips})
             return {"tiles": tiles}
         return provide
 
@@ -1335,14 +1344,14 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
                 chips = [m["name"] for m in members[:8]]
                 if len(members) > 8:
                     chips.append(f"+{len(members)-8} more")
-                lines = [["Members", f"{online}/{count} online" if count else "empty"]]
-                if g.get("description"):
-                    lines.insert(0, ["Description", g["description"]])
                 tiles.append({"key": name, "title": name,
                               "status": (f"{online}/{count}" if count else "empty")
                                          + (" · off" if g.get("enabled") is False else ""),
                               "tone": tone,
-                              "lines": lines,
+                              "meta": [["👥", f"{count} member{'' if count == 1 else 's'}"
+                                         + (f" · {online} online" if online else "")]]
+                                        + ([["🏷", g["description"]]]
+                                           if g.get("description") else []),
                               "chips": chips})
             return {"tiles": tiles}
         return provide
@@ -1626,12 +1635,9 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
                     "key": pname, "title": pname,
                     "status": "bound" if bound else "default",
                     "tone": "ok" if bound else "info",
-                    "chips": [bound] if bound else [],
-                    "lines": [
-                        ["Version", (m or {}).get("version", "?")],
-                        ["Library", f"{counts.get(pname, 0)} profile(s)"],
-                        ["Bound", bound or "plugin defaults"],
-                    ]})
+                    "meta": [["🏷", f"v{(m or {}).get('version', '?')}"],
+                             ["📚", f"{counts.get(pname, 0)} profile(s) in library"]],
+                    "chips": [{"text": bound, "kind": "plugin"}] if bound else []})
             return {"tiles": tiles}
         return provide
 
@@ -1640,13 +1646,22 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
         return {"open_modal": "bind-modal", "refresh": ["bind-profiles"]}
 
     async def open_editor(row, ctx):
-        _profiles_state["editor"] = {"plugin": row, "name": None}
-        return {"open_modal": "editor-modal"}
+        _profiles_state["editor"] = {"plugin": row, "name": None, "settings": {}}
+        return {"open_modal": "editor-modal", "refresh": ["editor-form"]}
 
     async def edit_profile(row, ctx):
         plugin, _, name = row.partition("|")
-        _profiles_state["editor"] = {"plugin": plugin, "name": name}
-        return {"open_modal": "editor-modal"}
+        settings: Dict[str, Any] = {}
+        if name:
+            try:
+                profiles = await api.plugin_profiles_list(plugin) or []
+                prof = next((x for x in profiles if x.get("name") == name), None)
+                settings = dict((prof or {}).get("settings") or {})
+            except Exception:
+                settings = {}
+        _profiles_state["editor"] = {"plugin": plugin, "name": name,
+                                     "settings": settings}
+        return {"open_modal": "editor-modal", "refresh": ["editor-form"]}
 
     async def unbind(row, ctx):
         account = _profiles_state.get("account")
@@ -1690,6 +1705,43 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
                 "message": f"{plugin}: {choice or 'default'} bound to {account}",
                 "refresh": ["prof-tiles"]}
 
+    def _editor_fields(api):
+        async def provide(ctx):
+            ed = _profiles_state.get("editor") or {}
+            plugin = ed.get("plugin")
+            if not plugin:
+                return {"fields": []}
+            schema = await _schema_for(api, plugin)
+            current = dict(ed.get("settings") or {})
+            fields = []
+            for s in schema or ():
+                name = getattr(s, "name", None)
+                stype = getattr(s, "type", "str")
+                if not name:
+                    continue
+                value = current.get(name, getattr(s, "default", None))
+                f: Dict[str, Any] = {"id": name, "type": "text",
+                                     "label": name,
+                                     "description": getattr(s, "description", "") or ""}
+                if stype in ("int", "float"):
+                    f["type"] = "number"
+                    f["step"] = 1 if stype == "int" else 0.1
+                    if getattr(s, "min_value", None) is not None:
+                        f["min"] = s.min_value
+                    if getattr(s, "max_value", None) is not None:
+                        f["max"] = s.max_value
+                    if value is not None:
+                        f["value"] = str(value)
+                elif stype == "bool":
+                    f["type"] = "checkbox"
+                    f["value"] = bool(value)
+                else:
+                    if value is not None:
+                        f["value"] = str(value)
+                fields.append(f)
+            return {"fields": fields}
+        return provide
+
     async def submit_editor(ctx, payload):
         ed = _profiles_state.get("editor") or {}
         plugin = ed.get("plugin")
@@ -1700,17 +1752,23 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
             return {"success": False, "field_errors": {
                 "pe-name": "Profile name is required."}}
         import json as _json
+        # schema-driven fields arrive typed under their setting names;
+        # the only raw JSON left is the channel scope
+        schema = await _schema_for(api, plugin)
         settings: Dict[str, Any] = {}
-        raw = str(payload.get("pe-settings") or "").strip()
-        if raw:
-            try:
-                settings = _json.loads(raw)
-            except ValueError:
-                return {"success": False, "field_errors": {
-                    "pe-settings": "Settings must be valid JSON."}}
-            if not isinstance(settings, dict):
-                return {"success": False, "field_errors": {
-                    "pe-settings": "Settings must be a JSON object."}}
+        for s in schema or ():
+            sname = getattr(s, "name", None)
+            if not sname or sname not in payload:
+                continue
+            raw_v = payload.get(sname)
+            if getattr(s, "type", "str") == "int":
+                settings[sname] = int(raw_v)
+            elif getattr(s, "type", "str") == "float":
+                settings[sname] = float(raw_v)
+            elif getattr(s, "type", "str") == "bool":
+                settings[sname] = bool(raw_v)
+            else:
+                settings[sname] = str(raw_v)
         channels_raw = str(payload.get("pe-channels") or "").strip()
         if channels_raw:
             try:
@@ -1821,24 +1879,21 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
                                    .set_options_provider(_bind_options(api)))))
      .add_modal(ui.Modal(component_id="editor-modal").set_title("Profile editor")
         .add_component(ui.Form(component_id="editor-form")
-                       .set_description("Settings and channel scope are JSON — "
-                                        "validated against the plugin schema "
+                       .set_description("Settings fields come from the plugin's "
+                                        "schema; values are validated "
                                         "server-side.")
                        .set_close_on_submit(True)
+                       .set_fields_provider(_editor_fields(api))
                        .set_submit_action(submit_editor).set_submit_label("Save Profile")
                        .add_fields(ui.TextInput(component_id="pe-name")
                                    .set_label("Profile name").set_max_length(64)
                                    .set_required(True),
                                    ui.TextInput(component_id="pe-desc")
                                    .set_label("Description").set_max_length(200),
-                                   ui.Textarea(component_id="pe-settings")
-                                   .set_label("Settings (JSON)")
-                                   .set_rows(8)
-                                   .set_placeholder('{"trigger": "go"}'),
                                    ui.Textarea(component_id="pe-channels")
-                                   .set_label("Channel scope (JSON)")
-                                   .set_rows(4)
-                                   .set_placeholder('{"allow": ["123..."]}'))))
+                                   .set_label("Channel scope (JSON, optional)")
+                                   .set_rows(3)
+                                   .set_placeholder('{"allow": ["channel-id…"]}'))))
      .add_modal(ui.Modal(component_id="effective-modal").set_title("Effective settings")
         .add_component(ui.ListView(component_id="eff-lines")
                        .set_empty_text("no settings")

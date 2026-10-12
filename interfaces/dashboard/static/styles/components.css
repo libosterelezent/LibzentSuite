@@ -302,7 +302,8 @@ dialog .dlg-foot { display: flex; gap: var(--sp-2); justify-content: flex-end; p
    in .dui-item wrappers (label above control, hint below) so every plugin
    page gets identical rhythm. Checkbox/radio choices reuse the structured
    .pick-row grid; the toggle is a switch-skinned checkbox. */
-.dui-page { display: flex; flex-direction: column; gap: var(--sp-4);
+.dui-page { display: flex; flex-direction: column; gap: var(--sp-5);
+  max-width: 1280px; margin: 0 auto; width: 100%;
   width: 100%; max-width: 100%; min-width: 0; }
 .dui-desc { margin-top: calc(-1 * var(--sp-2)); }
 .dui-section, .dui-tab, .dui-card, .dui-form { display: flex; flex-direction: column;
@@ -326,23 +327,36 @@ dialog .dlg-foot { display: flex; gap: var(--sp-2); justify-content: flex-end; p
   responsive via the minmax floor), repeat(n, …) for explicit counts —
   never overridden by media queries, the author chose n */
 
-/* TileView — responsive card grid fed by a provider */
+/* TileView — responsive card grid fed by a provider. Tiles carry the
+   legacy cards' visual language: status pill (.st), icon meta row,
+   colored chips, tone accent border, hover affordance. */
 .dui-tiles { display: grid; gap: var(--sp-3);
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
 .dui-tile { background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--r); padding: var(--sp-3); display: flex;
+  border-radius: var(--r); padding: var(--sp-3) var(--sp-4); display: flex;
   flex-direction: column; gap: var(--sp-2); min-width: 0;
-  border-left: 3px solid var(--border2); }
+  border-left: 3px solid var(--border2); transition: border-color .12s, box-shadow .12s; }
+.dui-tile:hover { border-color: var(--border2); border-left-color: var(--accent);
+  box-shadow: var(--shadow); }
 .dui-tile-ok { border-left-color: var(--ok); }
+.dui-tile-ok:hover { border-left-color: var(--ok); }
 .dui-tile-warn { border-left-color: var(--warn); }
+.dui-tile-warn:hover { border-left-color: var(--warn); }
 .dui-tile-err { border-left-color: var(--err); }
+.dui-tile-err:hover { border-left-color: var(--err); }
 .dui-tile-info { border-left-color: var(--accent); }
-.dui-tile-hdr { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
-.dui-tile-title { font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
+.dui-tile-hdr { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+.dui-tile-hdr .st { margin-left: auto; flex-shrink: 0; }
+.dui-tile-title { font-weight: 600; font-size: 15px; overflow-wrap: anywhere; }
+.dui-tile-meta { display: flex; flex-wrap: wrap; gap: 4px var(--sp-3);
+  font-size: 12px; color: var(--dim); }
+.dui-tile-meta .item { display: inline-flex; align-items: baseline; gap: 4px; }
+.dui-tile-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .dui-tile-lines { display: flex; flex-direction: column; gap: 3px; }
 .dui-tile-lines .dui-kv { display: flex; justify-content: space-between; gap: var(--sp-3);
   font-size: 12px; min-width: 0; }
-.dui-tile-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }
+.dui-tile-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto;
+  padding-top: var(--sp-2); border-top: 1px solid var(--border); }
 .dui-tile-check { position: absolute; }
 .dui-tile { position: relative; }
 .dui-tile-check input { width: 15px; height: 15px; }
@@ -387,6 +401,7 @@ dialog.dui-modal .dlg-body { max-height: min(70vh, 640px); overflow-y: auto;
 /* Metric CARDS — readouts sit in boxed cells instead of floating */
 .dui-item > .metric { background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--r); padding: var(--sp-3) var(--sp-4); height: 100%; }
+.dui-item > .metric .value { font-size: 22px; font-weight: 600; }
 
 /* Code blocks (logs, audit, reports, scenario lists) — bounded,
    scrollable panes instead of page-stretching walls of text */

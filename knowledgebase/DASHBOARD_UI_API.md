@@ -216,10 +216,25 @@ columns (the renderer never displays it):
 rows.append([visible, cells, ..., f"{account}|{plugin}"])   # __key rides last
 ```
 
+**Rich tiles** — a tile dict may carry `status` (rendered as the same
+`.st` pill the legacy cards used, colored by `tone`), `meta`
+(`[[icon, value], …]` — compact icon-prefaced row: 🔑 db · ⏱ 1h · ⚡
+88ms), `chips` (plain strings or `{text, kind}` with the legacy chip
+colors: group/plugin/ok/warn/err) and `lines` (label/value grid).
+
 **Bulk selection** — `Table`/`TileView` `.set_selectable(True)` renders
 a checkbox per row/tile; `.set_bulk_actions([BulkAction(...)])` adds the
 bulk bar (shown while rows are selected). BulkAction handlers receive
 the selected key LIST: `action(rows, context)`.
+
+**Dynamic form fields** — `Form.set_fields_provider(callable)`: the
+provider returns `{"fields": [{id, type, label, value?, placeholder?,
+description?, required?, options?, min?, max?, step?}]}` (types:
+text/number/textarea/select/checkbox) and the renderer builds REAL
+inputs, pre-filled — the schema-driven editor pattern (the profile
+editor's fields come from the plugin's setting schema, values from the
+profile being edited). May combine with static identity fields; a
+refresh naming the form re-fetches the fields.
 
 **Dynamic options** — `Select.set_options_provider(callable)` (also on
 RadioGroup/MultiSelect): the provider returns `{"options": [...],

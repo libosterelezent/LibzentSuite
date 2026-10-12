@@ -35,6 +35,8 @@ let duiComps = {};
 let duiDataCache = {};
 /* bulk-selection state: view component id -> Set of selected keys */
 const duiSelection = {};
+/* dynamic form fields: form id -> field defs from a fields provider */
+const duiFormFields = {};
 
 function duiSelected(compId) {
   duiSelection[compId] = duiSelection[compId] || new Set();
@@ -172,7 +174,10 @@ function refreshDashboardUIData(pluginName, ids) {
     const host = document.querySelector('[data-dui-body="' + id + '"][data-dui-plugin="' + duiSlug(pluginName) + '"]');
     if (host) { loadDUIData(pluginName, id, host, true); continue; }
     const leaf = document.querySelector('[data-dui-live="' + id + '"]');
-    if (leaf) loadDUILive(pluginName, id, leaf);
+    if (leaf) { loadDUILive(pluginName, id, leaf); continue; }
+    // dynamic form fields (schema-driven editors) re-fetch too
+    const fields = document.querySelector('[data-dui-fields="' + id + '"]');
+    if (fields) loadDuiFormFields(pluginName, id, fields);
   }
 }
 
@@ -283,17 +288,30 @@ function duiTilesHTML(comp, data, compId) {
   if (!tiles.length) return duiEmpty(comp.empty_text);
   const rowActions = Array.isArray(comp.row_actions) ? comp.row_actions : [];
   const keyCol = String(comp.key_column || "key");
+  const ST = {ok: "online", warn: "warning", err: "offline", info: "info"};
   const cards = tiles.map(t => {
     if (!t || typeof t !== "object") return "";
     const key = String(t[keyCol] ?? t.key ?? "");
-    const tone = ["ok", "warn", "err", "info"].includes(t.tone) ? ` dui-tile-${esc(t.tone)}` : "";
+    const tone = ["ok", "warn", "err", "info"].includes(t.tone) ? t.tone : null;
     const sel = comp.selectable === true
       ? `<label class="dui-tile-check" title="Select for bulk actions">` +
         `<input type="checkbox" data-dui-sel="${esc(compId)}" data-dui-key="${esc(key)}"${duiSelected(compId).has(key) ? " checked" : ""}></label>` : "";
+    // status pill: the same .st badges the legacy cards used
     const status = t.status
-      ? `<span class="st st-${["ok", "warn", "err", "info"].includes(t.tone) ? esc(t.tone) : "dim"}">${esc(t.status)}</span>` : "";
-    const chips = (Array.isArray(t.chips) ? t.chips : [])
-      .map(c => `<span class="chip">${esc(c)}</span>`).join("");
+      ? `<span class="st st-${tone ? ST[tone] : "dim"}">${esc(t.status)}</span>` : "";
+    // chips: plain strings or {text, kind} with the legacy chip colors
+    const chips = (Array.isArray(t.chips) ? t.chips : []).map(c => {
+      const text = (c && typeof c === "object") ? c.text : c;
+      const kind = (c && typeof c === "object" &&
+                    ["group", "plugin", "ok", "warn", "err"].includes(c.kind))
+        ? ` ${esc(c.kind)}` : "";
+      return `<span class="chip${kind}">${esc(text)}</span>`;
+    }).join("");
+    // meta: compact icon-prefaced items (🔑 db · ⏱ 1h · ⚡ 88ms · ⏳ 2)
+    const meta = (Array.isArray(t.meta) ? t.meta : []).map(m =>
+      Array.isArray(m) && m.length >= 2
+        ? `<span class="item" title="${esc(String(m[0]))}">${esc(String(m[0]))} ${duiCell(m[1])}</span>`
+        : "").join("");
     const lines = (Array.isArray(t.lines) ? t.lines : [])
       .map(l => Array.isArray(l) && l.length >= 2
         ? `<span class="dui-kv"><span class="dim">${esc(l[0])}</span><span class="dui-kv-v">${duiCell(l[1])}</span></span>`
@@ -303,8 +321,10 @@ function duiTilesHTML(comp, data, compId) {
           `<button type="button" class="btn btn-sm btn-${esc(a.variant || "secondary")}"` +
           ` data-dui-rowact="${esc(compId)}" data-dui-raction="${esc(a.id)}"` +
           ` data-dui-row="${esc(key)}"${a.confirm ? ` title="${esc(a.confirm)}"` : ""}>${esc(a.label)}</button>`).join(" ") + `</div>` : "";
-    return `<div class="dui-tile${tone}">` + sel +
-      `<div class="dui-tile-hdr"><span class="dui-tile-title" title="${esc(key)}">${esc(t.title ?? key)}</span>${status}${chips}</div>` +
+    return `<div class="dui-tile${tone ? ` dui-tile-${esc(tone)}` : ""}">` + sel +
+      `<div class="dui-tile-hdr"><span class="dui-tile-title" title="${esc(key)}">${esc(t.title ?? key)}</span>${status}</div>` +
+      (meta ? `<div class="dui-tile-meta">${meta}</div>` : "") +
+      (chips ? `<div class="dui-tile-chips">${chips}</div>` : "") +
       (lines ? `<div class="dui-tile-lines">${lines}</div>` : "") + acts + `</div>`;
   }).join("");
   return duiBulkBarHTML(comp, compId) + `<div class="dui-tiles">${cards}</div>`;
@@ -759,6 +779,44 @@ function renderTextarea(comp, disabled) {
     duiHint(comp) + `</div>`;
 }
 
+async function loadDuiFormFields(pluginName, id, host) {
+  let data = null;
+  try {
+    data = await api("/api/dashboard-ui/data?plugin=" + encodeURIComponent(pluginName) +
+                     "&component_id=" + encodeURIComponent(id));
+  } catch (e) {
+    host.innerHTML = duiAlertHTML("err", "Fields unavailable", e.message);
+    return;
+  }
+  const defs = (data && Array.isArray(data.fields)) ? data.fields : null;
+  if (!defs) {
+    host.innerHTML = duiAlertHTML("warn", "No fields",
+      "the fields provider returned no definitions");
+    return;
+  }
+  duiFormFields[id] = defs;
+  const TYPE_MAP = {text: "text-input", number: "number-input",
+                    textarea: "textarea", select: "select",
+                    checkbox: "checkbox"};
+  host.innerHTML = defs.map(d => {
+    if (!d || !d.id) return "";
+    const comp = {
+      type: TYPE_MAP[d.type] || "text-input",
+      id: String(d.id),
+      label: d.label != null ? String(d.label) : String(d.id),
+      value: d.value,
+      placeholder: d.placeholder,
+      description: d.description,
+      required: d.required === true,
+      options: Array.isArray(d.options) ? d.options : [],
+      min_value: d.min, max_value: d.max, step: d.step,
+    };
+    return renderDashboardUIComponent(comp, pluginName, false);
+  }).join("") || `<span class="dim">no settings in the schema</span>`;
+  // options-backed selects inside dynamic fields
+  host.querySelectorAll("[data-dui-field] select").forEach(() => {});
+}
+
 async function loadDuiOptions(pluginName, id, wrapper) {
   let data = null;
   try {
@@ -881,6 +939,9 @@ function renderForm(comp, pluginName, disabled) {
   }
   if (gridStyle)
     body = `<div class="dui-form-grid" style="${gridStyle}">${body}</div>`;
+  if (comp.fields_live)
+    body = `<div class="dui-form-grid dui-fields-live" data-dui-fields="${esc(comp.id)}">` +
+           `<span class="dim">loading fields…</span></div>` + body;
   return `<div class="dui-form" data-dui-comp="${esc(comp.id)}" data-dui-form="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
     (comp.title ? `<div class="dui-sec-title">${esc(comp.title)}</div>` : "") +
     (comp.description ? `<p class="sub">${esc(comp.description)}</p>` : "") +
@@ -943,6 +1004,11 @@ function wireDashboardUI(root, pluginName) {
     if (comp.options_live) loadDuiOptions(pluginName, id, el);
   });
 
+  // dynamic form fields: forms with a fields provider (schema-driven)
+  root.querySelectorAll("[data-dui-fields]").forEach(el => {
+    loadDuiFormFields(pluginName, el.dataset.duiFields, el);
+  });
+
   // live leaves (metrics / texts with data providers): first fetch
   loadDUILeaves(root, pluginName);
 
@@ -954,7 +1020,9 @@ function wireDashboardUI(root, pluginName) {
     if (!btn) return;
     btn.onclick = async () => {
       const payload = {};
-      for (const field of (comp.children || [])) {
+      const defs = [...(comp.children || []),
+                    ...(duiFormFields[id] || [])];
+      for (const field of defs) {
         if (!DUI_INPUT_TYPES.includes(field.type) || !field.id) continue;
         payload[field.id] = duiFieldValue(field, formEl);
       }
