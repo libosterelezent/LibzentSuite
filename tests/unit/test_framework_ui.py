@@ -539,6 +539,11 @@ class FleetStubAPI(StubAPI):
     async def accounts_effective_settings(self, account, plugin):
         return {"trigger": "go", "channels": {"allow": ["1"]}}
 
+    async def accounts_channels(self, account):
+        return [{"guild_id": "999", "guild_name": "Test Guild",
+                 "channels": [{"id": "111", "name": "general", "type": 0},
+                              {"id": "222", "name": "grind", "type": 0}]}]
+
     async def _plugin_schema(self, plugin):
         from core.settings_manager import Setting
         if plugin != "probe":
@@ -705,7 +710,26 @@ class TestProfilesPage(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.success, result.message)
         self.assertIn(("p-create", "probe", "typed"), api.fleet_calls)
 
-    async def test_editor_rejects_bad_channels_json(self):
+    async def test_editor_fields_include_channel_selector(self):
+        from core import framework_ui
+        reg, api = make_fleet_registry()
+        framework_ui._profiles_state["account"] = "a1"
+        framework_ui._profiles_state["editor"] = {
+            "plugin": "probe", "name": None,
+            "settings": {"channels": {"mode": "allow",
+                                      "rules": [{"guild_id": "999",
+                                                 "channel_ids": ["111"]}]}}}
+        data = await reg.get_data(FRAMEWORK_PLUGIN, "editor-form", None)
+        by_id = {f["id"]: f for f in data["fields"]}
+        self.assertIn("ch:999", by_id)
+        guild_field = by_id["ch:999"]
+        self.assertEqual(guild_field["type"], "multiselect")
+        self.assertEqual(guild_field["label"], "Test Guild")
+        self.assertEqual([o["value"] for o in guild_field["options"]],
+                         ["111", "222"])
+        self.assertEqual(guild_field["value"], ["111"])   # pre-checked
+
+    async def test_editor_submit_packs_channel_scope(self):
         from core import framework_ui
         reg, api = make_fleet_registry()
         framework_ui._profiles_state["editor"] = {"plugin": "probe", "name": None,
@@ -713,6 +737,10 @@ class TestProfilesPage(unittest.IsolatedAsyncioTestCase):
         ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="editor-form")
         result = await reg.dispatch_action(
             FRAMEWORK_PLUGIN, "editor-form",
-            {"pe-name": "x", "pe-channels": "{not json"}, ctx)
-        self.assertFalse(result.success)
-        self.assertIn("pe-channels", result.field_errors)
+            {"pe-name": "scoped", "pe-scope-mode": "allow",
+             "ch:999": ["111", "222"]}, ctx)
+        self.assertTrue(result.success, result.message)
+        create_calls = [c for c in api.fleet_calls if c[0] == "p-create"]
+        self.assertTrue(create_calls)
+
+

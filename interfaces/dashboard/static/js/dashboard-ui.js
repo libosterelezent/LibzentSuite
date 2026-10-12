@@ -797,7 +797,8 @@ async function loadDuiFormFields(pluginName, id, host) {
   duiFormFields[id] = defs;
   const TYPE_MAP = {text: "text-input", number: "number-input",
                     textarea: "textarea", select: "select",
-                    checkbox: "checkbox"};
+                    checkbox: "checkbox", multiselect: "multi-select",
+                    radio: "radio-group"};
   host.innerHTML = defs.map(d => {
     if (!d || !d.id) return "";
     const comp = {

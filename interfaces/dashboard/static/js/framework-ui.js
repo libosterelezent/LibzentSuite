@@ -51,15 +51,16 @@ async function renderFrameworkTab(view) {
     return;
   }
   renderDashboardUIPage(page, FRAMEWORK_PLUGIN, panel);
+  panel.dataset.fwRendered = view;   // REAL-TIME marker: quiet updates from here on
 }
 
 /* Refresh the active framework tab's dynamic parts IN PLACE: data bodies
    re-fetch quietly (no skeleton flash) and live metrics/texts update.
    Structural changes still go through render() → renderFrameworkTab. */
-function refreshFrameworkData() {
+function refreshFrameworkData(force) {
   if (!isFrameworkView(currentView)) return;
   const now = Date.now();
-  if (now - fwLastRefresh < 2000) return;   // throttle the WS tick path
+  if (!force && now - fwLastRefresh < 1200) return;   // throttle the WS tick path
   fwLastRefresh = now;
   const panel = $("panel-" + currentView);
   if (!panel) return;

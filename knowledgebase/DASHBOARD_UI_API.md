@@ -233,8 +233,18 @@ description?, required?, options?, min?, max?, step?}]}` (types:
 text/number/textarea/select/checkbox) and the renderer builds REAL
 inputs, pre-filled — the schema-driven editor pattern (the profile
 editor's fields come from the plugin's setting schema, values from the
-profile being edited). May combine with static identity fields; a
+profile being edited; its CHANNEL SELECTOR is per-guild multiselect
+fields built from the account's live channel cache, pre-checked from
+the profile's scope rules). Types: text/number/textarea/select/
+checkbox/multiselect/radio. May combine with static identity fields; a
 refresh naming the form re-fetches the fields.
+
+**Real-time data** — every data component IS live: data bodies
+(tables/tiles/lists) and live leaves re-fetch on the WebSocket stats
+tick (~1s throttle) and after any action's refresh list, IN PLACE —
+the framework pages never rebuild mid-view, so open modals and
+half-filled forms survive account status flips and fleet changes.
+Dynamic fields (below) refetch when a refresh names their form.
 
 **Dynamic options** — `Select.set_options_provider(callable)` (also on
 RadioGroup/MultiSelect): the provider returns `{"options": [...],

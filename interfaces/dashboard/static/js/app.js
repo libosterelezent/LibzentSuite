@@ -110,7 +110,11 @@ function render() {
   // The main tabs that migrated to the builder API render through the
   // generic framework pages; the rest keep their hand-coded renderers.
   if (isFrameworkView(currentView)) {
-    renderFrameworkTab(currentView);
+    const panel = $("panel-" + currentView);
+    if (panel && panel.dataset.fwRendered === currentView)
+      refreshFrameworkData(true);   // REAL-TIME: data updates in place
+    else
+      renderFrameworkTab(currentView);
   } else {
     if (currentView==="home") renderHome();
     if (currentView==="plugins") renderPlugins();
