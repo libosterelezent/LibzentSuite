@@ -1060,8 +1060,13 @@ class ControlAPI:
 
     async def plugins_reload(self, plugin: str,
                              surface: str = "api") -> Dict[str, Any]:
-        """Hot-reload one plugin (detach → re-import → re-attach)."""
-        if plugin not in self._plugins.names():
+        """Hot-reload one plugin (detach → re-import → re-attach).
+
+        The reserved name ``"__rescan__"`` re-scans the plugin directory
+        instead (no single plugin targeted) — the Plugins page's rescan
+        button.
+        """
+        if plugin != "__rescan__" and plugin not in self._plugins.names():
             raise ValueError(f"unknown plugin {plugin!r}")
         out = self._plugins.reload_plugin(plugin)
         self._audit_mgmt("system", "mgmt:plugin.reloaded", surface,

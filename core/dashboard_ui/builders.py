@@ -40,6 +40,7 @@ from .components import (
     Progress,
     RadioGroup,
     Row,
+    RowAction,
     Section,
     Select,
     Tab,
@@ -48,6 +49,10 @@ from .components import (
     TextInput,
     Textarea,
     Toggle,
+    Separator,
+    Description,
+    Header,
+    Footer,
 )
 from .errors import (
     ActionRegistrationError,
@@ -171,6 +176,7 @@ class DashboardUIToolset:
     Section = Section
     Card = Card
     Row = Row
+    RowAction = RowAction
     Column = Column
     Text = Text
     Badge = Badge
@@ -187,4 +193,8 @@ class DashboardUIToolset:
     Table = Table
     Progress = Progress
     Button = Button
+    Separator = Separator
+    Description = Description
+    Header = Header
+    Footer = Footer
     Form = Form

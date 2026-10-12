@@ -147,11 +147,13 @@ function renderPolicies() {
 
 /* ── Activity: tasks / cooldowns / logs / audit ────────────────────────────── */
 function renderTaskTable() {
+  const cnt = $("cnt-tasks");
+  const tbl = $("task-table");
+  if (!cnt || !tbl) return;   // legacy activity hosts replaced by the framework page
   const st = $("task-filter-status")?.value||"";
   const ac = $("task-filter-account")?.value||"";
   const filtered = taskList.filter(t=>(!st||t.status===st)&&(!ac||t.account===ac));
-  $("cnt-tasks").textContent = filtered.length;
-  const tbl = $("task-table");
+  cnt.textContent = filtered.length;
   if (!filtered.length) { tbl.innerHTML="<tbody><tr><td style='text-align:center;padding:20px;color:var(--dim)'>No active tasks</td></tr></tbody>"; return; }
   tbl.innerHTML = `<thead><tr><th>Account</th><th>Plugin</th><th>Action</th><th>Status</th><th>Priority</th><th>Age</th><th></th></tr></thead><tbody>` +
     filtered.map(t=>`<tr><td>${esc(t.account)}</td><td>${esc(t.plugin)}</td><td>${esc(t.action)}</td>

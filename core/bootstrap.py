@@ -586,6 +586,17 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     # RemoteControl bus handler is retired (class kept for compat; the
     # simulator stack still exercises it for its control_mention scenario).
     COMMAND_HUB.api_provider = lambda: api
+
+    # The dashboard's MAIN TABS are framework UI pages built with the same
+    # builder API plugins use — registered here so they exist from boot
+    # (the SPA routes the home/plugins/activity/policies/admin/tools views
+    # through the generic renderer).
+    from core.framework_ui import attach_framework_ui
+    try:
+        attach_framework_ui(plugins.ui_registry, api)
+    except Exception:
+        LOG.exception("framework UI attach failed — dashboard falls back "
+                      "to the legacy panels")
     return Framework(
         api=api, bus=bus, logs=logs, limiter=limiter, scheduler=scheduler,
         accounts=accounts, plugins=plugins, profiles=profiles, settings=settings,

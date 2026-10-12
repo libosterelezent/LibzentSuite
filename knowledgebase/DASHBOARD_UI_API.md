@@ -119,10 +119,21 @@ untouched.
 
 | Builder | Key setters | Purpose |
 |---|---|---|
-| `Text` | `set_value`, `set_variant("body"\|"muted"\|"code"\|"heading")` | a text block |
+| `Text` | `set_value`, `set_variant("body"\|"muted"\|"code"\|"heading")`, `set_data_source(callable)` (live) | a text block |
 | `Badge` | `set_value`, `set_variant("info"\|"ok"\|"warn"\|"err")` | a status pill |
-| `Metric` | `set_label`, `set_value` (str), `set_sub`, `set_level(""\|"ok"\|"warn"\|"err")` | a label/value readout |
+| `Metric` | `set_label`, `set_value` (str), `set_sub`, `set_level(""\|"ok"\|"warn"\|"err")`, `set_data_source(callable)` (live) | a label/value readout |
 | `Progress` | `set_value` (number 0–100), `set_label` | a progress bar |
+| `Separator` | `set_variant("solid"\|"dashed")` | a horizontal divider |
+| `Description` | `set_value` | a muted descriptive paragraph |
+| `Header` | `set_title`, `set_subtitle` | a prominent section header |
+| `Footer` | `set_value` | a small muted footer line |
+
+**Live leaves** — `Metric` and `Text` accept a data provider
+(`{"value", "sub?", "level"?}` for metrics, `{"value": str}` or a bare
+`str` for text). The frontend refreshes them in place on every stats
+tick without rebuilding the DOM, so forms the user is typing in
+elsewhere on the page survive. This is the builder-based replacement
+for hand-rolled log tails and report viewers.
 
 ### 2.3 Input components (the eight field types)
 
@@ -147,9 +158,27 @@ changes, payload `{"value": <current>}`).
 | Builder | Key setters | Purpose |
 |---|---|---|
 | `ListView` | `set_data_source(callable)`, `set_empty_text` | a list fed by a server-side provider |
-| `Table` | `set_columns([...])`, `set_data_source(callable)`, `set_page_size(int)`, `set_empty_text` | a paginated table fed by a provider |
+| `Table` | `set_columns([...])`, `set_data_source(callable)`, `set_page_size(int)`, `set_empty_text`, `set_key_column(str)`, `set_row_actions([RowAction, ...])` | a paginated table fed by a provider, with optional per-row buttons |
 | `Button` | `set_label`, `set_description`, `set_variant("primary"\|"secondary"\|"danger"\|"ghost")`, `set_confirm(str)`, `set_loading(bool)`, `set_action(callable)` | dispatches an action on click |
-| `Form` | `set_title`, `set_submit_label`, `set_submit_action(callable)`, `add_field(...)` | groups the eight input types behind ONE submit |
+| `Form` | `set_title`, `set_description`, `set_submit_label`, `set_submit_action(callable)`, `add_field(...)` | groups the eight input types behind ONE submit |
+| `RowAction` | `RowAction(action_id, label, callable, variant="secondary", confirm="")` | one per-row button for a `Table` |
+
+**Row actions** — a table's per-row buttons dispatch through the table's
+own action channel: `payload = {"action": <row action id>, "row": <key>}`.
+The callable runs as `callable(row_key, context)` (sync or async) and may
+return anything an action callback may. The key comes from the declared
+`set_key_column("name")` — or, for composite or display-cleaned keys,
+from an extra `"__key"` cell the provider appends PAST the visible
+columns (the renderer never displays it):
+
+```python
+rows.append([visible, cells, ..., f"{account}|{plugin}"])   # __key rides last
+```
+
+**Client-action forms** — `Form.set_client_action("save-token")` handles
+the submit entirely in the browser (the dashboard's own session-token
+editor — the token must never round-trip a server action). It is the
+only supported name; server plugins have no use for it.
 
 ---
 
@@ -411,3 +440,25 @@ data providers → visibility check → deactivation cleanup.
 | GET | `/api/dashboard-ui/data?plugin=&component_id=` | visibility-checked provider fetch (JSON-safe, bounded; 404 unknown/hidden/provider-less) |
 
 Full request/response detail: [API_ENDPOINTS.md §5a](API_ENDPOINTS.md).
+
+---
+
+## 14. The framework's own pages ($framework)
+
+The dashboard's MAIN TABS — Home, Plugins, Activity, Policies, Admin,
+Tools — are built with this same API (`core/framework_ui.py`) and
+registered under the reserved plugin name `"$framework"` at boot
+(`attach_framework_ui(registry, api)` from the bootstrap). The SPA
+renders them into the standard tab panels through the same generic
+renderer (`js/framework-ui.js`); the sidebar filters the reserved name
+out because those pages ARE the tabs.
+
+What this gives plugin authors: the component set is exercised by the
+dashboard itself — anything the main tabs do (row actions, live
+metrics, form validation with `field_errors`, refresh lists) is a
+working reference. Accounts & Groups and Profiles stay on the legacy
+panels until the builder API grows selection/modals.
+
+Framework actions close over the ControlAPI exclusively (audit and
+validation included) and return `refresh` lists naming the data
+components a mutation touched — the pattern every plugin should follow.

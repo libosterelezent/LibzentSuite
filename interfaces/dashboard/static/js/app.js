@@ -67,12 +67,14 @@ const UI = {
     $("tab-groups").classList.toggle("hidden",name!=="groups");
   },
   toolsTab(name) {
+    if (!$("ttab-sim")) return;   // tools is a framework page — no legacy tabs
     $$("#panel-tools .tabbar .tab").forEach(t=>t.classList.toggle("active",t.dataset.ttab===name));
     currentToolsTab = name;
     $("ttab-sim").classList.toggle("hidden",name!=="sim");
     $("ttab-adv").classList.toggle("hidden",name!=="adv");
   },
   activityTab(name) {
+    if (!$("atab-tasks")) return;   // activity is a framework page
     $$("#panel-activity .tabbar .tab").forEach(t=>t.classList.toggle("active",t.dataset.atab===name));
     currentActivityTab = name;
     ["tasks","cooldowns","logs","audit"].forEach(n=>$("atab-"+n).classList.toggle("hidden",n!==currentActivityTab));
@@ -105,12 +107,18 @@ function render() {
   // silently bouncing idle users off plugin pages every ~10s WS tick
   // when the panel was briefly absent during a buildNav rebuild.
   if (!currentView.startsWith("dui-")) showPanel("panel-"+currentView);
-  if (currentView==="home") renderHome();
-  if (currentView==="fleet") { renderAccounts(); renderGroups(); }
-  if (currentView==="plugins") renderPlugins();
-  if (currentView==="profiles") renderProfiles();
-  if (currentView==="policies") renderPolicies();
-  if (currentView==="admin") renderAdmin();
+  // The main tabs that migrated to the builder API render through the
+  // generic framework pages; the rest keep their hand-coded renderers.
+  if (isFrameworkView(currentView)) {
+    renderFrameworkTab(currentView);
+  } else {
+    if (currentView==="home") renderHome();
+    if (currentView==="fleet") { renderAccounts(); renderGroups(); }
+    if (currentView==="plugins") renderPlugins();
+    if (currentView==="profiles") renderProfiles();
+    if (currentView==="policies") renderPolicies();
+    if (currentView==="admin") renderAdmin();
+  }
   updateNavBadges();
 }
 
@@ -171,7 +179,7 @@ function connectWS() {
         // cooldown count). Per-second cosmetic ticks don't rebuild the
         // DOM — the v1 pattern, preserved.
         if (sig !== lastSig) { lastSig = sig; render(); }
-        else renderTick();
+        else { renderTick(); refreshFrameworkData(); }
       }
       else if (msg.type==="log") logLine(msg);
       else if (msg.type==="audit") auditLine(msg);
@@ -190,7 +198,8 @@ function handleWsClosed() {
 }
 let taskRefreshTimer = null;
 function scheduleTaskRefresh() {
-  if (taskRefreshTimer || currentView!=="activity") return;
+  // framework activity refreshes its own tables on the stats tick
+  if (taskRefreshTimer || currentView!=="activity" || isFrameworkView("activity")) return;
   taskRefreshTimer = setTimeout(()=>{ taskRefreshTimer=null; if(currentView==="activity") loadTasks(); }, 1000);
 }
 
@@ -415,13 +424,10 @@ try {
     .then(()=>render())
     .catch(e=>{ showErr("startup: "+(e&&e.message||e)); render(); });
   LOADERS.fleet = ()=>{ loadGroups(); };
-  LOADERS.activity = ()=>{ loadTasks(); loadCooldowns(); };
-  LOADERS.policies = ()=>{ loadPolicies(); };
-  LOADERS.admin = ()=>{ loadAdmin(); };
-  // both profile surfaces read the same per-plugin profile library
-  LOADERS.plugins = ()=>{ loadPluginProfiles(); };
+  // home/plugins/activity/policies/admin/tools are framework pages now —
+  // their data comes from server-side providers, no legacy loader needed
+  // the (still legacy) Profiles tab reads the per-plugin profile library
   LOADERS.profiles = ()=>{ loadPluginProfiles(); };
-  setInterval(()=>{ if(currentView==="activity"&&currentActivityTab==="cooldowns") loadCooldowns(); },5000);
   $("side-foot").textContent = "v2 · " + new Date().getFullYear();
 } catch (e) {
   // Report loudly instead of leaving a blank page with no explanation.

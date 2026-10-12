@@ -52,6 +52,10 @@ function buildDashboardUINav() {
   $$("[data-dui-nav]").forEach(el => el.remove());
   $$("[data-dui-panel]").forEach(el => el.remove());
   for (const entry of duiNav) {
+    // the framework's own pages ARE the main tabs (rendered into their
+    // panels by framework-ui.js) — listing them again in the sidebar
+    // would duplicate every entry
+    if (entry.plugin === "$framework") continue;
     const viewId = duiViewId(entry);
     const a = document.createElement("button");
     a.className = "nav-item" + (currentView === viewId ? " active" : "");
@@ -142,10 +146,10 @@ function refreshDashboardUIData(pluginName, ids) {
 }
 
 /* ── Data providers (list-view / table) ────────────────────────────────────── */
-async function loadDUIData(pluginName, compId, host) {
+async function loadDUIData(pluginName, compId, host, quiet) {
   if (!host) return;
-  host.innerHTML = `<div class="dui-skel" aria-hidden="true"><div></div><div></div></div>`;
-  clearFb(host.parentElement);
+  if (!quiet) host.innerHTML = `<div class="dui-skel" aria-hidden="true"><div></div><div></div></div>`;
+  if (!quiet) clearFb(host.parentElement);
   let data = null;
   try {
     data = await api("/api/dashboard-ui/data?plugin=" + encodeURIComponent(pluginName) +
@@ -198,8 +202,29 @@ function duiTableHTML(comp, data, compId) {
   if (!rows.length) return duiEmpty(comp.empty_text);
   const pageSize = Math.max(0, Math.round(+comp.page_size || 0));
   const visible = pageSize && rows.length > pageSize ? rows.slice(0, pageSize) : rows;
-  const head = columns.map(c => `<th>${esc(c)}</th>`).join("");
-  const body = visible.map(r => `<tr>${(r || []).map(v => `<td>${duiCell(v)}</td>`).join("")}</tr>`).join("");
+  // Row-action key resolution: the declared key column when it exists
+  // among the columns, else the "__key" pseudo-cell PAST the visible
+  // columns (composite or display-cleaned keys). Cells render strictly
+  // by column index so the extra cell never shows.
+  const keyCol = String(comp.key_column || "");
+  let keyIdx = keyCol ? columns.indexOf(keyCol) : -1;
+  if (keyCol === "__key" && keyIdx < 0) keyIdx = columns.length;
+  const rowActions = Array.isArray(comp.row_actions) ? comp.row_actions : [];
+  const head = columns.map(c => `<th>${esc(c)}</th>`).join("")
+    + (rowActions.length ? `<th></th>` : "");
+  const body = visible.map(r => {
+    const cells = columns.map((_, i) => `<td>${duiCell(r ? r[i] : "")}</td>`).join("");
+    let actionCell = "";
+    if (rowActions.length) {
+      const key = keyIdx >= 0 && r ? String(r[keyIdx] ?? "") : "";
+      actionCell = `<td class="dui-rowacts">` + rowActions.map(a =>
+        `<button type="button" class="btn btn-sm btn-${esc(a.variant || "secondary")}"` +
+        ` data-dui-rowact="${esc(compId)}" data-dui-raction="${esc(a.id)}"` +
+        ` data-dui-row="${esc(key)}"${a.confirm ? ` title="${esc(a.confirm)}"` : ""}>${esc(a.label)}</button>`
+      ).join(" ") + `</td>`;
+    }
+    return `<tr>${cells}${actionCell}</tr>`;
+  }).join("");
   const more = pageSize && rows.length > pageSize
     ? `<button type="button" class="btn btn-ghost btn-sm" data-dui-more="${esc(compId)}">show all ${rows.length} rows</button>`
     : "";
@@ -258,6 +283,10 @@ function renderDashboardUIComponent(comp, pluginName) {
     case "row": return renderRow(comp, pluginName, disabled);
     case "column": return renderColumn(comp, pluginName, disabled);
     case "text": return renderText(comp);
+    case "separator": return renderSeparator(comp);
+    case "description": return renderDescription(comp);
+    case "header": return renderHeader(comp);
+    case "footer": return renderFooter(comp);
     case "badge": return renderBadge(comp);
     case "metric": return renderMetric(comp);
     case "button": return renderButton(comp, disabled);
@@ -315,12 +344,32 @@ function renderColumn(comp, pluginName, disabled) {
 /* ── Display leaves ────────────────────────────────────────────────────────── */
 function renderText(comp) {
   const value = comp.value ?? "";
+  const live = comp.live ? ` data-dui-live="${esc(comp.id)}"` : "";
   switch (comp.variant) {
-    case "muted": return `<p class="sub dui-text" data-dui-comp="${esc(comp.id)}">${esc(value)}</p>`;
-    case "code": return `<pre class="dui-code mono" data-dui-comp="${esc(comp.id)}">${esc(value)}</pre>`;
-    case "heading": return `<h4 class="dui-heading" data-dui-comp="${esc(comp.id)}">${esc(value)}</h4>`;
-    default: return `<p class="dui-text" data-dui-comp="${esc(comp.id)}">${esc(value)}</p>`;
+    case "muted": return `<p class="sub dui-text" data-dui-comp="${esc(comp.id)}"${live}>${esc(value)}</p>`;
+    case "code": return `<pre class="dui-code mono" data-dui-comp="${esc(comp.id)}"${live}>${esc(value)}</pre>`;
+    case "heading": return `<h4 class="dui-heading" data-dui-comp="${esc(comp.id)}"${live}>${esc(value)}</h4>`;
+    default: return `<p class="dui-text" data-dui-comp="${esc(comp.id)}"${live}>${esc(value)}</p>`;
   }
+}
+
+function renderSeparator(comp) {
+  return `<hr class="dui-sep ${comp.variant === "dashed" ? "dui-sep-dashed" : ""}" data-dui-comp="${esc(comp.id)}">`;
+}
+
+function renderDescription(comp) {
+  return `<p class="dui-desc" data-dui-comp="${esc(comp.id)}">${esc(comp.value ?? "")}</p>`;
+}
+
+function renderHeader(comp) {
+  return `<div class="dui-header" data-dui-comp="${esc(comp.id)}">
+    <h3>${esc(comp.title ?? "")}</h3>
+    ${comp.subtitle ? `<p class="dui-desc">${esc(comp.subtitle)}</p>` : ""}
+  </div>`;
+}
+
+function renderFooter(comp) {
+  return `<footer class="dui-footer" data-dui-comp="${esc(comp.id)}">${esc(comp.value ?? "")}</footer>`;
 }
 
 function renderBadge(comp) {
@@ -331,11 +380,36 @@ function renderBadge(comp) {
 
 function renderMetric(comp) {
   const level = ["ok", "warn", "err"].includes(comp.level) ? esc(comp.level) : "";
-  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"><div class="metric">` +
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"><div class="metric"${comp.live ? ` data-dui-live="${esc(comp.id)}"` : ""}>` +
     (comp.label ? `<div class="label">${esc(comp.label)}</div>` : "") +
     `<div class="value ${level}">${esc(comp.value ?? "")}</div>` +
     (comp.sub ? `<div class="sub">${esc(comp.sub)}</div>` : "") +
     `</div></div>`;
+}
+
+/* Live-leaf refresh: fetch the provider result and update the metric or
+   text IN PLACE — no DOM rebuild, so refresh cycles never stomp a form
+   the user is typing in elsewhere on the page. */
+async function loadDUILive(pluginName, id, el) {
+  if (!el) return;
+  let data = null;
+  try {
+    data = await api("/api/dashboard-ui/data?plugin=" + encodeURIComponent(pluginName) +
+                     "&component_id=" + encodeURIComponent(id));
+  } catch { return; }   // leave the last good value in place
+  if (!data || typeof data !== "object" || Array.isArray(data)) return;
+  if (typeof data.value === "undefined" && typeof data.level === "undefined") return;
+  if (el.classList.contains("metric")) {
+    const v = el.querySelector(".value");
+    if (v && data.value != null) {
+      v.textContent = String(data.value);
+      v.className = "value " + (["ok", "warn", "err"].includes(data.level) ? data.level : "");
+    }
+    const s = el.querySelector(".sub");
+    if (s && data.sub != null) s.textContent = String(data.sub);
+    return;
+  }
+  if (data.value != null) el.textContent = String(data.value);
 }
 
 function renderProgress(comp) {
@@ -511,6 +585,33 @@ function wireDashboardUI(root, pluginName) {
     });
   });
 
+  // table row-action buttons: dispatch {"action", "row"} through the
+  // TABLE's own action channel (the server routes to the RowAction)
+  root.querySelectorAll("[data-dui-rowact]").forEach(el => {
+    const compId = el.dataset.duiRowact;
+    const comp = duiComps[compId] || {};
+    const def = (comp.row_actions || []).find(a => a.id === el.dataset.duiRaction) || {};
+    const host = el.closest(".tbl-wrap") || el.parentElement;
+    const fire = async () => {
+      try {
+        const res = await withBusy(el, dispatchUIAction(pluginName, compId,
+          { action: el.dataset.duiRaction, row: el.dataset.duiRow }));
+        if (!res) return;
+        if (res.field_errors && Object.keys(res.field_errors).length)
+          setFb(host, "error", Object.values(res.field_errors).join("; "));
+        else if (res.message)
+          res.success ? flashFb(host, res.message) : setFb(host, "error", res.message);
+      } catch (e) { setFb(host, "error", e.message); }
+    };
+    el.onclick = () => {
+      if (def.confirm) confirmAction("Confirm", def.confirm, fire);
+      else fire();
+    };
+  });
+
+  // live leaves (metrics / texts with data providers): first fetch
+  loadDUILeaves(root, pluginName);
+
   // forms: collect field values client-side, submit as one payload
   root.querySelectorAll("[data-dui-form]").forEach(formEl => {
     const id = formEl.dataset.duiForm;
@@ -522,6 +623,16 @@ function wireDashboardUI(root, pluginName) {
       for (const field of (comp.children || [])) {
         if (!DUI_INPUT_TYPES.includes(field.type) || !field.id) continue;
         payload[field.id] = duiFieldValue(field, formEl);
+      }
+      // client-side forms never dispatch: the only one is the dashboard's
+      // own token editor (the token must not round-trip a server action)
+      if (comp.client_action === "save-token") {
+        const tok = String(payload["token-value"] || "").trim();
+        if (!tok) { setFb(formEl, "error", "Token required."); return; }
+        secretStore.setItem("dash_token", tok);
+        wsRetries = 0; connectWS();
+        flashFb(formEl, "token saved — reconnecting…");
+        return;
       }
       try {
         const res = await withBusy(btn, dispatchUIAction(pluginName, id, payload));
@@ -545,6 +656,12 @@ function wireDashboardUI(root, pluginName) {
     el.dataset.duiPlugin = duiSlug(pluginName);
     loadDUIData(pluginName, el.dataset.duiBody, el);
   });
+}
+
+/* Fetch every live leaf under a root (initial render). */
+function loadDUILeaves(root, pluginName) {
+  root.querySelectorAll("[data-dui-live]").forEach(el =>
+    loadDUILive(pluginName, el.dataset.duiLive, el));
 }
 
 /* One field's current value from the DOM (form collection + input actions). */

@@ -50,7 +50,7 @@ TOKEN = "static-test-token"
 #: JS modules in the exact dependency order index.html loads them.
 JS_FILES = ["state.js", "api.js", "ui.js", "accounts.js", "groups.js",
             "views.js", "plugins-ui.js", "admin-ui.js", "plugin-ui.js",
-            "dashboard-ui.js", "app.js"]
+            "dashboard-ui.js", "framework-ui.js", "app.js"]
 #: every stylesheet index.html links.
 CSS_FILES = ["base.css", "layout.css", "components.css", "responsive.css"]
 
@@ -372,6 +372,7 @@ class TestPluginProfilesUI(unittest.TestCase):
                       '<script src="js/admin-ui.js"></script>\n'
                       '<script src="js/plugin-ui.js"></script>\n'
                       '<script src="js/dashboard-ui.js"></script>\n'
+                      '<script src="js/framework-ui.js"></script>\n'
                       '<script src="js/app.js"></script>', html)
         js = _js()
         self.assertEqual(js.count("function renderPlugins"), 1)
@@ -387,7 +388,9 @@ class TestPluginProfilesUI(unittest.TestCase):
         appjs = _js_file("app.js")
         self.assertIn('if (currentView==="profiles") renderProfiles();', appjs)
         self.assertIn("LOADERS.profiles =", appjs)
-        self.assertIn("LOADERS.plugins =", appjs)
+        # the Plugins tab is a framework page now; the profile-library
+        # loader serves the (still legacy) Profiles tab
+        self.assertIn("LOADERS.profiles =", appjs)
         # the loader swallows its own failure (fire-and-forget from LOADERS)
         self.assertIn("catch", self._fn("loadPluginProfiles"))
 

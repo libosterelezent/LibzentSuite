@@ -61,6 +61,7 @@ class Text(UIComponent):
         super().__init__(component_id=component_id, **kwargs)
         self._value: str | None = None
         self._variant: str | None = None
+        self._data_source = None
 
     def set_value(self, text: str) -> "Text":
         self._check_frozen("set the value")
@@ -72,12 +73,26 @@ class Text(UIComponent):
         self._variant = _require_choice(variant, self._VARIANTS, "variant")
         return self
 
+    def set_data_source(self, data_source) -> "Text":
+        """Live text: a provider returning ``{"value": str}`` (or a str).
+
+        The rendered element carries the live flag; the frontend refreshes
+        its content from the provider without rebuilding the DOM — the
+        builder-based replacement for streaming panels (log tails, report
+        viewers).
+        """
+        self._check_frozen("set the data source")
+        self._data_source = _require_callable(data_source, "data_source")
+        return self
+
     def _props(self) -> dict:
         props = super()._props()
         if self._value is not None:
             props["value"] = self._value
         if self._variant is not None:
             props["variant"] = self._variant
+        if getattr(self, "_data_source", None) is not None:
+            props["live"] = True
         return props
 
 
@@ -123,6 +138,7 @@ class Metric(UIComponent):
         self._value: str | None = None
         self._sub: str | None = None
         self._level: str | None = None
+        self._data_source = None
 
     def set_label(self, label: str) -> "Metric":
         self._check_frozen("set the label")
@@ -144,6 +160,17 @@ class Metric(UIComponent):
         self._level = _require_choice(level, self._LEVELS, "level")
         return self
 
+    def set_data_source(self, data_source) -> "Metric":
+        """Live values: a provider returning ``{value, sub?, level?}``.
+
+        The rendered snapshot keeps whatever was set via ``set_value``;
+        the frontend re-fetches the provider and updates the value, sub
+        and level in place (no DOM rebuild) on every refresh cycle.
+        """
+        self._check_frozen("set the data source")
+        self._data_source = _require_callable(data_source, "data_source")
+        return self
+
     def _props(self) -> dict:
         props = super()._props()
         if self._label is not None:
@@ -154,10 +181,93 @@ class Metric(UIComponent):
             props["sub"] = self._sub
         if self._level is not None:
             props["level"] = self._level
+        if getattr(self, "_data_source", None) is not None:
+            props["live"] = True
         return props
 
 
 # ----------------------------------------------------- input components
+class Separator(UIComponent):
+    """A horizontal divider line."""
+
+    _type_name = "separator"
+
+    def set_variant(self, variant: str) -> "Separator":
+        """'solid' (default) or 'dashed'."""
+        self._check_frozen("set the variant")
+        self._variant = _require_choice(variant, ("solid", "dashed"), "variant")
+        return self
+
+    def _props(self) -> dict:
+        props = super()._props()
+        if getattr(self, "_variant", None):
+            props["variant"] = self._variant
+        return props
+
+
+class Description(UIComponent):
+    """A descriptive paragraph (rendered smaller/muted below a title)."""
+
+    _type_name = "description"
+
+    def __init__(self, *, component_id: str = "", **kwargs) -> None:
+        super().__init__(component_id=component_id, **kwargs)
+        self._value: str | None = None
+
+    def set_value(self, text: str) -> "Description":
+        self._check_frozen("set the value")
+        self._value = _require_str(text, "value")
+        return self
+
+    def _props(self) -> dict:
+        props = super()._props()
+        if self._value is not None:
+            props["value"] = self._value
+        return props
+
+
+class Header(UIComponent):
+    """A prominent section header with optional subtitle."""
+
+    _type_name = "header"
+
+    def __init__(self, *, component_id: str = "", **kwargs) -> None:
+        super().__init__(component_id=component_id, **kwargs)
+        self._subtitle: str | None = None
+
+    def set_subtitle(self, text: str) -> "Header":
+        self._check_frozen("set the subtitle")
+        self._subtitle = _require_str(text, "subtitle")
+        return self
+
+    def _props(self) -> dict:
+        props = super()._props()
+        if self._subtitle is not None:
+            props["subtitle"] = self._subtitle
+        return props
+
+
+class Footer(UIComponent):
+    """A muted footer line (small text at the bottom of a section)."""
+
+    _type_name = "footer"
+
+    def __init__(self, *, component_id: str = "", **kwargs) -> None:
+        super().__init__(component_id=component_id, **kwargs)
+        self._value: str | None = None
+
+    def set_value(self, text: str) -> "Footer":
+        self._check_frozen("set the value")
+        self._value = _require_str(text, "value")
+        return self
+
+    def _props(self) -> dict:
+        props = super()._props()
+        if self._value is not None:
+            props["value"] = self._value
+        return props
+
+
 class Checkbox(_InputField):
     """A labeled boolean checkbox with an optional change action."""
 
@@ -336,8 +446,48 @@ class ListView(_Interactive):
         return props
 
 
+class RowAction:
+    """One per-row button on a :class:`Table`.
+
+    ``action`` is called as ``action(row_key, context)`` where ``row_key``
+    is the row's value in the table's key column and ``context`` is the
+    :class:`~core.dashboard_ui.context.ActionContext` of the dispatch. It
+    may be sync or async and returns anything an action callback may
+    (None, str, dict, ActionResult).
+    """
+
+    __slots__ = ("id", "label", "action", "variant", "confirm")
+
+    def __init__(self, action_id: str, label: str, action, *,
+                 variant: str = "secondary", confirm: str = "") -> None:
+        if not isinstance(action_id, str) or not action_id:
+            raise UIError(f"row action id must be a non-empty str, got {action_id!r}")
+        if not isinstance(label, str) or not label:
+            raise UIError(f"row action label must be a non-empty str, got {label!r}")
+        if not callable(action):
+            raise UIError(
+                f"row action {action_id!r} needs a callable action, got "
+                f"{type(action).__name__}")
+        if variant not in ("primary", "secondary", "danger", "ghost"):
+            raise UIError(f"row action variant must be a known variant, got {variant!r}")
+        if not isinstance(confirm, str):
+            raise UIError(f"row action confirm must be a str, got {confirm!r}")
+        self.id = action_id
+        self.label = label
+        self.action = action
+        self.variant = variant
+        self.confirm = confirm
+
+
 class Table(_Interactive):
-    """A paginated table fed by a server-side data source callable."""
+    """A paginated table fed by a server-side data source callable.
+
+    Tables may declare ROW ACTIONS: per-row buttons (edit/clear/reload…)
+    dispatched through the table's own action channel with
+    ``payload = {"action": <row action id>, "row": <key column value>}``.
+    The key column tells both the renderer and the callbacks which column
+    identifies a row.
+    """
 
     _type_name = "table"
 
@@ -347,6 +497,8 @@ class Table(_Interactive):
         self._data_source = None
         self._empty_text: str | None = None
         self._page_size: int | None = None
+        self._row_actions: list[RowAction] = []
+        self._key_column: str | None = None
 
     def set_columns(self, columns) -> "Table":
         self._check_frozen("set the columns")
@@ -372,6 +524,53 @@ class Table(_Interactive):
         self._page_size = _require_int(page_size, "page_size")
         return self
 
+    def set_key_column(self, column: str) -> "Table":
+        """Which column identifies a row for row-action dispatch."""
+        self._check_frozen("set the key column")
+        self._key_column = _require_str(column, "key column")
+        return self
+
+    def set_row_actions(self, actions) -> "Table":
+        """Declare per-row buttons (list of :class:`RowAction`)."""
+        self._check_frozen("set the row actions")
+        if not isinstance(actions, list):
+            raise UIError(
+                f"row actions must be a list, got {type(actions).__name__}")
+        checked: list[RowAction] = []
+        seen: set[str] = set()
+        for entry in actions:
+            if not isinstance(entry, RowAction):
+                raise UIError(
+                    "each row action must be a RowAction, got "
+                    f"{type(entry).__name__}")
+            if entry.id in seen:
+                raise UIError(f"duplicate row action id {entry.id!r}")
+            seen.add(entry.id)
+            checked.append(entry)
+        self._row_actions = checked
+        if checked:
+            # row buttons dispatch through the table's own action channel
+            # with {"action": <id>, "row": <key>}; the dispatcher routes
+            # to the right RowAction callable below.
+            self.set_action(self._dispatch_row_action)
+        return self
+
+    async def _dispatch_row_action(self, context, payload):
+        payload = payload or {}
+        action_id = payload.get("action")
+        row = payload.get("row")
+        if not isinstance(action_id, str) or not action_id:
+            raise UIError("row action dispatch needs an 'action' id")
+        if not isinstance(row, str) or not row:
+            raise UIError("row action dispatch needs a 'row' key")
+        for entry in self._row_actions:
+            if entry.id == action_id:
+                result = entry.action(row, context)
+                if hasattr(result, "__await__"):
+                    result = await result
+                return result
+        raise UIError(f"unknown row action {action_id!r}")
+
     def _props(self) -> dict:
         props = super()._props()
         if self._columns is not None:
@@ -380,6 +579,14 @@ class Table(_Interactive):
             props["empty_text"] = self._empty_text
         if self._page_size is not None:
             props["page_size"] = self._page_size
+        if self._key_column is not None:
+            props["key_column"] = self._key_column
+        if self._row_actions:
+            props["row_actions"] = [
+                {"id": a.id, "label": a.label,
+                 "variant": a.variant, "confirm": a.confirm}
+                for a in self._row_actions
+            ]
         return props
 
 
@@ -481,6 +688,7 @@ class Form(UIContainer):
         super().__init__(component_id=component_id, **kwargs)
         self._submit_action = None
         self._submit_label: str | None = None
+        self._client_action: str | None = None
 
     def set_submit_action(self, action) -> "Form":
         self._check_frozen("set the submit action")
@@ -491,6 +699,25 @@ class Form(UIContainer):
     def set_submit_label(self, label: str) -> "Form":
         self._check_frozen("set the submit label")
         self._submit_label = _require_str(label, "submit label")
+        return self
+
+    def set_description(self, description: str) -> "Form":
+        self._check_frozen("set the description")
+        self._description = _require_str(description, "description")
+        return self
+
+    def set_client_action(self, name: str) -> "Form":
+        """Handle submission CLIENT-side instead of a server action.
+
+        The only supported name is ``"save-token"`` — the dashboard's own
+        session-token editor (the token must never round-trip a server
+        action). The renderer collects the form's fields exactly like a
+        server submit, then applies the client behavior.
+        """
+        self._check_frozen("set the client action")
+        if name != "save-token":
+            raise UIError(f"unknown client action {name!r}")
+        self._client_action = name
         return self
 
     def add_field(self, field) -> "Form":
@@ -516,6 +743,10 @@ class Form(UIContainer):
             props["submit_label"] = self._submit_label
         if self._submit_action is not None:
             props["submit_action"] = True
+        if self._client_action is not None:
+            props["client_action"] = self._client_action
+        if getattr(self, "_description", None) is not None:
+            props["description"] = self._description
         return props
 
     def _validate(self) -> list[str]:
@@ -576,7 +807,7 @@ class Column(_ComponentParent):
 _CONTENT_CHILD_TYPES = (Card, Row, Column, Text, Badge, Metric, Button,
                         Checkbox, Toggle, TextInput, NumberInput, Textarea,
                         Select, RadioGroup, MultiSelect, ListView, Table,
-                        Progress, Form)
+                        Progress, Form, Separator, Description, Header, Footer)
 _FLOW_CHILD_TYPES = tuple(t for t in _CONTENT_CHILD_TYPES if t is not Row)
 Section._allowed_child_types = _CONTENT_CHILD_TYPES
 Card._allowed_child_types = _CONTENT_CHILD_TYPES

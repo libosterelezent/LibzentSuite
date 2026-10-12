@@ -113,7 +113,8 @@
   min-width: 0; justify-self: end; }
 
 /* Empty state */
-.empty { text-align: center; padding: var(--sp-6) var(--sp-4); color: var(--dim); }
+.empty { text-align: center; padding: var(--sp-6) var(--sp-4); color: var(--dim);
+  grid-column: 1 / -1; }   /* span all grid columns when inside a grid */
 .empty .icon { width: 40px; height: 40px; margin: 0 auto var(--sp-3); opacity: .3; }
 .empty h3 { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
 .empty p { font-size: 12.5px; max-width: 340px; margin: 0 auto var(--sp-3); line-height: 1.5; }
@@ -328,6 +329,14 @@ dialog .dlg-foot { display: flex; gap: var(--sp-2); justify-content: flex-end; p
 .dui-row .dui-item input[type="text"], .dui-row .dui-item input[type="number"],
 .dui-row .dui-item select { min-width: 150px; }
 .dui-text { overflow-wrap: anywhere; white-space: pre-wrap; }
+.dui-sep { border: 0; border-top: 1px solid var(--border); margin: var(--sp-1) 0 var(--sp-2); width: 100%; }
+.dui-sep-dashed { border-top-style: dashed; }
+.dui-header { display: flex; flex-direction: column; gap: 4px; }
+.dui-header h3 { font-size: 16px; font-weight: 600; margin: 0; }
+.dui-footer { font-size: 11px; color: var(--faint); margin-top: var(--sp-2);
+  border-top: 1px dashed var(--border); padding-top: var(--sp-2); }
+.dui-rowacts { white-space: nowrap; text-align: right; }
+.dui-rowacts .btn { margin-left: 4px; }
 .dui-heading { font-size: 14px; font-weight: 600; margin: 0; }
 .dui-code { background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm);
   padding: var(--sp-2) var(--sp-3); margin: 0; overflow-x: auto;

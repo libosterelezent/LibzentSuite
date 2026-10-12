@@ -267,6 +267,14 @@ class PluginManager:
         dict. Raises PluginError when the plugin is unknown or the
         re-import fails (the OLD state is preserved on failure).
         """
+        if name == "__rescan__":
+            # special key: full re-scan without targeting one plugin
+            self._loader.discover()
+            self.init_boot_dashboard_uis()
+            found = self._loader.names()
+            self._logger.info("plugin directory rescan: %d plugin(s)", len(found))
+            return {"plugin": "__rescan__", "discovered": found,
+                    "restored_accounts": 0}
         # always re-scan: an unloaded plugin was removed from _records,
         # so we need a fresh discovery to pick it up again
         self._loader.discover()

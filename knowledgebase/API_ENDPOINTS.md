@@ -107,6 +107,12 @@ Plugin pages built with the [Dashboard UI API](DASHBOARD_UI_API.md)
 `UIError`/`ValueError` → 400 (they are domain outcomes the frontend
 renders inline). Reference example: `tests/fixtures/plugins/config_demo/`.
 
+The dashboard's own MAIN TABS ride these same four routes: the
+reserved plugin name `"$framework"` (`core/framework_ui.py`) serves the
+home/plugins/activity/policies/admin/tools pages through the identical
+pipeline — the SPA's tab renderer and the sidebar filter treat the name
+specially, the wire contract does not.
+
 | Method | Path | Request | `data` payload | ControlAPI | Description |
 |---|---|---|---|---|---|
 | GET | `/api/dashboard-ui/navigation` | — | `[{plugin, page_id, title, icon, order}]` (sorted by `(order, plugin)`) | `dashboard_ui_navigation()` | Sidebar entries for every attached plugin page. Reads the frozen snapshots only — no plugin code runs, so this is safe for every boot/refresh |
