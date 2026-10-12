@@ -163,6 +163,10 @@ async function loadDUIData(pluginName, compId, host, quiet) {
                                      : duiListHTML(comp, data);
   host.innerHTML = html || "";
   wireDUIMore(host, compId);
+  // row-action buttons render WITH the data (inside the body) — they
+  // did not exist when wireDashboardUI ran, so wire them HERE on every
+  // load/refresh or they are dead DOM
+  wireDUIRowActions(host, pluginName);
 }
 
 function duiEmpty(emptyText) {
@@ -227,6 +231,42 @@ function duiTableHTML(comp, data, compId) {
     ? `<button type="button" class="btn btn-ghost btn-sm" data-dui-more="${esc(compId)}">show all ${rows.length} rows</button>`
     : "";
   return `<div class="tbl-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>${more}`;
+}
+
+/* Wire row-action buttons (dispatch {"action", "row"} through the
+   TABLE's action channel; the server routes to the RowAction).
+   Called from wireDashboardUI for static markup AND from loadDUIData —
+   row buttons render inside table bodies, which fill asynchronously
+   after wiring ran. */
+function wireDUIRowActions(root, pluginName) {
+  root.querySelectorAll("[data-dui-rowact]").forEach(el => {
+    if (el.dataset.duiWired) return;   // idempotent across refreshes
+    el.dataset.duiWired = "1";
+    const compId = el.dataset.duiRowact;
+    const comp = duiComps[compId] || {};
+    const def = (comp.row_actions || []).find(a => a.id === el.dataset.duiRaction) || {};
+    // feedback goes on the component wrapper OUTSIDE the data body —
+    // the action's own refresh re-renders the body, which would wipe
+    // any message placed inside it (the "silent success" trap)
+    const body = el.closest("[data-dui-body]");
+    const host = (body && body.parentElement) || el.closest(".tbl-wrap")
+                 || el.parentElement;
+    const fire = async () => {
+      try {
+        const res = await withBusy(el, dispatchUIAction(pluginName, compId,
+          { action: el.dataset.duiRaction, row: el.dataset.duiRow }));
+        if (!res) return;
+        if (res.field_errors && Object.keys(res.field_errors).length)
+          setFb(host, "error", Object.values(res.field_errors).join("; "));
+        else if (res.message)
+          res.success ? flashFb(host, res.message) : setFb(host, "error", res.message);
+      } catch (e) { setFb(host, "error", e.message); }
+    };
+    el.onclick = () => {
+      if (def.confirm) confirmAction("Confirm", def.confirm, fire);
+      else fire();
+    };
+  });
 }
 
 /* Reveal the rows a page_size hid (works off the cached provider result). */
@@ -694,29 +734,9 @@ function wireDashboardUI(root, pluginName) {
     });
   });
 
-  // table row-action buttons: dispatch {"action", "row"} through the
-  // TABLE's own action channel (the server routes to the RowAction)
-  root.querySelectorAll("[data-dui-rowact]").forEach(el => {
-    const compId = el.dataset.duiRowact;
-    const comp = duiComps[compId] || {};
-    const def = (comp.row_actions || []).find(a => a.id === el.dataset.duiRaction) || {};
-    const host = el.closest(".tbl-wrap") || el.parentElement;
-    const fire = async () => {
-      try {
-        const res = await withBusy(el, dispatchUIAction(pluginName, compId,
-          { action: el.dataset.duiRaction, row: el.dataset.duiRow }));
-        if (!res) return;
-        if (res.field_errors && Object.keys(res.field_errors).length)
-          setFb(host, "error", Object.values(res.field_errors).join("; "));
-        else if (res.message)
-          res.success ? flashFb(host, res.message) : setFb(host, "error", res.message);
-      } catch (e) { setFb(host, "error", e.message); }
-    };
-    el.onclick = () => {
-      if (def.confirm) confirmAction("Confirm", def.confirm, fire);
-      else fire();
-    };
-  });
+  // row-action buttons in STATIC markup (data-body ones are wired by
+  // loadDUIData when their table renders)
+  wireDUIRowActions(root, pluginName);
 
   // live leaves (metrics / texts with data providers): first fetch
   loadDUILeaves(root, pluginName);

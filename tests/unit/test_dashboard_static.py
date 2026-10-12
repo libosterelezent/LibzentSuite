@@ -976,5 +976,29 @@ class TestStartupEndpointsLive(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["data"]["accounts"], [])
 
 
+class TestRowActionWiring(unittest.TestCase):
+    """Row-action buttons render INSIDE table bodies, which load
+    asynchronously AFTER wireDashboardUI ran — loadDUIData must wire
+    them on every render or they are dead DOM (the bug behind
+    'unresponsive buttons')."""
+
+    def test_load_dui_data_wires_row_actions(self):
+        js = _js()
+        self.assertIn("wireDUIRowActions(host, pluginName);", js,
+                      "loadDUIData must wire row-action buttons in the "
+                      "freshly rendered table body")
+        # and the shared wiring helper exists + is idempotent
+        self.assertIn("function wireDUIRowActions(root, pluginName)", js)
+        self.assertIn('el.dataset.duiWired = "1"', js)
+        # feedback must target a host OUTSIDE the data body (an action's
+        # own refresh re-renders the body and would wipe the message)
+        self.assertIn('const body = el.closest("[data-dui-body]");', js)
+
+    def test_wire_dashboard_ui_still_wires_row_actions(self):
+        js = _js()
+        # the static path (pre-rendered markup) keeps wiring too
+        self.assertIn("wireDUIRowActions(root, pluginName);", js)
+
+
 if __name__ == "__main__":
     unittest.main()
