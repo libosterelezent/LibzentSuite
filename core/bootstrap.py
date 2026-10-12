@@ -172,7 +172,6 @@ class Framework:
                  profiles: ProfileManager, settings: SettingsManager,
                  audit: AuditRecorder, database: Any,
                  credentials: Credentials, config: ProjectConfig,
-                 remote_control: Any = None,
                  credential_service: Any = None,
                  cooldowns: Any = None,
                  plugin_state: Any = None,
@@ -190,7 +189,6 @@ class Framework:
         self.database = database
         self.credentials = credentials
         self.config = config
-        self.remote_control = remote_control
         #: shared services (also wired into the managers/plugin facades)
         self.credential_service = credential_service
         self.cooldowns = cooldowns
@@ -218,7 +216,6 @@ class Framework:
             return
         self._shut_down = True
         steps = (
-            ("remote control", self._stop_remote_control),
             ("scheduler", lambda: self.scheduler.stop(drain=True)),
             ("bus drain", self.bus.drain),
             ("accounts", self.accounts.stop_all),
@@ -253,10 +250,6 @@ class Framework:
                                     label, type(exc).__name__, exc)
         if interrupted is not None:
             raise interrupted
-
-    async def _stop_remote_control(self) -> None:
-        if self.remote_control is not None:
-            self.remote_control.stop()
 
     def _close_plugins(self) -> None:
         close = getattr(self.plugins, "close", None)
@@ -338,7 +331,7 @@ async def build(
 
     # PARTIAL-BUILD CLEANUP: anything failing from here on must release what
     # was already started (DB connection thread, log/audit drain workers,
-    # stdlib bridge, lanes, remote control) — otherwise a failed boot leaks
+    # stdlib bridge, lanes) — otherwise a failed boot leaks
     # them and a real aiosqlite connection can keep the process from exiting
     cleanups: list = []
     try:
@@ -489,6 +482,10 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         plugin_state=plugin_state,
     )
     plugins.discover()
+    # Plugin dashboard UIs register at BOOT (discovery time) so plugin
+    # pages are visible in the dashboard immediately — not only after an
+    # account connects. Class-level instantiation, no account needed.
+    plugins.init_boot_dashboard_uis()
     await plugins.persist_metadata()
 
     profiles = ProfileManager(
@@ -581,34 +578,18 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         started_at=_time.time(),
     )
 
-    # Discord-side management: owners mention an account (@account status)
-    # to run the SAME CoreAPI commands from chat — replies flow through the
-    # paced pipeline; REMOTE_CONTROL=0 in .env disables the wiring entirely
-    remote_control = None
-    if credentials.remote_control_enabled:
-        from .remote_control import RemoteControl
-
-        owner_ids = getattr(credentials, "owner_user_ids", None)
-        if not owner_ids:  # fail loudly at boot, not per-mention
-            ROOT_LOGGER.warning(
-                "REMOTE_CONTROL is enabled but OWNER_USER_IDS is empty or "
-                "malformed — remote control will reject every mention")
-        else:
-            ROOT_LOGGER.info("remote control armed for %s owner id(s)",
-                             len(owner_ids))
-        remote_control = RemoteControl(
-            bus, scheduler, accounts, lambda: api, credentials,
-            ServiceLogger(logs, "remote-control"),
-        ).start()
-        # PHASE-4 (S3-G2): let the account-removal cascade clear the
-        # remote-control reply-throttle stamp for the removed name.
-        accounts._remote_control = remote_control
-        cleanups.append(("remote control", remote_control.stop))
+    # Framework management from chat (status/accounts/plugins/ratelimit/
+    # lane/tasks/estop/simulation) rides the SELF-COMMAND layer now: the
+    # hub's api_provider bridges the ported Framework verbs to the ONE
+    # ControlAPI — same commands, same replies, one dispatch path and one
+    # authorization gate with the plugin commands. The separate
+    # RemoteControl bus handler is retired (class kept for compat; the
+    # simulator stack still exercises it for its control_mention scenario).
+    COMMAND_HUB.api_provider = lambda: api
     return Framework(
         api=api, bus=bus, logs=logs, limiter=limiter, scheduler=scheduler,
         accounts=accounts, plugins=plugins, profiles=profiles, settings=settings,
         audit=audit, database=database, credentials=credentials, config=config,
-        remote_control=remote_control,
         credential_service=credential_service, cooldowns=cooldowns,
         plugin_state=plugin_state, sync_groups=sync_groups,
     )

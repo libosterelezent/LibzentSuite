@@ -46,7 +46,7 @@ from core.plugin_base import (
 from core.priority import Priority
 from core.settings_manager import SettingsManager
 
-from .commands import COMMAND_HUB, MAX_REPLY_CHARS
+from .commands import COMMAND_HUB, MAX_REPLY_CHARS, FRAMEWORK_PLUGIN
 from .commands import RegisteredCommand
 from .loader import PluginLoader
 
@@ -293,6 +293,42 @@ class PluginManager:
         # (after on_load/on_enable — actions may reflect plugin state)
         self._init_dashboard_uis(account, runtimes)
         self._logger.info("activated plugins on %s", account)
+
+    def init_boot_dashboard_uis(self) -> int:
+        """Register plugin dashboard UIs at DISCOVERY time (no account).
+
+        Instantiates a THROWAWAY instance of each discovered plugin that
+        overrides initialize_dashboard_ui, calls the hook, and discards
+        the instance — the layout is class-level state, not per-account.
+        This makes plugin UI pages visible in the dashboard from boot,
+        not only after an account connects. Returns how many UIs were
+        registered. Failures are isolated per plugin.
+        """
+        registered = 0
+        if not self._discovered:
+            self.discover()
+        for plugin_name, record in self._loader._records.items():
+            if plugin_name in self._ui_registry.list_plugins():
+                continue  # already registered (e.g. by an account)
+            cls = record.cls
+            # check the CLASS for an overridden hook (no instance needed)
+            if getattr(cls, "initialize_dashboard_ui", None)                     is getattr(PluginBase, "initialize_dashboard_ui", None):
+                continue  # base no-op: declares no UI
+            try:
+                instance = cls()
+                instance._ui_registry = self._ui_registry
+                from core.dashboard_ui import DashboardUIToolset
+                instance.initialize_dashboard_ui(DashboardUIToolset())
+                registered += 1
+            except Exception:
+                self._logger.warning(
+                    "boot UI init failed for %s — isolated", plugin_name,
+                    exc_info=True)
+                self._ui_registry.detach(plugin_name)
+        if registered:
+            self._logger.info(
+                "boot dashboard UIs registered: %d plugin(s)", registered)
+        return registered
 
     def _init_dashboard_uis(self, account: str,
                             runtimes: Dict[str, PluginRuntime]) -> None:
@@ -753,9 +789,15 @@ class PluginManager:
         use — never a raw client send.
 
         The owner gate mirrors the trigger-word path exactly: the invoking
-        Discord user id must be in ``credentials.owner_user_ids`` (the
-        adapter layer gates first; this is the defense-in-depth check) —
-        non-owners are ignored with no reply, like today.
+        Discord user id must pass AccessManager.can_invoke (the hub's
+        bootstrap-registered manager, or the legacy credentials owner ids
+        on stacks without one) — non-owners are ignored with no reply,
+        like today.
+
+        FRAMEWORK commands (plugin="selfcmd": help/pg/estop/…) run even
+        when the account's plugins are deactivated — their handlers use
+        the hub's api_provider, not ctx.services, and an undeliverable
+        reply is logged instead of dropped (SAFETY: `estop` always runs).
         """
         entry = self._find_command(account, name)
         if entry is None:
@@ -763,15 +805,17 @@ class PluginManager:
             return
         spec, plugin = entry.spec, entry.plugin
         factory = self._services.get(account)
-        if factory is None:
+        services = factory(plugin) if factory is not None else None
+        if services is None and plugin != FRAMEWORK_PLUGIN:
+            # Plugin verbs need their paced pipeline. FRAMEWORK verbs do
+            # not (their handlers talk to the ControlAPI through the
+            # hub's api_provider): estop must run even on an account
+            # whose plugins are deactivated — only the REPLY needs the
+            # pipeline, and _send_reply logs it when there is none.
             self._logger.warning(
-                "self-command %r on %s dropped: plugins not activated",
-                name, account)
-            return
-        services = factory(plugin)
-        if services is None:
-            self._logger.warning(
-                "self-command %r on %s dropped: no services facade", name, account)
+                "self-command %r on %s dropped: %s", name, account,
+                "plugins not activated" if factory is None
+                else "no services facade")
             return
         # THE command gate: AccessManager.can_invoke (per-account
         # permission list + admin bypass, fail-closed) when wired; the
@@ -779,6 +823,10 @@ class PluginManager:
         # direct-construction stacks without an access manager.
         if invoker_id is not None:
             access = getattr(self, "_access_manager", None)
+            if access is None:
+                # the hub's bootstrap-registered AccessManager (None on
+                # stripped stacks — then the legacy owner-ids fallback)
+                access = getattr(self.command_hub, "access", None)
             allowed = False
             if access is not None:
                 try:
@@ -838,6 +886,15 @@ class PluginManager:
         """One paced reply (NORMAL priority — interactive, single message)."""
         if len(text) > MAX_REPLY_CHARS:
             text = text[: MAX_REPLY_CHARS - 20] + "\n… (truncated)"
+        if services is None:
+            # framework verb (estop!) on an account with no active plugin
+            # pipeline: the reply CANNOT be delivered in-band — log it at
+            # ERROR with the full text so the operator's answer survives
+            # (the retired remote control's undeliverable-reply contract)
+            logger.error(
+                "self-command reply undeliverable (no services facade) — "
+                "reply was: %s", text)
+            return
         try:
             await services.send_message(
                 int(channel_id), text, priority=Priority.NORMAL)

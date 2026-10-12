@@ -264,6 +264,14 @@ class AccessManager:
             out[key.rsplit(":", 1)[-1]] = row
         return out
 
+    async def forget_account(self, name: str) -> None:
+        """Removal cascade: delete the account's access row (admin flag,
+        perms, prefix) so the Admin page doesn't show deleted accounts."""
+        import asyncio
+        await self._kv.delete(account_key(name))
+        self._prefix_cache.pop(name, None)
+        self._log.info("access row cleared for removed account %s", name)
+
     # ---------------------------------------------------------- gating
     async def is_admin_id(self, user_id: Optional[int]) -> bool:
         """Admin = id in the admin list OR the user id of an

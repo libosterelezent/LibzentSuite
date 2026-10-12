@@ -318,6 +318,14 @@ class ControlAPI:
         """
         out = await _resolved(self._accounts.remove_account(name))
         self._audit_mgmt(name, "mgmt:account.removed", surface)
+        # Access row cascade: clear the admin/perms/prefix row so the
+        # Admin page doesn't show deleted accounts
+        access = getattr(self, "_access", None)
+        if access is not None:
+            try:
+                await access.forget_account(name)
+            except Exception:
+                LOG.exception("access cascade failed for %r", name)
         # Backstop cascade (idempotent with manager.remove_account's own
         # guarded cascade): covers stacks where the MANAGER is not wired
         # with the credential service / cooldown service (direct
