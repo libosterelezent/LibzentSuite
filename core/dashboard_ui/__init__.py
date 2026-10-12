@@ -1,9 +1,8 @@
-"""Dashboard UI API — builder core (Stage B).
+"""Dashboard UI API — builder core (Stage B) + registry (Stage C).
 
-Pure-core fluent builders for assembling dashboard UI trees, plus the
-error hierarchy they raise. Later stages attach the registry, routing
-and frontend; nothing here imports from adapters/, interfaces/ or
-database/.
+Pure-core fluent builders for assembling dashboard UI trees, the error
+hierarchy they raise, and the central registry that attaches/dispatches
+them. Nothing here imports from adapters/, interfaces/ or database/.
 """
 from __future__ import annotations
 
@@ -35,6 +34,11 @@ from .builders import (
     UIComponent,
     UIContainer,
 )
+from .context import (
+    ActionContext,
+    ActionResult,
+    CheckContext,
+)
 from .errors import (
     ActionRegistrationError,
     DuplicateComponentIdError,
@@ -44,9 +48,14 @@ from .errors import (
     TreeValidationError,
     UIError,
 )
+from .registry import DashboardUIRegistry
 
 __all__ = [
     "DashboardUIToolset",
+    "DashboardUIRegistry",
+    "CheckContext",
+    "ActionContext",
+    "ActionResult",
     "Layout",
     "Page",
     "Tab",

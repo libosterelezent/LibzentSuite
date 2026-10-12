@@ -56,10 +56,12 @@ from typing import (
     runtime_checkable,
 )
 
+from .dashboard_ui.errors import UIError
 from .priority import Priority
 
 if TYPE_CHECKING:  # runtime duck-typing avoids import cycles / hard deps
     from .credentials import Credentials
+    from .dashboard_ui.builders import DashboardUIToolset, Layout
     from .event_bus import Event, MessageReceived
     from .settings_manager import Setting
     from adapters.base import DiscordMessage
@@ -146,6 +148,40 @@ class PluginBase(abc.ABC):
         sections (metrics/table/list/text) — never raw HTML.
         """
         return ()
+
+    # ------------------------------------------------------ dashboard UI (C)
+    def initialize_dashboard_ui(self, ui: "DashboardUIToolset") -> None:
+        """Optional hook for declaring this plugin's dashboard interface.
+
+        Called during plugin activation with a DashboardUIToolset. Build a
+        Layout using the toolset's builder classes, then call
+        self.attach_dashboard_ui(layout) to register it. The hook is SYNC:
+        attachment is pure in-memory registration (validate + freeze +
+        index), so no event-loop gymnastics are needed here. Overriding is
+        optional — plugins without the hook are completely unaffected.
+
+        Plugin-wide: a plugin's UI registers ONCE, no matter how many
+        accounts run the plugin (the first activation wins; later ones
+        skip). UI initialization failure never fails the activation.
+        """
+        return None
+
+    def attach_dashboard_ui(self, layout: "Layout") -> None:
+        """Attach a completed UI layout to the framework.
+
+        The layout is validated, frozen, and registered. Call this from
+        initialize_dashboard_ui(). Raises UIError on an invalid tree, a
+        duplicate-ID tree, or when no registry is wired (the plugin
+        manager injects it during the managed activation lifecycle).
+        """
+        # the registry is injected by the plugin manager as self._ui_registry
+        registry = getattr(self, "_ui_registry", None)
+        if registry is None:
+            raise UIError(
+                "no UI registry wired — attach_dashboard_ui requires a "
+                "managed plugin lifecycle")
+        # the plugin name is the class-declared slug (self.name)
+        registry.attach(self.name, layout)
 
     # ------------------------------------------------------------- lifecycle
     async def on_load(self, ctx: "PluginContext") -> None:

@@ -27,6 +27,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from core.errors import PluginError, SettingsValidationError
+from core.dashboard_ui import DashboardUIToolset, DashboardUIRegistry
 from core.event_bus import (
     EventBus,
     Event,
@@ -40,6 +41,7 @@ from core.event_bus import (
 )
 from core.plugin_base import (
     CommandContext, CommandSpec, parse_command_args, usage_line,
+    PluginBase,
 )
 from core.priority import Priority
 from core.settings_manager import SettingsManager
@@ -81,6 +83,7 @@ class PluginManager:
         cooldowns: Any = None,
         plugin_state: Any = None,
         dispatch_grace_s: float = 1.0,
+        ui_registry: Any = None,
     ) -> None:
         """``credential_service``/``cooldowns``/``plugin_state`` accept the
         framework's shared services (CredentialService, CooldownService,
@@ -90,6 +93,8 @@ class PluginManager:
         account manager's services factory. ``dispatch_grace_s`` bounds how
         long :meth:`deactivate_account` waits for in-flight dispatch tasks
         before cancelling them (round-3 ghost-write finding).
+        ``ui_registry`` overrides the plugin dashboard-UI registry (tests);
+        a fresh :class:`DashboardUIRegistry` is built by default.
         """
         self._bus = bus
         self._logger = logger
@@ -109,6 +114,9 @@ class PluginManager:
         self._pending_by_account: Dict[str, Set[asyncio.Task]] = {}
         #: bounded grace for in-flight handlers during deactivate_account
         self._dispatch_grace_s = dispatch_grace_s
+        #: central registry for plugin-attached dashboard UIs (Stage C);
+        #: the dashboard routes dispatch through this in Stage D
+        self._ui_registry = ui_registry or DashboardUIRegistry()
         # every account-scoped Discord event type routes to plugins; new
         # types are ADDITIVE — plugins filter by isinstance in handle_event
         self._unsubscribe = bus.subscribe(MessageReceived, self._on_message)
@@ -281,7 +289,50 @@ class PluginManager:
             if not runtime.enabled:
                 continue
             await self._activate_one(account, runtime)
+        # UI lifecycle: offer the toolset to plugins that declare a UI
+        # (after on_load/on_enable — actions may reflect plugin state)
+        self._init_dashboard_uis(account, runtimes)
         self._logger.info("activated plugins on %s", account)
+
+    def _init_dashboard_uis(self, account: str,
+                            runtimes: Dict[str, PluginRuntime]) -> None:
+        """Offer the dashboard UI toolset to this account's plugins.
+
+        Only plugins that OVERRIDE ``initialize_dashboard_ui`` are called
+        (the PluginBase no-op means "declares no UI"). Plugin-wide dedup:
+        a plugin's UI registers ONCE — the first account to activate it
+        wins, later activations of the same plugin on other accounts see
+        the registration and skip (one dashboard page per plugin, not per
+        account). Failures are isolated: a crashing hook (or a rejected
+        layout) never fails the account's activation, and any partial
+        registration is detached again.
+        """
+        for plugin_name, entry in runtimes.items():
+            instance = entry.instance
+            if instance is None or not entry.enabled:
+                continue
+            hook = getattr(instance, "initialize_dashboard_ui", None)
+            if hook is None or not callable(hook):
+                continue  # duck-typed instance without the hook
+            # bound-method vs function never compares identical: check the
+            # CLASS attribute to see whether the hook is actually overridden
+            if getattr(type(instance), "initialize_dashboard_ui", None) \
+                    is PluginBase.initialize_dashboard_ui:
+                continue  # base no-op: this plugin declares no UI
+            if plugin_name in self._ui_registry.list_plugins():
+                continue  # another account already registered this UI
+            try:
+                # inject the registry reference attach_dashboard_ui uses
+                instance._ui_registry = self._ui_registry
+                hook(DashboardUIToolset())
+            except Exception as exc:
+                entry.error_count += 1
+                entry.last_error = f"ui_init: {type(exc).__name__}: {exc}"
+                self._logger.warning(
+                    "dashboard UI init failed for %s on %s — isolated",
+                    plugin_name, account, exc_info=True)
+                # don't fail the activation — clean any partial registration
+                self._ui_registry.detach(plugin_name)
 
     async def _activate_one(self, account: str, runtime: PluginRuntime) -> None:
         """Load + enable one runtime, isolating any hook failure."""
@@ -399,6 +450,31 @@ class PluginManager:
                 runtime.loaded = False
                 self._bus.publish_nowait(PluginUnloaded(account=account, plugin=runtime.name))
             runtime.active = False
+        # UI cleanup: detach this account's plugin UIs — but a plugin's UI
+        # is PLUGIN-WIDE, so only detach when NO other account still has
+        # the plugin active (ref-counted by account)
+        for plugin_name in list(runtimes.keys()):
+            if self._ui_active_elsewhere(plugin_name, excluding=account):
+                continue
+            self._ui_registry.detach(plugin_name)
+
+    def _ui_active_elsewhere(self, plugin: str, excluding: str) -> bool:
+        """True when any OTHER account still holds this plugin active
+        (enabled + activated) — its UI registration must survive."""
+        for acct, others in self._accounts.items():
+            if acct == excluding:
+                continue
+            rt = others.get(plugin)
+            if rt is None or rt.instance is None:
+                continue
+            if rt.enabled and rt.active:
+                return True
+        return False
+
+    @property
+    def ui_registry(self) -> Any:
+        """The plugin dashboard-UI registry (Stage D routes dispatch here)."""
+        return self._ui_registry
 
     async def _quiesce_dispatch(self, account: str) -> None:
         """Bounded-join the account's in-flight dispatch tasks.
