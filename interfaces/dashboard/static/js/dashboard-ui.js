@@ -33,6 +33,19 @@ let duiNav = [];
 let duiSeq = 0;
 let duiComps = {};
 let duiDataCache = {};
+/* bulk-selection state: view component id -> Set of selected keys */
+const duiSelection = {};
+
+function duiSelected(compId) {
+  duiSelection[compId] = duiSelection[compId] || new Set();
+  return duiSelection[compId];
+}
+
+function openDuiModal(modalId) {
+  const dlg = document.querySelector('dialog.dui-modal[data-dui-comp="' + duiSlug(modalId) + '"]');
+  if (dlg) dlg.showModal();
+  return !!dlg;
+}
 
 /* ── Navigation ────────────────────────────────────────────────────────────── */
 async function loadDashboardUINav() {
@@ -111,13 +124,27 @@ function renderDashboardUIPage(page, pluginName, panel) {
   duiComps = {};
   duiDataCache = {};
   duiIndexComponents(page);
+  const flow = [], modals = [];
+  for (const c of (page.children || []))
+    (c.type === "modal" ? modals : flow).push(c);
   let html = `<div class="dui-page">`;
   if (page.description)
     html += `<p class="sub dui-desc">${esc(page.description)}</p>`;
-  html += (page.children || []).map(c => renderDashboardUIComponent(c, pluginName)).join("");
+  html += flow.map(c => renderDashboardUIComponent(c, pluginName)).join("");
   html += `</div>`;
+  html += modals.map(m => renderModal(m, pluginName)).join("");
   panel.innerHTML = html || '<div class="dui-page"><p class="dim">This page has no content.</p></div>';
   wireDashboardUI(panel, pluginName);
+}
+
+function renderModal(comp, pluginName, disabled) {
+  return `<dialog class="dui-modal" data-dui-comp="${esc(comp.id)}">` +
+    `<div class="dlg-hdr"><span class="dlg-title">${esc(comp.title || "")}</span>` +
+    `<button type="button" class="dlg-close" data-dlg-close aria-label="Close">✕</button></div>` +
+    `<div class="dlg-body">` +
+    (comp.description ? `<p class="sub">${esc(comp.description)}</p>` : "") +
+    duiChildren(comp, pluginName, disabled) +
+    `</div></dialog>`;
 }
 
 function duiIndexComponents(comp) {
@@ -133,14 +160,19 @@ async function dispatchUIAction(pluginName, componentId, payload) {
   });
   if (result && Array.isArray(result.refresh) && result.refresh.length)
     refreshDashboardUIData(pluginName, result.refresh);
+  if (result && result.modal) openDuiModal(result.modal);
   return result;
 }
 
-/* Re-fetch the listed component ids inside the plugin's active panel. */
+/* Re-fetch the listed component ids inside the plugin's active panel.
+ * Covers BOTH data bodies (tables/lists/tiles) and live leaves (metrics,
+ * texts) — a refresh list naming a modal's metric must update it too. */
 function refreshDashboardUIData(pluginName, ids) {
   for (const id of (ids || [])) {
     const host = document.querySelector('[data-dui-body="' + id + '"][data-dui-plugin="' + duiSlug(pluginName) + '"]');
-    if (host) loadDUIData(pluginName, id, host);
+    if (host) { loadDUIData(pluginName, id, host, true); continue; }
+    const leaf = document.querySelector('[data-dui-live="' + id + '"]');
+    if (leaf) loadDUILive(pluginName, id, leaf);
   }
 }
 
@@ -160,13 +192,16 @@ async function loadDUIData(pluginName, compId, host, quiet) {
   duiDataCache[compId] = data;
   const comp = duiComps[compId] || {};
   const html = comp.type === "table" ? duiTableHTML(comp, data, compId)
-                                     : duiListHTML(comp, data);
+                                     : (comp.type === "tile-view"
+                                        ? duiTilesHTML(comp, data, compId)
+                                        : duiListHTML(comp, data));
   host.innerHTML = html || "";
   wireDUIMore(host, compId);
   // row-action buttons render WITH the data (inside the body) — they
   // did not exist when wireDashboardUI ran, so wire them HERE on every
   // load/refresh or they are dead DOM
   wireDUIRowActions(host, pluginName);
+  wireDuiSelection(host, pluginName, compId);
 }
 
 function duiEmpty(emptyText) {
@@ -212,25 +247,132 @@ function duiTableHTML(comp, data, compId) {
   let keyIdx = keyCol ? columns.indexOf(keyCol) : -1;
   if (keyCol === "__key" && keyIdx < 0) keyIdx = columns.length;
   const rowActions = Array.isArray(comp.row_actions) ? comp.row_actions : [];
-  const head = columns.map(c => `<th>${esc(c)}</th>`).join("")
+  const selectable = comp.selectable === true;
+  const head = (selectable ? `<th class="dui-sel-th"></th>` : "")
+    + columns.map(c => `<th>${esc(c)}</th>`).join("")
     + (rowActions.length ? `<th></th>` : "");
   const body = visible.map(r => {
     const cells = columns.map((_, i) => `<td>${duiCell(r ? r[i] : "")}</td>`).join("");
+    const key = keyIdx >= 0 && r ? String(r[keyIdx] ?? "") : "";
+    const selCell = selectable
+      ? `<td class="dui-sel-td"><input type="checkbox" data-dui-sel="${esc(compId)}" data-dui-key="${esc(key)}"${duiSelected(compId).has(key) ? " checked" : ""}></td>` : "";
     let actionCell = "";
     if (rowActions.length) {
-      const key = keyIdx >= 0 && r ? String(r[keyIdx] ?? "") : "";
       actionCell = `<td class="dui-rowacts">` + rowActions.map(a =>
         `<button type="button" class="btn btn-sm btn-${esc(a.variant || "secondary")}"` +
         ` data-dui-rowact="${esc(compId)}" data-dui-raction="${esc(a.id)}"` +
         ` data-dui-row="${esc(key)}"${a.confirm ? ` title="${esc(a.confirm)}"` : ""}>${esc(a.label)}</button>`
       ).join(" ") + `</td>`;
     }
-    return `<tr>${cells}${actionCell}</tr>`;
+    return `<tr>${selCell}${cells}${actionCell}</tr>`;
   }).join("");
   const more = pageSize && rows.length > pageSize
     ? `<button type="button" class="btn btn-ghost btn-sm" data-dui-more="${esc(compId)}">show all ${rows.length} rows</button>`
     : "";
-  return `<div class="tbl-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>${more}`;
+  return duiBulkBarHTML(comp, compId) +
+    `<div class="tbl-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>${more}`;
+}
+
+/* ── TileView bodies + the shared bulk-selection machinery ─────────────── */
+function duiTilesHTML(comp, data, compId) {
+  let tiles = null;
+  if (data && !Array.isArray(data) && typeof data === "object")
+    tiles = Array.isArray(data.tiles) ? data.tiles : null;
+  else if (Array.isArray(data)) tiles = data;
+  if (!tiles) return duiEmpty("tile data must be a list or a {tiles: […]} object");
+  if (!tiles.length) return duiEmpty(comp.empty_text);
+  const rowActions = Array.isArray(comp.row_actions) ? comp.row_actions : [];
+  const keyCol = String(comp.key_column || "key");
+  const cards = tiles.map(t => {
+    if (!t || typeof t !== "object") return "";
+    const key = String(t[keyCol] ?? t.key ?? "");
+    const tone = ["ok", "warn", "err", "info"].includes(t.tone) ? ` dui-tile-${esc(t.tone)}` : "";
+    const sel = comp.selectable === true
+      ? `<label class="dui-tile-check" title="Select for bulk actions">` +
+        `<input type="checkbox" data-dui-sel="${esc(compId)}" data-dui-key="${esc(key)}"${duiSelected(compId).has(key) ? " checked" : ""}></label>` : "";
+    const status = t.status
+      ? `<span class="st st-${["ok", "warn", "err", "info"].includes(t.tone) ? esc(t.tone) : "dim"}">${esc(t.status)}</span>` : "";
+    const chips = (Array.isArray(t.chips) ? t.chips : [])
+      .map(c => `<span class="chip">${esc(c)}</span>`).join("");
+    const lines = (Array.isArray(t.lines) ? t.lines : [])
+      .map(l => Array.isArray(l) && l.length >= 2
+        ? `<span class="dui-kv"><span class="dim">${esc(l[0])}</span><span class="dui-kv-v">${duiCell(l[1])}</span></span>`
+        : "").join("");
+    const acts = rowActions.length
+      ? `<div class="dui-tile-actions">` + rowActions.map(a =>
+          `<button type="button" class="btn btn-sm btn-${esc(a.variant || "secondary")}"` +
+          ` data-dui-rowact="${esc(compId)}" data-dui-raction="${esc(a.id)}"` +
+          ` data-dui-row="${esc(key)}"${a.confirm ? ` title="${esc(a.confirm)}"` : ""}>${esc(a.label)}</button>`).join(" ") + `</div>` : "";
+    return `<div class="dui-tile${tone}">` + sel +
+      `<div class="dui-tile-hdr"><span class="dui-tile-title" title="${esc(key)}">${esc(t.title ?? key)}</span>${status}${chips}</div>` +
+      (lines ? `<div class="dui-tile-lines">${lines}</div>` : "") + acts + `</div>`;
+  }).join("");
+  return duiBulkBarHTML(comp, compId) + `<div class="dui-tiles">${cards}</div>`;
+}
+
+function duiBulkBarHTML(comp, compId) {
+  const bulk = Array.isArray(comp.bulk_actions) ? comp.bulk_actions : [];
+  if (!bulk.length) return "";
+  return `<div class="dui-bulkbar" data-dui-bulkbar="${esc(compId)}">` +
+    `<span class="dui-bulk-count">0 selected</span>` +
+    bulk.map(a => `<button type="button" class="btn btn-${esc(a.variant || "secondary")} btn-sm"` +
+      ` data-dui-bulk="${esc(compId)}" data-dui-baction="${esc(a.id)}"${a.confirm ? ` data-dui-confirm="${esc(a.confirm)}"` : ""}>${esc(a.label)}</button>`).join("") +
+    `<button type="button" class="btn btn-ghost btn-sm" data-dui-bulkclear="${esc(compId)}">clear</button></div>`;
+}
+
+function updateDuiBulkBar(compId) {
+  const bar = document.querySelector(`[data-dui-bulkbar="${compId}"]`);
+  if (!bar) return;
+  const n = duiSelected(compId).size;
+  bar.classList.toggle("open", n > 0);
+  const cnt = bar.querySelector(".dui-bulk-count");
+  if (cnt) cnt.textContent = `${n} selected`;
+}
+
+/* Wire checkboxes + bulk buttons in freshly rendered bodies. */
+function wireDuiSelection(root, pluginName, compId) {
+  root.querySelectorAll(`input[data-dui-sel="${compId}"]`).forEach(cb => {
+    if (cb.dataset.duiWired) return;
+    cb.dataset.duiWired = "1";
+    cb.addEventListener("change", () => {
+      const set = duiSelected(compId);
+      if (cb.checked) set.add(cb.dataset.duiKey); else set.delete(cb.dataset.duiKey);
+      updateDuiBulkBar(compId);
+    });
+  });
+  root.querySelectorAll(`button[data-dui-bulk="${compId}"]`).forEach(btn => {
+    if (btn.dataset.duiWired) return;
+    btn.dataset.duiWired = "1";
+    const host = btn.closest(".dui-item") || btn.parentElement;
+    const fire = async () => {
+      const rows = [...duiSelected(compId)];
+      try {
+        const res = await withBusy(btn, dispatchUIAction(pluginName, compId,
+          { action: btn.dataset.duiBaction, rows }));
+        if (!res) return;
+        if (res.field_errors && Object.keys(res.field_errors).length)
+          setFb(host, "error", Object.values(res.field_errors).join("; "));
+        else if (res.message)
+          res.success ? flashFb(host, res.message) : setFb(host, "error", res.message);
+        if (res.success !== false && !(res.field_errors && Object.keys(res.field_errors).length))
+          duiSelection[compId] = new Set();   // bulk ops consume the selection
+      } catch (e) { setFb(host, "error", e.message); }
+    };
+    btn.onclick = () => {
+      const rows = duiSelected(compId);
+      if (!rows.size) return;
+      const confirmText = btn.dataset.duiConfirm;
+      if (confirmText) confirmAction("Confirm", confirmText, fire);
+      else fire();
+    };
+  });
+  root.querySelectorAll(`button[data-dui-bulkclear="${compId}"]`).forEach(btn => {
+    if (btn.dataset.duiWired) return;
+    btn.dataset.duiWired = "1";
+    btn.onclick = () => { duiSelection[compId] = new Set(); updateDuiBulkBar(compId);
+      root.querySelectorAll(`input[data-dui-sel="${compId}"]`).forEach(cb => cb.checked = false); };
+  });
+  updateDuiBulkBar(compId);
 }
 
 /* Wire row-action buttons (dispatch {"action", "row"} through the
@@ -354,6 +496,7 @@ function renderDashboardUIComponent(comp, pluginName) {
     case "container": return renderContainer(comp, pluginName, disabled);
     case "grid": return renderGrid(comp, pluginName, disabled);
     case "toolbar": return renderToolbar(comp, pluginName, disabled);
+    case "tile-view": return renderTileView(comp);
     case "text": return renderText(comp);
     case "display-text": return renderDisplayText(comp);
     case "alert": return renderAlert(comp);
@@ -570,7 +713,7 @@ function renderButton(comp, disabled) {
   const variant = ["primary", "secondary", "danger", "ghost"].includes(comp.variant) ? comp.variant : "secondary";
   const off = disabled || comp.disabled === true;
   return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)}${off ? ' data-dui-disabled="1"' : ""}>` +
-    `<button type="button" class="btn btn-${esc(variant)}${comp.loading ? " busy" : ""}" data-dui-act="${esc(comp.id)}"${off || comp.loading ? " disabled" : ""}>${esc(comp.label || comp.id)}</button>` +
+    `<button type="button" class="btn btn-${esc(variant)}${comp.loading ? " busy" : ""}" data-dui-act="${esc(comp.id)}"${comp.open_modal ? ` data-dui-open="${esc(comp.open_modal)}"` : ""}${off || comp.loading ? " disabled" : ""}>${esc(comp.label || comp.id)}</button>` +
     duiHint(comp) + `</div>`;
 }
 
@@ -616,6 +759,43 @@ function renderTextarea(comp, disabled) {
     duiHint(comp) + `</div>`;
 }
 
+async function loadDuiOptions(pluginName, id, wrapper) {
+  let data = null;
+  try {
+    data = await api("/api/dashboard-ui/data?plugin=" + encodeURIComponent(pluginName) +
+                     "&component_id=" + encodeURIComponent(id));
+  } catch (e) { wrapper.innerHTML = ""; setFb(wrapper, "error", e.message); return; }
+  if (!data || typeof data !== "object" || !Array.isArray(data.options)) return;
+  const comp = duiComps[id] || {};
+  const values = (Array.isArray(data.value) ? data.value : []).map(String);
+  if (comp.type === "multi-select") {
+    const host = wrapper.querySelector(".picklist");
+    if (!host) return;
+    host.innerHTML = data.options.map(o =>
+      `<label class="pick-row">` +
+      `<input type="checkbox" value="${esc(String(o.value ?? o))}"${values.includes(String(o.value ?? o)) ? " checked" : ""}>` +
+      `<span class="pl-name">${esc(String(o.label ?? o.value ?? o))}</span></label>`).join("")
+      || duiEmpty("no options");
+    return;
+  }
+  if (comp.type === "radio-group") {
+    const host = wrapper.querySelector(".picklist");
+    if (!host) return;
+    host.innerHTML = data.options.map(o =>
+      `<label class="pick-row">` +
+      `<input type="radio" name="dui-rg-${esc(id)}" value="${esc(String(o.value ?? o))}">` +
+      `<span class="pl-name">${esc(String(o.label ?? o.value ?? o))}</span></label>`).join("")
+      || duiEmpty("no options");
+    return;
+  }
+  const sel = wrapper.querySelector("select");
+  if (!sel) return;
+  const keep = sel.value;
+  sel.innerHTML = `<option value=""></option>` + data.options.map(o =>
+    `<option value="${esc(String(o.value ?? o))}">${esc(String(o.label ?? o.value ?? o))}</option>`).join("");
+  if (keep && [...sel.options].some(o => o.value === keep)) sel.value = keep;
+}
+
 function duiOptions(comp) {
   return (comp.options || []).map(o => {
     const value = typeof o === "object" && o !== null ? o.value : o;
@@ -627,6 +807,17 @@ function duiOptions(comp) {
 function renderSelect(comp, disabled) {
   const off = disabled || comp.disabled === true;
   const current = String(comp.value ?? "");
+  if (comp.options_live) {
+    // dynamic choices: populated by loadDuiOptions after the parse
+    const live = `<option value="">loading…</option>`;
+    if (comp.type === "radio-group") {
+      return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)} data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
+        duiLabel(comp) + `<div class="picklist">${live}</div>` + duiHint(comp) + `</div>`;
+    }
+    return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)} data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
+      duiLabel(comp) + `<select${off ? " disabled" : ""}>${live}</select>` +
+      duiHint(comp) + `</div>`;
+  }
   if (comp.type === "radio-group") {
     const radios = duiOptions(comp).map(o =>
       `<label class="pick-row">` +
@@ -662,6 +853,12 @@ function renderListView(comp) {
 }
 
 function renderTable(comp) {
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)}>` +
+    (comp.title ? `<div class="dui-sec-title">${esc(comp.title)}</div>` : "") +
+    `<div class="dui-data" data-dui-body="${esc(comp.id)}"></div></div>`;
+}
+
+function renderTileView(comp) {
   return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)}>` +
     (comp.title ? `<div class="dui-sec-title">${esc(comp.title)}</div>` : "") +
     `<div class="dui-data" data-dui-body="${esc(comp.id)}"></div></div>`;
@@ -715,6 +912,7 @@ function wireDashboardUI(root, pluginName) {
     };
     const comp = duiComps[id] || {};
     el.onclick = () => {
+      if (el.dataset.duiOpen) { openDuiModal(el.dataset.duiOpen); return; }
       if (comp.confirm) confirmAction("Confirm", comp.confirm, fire);
       else fire();
     };
@@ -737,6 +935,13 @@ function wireDashboardUI(root, pluginName) {
   // row-action buttons in STATIC markup (data-body ones are wired by
   // loadDUIData when their table renders)
   wireDUIRowActions(root, pluginName);
+
+  // dynamic options: selects/multi-selects with an options provider
+  root.querySelectorAll("[data-dui-field]").forEach(el => {
+    const id = el.dataset.duiField;
+    const comp = duiComps[id] || {};
+    if (comp.options_live) loadDuiOptions(pluginName, id, el);
+  });
 
   // live leaves (metrics / texts with data providers): first fetch
   loadDUILeaves(root, pluginName);
@@ -782,6 +987,11 @@ function wireDashboardUI(root, pluginName) {
           }
         if (res.message)
           res.success ? flashFb(formEl, res.message) : setFb(formEl, "error", res.message);
+        if (comp.close_on_submit && res.success !== false
+            && !(res.field_errors && Object.keys(res.field_errors).length)) {
+          const dlg = formEl.closest("dialog");
+          if (dlg) dlg.close();
+        }
       } catch (e) { setFb(formEl, "error", e.message); }
     };
   });

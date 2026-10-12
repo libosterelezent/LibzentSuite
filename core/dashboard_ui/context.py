@@ -89,7 +89,11 @@ class ActionResult:
       * ``field_errors`` — per-field validation errors (form renders
         these inline; maps field id -> error message);
       * ``refresh``    — component ids the frontend should re-fetch
-        data for (the registry does not push; it only names targets).
+        data for (the registry does not push; it only names targets);
+      * ``modal``      — open the named Modal after the action (the
+        context-modal pattern: the action records which row we are
+        looking at server-side, refreshes the modal's components, and
+        the frontend shows the dialog).
     """
 
     success: bool
@@ -97,6 +101,7 @@ class ActionResult:
     data: Any = None
     field_errors: Dict[str, str] = field(default_factory=dict)
     refresh: List[str] = field(default_factory=list)
+    modal: Optional[str] = None
 
 
 __all__ = ["CheckContext", "ActionContext", "ActionResult"]

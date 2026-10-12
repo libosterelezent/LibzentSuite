@@ -386,11 +386,11 @@ class TestPluginProfilesUI(unittest.TestCase):
         self.assertIn('id="pp-acct"', html)
         self.assertIn('id="pp-host"', html)
         appjs = _js_file("app.js")
-        self.assertIn('if (currentView==="profiles") renderProfiles();', appjs)
-        self.assertIn("LOADERS.profiles =", appjs)
-        # the Plugins tab is a framework page now; the profile-library
-        # loader serves the (still legacy) Profiles tab
-        self.assertIn("LOADERS.profiles =", appjs)
+        # every main tab (incl. fleet + profiles) is a framework page now
+        self.assertNotIn('renderProfiles();', appjs.split("function wire")[0])
+        # every main tab is a framework page — no legacy loaders remain
+        self.assertNotIn("LOADERS.profiles =", appjs)
+        self.assertNotIn("LOADERS.fleet =", appjs)
         # the loader swallows its own failure (fire-and-forget from LOADERS)
         self.assertIn("catch", self._fn("loadPluginProfiles"))
 

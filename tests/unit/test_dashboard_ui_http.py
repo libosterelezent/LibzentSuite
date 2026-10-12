@@ -300,7 +300,7 @@ class DashboardUIRouteTests(unittest.IsolatedAsyncioTestCase):
         result = get_json(body)["data"]
         # the full ActionResult shape crosses the wire
         self.assertEqual(sorted(result),
-                         ["data", "field_errors", "message", "refresh",
+                         ["data", "field_errors", "message", "modal", "refresh",
                           "success"])
         self.assertTrue(result["success"])
         self.assertEqual(result["message"], "probe executed")

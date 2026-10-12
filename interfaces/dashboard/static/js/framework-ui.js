@@ -19,7 +19,8 @@
    ═══════════════════════════════════════════════════════════════════════════ */
 
 const FRAMEWORK_PLUGIN = "$framework";
-const FRAMEWORK_VIEWS = new Set(["home", "plugins", "activity", "policies", "admin", "tools"]);
+const FRAMEWORK_VIEWS = new Set(["home", "fleet", "plugins", "activity",
+                                "policies", "admin", "tools", "profiles"]);
 let fwSeq = 0;
 let fwLastRefresh = 0;
 

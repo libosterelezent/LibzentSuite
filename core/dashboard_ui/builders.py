@@ -58,6 +58,9 @@ from .components import (
     Grid,
     Alert,
     Toolbar,
+    Modal,
+    TileView,
+    BulkAction,
 )
 from .errors import (
     ActionRegistrationError,
@@ -207,4 +210,7 @@ class DashboardUIToolset:
     Grid = Grid
     Alert = Alert
     Toolbar = Toolbar
+    Modal = Modal
+    TileView = TileView
+    BulkAction = BulkAction
     Form = Form

@@ -31,14 +31,23 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List
 
-from core.dashboard_ui import DashboardUIToolset, RowAction
+from core.dashboard_ui import DashboardUIToolset, RowAction, BulkAction
 from core.dashboard_ui.registry import DashboardUIRegistry
 
 #: reserved registry plugin name for the framework's own pages
 FRAMEWORK_PLUGIN = "$framework"
 
 #: main-tab views the SPA renders through the framework pages
-FRAMEWORK_VIEWS = ("home", "plugins", "activity", "policies", "admin", "tools")
+FRAMEWORK_VIEWS = ("home", "fleet", "plugins", "activity", "policies",
+                   "admin", "tools", "profiles")
+
+#: context-modal state: which row each modal is looking at (set by the
+#: opening action, read by the modal's data providers)
+_fleet_state: Dict[str, Any] = {"details": None, "cred": None, "move": None,
+                                "assign": None, "group_details": None,
+                                "group_edit": None, "group_members": None}
+_profiles_state: Dict[str, Any] = {"account": None, "bind": None,
+                                   "editor": None, "effective": None}
 
 
 def attach_framework_ui(registry: DashboardUIRegistry, api: Any) -> int:
@@ -51,8 +60,9 @@ def attach_framework_ui(registry: DashboardUIRegistry, api: Any) -> int:
     """
     ui = DashboardUIToolset()
     layout = ui.Layout(component_id="framework-root")
-    for build in (_build_home, _build_plugins, _build_activity,
-                  _build_policies, _build_admin, _build_tools):
+    for build in (_build_home, _build_fleet, _build_plugins,
+                  _build_activity, _build_policies, _build_admin,
+                  _build_tools, _build_profiles):
         layout.add_page(build(ui, api))
     registry.attach(FRAMEWORK_PLUGIN, layout)
     return len(layout.pages())
@@ -918,4 +928,919 @@ def _build_tools(ui: DashboardUIToolset, api: Any):
                        .add_fields(ui.TextInput(component_id="token-value")
                                    .set_label("Token")
                                    .set_placeholder("paste the dashboard token")))))
+    return page
+
+
+# ──────────────────────────────────────────────────────────────────── fleet
+def _build_fleet(ui: DashboardUIToolset, api: Any):
+    page = (ui.Page(component_id="fleet")
+            .set_title("Accounts & Groups")
+            .set_icon("M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75")
+            .set_description(
+                "The fleet: every Discord account with runtime state, and "
+                "the sync groups that coordinate their pacing. Bulk-select "
+                "accounts for fleet-wide actions."))
+
+    async def _accts():
+        st = await _status(api)
+        return st.get("accounts") or []
+
+    async def _groups():
+        try:
+            return await api.groups_list() or []
+        except Exception:
+            return []
+
+    # ── account actions ────────────────────────────────────────────
+    async def toggle_run(row, ctx):
+        st = await _status(api)
+        acct = next((a for a in st.get("accounts") or []
+                     if a.get("name") == row), None)
+        running = acct and acct.get("status") == "running"
+        await api.accounts_start(row, surface="dashboard") if not running \
+            else await api.accounts_stop(row, surface="dashboard")
+        return {"success": True,
+                "message": f"{row}: {'stop' if running else 'start'} requested"}
+
+    async def open_details(row, ctx):
+        _fleet_state["details"] = row
+        return {"open_modal": "acct-details-modal",
+                "refresh": ["ad-status", "ad-lines", "ad-plugins"]}
+
+    async def open_cred(row, ctx):
+        _fleet_state["cred"] = row
+        return {"open_modal": "acct-cred-modal"}
+
+    async def open_move(row, ctx):
+        _fleet_state["move"] = [row]
+        return {"open_modal": "move-modal", "refresh": ["move-target"]}
+
+    async def open_assign(row, ctx):
+        _fleet_state["assign"] = row
+        return {"open_modal": "assign-modal", "refresh": ["assign-plugins"]}
+
+    async def estop_row(row, ctx):
+        await api.accounts_emergency_stop(row, surface="dashboard")
+        return {"success": True, "message": f"emergency stop requested for {row}"}
+
+    async def remove_row(row, ctx):
+        await api.accounts_remove(row, surface="dashboard")
+        return {"success": True, "message": f"{row} removed",
+                "refresh": ["acct-tiles", "group-tiles", "indep-list"]}
+
+    async def bulk_start(rows, ctx):
+        rs = [a for (_, a) in await _run_all(
+            [lambda n=n: api.accounts_start(n, surface="dashboard") for n in rows])]
+        return rs
+
+    async def _run_all(calls):
+        import asyncio
+        results = await asyncio.gather(*[c() for c in calls], return_exceptions=True)
+        out = []
+        for r in results:
+            out.append(("err", str(r)) if isinstance(r, Exception) else ("ok", r))
+        return out
+
+    async def bulk_run(rows, ctx, start=True):
+        calls = [(api.accounts_start if start else api.accounts_stop)
+                 (n, surface="dashboard") for n in rows]
+        results = await _run_all_static(calls)
+        failed = [str(e) for e in results if isinstance(e, Exception)]
+        if failed:
+            return {"success": False,
+                    "message": f"{len(results)-len(failed)}/{len(results)} succeeded — {'; '.join(failed[:3])}"}
+        return {"success": True,
+                "message": f"{len(results)} request{'s' if len(results) != 1 else ''} sent"}
+
+    async def _run_all_static(calls):
+        import asyncio
+        return await asyncio.gather(*calls, return_exceptions=True)
+
+    async def bulk_start(rows, ctx):
+        return await bulk_run(rows, ctx, start=True)
+
+    async def bulk_stop(rows, ctx):
+        return await bulk_run(rows, ctx, start=False)
+
+    async def bulk_move(rows, ctx):
+        _fleet_state["move"] = list(rows)
+        return {"open_modal": "move-modal", "refresh": ["move-target"]}
+
+    # ── form submits ───────────────────────────────────────────────
+    async def submit_add(ctx, payload):
+        name = str(payload.get("fa-name") or "").strip()
+        if not name:
+            return {"success": False, "field_errors": {
+                "fa-name": "Account name is required."}}
+        body: Dict[str, Any] = {"name": name}
+        group = str(payload.get("fa-group") or "").strip()
+        if group and group != "__independent__":
+            body["sync_group"] = group
+        plugins = payload.get("fa-plugins") or []
+        if isinstance(plugins, list):
+            body["plugins"] = plugins
+        cred = str(payload.get("fa-cred") or "").strip()
+        if cred:
+            body["credential"] = cred
+        await api.accounts_add(body, surface="dashboard")
+        return {"success": True, "message": f"account {name} created",
+                "refresh": ["acct-tiles", "group-tiles", "indep-list"]}
+
+    async def submit_cred(ctx, payload):
+        name = _fleet_state.get("cred") or ""
+        cred = str(payload.get("fc-cred") or "").strip()
+        if not name:
+            return {"success": False, "message": "no account selected"}
+        if not cred:
+            return {"success": False, "field_errors": {
+                "fc-cred": "Paste the Discord token."}}
+        await api.accounts_set_credential(name, cred, surface="dashboard")
+        return {"success": True, "message": f"credential stored for {name}",
+                "refresh": ["acct-tiles", "ad-lines"]}
+
+    async def submit_move(ctx, payload):
+        names = _fleet_state.get("move") or []
+        group = str(payload.get("mv-group") or "").strip()
+        if not names:
+            return {"success": False, "message": "nothing to move"}
+        results = await _run_all_static([
+            (api.groups_clear_account(n, surface="dashboard")
+             if group in ("", "__independent__")
+             else api.groups_set_account(n, group, surface="dashboard"))
+            for n in names])
+        failed = [str(e) for e in results if isinstance(e, Exception)]
+        if failed:
+            return {"success": False,
+                    "message": f"{len(results)-len(failed)}/{len(results)} moved — {'; '.join(failed[:3])}"}
+        target = "independent" if group in ("", "__independent__") else group
+        return {"success": True,
+                "message": f"{len(names)} moved to {target}",
+                "refresh": ["acct-tiles", "group-tiles", "indep-list"]}
+
+    async def submit_assign(ctx, payload):
+        name = _fleet_state.get("assign") or ""
+        if not name:
+            return {"success": False, "message": "no account selected"}
+        plugins = payload.get("as-plugins") or []
+        if not isinstance(plugins, list):
+            plugins = []
+        await api.accounts_plugins_set(name, plugins, surface="dashboard")
+        return {"success": True,
+                "message": f"{name}: {len(plugins)} plugin(s) assigned",
+                "refresh": ["acct-tiles", "ad-plugins", "plug-state"]}
+
+    # ── providers ──────────────────────────────────────────────────
+    def _tiles_data(api):
+        async def provide(ctx):
+            rows = await _accts()
+            tiles = []
+            for a in rows:
+                status = a.get("status") or "unknown"
+                tone = {"running": "ok", "failed": "err",
+                        "invalid_credential": "err",
+                        "missing_credential": "warn"}.get(status, "info")
+                if not a.get("credential") and tone not in ("err", "warn"):
+                    tone = "warn"   # missing credential always flags
+                lines = []
+                lines.append(["Credential",
+                              ("ok (" + a.get("credential") + ")")
+                              if a.get("credential") else "missing"])
+                if a.get("uptime_s"):
+                    lines.append(["Uptime", _fmt_uptime(a["uptime_s"])])
+                if a.get("latency_ms") is not None:
+                    lines.append(["Latency", f"{a['latency_ms']:.0f}ms"])
+                if a.get("cooldowns"):
+                    lines.append(["Cooldowns", str(a["cooldowns"])])
+                lines.append(["Group", a.get("sync_group") or "independent"])
+                lines.append(["Plugins",
+                              ", ".join(a.get("assigned_plugins") or [])
+                              or "none"])
+                tiles.append({"key": a.get("name", "?"), "title": a.get("name", "?"),
+                              "status": status, "tone": tone,
+                              "lines": lines})
+            return {"tiles": tiles}
+        return provide
+
+    def _indep_data(api):
+        async def provide(ctx):
+            rows = await _accts()
+            return [{"label": a["name"], "value": a.get("status", "?")}
+                    for a in rows if not a.get("sync_group")]
+        return provide
+
+    def _details_status(api):
+        async def provide(ctx):
+            name = _fleet_state.get("details")
+            if not name:
+                return {"value": "no account selected"}
+            rows = await _accts()
+            a = next((x for x in rows if x.get("name") == name), None)
+            if not a:
+                return {"value": f"{name} — not found (removed?)"}
+            return {"value": f"{a.get('status', '?')} · id {a.get('user_id', '?')} · "
+                            f"{'enabled' if a.get('enabled', True) else 'disabled'}",
+                    "level": "ok" if a.get("status") == "running" else "err"}
+        return provide
+
+    def _details_lines(api):
+        async def provide(ctx):
+            name = _fleet_state.get("details")
+            rows = await _accts()
+            a = next((x for x in rows if x.get("name") == name), None)
+            if not a:
+                return []
+            out = []
+            if a.get("latency_ms") is not None:
+                out.append({"label": "Latency", "value": f"{a['latency_ms']:.0f}ms"})
+            out.append({"label": "Uptime", "value": _fmt_uptime(a.get("uptime_s") or 0)})
+            out.append({"label": "Credential",
+                        "value": a.get("credential") or "missing"})
+            out.append({"label": "Sync group", "value": a.get("sync_group") or "independent"})
+            return out
+        return provide
+
+    def _details_plugins(api):
+        async def provide(ctx):
+            name = _fleet_state.get("details")
+            rows = await _accts()
+            a = next((x for x in rows if x.get("name") == name), None)
+            if not a:
+                return {"columns": ["Plugin"], "rows": []}
+            return {"columns": ["Plugin"],
+                    "rows": [[p] for p in (a.get("assigned_plugins") or [])]}
+        return provide
+
+    async def unassign_plugin(row, ctx):
+        # row arrives as "account|plugin" via the __key cell
+        account, _, plugin = row.partition("|")
+        await api.accounts_plugin_unassign(account, plugin, surface="dashboard")
+        return {"success": True, "message": f"{plugin} unassigned from {account}",
+                "refresh": ["ad-plugins", "acct-tiles"]}
+
+    def _details_plugins_rows(api):
+        async def provide(ctx):
+            name = _fleet_state.get("details")
+            rows = await _accts()
+            a = next((x for x in rows if x.get("name") == name), None)
+            if not a:
+                return {"columns": ["Plugin"], "rows": []}
+            return {"columns": ["Plugin", "Key"],
+                    "rows": [[p, f"{name}|{p}"]
+                             for p in (a.get("assigned_plugins") or [])]}
+        return provide
+
+    def _group_options(api):
+        async def provide(ctx):
+            groups = await _groups()
+            return {"options": [{"value": "__independent__",
+                                 "label": "Independent / no group"}] +
+                               [{"value": g["name"], "label": g["name"]}
+                                for g in groups]}
+        return provide
+
+    def _plugin_options(api):
+        async def provide(ctx):
+            try:
+                manifests = await api.plugins_manifests()
+            except Exception:
+                manifests = []
+            return {"options": [{"value": m.get("name", "?"),
+                                 "label": m.get("name", "?")}
+                                for m in (manifests or [])]}
+        return provide
+
+    def _assign_plugins(api):
+        async def provide(ctx):
+            name = _fleet_state.get("assign")
+            rows = await _accts()
+            a = next((x for x in rows if x.get("name") == name), None)
+            current = set((a or {}).get("assigned_plugins") or [])
+            try:
+                manifests = await api.plugins_manifests()
+            except Exception:
+                manifests = []
+            return {"options": [{"value": m.get("name", "?"),
+                                 "label": m.get("name", "?")}
+                                for m in (manifests or [])],
+                    "value": sorted(current)}
+        return provide
+
+    # ── group actions ──────────────────────────────────────────────
+    async def group_details(row, ctx):
+        _fleet_state["group_details"] = row
+        return {"open_modal": "group-details-modal",
+                "refresh": ["gd-lines", "gd-members"]}
+
+    async def group_edit(row, ctx):
+        _fleet_state["group_edit"] = row
+        return {"open_modal": "group-edit-modal"}
+
+    async def group_addmember(row, ctx):
+        _fleet_state["group_members"] = row
+        return {"open_modal": "group-member-modal",
+                "refresh": ["gm-accounts"]}
+
+    async def group_delete(row, ctx):
+        try:
+            groups = await _groups()
+        except Exception:
+            groups = []
+        g = next((x for x in groups if x.get("name") == row), None)
+        count = (g or {}).get("member_count", 0) or 0
+        await api.groups_delete(row, detach_members=bool(count),
+                                surface="dashboard")
+        return {"success": True, "message": f"group {row} deleted",
+                "refresh": ["group-tiles", "acct-tiles", "indep-list"]}
+
+    async def group_bulk_run(row, ctx, start=True):
+        try:
+            snap = await api.groups_get(row)
+        except Exception:
+            return {"success": False, "message": f"unknown group {row}"}
+        members = [m.get("name") for m in (snap.get("members") or [])]
+        if not members:
+            return {"success": False, "message": "group is empty"}
+        return await bulk_run(members, ctx, start=start)
+
+    async def group_start(row, ctx):
+        return await group_bulk_run(row, ctx, start=True)
+
+    async def group_stop(row, ctx):
+        return await group_bulk_run(row, ctx, start=False)
+
+    async def submit_group_create(ctx, payload):
+        name = str(payload.get("gc-name") or "").strip()
+        if not name:
+            return {"success": False, "field_errors": {
+                "gc-name": "Group name is required."}}
+        await api.groups_create(name,
+                                description=str(payload.get("gc-desc") or ""),
+                                enabled=payload.get("gc-enabled") is not False,
+                                surface="dashboard")
+        return {"success": True, "message": f"group {name} created",
+                "refresh": ["group-tiles"]}
+
+    async def submit_group_edit(ctx, payload):
+        group = _fleet_state.get("group_edit") or ""
+        if not group:
+            return {"success": False, "message": "no group selected"}
+        body: Dict[str, Any] = {}
+        nn = str(payload.get("ge-name") or "").strip()
+        if nn and nn != group:
+            body["name"] = nn
+        desc = str(payload.get("ge-desc") or "")
+        if desc:
+            body["description"] = desc
+        body["enabled"] = payload.get("ge-enabled") is not False
+        await api.groups_update(group, body, surface="dashboard")
+        return {"success": True, "message": f"group {group} updated",
+                "refresh": ["group-tiles", "gd-lines"]}
+
+    async def submit_group_member(ctx, payload):
+        group = _fleet_state.get("group_members") or ""
+        chosen = payload.get("gm-accounts") or []
+        if not group:
+            return {"success": False, "message": "no group selected"}
+        if not chosen:
+            return {"success": False, "field_errors": {
+                "gm-accounts": "Select at least one account."}}
+        results = await _run_all_static([
+            api.groups_add_member(group, n, surface="dashboard") for n in chosen])
+        failed = [str(e) for e in results if isinstance(e, Exception)]
+        if failed:
+            return {"success": False,
+                    "message": f"{len(results)-len(failed)}/{len(results)} added — {'; '.join(failed[:3])}"}
+        return {"success": True, "message": f"{len(chosen)} member(s) added to {group}",
+                "refresh": ["group-tiles", "gd-members", "acct-tiles"]}
+
+    async def remove_member(row, ctx):
+        group, _, account = row.partition("|")
+        await api.groups_remove_member(group, account, surface="dashboard")
+        return {"success": True, "message": f"{account} removed from {group}",
+                "refresh": ["group-tiles", "gd-members", "acct-tiles", "indep-list"]}
+
+    def _group_tiles(api):
+        async def provide(ctx):
+            groups = await _groups()
+            rows = await _accts()
+            tiles = []
+            for g in groups:
+                name = g.get("name", "?")
+                members = [a for a in rows if a.get("sync_group") == name]
+                online = sum(1 for m in members if m.get("status") == "running")
+                count = g.get("member_count", len(members)) or len(members)
+                tone = ("info" if g.get("enabled") is False
+                        else ("ok" if members and online == len(members)
+                              else ("err" if online == 0 and members else "warn")))
+                chips = [m["name"] for m in members[:8]]
+                if len(members) > 8:
+                    chips.append(f"+{len(members)-8} more")
+                lines = [["Members", f"{online}/{count} online" if count else "empty"]]
+                if g.get("description"):
+                    lines.insert(0, ["Description", g["description"]])
+                tiles.append({"key": name, "title": name,
+                              "status": (f"{online}/{count}" if count else "empty")
+                                         + (" · off" if g.get("enabled") is False else ""),
+                              "tone": tone,
+                              "lines": lines,
+                              "chips": chips})
+            return {"tiles": tiles}
+        return provide
+
+    def _gd_lines(api):
+        async def provide(ctx):
+            name = _fleet_state.get("group_details")
+            if not name:
+                return []
+            try:
+                snap = await api.groups_get(name)
+            except Exception:
+                return [{"label": name, "value": "not found"}]
+            out = [{"label": "State",
+                    "value": "enabled" if snap.get("enabled", True) else "disabled"}]
+            if snap.get("description"):
+                out.append({"label": "Description", "value": snap["description"]})
+            if snap.get("pacing_key"):
+                out.append({"label": "Pacing", "value": snap["pacing_key"]})
+            members = snap.get("members") or []
+            online = sum(1 for m in members if m.get("status") == "running")
+            out.append({"label": "Online", "value": f"{online}/{len(members)}"})
+            return out
+        return provide
+
+    def _gd_members(api):
+        async def provide(ctx):
+            name = _fleet_state.get("group_details")
+            if not name:
+                return {"columns": ["Member", "Status", "Key"], "rows": []}
+            try:
+                snap = await api.groups_get(name)
+            except Exception:
+                return {"columns": ["Member", "Status", "Key"], "rows": []}
+            rows = []
+            for m in (snap.get("members") or []):
+                rows.append([m.get("name", "?"), m.get("status", "?"),
+                             f"{name}|{m.get('name', '?')}"])
+            return {"columns": ["Member", "Status", "Key"], "rows": rows}
+        return provide
+
+    def _gm_accounts(api):
+        async def provide(ctx):
+            group = _fleet_state.get("group_members") or ""
+            rows = await _accts()
+            cands = [a for a in rows if a.get("sync_group") != group]
+            return {"options": [{"value": a["name"],
+                                 "label": f"{a['name']} ({a.get('sync_group') or 'independent'})"}
+                                for a in cands]}
+        return provide
+
+    # ── assemble ───────────────────────────────────────────────────
+    run_toggle = RowAction("run", "start/stop", toggle_run)
+    (page
+     .add_section(ui.Section(component_id="fleet-accts-sec")
+        .add_component(ui.Toolbar(component_id="fleet-accts-bar")
+                       .set_title("Accounts")
+                       .set_icon("M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75")
+                       .add_component(ui.Button(component_id="fleet-add")
+                                      .set_label("+ Add Account")
+                                      .set_variant("primary")
+                                      .set_open_modal("fleet-add-modal")))
+        .add_component(ui.TileView(component_id="acct-tiles")
+                       .set_key_column("key")
+                       .set_empty_text("No accounts yet — add your first "
+                                       "Discord account.")
+                       .set_data_source(_tiles_data(api))
+                       .set_row_actions([
+                           run_toggle,
+                           RowAction("details", "details", open_details),
+                           RowAction("cred", "credential", open_cred),
+                           RowAction("group", "group", open_move),
+                           RowAction("plugins", "plugins", open_assign),
+                           RowAction("estop", "estop", estop_row, variant="danger",
+                                     confirm="Emergency stop this account?"),
+                           RowAction("remove", "remove", remove_row, variant="danger",
+                                     confirm="Remove this account? Deletes its "
+                                             "credential, cooldowns and state."),
+                       ])
+                       .set_bulk_actions([
+                           BulkAction("start", "Start", bulk_start),
+                           BulkAction("stop", "Stop", bulk_stop),
+                           BulkAction("move", "Move to group…", bulk_move),
+                       ]))
+        .add_component(ui.ListView(component_id="indep-list")
+                       .set_empty_text("")
+                       .set_data_source(_indep_data(api))))
+     .add_section(ui.Section(component_id="fleet-groups-sec")
+        .add_component(ui.Toolbar(component_id="fleet-groups-bar")
+                       .set_title("Sync Groups")
+                       .set_icon("M17 20h5v-2a4 4 0 0 0-3-3.87M9 20H4v-2a4 4 0 0 1 3-3.87m6-1.13a4 4 0 1 0 0-8 4 4 0 0 0 0 8z")
+                       .add_component(ui.Button(component_id="fleet-group-add")
+                                      .set_label("+ Create Group")
+                                      .set_variant("primary")
+                                      .set_open_modal("group-create-modal")))
+        .add_component(ui.TileView(component_id="group-tiles")
+                       .set_key_column("key")
+                       .set_empty_text("No sync groups — create one to let "
+                                       "accounts coordinate their pacing.")
+                       .set_data_source(_group_tiles(api))
+                       .set_row_actions([
+                           RowAction("open", "open", group_details),
+                           RowAction("edit", "edit", group_edit),
+                           RowAction("addmember", "+ member", group_addmember),
+                           RowAction("start", "start all", group_start),
+                           RowAction("stop", "stop all", group_stop),
+                           RowAction("delete", "delete", group_delete, variant="danger",
+                                     confirm="Delete this group? Accounts are never "
+                                             "deleted — members return to independent "
+                                             "pacing."),
+                       ])))
+     # ── modals ──
+     .add_modal(ui.Modal(component_id="fleet-add-modal").set_title("Add Account")
+        .add_component(ui.Form(component_id="fleet-add-form")
+                       .set_description("The token is stored encrypted — never "
+                                        "displayed back.")
+                       .set_close_on_submit(True)
+                       .set_submit_action(submit_add).set_submit_label("Create Account")
+                       .add_fields(ui.TextInput(component_id="fa-name")
+                                   .set_label("Account name").set_max_length(32)
+                                   .set_required(True),
+                                   ui.Select(component_id="fa-group").set_label("Sync group")
+                                   .set_options_provider(_group_options(api)),
+                                   ui.MultiSelect(component_id="fa-plugins")
+                                   .set_label("Plugins")
+                                   .set_options_provider(_plugin_options(api)),
+                                   ui.TextInput(component_id="fa-cred").set_label("Token")
+                                   .set_placeholder("Discord token (optional now)"))))
+     .add_modal(ui.Modal(component_id="acct-details-modal").set_title("Account")
+        .add_component(ui.Metric(component_id="ad-status").set_label("State")
+                       .set_value("—").set_data_source(_details_status(api)))
+        .add_component(ui.ListView(component_id="ad-lines")
+                       .set_data_source(_details_lines(api)))
+        .add_component(ui.Toolbar(component_id="ad-plugins-bar")
+                       .set_title("Assigned plugins"))
+        .add_component(ui.Table(component_id="ad-plugins")
+                       .set_columns(["Plugin"]).set_key_column("__key")
+                       .set_empty_text("none assigned")
+                       .set_data_source(_details_plugins_rows(api))
+                       .set_row_actions([
+                           RowAction("unassign", "✕", unassign_plugin, variant="danger",
+                                     confirm="Unassign this plugin?")])))
+     .add_modal(ui.Modal(component_id="acct-cred-modal").set_title("Set Credential")
+        .add_component(ui.Form(component_id="acct-cred-form")
+                       .set_description("Encrypted at rest; never displayed back.")
+                       .set_close_on_submit(True)
+                       .set_submit_action(submit_cred).set_submit_label("Save")
+                       .add_fields(ui.TextInput(component_id="fc-cred")
+                                   .set_label("Discord token").set_required(True))))
+     .add_modal(ui.Modal(component_id="move-modal").set_title("Move to group")
+        .add_component(ui.Form(component_id="move-form")
+                       .set_close_on_submit(True)
+                       .set_submit_action(submit_move).set_submit_label("Move")
+                       .add_fields(ui.Select(component_id="mv-group").set_label("Group")
+                                   .set_options_provider(_group_options(api)))))
+     .add_modal(ui.Modal(component_id="assign-modal").set_title("Assign Plugins")
+        .add_component(ui.Form(component_id="assign-form")
+                       .set_description("Empty selection is valid — the account "
+                                        "runs nothing.")
+                       .set_close_on_submit(True)
+                       .set_submit_action(submit_assign).set_submit_label("Save")
+                       .add_fields(ui.MultiSelect(component_id="as-plugins")
+                                   .set_label("Plugins")
+                                   .set_options_provider(_assign_plugins(api)))))
+     .add_modal(ui.Modal(component_id="group-create-modal").set_title("Create Group")
+        .add_component(ui.Form(component_id="group-create-form")
+                       .set_close_on_submit(True)
+                       .set_submit_action(submit_group_create)
+                       .set_submit_label("Create Group")
+                       .add_fields(ui.TextInput(component_id="gc-name")
+                                   .set_label("Group name").set_max_length(32)
+                                   .set_required(True),
+                                   ui.TextInput(component_id="gc-desc")
+                                   .set_label("Description").set_max_length(200),
+                                   ui.Toggle(component_id="gc-enabled")
+                                   .set_label("Group is active").set_value(True))))
+     .add_modal(ui.Modal(component_id="group-edit-modal").set_title("Edit Group")
+        .add_component(ui.Form(component_id="group-edit-form")
+                       .set_description("Renaming moves every member and their "
+                                        "shared pacing to the new name.")
+                       .set_close_on_submit(True)
+                       .set_submit_action(submit_group_edit).set_submit_label("Save")
+                       .add_fields(ui.TextInput(component_id="ge-name")
+                                   .set_label("Name").set_max_length(32),
+                                   ui.TextInput(component_id="ge-desc")
+                                   .set_label("Description").set_max_length(200),
+                                   ui.Toggle(component_id="ge-enabled")
+                                   .set_label("Group is active").set_value(True))))
+     .add_modal(ui.Modal(component_id="group-details-modal").set_title("Group")
+        .add_component(ui.ListView(component_id="gd-lines")
+                       .set_data_source(_gd_lines(api)))
+        .add_component(ui.Toolbar(component_id="gd-members-bar")
+                       .set_title("Members"))
+        .add_component(ui.Table(component_id="gd-members")
+                       .set_columns(["Member", "Status"]).set_key_column("__key")
+                       .set_empty_text("empty group")
+                       .set_data_source(_gd_members(api))
+                       .set_row_actions([
+                           RowAction("remove", "remove", remove_member, variant="danger"),
+                       ])))
+     .add_modal(ui.Modal(component_id="group-member-modal").set_title("Add Member")
+        .add_component(ui.Form(component_id="group-member-form")
+                       .set_description("Adding an account REPLACES its previous "
+                                        "group membership.")
+                       .set_close_on_submit(True)
+                       .set_submit_action(submit_group_member).set_submit_label("Add")
+                       .add_fields(ui.MultiSelect(component_id="gm-accounts")
+                                   .set_label("Accounts")
+                                   .set_options_provider(_gm_accounts(api))))))
+    return page
+
+
+# ──────────────────────────────────────────────────────────────── profiles
+def _build_profiles(ui: DashboardUIToolset, api: Any):
+    page = (ui.Page(component_id="profiles")
+            .set_title("Profiles")
+            .set_icon("M12 2L2 7l10 5 10-5-10-5zM2 12l10 5 10-5M2 17l10 5 10-5")
+            .set_description(
+                "Per-plugin profiles: shared settings bundles with channel "
+                "scopes, bound per account. Pick an account to manage its "
+                "bindings."))
+
+    async def _accts():
+        st = await _status(api)
+        return st.get("accounts") or []
+
+    def _account_options(api):
+        async def provide(ctx):
+            rows = await _accts()
+            if not _profiles_state.get("account") and rows:
+                _profiles_state["account"] = rows[0].get("name")
+            return {"options": [{"value": a["name"], "label": a["name"]}
+                                for a in rows]}
+        return provide
+
+    async def select_account(ctx, payload):
+        _profiles_state["account"] = str(payload.get("value") or "").strip() or None
+        return {"success": True,
+                "message": f"showing {_profiles_state['account'] or 'no account'}",
+                "refresh": ["prof-tiles"]}
+
+    def _bound_map():
+        async def fetch():
+            account = _profiles_state.get("account")
+            if not account:
+                return {}
+            try:
+                return await api.accounts_plugin_profiles(account) or {}
+            except Exception:
+                return {}
+        return fetch
+
+    def _prof_tiles(api):
+        async def provide(ctx):
+            account = _profiles_state.get("account")
+            if not account:
+                return {"tiles": []}
+            rows = await _accts()
+            a = next((x for x in rows if x.get("name") == account), None)
+            assigned = (a or {}).get("assigned_plugins") or []
+            try:
+                bindings = await api.accounts_plugin_profiles(account) or {}
+            except Exception:
+                bindings = {}
+            try:
+                profiles = await api.plugin_profiles_list() or []
+            except Exception:
+                profiles = []
+            counts: Dict[str, int] = {}
+            for p in profiles:
+                counts[p.get("plugin", "?")] = counts.get(p.get("plugin", "?"), 0) + 1
+            tiles = []
+            for pname in assigned:
+                bound = bindings.get(pname)
+                try:
+                    manifests = await api.plugins_manifests()
+                except Exception:
+                    manifests = []
+                m = next((x for x in manifests if x.get("name") == pname), None)
+                tiles.append({
+                    "key": pname, "title": pname,
+                    "status": "bound" if bound else "default",
+                    "tone": "ok" if bound else "info",
+                    "chips": [bound] if bound else [],
+                    "lines": [
+                        ["Version", (m or {}).get("version", "?")],
+                        ["Library", f"{counts.get(pname, 0)} profile(s)"],
+                        ["Bound", bound or "plugin defaults"],
+                    ]})
+            return {"tiles": tiles}
+        return provide
+
+    async def open_bind(row, ctx):
+        _profiles_state["bind"] = row
+        return {"open_modal": "bind-modal", "refresh": ["bind-profiles"]}
+
+    async def open_editor(row, ctx):
+        _profiles_state["editor"] = {"plugin": row, "name": None}
+        return {"open_modal": "editor-modal"}
+
+    async def edit_profile(row, ctx):
+        plugin, _, name = row.partition("|")
+        _profiles_state["editor"] = {"plugin": plugin, "name": name}
+        return {"open_modal": "editor-modal"}
+
+    async def unbind(row, ctx):
+        account = _profiles_state.get("account")
+        if not account:
+            return {"success": False, "message": "select an account first"}
+        await api.accounts_plugin_profile(account, row, None, surface="dashboard")
+        return {"success": True, "message": f"{row} unbound — defaults apply",
+                "refresh": ["prof-tiles"]}
+
+    async def open_effective(row, ctx):
+        _profiles_state["effective"] = row
+        return {"open_modal": "effective-modal", "refresh": ["eff-lines"]}
+
+    def _bind_options(api):
+        async def provide(ctx):
+            plugin = _profiles_state.get("bind")
+            try:
+                profiles = await api.plugin_profiles_list(plugin) or []
+            except Exception:
+                profiles = []
+            opts = [{"value": "", "label": "Default (no profile)"}]
+            opts += [{"value": p.get("name", "?"),
+                      "label": f"{p.get('name', '?')} — {p.get('description', '')[:40]}"}
+                     for p in profiles]
+            opts.append({"value": "__new__", "label": "New profile…"})
+            return {"options": opts}
+        return provide
+
+    async def submit_bind(ctx, payload):
+        account = _profiles_state.get("account")
+        plugin = _profiles_state.get("bind")
+        choice = str(payload.get("bp-profile") or "")
+        if not account or not plugin:
+            return {"success": False, "message": "select an account and plugin first"}
+        if choice == "__new__":
+            _profiles_state["editor"] = {"plugin": plugin, "name": None}
+            return {"open_modal": "editor-modal"}
+        await api.accounts_plugin_profile(account, plugin, choice or None,
+                                           surface="dashboard")
+        return {"success": True,
+                "message": f"{plugin}: {choice or 'default'} bound to {account}",
+                "refresh": ["prof-tiles"]}
+
+    async def submit_editor(ctx, payload):
+        ed = _profiles_state.get("editor") or {}
+        plugin = ed.get("plugin")
+        if not plugin:
+            return {"success": False, "message": "no plugin selected"}
+        name = str(payload.get("pe-name") or "").strip()
+        if not name:
+            return {"success": False, "field_errors": {
+                "pe-name": "Profile name is required."}}
+        import json as _json
+        settings: Dict[str, Any] = {}
+        raw = str(payload.get("pe-settings") or "").strip()
+        if raw:
+            try:
+                settings = _json.loads(raw)
+            except ValueError:
+                return {"success": False, "field_errors": {
+                    "pe-settings": "Settings must be valid JSON."}}
+            if not isinstance(settings, dict):
+                return {"success": False, "field_errors": {
+                    "pe-settings": "Settings must be a JSON object."}}
+        channels_raw = str(payload.get("pe-channels") or "").strip()
+        if channels_raw:
+            try:
+                settings["channels"] = _json.loads(channels_raw)
+            except ValueError:
+                return {"success": False, "field_errors": {
+                    "pe-channels": "Channels must be valid JSON."}}
+        description = str(payload.get("pe-desc") or "")
+        if ed.get("name"):
+            await api.plugin_profile_update(
+                plugin, ed["name"], description=description or None,
+                settings=settings or None, surface="dashboard")
+        else:
+            await api.plugin_profile_create(plugin, name, description,
+                                            settings or None,
+                                            surface="dashboard")
+            account = _profiles_state.get("account")
+            if account and payload.get("pe-bind") is not False:
+                try:
+                    await api.accounts_plugin_profile(account, plugin, name,
+                                                      surface="dashboard")
+                except Exception:
+                    pass   # plugin may not be assigned — creation still succeeded
+        return {"success": True,
+                "message": f"profile {name} saved for {plugin}",
+                "refresh": ["prof-tiles"]}
+
+    async def delete_profile(row, ctx):
+        plugin, _, name = row.partition("|")
+        await api.plugin_profile_delete(plugin, name)
+        return {"success": True, "message": f"profile {name} deleted",
+                "refresh": ["prof-tiles", "bind-profiles"]}
+
+    def _library_tiles(api):
+        async def provide(ctx):
+            try:
+                profiles = await api.plugin_profiles_list() or []
+            except Exception:
+                profiles = []
+            tiles = []
+            for p in profiles:
+                plugin = p.get("plugin", "?")
+                name = p.get("name", "?")
+                desc = p.get("description") or ""
+                settings = p.get("settings") or {}
+                scope = settings.get("channels")
+                tiles.append({"key": f"{plugin}|{name}", "title": name,
+                              "status": plugin, "tone": "info",
+                              "lines": [["Description", desc or "—"],
+                                        ["Scope", str(scope) if scope else "all channels"]]})
+            return {"tiles": tiles}
+        return provide
+
+    def _eff_lines(api):
+        async def provide(ctx):
+            account = _profiles_state.get("account")
+            plugin = _profiles_state.get("effective")
+            if not account or not plugin:
+                return []
+            try:
+                eff = await api.accounts_effective_settings(account, plugin)
+            except Exception as e:
+                return [{"label": "error", "value": str(e)}]
+            return [{"label": str(k), "value": v}
+                    for k, v in (eff or {}).items()]
+        return provide
+
+    (page
+     .add_section(ui.Section(component_id="prof-sec")
+        .add_component(ui.Toolbar(component_id="prof-bar")
+                       .set_title("Account bindings")
+                       .set_icon("M12 2L2 7l10 5 10-5-10-5zM2 12l10 5 10-5M2 17l10 5 10-5")
+                       .add_component(ui.Select(component_id="prof-account")
+                                      .set_label("")
+                                      .set_options_provider(_account_options(api))
+                                      .set_action(select_account)))
+        .add_component(ui.TileView(component_id="prof-tiles")
+                       .set_key_column("key")
+                       .set_empty_text("Assign plugins to the account first "
+                                       "(Accounts → plugins).")
+                       .set_data_source(_prof_tiles(api))
+                       .set_row_actions([
+                           RowAction("bind", "bind / switch", open_bind),
+                           RowAction("edit", "edit bound", edit_profile),
+                           RowAction("unbind", "unbind", unbind),
+                           RowAction("eff", "effective…", open_effective),
+                       ])))
+     .add_section(ui.Section(component_id="prof-lib-sec")
+        .add_component(ui.Toolbar(component_id="prof-lib-bar")
+                       .set_title("Profile library")
+                       .set_icon("M4 6h16M4 12h16M4 18h10"))
+        .add_component(ui.TileView(component_id="prof-lib")
+                       .set_key_column("key")
+                       .set_empty_text("no profiles in the library yet")
+                       .set_data_source(_library_tiles(api))
+                       .set_row_actions([
+                           RowAction("edit", "edit", edit_profile),
+                           RowAction("delete", "delete", delete_profile, variant="danger",
+                                     confirm="Delete this profile? Accounts bound "
+                                             "to it fall back to plugin defaults."),
+                       ])))
+     .add_modal(ui.Modal(component_id="bind-modal").set_title("Bind profile")
+        .add_component(ui.Form(component_id="bind-form")
+                       .set_close_on_submit(True)
+                       .set_submit_action(submit_bind).set_submit_label("Bind")
+                       .add_fields(ui.RadioGroup(component_id="bp-profile")
+                                   .set_label("Profile")
+                                   .set_options_provider(_bind_options(api)))))
+     .add_modal(ui.Modal(component_id="editor-modal").set_title("Profile editor")
+        .add_component(ui.Form(component_id="editor-form")
+                       .set_description("Settings and channel scope are JSON — "
+                                        "validated against the plugin schema "
+                                        "server-side.")
+                       .set_close_on_submit(True)
+                       .set_submit_action(submit_editor).set_submit_label("Save Profile")
+                       .add_fields(ui.TextInput(component_id="pe-name")
+                                   .set_label("Profile name").set_max_length(64)
+                                   .set_required(True),
+                                   ui.TextInput(component_id="pe-desc")
+                                   .set_label("Description").set_max_length(200),
+                                   ui.Textarea(component_id="pe-settings")
+                                   .set_label("Settings (JSON)")
+                                   .set_rows(8)
+                                   .set_placeholder('{"trigger": "go"}'),
+                                   ui.Textarea(component_id="pe-channels")
+                                   .set_label("Channel scope (JSON)")
+                                   .set_rows(4)
+                                   .set_placeholder('{"allow": ["123..."]}'))))
+     .add_modal(ui.Modal(component_id="effective-modal").set_title("Effective settings")
+        .add_component(ui.ListView(component_id="eff-lines")
+                       .set_empty_text("no settings")
+                       .set_data_source(_eff_lines(api)))))
     return page

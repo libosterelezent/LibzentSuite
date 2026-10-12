@@ -472,7 +472,8 @@ class DashboardUIRegistry:
         if isinstance(raw, str):
             return ActionResult(success=True, message=raw)
         if isinstance(raw, dict):
-            keys = {"success", "message", "data", "field_errors", "refresh"}
+            keys = {"success", "message", "data", "field_errors",
+                    "refresh", "modal", "open_modal"}
             # ANY result-shaped key opts into result parsing — a callback
             # returning a bare {"refresh": [...]} (e.g. a refresh button
             # with no message) used to fall through to a data payload,
@@ -486,6 +487,7 @@ class DashboardUIRegistry:
                         data=raw.get("data"),
                         field_errors=dict(raw.get("field_errors") or {}),
                         refresh=list(raw.get("refresh") or ()),
+                        modal=(str(raw.get("modal") or raw.get("open_modal") or "") or None),
                     )
                 except Exception:
                     pass  # malformed shape: fall through to data payload

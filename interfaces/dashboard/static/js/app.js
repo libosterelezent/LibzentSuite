@@ -113,9 +113,7 @@ function render() {
     renderFrameworkTab(currentView);
   } else {
     if (currentView==="home") renderHome();
-    if (currentView==="fleet") { renderAccounts(); renderGroups(); }
     if (currentView==="plugins") renderPlugins();
-    if (currentView==="profiles") renderProfiles();
     if (currentView==="policies") renderPolicies();
     if (currentView==="admin") renderAdmin();
   }
@@ -424,11 +422,8 @@ try {
   Promise.all([loadManifests(),loadGroups(),loadScenarios(),loadPluginUI()])
     .then(()=>render())
     .catch(e=>{ showErr("startup: "+(e&&e.message||e)); render(); });
-  LOADERS.fleet = ()=>{ loadGroups(); };
-  // home/plugins/activity/policies/admin/tools are framework pages now —
-  // their data comes from server-side providers, no legacy loader needed
-  // the (still legacy) Profiles tab reads the per-plugin profile library
-  LOADERS.profiles = ()=>{ loadPluginProfiles(); };
+  // every main tab is a framework page now — data comes from
+  // server-side providers, no legacy loaders remain
   $("side-foot").textContent = "v2 · " + new Date().getFullYear();
 } catch (e) {
   // Report loudly instead of leaving a blank page with no explanation.

@@ -196,6 +196,8 @@ changes, payload `{"value": <current>}`).
 | `Container` | `set_direction("vertical"\|"horizontal")`, `set_gap(size)`, `set_align`, `set_justify` | a neutral untitled grouping box — the alignment primitive; nests (explicit opt-in) |
 | `Grid` | `set_columns(1–6 \|"auto")`, `set_min_child(size)` (auto mode), `set_gap(size)` | STRUCTURED columns — children slot into equal cells that wrap as whole rows (the tidiness primitive; auto-fill is inherently responsive) |
 | `Toolbar` | `set_title`, `set_icon`, `set_gap`, `set_align` | the section header bar: title left, actions right — refresh/add buttons sit IN the bar instead of floating above the content |
+| `TileView` | `set_data_source`, `set_key_column`, `set_row_actions`, `set_selectable`, `set_bulk_actions`, `set_empty_text` | a responsive card grid fed by a provider (`{tiles: [{key, title, tone, status, lines, chips}]}`) — same row-action and bulk-selection contracts as Table |
+| `Modal` | `set_title`, `set_description`, `add_component` | a dialog overlay in the page tree (`page.add_modal(...)`); opens client-side via `Button.set_open_modal(id)` or server-side when an action result carries `modal: id` (the context-modal pattern) |
 | `ListView` | `set_data_source(callable)`, `set_empty_text` | a list fed by a server-side provider |
 | `Table` | `set_columns([...])`, `set_data_source(callable)`, `set_page_size(int)`, `set_empty_text`, `set_key_column(str)`, `set_row_actions([RowAction, ...])` | a paginated table fed by a provider, with optional per-row buttons |
 | `Button` | `set_label`, `set_description`, `set_variant("primary"\|"secondary"\|"danger"\|"ghost")`, `set_confirm(str)`, `set_loading(bool)`, `set_action(callable)` | dispatches an action on click |
@@ -213,6 +215,23 @@ columns (the renderer never displays it):
 ```python
 rows.append([visible, cells, ..., f"{account}|{plugin}"])   # __key rides last
 ```
+
+**Bulk selection** — `Table`/`TileView` `.set_selectable(True)` renders
+a checkbox per row/tile; `.set_bulk_actions([BulkAction(...)])` adds the
+bulk bar (shown while rows are selected). BulkAction handlers receive
+the selected key LIST: `action(rows, context)`.
+
+**Dynamic options** — `Select.set_options_provider(callable)` (also on
+RadioGroup/MultiSelect): the provider returns `{"options": [...],
+"value": [...]}` and the renderer fetches it lazily — choices track
+live state (accounts, groups, scenarios) while the tree stays frozen.
+Cannot be combined with static `set_options`.
+
+**The modal action channel** — an action returning `{"modal": id}` (or
+`{"open_modal": id}`) opens that Modal after the refresh list runs:
+record which row the modal is about in your own state, name the modal's
+components in `refresh`, return the modal id. `Form.set_close_on_submit
+(True)` closes the containing dialog on success.
 
 **Client-action forms** — `Form.set_client_action(name)` handles the
 submit entirely in the browser. Supported names: `"save-token"` (the

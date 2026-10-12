@@ -373,6 +373,20 @@ class Select(_InputField):
     def __init__(self, *, component_id: str = "", **kwargs) -> None:
         super().__init__(component_id=component_id, **kwargs)
         self._options: list | None = None
+        self._data_source = None
+
+    def set_options_provider(self, provider) -> "Select":
+        """DYNAMIC options: a callable returning ``{"options": [...]}``
+        (and optionally ``{"value": [...]}`` to pre-check a MultiSelect).
+        Fetched lazily by the renderer — the frozen snapshot stays valid
+        while the choices track live state (accounts, groups, scenarios).
+        May not be combined with static set_options."""
+        self._check_frozen("set the options provider")
+        if getattr(self, "_options", None):
+            raise UIError("select has static options — remove them before "
+                          "setting an options provider")
+        self._data_source = _require_callable(provider, "options provider")
+        return self
 
     def set_options(self, options) -> "Select":
         """Accepts a list of strings or {'value','label'} dicts; both are
@@ -397,6 +411,8 @@ class Select(_InputField):
         props = super()._props()
         if self._options is not None:
             props["options"] = [dict(o) for o in self._options]
+        if self._data_source is not None:
+            props["options_live"] = True
         return props
 
 
@@ -480,7 +496,87 @@ class RowAction:
         self.confirm = confirm
 
 
-class Table(_Interactive):
+class BulkAction:
+    """One bulk-operation button for a selectable Table/TileView.
+
+    ``action`` is called as ``action(rows, context)`` where ``rows`` is
+    the list of selected keys (possibly empty — decide whether to reject).
+    """
+
+    __slots__ = ("id", "label", "action", "variant", "confirm")
+
+    def __init__(self, action_id: str, label: str, action, *,
+                 variant: str = "secondary", confirm: str = "") -> None:
+        if not isinstance(action_id, str) or not action_id:
+            raise UIError(f"bulk action id must be a non-empty str, got {action_id!r}")
+        if not isinstance(label, str) or not label:
+            raise UIError(f"bulk action label must be a non-empty str, got {label!r}")
+        if not callable(action):
+            raise UIError(
+                f"bulk action {action_id!r} needs a callable action, got "
+                f"{type(action).__name__}")
+        if variant not in ("primary", "secondary", "danger", "ghost"):
+            raise UIError(f"bulk action variant must be a known variant, got {variant!r}")
+        self.id = action_id
+        self.label = label
+        self.action = action
+        self.variant = variant
+        self.confirm = confirm
+
+
+class _Selectable:
+    """Shared selection machinery for Table and TileView (mixin)."""
+
+    def set_selectable(self, selectable: bool):
+        """Render a checkbox per row/tile; selected keys feed the bulk
+        actions bar."""
+        self._check_frozen("set selectable")
+        self._selectable = _require_bool(selectable, "selectable")
+        return self
+
+    def set_bulk_actions(self, actions) -> "Table":
+        """Bulk-operation buttons shown while rows are selected (list of
+        :class:`BulkAction`); handlers receive the selected key list."""
+        self._check_frozen("set the bulk actions")
+        if not isinstance(actions, list):
+            raise UIError(
+                f"bulk actions must be a list, got {type(actions).__name__}")
+        checked = []
+        seen = set()
+        for entry in actions:
+            if not isinstance(entry, BulkAction):
+                raise UIError("each bulk action must be a BulkAction, got "
+                              f"{type(entry).__name__}")
+            if entry.id in seen:
+                raise UIError(f"duplicate bulk action id {entry.id!r}")
+            seen.add(entry.id)
+            checked.append(entry)
+        self._bulk_actions = checked
+        if checked:
+            self._selectable = True
+            if getattr(self, "_action", None) is None:
+                self.set_action(self._dispatch_view_action)
+        return self
+
+    async def _dispatch_view_action(self, context, payload):
+        payload = payload or {}
+        action_id = payload.get("action")
+        rows = payload.get("rows")
+        if not isinstance(action_id, str) or not action_id:
+            raise UIError("view action dispatch needs an 'action' id")
+        if action_id == "__selection__":
+            # selection changed client-side — nothing to do server-side
+            return {"success": True}
+        for entry in getattr(self, "_bulk_actions", []):
+            if entry.id == action_id:
+                result = entry.action(list(rows or []), context)
+                if hasattr(result, "__await__"):
+                    result = await result
+                return result
+        return await self._dispatch_row_action(context, payload)
+
+
+class Table(_Selectable, _Interactive):
     """A paginated table fed by a server-side data source callable.
 
     Tables may declare ROW ACTIONS: per-row buttons (edit/clear/reload…)
@@ -500,6 +596,8 @@ class Table(_Interactive):
         self._page_size: int | None = None
         self._row_actions: list[RowAction] = []
         self._key_column: str | None = None
+        self._selectable = False
+        self._bulk_actions: list[BulkAction] = []
 
     def set_columns(self, columns) -> "Table":
         self._check_frozen("set the columns")
@@ -588,6 +686,14 @@ class Table(_Interactive):
                  "variant": a.variant, "confirm": a.confirm}
                 for a in self._row_actions
             ]
+        if self._selectable:
+            props["selectable"] = True
+        if self._bulk_actions:
+            props["bulk_actions"] = [
+                {"id": a.id, "label": a.label,
+                 "variant": a.variant, "confirm": a.confirm}
+                for a in self._bulk_actions
+            ]
         return props
 
 
@@ -637,6 +743,7 @@ class Button(_Interactive):
         self._variant: str | None = None
         self._confirm: str | None = None
         self._loading = False
+        self._open_modal: str | None = None
 
     def set_label(self, label: str) -> "Button":
         self._check_frozen("set the label")
@@ -659,6 +766,12 @@ class Button(_Interactive):
         self._confirm = _require_str(confirm, "confirm")
         return self
 
+    def set_open_modal(self, modal_id) -> "Button":
+        """Open a Modal client-side on click (no server round trip)."""
+        self._check_frozen("set the modal to open")
+        self._open_modal = _require_str(modal_id, "modal id")
+        return self
+
     def set_loading(self, loading: bool) -> "Button":
         self._check_frozen("set loading")
         self._loading = _require_bool(loading, "loading")
@@ -676,6 +789,8 @@ class Button(_Interactive):
             props["confirm"] = self._confirm
         if self._loading:
             props["loading"] = True
+        if self._open_modal is not None:
+            props["open_modal"] = self._open_modal
         return props
 
 
@@ -691,6 +806,7 @@ class Form(UIContainer):
         self._submit_label: str | None = None
         self._client_action: str | None = None
         self._field_columns: int | str | None = None
+        self._close_on_submit: bool | None = None
 
     def set_submit_action(self, action) -> "Form":
         self._check_frozen("set the submit action")
@@ -701,6 +817,13 @@ class Form(UIContainer):
     def set_submit_label(self, label: str) -> "Form":
         self._check_frozen("set the submit label")
         self._submit_label = _require_str(label, "submit label")
+        return self
+
+    def set_close_on_submit(self, close: bool = True) -> "Form":
+        """Close the containing Modal after a successful submit (no
+        field errors, success not False)."""
+        self._check_frozen("set close_on_submit")
+        self._close_on_submit = _require_bool(close, "close_on_submit")
         return self
 
     def set_columns(self, columns) -> "Form":
@@ -775,6 +898,8 @@ class Form(UIContainer):
             props["description"] = self._description
         if self._field_columns is not None:
             props["columns"] = self._field_columns
+        if self._close_on_submit is not None:
+            props["close_on_submit"] = self._close_on_submit
         return props
 
     def _validate(self) -> list[str]:
@@ -812,6 +937,95 @@ class Container(_ComponentParent):
         props = super()._props()
         if self._direction is not None:
             props["direction"] = self._direction
+        return props
+
+
+class TileView(_Selectable, _Interactive):
+    """A responsive grid of data-driven cards (tiles).
+
+    The provider returns ``{"tiles": [{key, title, tone?, status?, 
+    lines?: [[label, value], …], chips?: [str, …]}]}``. Per-tile actions
+    (RowAction) and bulk selection work exactly like Table's — same
+    key-column contract, same dispatch channels.
+    """
+
+    _type_name = "tile-view"
+
+    def __init__(self, *, component_id: str = "", **kwargs) -> None:
+        super().__init__(component_id=component_id, **kwargs)
+        self._data_source = None
+        self._empty_text: str | None = None
+        self._row_actions: list[RowAction] = []
+        self._key_column: str | None = None
+        self._selectable = False
+        self._bulk_actions: list[BulkAction] = []
+
+    def set_data_source(self, data_source) -> "TileView":
+        self._check_frozen("set the data source")
+        self._data_source = _require_callable(data_source, "data_source")
+        return self
+
+    def set_empty_text(self, text: str) -> "TileView":
+        self._check_frozen("set the empty text")
+        self._empty_text = _require_str(text, "empty_text")
+        return self
+
+    def set_key_column(self, column: str) -> "TileView":
+        self._check_frozen("set the key column")
+        self._key_column = _require_str(column, "key column")
+        return self
+
+    def set_row_actions(self, actions) -> "TileView":
+        self._check_frozen("set the row actions")
+        if not isinstance(actions, list):
+            raise UIError(
+                f"row actions must be a list, got {type(actions).__name__}")
+        checked: list[RowAction] = []
+        seen: set[str] = set()
+        for entry in actions:
+            if not isinstance(entry, RowAction):
+                raise UIError("each row action must be a RowAction")
+            if entry.id in seen:
+                raise UIError(f"duplicate row action id {entry.id!r}")
+            seen.add(entry.id)
+            checked.append(entry)
+        self._row_actions = checked
+        if checked and getattr(self, "_action", None) is None:
+            self.set_action(self._dispatch_view_action)
+        return self
+
+    async def _dispatch_row_action(self, context, payload):
+        row = payload.get("row")
+        if not isinstance(row, str) or not row:
+            raise UIError("tile action dispatch needs a 'row' key")
+        for entry in self._row_actions:
+            if entry.id == payload.get("action"):
+                result = entry.action(row, context)
+                if hasattr(result, "__await__"):
+                    result = await result
+                return result
+        raise UIError(f"unknown row action {payload.get('action')!r}")
+
+    def _props(self) -> dict:
+        props = super()._props()
+        if self._empty_text is not None:
+            props["empty_text"] = self._empty_text
+        if self._key_column is not None:
+            props["key_column"] = self._key_column
+        if self._row_actions:
+            props["row_actions"] = [
+                {"id": a.id, "label": a.label,
+                 "variant": a.variant, "confirm": a.confirm}
+                for a in self._row_actions
+            ]
+        if self._selectable:
+            props["selectable"] = True
+        if self._bulk_actions:
+            props["bulk_actions"] = [
+                {"id": a.id, "label": a.label,
+                 "variant": a.variant, "confirm": a.confirm}
+                for a in self._bulk_actions
+            ]
         return props
 
 
@@ -1055,7 +1269,7 @@ class Column(_ComponentParent):
 # set minus Row (no nested rows); Container additionally accepts other
 # Containers (explicit opt-in nesting — see its docstring).
 _CONTENT_CHILD_TYPES = (Card, Row, Column, Container, Toolbar, Grid,
-                        Alert, Text, DisplayText, Badge, Metric, Button,
+                        TileView, Alert, Text, DisplayText, Badge, Metric, Button,
                         Checkbox, Toggle, TextInput, NumberInput, Textarea,
                         Select, RadioGroup, MultiSelect, ListView, Table,
                         Progress, Form, Separator, Description, Header, Footer)
@@ -1101,11 +1315,45 @@ class Tab(UIContainer):
         return props
 
 
+class Modal(_ComponentParent):
+    """A dialog overlay rendered from the page tree.
+
+    Content is any content component (forms, live lists, tables…).
+    Opens CLIENT-side via ``Button.set_open_modal(id)`` or SERVER-side
+    when an action returns ``{"open_modal": id}`` (the pattern for
+    context modals: the action records which row we are looking at,
+    then refreshes the modal's data components). Forms inside may set
+    ``set_close_on_submit(True)`` to close the dialog on success.
+    Lives at PAGE level (``page.add_modal(...)``) — never in a Section.
+    """
+
+    _type_name = "modal"
+
+    def __init__(self, *, component_id: str = "", **kwargs) -> None:
+        super().__init__(component_id=component_id, **kwargs)
+        self._description: str | None = None
+
+    def set_description(self, description: str) -> "Modal":
+        self._check_frozen("set the description")
+        self._description = _require_str(description, "description")
+        return self
+
+    def _props(self) -> dict:
+        props = super()._props()
+        if self._description is not None:
+            props["description"] = self._description
+        return props
+
+
+Modal._allowed_child_types = tuple(
+    t for t in _CONTENT_CHILD_TYPES if t is not TileView) + (TileView,)
+
+
 class Page(UIContainer):
-    """A dashboard page holding sections and/or tabs."""
+    """A dashboard page holding sections and/or tabs (plus modals)."""
 
     _type_name = "page"
-    _allowed_child_types = (Section, Tab)
+    _allowed_child_types = (Section, Tab, Modal)
 
     def __init__(self, *, component_id: str = "", **kwargs) -> None:
         super().__init__(component_id=component_id, **kwargs)
@@ -1136,6 +1384,16 @@ class Page(UIContainer):
 
     def add_sections(self, *sections) -> "Page":
         self._add_many(sections)
+        return self
+
+    def add_modal(self, modal) -> "Page":
+        self._check_frozen("add a modal")
+        self._check_child(modal)
+        self._add_child(modal)
+        return self
+
+    def add_modals(self, *modals) -> "Page":
+        self._add_many(modals)
         return self
 
     def add_tab(self, tab) -> "Page":

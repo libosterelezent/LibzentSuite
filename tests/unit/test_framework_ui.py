@@ -156,9 +156,9 @@ def make_registry():
 
 
 class TestAttach(unittest.TestCase):
-    def test_registers_six_main_tab_pages(self):
+    def test_registers_every_main_tab_page(self):
         reg, api, count = make_registry()
-        self.assertEqual(count, 6)
+        self.assertEqual(count, 8)
         self.assertIn(FRAMEWORK_PLUGIN, reg.list_plugins())
         layout = reg.get_layout(FRAMEWORK_PLUGIN)
         page_ids = [p["id"] for p in (layout.get("children") or [])]
@@ -167,7 +167,7 @@ class TestAttach(unittest.TestCase):
     def test_reattach_replaces_atomically(self):
         reg, api, _ = make_registry()
         # a second attach replaces without error (validation-first)
-        self.assertEqual(attach_framework_ui(reg, StubAPI()), 6)
+        self.assertEqual(attach_framework_ui(reg, StubAPI()), 8)
         self.assertIn(FRAMEWORK_PLUGIN, reg.list_plugins())
 
     def test_reservered_name_cannot_collide_with_real_plugins(self):
@@ -440,3 +440,245 @@ class TestRowActionComponent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FleetStubAPI(StubAPI):
+    """The fleet/profiles surfaces the new pages touch."""
+
+    def __init__(self):
+        super().__init__()
+        self.fleet_calls: list = []
+        self._groups = [{"name": "g1", "member_count": 1, "enabled": True,
+                         "description": "farm"}]
+        self._snap = {"name": "g1", "enabled": True, "description": "farm",
+                      "pacing_key": "group:g1", "members": [
+                          {"name": "a1", "status": "running"}]}
+
+    async def status(self):
+        return {"accounts": [
+                    {"name": "a1", "status": "running", "sync_group": "g1",
+                     "credential": "db", "uptime_s": 100, "latency_ms": 88,
+                     "assigned_plugins": ["probe"], "enabled": True},
+                    {"name": "a2", "status": "stopped", "sync_group": None,
+                     "credential": None, "assigned_plugins": []}],
+                "ratelimit": {}, "tasks": {}, "uptime_s": 10}
+
+    async def accounts_start(self, account, surface="api"):
+        self.fleet_calls.append(("start", account)); return {}
+
+    async def accounts_stop(self, account, surface="api"):
+        self.fleet_calls.append(("stop", account)); return {}
+
+    async def accounts_emergency_stop(self, name, surface="api"):
+        self.fleet_calls.append(("estop", name)); return {}
+
+    async def accounts_remove(self, name, surface="api"):
+        self.fleet_calls.append(("remove", name)); return {}
+
+    async def accounts_add(self, payload, surface="api"):
+        self.fleet_calls.append(("add", payload)); return {}
+
+    async def accounts_set_credential(self, name, credential, surface="api"):
+        self.fleet_calls.append(("cred", name)); return {}
+
+    async def accounts_plugins_set(self, account, plugins, surface="api"):
+        self.fleet_calls.append(("plugins-set", account, tuple(plugins))); return {}
+
+    async def accounts_plugin_unassign(self, account, plugin, surface="api"):
+        self.fleet_calls.append(("unassign", account, plugin)); return {}
+
+    async def groups_list(self):
+        return list(self._groups)
+
+    async def groups_get(self, group):
+        return dict(self._snap) if group == "g1" else None
+
+    async def groups_create(self, name, description="", enabled=True, surface="api"):
+        self.fleet_calls.append(("g-create", name)); return {}
+
+    async def groups_update(self, group, payload, surface="api"):
+        self.fleet_calls.append(("g-update", group, payload)); return {}
+
+    async def groups_delete(self, group, detach_members=False, surface="api"):
+        self.fleet_calls.append(("g-delete", group, detach_members)); return {}
+
+    async def groups_add_member(self, group, account, surface="api"):
+        self.fleet_calls.append(("g-add", group, account)); return {}
+
+    async def groups_remove_member(self, group, account, surface="api"):
+        self.fleet_calls.append(("g-remove", group, account)); return {}
+
+    async def groups_set_account(self, account, group, surface="api"):
+        self.fleet_calls.append(("g-set", account, group)); return {}
+
+    async def groups_clear_account(self, account, surface="api"):
+        self.fleet_calls.append(("g-clear", account)); return {}
+
+    async def plugin_profiles_list(self, plugin=None):
+        return [{"plugin": "probe", "name": "fast", "description": "d",
+                 "settings": {"trigger": "go"}}]
+
+    async def accounts_plugin_profiles(self, account):
+        return {"probe": "fast"}
+
+    async def accounts_plugin_profile(self, account, plugin, profile, surface="api"):
+        self.fleet_calls.append(("bind", account, plugin, profile)); return {}
+
+    async def plugin_profile_create(self, plugin, name, description="",
+                                    settings=None, surface="api"):
+        self.fleet_calls.append(("p-create", plugin, name)); return {}
+
+    async def plugin_profile_update(self, plugin, name, *, name_new=None,
+                                    description=None, settings=None,
+                                    surface="api"):
+        self.fleet_calls.append(("p-update", plugin, name)); return {}
+
+    async def plugin_profile_delete(self, plugin, name):
+        self.fleet_calls.append(("p-delete", plugin, name)); return {}
+
+    async def accounts_effective_settings(self, account, plugin):
+        return {"trigger": "go", "channels": {"allow": ["1"]}}
+
+
+def make_fleet_registry():
+    api = FleetStubAPI()
+    reg = DashboardUIRegistry()
+    attach_framework_ui(reg, api)
+    return reg, api
+
+
+class TestFleetPage(unittest.IsolatedAsyncioTestCase):
+    async def test_eight_pages_register_including_fleet(self):
+        reg, api, _ = make_registry() if False else (None, None, None)
+        reg, api = make_fleet_registry()
+        layout = reg.get_layout(FRAMEWORK_PLUGIN)
+        ids = [p["id"] for p in layout["children"]]
+        self.assertEqual(sorted(ids), sorted(FRAMEWORK_VIEWS))
+
+    async def test_account_tiles_provider(self):
+        reg, api = make_fleet_registry()
+        data = await reg.get_data(FRAMEWORK_PLUGIN, "acct-tiles", None)
+        keys = [t["key"] for t in data["tiles"]]
+        self.assertEqual(keys, ["a1", "a2"])
+        self.assertEqual(data["tiles"][0]["tone"], "ok")
+        self.assertEqual(data["tiles"][1]["tone"], "warn")  # no credential
+
+    async def test_group_tiles_provider(self):
+        reg, api = make_fleet_registry()
+        data = await reg.get_data(FRAMEWORK_PLUGIN, "group-tiles", None)
+        self.assertEqual(data["tiles"][0]["key"], "g1")
+        self.assertEqual(data["tiles"][0]["status"], "1/1")
+
+    async def test_details_row_action_opens_modal(self):
+        from core import framework_ui
+        reg, api = make_fleet_registry()
+        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="acct-tiles")
+        result = await reg.dispatch_action(
+            FRAMEWORK_PLUGIN, "acct-tiles",
+            {"action": "details", "row": "a1"}, ctx)
+        self.assertEqual(result.modal, "acct-details-modal")
+        self.assertEqual(framework_ui._fleet_state["details"], "a1")
+        lines = await reg.get_data(FRAMEWORK_PLUGIN, "ad-lines", None)
+        self.assertTrue(any("db" == item["value"] for item in lines))
+
+    async def test_bulk_start_dispatches_each(self):
+        reg, api = make_fleet_registry()
+        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="acct-tiles")
+        result = await reg.dispatch_action(
+            FRAMEWORK_PLUGIN, "acct-tiles",
+            {"action": "start", "rows": ["a1", "a2"]}, ctx)
+        self.assertTrue(result.success)
+        self.assertIn(("start", "a1"), api.fleet_calls)
+        self.assertIn(("start", "a2"), api.fleet_calls)
+
+    async def test_bulk_move_opens_move_modal(self):
+        from core import framework_ui
+        reg, api = make_fleet_registry()
+        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="acct-tiles")
+        result = await reg.dispatch_action(
+            FRAMEWORK_PLUGIN, "acct-tiles",
+            {"action": "move", "rows": ["a1"]}, ctx)
+        self.assertEqual(result.modal, "move-modal")
+        self.assertEqual(framework_ui._fleet_state["move"], ["a1"])
+
+    async def test_move_form_moves_all_selected(self):
+        from core import framework_ui
+        reg, api = make_fleet_registry()
+        framework_ui._fleet_state["move"] = ["a1", "a2"]
+        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="move-form")
+        result = await reg.dispatch_action(
+            FRAMEWORK_PLUGIN, "move-form", {"mv-group": "g1"}, ctx)
+        self.assertTrue(result.success)
+        self.assertIn(("g-set", "a1", "g1"), api.fleet_calls)
+        self.assertIn(("g-set", "a2", "g1"), api.fleet_calls)
+
+    async def test_group_actions_route(self):
+        reg, api = make_fleet_registry()
+        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="group-tiles")
+        result = await reg.dispatch_action(
+            FRAMEWORK_PLUGIN, "group-tiles",
+            {"action": "open", "row": "g1"}, ctx)
+        self.assertEqual(result.modal, "group-details-modal")
+        result = await reg.dispatch_action(
+            FRAMEWORK_PLUGIN, "group-tiles",
+            {"action": "start", "row": "g1"}, ctx)
+        self.assertTrue(result.success)
+        self.assertIn(("start", "a1"), api.fleet_calls)
+
+    async def test_dynamic_options_providers(self):
+        reg, api = make_fleet_registry()
+        groups = await reg.get_data(FRAMEWORK_PLUGIN, "fa-group", None)
+        self.assertEqual([o["value"] for o in groups["options"]],
+                         ["__independent__", "g1"])
+        plugins = await reg.get_data(FRAMEWORK_PLUGIN, "fa-plugins", None)
+        self.assertEqual([o["value"] for o in plugins["options"]], ["probe"])
+
+
+class TestProfilesPage(unittest.IsolatedAsyncioTestCase):
+    async def test_binding_tiles_provider(self):
+        from core import framework_ui
+        reg, api = make_fleet_registry()
+        framework_ui._profiles_state["account"] = "a1"
+        data = await reg.get_data(FRAMEWORK_PLUGIN, "prof-tiles", None)
+        self.assertEqual([t["key"] for t in data["tiles"]], ["probe"])
+        self.assertEqual(data["tiles"][0]["status"], "bound")
+
+    async def test_bind_action_and_form(self):
+        from core import framework_ui
+        reg, api = make_fleet_registry()
+        framework_ui._profiles_state["account"] = "a1"
+        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="prof-tiles")
+        result = await reg.dispatch_action(
+            FRAMEWORK_PLUGIN, "prof-tiles",
+            {"action": "bind", "row": "probe"}, ctx)
+        self.assertEqual(result.modal, "bind-modal")
+        opts = await reg.get_data(FRAMEWORK_PLUGIN, "bp-profile", None)
+        values = [o["value"] for o in opts["options"]]
+        self.assertIn("fast", values)
+        self.assertIn("__new__", values)
+        result = await reg.dispatch_action(
+            FRAMEWORK_PLUGIN, "bind-form", {"bp-profile": "fast"}, ctx)
+        self.assertTrue(result.success)
+        self.assertIn(("bind", "a1", "probe", "fast"), api.fleet_calls)
+
+    async def test_editor_creates_profile(self):
+        from core import framework_ui
+        reg, api = make_fleet_registry()
+        framework_ui._profiles_state["editor"] = {"plugin": "probe", "name": None}
+        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="editor-form")
+        result = await reg.dispatch_action(
+            FRAMEWORK_PLUGIN, "editor-form",
+            {"pe-name": "fast2", "pe-settings": '{"trigger": "hi"}'}, ctx)
+        self.assertTrue(result.success)
+        self.assertIn(("p-create", "probe", "fast2"), api.fleet_calls)
+
+    async def test_editor_rejects_bad_json(self):
+        from core import framework_ui
+        reg, api = make_fleet_registry()
+        framework_ui._profiles_state["editor"] = {"plugin": "probe", "name": None}
+        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="editor-form")
+        result = await reg.dispatch_action(
+            FRAMEWORK_PLUGIN, "editor-form",
+            {"pe-name": "x", "pe-settings": "{not json"}, ctx)
+        self.assertFalse(result.success)
+        self.assertIn("pe-settings", result.field_errors)

@@ -1435,7 +1435,7 @@ class ControlAPI:
             plugin, component_id, payload, context)
         return {"success": result.success, "message": result.message,
                 "data": result.data, "field_errors": result.field_errors,
-                "refresh": result.refresh}
+                "refresh": result.refresh, "modal": result.modal}
 
     async def dashboard_ui_data(self, plugin: str,
                                 component_id: str) -> Any:
