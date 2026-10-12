@@ -31,6 +31,13 @@ function isFrameworkView(view) {
 async function renderFrameworkTab(view) {
   const panel = $("panel-" + view);
   if (!panel) return;
+  // duiComps is a GLOBAL index of the LAST rendered page — every OTHER
+  // framework view's marker must die here or returning to it would take
+  // the quiet-refresh path against the wrong component index (tiles
+  // rendering as list junk, dead buttons)
+  $$(".panel[data-fw-rendered]").forEach(p => {
+    if (p !== panel) delete p.dataset.fwRendered;
+  });
   const seq = ++fwSeq;
   panel.innerHTML = `<div class="dui-skel" aria-hidden="true"><div></div><div></div><div></div></div>`;
   let page = null;

@@ -91,6 +91,9 @@ function buildDashboardUINav() {
 async function showDashboardUIPage(entry) {
   const panel = $(duiPanelId(entry));
   if (!panel) return;
+  // this render replaces the GLOBAL duiComps index — framework tabs
+  // must fully re-render when navigated back to (see framework-ui.js)
+  $$(".panel[data-fw-rendered]").forEach(p => delete p.dataset.fwRendered);
   const viewId = duiViewId(entry);
   // currentView carries the dui view id so render()/showPanel() — which run
   // on every WS structural change — keep THIS panel active instead of

@@ -464,8 +464,8 @@ def _logs_data(api: Any):
         lines = []
         for e in (entries or []):
             lines.append(f"[{e.get('ts', e.get('time', ''))}] "
-                         f"{str(e.get('account', 'system')):12} "
-                         f"{str(e.get('level', 'info')):5} "
+                         f"{str(e.get('account') or 'system'):12} "
+                         f"{str(e.get('level') or 'info'):5} "
                          f"{e.get('message', e.get('msg', ''))}")
         return {"value": "\n".join(lines) or "— no log entries —"}
     return provide
@@ -480,7 +480,7 @@ def _audit_data(api: Any):
         lines = []
         for e in (entries or []):
             lines.append(f"[{e.get('ts', e.get('time', ''))}] "
-                         f"{str(e.get('account', 'system')):12} "
+                         f"{str(e.get('account') or 'system'):12} "
                          f"{e.get('event', '?')}"
                          + (f" — {e.get('detail')}" if e.get("detail") else ""))
         return {"value": "\n".join(lines) or "— no audit entries —"}
