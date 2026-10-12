@@ -15,13 +15,20 @@ bootstrap (both outside this phase's ownership):
     run with plugin-grade pacing (replies go through the per-plugin
     services facade into the task pipeline, NEVER a raw client send).
 
-FRAMEWORK COMMANDS: ``pg`` and ``say`` (category "Utilities") and the
-dynamic ``help`` ("No Category") are declared HERE, not by plugins —
-matching Mudae's layout. They are first-class :class:`CommandSpec`s, so
-the registry treats them exactly like plugin-declared verbs (and the
+FRAMEWORK COMMANDS: the retired RemoteControl mention verbs
+(``status``/``accounts``/``plugins``/``ratelimit``/``lane``/``tasks``/
+``estop``/``simulation``, category "Framework"), the admin* settings
+verbs, ``pg`` and ``say`` (category "Utilities") and the dynamic
+``help`` ("No Category") are declared HERE, not by plugins — matching
+Mudae's layout. They are first-class :class:`CommandSpec`s, so the
+registry treats them exactly like plugin-declared verbs (and the
 ``help`` listing is built dynamically from whatever the registry holds —
 ``snipewatch``-style extras a later plugin declares appear in the help
-with zero framework changes).
+with zero framework changes). The management verbs reach the ControlAPI
+through the hub's ``api_provider`` (bootstrap-registered): ONE command
+layer, one dispatch path, one authorization gate — the separate
+RemoteControl bus handler is retired, so mention-prefix commands no
+longer race the Bot when prefix_mode=mention.
 
 COLLISION POLICY (deterministic): framework names are reserved, then
 plugin specs are collected in manifest order (plugin name sort); the
@@ -36,12 +43,21 @@ the last one (documented last-wins) — executor-level tests can call
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from ..plugin_base import CommandContext, CommandSpec, usage_line
+from ..errors import (
+    AccountError,
+    CredentialsError,
+    PluginError,
+    ProfileError,
+    RatePolicyError,
+    SettingsValidationError,
+)
+from ..plugin_base import ArgSpec, CommandContext, CommandSpec, usage_line
 
 LOG = logging.getLogger("slaughtermudae.selfcommands")
 
@@ -55,6 +71,21 @@ FRAMEWORK_PLUGIN = "selfcmd"
 UTILITIES_CATEGORY = "Utilities"
 SETTINGS_CATEGORY = "Settings"
 NO_CATEGORY = "No Category"
+
+#: the retired RemoteControl mention verbs (status/accounts/plugins/
+#: ratelimit/lane/tasks/estop/simulation) — framework management from
+#: chat, ported into the ONE command layer.
+FRAMEWORK_CATEGORY = "Framework"
+
+#: domain errors render their (safe, human-written) message bare as an
+#: ``error: …`` reply (the retired remote control's convention); anything
+#: else is an internal failure that raises on — the executor masks it.
+#: NOTE: bare RuntimeError is deliberately NOT domain — typed domain
+#: errors that subclass RuntimeError (AccountError etc.) still render.
+_DOMAIN_ERRORS = (
+    AccountError, CredentialsError, PluginError, ProfileError,
+    RatePolicyError, SettingsValidationError, ValueError,
+)
 
 
 class PacingBackend:
@@ -91,6 +122,36 @@ class PacingBackend:
 #: hard cap on one command reply (Discord's own limit is 2000; the same
 #: headroom convention as core.remote_control)
 MAX_REPLY_CHARS = 1900
+
+
+# ------------------------------------------------- ported remote-control bridge
+def _framework_api() -> Any:
+    """The ControlAPI for the ported framework management verbs.
+
+    Reaches the process hub's ``api_provider`` (registered by the
+    bootstrap right after the ControlAPI is built — the same late-bound
+    seam as ``pacing`` and ``access``). Raises ValueError with an honest
+    message on stacks that never wired one (direct-construction tests).
+    """
+    provider = COMMAND_HUB.api_provider
+    api = provider() if callable(provider) else provider
+    if api is None:
+        raise ValueError("framework management unavailable on this stack")
+    return api
+
+
+def _ported(command: Callable) -> Callable:
+    """Decorator for the ported remote-control verbs: ControlAPI domain
+    errors render their (safe) message bare — ``error: …`` — exactly like
+    the retired mention bridge did; internal failures raise on and the
+    executor masks them (``failed internally, see logs``)."""
+    @functools.wraps(command)
+    async def guarded(ctx: CommandContext, args: List[str]) -> str:
+        try:
+            return await command(ctx, args)
+        except _DOMAIN_ERRORS as exc:
+            return f"error: {exc}" if str(exc) else f"error: {type(exc).__name__}"
+    return guarded
 
 
 def _fmt_uptime(seconds: Optional[float]) -> str:
@@ -248,9 +309,239 @@ async def _adminprefix_handler(ctx: CommandContext, args: List[str]) -> str:
             f"(applies on next connect/rebuild)")
 
 
+# ------------------------------------------- ported remote-control commands
+# Framework management verbs, ported 1:1 from the retired
+# core.remote_control.RemoteControl allowlist: same grammar, same
+# ControlAPI calls, same reply text (one unified command layer — no more
+# mention-prefix race when prefix_mode=mention).
+@_ported
+async def _status_handler(ctx: CommandContext, args: List[str]) -> str:
+    """Fleet overview: uptime, task counters, per-account status lines."""
+    if args:
+        return "'status' takes no arguments"
+    api = _framework_api()
+    status = await api.status()
+    tasks = status.get("tasks") or {}
+    accounts = status.get("accounts") or []
+    lines = [
+        f"uptime {status.get('uptime_s', 0):.0f}s · tasks "
+        + " ".join(f"{k}={v}" for k, v in tasks.items() if k != "avg_duration_s")
+    ]
+    for account in accounts:
+        lines.append(
+            f"· {account.get('name')}: {account.get('status')}"
+            + (f" (lat {account.get('latency_ms'):.0f}ms)"
+               if account.get("latency_ms") is not None else "")
+        )
+    warnings = status.get("warnings") or []
+    if warnings:
+        lines.append(f"{len(warnings)} warning(s) — 'ratelimit warnings'")
+    return "\n".join(lines)
+
+
+@_ported
+async def _accounts_handler(ctx: CommandContext, args: List[str]) -> str:
+    """``accounts [list]|info <n>|start <n>|stop <n>``."""
+    api = _framework_api()
+    if not args or args[0] == "list":
+        accounts = await api.accounts_list()
+        if not accounts:
+            return "no accounts registered"
+        return "\n".join(
+            f"· {a['name']}: {a.get('status')} profiles={a.get('profiles') or '-'}"
+            for a in accounts
+        )
+    sub, rest = args[0], args[1:]
+    if sub == "info" and len(rest) == 1:
+        info = await api.accounts_info(rest[0])
+        st = info.get("status") or {}
+        rt = info.get("runtime") or {}
+        latency = st.get("latency_ms")
+        return (
+            f"{info['name']} — {st.get('state')}\n"
+            f"latency {latency if latency is not None else '-'}ms · "
+            f"uptime {(st.get('uptime_s') or 0):.0f}s\n"
+            f"cached: {rt.get('cached_guilds')}g {rt.get('cached_channels')}c "
+            f"{rt.get('cached_dms')}d (client cache)"
+        )
+    if sub == "start" and len(rest) == 1:
+        await api.accounts_start(rest[0])
+        return f"started {rest[0]}"
+    if sub == "stop" and len(rest) == 1:
+        await api.accounts_stop(rest[0])
+        return f"stopped {rest[0]}"
+    return "usage: accounts list|info <n>|start <n>|stop <n>"
+
+
+@_ported
+async def _plugins_handler(ctx: CommandContext, args: List[str]) -> str:
+    """``plugins <account> [<plugin> on|off]``."""
+    api = _framework_api()
+    if not args:
+        return "usage: plugins <account> [<plugin> on|off]"
+    account = args[0]
+    if len(args) == 1:
+        states = await api.plugins_state(account)
+        return "\n".join(
+            f"{'+' if s['enabled'] else '-'} {s['name']}"
+            + (f" ({s['error_count']} err)" if s.get("error_count") else "")
+            for s in states
+        ) or "no plugins"
+    plugin, flag = args[1], (args[2].lower() if len(args) > 2 else "")
+    if flag not in ("on", "off"):
+        return "usage: plugins <account> <plugin> on|off"
+    await api.plugins_set_enabled(account, plugin, flag == "on")
+    return f"{plugin} {'enabled' if flag == 'on' else 'disabled'} on {account}"
+
+
+@_ported
+async def _ratelimit_handler(ctx: CommandContext, args: List[str]) -> str:
+    """``ratelimit [show|warnings]`` — rate-limit state."""
+    api = _framework_api()
+    sub = ctx.parsed.get("view") or (args[0].lower() if args else "show")
+    if sub == "show":
+        policies = await api.ratelimit_policies()
+        if not policies:
+            return "no stored policies — everything paces at the floor"
+        return "\n".join(
+            f"· {p['level']}{':' + p['owner'] if p['owner'] else ''} "
+            f"{p['action']}: {p['interval']}s +{p['jitter'][0]}..{p['jitter'][1]}s"
+            for p in policies
+        )
+    if sub == "warnings":
+        warnings = await api.ratelimit_warnings()
+        if not warnings:
+            return "no safety warnings — configuration looks sane"
+        return "\n".join(f"[{w['level']}] {w['code']}: {w['message']}" for w in warnings)
+    return "usage: ratelimit show|warnings"
+
+
+@_ported
+async def _lane_handler(ctx: CommandContext, args: List[str]) -> str:
+    """``lane [show]`` — send-lane state (read-only)."""
+    api = _framework_api()
+    lane = await api.ratelimit_lane()
+    if not lane.get("enabled"):
+        return "send lane: off (per-account pacing only)"
+    state = "PAUSED (all outbound holds)" if lane.get("paused") else "active"
+    return (f"send lane: on ({state}) · spacing {lane.get('prefixrate')}s · "
+            f"waiting {lane.get('waiting')} · grants {lane.get('grants')}")
+
+
+@_ported
+async def _tasks_handler(ctx: CommandContext, args: List[str]) -> str:
+    """``tasks`` — queued/running tasks (first 10)."""
+    api = _framework_api()
+    rows = await api.tasks_list()
+    if not rows:
+        return "no queued/running tasks"
+    return "\n".join(
+        f"· #{t['id']} {t.get('account')}/{t.get('plugin')} {t.get('action')}"
+        f" [{t.get('status')}]"
+        for t in rows[:10]
+    ) + (f"\n(+{len(rows) - 10} more)" if len(rows) > 10 else "")
+
+
+@_ported
+async def _estop_handler(ctx: CommandContext, args: List[str]) -> str:
+    """``estop [account]`` — EMERGENCY STOP (always invokable).
+
+    SAFETY: this verb is never gated by visibility or plugin state —
+    the executor runs framework commands even on a deactivated account,
+    and the (possibly undeliverable) reply survives in the logs.
+    """
+    api = _framework_api()
+    target = ctx.parsed.get("account")
+    if target:
+        out = await api.accounts_emergency_stop(target, surface="remote")
+        ctx.logger.info(
+            "account-scoped estop reply may be undeliverable (account "
+            "%s is stopped) — reply was: emergency stop %s: %s task(s) "
+            "cancelled", target, target, out.get("cancelled_tasks", 0))
+        return f"emergency stop {target}: {out.get('cancelled_tasks', 0)} task(s) cancelled"
+    out = await api.emergency_stop_all()
+    return (
+        f"GLOBAL EMERGENCY STOP — {out.get('cancelled_tasks', 0)} task(s) "
+        "cancelled, all accounts halted. Restart manually."
+    )
+
+
+@_ported
+async def _simulation_handler(ctx: CommandContext, args: List[str]) -> str:
+    """``simulation [list]`` — available scenarios (run lives in the
+    dashboard)."""
+    api = _framework_api()
+    scenarios = await api.simulation_list()
+    if not scenarios:
+        return "no scenarios available"
+    return "\n".join(f"· {s['name']}: {s.get('description', '')}" for s in scenarios)
+
+
 #: framework-declared commands (reserved names; collision policy: a
-#: plugin re-declaring one of these is dropped with a warning)
+#: plugin re-declaring one of these is dropped with a warning). The
+#: "Framework" group is the retired RemoteControl mention surface.
 FRAMEWORK_COMMANDS: Sequence[CommandSpec] = (
+    CommandSpec(
+        name="status",
+        help="Fleet overview and uptime",
+        usage="",
+        category=FRAMEWORK_CATEGORY,
+        handler=_status_handler,
+    ),
+    CommandSpec(
+        name="accounts",
+        help="List or start/stop accounts",
+        usage="list|info <n>|start <n>|stop <n>",
+        category=FRAMEWORK_CATEGORY,
+        handler=_accounts_handler,
+    ),
+    CommandSpec(
+        name="plugins",
+        help="Plugin states and toggles",
+        usage="<account> [<plugin> on|off]",
+        category=FRAMEWORK_CATEGORY,
+        handler=_plugins_handler,
+    ),
+    CommandSpec(
+        name="ratelimit",
+        help="Show policies or warnings",
+        usage="show|warnings",
+        args=(ArgSpec("view", choices=("show", "warnings"),
+                      required=False, default="show"),),
+        category=FRAMEWORK_CATEGORY,
+        handler=_ratelimit_handler,
+    ),
+    CommandSpec(
+        name="lane",
+        help="Send-lane state",
+        usage="[show]",
+        category=FRAMEWORK_CATEGORY,
+        handler=_lane_handler,
+    ),
+    CommandSpec(
+        name="tasks",
+        help="Queued and running tasks",
+        usage="",
+        category=FRAMEWORK_CATEGORY,
+        handler=_tasks_handler,
+    ),
+    CommandSpec(
+        name="estop",
+        help="EMERGENCY STOP (safety)",
+        usage="[account]",
+        args=(ArgSpec("account", required=False),),
+        category=FRAMEWORK_CATEGORY,
+        handler=_estop_handler,
+    ),
+    CommandSpec(
+        name="simulation",
+        help="List simulation scenarios",
+        usage="list",
+        args=(ArgSpec("view", choices=("list",),
+                      required=False, default="list"),),
+        category=FRAMEWORK_CATEGORY,
+        handler=_simulation_handler,
+    ),
     CommandSpec(
         name="adminlist",
         help="list admins and per-account access",
@@ -436,6 +727,10 @@ class SelfCommandHub:
         self.pacing: Any = None
         #: optional AccessManager (bootstrap registers; admin* verbs use)
         self.access: Any = None
+        #: zero-arg ControlAPI provider (bootstrap registers right after
+        #: the API is built; the ported Framework verbs use it — the same
+        #: late-bound seam as pacing/access)
+        self.api_provider: Any = None
 
     # ---------------------------------------------------------- bindings
     def bind(self, manager: Any) -> None:
@@ -587,7 +882,8 @@ class SelfCommandHub:
 
 __all__ = [
     "SelfCommandHub", "RegisteredCommand", "FRAMEWORK_COMMANDS",
-    "FRAMEWORK_PLUGIN", "UTILITIES_CATEGORY", "NO_CATEGORY",
+    "FRAMEWORK_PLUGIN", "UTILITIES_CATEGORY", "SETTINGS_CATEGORY",
+    "FRAMEWORK_CATEGORY", "NO_CATEGORY",
     "MAX_REPLY_CHARS", "render_help", "COMMAND_HUB",
 ]
 

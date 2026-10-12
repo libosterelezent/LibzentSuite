@@ -742,6 +742,42 @@ class AdapterLayerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             commands_mod.COMMAND_HUB.invoke = original
 
+    async def test_mention_prefix_mode_resolves_to_when_mentioned(self) -> None:
+        """prefix_mode=mention (the admin-panel default): the Bot prefix
+        is the library's when_mentioned — the retired RemoteControl's
+        mention surface now rides THIS path (one command layer)."""
+        from discord.ext import commands as ext_commands
+        client = self._client()
+        client._prefix_mode = "mention"
+        client._command_prefix = "@me"  # the SELF_COMMAND_PREFIX env default
+        self.assertIs(client._resolve_prefix(ext_commands),
+                      ext_commands.when_mentioned)
+
+    async def test_mention_invocation_routes_to_the_hub(self) -> None:
+        """`@account status` (mention prefix): the Bot dispatch reaches
+        _dispatch_self_command, the invocation parses out of the mention
+        text and lands on the hub as the ported Framework verb."""
+        client = self._client()
+        self._bot(client)
+        client.set_plugin_commands(FRAMEWORK_COMMANDS)
+        self.assertIn("status", client._client.all_commands)
+        invoked: List[tuple] = []
+        original = COMMAND_HUB.invoke
+
+        async def fake_invoke(account, name, args, channel_id, **kw):
+            invoked.append((account, name, args, channel_id, kw.get("invoker_id")))
+
+        import core.plugin_manager.commands as commands_mod
+        commands_mod.COMMAND_HUB.invoke = fake_invoke
+        try:
+            ctx = NS(message=NS(content=f"<@{OWNER_ID}> status"),
+                     channel=NS(id=42, guild=NS(id=GUILD)),
+                     author=NS(id=OWNER_ID))
+            await client._dispatch_self_command(ctx, "status")
+            self.assertEqual(invoked, [("alpha", "status", [], 42, OWNER_ID)])
+        finally:
+            commands_mod.COMMAND_HUB.invoke = original
+
     async def test_dispatch_contained_when_hub_raises(self) -> None:
         client = self._client()
         self._bot(client)

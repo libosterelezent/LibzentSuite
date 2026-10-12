@@ -1,70 +1,78 @@
-"""RemoteControl tests: mention-prefix management from Discord (fakes only)."""
+"""Ported remote-control commands: framework management from Discord.
+
+The RemoteControl mention bridge is retired — its allowlist (status,
+accounts, plugins, ratelimit, lane, tasks, estop, simulation) now lives
+as framework CommandSpecs (category "Framework") in the SelfCommandHub,
+so these tests drive every ported verb through the REAL execution path:
+``PluginManager.execute_self_command`` → handler → ControlAPI (faked) →
+reply through the paced pipeline (faked services record the send).
+
+The mention itself (@account status → Bot when_mentioned prefix → hub
+dispatch) is covered in tests/unit/test_plugin_commands.py
+(AdapterLayerTests) and tests/integration/test_full_stack.py exercises
+the production bootstrap wiring end to end.
+"""
 from __future__ import annotations
 
-import asyncio
+import logging
+import tempfile
 import unittest
-from types import SimpleNamespace
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from core.credentials import Credentials
-from core.event_bus import EventBus, MessageReceived
-from core.priority import Priority
-from core.remote_control import RemoteControl
+from core.event_bus import EventBus
+from core.plugin_manager import PluginManager
+from core.plugin_manager.commands import COMMAND_HUB, MAX_REPLY_CHARS
+from core.settings_manager import SettingsManager
 
 OWNER = 1001
-ALPHA_ID = 2001
 STRANGER = 4242
 CHANNEL = 500
+GUILD = 7
 
-
-class FakeScheduler:
-    def __init__(self) -> None:
-        self.submitted = []
-
-    def submit(self, account, plugin, action, *, channel_id=None, user_id=None,
-               content=None, priority=Priority.NORMAL, name=None, timeout=None,
-               retries=0):
-        self.submitted.append({
-            "account": account, "plugin": plugin, "action": action,
-            "channel_id": channel_id, "content": content, "priority": int(priority),
-        })
-        return SimpleNamespace(id=len(self.submitted))
-
-
-class FakeAccounts:
-    def __init__(self) -> None:
-        self._accounts = {"alpha": SimpleNamespace(
-            runtime=SimpleNamespace(user_id=ALPHA_ID))}
-
-    def get(self, name):
-        return self._accounts.get(name)
-
-
-class RaisingAccounts(FakeAccounts):
-    def get(self, name):
-        from core.errors import AccountError
-        raise AccountError(f"unknown account {name!r}")
+LOG = logging.getLogger("test-remote-control")
 
 
 class FakeApi:
+    """ControlAPI double: canned replies + a call journal."""
+
     def __init__(self) -> None:
-        self.calls: list = []
+        self.calls: List[tuple] = []
 
     async def status(self):
-        self.calls.append("status")
+        self.calls.append(("status",))
         return {"uptime_s": 12.0, "tasks": {"queued": 0, "completed": 3},
                 "accounts": [{"name": "alpha", "status": "running",
                               "latency_ms": 83.0, "profiles": []}],
                 "warnings": []}
 
     async def accounts_list(self):
+        self.calls.append(("accounts_list",))
         return [{"name": "alpha", "status": "running", "profiles": ["copier"]}]
+
+    async def accounts_info(self, name):
+        self.calls.append(("accounts_info", name))
+        return {"name": name, "status": {"state": "running",
+                                         "latency_ms": 83.0,
+                                         "uptime_s": 45.0},
+                "runtime": {"cached_guilds": 2, "cached_channels": 10,
+                            "cached_dms": 1}}
+
+    async def accounts_start(self, name, surface="api"):
+        self.calls.append(("accounts_start", name, surface))
+        return {"started": name}
+
+    async def accounts_stop(self, name, surface="api"):
+        self.calls.append(("accounts_stop", name, surface))
+        return {"stopped": name}
 
     async def plugins_state(self, account):
         return [{"name": "soulcopy", "enabled": True, "error_count": 0},
                 {"name": "roll", "enabled": False, "error_count": 0}]
 
     async def plugins_set_enabled(self, account, plugin, enabled):
-        self.last_set_enabled = (account, plugin, enabled)
+        self.calls.append(("plugins_set_enabled", account, plugin, enabled))
         return {"account": account, "plugin": plugin, "enabled": enabled}
 
     async def ratelimit_policies(self):
@@ -72,7 +80,8 @@ class FakeApi:
                  "interval": 2.0, "jitter": [0.1, 0.5]}]
 
     async def ratelimit_warnings(self):
-        return []
+        return [{"level": "global", "code": "below_floor",
+                 "message": "interval under the safety floor"}]
 
     async def ratelimit_lane(self):
         return {"enabled": True, "prefixrate": 1.5, "paused": False,
@@ -83,248 +92,287 @@ class FakeApi:
                  "action": "message", "status": "queued"}]
 
     async def emergency_stop_all(self):
-        self.calls.append("estop")
+        self.calls.append(("emergency_stop_all",))
         return {"cancelled_tasks": 2}
 
-    async def accounts_emergency_stop(self, name):
+    async def accounts_emergency_stop(self, name, surface="api"):
+        self.calls.append(("accounts_emergency_stop", name, surface))
         return {"cancelled_tasks": 1}
 
     async def simulation_list(self):
         return [{"name": "soulcopy_basic", "description": "d"}]
 
 
-def make_bridge(bus=None, cooldown=0.0, owner=OWNER):
-    bus = bus or EventBus()
-    scheduler = FakeScheduler()
-    accounts = FakeAccounts()
-    api = FakeApi()
-    credentials = Credentials.from_values({"OWNER_USER_IDS": str(owner)})
-    bridge = RemoteControl(
-        bus, scheduler, accounts, lambda: api, credentials,
-        reply_cooldown_s=cooldown,
-    ).start()
-    return bridge, bus, scheduler, api
+class FakeServices:
+    """PluginServices double: records the paced replies."""
+
+    def __init__(self) -> None:
+        self.account = "alpha"
+        self.plugin = "selfcmd"
+        self.sent: List[tuple] = []
+
+    @property
+    def credentials(self) -> Credentials:
+        return Credentials.from_values({"OWNER_USER_IDS": str(OWNER)})
+
+    async def send_message(self, channel_id: int, content: str, *,
+                           priority: Any = None) -> None:
+        self.sent.append((int(channel_id), content))
 
 
-def mention_message(content, author=OWNER, account="alpha", channel=CHANNEL):
-    return MessageReceived(
-        account=account, message_id=hash(content) % 10**6, channel_id=channel,
-        author_id=author, content=content, dm=False,
-    )
+class FakeAccess:
+    """AccessManager double for the no-services (estop) path."""
+
+    def __init__(self, *owners: int) -> None:
+        self._owners = set(owners)
+
+    async def can_invoke(self, account: str, user_id: Optional[int]) -> bool:
+        return user_id in self._owners
 
 
-class TestRemoteControl(unittest.IsolatedAsyncioTestCase):
-    async def test_owner_mention_status_gets_pipelined_reply(self) -> None:
-        bridge, bus, scheduler, _ = make_bridge()
-        bus.publish_nowait(mention_message(f"<@{ALPHA_ID}> status"))
-        await asyncio.sleep(0.05)
-        bridge.stop()
-        self.assertEqual(len(scheduler.submitted), 1)
-        reply = scheduler.submitted[0]
-        self.assertEqual(reply["plugin"], "control")
-        self.assertEqual(reply["channel_id"], CHANNEL)
-        self.assertEqual(reply["priority"], int(Priority.NORMAL))
-        self.assertIn("uptime", reply["content"])
+class PortedCommandTests(unittest.IsolatedAsyncioTestCase):
+    """Every ported verb through execute_self_command (the one path)."""
 
-    async def test_bang_mention_form_accepted(self) -> None:
-        bridge, bus, scheduler, _ = make_bridge()
-        bus.publish_nowait(mention_message(f"<@!{ALPHA_ID}> lane"))
-        await asyncio.sleep(0.05)
-        bridge.stop()
-        self.assertEqual(len(scheduler.submitted), 1)
-        self.assertIn("send lane", scheduler.submitted[0]["content"])
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="sm-rc-")
+        self.addCleanup(self.tmp.cleanup)
+        bus = EventBus()
+        self.api = FakeApi()
+        self.services = FakeServices()
+        self.manager = PluginManager(
+            bus, LOG, SettingsManager(bus), plugin_dir=self.tmp.name)
+        # framework handlers read the process hub: bind THIS test's
+        # manager + API bridge, restore the previous state on teardown
+        COMMAND_HUB.bind(self.manager)
+        self._saved_provider = COMMAND_HUB.api_provider
+        COMMAND_HUB.api_provider = lambda: self.api
 
-    async def test_non_owner_ignored_completely(self) -> None:
-        bridge, bus, scheduler, _ = make_bridge()
-        bus.publish_nowait(mention_message(f"<@{ALPHA_ID}> estop", author=STRANGER))
-        await asyncio.sleep(0.05)
-        bridge.stop()
-        self.assertEqual(scheduler.submitted, [])  # not even an error reply
+    def tearDown(self) -> None:
+        COMMAND_HUB.api_provider = self._saved_provider
+        self.manager.close()
 
-    async def test_foreign_mention_ignored(self) -> None:
-        bridge, bus, scheduler, _ = make_bridge()
-        bus.publish_nowait(mention_message("<@999999> status"))
-        await asyncio.sleep(0.05)
-        bridge.stop()
-        self.assertEqual(scheduler.submitted, [])
+    async def asyncSetUp(self) -> None:
+        await self.manager.attach_account("alpha", set())
+        await self.manager.activate_account(
+            "alpha", lambda plugin: self.services)
 
-    async def test_unknown_command_replies_with_hint(self) -> None:
-        bridge, bus, scheduler, _ = make_bridge()
-        bus.publish_nowait(mention_message(f"<@{ALPHA_ID}> frobnicate"))
-        await asyncio.sleep(0.05)
-        bridge.stop()
-        self.assertIn("unknown command", scheduler.submitted[0]["content"])
+    async def _run(self, name: str, args: List[str], *,
+                   invoker: Optional[int] = OWNER) -> Optional[str]:
+        await self.manager.execute_self_command(
+            "alpha", name, args, CHANNEL, guild_id=GUILD, invoker_id=invoker)
+        if not self.services.sent:
+            return None
+        return self.services.sent[-1][1]
 
+    # ------------------------------------------------------------- status
+    async def test_status_overview(self) -> None:
+        reply = await self._run("status", [])
+        self.assertIn("uptime 12s", reply)
+        self.assertIn("queued=0", reply)
+        self.assertIn("completed=3", reply)
+        self.assertIn("· alpha: running (lat 83ms)", reply)
+        channel = self.services.sent[-1][0]
+        self.assertEqual(channel, CHANNEL)
+
+    async def test_status_rejects_arguments(self) -> None:
+        self.assertEqual(await self._run("status", ["x"]),
+                         "'status' takes no arguments")
+
+    # ----------------------------------------------------------- accounts
+    async def test_accounts_list_default_and_explicit(self) -> None:
+        self.assertIn("· alpha: running profiles=['copier']",
+                      await self._run("accounts", []))
+        self.assertIn("· alpha: running profiles=['copier']",
+                      await self._run("accounts", ["list"]))
+
+    async def test_accounts_info(self) -> None:
+        reply = await self._run("accounts", ["info", "alpha"])
+        self.assertIn("alpha — running", reply)
+        self.assertIn("latency 83.0ms · uptime 45s", reply)
+        self.assertIn("cached: 2g 10c 1d (client cache)", reply)
+
+    async def test_accounts_start_and_stop(self) -> None:
+        self.assertEqual(await self._run("accounts", ["start", "alpha"]),
+                         "started alpha")
+        self.assertEqual(await self._run("accounts", ["stop", "alpha"]),
+                         "stopped alpha")
+
+    async def test_accounts_usage_error(self) -> None:
+        self.assertEqual(await self._run("accounts", ["frobnicate"]),
+                         "usage: accounts list|info <n>|start <n>|stop <n>")
+        self.assertEqual(await self._run("accounts", ["info"]),
+                         "usage: accounts list|info <n>|start <n>|stop <n>")
+
+    # ------------------------------------------------------------ plugins
+    async def test_plugins_listing(self) -> None:
+        reply = await self._run("plugins", ["alpha"])
+        self.assertIn("+ soulcopy", reply)
+        self.assertIn("- roll", reply)
+
+    async def test_plugins_toggle_and_usage(self) -> None:
+        reply = await self._run("plugins", ["alpha", "roll", "on"])
+        self.assertEqual(reply, "roll enabled on alpha")
+        self.assertIn(("plugins_set_enabled", "alpha", "roll", True),
+                      self.api.calls)
+        self.assertEqual(await self._run("plugins", []),
+                         "usage: plugins <account> [<plugin> on|off]")
+        self.assertEqual(await self._run("plugins", ["alpha", "roll"]),
+                         "usage: plugins <account> <plugin> on|off")
+
+    # ---------------------------------------------------------- ratelimit
+    async def test_ratelimit_show_default_and_explicit(self) -> None:
+        expected = "· global message: 2.0s +0.1..0.5s"
+        self.assertIn(expected, await self._run("ratelimit", []))
+        self.assertIn(expected, await self._run("ratelimit", ["show"]))
+
+    async def test_ratelimit_warnings(self) -> None:
+        reply = await self._run("ratelimit", ["warnings"])
+        self.assertIn("[global] below_floor: interval under the safety floor",
+                      reply)
+
+    async def test_ratelimit_bad_choice_is_usage_error(self) -> None:
+        reply = await self._run("ratelimit", ["explode"])
+        self.assertIn("usage: ratelimit show|warnings", reply)
+        self.assertIn("must be one of: show/warnings", reply)
+
+    # ---------------------------------------------------------------- lane
+    async def test_lane_state(self) -> None:
+        self.assertIn("send lane: on (active) · spacing 1.5s · "
+                      "waiting 0 · grants 4", await self._run("lane", []))
+        self.assertIn("send lane", await self._run("lane", ["show"]))
+
+    async def test_lane_disabled(self) -> None:
+        async def off():  # local override of the canned reply
+            return {"enabled": False}
+        self.api.ratelimit_lane = off
+        self.assertEqual(await self._run("lane", []),
+                         "send lane: off (per-account pacing only)")
+
+    # --------------------------------------------------------------- tasks
+    async def test_tasks_listing(self) -> None:
+        reply = await self._run("tasks", [])
+        self.assertIn("· #7 alpha/soulcopy message [queued]", reply)
+
+    async def test_tasks_capped_at_ten_with_overflow_note(self) -> None:
+        rows = [{"id": i, "account": "alpha", "plugin": "p",
+                 "action": "message", "status": "queued"} for i in range(12)]
+
+        async def many(status=None, account=None):
+            return rows
+        self.api.tasks_list = many
+        reply = await self._run("tasks", [])
+        self.assertIn("(+2 more)", reply)
+        self.assertNotIn("· #11 ", reply)  # only the first ten render
+
+    # --------------------------------------------------------------- estop
     async def test_estop_global(self) -> None:
-        bridge, bus, scheduler, _ = make_bridge()
-        bus.publish_nowait(mention_message(f"<@{ALPHA_ID}> estop"))
-        await asyncio.sleep(0.05)
-        bridge.stop()
-        self.assertIn("GLOBAL EMERGENCY STOP", scheduler.submitted[0]["content"])
+        reply = await self._run("estop", [])
+        self.assertIn("GLOBAL EMERGENCY STOP — 2 task(s) cancelled", reply)
+        self.assertIn(("emergency_stop_all",), self.api.calls)
 
-    async def test_plugin_toggle_and_usage_errors(self) -> None:
-        bridge, bus, scheduler, api = make_bridge()
-        bus.publish_nowait(mention_message(f"<@{ALPHA_ID}> plugins alpha roll on"))
-        await asyncio.sleep(0.05)
-        self.assertEqual(getattr(api, "last_set_enabled", None),
-                         ("alpha", "roll", True))
-        bus.publish_nowait(mention_message(f"<@{ALPHA_ID}> plugins"))
-        await asyncio.sleep(0.05)
-        bridge.stop()
-        self.assertIn("usage:", scheduler.submitted[-1]["content"])
+    async def test_estop_account_scoped_uses_remote_surface(self) -> None:
+        reply = await self._run("estop", ["beta"])
+        self.assertEqual(reply,
+                         "emergency stop beta: 1 task(s) cancelled")
+        self.assertIn(("accounts_emergency_stop", "beta", "remote"),
+                      self.api.calls)
 
-    async def test_reply_cooldown_self_throttles(self) -> None:
-        bridge, bus, scheduler, _ = make_bridge(cooldown=5.0)
-        bus.publish_nowait(mention_message(f"<@{ALPHA_ID}> status"))
-        await asyncio.sleep(0.02)
-        bus.publish_nowait(mention_message(f"<@{ALPHA_ID}> status"))
-        await asyncio.sleep(0.05)
-        bridge.stop()
-        self.assertEqual(len(scheduler.submitted), 1)  # second one held
+    async def test_estop_extra_arguments_usage(self) -> None:
+        reply = await self._run("estop", ["a", "b"])
+        self.assertIn("usage: estop [account]", reply)
 
-    async def test_long_reply_truncated(self) -> None:
-        bridge, bus, scheduler, _ = make_bridge()
-        bus.publish_nowait(mention_message(f"<@{ALPHA_ID}> accounts list"))
-        await asyncio.sleep(0.05)
-        bridge.stop()
-        for entry in scheduler.submitted:
-            self.assertLessEqual(len(entry["content"]), 1900)
+    async def test_estop_runs_without_services(self) -> None:
+        """SAFETY: estop must run even when the account's plugins are
+        deactivated (no paced pipeline → no facade credentials either;
+        the gate falls back to the hub's bootstrap-registered
+        AccessManager). The reply is logged, not sent, but the API call
+        ALWAYS happens."""
+        manager = self.manager
+        await manager.deactivate_account("alpha")  # drops the services gate
+        saved_access = COMMAND_HUB.access
+        COMMAND_HUB.access = FakeAccess(OWNER)
+        try:
+            await manager.execute_self_command(
+                "alpha", "estop", [], CHANNEL, invoker_id=OWNER)
+            self.assertIn(("emergency_stop_all",), self.api.calls)
+            self.assertEqual(self.services.sent, [])  # reply logged, not sent
+        finally:
+            COMMAND_HUB.access = saved_access
 
-    async def test_broken_api_replies_with_error(self) -> None:
-        bridge, bus, scheduler, _ = make_bridge()
+    # ---------------------------------------------------------- simulation
+    async def test_simulation_list_bare_and_explicit(self) -> None:
+        expected = "· soulcopy_basic: d"
+        self.assertIn(expected, await self._run("simulation", []))
+        self.assertIn(expected, await self._run("simulation", ["list"]))
 
-        class ExplodingApi(FakeApi):
-            async def status(self):
-                raise RuntimeError("boom")
+    async def test_simulation_rejects_other_subcommands(self) -> None:
+        reply = await self._run("simulation", ["run", "x"])
+        self.assertIn("usage: simulation list", reply)
 
-        bridge._api_provider = lambda: ExplodingApi()
-        bus.publish_nowait(mention_message(f"<@{ALPHA_ID}> status"))
-        await asyncio.sleep(0.05)
-        bridge.stop()
-        # non-domain internals must NOT leak class/text into the channel
-        self.assertIn("error: internal (see logs)", scheduler.submitted[0]["content"])
-        self.assertNotIn("RuntimeError", scheduler.submitted[0]["content"])
+    async def test_simulation_empty(self) -> None:
+        async def empty():
+            return []
+        self.api.simulation_list = empty
+        self.assertEqual(await self._run("simulation", ["list"]),
+                         "no scenarios available")
 
-    async def test_help_lists_commands(self) -> None:
-        bridge, bus, scheduler, _ = make_bridge()
-        bus.publish_nowait(mention_message(f"<@{ALPHA_ID}>"))
-        await asyncio.sleep(0.05)
-        bridge.stop()
-        self.assertIn("commands:", scheduler.submitted[0]["content"])
+    # ---------------------------------------------------------- the gates
+    async def test_non_owner_ignored_completely(self) -> None:
+        self.assertIsNone(await self._run("estop", [], invoker=STRANGER))
+        self.assertEqual(self.services.sent, [])  # not even an error reply
+        self.assertEqual(self.api.calls, [])
 
-    async def test_mention_for_removed_account_ignored(self) -> None:
-        bus = EventBus()
-        scheduler = FakeScheduler()
-        api = FakeApi()
-        credentials = Credentials.from_values({"OWNER_USER_IDS": str(OWNER)})
-        bridge = RemoteControl(
-            bus, scheduler, RaisingAccounts(), lambda: api, credentials,
-        ).start()
-        bus.publish_nowait(
-            mention_message(f"<@{ALPHA_ID}> status", account="ghost"))
-        await bus.drain(timeout=2)  # F5-c: dispatch completes on drain
-        bridge.stop()
-        self.assertEqual(scheduler.submitted, [])
+    async def test_domain_error_renders_bare_error(self) -> None:
+        from core.errors import AccountError
 
-    async def test_partial_mention_id_not_matched(self) -> None:
-        bridge, bus, scheduler, _ = make_bridge()
-        bus.publish_nowait(mention_message("<@200> status"))
-        await asyncio.sleep(0.05)
-        bridge.stop()
-        self.assertEqual(scheduler.submitted, [])
+        async def boom(name):
+            raise AccountError(f"unknown account {name!r}")
+        self.api.accounts_info = boom
+        reply = await self._run("accounts", ["info", "ghost"])
+        self.assertEqual(reply, "error: unknown account 'ghost'")
 
-    async def test_malformed_owner_ids_rejected_quietly(self) -> None:
-        bus = EventBus()
-        scheduler = FakeScheduler()
-        api = FakeApi()
-        credentials = Credentials.from_values({"OWNER_USER_IDS": "abc,def"})
-        bridge = RemoteControl(
-            bus, scheduler, FakeAccounts(), lambda: api, credentials,
-        ).start()
-        bus.publish_nowait(mention_message(f"<@{ALPHA_ID}> status"))
-        await bus.drain(timeout=2)
-        bridge.stop()
-        self.assertEqual(scheduler.submitted, [])
+    async def test_internal_error_is_masked(self) -> None:
+        async def boom():
+            raise RuntimeError("boom (paths, sql)")
+        self.api.status = boom
+        reply = await self._run("status", [])
+        self.assertIn("error: status failed internally (see logs)", reply)
+        self.assertNotIn("boom", reply)
 
-    # --------------------------------------------- round-2 audit coverage
-    async def test_string_author_id_fail_closed(self) -> None:
-        """A producer echoing author_id as a STRING must not pass the gate
-        ('1001' is not in {1001}) — the owner check is int-membership."""
-        bridge, bus, scheduler, api = make_bridge()
-        bus.publish_nowait(
-            mention_message(f"<@{ALPHA_ID}> status", author=str(OWNER)))
-        await bus.drain(timeout=2)
-        await asyncio.sleep(0.05)
-        bridge.stop()
-        self.assertEqual(scheduler.submitted, [])
-        self.assertEqual(api.calls, [])
+    async def test_no_api_provider_answers_honestly(self) -> None:
+        COMMAND_HUB.api_provider = None
+        reply = await self._run("status", [])
+        self.assertEqual(reply, "error: framework management unavailable "
+                                "on this stack")
 
-    async def test_two_mentions_in_one_message_is_one_command(self) -> None:
-        bridge, bus, scheduler, _ = make_bridge()
-        await asyncio.wait_for(bus.publish_nowait(
-            mention_message(f"<@{ALPHA_ID}> status <@{ALPHA_ID}> estop")), 2)
-        await asyncio.sleep(0.05)
-        bridge.stop()
-        # parsed as 'status' + junk args: one reply, no crash, no estop run
-        self.assertEqual(len(scheduler.submitted), 1)
-        self.assertIn("takes no arguments", scheduler.submitted[0]["content"])
+    # ----------------------------------------------------------- plumbing
+    async def test_long_reply_truncated_at_1900(self) -> None:
+        huge = "x" * 5000
 
-    async def test_self_mention_when_account_is_owner_runs_once(self) -> None:
-        bridge, bus, scheduler, _ = make_bridge(owner=ALPHA_ID)
-        await asyncio.wait_for(bus.publish_nowait(
-            mention_message(f"<@{ALPHA_ID}> status", author=ALPHA_ID)), 2)
-        await asyncio.sleep(0.05)
-        bridge.stop()
-        self.assertEqual(len(scheduler.submitted), 1)
+        async def one_huge_row():
+            return [{"name": huge, "status": "running", "profiles": []}]
+        self.api.accounts_list = one_huge_row
+        reply = await self._run("accounts", ["list"])
+        self.assertLessEqual(len(reply), MAX_REPLY_CHARS)
+        self.assertIn("… (truncated)", reply)
 
-    async def test_flood_executes_every_command_replies_bounded(self) -> None:
-        """Command flood inside the cooldown window: EXECUTION is never
-        throttled; the reply stream is bounded by the cooldown."""
-        bridge, bus, scheduler, api = make_bridge(cooldown=0.3)
-        for _ in range(6):
-            await asyncio.wait_for(bus.publish_nowait(
-                mention_message(f"<@{ALPHA_ID}> status")), 2)
-            await asyncio.sleep(0.01)  # faster than the window
-        await asyncio.sleep(0.2)
-        bridge.stop()
-        self.assertEqual(len(api.calls), 6)
-        self.assertLessEqual(len(scheduler.submitted), 6)
+    async def test_help_lists_the_framework_category(self) -> None:
+        reply = await self._run("help", [])
+        self.assertIn("FRAMEWORK", reply)
+        for verb in ("status", "accounts", "plugins", "ratelimit", "lane",
+                     "tasks", "estop", "simulation"):
+            self.assertIn(verb, reply)
+        # per-command help shows the ported grammar
+        detail = await self._run("help", ["estop"])
+        self.assertIn("usage: estop [account]", detail)
+        self.assertIn("category: Framework", detail)
 
-    async def test_safety_command_runs_inside_cooldown_window(self) -> None:
-        bridge, bus, scheduler, api = make_bridge(cooldown=60.0)
-        await asyncio.wait_for(bus.publish_nowait(
-            mention_message(f"<@{ALPHA_ID}> status")), 2)
-        await asyncio.sleep(0.05)
-        await asyncio.wait_for(bus.publish_nowait(
-            mention_message(f"<@{ALPHA_ID}> estop")), 2)
-        await asyncio.sleep(0.05)
-        bridge.stop()
-        self.assertEqual(api.calls, ["status", "estop"])  # estop RAN
-
-    async def test_undeliverable_reply_is_contained(self) -> None:
-        class DeadScheduler(FakeScheduler):
-            def submit(self, *a, **kw):
-                raise RuntimeError("scheduler stopped (estop)")
-        bus = EventBus()
-        scheduler = DeadScheduler()
-        api = FakeApi()
-        credentials = Credentials.from_values({"OWNER_USER_IDS": str(OWNER)})
-        bridge = RemoteControl(
-            bus, scheduler, FakeAccounts(), lambda: api, credentials,
-        ).start()
-        bus.publish_nowait(mention_message(f"<@{ALPHA_ID}> status"))
-        await bus.drain(timeout=2)
-        await asyncio.sleep(0.05)
-        bridge.stop()
-
-    async def test_start_is_idempotent_no_double_subscription(self) -> None:
-        bridge, bus, scheduler, _ = make_bridge()
-        bridge.start()  # second start must not duplicate the handler
-        registered = sum(
-            1 for handlers in bus._subs.values() for h in handlers
-            if getattr(h, "__name__", "") == "_on_message")
-        bridge.stop()
-        self.assertEqual(registered, 1)
+    async def test_framework_names_are_reserved_for_the_verbs(self) -> None:
+        entries = {e.spec.name: e for e in COMMAND_HUB.entries("alpha")}
+        for verb in ("status", "accounts", "plugins", "ratelimit", "lane",
+                     "tasks", "estop", "simulation"):
+            self.assertIn(verb, entries)
+            self.assertEqual(entries[verb].plugin, "selfcmd")
 
 
 if __name__ == "__main__":

@@ -771,13 +771,6 @@ class AccountManager:
                     await resolved
             except Exception:
                 self._logger.exception("rate-engine residue cascade failed for %s", name)
-        remote = getattr(self, "_remote_control", None)
-        if hasattr(remote, "forget_account"):  # PHASE-4 (S3-G2), tolerant
-            try:
-                remote.forget_account(name)
-            except Exception:
-                self._logger.exception(
-                    "remote-control throttle cascade failed for %s", name)
         if self._lifecycle is not None:  # PHASE-4 (S4): pacer cleanup
             try:
                 self._lifecycle.forget(name)

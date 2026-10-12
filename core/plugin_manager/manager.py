@@ -789,10 +789,10 @@ class PluginManager:
         use — never a raw client send.
 
         The owner gate mirrors the trigger-word path exactly: the invoking
-        Discord user id must pass AccessManager.can_invoke (the hub's
-        bootstrap-registered manager, or the legacy credentials owner ids
-        on stacks without one) — non-owners are ignored with no reply,
-        like today.
+        Discord user id must pass AccessManager.can_invoke (when wired)
+        or the credentials view's owner ids (``services.credentials`` —
+        the legacy fallback for direct-construction stacks) — non-owners
+        are ignored with no reply, like today.
 
         FRAMEWORK commands (plugin="selfcmd": help/pg/estop/…) run even
         when the account's plugins are deactivated — their handlers use
@@ -823,9 +823,12 @@ class PluginManager:
         # direct-construction stacks without an access manager.
         if invoker_id is not None:
             access = getattr(self, "_access_manager", None)
-            if access is None:
-                # the hub's bootstrap-registered AccessManager (None on
-                # stripped stacks — then the legacy owner-ids fallback)
+            if access is None and services is None:
+                # framework verb with NO plugin pipeline (estop on a
+                # deactivated account): there are no facade credentials
+                # to read the legacy owner list from — consult the hub's
+                # bootstrap-registered AccessManager instead, so the
+                # safety verbs keep their gate without widening it
                 access = getattr(self.command_hub, "access", None)
             allowed = False
             if access is not None:
