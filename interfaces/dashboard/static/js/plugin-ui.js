@@ -37,8 +37,9 @@ function pluginStatsHTML(cards) {
 
 /* ── Sidebar panels ───────────────────────────────────────────────────── */
 function buildPluginNav() {
-  // remove any previous plugin nav entries + panels
+  // remove any previous plugin nav entries + panels (idempotent)
   $$("[data-plugin-panel]").forEach(el => el.remove());
+  if (!pluginPanels.length) return;   // no simple panels — no nav entries
   for (const panel of pluginPanels) {
     const pid = panel.id.replace(/[^a-zA-Z0-9_-]/g, "-");
     // nav entry

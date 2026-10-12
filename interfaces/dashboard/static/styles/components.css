@@ -301,9 +301,11 @@ dialog .dlg-foot { display: flex; gap: var(--sp-2); justify-content: flex-end; p
    in .dui-item wrappers (label above control, hint below) so every plugin
    page gets identical rhythm. Checkbox/radio choices reuse the structured
    .pick-row grid; the toggle is a switch-skinned checkbox. */
-.dui-page { display: flex; flex-direction: column; gap: var(--sp-4); }
+.dui-page { display: flex; flex-direction: column; gap: var(--sp-4);
+  width: 100%; max-width: 100%; min-width: 0; }
 .dui-desc { margin-top: calc(-1 * var(--sp-2)); }
 .dui-section, .dui-tab, .dui-card, .dui-form { display: flex; flex-direction: column;
+  width: 100%; max-width: 100%; min-width: 0;
   gap: var(--sp-2); min-width: 0; }
 .dui-section, .dui-tab { gap: var(--sp-3); }
 .dui-card { background: var(--surface); border: 1px solid var(--border);
@@ -312,11 +314,12 @@ dialog .dlg-foot { display: flex; gap: var(--sp-2); justify-content: flex-end; p
   letter-spacing: .08em; margin-bottom: 2px; }
 .dui-sec-title { font-size: 11px; color: var(--dim); text-transform: uppercase;
   letter-spacing: .08em; font-weight: 600; }
-.dui-row { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: flex-end; }
+.dui-row { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: flex-end;
+  width: 100%; min-width: 0; }
 .dui-col { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; flex: 1; }
 .dui-item { display: flex; flex-direction: column; gap: 4px; min-width: 0;
   max-width: 480px; }
-.dui-row > .dui-item { max-width: none; flex: 0 1 auto; min-width: 170px; }
+.dui-row > .dui-item { max-width: none; flex: 1 1 170px; min-width: 170px; }
 .dui-item > label { font-size: 12px; color: var(--dim); font-weight: 500; }
 .dui-item .hint { font-size: 11px; color: var(--faint); }
 .dui-req { color: var(--err); }

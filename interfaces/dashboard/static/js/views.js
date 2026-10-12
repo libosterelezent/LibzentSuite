@@ -49,21 +49,15 @@ function renderHome() {
     d.onclick=()=>openGroupDetails(g.name);
     gr.appendChild(d);
   }
-  // plugin-contributed stat cards (structured data, esc()'d templates)
+  // plugin-contributed stat cards: appended INSIDE home-metrics so they
+  // are rebuilt with it on every renderHome (no accumulation — the old
+  // sibling-insert survived innerHTML rebuilds and duplicated)
   const statAccount = accounts().length ? accounts()[0].name : "";
   if (statAccount) {
     loadPluginStats(statAccount).then(cards => {
-      if (cards.length) {
-        const wrap = document.createElement("div");
-        wrap.className = "metrics";
-        wrap.style.marginBottom = "var(--sp-3)";
-        wrap.innerHTML = pluginStatsHTML(cards);
-        const metricsEl = $("home-metrics");
-        if (metricsEl && metricsEl.nextSibling) {
-          metricsEl.parentNode.insertBefore(wrap, metricsEl.nextSibling);
-        } else if (metricsEl) {
-          metricsEl.parentNode.appendChild(wrap);
-        }
+      if (cards.length && currentView === "home") {
+        const m = $("home-metrics");
+        if (m) m.innerHTML += pluginStatsHTML(cards);
       }
     }).catch(() => {});
   }
