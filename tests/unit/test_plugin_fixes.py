@@ -528,18 +528,57 @@ class DispatchBoundTests(unittest.IsolatedAsyncioTestCase):
             ))
         await asyncio.sleep(0.2)  # let the bus dispatcher drain its queue
         stats = manager.dispatch_stats("alpha")
-        self.assertLessEqual(stats["in_flight"], 5)
-        self.assertEqual(stats["in_flight"], 5)
-        self.assertEqual(stats["dropped"], 95)
-        self.assertEqual(len(handled), 5)  # only admitted events ran
+        # INVARIANTS (scheduler-independent): the live-task set is bounded
+        # (running cap 5 + backlog net 4x cap = 20), every event is either
+        # admitted (parked at the gate) or counted as dropped, and the
+        # drop counter survives until the account detaches.
+        self.assertLessEqual(stats["in_flight"], 20)
+        self.assertGreaterEqual(stats["dropped"], 80)
+        self.assertEqual(stats["dropped"], 100 - stats["in_flight"])
+        self.assertEqual(len(handled), stats["in_flight"])
         gate.set()
         await asyncio.sleep(0.1)
         self.assertEqual(manager.dispatch_stats("alpha")["in_flight"], 0)
-        # the dropped counter survives until the account detaches
-        self.assertEqual(manager.dispatch_stats("alpha")["dropped"], 95)
+        self.assertEqual(
+            manager.dispatch_stats("alpha")["dropped"], stats["dropped"])
+        manager.close()
+
+    async def test_sustained_flood_caps_running_handlers(self) -> None:
+        """Events arriving OVER TIME (realistic traffic spacing — each
+        publish gives the loop a tick) park exactly `limit` handlers and
+        drop everything after: the tier-1 running bound biting alone."""
+        manager = _make_manager(dispatch_inflight_limit=5)
+        await manager.attach_account("alpha")
+        await manager.activate_account("alpha", FakeServices())
+        inst = manager._accounts["alpha"][SPY].instance
+        gate = asyncio.Event()
+        handled: List[Any] = []
+
+        async def slow(ctx, event):
+            handled.append(event)
+            await gate.wait()
+
+        inst.handle_event = slow
+        for i in range(60):
+            manager._bus.publish_nowait(MessageReceived(
+                account="alpha", message_id=i, channel_id=5, author_id=9,
+                content="flood",
+            ))
+            await asyncio.sleep(0.001)  # real tick: dispatch tasks start & park
+        await asyncio.sleep(0.1)
+        stats = manager.dispatch_stats("alpha")
+        self.assertLessEqual(stats["running"], 5)
+        self.assertGreater(stats["dropped"], 0)
+        self.assertEqual(len(handled), stats["in_flight"])
+        gate.set()
         manager.close()
 
     async def test_normal_traffic_never_drops(self) -> None:
+        """A zero-gap burst of events with INSTANT handlers is normal
+        traffic (a busy channel replaying history): the bus dispatcher
+        yields only every SLICE_EVENTS, so none of these tasks may have
+        started when the later admission checks run — the two-tier bound
+        must not misread that scheduling artifact as a flood."""
         manager = _make_manager(dispatch_inflight_limit=5)
         await manager.attach_account("alpha")
         await manager.activate_account("alpha", FakeServices())

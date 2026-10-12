@@ -118,6 +118,12 @@ class PluginManager:
         self._pending: Set[asyncio.Task] = set()
         #: account -> in-flight dispatch tasks (quiesced on deactivation)
         self._pending_by_account: Dict[str, Set[asyncio.Task]] = {}
+        #: account -> dispatch tasks that have STARTED and not finished.
+        #: The slow-handler pileup is what the flood bound caps; created-
+        #: but-not-yet-scheduled tasks don't count — the bus dispatcher
+        #: yields only every SLICE_EVENTS, so a same-slice burst of instant
+        #: handlers would otherwise be miscounted as a flood and dropped.
+        self._dispatch_started: Dict[str, Set[asyncio.Task]] = {}
         #: bounded grace for in-flight handlers during deactivate_account
         self._dispatch_grace_s = dispatch_grace_s
         #: central registry for plugin-attached dashboard UIs (Stage C);
@@ -295,6 +301,7 @@ class PluginManager:
         # dispatch bookkeeping: any task still queued dies at the services
         # gate in _dispatch (the account's services are gone)
         self._pending_by_account.pop(account, None)
+        self._dispatch_started.pop(account, None)
         self._dispatch_dropped.pop(account, None)
         # the account's self-command surface is gone with it
         self.command_hub.forget(account)
@@ -808,10 +815,14 @@ class PluginManager:
 
     def dispatch_stats(self, account: str) -> Dict[str, int]:
         """Bounded-dispatch health for one account: how many dispatch
-        tasks are in flight and how many events were dropped because
-        the per-account in-flight cap (:meth:`_on_message`) was full."""
+        tasks are unfinished (created or running), how many are actually
+        executing handlers, and how many events were dropped because the
+        per-account flood bound (:meth:`_on_message`) was full."""
+        queued = self._pending_by_account.get(account, ())
+        started = self._dispatch_started.get(account, ())
         return {
-            "in_flight": len(self._pending_by_account.get(account, ())),
+            "in_flight": sum(1 for t in queued if not t.done()),
+            "running": sum(1 for t in started if not t.done()),
             "dropped": self._dispatch_dropped.get(account, 0),
         }
 
@@ -1120,42 +1131,68 @@ class PluginManager:
         runtimes = self._accounts.get(event.account)
         if not runtimes:
             return
-        # FLOOD BOUND: cap the per-account in-flight dispatch tasks.
+        # FLOOD BOUND: cap the per-account dispatch workload in two tiers.
         # Without this, a burst of events against slow plugins grows the
         # live-task set without bound (the bus's own 20k queue bound is
-        # recreated one layer up). Over the cap the NEW event is dropped
-        # (drop-newest: in-flight work is never killed mid-flight) and
-        # counted; the WARNING is rate-limited (first drop + every 50th)
-        # so a sustained flood cannot flood the logs too.
-        in_flight = self._pending_by_account.get(event.account)
-        if in_flight is not None and len(in_flight) >= self._dispatch_limit:
-            dropped = self._dispatch_dropped.get(event.account, 0) + 1
-            self._dispatch_dropped[event.account] = dropped
+        # recreated one layer up otherwise).
+        #   tier 1 — STARTED-and-unfinished tasks >= limit: the slow-handler
+        #            pileup proper; the NEW event is dropped (drop-newest:
+        #            in-flight work is never killed mid-flight).
+        #   tier 2 — unfinished backlog >= 4x limit: admission safety net
+        #            for zero-yield drain slices (created tasks that have
+        #            not run yet); still bounded, still drops-newest.
+        # Instant handlers must NEVER lose events to a burst: they only
+        # exist momentarily in tier 2 and age out as soon as the loop
+        # schedules them. The WARNING is rate-limited (first drop + every
+        # 50th) so a sustained flood cannot flood the logs too.
+        account = event.account
+        running = self._dispatch_started.get(account)
+        if running is not None:
+            n_running = sum(1 for t in running if not t.done())
+        else:
+            n_running = 0
+        queued = self._pending_by_account.get(account)
+        n_backlog = (sum(1 for t in queued if not t.done())
+                     if queued is not None else 0)
+        if (n_running >= self._dispatch_limit
+                or n_backlog >= 4 * self._dispatch_limit):
+            dropped = self._dispatch_dropped.get(account, 0) + 1
+            self._dispatch_dropped[account] = dropped
             if dropped == 1 or dropped % 50 == 0:
                 self._logger.warning(
-                    "dispatch queue full for %s (%d in flight, cap %d) — "
-                    "event dropped (%d dropped so far)",
-                    event.account, len(in_flight), self._dispatch_limit,
+                    "dispatch queue full for %s (%d running, %d backlog, "
+                    "cap %d) — event dropped (%d dropped so far)",
+                    account, n_running, n_backlog, self._dispatch_limit,
                     dropped)
             return
         task = asyncio.get_running_loop().create_task(self._dispatch(event, runtimes))
         self._pending.add(task)
-        self._pending_by_account.setdefault(event.account, set()).add(task)
+        self._pending_by_account.setdefault(account, set()).add(task)
         task.add_done_callback(
-            lambda t, account=event.account: self._reap_dispatch(account, t)
+            lambda t, account=account: self._reap_dispatch(account, t)
         )
 
     def _reap_dispatch(self, account: str, task: asyncio.Task) -> None:
-        """Drop a finished dispatch task from both bookkeeping sets."""
+        """Drop a finished dispatch task from all bookkeeping sets."""
         self._pending.discard(task)
         tasks = self._pending_by_account.get(account)
         if tasks is not None:
             tasks.discard(task)
             if not tasks:
                 self._pending_by_account.pop(account, None)
+        started = self._dispatch_started.get(account)
+        if started is not None:
+            started.discard(task)
+            if not started:
+                self._dispatch_started.pop(account, None)
 
     async def _dispatch(self, event: MessageReceived, runtimes: Dict[str, PluginRuntime]) -> None:
         """Await every enabled plugin's handle_event, isolated per plugin.
+
+        RUNNING bookkeeping: the task registers itself at coroutine entry
+        so the flood bound's tier-1 count reflects handlers actually
+        executing (a created-but-unscheduled task must not be mistaken
+        for a parked handler). Removal happens in _reap_dispatch.
 
         The ``runtimes`` dict is a snapshot taken at enqueue time; if the
         account was detached (or re-attached with fresh runtimes) before
@@ -1168,6 +1205,9 @@ class PluginManager:
         ``services=None`` and crash the handler with an AttributeError the
         plugin got blamed for. Skip instead — the account is going down.
         """
+        current = asyncio.current_task()
+        if current is not None:
+            self._dispatch_started.setdefault(event.account, set()).add(current)
         if self._accounts.get(event.account) is not runtimes:
             return
         factory = self._services.get(event.account)
