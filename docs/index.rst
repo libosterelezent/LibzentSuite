@@ -33,14 +33,13 @@ Indices
 Where the knowledge lives
 -------------------------
 
-* ``knowledgebase/`` is **generated and gitignored** — a fresh clone has
-  no ``knowledgebase/`` directory until you run
-  ``python3 scripts/gen_knowledgebase.py``.
+* ``knowledgebase/`` — the deep knowledge base, committed with the
+  repository: handwritten ``*.md`` deep-dive guides (the WHY — start at
+  ``knowledgebase/README.md``; the complete surface reference is
+  ``knowledgebase/API_ENDPOINTS.md``) plus generated artifacts.
 * ``knowledgebase/read_only/`` — generated READ-ONLY symbol snapshot
   (regenerate with ``python3 scripts/gen_knowledgebase.py``).
 * ``knowledgebase/generated/`` — machine-readable indexes
-  (``symbol_index.json``, coverage, drift baseline).
-* Handwritten ``knowledgebase/*.md`` deep-dive guides (the WHY) are
-  maintained separately and are not part of this repository.
+  (``symbol_index.json``, coverage, drift baseline) — gitignored.
 * This Sphinx site — navigable API reference (autodoc from the real
   docstrings) + condensed architecture/operations pages.

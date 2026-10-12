@@ -9,6 +9,8 @@ database — persistence
    :members: AccountsRepository
 .. automodule:: database.repositories.account_plugins
    :members: AccountPluginsRepository
+.. automodule:: database.repositories.plugin_profiles
+   :members: PluginProfilesRepository
 .. automodule:: database.repositories.cache
    :members: CacheRepository
 .. automodule:: database.repositories.logs
@@ -17,5 +19,4 @@ database — persistence
    :members: TaskHistoryRepository
 
 Schema/migrations: ``knowledgebase/DATABASE.md`` (tables, indexes,
-pruning, cascades, secrets policy) — if you maintain a local
-knowledgebase; it is not shipped in a fresh clone.
+pruning, cascades, secrets policy) — committed with the repository.

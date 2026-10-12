@@ -3,9 +3,8 @@ Reference
 
 Generated knowledge artifacts (regenerate with
 ``python3 scripts/gen_knowledgebase.py``; drift-check with ``--check``).
-``knowledgebase/`` is **gitignored**: a fresh clone has none of these
-until you run the generator (its exit is 0 with a notice when the
-baseline is absent).
+The handwritten deep dives in ``knowledgebase/*.md`` are committed with
+the repository; only ``knowledgebase/generated/`` is gitignored.
 
 * ``knowledgebase/read_only/SYMBOL_INDEX.md`` — module inventory snapshot
 * ``knowledgebase/generated/symbol_index.json`` — machine-readable index
@@ -22,6 +21,6 @@ baseline is absent).
 
 Handwritten deep dives (architecture, data flow, lifecycle,
 per-subsystem references, the formal plugin API, configuration, CLI,
-dashboard, testing, security, glossary, changelog) are maintained
-SEPARATELY from this repository — they are not shipped in a fresh clone
-and are not produced by the generator.
+dashboard, endpoint reference, testing, security, glossary, changelog)
+live in ``knowledgebase/*.md`` — committed with the repository,
+maintained by hand, never overwritten by the generator.

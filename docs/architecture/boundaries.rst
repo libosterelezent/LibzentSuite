@@ -31,5 +31,5 @@ Hard rules enforced by review and tests:
   ``DISCORD_TOKEN_*`` entries are read just once by the
   ``credentials import-env`` migration into the encrypted store.
 
-Details: ``knowledgebase/COMPONENT_MAP.md`` (if you maintain a local
-knowledgebase — not shipped in a fresh clone).
+Details: ``knowledgebase/COMPONENT_MAP.md`` (committed with the
+repository).

@@ -23,5 +23,6 @@ venv/
 .coverage
 htmlcov/
 docs/_build/
-knowledgebase/
+# the knowledgebase is committed; only its generated machine data is local
+knowledgebase/generated/
 knowledgebase_*.db
