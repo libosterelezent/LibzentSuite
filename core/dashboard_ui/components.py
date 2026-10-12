@@ -707,17 +707,23 @@ class Form(UIContainer):
         self._description = _require_str(description, "description")
         return self
 
+    _CLIENT_ACTIONS = ("save-token", "save-theme")
+
     def set_client_action(self, name: str) -> "Form":
         """Handle submission CLIENT-side instead of a server action.
 
-        The only supported name is ``"save-token"`` — the dashboard's own
-        session-token editor (the token must never round-trip a server
-        action). The renderer collects the form's fields exactly like a
-        server submit, then applies the client behavior.
+        Supported names: ``"save-token"`` — the dashboard's own session
+        token editor (the token must never round-trip a server action);
+        ``"save-theme"`` — the decorative theme picker (pure
+        presentation, persisted in the browser only). The renderer
+        collects the form's fields exactly like a server submit, then
+        applies the client behavior.
         """
         self._check_frozen("set the client action")
-        if name != "save-token":
-            raise UIError(f"unknown client action {name!r}")
+        if name not in self._CLIENT_ACTIONS:
+            raise UIError(
+                f"unknown client action {name!r} "
+                f"(one of {', '.join(self._CLIENT_ACTIONS)})")
         self._client_action = name
         return self
 
@@ -774,7 +780,6 @@ class Container(_ComponentParent):
     def __init__(self, *, component_id: str = "", **kwargs) -> None:
         super().__init__(component_id=component_id, **kwargs)
         self._direction: str | None = None
-        self._gap: str | None = None
 
     def set_direction(self, direction) -> "Container":
         """Which way children flow ("vertical" default | "horizontal")."""
@@ -782,18 +787,92 @@ class Container(_ComponentParent):
         self._direction = _require_choice(direction, self._DIRECTIONS, "direction")
         return self
 
-    def set_gap(self, gap) -> "Container":
-        """Spacing between children (CSS size string or px number)."""
-        self._check_frozen("set the gap")
-        self._gap = _validate_css_size(gap, "gap")
-        return self
-
     def _props(self) -> dict:
         props = super()._props()
         if self._direction is not None:
             props["direction"] = self._direction
-        if self._gap is not None:
-            props["gap"] = self._gap
+        return props
+
+
+class Grid(_ComponentParent):
+    """A structured column grid — THE layout primitive for tidiness.
+
+    Children slot into equal-width columns that wrap as whole rows
+    (unlike a Row, where mixed-height children raggedly re-flow).
+    ``set_columns(n)`` pins 1–6 columns; ``set_columns("auto")`` plus
+    ``set_min_child("240px")`` lets the renderer fit as many columns
+    as the width allows (auto-fill). Narrow screens collapse via CSS.
+    """
+
+    _type_name = "grid"
+
+    def __init__(self, *, component_id: str = "", **kwargs) -> None:
+        super().__init__(component_id=component_id, **kwargs)
+        self._columns = None          # int 1-6 or "auto"
+        self._min_child: str | None = None   # css size (auto mode)
+
+    def set_columns(self, columns) -> "Grid":
+        """Column count (int 1–6) or "auto" (with set_min_child)."""
+        self._check_frozen("set the columns")
+        if columns == "auto":
+            self._columns = "auto"
+            return self
+        value = _require_int(columns, "columns")
+        if not 1 <= value <= 6:
+            raise UIError(f"columns must be 1-6 (or 'auto'), got {value}")
+        self._columns = value
+        return self
+
+    def set_min_child(self, min_child) -> "Grid":
+        """Minimum child width in auto mode (CSS size; default 240px)."""
+        self._check_frozen("set the min child")
+        self._min_child = _validate_css_size(min_child, "min_child")
+        return self
+
+    def _props(self) -> dict:
+        props = super()._props()
+        if self._columns is not None:
+            props["columns"] = self._columns
+        if self._min_child is not None:
+            props["min_child"] = self._min_child
+        return props
+
+
+class Alert(UIComponent):
+    """A message box for errors, warnings and notices.
+
+    The designed home for FAILURE: plugins surface caught errors as an
+    Alert instead of raw text, and the generic renderer uses the same
+    markup when a data provider or page fetch fails — so problems read
+    as part of the UI, never as a glitch that breaks the layout.
+    """
+
+    _type_name = "alert"
+    _VARIANTS = ("info", "ok", "warn", "err")
+
+    def __init__(self, *, component_id: str = "", **kwargs) -> None:
+        super().__init__(component_id=component_id, **kwargs)
+        self._value: str | None = None
+        self._variant: str | None = None
+
+    def set_value(self, value) -> "Alert":
+        """The message body."""
+        self._check_frozen("set the value")
+        self._value = _require_str(value, "value")
+        return self
+
+    def set_variant(self, variant: str) -> "Alert":
+        """Severity look + icon ("info"|"ok"|"warn"|"err")."""
+        self._check_frozen("set the variant")
+        self._variant = _require_choice(variant, self._VARIANTS, "variant")
+        return self
+
+    def _props(self) -> dict:
+        props = super()._props()
+        if self._value is not None:
+            props["value"] = self._value
+        if self._variant is not None:
+            props["variant"] = self._variant
         return props
 
 
@@ -886,6 +965,15 @@ class Section(_ComponentParent):
     def __init__(self, *, component_id: str = "", **kwargs) -> None:
         super().__init__(component_id=component_id, **kwargs)
         self._description: str | None = None
+        self._icon: str | None = None
+
+    def set_icon(self, icon) -> "Section":
+        """Decorative SVG path drawn beside the title (24×24 viewBox
+        path data, same vocabulary as the sidebar icons). Escaped by
+        the renderer; purely decorative."""
+        self._check_frozen("set the icon")
+        self._icon = _require_str(icon, "icon")
+        return self
 
     def set_description(self, description: str) -> "Section":
         self._check_frozen("set the description")
@@ -896,13 +984,36 @@ class Section(_ComponentParent):
         props = super()._props()
         if self._description is not None:
             props["description"] = self._description
+        if self._icon is not None:
+            props["icon"] = self._icon
         return props
 
 
 class Card(_ComponentParent):
-    """A boxed content container with an optional title."""
+    """A boxed content container with an optional title.
+
+    ``set_tone`` adds a decorative accent border (info/ok/warn/err) —
+    emphasis ONLY: tone never changes meaning, order or layout.
+    """
 
     _type_name = "card"
+    _TONES = ("info", "ok", "warn", "err")
+
+    def __init__(self, *, component_id: str = "", **kwargs) -> None:
+        super().__init__(component_id=component_id, **kwargs)
+        self._tone: str | None = None
+
+    def set_tone(self, tone) -> "Card":
+        """Decorative accent border ("info"|"ok"|"warn"|"err")."""
+        self._check_frozen("set the tone")
+        self._tone = _require_choice(tone, self._TONES, "tone")
+        return self
+
+    def _props(self) -> dict:
+        props = super()._props()
+        if self._tone is not None:
+            props["tone"] = self._tone
+        return props
 
 
 class Row(_ComponentParent):
@@ -921,8 +1032,8 @@ class Column(_ComponentParent):
 # Section/Card accept every content component; Row/Column accept the same
 # set minus Row (no nested rows); Container additionally accepts other
 # Containers (explicit opt-in nesting — see its docstring).
-_CONTENT_CHILD_TYPES = (Card, Row, Column, Container, Text, DisplayText,
-                        Badge, Metric, Button,
+_CONTENT_CHILD_TYPES = (Card, Row, Column, Container, Grid, Alert,
+                        Text, DisplayText, Badge, Metric, Button,
                         Checkbox, Toggle, TextInput, NumberInput, Textarea,
                         Select, RadioGroup, MultiSelect, ListView, Table,
                         Progress, Form, Separator, Description, Header, Footer)
@@ -932,6 +1043,7 @@ Card._allowed_child_types = _CONTENT_CHILD_TYPES
 Row._allowed_child_types = _FLOW_CHILD_TYPES
 Column._allowed_child_types = _FLOW_CHILD_TYPES
 Container._allowed_child_types = _FLOW_CHILD_TYPES   # incl. Containers: opt-in nesting
+Grid._allowed_child_types = _FLOW_CHILD_TYPES
 
 
 class Tab(UIContainer):

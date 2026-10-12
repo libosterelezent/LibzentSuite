@@ -412,6 +412,7 @@ try {
   const qtoken = new URLSearchParams(location.search).get("token");
   if (qtoken) { secretStore.setItem("dash_token",qtoken.trim()); $("adv-token").value=qtoken.trim(); history.replaceState(null,"",location.pathname); }
 
+  applyDashTheme();   // decorative layer: persisted accent + density
   buildNav(); wire(); connectWS();
   // Activate the initial view — .panel{display:none} means NOTHING is
   // visible until UI.go() adds .active; without this the first paint is

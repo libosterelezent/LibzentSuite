@@ -107,3 +107,32 @@ function openDetailsPopup(title) {
   if (!dlg.open) dlg.showModal();    // re-entrant opens (picker from the
   return body;                       // details card) just swap the body
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Decorative theme layer — customization that can NEVER touch structure.
+   Accent hue + density swap CSS variables on <html>; everything else
+   (layout, components, spacing scale) stays the framework's. Persisted in
+   localStorage (non-sensitive, unlike the session token).
+   ═══════════════════════════════════════════════════════════════════════════ */
+const DASH_ACCENTS = {
+  blue:   ["#5ba3f5", "#3d7fd0"],
+  violet: ["#a78bfa", "#7c5ce0"],
+  green:  ["#34d399", "#059669"],
+  amber:  ["#fbbf24", "#d97706"],
+  rose:   ["#fb7185", "#e11d48"],
+  cyan:   ["#22d3ee", "#0891b2"],
+};
+
+function applyDashTheme(accent, density) {
+  const root = document.documentElement;
+  const name = DASH_ACCENTS[accent] ? accent
+    : (localStorage.getItem("dash_accent") || "blue");
+  const pair = DASH_ACCENTS[name];
+  root.style.setProperty("--accent", pair[0]);
+  root.style.setProperty("--accent2", pair[1]);
+  localStorage.setItem("dash_accent", name);
+  const dens = ["comfortable", "compact"].includes(density) ? density
+    : (localStorage.getItem("dash_density") || "comfortable");
+  root.dataset.density = dens;
+  localStorage.setItem("dash_density", dens);
+}

@@ -1212,3 +1212,114 @@ class TestAlignmentVocabulary(unittest.TestCase):
         self.assertEqual(snap_row["type"], "row")
         self.assertEqual([c.get("grow") for c in snap_row["children"]],
                          [1, 2, 1])
+
+
+class TestGridComponent(unittest.TestCase):
+    """Structured columns: fixed n or auto-fill with a min child width."""
+
+    def _ui(self):
+        from core.dashboard_ui import DashboardUIToolset
+        return DashboardUIToolset()
+
+    def test_fixed_columns_and_gap(self):
+        g = (self._ui().Grid(component_id="g")
+             .set_columns(4).set_gap("12px"))
+        self.assertEqual(g._props(), {"columns": 4, "gap": "12px"})
+
+    def test_auto_columns_with_min_child(self):
+        g = (self._ui().Grid(component_id="g")
+             .set_columns("auto").set_min_child("200px"))
+        self.assertEqual(g._props(), {"columns": "auto",
+                                      "min_child": "200px"})
+
+    def test_column_bounds(self):
+        from core.dashboard_ui.errors import UIError
+        g = self._ui().Grid(component_id="g")
+        for bad in (0, 7, "many"):
+            with self.assertRaises(UIError):
+                g.set_columns(bad)
+
+    def test_grid_holds_content_children(self):
+        ui = self._ui()
+        ui.Grid(component_id="g").add_component(
+            ui.Container(component_id="c"))
+        ui.Grid(component_id="g2").add_component(
+            ui.DisplayText(component_id="d").set_value("x"))
+
+    def test_alignment_inherited(self):
+        g = (self._ui().Grid(component_id="g")
+             .set_align("center").set_justify("between"))
+        self.assertEqual((g._props()["align"], g._props()["justify"]),
+                         ("center", "between"))
+
+    def test_grid_tree_validates(self):
+        from core.dashboard_ui.registry import DashboardUIRegistry
+        ui = self._ui()
+        page = (ui.Page(component_id="p")
+                .add_section(ui.Section(component_id="s").add_component(
+                    ui.Grid(component_id="g").set_columns(3)
+                    .add_component(ui.DisplayText(component_id="d1")
+                                   .set_value("1"))
+                    .add_component(ui.DisplayText(component_id="d2")
+                                   .set_value("2")))))
+        registry = DashboardUIRegistry()
+        registry.attach("t", ui.Layout(component_id="l").add_page(page))
+        grid = (registry.get_layout("t")["children"][0]
+                ["children"][0]["children"][0])
+        self.assertEqual(grid["type"], "grid")
+        self.assertEqual(len(grid["children"]), 2)
+
+
+class TestAlertComponent(unittest.TestCase):
+    """The designed error/notice surface."""
+
+    def _ui(self):
+        from core.dashboard_ui import DashboardUIToolset
+        return DashboardUIToolset()
+
+    def test_serialize(self):
+        a = (self._ui().Alert(component_id="a")
+             .set_title("Boom").set_value("it broke").set_variant("err"))
+        self.assertEqual(a._props(), {"title": "Boom", "value": "it broke",
+                                      "variant": "err"})
+
+    def test_variant_rejected(self):
+        from core.dashboard_ui.errors import UIError
+        with self.assertRaises(UIError):
+            self._ui().Alert(component_id="a").set_variant("loud")
+
+    def test_alert_anywhere_content_goes(self):
+        ui = self._ui()
+        ui.Section(component_id="s").add_component(
+            ui.Alert(component_id="a1"))
+        ui.Container(component_id="c").add_component(
+            ui.Alert(component_id="a2"))
+        ui.Grid(component_id="g").add_component(ui.Alert(component_id="a3"))
+
+
+class TestDecorativeLayer(unittest.TestCase):
+    """Card tones + Section icons: emphasis that never changes structure."""
+
+    def _ui(self):
+        from core.dashboard_ui import DashboardUIToolset
+        return DashboardUIToolset()
+
+    def test_card_tone(self):
+        from core.dashboard_ui.errors import UIError
+        card = self._ui().Card(component_id="c")
+        for good in ("info", "ok", "warn", "err"):
+            card.set_tone(good)
+        with self.assertRaises(UIError):
+            card.set_tone("purple")
+
+    def test_section_icon(self):
+        s = self._ui().Section(component_id="s").set_icon("M3 12h4")
+        self.assertEqual(s._props()["icon"], "M3 12h4")
+
+    def test_client_action_whitelist(self):
+        from core.dashboard_ui.errors import UIError
+        ui = self._ui()
+        ui.Form(component_id="f1").set_client_action("save-token")
+        ui.Form(component_id="f2").set_client_action("save-theme")
+        with self.assertRaises(UIError):
+            ui.Form(component_id="f3").set_client_action("save-anything")

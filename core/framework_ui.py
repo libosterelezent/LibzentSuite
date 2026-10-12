@@ -122,7 +122,8 @@ def _build_home(ui: DashboardUIToolset, api: Any):
 
     (page
      .add_section(ui.Section(component_id="home-metrics-sec")
-        .add_component(ui.Row(component_id="home-metrics")
+        .add_component(ui.Grid(component_id="home-metrics")
+           .set_columns("auto").set_min_child("150px")
            .add_component(ui.Metric(component_id="hm-accounts").set_label("Accounts")
                           .set_value("0/0").set_level("warn")
                           .set_data_source(accounts_metric))
@@ -135,6 +136,7 @@ def _build_home(ui: DashboardUIToolset, api: Any):
            .add_component(ui.Metric(component_id="hm-uptime").set_label("Uptime")
                           .set_value("0s").set_data_source(uptime_metric))))
      .add_section(ui.Section(component_id="home-attn-sec", title="Attention")
+            .set_icon("M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z")
         .add_component(ui.ListView(component_id="home-attn")
                        .set_empty_text("All accounts healthy — no alerts.")
                        .set_data_source(_attention_data(api))))
@@ -246,6 +248,7 @@ def _build_plugins(ui: DashboardUIToolset, api: Any):
                               "Re-scan plugins/ for new or externally-changed packages.")
                           .set_action(rescan))))
      .add_section(ui.Section(component_id="plug-man-sec", title="Discovered plugins")
+                       .set_icon("M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4")
         .add_component(ui.Table(component_id="plug-manifests")
                        .set_columns(["Plugin", "Version", "Accounts", "Description"])
                        .set_key_column("Plugin")
@@ -364,6 +367,7 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
                                              "for this plugin?"),
                        ])))
      .add_section(ui.Section(component_id="act-logs-sec", title="Recent logs")
+        .set_icon("M4 6h16M4 12h16M4 18h10")
         .add_component(ui.Button(component_id="act-logs-refresh")
                        .set_label("↻ Refresh logs").set_variant("ghost")
                        .set_action(lambda ctx=None, payload=None: {"refresh": ["act-logs"]}))
@@ -543,7 +547,8 @@ def _build_policies(ui: DashboardUIToolset, api: Any):
 
     (page
      .add_section(ui.Section(component_id="pol-top-sec")
-        .add_component(ui.Row(component_id="pol-top")
+        .add_component(ui.Grid(component_id="pol-top")
+           .set_columns(2)
            .add_component(ui.Metric(component_id="pol-floor")
                           .set_label("Safety floor").set_value("—")
                           .set_data_source(floor_metric))
@@ -680,7 +685,7 @@ def _build_admin(ui: DashboardUIToolset, api: Any):
                 "message": f"{row} removed from the admin list",
                 "refresh": ["adm-accounts"]}
 
-    top = (ui.Row(component_id="adm-top")
+    top = (ui.Container(component_id="adm-top")
            .add_component(ui.Column(component_id="adm-ids-col")
                           .add_component(ui.Header(component_id="adm-ids-h")
                                          .set_title("Admin user ids"))
@@ -694,7 +699,7 @@ def _build_admin(ui: DashboardUIToolset, api: Any):
                                       .set_placeholder("integer, or empty to clear")
                                       .set_max_length(32))))
 
-    forms = (ui.Row(component_id="adm-forms")
+    forms = (ui.Container(component_id="adm-forms")
              .add_component(ui.Form(component_id="adm-add-form", title="Add admin id")
                             .set_submit_action(add_admin).set_submit_label("Add")
                             .add_fields(ui.TextInput(component_id="adm-add-id")
@@ -729,8 +734,12 @@ def _build_admin(ui: DashboardUIToolset, api: Any):
                 ]))
 
     page.add_sections(
-        ui.Section(component_id="adm-top-sec").add_component(top),
-        ui.Section(component_id="adm-forms-sec").add_component(forms),
+        ui.Section(component_id="adm-top-sec")
+        .add_component(ui.Grid(component_id="adm-top-grid").set_columns(2).add_component(top)),
+        ui.Section(component_id="adm-forms-sec")
+        .add_component(ui.Grid(component_id="adm-forms-grid")
+                       .set_columns("auto").set_min_child("260px")
+                       .add_component(forms)),
         ui.Section(component_id="adm-accounts-sec",
                    title="Account access rows").add_component(accounts))
     return page
@@ -809,7 +818,7 @@ def _build_tools(ui: DashboardUIToolset, api: Any):
 
     (page
      .add_section(ui.Section(component_id="sim-sec", title="Simulation")
-        .add_component(ui.Row(component_id="sim-row")
+        .add_component(ui.Grid(component_id="sim-row").set_columns(2)
            .add_component(ui.Form(component_id="sim-form")
                           .set_description("Run a scenario against the simulated "
                                            "stack (no live accounts).")
@@ -826,6 +835,7 @@ def _build_tools(ui: DashboardUIToolset, api: Any):
                        .set_data_source(lambda ctx: {"value": last_report["log"]
                                                      or "— no scenario run yet —"})))
      .add_section(ui.Section(component_id="adv-sec", title="Fleet controls")
+        .set_icon("M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z")
         .add_component(ui.Row(component_id="adv-row")
            .add_component(ui.Button(component_id="adv-estop")
                           .set_label("■ EMERGENCY STOP").set_variant("danger")
@@ -840,6 +850,20 @@ def _build_tools(ui: DashboardUIToolset, api: Any):
                           .set_description("One-time import of legacy .env tokens "
                                            "into the encrypted store.")
                           .set_action(import_env))))
+     .add_section(ui.Section(component_id="theme-sec", title="Appearance")
+        .add_component(ui.Form(component_id="theme-form")
+                       .set_description("Decorative only — accent hue and "
+                                        "density, applied instantly in this "
+                                        "browser. Layout never changes.")
+                       .set_client_action("save-theme")
+                       .set_submit_label("Apply")
+                       .add_fields(ui.Select(component_id="theme-accent")
+                                   .set_label("Accent")
+                                   .set_options(["blue", "violet", "green",
+                                                 "amber", "rose", "cyan"]),
+                                   ui.Select(component_id="theme-density")
+                                   .set_label("Density")
+                                   .set_options(["comfortable", "compact"]))))
      .add_section(ui.Section(component_id="token-sec", title="Dashboard session token")
         .add_component(ui.Form(component_id="token-form")
                        .set_description("Stored only in this browser's sessionStorage "

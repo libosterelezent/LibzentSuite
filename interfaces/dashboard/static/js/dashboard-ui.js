@@ -94,8 +94,7 @@ async function showDashboardUIPage(entry) {
                      "&page_id=" + encodeURIComponent(entry.page_id));
   } catch (e) {
     if (seq !== duiSeq) return;
-    panel.innerHTML = "";
-    setFb(panel, "error", e.message);
+    panel.innerHTML = duiAlertHTML("err", "Page unavailable", e.message);
     return;
   }
   if (seq !== duiSeq) return;  // a newer click superseded this fetch
@@ -155,8 +154,7 @@ async function loadDUIData(pluginName, compId, host, quiet) {
     data = await api("/api/dashboard-ui/data?plugin=" + encodeURIComponent(pluginName) +
                      "&component_id=" + encodeURIComponent(compId));
   } catch (e) {
-    host.innerHTML = "";
-    setFb(host.parentElement || host, "error", e.message);
+    host.innerHTML = duiAlertHTML("err", "Data unavailable", e.message);
     return;
   }
   duiDataCache[compId] = data;
@@ -314,8 +312,10 @@ function renderDashboardUIComponent(comp, pluginName) {
     case "row": return renderRow(comp, pluginName, disabled);
     case "column": return renderColumn(comp, pluginName, disabled);
     case "container": return renderContainer(comp, pluginName, disabled);
+    case "grid": return renderGrid(comp, pluginName, disabled);
     case "text": return renderText(comp);
     case "display-text": return renderDisplayText(comp);
+    case "alert": return renderAlert(comp);
     case "separator": return renderSeparator(comp);
     case "description": return renderDescription(comp);
     case "header": return renderHeader(comp);
@@ -352,14 +352,17 @@ function renderTab(comp, pluginName, disabled) {
 }
 
 function renderSection(comp, pluginName, disabled) {
+  const icon = comp.icon
+    ? `<svg class="dui-sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="${esc(comp.icon)}"/></svg>` : "";
   return `<div class="dui-section" data-dui-comp="${esc(comp.id)}"${duiBoxStyle(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
-    (comp.title ? `<div class="dui-sec-title">${esc(comp.title)}</div>` : "") +
+    (comp.title ? `<div class="dui-sec-title">${icon}${esc(comp.title)}</div>` : "") +
     (comp.description ? `<p class="sub">${esc(comp.description)}</p>` : "") +
     duiChildren(comp, pluginName, disabled) + `</div>`;
 }
 
 function renderCard(comp, pluginName, disabled) {
-  return `<div class="card dui-card" data-dui-comp="${esc(comp.id)}"${duiBoxStyle(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
+  const tone = ["info", "ok", "warn", "err"].includes(comp.tone) ? ` dui-card-${esc(comp.tone)}` : "";
+  return `<div class="card dui-card${tone}" data-dui-comp="${esc(comp.id)}"${duiBoxStyle(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
     (comp.title ? `<h4>${esc(comp.title)}</h4>` : "") +
     duiChildren(comp, pluginName, disabled) + `</div>`;
 }
@@ -377,6 +380,22 @@ function renderColumn(comp, pluginName, disabled) {
 function renderContainer(comp, pluginName, disabled) {
   const dir = comp.direction === "horizontal" ? " dui-container-h" : "";
   return `<div class="dui-container${dir}" data-dui-comp="${esc(comp.id)}"${duiBoxStyle(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
+    duiChildren(comp, pluginName, disabled) + `</div>`;
+}
+
+function renderGrid(comp, pluginName, disabled) {
+  let cols = "";
+  if (comp.columns === "auto")
+    cols = `repeat(auto-fill, minmax(${esc(comp.min_child || "240px")}, 1fr))`;
+  else {
+    const n = Math.round(+comp.columns);
+    if (Number.isFinite(n) && n >= 1 && n <= 6)
+      cols = `repeat(${n}, minmax(0, 1fr))`;
+  }
+  let s = duiSize(comp) + duiFlex(comp);
+  if (cols) s += ` grid-template-columns:${cols};`;
+  if (comp.gap) s += ` gap:${esc(comp.gap)};`;
+  return `<div class="dui-grid" data-dui-comp="${esc(comp.id)}"${s ? ` style="${s}"` : ""}${disabled ? ' data-dui-disabled="1"' : ""}>` +
     duiChildren(comp, pluginName, disabled) + `</div>`;
 }
 
@@ -402,6 +421,23 @@ function renderDisplayText(comp) {
   return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)}>` +
     `<div class="dui-dt dui-dt-${esc(tone)} dui-dt-${esc(size)}${comp.monospace ? " mono" : ""}"${s ? ` style="${s}"` : ""}>` +
     `${esc(comp.value ?? "")}</div></div>`;
+}
+
+const DUI_ALERT_ICONS = {info: "i", ok: "&#10003;", warn: "!", err: "&#10005;"};
+
+function duiAlertHTML(variant, title, message) {
+  const v = ["info", "ok", "warn", "err"].includes(variant) ? variant : "info";
+  return `<div class="dui-alert dui-alert-${esc(v)}">` +
+    `<span class="dui-alert-icon" aria-hidden="true">${DUI_ALERT_ICONS[v]}</span>` +
+    `<div class="dui-alert-body">` +
+    (title ? `<div class="dui-alert-title">${esc(title)}</div>` : "") +
+    `<div class="dui-alert-msg">${esc(message ?? "")}</div>` +
+    `</div></div>`;
+}
+
+function renderAlert(comp) {
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)}>` +
+    duiAlertHTML(comp.variant, comp.title, comp.value) + `</div>`;
 }
 
 function renderSeparator(comp) {
@@ -675,14 +711,22 @@ function wireDashboardUI(root, pluginName) {
         if (!DUI_INPUT_TYPES.includes(field.type) || !field.id) continue;
         payload[field.id] = duiFieldValue(field, formEl);
       }
-      // client-side forms never dispatch: the only one is the dashboard's
-      // own token editor (the token must not round-trip a server action)
+      // client-side forms never dispatch: the dashboard's own token
+      // editor (the token must not round-trip a server action) and the
+      // decorative theme picker (pure presentation, nothing to persist
+      // server-side)
       if (comp.client_action === "save-token") {
         const tok = String(payload["token-value"] || "").trim();
         if (!tok) { setFb(formEl, "error", "Token required."); return; }
         secretStore.setItem("dash_token", tok);
         wsRetries = 0; connectWS();
         flashFb(formEl, "token saved — reconnecting…");
+        return;
+      }
+      if (comp.client_action === "save-theme") {
+        applyDashTheme(String(payload["theme-accent"] || ""),
+                       String(payload["theme-density"] || ""));
+        flashFb(formEl, "theme applied");
         return;
       }
       try {

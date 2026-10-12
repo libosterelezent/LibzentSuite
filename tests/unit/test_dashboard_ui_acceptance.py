@@ -396,9 +396,10 @@ class TestConfigDemoExample(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(
                 _find_comp(page, type_name), f"missing {type_name}")
         # layout containers, data parts and display parts too
-        for type_name in ("row", "column", "container", "table",
-                          "list-view", "metric", "progress", "badge",
-                          "text", "display-text", "form", "button"):
+        for type_name in ("row", "column", "container", "grid", "alert",
+                          "table", "list-view", "metric", "progress",
+                          "badge", "text", "display-text", "form",
+                          "button"):
             self.assertIsNotNone(
                 _find_comp(page, type_name), f"missing {type_name}")
         # input constraints serialize (bounds + explicit options)
@@ -420,6 +421,15 @@ class TestConfigDemoExample(unittest.IsolatedAsyncioTestCase):
                            if d["id"] == "split-value")
         self.assertTrue(split_value.get("monospace"))
         self.assertEqual(split_value.get("width"), "120px")
+        # the structured grid serializes its auto-fill columns
+        demo_grid = next(g for g in _all_of_type(page, "grid")
+                         if g["id"] == "demo-grid")
+        self.assertEqual(demo_grid.get("columns"), "auto")
+        self.assertEqual(demo_grid.get("min_child"), "160px")
+        # alerts carry their severity
+        err_alert = next(a for a in _all_of_type(page, "alert")
+                         if a["id"] == "al-err")
+        self.assertEqual(err_alert.get("variant"), "err")
         # the confirmation + disabled states are part of the snapshot
         purge = next(b for b in _all_of_type(page, "button")
                      if b["id"] == "purge-button")

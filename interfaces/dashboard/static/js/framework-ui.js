@@ -38,14 +38,15 @@ async function renderFrameworkTab(view) {
                      "&page_id=" + encodeURIComponent(view));
   } catch (e) {
     if (seq !== fwSeq) return;
-    panel.innerHTML = "";
-    setFb(panel, "error", "framework page unavailable: " + (e.message || e));
+    panel.innerHTML = duiAlertHTML("err", "Page unavailable",
+                                   e.message || String(e));
     return;
   }
   if (seq !== fwSeq) return;   // a newer navigation superseded this fetch
   if (!page || page.type !== "page") {
-    panel.innerHTML = "";
-    setFb(panel, "error", "framework page not found (is the dashboard server current?)");
+    panel.innerHTML = duiAlertHTML("warn", "Page not found",
+      "The framework page for this tab is missing — the dashboard server " +
+      "may predate the builder migration.");
     return;
   }
   renderDashboardUIPage(page, FRAMEWORK_PLUGIN, panel);

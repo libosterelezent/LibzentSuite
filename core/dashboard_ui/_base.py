@@ -477,6 +477,13 @@ class _ComponentParent(UIContainer):
         super().__init__(component_id=component_id, **kwargs)
         self._align: str | None = None
         self._justify: str | None = None
+        self._gap: str | None = None
+
+    def set_gap(self, gap) -> "_ComponentParent":
+        """Spacing between children (CSS size string or px number)."""
+        self._check_frozen("set the gap")
+        self._gap = _validate_css_size(gap, "gap")
+        return self
 
     def set_align(self, align) -> "_ComponentParent":
         """Cross-axis alignment of the children ("start"|"center"|"end"|
@@ -500,6 +507,8 @@ class _ComponentParent(UIContainer):
             props["align"] = self._align
         if self._justify is not None:
             props["justify"] = self._justify
+        if self._gap is not None:
+            props["gap"] = self._gap
         return props
 
     def add_component(self, comp) -> "_ComponentParent":

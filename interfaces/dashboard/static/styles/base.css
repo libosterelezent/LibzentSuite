@@ -155,3 +155,12 @@ input[type="checkbox"] { accent-color: var(--accent2); }
   overflow-wrap: anywhere; animation: fadeIn .15s; }
 .toast-ok { border-left-color: var(--ok); }
 .toast-info { border-left-color: var(--accent); }
+
+/* ═════════════════════════════ Density (decorative) ═══════════════════════
+   The theme layer's compact mode: re-pins the spacing scale + control
+   height. Layout, structure and components are untouched — decoration
+   only. Applied as html[data-density="compact"] by applyDashTheme(). */
+html[data-density="compact"] {
+  --sp-2: 6px; --sp-3: 8px; --sp-4: 12px; --sp-5: 14px; --sp-6: 16px;
+  --gap: var(--sp-2); --gap-sm: 4px; --ctrl-h: 30px;
+}

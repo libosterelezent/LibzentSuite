@@ -317,6 +317,45 @@ dialog .dlg-foot { display: flex; gap: var(--sp-2); justify-content: flex-end; p
   letter-spacing: .08em; font-weight: 600; }
 .dui-container { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
 .dui-container-h { flex-direction: row; flex-wrap: wrap; align-items: flex-start; }
+
+/* Grid — structured columns: children slot into equal cells that wrap
+   as WHOLE rows (no ragged re-flow like a mixed-height Row) */
+.dui-grid { display: grid; gap: var(--sp-2); min-width: 0;
+  grid-template-columns: 1fr; }   /* defensive default; the real tracks
+  come from the renderer: auto-fill for "auto" grids (inherently
+  responsive via the minmax floor), repeat(n, …) for explicit counts —
+  never overridden by media queries, the author chose n */
+
+/* Alert — the designed error/notice surface (also used by the renderer
+   for failed data providers and page fetches) */
+.dui-alert { display: flex; gap: var(--sp-2); align-items: flex-start;
+  padding: var(--sp-3); border-radius: var(--r-sm);
+  border: 1px solid var(--border); border-left-width: 3px;
+  background: var(--surface2); overflow-wrap: anywhere; }
+.dui-alert-icon { flex-shrink: 0; width: 18px; height: 18px; margin-top: 1px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%; font-size: 11px; font-weight: 700; }
+.dui-alert-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.dui-alert-title { font-weight: 600; font-size: 13px; }
+.dui-alert-msg { font-size: 12px; color: var(--dim); white-space: pre-wrap; }
+.dui-alert-info { border-left-color: var(--accent); }
+.dui-alert-info .dui-alert-icon { color: var(--accent); background: rgba(91,163,245,.15); }
+.dui-alert-ok { border-left-color: var(--ok); }
+.dui-alert-ok .dui-alert-icon { color: var(--ok); background: rgba(52,211,153,.15); }
+.dui-alert-warn { border-left-color: var(--warn); }
+.dui-alert-warn .dui-alert-icon { color: var(--warn); background: rgba(251,191,36,.15); }
+.dui-alert-err { border-left-color: var(--err); }
+.dui-alert-err .dui-alert-icon { color: var(--err); background: rgba(248,113,113,.15); }
+
+/* Card tone — decorative accent border (emphasis only, never meaning) */
+.card.dui-card-info { border-left: 3px solid var(--accent); }
+.card.dui-card-ok { border-left: 3px solid var(--ok); }
+.card.dui-card-warn { border-left: 3px solid var(--warn); }
+.card.dui-card-err { border-left: 3px solid var(--err); }
+
+/* Section icon — decorative marker beside the title */
+.dui-sec-title { display: flex; align-items: center; gap: 6px; }
+.dui-sec-icon { width: 13px; height: 13px; color: var(--dim); flex-shrink: 0; }
 .dui-row { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: flex-end;
   width: 100%; min-width: 0; }
 .dui-col { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; flex: 1; }

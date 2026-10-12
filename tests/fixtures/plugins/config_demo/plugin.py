@@ -318,6 +318,29 @@ class ConfigDemoPlugin(PluginBase):
                                               "takes the rest (grow 1)")
                                           .set_tone("dim").set_size("sm"))))
 
+        # structured grid: equal cells that wrap as whole rows
+        layout_section.add_component(
+            ui.Grid().set_id("demo-grid").set_columns("auto").set_min_child("160px")
+            .add_component(ui.DisplayText().set_id("g1").set_value("cell 1")
+                           .set_tone("dim").set_align("center"))
+            .add_component(ui.DisplayText().set_id("g2").set_value("cell 2")
+                           .set_tone("dim").set_align("center"))
+            .add_component(ui.DisplayText().set_id("g3").set_value("cell 3")
+                           .set_tone("dim").set_align("center"))
+            .add_component(ui.DisplayText().set_id("g4").set_value("cell 4")
+                           .set_tone("dim").set_align("center")))
+
+        # alerts: the designed error/notice surface
+        layout_section.add_component(
+            ui.Grid().set_id("alert-grid").set_columns(2)
+            .add_component(ui.Alert().set_id("al-info").set_variant("info")
+                           .set_title("Heads up")
+                           .set_value("Notices render as part of the UI."))
+            .add_component(ui.Alert().set_id("al-err").set_variant("err")
+                           .set_title("Something failed")
+                           .set_value("Caught errors belong in an Alert, "
+                                      "never in raw text.")))
+
         layout_tab = (ui.Tab().set_id("tab-layout").set_title("Layout")
                       .add_section(layout_section))
 

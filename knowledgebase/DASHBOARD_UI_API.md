@@ -158,6 +158,7 @@ ui.Container().set_direction("horizontal").set_gap("12px").add_component(
 | `Metric` | `set_label`, `set_value` (str), `set_sub`, `set_level(""\|"ok"\|"warn"\|"err")`, `set_data_source(callable)` (live) | a label/value readout |
 | `Progress` | `set_value` (number 0–100), `set_label` | a progress bar |
 | `DisplayText` | `set_value`, `set_tone("default"\|"dim"\|"ok"\|"warn"\|"err")`, `set_size("xs"\|"sm"\|"md"\|"lg"\|"xl")`, `set_weight("normal"\|"medium"\|"semibold"\|"bold")`, `set_align("left"\|"center"\|"right")`, `set_monospace(bool)` | read-only presentation text — values with visual weight |
+| `Alert` | `set_title`, `set_value` (message), `set_variant("info"\|"ok"\|"warn"\|"err")` | the designed error/notice box — also the markup the renderer itself uses when a data provider or page fetch fails |
 | `Separator` | `set_variant("solid"\|"dashed")` | a horizontal divider |
 | `Description` | `set_value` | a muted descriptive paragraph |
 | `Header` | `set_title`, `set_subtitle` | a prominent section header |
@@ -193,6 +194,7 @@ changes, payload `{"value": <current>}`).
 | Builder | Key setters | Purpose |
 |---|---|---|
 | `Container` | `set_direction("vertical"\|"horizontal")`, `set_gap(size)`, `set_align`, `set_justify` | a neutral untitled grouping box — the alignment primitive; nests (explicit opt-in) |
+| `Grid` | `set_columns(1–6 \|"auto")`, `set_min_child(size)` (auto mode), `set_gap(size)` | STRUCTURED columns — children slot into equal cells that wrap as whole rows (the tidiness primitive; narrow screens collapse via CSS) |
 | `ListView` | `set_data_source(callable)`, `set_empty_text` | a list fed by a server-side provider |
 | `Table` | `set_columns([...])`, `set_data_source(callable)`, `set_page_size(int)`, `set_empty_text`, `set_key_column(str)`, `set_row_actions([RowAction, ...])` | a paginated table fed by a provider, with optional per-row buttons |
 | `Button` | `set_label`, `set_description`, `set_variant("primary"\|"secondary"\|"danger"\|"ghost")`, `set_confirm(str)`, `set_loading(bool)`, `set_action(callable)` | dispatches an action on click |
@@ -211,10 +213,18 @@ columns (the renderer never displays it):
 rows.append([visible, cells, ..., f"{account}|{plugin}"])   # __key rides last
 ```
 
-**Client-action forms** — `Form.set_client_action("save-token")` handles
-the submit entirely in the browser (the dashboard's own session-token
-editor — the token must never round-trip a server action). It is the
-only supported name; server plugins have no use for it.
+**Client-action forms** — `Form.set_client_action(name)` handles the
+submit entirely in the browser. Supported names: `"save-token"` (the
+dashboard's session-token editor — the token must never round-trip a
+server action) and `"save-theme"` (the decorative theme picker).
+Server plugins have no use for either.
+
+**The decorative layer** — customization that can NEVER touch
+structure: `Card.set_tone("info"|"ok"|"warn"|"err")` adds an accent
+border (emphasis only), `Section.set_icon(<svg path>)` draws a marker
+beside the title, and the dashboard-level theme (accent hue + density,
+Tools → Appearance) re-pins CSS variables on `<html>`. Tone never
+changes meaning, order or layout — only look.
 
 ---
 

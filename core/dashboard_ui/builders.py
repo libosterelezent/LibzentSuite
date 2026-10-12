@@ -55,6 +55,8 @@ from .components import (
     DisplayText,
     Header,
     Footer,
+    Grid,
+    Alert,
 )
 from .errors import (
     ActionRegistrationError,
@@ -201,4 +203,6 @@ class DashboardUIToolset:
     DisplayText = DisplayText
     Header = Header
     Footer = Footer
+    Grid = Grid
+    Alert = Alert
     Form = Form
