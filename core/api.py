@@ -64,14 +64,15 @@ import logging
 import time as _time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from .dashboard_ui.context import ActionContext, CheckContext
+from .errors import DatabaseError, SyncGroupError
+from . import plugin_scopes
 from .rate_limit_manager import (
     KV_FLOOR_KEY,
     KV_LANE_KEY,
     KV_REMOVED_KEY,
     MAX_PREFIXRATE,
 )
-from .errors import DatabaseError, SyncGroupError
-from . import plugin_scopes
 
 if TYPE_CHECKING:  # duck-typed at runtime — no manager imports here
     from .account_manager import AccountManager
@@ -1343,6 +1344,74 @@ class ControlAPI:
     async def ui_panels(self) -> List[Dict[str, Any]]:
         """Plugin-contributed sidebar panels (framework-level)."""
         return await _resolved(self._plugins.ui_panels())
+
+    # ------------------------------------------- dashboard UI extension (D)
+    async def dashboard_ui_navigation(self) -> List[Dict[str, Any]]:
+        """Plugin pages for the sidebar: [{plugin, page_id, title, icon,
+        order}], sorted by (order, plugin). Reads the frozen snapshots —
+        no plugin code runs, so this is safe for every boot/refresh."""
+        registry = self._plugins.ui_registry
+        nav: List[Dict[str, Any]] = []
+        for plugin_name in registry.list_plugins():
+            layout = registry.get_layout(plugin_name)
+            if not layout:
+                continue
+            for page in (layout.get("children") or []):
+                if page.get("type") != "page":
+                    continue
+                nav.append({
+                    "plugin": plugin_name,
+                    "page_id": page.get("id", ""),
+                    "title": page.get("title", plugin_name),
+                    "icon": page.get("icon", ""),
+                    "order": page.get("order", 0),
+                })
+        return sorted(nav, key=lambda n: (n.get("order", 0), n["plugin"]))
+
+    async def dashboard_ui_page(self, plugin: str,
+                                page_id: str) -> Optional[Dict[str, Any]]:
+        """One page's full serialized component tree; None when the
+        plugin has no UI or the page id is unknown (route -> 404)."""
+        registry = self._plugins.ui_registry
+        layout = registry.get_layout(plugin)
+        if not layout:
+            return None
+        for page in (layout.get("children") or []):
+            if page.get("id") == page_id:
+                return page
+        return None
+
+    async def dashboard_ui_action(self, plugin: str, component_id: str,
+                                  payload: Dict[str, Any],
+                                  surface: str = "api") -> Dict[str, Any]:
+        """Dispatch a registered component action (visibility-checked).
+
+        Raises UIError (a ValueError -> honest 400 at the interface) for
+        unknown plugin/component, hidden components, missing actions and
+        callback failures. ``surface`` names the calling interface in the
+        audit vocabulary (api/dashboard) — reserved for mgmt audit wiring.
+        """
+        registry = self._plugins.ui_registry
+        context = ActionContext(plugin=plugin, component_id=component_id)
+        result = await registry.dispatch_action(
+            plugin, component_id, payload, context)
+        return {"success": result.success, "message": result.message,
+                "data": result.data, "field_errors": result.field_errors,
+                "refresh": result.refresh}
+
+    async def dashboard_ui_data(self, plugin: str,
+                                component_id: str) -> Any:
+        """Fetch a data-provider result (visibility-checked, JSON-safe).
+
+        Raises UIError when the plugin/component is unknown, hidden, or
+        declares no provider (the interface distinguishes that from a
+        payload fault: it maps to 404, not 400)."""
+        registry = self._plugins.ui_registry
+        # the outer context only carries the account; the registry pins a
+        # precise per-component CheckContext for the actual provider call
+        context = CheckContext(plugin=plugin, component_id=component_id,
+                               component_type="")
+        return await registry.get_data(plugin, component_id, context)
 
     # ------------------------------------------------------ admin access
     async def admin_overview(self) -> Dict[str, Any]:

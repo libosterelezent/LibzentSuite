@@ -76,6 +76,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from core.api import ControlAPI
+from core.dashboard_ui.errors import UIError
 from core.errors import AccountError, DatabaseError
 from core.event_bus import (
     Event,
@@ -959,6 +960,53 @@ class DashboardServer:
                     q_str(query, "account", path))}
             if (method, path) == ("GET", "/api/ui/panels"):
                 return 200, {"ok": True, "data": await api.ui_panels()}
+
+            # ------------------------------------------- dashboard UI (Stage D)
+            # Builder-based plugin pages: navigation for the sidebar, one
+            # page's serialized component tree, action dispatch and data
+            # providers. Unknown plugin/page/provider is a MISSING READ
+            # (404), not a client payload fault — action dispatch errors
+            # stay UIError/ValueError -> 400 below (they are domain
+            # outcomes the frontend renders inline).
+            if (method, path) == ("GET", "/api/dashboard-ui/navigation"):
+                return 200, {"ok": True,
+                             "data": await api.dashboard_ui_navigation()}
+            if (method, path) == ("GET", "/api/dashboard-ui/page"):
+                page = await api.dashboard_ui_page(
+                    q_str(query, "plugin", path),
+                    q_str(query, "page_id", path))
+                if page is None:
+                    return 404, {"ok": False,
+                                 "error": "unknown plugin page"}
+                return 200, {"ok": True, "data": page}
+            if (method, path) == ("POST", "/api/dashboard-ui/action"):
+                payload = body.get("payload")
+                if payload is None:
+                    payload = {}
+                if not isinstance(payload, dict):
+                    return 400, {"ok": False,
+                                 "error": "field 'payload' in POST "
+                                          "/api/dashboard-ui/action must "
+                                          "be an object"}
+                return 200, {
+                    "ok": True,
+                    "data": await api.dashboard_ui_action(
+                        require_str(body, "plugin", path),
+                        require_str(body, "component_id", path),
+                        payload,
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("GET", "/api/dashboard-ui/data"):
+                try:
+                    data = await api.dashboard_ui_data(
+                        q_str(query, "plugin", path),
+                        q_str(query, "component_id", path))
+                except UIError as exc:
+                    # unknown plugin/component, hidden, or no provider:
+                    # the read cannot be served — 404, not a 400
+                    return 404, {"ok": False, "error": str(exc)}
+                return 200, {"ok": True, "data": data}
 
             # ------------------------------------------------------------ admin access
             if (method, path) == ("GET", "/api/admin/overview"):

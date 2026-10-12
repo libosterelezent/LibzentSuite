@@ -37,6 +37,12 @@ function buildNav() {
     a.onclick = () => UI.go(item.id);
     bn.appendChild(a);
   }
+  // Dynamic plugin surfaces: buildNav() wipes #snav on EVERY navigation,
+  // so the plugin panels/pages must be re-appended here or they would
+  // vanish after the first click. Both builders clear their own
+  // [data-*] remnants first — idempotent, safe before their data loads.
+  if (typeof buildPluginNav === "function") buildPluginNav();
+  if (typeof buildDashboardUINav === "function") buildDashboardUINav();
 }
 
 const LOADERS = {};

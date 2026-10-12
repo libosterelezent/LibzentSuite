@@ -49,7 +49,8 @@ TOKEN = "static-test-token"
 
 #: JS modules in the exact dependency order index.html loads them.
 JS_FILES = ["state.js", "api.js", "ui.js", "accounts.js", "groups.js",
-            "views.js", "plugins-ui.js", "admin-ui.js", "plugin-ui.js", "app.js"]
+            "views.js", "plugins-ui.js", "admin-ui.js", "plugin-ui.js",
+            "dashboard-ui.js", "app.js"]
 #: every stylesheet index.html links.
 CSS_FILES = ["base.css", "layout.css", "components.css", "responsive.css"]
 
@@ -361,11 +362,14 @@ class TestPluginProfilesUI(unittest.TestCase):
         self.assertIn("plugins-ui.js", JS_FILES)
         html = _spa()
         # script tag loads it between views.js and app.js (exact order is
-        # separately enforced by test_every_script_tag_resolves)
+        # separately enforced by test_every_script_tag_resolves;
+        # dashboard-ui.js — the Stage-D generic renderer — loads between
+        # plugin-ui.js and app.js)
         self.assertIn('<script src="js/views.js"></script>\n'
                       '<script src="js/plugins-ui.js"></script>\n'
                       '<script src="js/admin-ui.js"></script>\n'
                       '<script src="js/plugin-ui.js"></script>\n'
+                      '<script src="js/dashboard-ui.js"></script>\n'
                       '<script src="js/app.js"></script>', html)
         js = _js()
         self.assertEqual(js.count("function renderPlugins"), 1)

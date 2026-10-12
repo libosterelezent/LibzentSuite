@@ -12,6 +12,10 @@ async function loadPluginUI() {
     pluginPanels = await api("/api/ui/panels") || [];
   } catch { pluginPanels = []; }
   buildPluginNav();
+  // Builder-based plugin pages (Stage D) load after the simple panels —
+  // an additional surface, both stay alive. Fire-and-forget: it catches
+  // its own failure so a dead endpoint can never block boot.
+  loadDashboardUINav();
 }
 
 /* ── Home stat cards (called by views.js renderHome) ─────────────────── */

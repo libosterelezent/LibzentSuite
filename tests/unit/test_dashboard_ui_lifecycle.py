@@ -99,9 +99,11 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     # ------------------------------------------------- backward compatibility
     async def test_plugin_without_hook_works_exactly_as_before(self) -> None:
-        # the stock fixtures (spy + echo) define no initialize_dashboard_ui
+        # spy + echo define no initialize_dashboard_ui (probe, sharing the
+        # fixtures dir, DOES since Stage D — excluded here so this test
+        # stays about hook-less plugins)
         manager = self._manager(plugin_dir=FIXTURES)
-        await manager.attach_account("alpha")
+        await manager.attach_account("alpha", {"spy", "echo"})
         await manager.activate_account("alpha", FakeServices("alpha"))
         spy = manager._accounts["alpha"]["spy"]
         self.assertTrue(spy.active)

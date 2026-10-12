@@ -294,3 +294,87 @@ dialog .dlg-foot { display: flex; gap: var(--sp-2); justify-content: flex-end; p
   max-height: 220px; overflow-y: auto; }
 .pp-guild.open .pp-chans { display: flex; }
 .pp-chans .pick-row { padding: 4px 8px; }
+
+/* ── Dashboard UI (generic plugin-page renderer) ─────────────────────────
+   Stage D: builder-based plugin pages render into .dui-* structure.
+   Containers stack with the framework spacing tokens; leaf controls live
+   in .dui-item wrappers (label above control, hint below) so every plugin
+   page gets identical rhythm. Checkbox/radio choices reuse the structured
+   .pick-row grid; the toggle is a switch-skinned checkbox. */
+.dui-page { display: flex; flex-direction: column; gap: var(--sp-4); }
+.dui-desc { margin-top: calc(-1 * var(--sp-2)); }
+.dui-section, .dui-tab, .dui-card, .dui-form { display: flex; flex-direction: column;
+  gap: var(--sp-2); min-width: 0; }
+.dui-section, .dui-tab { gap: var(--sp-3); }
+.dui-card { background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: var(--sp-3); gap: var(--sp-2); }
+.dui-card > h4 { font-size: 11px; color: var(--dim); text-transform: uppercase;
+  letter-spacing: .08em; margin-bottom: 2px; }
+.dui-sec-title { font-size: 11px; color: var(--dim); text-transform: uppercase;
+  letter-spacing: .08em; font-weight: 600; }
+.dui-row { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: flex-end; }
+.dui-col { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; flex: 1; }
+.dui-item { display: flex; flex-direction: column; gap: 4px; min-width: 0;
+  max-width: 480px; }
+.dui-row > .dui-item { max-width: none; flex: 0 1 auto; min-width: 170px; }
+.dui-item > label { font-size: 12px; color: var(--dim); font-weight: 500; }
+.dui-item .hint { font-size: 11px; color: var(--faint); }
+.dui-req { color: var(--err); }
+.dui-item input[type="text"], .dui-item input[type="number"],
+.dui-item select, .dui-item textarea { min-width: 200px; max-width: 420px; }
+.dui-row .dui-item input[type="text"], .dui-row .dui-item input[type="number"],
+.dui-row .dui-item select { min-width: 150px; }
+.dui-text { overflow-wrap: anywhere; white-space: pre-wrap; }
+.dui-heading { font-size: 14px; font-weight: 600; margin: 0; }
+.dui-code { background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3); margin: 0; overflow-x: auto;
+  white-space: pre-wrap; overflow-wrap: anywhere; }
+.dui-unknown { border: 1px dashed var(--border); border-radius: var(--r-sm);
+  padding: 6px 10px; font-style: italic; }
+.dui-disabled, .dui-page [data-dui-disabled="1"] { opacity: .55; pointer-events: none; }
+
+/* badges: level pills with the shared status-dot language */
+.dui-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px;
+  font-weight: 600; padding: 2px 9px; border-radius: 999px; width: fit-content; }
+.dui-badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%;
+  flex-shrink: 0; background: currentColor; }
+.dui-badge-info { color: var(--accent); background: rgba(91,163,245,.12); }
+.dui-badge-ok { color: var(--ok); background: rgba(52,211,153,.12); }
+.dui-badge-warn { color: var(--warn); background: rgba(251,191,36,.12); }
+.dui-badge-err { color: var(--err); background: rgba(248,113,113,.12); }
+
+/* progress: track + fill, label row carries the percentage */
+.dui-plabel { display: flex; justify-content: space-between; gap: var(--sp-2);
+  font-size: 12px; color: var(--dim); }
+.dui-prog { height: 8px; background: var(--surface3); border-radius: 4px;
+  overflow: hidden; border: 1px solid var(--border); }
+.dui-prog-fill { height: 100%; background: var(--accent2); border-radius: 4px;
+  transition: width .3s ease; }
+
+/* data components: provider body, key/value rows, empty + skeleton states */
+.dui-data { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.dui-list { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dui-kv { display: flex; align-items: baseline; gap: var(--sp-2); padding: 5px 10px;
+  background: var(--surface2); border-radius: 6px; font-size: 12.5px; flex-wrap: wrap; }
+.dui-kv .dui-kv-v { font-weight: 500; overflow-wrap: anywhere; }
+.dui-empty { border: 1px dashed var(--border); border-radius: var(--r-sm);
+  padding: var(--sp-3); text-align: center; }
+.dui-skel { display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
+.dui-skel div { height: 13px; border-radius: 6px; background: var(--surface3);
+  animation: dui-pulse 1.2s ease-in-out infinite; }
+.dui-skel div:nth-child(2) { width: 70%; }
+.dui-skel div:nth-child(3) { width: 45%; }
+@keyframes dui-pulse { 0%, 100% { opacity: .45; } 50% { opacity: .9; } }
+
+/* toggle: a checkbox skinned into a switch (keeps native semantics) */
+.dui-switch { appearance: none; -webkit-appearance: none; width: 34px; height: 19px;
+  border-radius: 999px; background: var(--surface3); border: 1px solid var(--border);
+  position: relative; cursor: pointer; flex-shrink: 0; margin: 0;
+  transition: background .15s, border-color .15s; }
+.dui-switch::after { content: ''; position: absolute; top: 2px; left: 2px;
+  width: 13px; height: 13px; border-radius: 50%; background: var(--dim);
+  transition: left .15s, background .15s; }
+.dui-switch:checked { background: var(--accent2); border-color: var(--accent2); }
+.dui-switch:checked::after { left: 17px; background: #fff; }
+.dui-switch:disabled { cursor: not-allowed; opacity: .55; }
+.dui-switch-row input[type="checkbox"] { width: auto; }

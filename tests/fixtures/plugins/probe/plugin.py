@@ -13,8 +13,10 @@ multi-name form (``rollstart <p1> <p2> <p3>``-shaped).
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
+from core.dashboard_ui import ActionResult
 from core.event_bus import Event
 from core.plugin_base import (
     ArgSpec,
@@ -27,6 +29,9 @@ from core.plugin_base import (
     PluginContext,
 )
 from core.settings_manager import Setting
+
+if TYPE_CHECKING:
+    from core.dashboard_ui.builders import DashboardUIToolset
 
 
 class ProbePlugin(PluginBase):
@@ -97,6 +102,51 @@ class ProbePlugin(PluginBase):
                 ),
             ),
         )
+
+    # ------------------------------------------------ dashboard UI (Stage D)
+    def initialize_dashboard_ui(self, ui: "DashboardUIToolset") -> None:
+        """Builder-based fixture page: the complete path the generic
+        renderer exercises — builder → layout → attach → navigation →
+        page render → button click → action dispatch → result feedback."""
+        page = (ui.Page()
+                .set_id("probe-ui")
+                .set_title("Probe UI")
+                .set_description("Fixture dashboard"))
+
+        section = ui.Section().set_title("Controls")
+        card = ui.Card().set_title("Actions")
+
+        btn = (ui.Button()
+               .set_label("Run Probe")
+               .set_action(self._probe_action)
+               .set_variant("primary"))
+        card.add_component(btn)
+
+        status = (ui.Metric()
+                  .set_label("Status")
+                  .set_value("ready")
+                  .set_level("ok"))
+        card.add_component(status)
+
+        check = (ui.Checkbox()
+                 .set_label("Verbose")
+                 .set_value(False)
+                 .set_action(self._set_verbose))
+        card.add_component(check)
+
+        section.add_component(card)
+        page.add_section(section)
+        layout = ui.Layout()
+        layout.add_page(page)
+        self.attach_dashboard_ui(layout)
+
+    async def _probe_action(self, context, payload):
+        return ActionResult(success=True, message="probe executed",
+                            data={"ts": time.time()})
+
+    async def _set_verbose(self, context, payload):
+        return ActionResult(success=True,
+                            message=f"verbose → {payload.get('value')}")
 
     # -------------------------------------------------------- self-commands
     async def _cmd_probeinfo(self, ctx: CommandContext,
