@@ -1058,6 +1058,25 @@ class ControlAPI:
         """Per-account plugin runtime state incl. resolved settings + errors."""
         return self._plugins.states(account)
 
+    async def plugins_reload(self, plugin: str,
+                             surface: str = "api") -> Dict[str, Any]:
+        """Hot-reload one plugin (detach → re-import → re-attach)."""
+        if plugin not in self._plugins.names():
+            raise ValueError(f"unknown plugin {plugin!r}")
+        out = self._plugins.reload_plugin(plugin)
+        self._audit_mgmt("system", "mgmt:plugin.reloaded", surface,
+                         extra=f"plugin={plugin}")
+        return out
+
+    async def plugins_unload(self, plugin: str,
+                             surface: str = "api") -> Dict[str, Any]:
+        """Unload a plugin (detach everywhere, unregister UI; assignments
+        stay in the DB so reload restores them)."""
+        out = self._plugins.unload_plugin(plugin)
+        self._audit_mgmt("system", "mgmt:plugin.unloaded", surface,
+                         extra=f"plugin={plugin}")
+        return out
+
     async def plugins_set_enabled(
         self, account: str, plugin: str, enabled: bool
     ) -> Dict[str, Any]:

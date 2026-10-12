@@ -351,6 +351,8 @@ class TestPluginProfilesUI(unittest.TestCase):
         "/api/plugins/profiles/update", "/api/plugins/profiles/delete",
         "/api/accounts/plugin-profiles", "/api/accounts/plugin-profile",
         "/api/accounts/effective-settings", "/api/accounts/channels",
+        # plugin lifecycle (load/unload added later)
+        "/api/plugins/reload", "/api/plugins/unload",
     }
 
     def _fn(self, name):

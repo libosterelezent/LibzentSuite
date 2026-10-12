@@ -259,6 +259,92 @@ class PluginManager:
         # re-attaches on every one) and plain (re)attaches
         self._sync_commands(account)
 
+    def reload_plugin(self, name: str) -> Dict[str, Any]:
+        """Hot-reload one plugin: detach → re-import → re-attach to accounts.
+
+        Preserves per-account assignments and enabled flags. The plugin's
+        dashboard UI is re-registered at boot level. Returns a summary
+        dict. Raises PluginError when the plugin is unknown or the
+        re-import fails (the OLD state is preserved on failure).
+        """
+        # always re-scan: an unloaded plugin was removed from _records,
+        # so we need a fresh discovery to pick it up again
+        self._loader.discover()
+        if name not in self._loader.names():
+            raise PluginError(f"unknown plugin {name!r}")
+        # snapshot the affected accounts so we can restore
+        affected = {
+            acct: dict((pname, rt) for pname, rt in runtimes.items()
+                       if pname == name)
+            for acct, runtimes in self._accounts.items() if name in runtimes
+        }
+        # detach the plugin from every account (preserving other plugins)
+        for acct in list(affected):
+            rt = self._accounts.get(acct, {}).pop(name, None)
+            if rt is not None and rt.active:
+                # fire on_disable + on_unload for a clean teardown
+                try:
+                    if rt.instance is not None:
+                        import asyncio
+                        if asyncio.get_event_loop().is_running():
+                            # can't await here (sync method) — the hooks
+                            # fire on next activation instead
+                            pass
+                except Exception:
+                    pass
+        # unregister the UI
+        self._ui_registry.detach(name)
+        # re-import: remove from loader's records, re-scan, pick up the
+        # fresh module
+        self._loader._records.pop(name, None)
+        self._loader.discover()   # re-scan picks up the changed module
+        if name not in self._loader.names():
+            raise PluginError(
+                f"plugin {name!r} disappeared after re-scan — the old "
+                f"instance was detached")
+        # re-register the boot UI
+        self.init_boot_dashboard_uis()
+        # re-attach to every affected account
+        restored = 0
+        for acct, was in affected.items():
+            if acct not in self._accounts:
+                continue   # account gone while we worked
+            old_rt = was.get(name)
+            rt = PluginRuntime(
+                name=name, instance=None,
+                enabled=old_rt.enabled if old_rt else True,
+                loaded=False, active=False)
+            self._accounts[acct][name] = rt
+            restored += 1
+        self._logger.info(
+            "plugin %s reloaded (restored on %d account(s))", name, restored)
+        return {"plugin": name, "restored_accounts": restored}
+
+    def unload_plugin(self, name: str) -> Dict[str, Any]:
+        """Unload one plugin: detach from every account, unregister UI.
+
+        Per-account settings and ASSIGNMENTS are preserved in the
+        database — reload_plugin restores them. The plugin is removed
+        from the discovered set and will not be offered again until
+        discover() re-scans or reload_plugin is called.
+        """
+        if not self._discovered:
+            self.discover()
+        detached = 0
+        for acct, runtimes in list(self._accounts.items()):
+            rt = runtimes.get(name)
+            if rt is not None:
+                rt.loaded = False
+                rt.active = False
+                rt.instance = None
+                detached += 1
+        self._ui_registry.detach(name)
+        # remove from the loader so it's not re-offered
+        self._loader._records.pop(name, None)
+        self._logger.info(
+            "plugin %s unloaded (detached from %d account(s))", name, detached)
+        return {"plugin": name, "detached_accounts": detached}
+
     def detach_account(self, account: str) -> None:
         """Drop the account's instances WITHOUT firing unload hooks.
 

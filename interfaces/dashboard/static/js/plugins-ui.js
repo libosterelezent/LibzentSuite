@@ -72,7 +72,11 @@ function renderPlugins() {
       <div class="row" style="margin-bottom:6px">
         <b class="trunc" style="font-size:14px;color:var(--ok);flex-shrink:1;min-width:0">${esc(m.name)}</b>
         <span class="dim mono" style="font-size:11px;flex-shrink:0">v${esc(m.version||"?")}</span>
-        <span class="dim" style="font-size:12px;margin-left:auto;flex-shrink:0">${users.length} account${users.length!==1?"s":""}</span>
+        <span style="margin-left:auto;display:flex;gap:4px;flex-shrink:0">
+          <button class="btn btn-ghost btn-sm" data-pact="reload" title="Re-import the plugin module and re-attach to accounts">↻ reload</button>
+          <button class="btn btn-ghost btn-sm" style="color:var(--err)" data-pact="unload" title="Detach from all accounts (assignments preserved)">unload</button>
+        </span>
+        <span class="dim" style="font-size:12px;flex-shrink:0">${users.length} account${users.length!==1?"s":""}</span>
       </div>
       <p class="sub" style="margin-bottom:var(--sp-2);overflow-wrap:anywhere">${esc(m.description||"")}</p>
       <div class="pp-sec">
@@ -114,6 +118,20 @@ function renderPlugins() {
 function wirePluginCard(card, m) {
   card.querySelectorAll("[data-pact]").forEach(b=>b.onclick=()=>{
     const act = b.dataset.pact;
+    if (act === "reload") {
+      b.disabled = true;
+      post("/api/plugins/reload", {plugin: m.name})
+        .then(r => { flashFb(card, `${m.name} reloaded (${r.restored_accounts} account(s))`); loadManifests().then(renderPlugins); })
+        .catch(e => { setFb(card, "error", e.message); b.disabled = false; });
+      return;
+    }
+    if (act === "unload") {
+      confirmAction("Unload Plugin", `Unload ${m.name} from all accounts? Assignments are preserved — reload restores them.`,
+        () => post("/api/plugins/unload", {plugin: m.name})
+          .then(r => { toast(`${m.name} unloaded from ${r.detached_accounts} account(s)`, "info"); loadManifests().then(renderPlugins); })
+          .catch(e => setFb(card, "error", e.message)));
+      return;
+    }
     // the channel tree needs an account's live cache — any assigned one
     const chanAccount = accounts().find(x=>assignedPlugins(x).includes(m.name));
     if (act==="new") return openProfileEditor(m.name, null, {account: chanAccount?chanAccount.name:null});

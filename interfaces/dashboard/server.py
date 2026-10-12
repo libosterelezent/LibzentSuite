@@ -955,6 +955,13 @@ class DashboardServer:
             # the dashboard drives). Unknown account/plugin names are
             # domain errors from the api -> honest 400s below.
             # ------------------------------------------------------- UI extension
+            if (method, path) == ("POST", "/api/plugins/reload"):
+                return 200, {"ok": True, "data": await api.plugins_reload(
+                    require_str(body, "plugin", path), surface="dashboard")}
+            if (method, path) == ("POST", "/api/plugins/unload"):
+                return 200, {"ok": True, "data": await api.plugins_unload(
+                    require_str(body, "plugin", path), surface="dashboard")}
+
             if (method, path) == ("GET", "/api/ui/stats"):
                 return 200, {"ok": True, "data": await api.ui_stats(
                     q_str(query, "account", path))}
