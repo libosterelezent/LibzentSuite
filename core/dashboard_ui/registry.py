@@ -473,7 +473,12 @@ class DashboardUIRegistry:
             return ActionResult(success=True, message=raw)
         if isinstance(raw, dict):
             keys = {"success", "message", "data", "field_errors", "refresh"}
-            if "success" in raw or "message" in raw:
+            # ANY result-shaped key opts into result parsing — a callback
+            # returning a bare {"refresh": [...]} (e.g. a refresh button
+            # with no message) used to fall through to a data payload,
+            # silently swallowing the refresh list: the frontend then
+            # re-fetched nothing and the button looked dead.
+            if any(k in raw for k in keys):
                 try:
                     return ActionResult(
                         success=bool(raw.get("success", True)),

@@ -644,3 +644,34 @@ class PluginScopeTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResultNormalizationEdgeCases(unittest.TestCase):
+    """Bare result-shaped dicts must keep their keys (regression).
+
+    A callback returning {"refresh": [...]} with no success/message used
+    to be coerced to a DATA payload — swallowing the refresh list, so the
+    frontend re-fetched nothing and refresh buttons looked dead.
+    """
+
+    def test_bare_refresh_dict_keeps_refresh(self):
+        from core.dashboard_ui.registry import DashboardUIRegistry
+        result = DashboardUIRegistry._normalize_result(
+            {"refresh": ["tbl"]}, "p", "btn")
+        self.assertEqual(result.refresh, ["tbl"])
+        self.assertTrue(result.success)
+        self.assertIsNone(result.data)
+
+    def test_bare_field_errors_dict_parses(self):
+        from core.dashboard_ui.registry import DashboardUIRegistry
+        result = DashboardUIRegistry._normalize_result(
+            {"field_errors": {"f": "bad"}}, "p", "btn")
+        self.assertEqual(result.field_errors, {"f": "bad"})
+        self.assertTrue(result.success)
+
+    def test_unrelated_dict_still_becomes_data(self):
+        from core.dashboard_ui.registry import DashboardUIRegistry
+        result = DashboardUIRegistry._normalize_result(
+            {"rows": [1, 2]}, "p", "btn")
+        self.assertEqual(result.data, {"rows": [1, 2]})
+        self.assertEqual(result.refresh, [])
