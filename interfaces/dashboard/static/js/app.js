@@ -100,7 +100,11 @@ function render() {
   // back to onboarding because this guard covered all views).
   const hasAccts = accounts().length > 0;
   if (!hasAccts && currentView==="home") { showPanel("panel-onboard"); return; }
-  showPanel("panel-"+currentView);
+  // Plugin dashboard-UI pages ("dui-*" views) manage their OWN panel
+  // activation + content — showPanel()'s fallback to panel-home was
+  // silently bouncing idle users off plugin pages every ~10s WS tick
+  // when the panel was briefly absent during a buildNav rebuild.
+  if (!currentView.startsWith("dui-")) showPanel("panel-"+currentView);
   if (currentView==="home") renderHome();
   if (currentView==="fleet") { renderAccounts(); renderGroups(); }
   if (currentView==="plugins") renderPlugins();
