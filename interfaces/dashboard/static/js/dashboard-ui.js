@@ -238,6 +238,15 @@ function duiListHTML(comp, data) {
 }
 
 /* ── The generic renderer ──────────────────────────────────────────────────── */
+// Build inline width/height style attributes from the component's
+// serialized size properties (validated server-side as CSS-safe strings)
+function duiSize(comp) {
+  let s = "";
+  if (comp.width) s += ` width:${esc(comp.width)};`;
+  if (comp.height) s += ` height:${esc(comp.height)};`;
+  return s ? ` style="${s}"` : "";
+}
+
 function renderDashboardUIComponent(comp, pluginName) {
   if (!comp || typeof comp !== "object") return "";
   const disabled = comp.disabled === true;
@@ -275,31 +284,31 @@ function duiChildren(comp, pluginName, disabled) {
 }
 
 function renderTab(comp, pluginName, disabled) {
-  return `<div class="dui-tab" data-dui-comp="${esc(comp.id)}"${disabled ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="dui-tab" data-dui-comp="${esc(comp.id)}"${duiSize(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
     (comp.title ? `<div class="dui-sec-title">${esc(comp.title)}</div>` : "") +
     duiChildren(comp, pluginName, disabled) + `</div>`;
 }
 
 function renderSection(comp, pluginName, disabled) {
-  return `<div class="dui-section" data-dui-comp="${esc(comp.id)}"${disabled ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="dui-section" data-dui-comp="${esc(comp.id)}"${duiSize(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
     (comp.title ? `<div class="dui-sec-title">${esc(comp.title)}</div>` : "") +
     (comp.description ? `<p class="sub">${esc(comp.description)}</p>` : "") +
     duiChildren(comp, pluginName, disabled) + `</div>`;
 }
 
 function renderCard(comp, pluginName, disabled) {
-  return `<div class="card dui-card" data-dui-comp="${esc(comp.id)}"${disabled ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="card dui-card" data-dui-comp="${esc(comp.id)}"${duiSize(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
     (comp.title ? `<h4>${esc(comp.title)}</h4>` : "") +
     duiChildren(comp, pluginName, disabled) + `</div>`;
 }
 
 function renderRow(comp, pluginName, disabled) {
-  return `<div class="dui-row" data-dui-comp="${esc(comp.id)}"${disabled ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="dui-row" data-dui-comp="${esc(comp.id)}"${duiSize(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
     duiChildren(comp, pluginName, disabled) + `</div>`;
 }
 
 function renderColumn(comp, pluginName, disabled) {
-  return `<div class="dui-col" data-dui-comp="${esc(comp.id)}"${disabled ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="dui-col" data-dui-comp="${esc(comp.id)}"${duiSize(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
     duiChildren(comp, pluginName, disabled) + `</div>`;
 }
 

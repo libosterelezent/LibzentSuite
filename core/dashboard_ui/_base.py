@@ -28,6 +28,27 @@ _MAX_ID_LENGTH = 64
 
 
 # ---------------------------------------------------------- argument checking
+_CSS_SIZE_RE = __import__("re").compile(
+    r"^[0-9]*\.?[0-9]+(px|%|em|rem|vh|vw|ch|ex|fr| vmin|vmax)$")
+
+
+def _validate_css_size(value, prop: str) -> str:
+    """Validate a CSS size: number (px) or a size string like '100%'."""
+    if isinstance(value, bool):
+        raise UIError(f"{prop} must be a number or CSS size string, not bool")
+    if isinstance(value, (int, float)):
+        if value <= 0:
+            raise UIError(f"{prop} must be positive, got {value}")
+        return f"{value}px"
+    if isinstance(value, str):
+        v = value.strip()
+        if _CSS_SIZE_RE.match(v):
+            return v
+    raise UIError(
+        f"{prop} must be a positive number (px) or a CSS size string "
+        f"like '100%', '300px', '50vh' — got {value!r}")
+
+
 def _require_str(value, what: str) -> str:
     if not isinstance(value, str):
         raise UIError(f"{what} must be a str, got {type(value).__name__}")
@@ -101,6 +122,8 @@ class UIComponent:
         self._parent = None         # set by the owning parent on add
         self._frozen = False        # set by the registry on attachment
         self._disabled = False
+        self._width: str | None = None    # CSS size ("300px", "100%", "50vh")
+        self._height: str | None = None
 
     # --- fluent setters (return self) ---
 
@@ -136,6 +159,22 @@ class UIComponent:
     def set_disabled(self, disabled: bool) -> "UIComponent":
         self._check_frozen("set disabled")
         self._disabled = _require_bool(disabled, "disabled")
+        return self
+
+    def set_width(self, width) -> "UIComponent":
+        """Set the component width (CSS size string or px number).
+
+        Accepts: "300px", "100%", "50vw", "12rem", or a positive
+        number (interpreted as pixels). Validated immediately.
+        """
+        self._check_frozen("set width")
+        self._width = _validate_css_size(width, "width")
+        return self
+
+    def set_height(self, height) -> "UIComponent":
+        """Set the component height (CSS size string or px number)."""
+        self._check_frozen("set height")
+        self._height = _validate_css_size(height, "height")
         return self
 
     # --- getters ---
@@ -220,6 +259,10 @@ class UIComponent:
             props["title"] = self._title
         if self._disabled:
             props["disabled"] = True
+        if self._width is not None:
+            props["width"] = self._width
+        if self._height is not None:
+            props["height"] = self._height
         return props
 
     def __repr__(self) -> str:

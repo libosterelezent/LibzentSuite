@@ -981,3 +981,60 @@ class BaseContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWidthHeight(unittest.TestCase):
+    """set_width/set_height on every component + CSS-size validation."""
+
+    def test_number_becomes_px(self):
+        c = Button().set_width(300)
+        self.assertEqual(c.to_dict()["width"], "300px")
+        c2 = Card().set_height(200)
+        self.assertEqual(c2.to_dict()["height"], "200px")
+
+    def test_css_string_passthrough(self):
+        for size in ("100%", "50vh", "12rem", "300px", "50vw", "2fr"):
+            c = Section().set_width(size)
+            self.assertEqual(c.to_dict()["width"], size)
+
+    def test_float_px(self):
+        c = Metric().set_width(150.5)
+        self.assertEqual(c.to_dict()["width"], "150.5px")
+
+    def test_invalid_rejected(self):
+        for bad in (-100, 0, "100xp", "abc", True, None, ""):
+            with self.assertRaises(UIError):
+                Button().set_width(bad)
+            with self.assertRaises(UIError):
+                Button().set_height(bad)
+
+    def test_unset_not_serialized(self):
+        c = Button()
+        self.assertNotIn("width", c.to_dict())
+        self.assertNotIn("height", c.to_dict())
+
+    def test_fluent_chaining(self):
+        c = Card().set_width("50%").set_height("300px").set_title("T")
+        d = c.to_dict()
+        self.assertEqual(d["width"], "50%")
+        self.assertEqual(d["height"], "300px")
+        self.assertEqual(d["title"], "T")
+
+    def test_frozen_rejects_size_change(self):
+        c = Button().set_width("100%")
+        c._freeze()
+        with self.assertRaises(FrozenLayoutError):
+            c.set_width("50%")
+
+    def test_available_on_all_components(self):
+        from core.dashboard_ui import DashboardUIToolset
+        ui = DashboardUIToolset()
+        for name in ("Layout", "Page", "Tab", "Section", "Card", "Row",
+                     "Column", "Text", "Badge", "Metric", "Checkbox",
+                     "Toggle", "TextInput", "NumberInput", "Textarea",
+                     "Select", "RadioGroup", "MultiSelect", "ListView",
+                     "Table", "Progress", "Button", "Form"):
+            cls = getattr(ui, name)
+            inst = cls()
+            self.assertTrue(hasattr(inst, "set_width"), f"{name} missing set_width")
+            self.assertTrue(hasattr(inst, "set_height"), f"{name} missing set_height")
