@@ -52,7 +52,8 @@ function renderAdmin() {
   host.appendChild(accountsCard);
   const rowsHost = accountsCard.querySelector("#admin-account-rows");
   const accts = accounts();  // live WS state for names
-  const known = new Set([...(Object.keys(ov.accounts||{})), ...accts.map(a=>a.name)]);
+  const liveNames = new Set(accts.map(a=>a.name));
+  const known = new Set([...(Object.keys(ov.accounts||{})), ...liveNames]);
   for (const name of [...known].sort()) {
     const row = ov.accounts?.[name] || {is_admin: false, prefix_mode: "mention", prefix_symbol: "", allowed_user_ids: []};
     rowsHost.appendChild(adminAccountRow(name, row));
@@ -69,8 +70,10 @@ function adminAccountRow(name, row) {
     <div class="row" style="margin-bottom:6px">
       <b>${esc(name)}</b>
       ${row.is_admin ? '<span class="chip grant">ADMIN</span>' : ""}
+      ${!liveNames.has(name) ? '<span class="chip deny" title="account no longer exists — stale access row">stale</span>' : ""}
       <span class="faint" style="font-size:11px">prefix: ${esc(row.prefix_mode)}${row.prefix_symbol ? " "+esc(row.prefix_symbol) : ""}</span>
       <span class="spacer" style="flex:1"></span>
+      ${!liveNames.has(name) ? `<button class="btn btn-ghost btn-sm" style="color:var(--err)" data-forget-acct="${esc(name)}" title="Remove this stale access row">✕ remove</button>` : ""}
       <button class="btn ${row.is_admin ? "btn-danger" : "btn-secondary"} btn-sm" data-flag-admin="${esc(name)}" data-val="${row.is_admin ? "false" : "true"}">
         ${row.is_admin ? "Remove Admin" : "Make Admin"}</button>
     </div>
@@ -111,6 +114,14 @@ function wireAdmin() {
     try { await post("/api/admin/mudae-id/set", body); flashFb(mudaeSave.closest(".card"), "saved"); await loadAdmin(); }
     catch (e) { setFb(mudaeSave.closest(".card"), "error", e.message); }
   };
+  $$("[data-forget-acct]").forEach(b => b.onclick = async () => {
+    const name = b.dataset.forgetAcct;
+    try {
+      await post("/api/admin/forget-account", {account: name});
+      flashFb(b.closest(".card2"), `removed ${name} from admin list`);
+      await loadAdmin();
+    } catch (e) { setFb(b.closest(".card2"), "error", e.message); }
+  });
   $$("[data-flag-admin]").forEach(b => b.onclick = async () => {
     try {
       await post("/api/admin/account-flag", {account: b.dataset.flagAdmin, is_admin: b.dataset.val === "true"});

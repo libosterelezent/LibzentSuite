@@ -1060,6 +1060,9 @@ class DashboardServer:
                     require_str(body, "mode", path),
                     str(body.get("symbol") or ""),
                     surface="dashboard")}
+            if (method, path) == ("POST", "/api/admin/forget-account"):
+                return 200, {"ok": True, "data": await api.admin_forget_account(
+                    require_str(body, "account", path), surface="dashboard")}
             if (method, path) == ("GET", "/api/admin/mudae-id"):
                 return 200, {"ok": True, "data": await api.admin_mudae_id()}
             if (method, path) == ("POST", "/api/admin/mudae-id/set"):

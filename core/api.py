@@ -1557,6 +1557,15 @@ class ControlAPI:
                          extra=f"value={user_id}")
         return {"mudae_bot_id": await access.mudae_bot_id()}
 
+    async def admin_forget_account(self, account: str,
+                                   surface: str = "api") -> Dict[str, Any]:
+        """Remove an account's access row (admin/perms/prefix) — cleanup
+        for accounts deleted before the cascade existed, or manual prune."""
+        access = self._require_access()
+        await access.forget_account(account)
+        self._audit_mgmt(account, "mgmt:admin.forgot", surface)
+        return {"forgotten": account}
+
     def _require_access(self) -> Any:
         access = getattr(self, "_access", None)
         if access is None:
