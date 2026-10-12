@@ -109,6 +109,30 @@ def _provider_layout() -> "DashboardUIToolset.Layout":
     return ui.Layout().add_page(page)
 
 
+async def _yes_action(context, payload):
+    return None
+
+
+def _pruning_layout() -> "DashboardUIToolset.Layout":
+    """A page whose hidden button is denied by its own check and whose
+    gated section is denied by an ancestor check."""
+    ui = DashboardUIToolset()
+    open_button = (ui.Button(component_id="prune-open")
+                   .set_label("Open").set_action(_yes_action))
+    hidden_button = (ui.Button(component_id="prune-hidden")
+                     .set_label("Hidden").set_action(_yes_action)
+                     .set_check(lambda ctx: False))
+    open_section = ui.Section().add_component(open_button)
+    gated_section = (ui.Section(component_id="prune-gated")
+                     .set_check(lambda ctx: False)
+                     .add_component(ui.Badge(component_id="prune-badge")
+                                    .set_value("never rendered")))
+    page = (ui.Page(component_id="prune-page")
+            .add_section(open_section)
+            .add_section(gated_section))
+    return ui.Layout().add_page(page)
+
+
 class DashboardUIRouteTests(unittest.IsolatedAsyncioTestCase):
     """The four Stage-D routes against the real registry + fixture."""
 
@@ -125,6 +149,8 @@ class DashboardUIRouteTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.activate_account("alpha", FakeServices("alpha"))
         # a second, registry-level UI carrying data providers
         self.registry.attach("datademo", _provider_layout())
+        # a third carrying visibility-denied subtrees (pruning)
+        self.registry.attach("prunedemo", _pruning_layout())
         # the REAL ControlAPI — its dashboard_ui_* methods only touch
         # plugins.ui_registry, which the real manager exposes
         self.api = ControlAPI(
@@ -214,6 +240,36 @@ class DashboardUIRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((checkbox["label"], checkbox["value"]),
                          ("Verbose", False))
         self.assertIs(checkbox["action"], True)
+
+    async def test_page_prunes_visibility_denied_subtrees(self) -> None:
+        status, body = await self.get(
+            "/api/dashboard-ui/page?plugin=prunedemo&page_id=prune-page")
+        self.assertEqual(status, 200)
+        page = get_json(body)["data"]
+        # the allowed button stays
+        self.assertIsNotNone(_find_comp(page, "button"))
+        ids = {c.get("id") for c in page.get("children", [])}
+        # the section denied by its own check is gone entirely (with
+        # its badge); the button denied by its own check is gone too
+        self.assertNotIn("prune-gated", ids)
+
+        def _walk(node, out):
+            if isinstance(node, dict):
+                out.append(node.get("id"))
+                for child in node.get("children") or []:
+                    _walk(child, out)
+            return out
+
+        every_id = set(_walk(page, []))
+        self.assertNotIn("prune-hidden", every_id)
+        self.assertNotIn("prune-badge", every_id)
+        # the server enforces the same verdicts on dispatch (400, not
+        # silent success)
+        status, body = await self.post("/api/dashboard-ui/action", {
+            "plugin": "prunedemo", "component_id": "prune-hidden",
+            "payload": {}})
+        self.assertEqual(status, 400)
+        self.assertFalse(get_json(body)["ok"])
 
     async def test_page_unknown_ids_404(self) -> None:
         for query in ("plugin=probe&page_id=nope",

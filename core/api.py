@@ -1371,14 +1371,20 @@ class ControlAPI:
     async def dashboard_ui_page(self, plugin: str,
                                 page_id: str) -> Optional[Dict[str, Any]]:
         """One page's full serialized component tree; None when the
-        plugin has no UI or the page id is unknown (route -> 404)."""
+        plugin has no UI or the page id is unknown (route -> 404).
+
+        Visibility is applied to the RENDERED definition: subtrees
+        whose (own or ancestor) check denies are pruned from the tree
+        before it crosses the wire — the same fail-closed verdicts the
+        dispatch/data surfaces enforce server-side.
+        """
         registry = self._plugins.ui_registry
         layout = registry.get_layout(plugin)
         if not layout:
             return None
         for page in (layout.get("children") or []):
             if page.get("id") == page_id:
-                return page
+                return await registry.visible_tree(plugin, page)
         return None
 
     async def dashboard_ui_action(self, plugin: str, component_id: str,

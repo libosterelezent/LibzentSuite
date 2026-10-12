@@ -11,7 +11,10 @@ of a plugin's UI:
   * data providers     — visibility-checked, JSON-safe, bounded results;
   * visibility         — walks the component's FULL ancestor chain,
     evaluating every check (sync or async); any False or any raised
-    error hides the component (fail-closed);
+    error hides the component (fail-closed). ``visible_tree`` applies
+    the same verdicts to the SERIALIZED page tree, so denied subtrees
+    are pruned from what the frontend renders, not merely blocked at
+    dispatch;
   * lifecycle cleanup  — detach unfreezes the tree and drops every
     registration; idempotent.
 
@@ -58,8 +61,9 @@ class DashboardUIRegistry:
     """Central registry for plugin-attached dashboard UIs.
 
     Manages: layout attachment/validation, action callback registration,
-    visibility check dispatch, data provider registration, lifecycle cleanup.
-    Plugin-scoped: two plugins can use the same component ID safely.
+    visibility check dispatch (incl. page-tree pruning), data provider
+    registration, lifecycle cleanup. Plugin-scoped: two plugins can use
+    the same component ID safely.
     """
 
     def __init__(self) -> None:
@@ -299,19 +303,43 @@ class DashboardUIRegistry:
         never surfaced). Unknown plugin/component is False. Sync and
         async checks are both supported.
         """
-        nodes = self._nodes.get(plugin_name)
-        if not nodes:
+        allowed = await self._chain_allowed(
+            plugin_name,
+            self._lookup_node(plugin_name, component_id),
+            getattr(context, "account", None),
+            cache={})
+        return bool(allowed)
+
+    def _lookup_node(self, plugin_name: str, component_id: str) -> Any:
+        """Builder node for one id; None when unknown (denies closed)."""
+        if not self._nodes.get(plugin_name):
             LOG.debug("visibility check for unknown plugin %r — closed",
                       plugin_name)
-            return False
-        node = nodes.get(component_id)
+            return None
+        node = self._nodes[plugin_name].get(component_id)
         if node is None:
             LOG.debug(
                 "visibility check for unknown component %r of plugin %r — closed",
                 component_id, plugin_name)
+        return node
+
+    async def _chain_allowed(
+        self,
+        plugin_name: str,
+        node: Any,
+        account: Optional[str],
+        cache: Dict[int, bool],
+    ) -> bool:
+        """Ancestor-chain verdict for one builder node (root-first).
+
+        Semantics IDENTICAL to :meth:`check_visibility` — every
+        ancestor with a check and the node's own check must allow,
+        fail-closed on falsey returns and raised errors. ``cache``
+        memoizes per-node verdicts so a page-wide prune invokes each
+        check at most once (``visible_tree`` shares one cache).
+        """
+        if node is None:
             return False
-        account = getattr(context, "account", None)
-        # root-first chain: a denying ancestor short-circuits the walk
         chain: List[Any] = []
         seen: set[int] = set()
         walker: Any = node
@@ -320,8 +348,14 @@ class DashboardUIRegistry:
             chain.append(walker)
             walker = walker.get_parent()
         for candidate in reversed(chain):
+            key = id(candidate)
+            if key in cache:
+                if not cache[key]:
+                    return False
+                continue
             check = candidate.get_check()
             if check is None:
+                cache[key] = True
                 continue
             check_context = self._check_context(
                 plugin_name, candidate, account)
@@ -334,10 +368,59 @@ class DashboardUIRegistry:
                     "visibility check for %r of plugin %r raised — "
                     "failing closed",
                     candidate.get_id(), plugin_name, exc_info=True)
+                cache[key] = False
                 return False
             if not allowed:
+                cache[key] = False
                 return False
+            cache[key] = True
         return True
+
+    async def visible_tree(
+        self,
+        plugin_name: str,
+        node: dict,
+        account: Optional[str] = None,
+    ) -> Optional[dict]:
+        """A copy of a serialized ``node`` with every visibility-denied
+        subtree pruned (``None`` when the node itself is denied).
+
+        Page serialization calls this so checks apply to what the
+        frontend RENDERS, not only to server-side requests: a denied
+        component (own check or any ancestor's) never crosses the
+        wire. Each check runs at most once per call (one shared
+        memoization cache across the whole tree walk); verdicts match
+        :meth:`check_visibility` exactly. The input dict is never
+        mutated. Unknown plugin → ``None`` (fail-closed).
+        """
+        if not self._nodes.get(plugin_name):
+            return None
+        cache: Dict[int, bool] = {}
+        return await self._visible_copy(plugin_name, node, account, cache)
+
+    async def _visible_copy(
+        self,
+        plugin_name: str,
+        node: Any,
+        account: Optional[str],
+        cache: Dict[int, bool],
+    ) -> Optional[dict]:
+        if not isinstance(node, dict):
+            return node
+        builder = self._lookup_node(plugin_name, node.get("id"))
+        if not await self._chain_allowed(plugin_name, builder, account, cache):
+            return None
+        if "children" in node:
+            out = dict(node)
+            kept: list = []
+            for child in node["children"]:
+                copy = await self._visible_copy(
+                    plugin_name, child, account, cache)
+                if copy is not None:
+                    kept.append(copy)
+            out["children"] = kept
+            return out
+        return dict(node)
 
     # -------------------------------------------------------------- helpers
     @staticmethod
