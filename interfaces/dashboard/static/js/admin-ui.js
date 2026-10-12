@@ -56,13 +56,13 @@ function renderAdmin() {
   const known = new Set([...(Object.keys(ov.accounts||{})), ...liveNames]);
   for (const name of [...known].sort()) {
     const row = ov.accounts?.[name] || {is_admin: false, prefix_mode: "mention", prefix_symbol: "", allowed_user_ids: []};
-    rowsHost.appendChild(adminAccountRow(name, row));
+    rowsHost.appendChild(adminAccountRow(name, row, !liveNames.has(name)));
   }
 
   wireAdmin();
 }
 
-function adminAccountRow(name, row) {
+function adminAccountRow(name, row, isStale) {
   const div = document.createElement("div"); div.className = "card2";
   div.style.marginBottom = "var(--sp-2)";
   const perms = (row.allowed_user_ids||[]);
@@ -70,10 +70,10 @@ function adminAccountRow(name, row) {
     <div class="row" style="margin-bottom:6px">
       <b>${esc(name)}</b>
       ${row.is_admin ? '<span class="chip grant">ADMIN</span>' : ""}
-      ${!liveNames.has(name) ? '<span class="chip deny" title="account no longer exists — stale access row">stale</span>' : ""}
+      ${isStale ? '<span class="chip deny" title="account no longer exists — stale access row">stale</span>' : ""}
       <span class="faint" style="font-size:11px">prefix: ${esc(row.prefix_mode)}${row.prefix_symbol ? " "+esc(row.prefix_symbol) : ""}</span>
       <span class="spacer" style="flex:1"></span>
-      ${!liveNames.has(name) ? `<button class="btn btn-ghost btn-sm" style="color:var(--err)" data-forget-acct="${esc(name)}" title="Remove this stale access row">✕ remove</button>` : ""}
+      ${isStale ? `<button class="btn btn-ghost btn-sm" style="color:var(--err)" data-forget-acct="${esc(name)}" title="Remove this stale access row">✕ remove</button>` : ""}
       <button class="btn ${row.is_admin ? "btn-danger" : "btn-secondary"} btn-sm" data-flag-admin="${esc(name)}" data-val="${row.is_admin ? "false" : "true"}">
         ${row.is_admin ? "Remove Admin" : "Make Admin"}</button>
     </div>
