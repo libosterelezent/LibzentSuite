@@ -12,7 +12,8 @@ Source of truth for this page: `core/plugin_base.py`, `core/plugin_manager/loade
 `core/profile_manager/manager.py`,
 `core/account_manager/{manager,services}.py`. The framework ships with
 NO plugins — the working examples live in `tests/fixtures/plugins/probe`
-(the loader/manager/command-registry/UI-extension fixture) and
+(the loader/manager/command-registry/UI-extension fixture),
+`tests/fixtures/plugins/config_demo` (the dashboard-UI reference) and
 `tests/fixtures/sim_plugins/soulcopy` (the simulation workload).
 
 ---
@@ -421,6 +422,49 @@ output is XSS-safe by construction):
   the default plug icon).
 
 Both hooks have default no-op implementations returning `()`.
+
+---
+
+## 7c. Dashboard UI API: builder-based plugin pages
+
+Plugins that need more than stat cards/panels declare their own
+**dashboard pages** with the builder-based Dashboard UI API — one
+optional SYNC hook, `initialize_dashboard_ui(self, ui)`, assembles a
+validated component tree (pages → tabs → sections → cards → inputs,
+buttons, forms, tables, metrics) through the fluent
+`DashboardUIToolset` builders and registers it with
+`self.attach_dashboard_ui(layout)`:
+
+* **Actions are direct Python callables** (`set_action(self._cb)`,
+  signature `(ActionContext, payload) → ActionResult`) — no manual
+  registration; dispatch is visibility-checked, error-isolated and
+  normalized server-side by `core.dashboard_ui.registry.DashboardUIRegistry`.
+* **Data providers** (`set_data_source`) feed tables/list-views with
+  JSON-safe rows; **visibility checks** (`set_check`, on every
+  component) are fail-closed and applied to rendered definitions AND
+  server-side requests; **`set_disabled` is UI state, not
+  authorization**.
+* **IDs**: automatic `uuid4().hex[:12]`, or explicit
+  `[A-Za-z0-9_-]{1,64}`; duplicates are rejected at add time AND at
+  tree validation (`DuplicateComponentIdError` /
+  `TreeValidationError`) — failed mutations never corrupt the tree.
+* **Lifecycle**: attach validates + freezes the tree (mutations raise
+  `FrozenLayoutError`); updates are explicit (build fresh → re-attach);
+  reload/unload detaches stale registrations; UI-init failures never
+  fail the account activation.
+* **Scope**: one UI per PLUGIN (first account to activate wins) — not
+  per account; per-account behavior lives in the callbacks
+  (`context.account`) and providers.
+
+Served by 4 routes (`/api/dashboard-ui/navigation|page|action|data`)
+and rendered by the generic component renderer
+(`interfaces/dashboard/static/js/dashboard-ui.js`).
+
+**Full author's guide (every builder, forms + field_errors, data
+shapes, lifecycle, scope): [DASHBOARD_UI_API.md](DASHBOARD_UI_API.md).**
+Working reference example:
+`tests/fixtures/plugins/config_demo/plugin.py` (every pattern, driven
+end-to-end by `tests/unit/test_dashboard_ui_acceptance.py`).
 
 ---
 

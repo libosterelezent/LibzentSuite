@@ -13,7 +13,8 @@ a production boot):
 
 | Fixture | Kind | Purpose | Source |
 |---|---|---|---|
-| `probe` | loader/manager/UI/command fixture | the minimal well-formed plugin: settings manifest, declared `COMMANDS` (positional + greedy ArgSpec grammar), `ui_stats`/`ui_panels` providers | `tests/fixtures/plugins/probe/plugin.py` |
+| `probe` | loader/manager/UI/command fixture | the minimal well-formed plugin: settings manifest, declared `COMMANDS` (positional + greedy ArgSpec grammar), `ui_stats`/`ui_panels` providers, a builder-based dashboard page | `tests/fixtures/plugins/probe/plugin.py` |
+| `config_demo` | dashboard-UI reference example | the FULL Dashboard UI API surface: tabs, cards, all 8 input types, a validated form (`field_errors`), data-backed table/list, metric + progress, confirmation + disabled buttons, a visibility check ([../DASHBOARD_UI_API.md](../DASHBOARD_UI_API.md)) | `tests/fixtures/plugins/config_demo/plugin.py` |
 | `soulcopy` | simulation workload | the full multi-step flow plugin the offline scenarios drive (DM page collection, chunked re-send) | `tests/fixtures/sim_plugins/soulcopy/plugin.py` |
 | `echo`, `spy` | minimal fixtures | event/dispatch assertions | `tests/fixtures/plugins/{echo,spy}.py` |
 
@@ -34,9 +35,10 @@ The former `plugins/roll` and `plugins/soulcopy` packages were REMOVED
 3. **Subclass `core.plugin_base.PluginBase`** in that module (classes defined elsewhere are not
    discovered): declare `name`, `version`, `description`, `settings` (a tuple of
    `core.settings_manager.Setting`), optionally `COMMANDS` (a tuple of `CommandSpec` — the
-   plugin's Discord self-command verbs, ArgSpec-declared grammar) and the UI-extension hooks
-   `ui_stats`/`ui_panels`, and implement what you need of `on_load` / `on_enable` /
-   `on_disable` / `on_unload` / `handle_event`.
+   plugin's Discord self-command verbs, ArgSpec-declared grammar), the UI-extension hooks
+   `ui_stats`/`ui_panels`, `initialize_dashboard_ui` (builder-based dashboard pages —
+   [../DASHBOARD_UI_API.md](../DASHBOARD_UI_API.md)), and implement what you need of
+   `on_load` / `on_enable` / `on_disable` / `on_unload` / `handle_event`.
 4. **Follow the contract**: filter fast in `handle_event`, gate every trigger on the
    access/owner view, validate channels before acting, wrap multi-step flows in one
    `try/except FlowBlocked` with a single abort line
@@ -50,7 +52,8 @@ The former `plugins/roll` and `plugins/soulcopy` packages were REMOVED
 6. **Test offline**: simulation scenarios run the real stack against `SimWorld` with zero
    network ([../ADAPTERS.md §4](../ADAPTERS.md)); the `probe` fixture is the copy-and-adapt
    template for grammar/commands/UI, the `soulcopy` fixture the full-flow template
-   ([../PLUGIN_EXAMPLES.md](../PLUGIN_EXAMPLES.md)).
+   ([../PLUGIN_EXAMPLES.md](../PLUGIN_EXAMPLES.md)), and `config_demo` the dashboard-UI
+   template ([../DASHBOARD_UI_API.md](../DASHBOARD_UI_API.md)).
 
 Reference deep-dive: [../PLUGIN_SYSTEM.md](../PLUGIN_SYSTEM.md) (incl.
-§7a self-commands and §7b UI extension).
+§7a self-commands, §7b UI extension and §7c dashboard UI pages).

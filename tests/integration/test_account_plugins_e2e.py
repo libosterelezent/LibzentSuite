@@ -52,7 +52,8 @@ from interfaces.dashboard.server import DashboardServer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 #: fixture plugins — the framework bundles none; probe/spy/echo carry the
-#: capability-model assertions below (probe has the "trigger" setting)
+#: capability-model assertions below (probe has the "trigger" setting;
+#: config_demo is the dashboard-UI reference fixture)
 REAL_PLUGINS = REPO_ROOT / "tests" / "fixtures" / "plugins"
 
 PROBE, SPY = "probe", "spy"
@@ -196,7 +197,8 @@ class TestAssignmentBootSemantics(AccountPluginsE2EBase):
         fw, attach_calls = await self.boot()
         api = fw.api
         discovered = {m["name"] for m in await api.plugins_manifests()}
-        self.assertEqual(discovered, {"probe", "spy", "echo"})  # fixture sanity
+        self.assertEqual(discovered,
+                         {"probe", "spy", "echo", "config_demo"})  # sanity
 
         await api.accounts_add(
             {"name": "alpha", "plugins": [PROBE, SPY]})

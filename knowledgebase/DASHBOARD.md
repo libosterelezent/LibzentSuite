@@ -80,6 +80,18 @@ body fields as JSON. "Auth" applies to every `/api/*` route (see §3).
 | GET | `/api/ui/stats` | `?account=` (req) | `ui_stats(account)` — Home-tab stat cards |
 | GET | `/api/ui/panels` | — | `ui_panels()` — plugin sidebar panels |
 
+### Dashboard UI (builder-based plugin pages)
+
+Rendered by the generic component renderer (`js/dashboard-ui.js`);
+author's guide: [DASHBOARD_UI_API.md](DASHBOARD_UI_API.md).
+
+| Method | Path | Payload | → ControlAPI |
+|---|---|---|---|
+| GET | `/api/dashboard-ui/navigation` | — | `dashboard_ui_navigation()` — sidebar entries per plugin page |
+| GET | `/api/dashboard-ui/page` | `?plugin=`, `?page_id=` | `dashboard_ui_page(plugin, page_id)` — the page's component tree, visibility-denied subtrees pruned (404 unknown) |
+| POST | `/api/dashboard-ui/action` | body: `plugin`, `component_id`, `payload?` | `dashboard_ui_action(...)` — visibility-checked dispatch → `ActionResult` |
+| GET | `/api/dashboard-ui/data` | `?plugin=`, `?component_id=` | `dashboard_ui_data(...)` — visibility-checked provider fetch (404 unknown/hidden) |
+
 ### Admin access
 
 | Method | Path | Payload | → ControlAPI |

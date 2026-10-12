@@ -24,6 +24,9 @@ knowledgebase/
   CLI.md               the real command surface (HELP registry, strict
                        parsing, REPL vs one-shot)
   DASHBOARD.md         REST route table, WS protocol, SPA, security model
+  DASHBOARD_UI_API.md  the builder-based plugin dashboard UI API (every
+                       component, action/provider/check contracts,
+                       lifecycle, scope) — the plugin author's guide
   TESTING.md           suite layout + inventory, determinism, scenarios
   SECURITY.md          credentials, token gates, exposure model, posture
   GLOSSARY.md          every domain term
@@ -105,6 +108,7 @@ around it. Working rules for agents: [AGENT_GUIDE.md](AGENT_GUIDE.md).
 | [CONFIGURATION.md](CONFIGURATION.md) | "What can I configure, where, with what defaults/bounds, and does it need a restart?" |
 | [CLI.md](CLI.md) | "What commands exist, how are they parsed, how do the REPL and one-shot modes differ?" |
 | [DASHBOARD.md](DASHBOARD.md) | "Which routes/WS messages exist, how do I run and secure the dashboard?" |
+| [DASHBOARD_UI_API.md](DASHBOARD_UI_API.md) | "How does a plugin build its own dashboard pages (builders, actions, data providers, visibility checks, forms)?" |
 | [TESTING.md](TESTING.md) | "What does the suite cover, how is it deterministic, how do I run it?" |
 | [SECURITY.md](SECURITY.md) | "Where do secrets live, what is gated, what is *not* protected?" |
 | [GLOSSARY.md](GLOSSARY.md) | "What does term X mean in this codebase?" |

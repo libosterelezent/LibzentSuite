@@ -98,6 +98,22 @@ listing the discovered set (400).
 | GET | `/api/ui/stats` | `?account=` (req) | `[{plugin, label, value, sub, level}]` | `ui_stats(account)` | Plugin-contributed Home-tab metric cards. `level`: `""`/`ok`/`warn`/`err`. A crashing provider contributes nothing (isolation) |
 | GET | `/api/ui/panels` | — | `[{id, plugin, title, icon, sections: [{kind, title, data}]}]` | `ui_panels()` | Plugin-contributed sidebar panels (framework-level, deduped by `id`, sorted). `kind`: `metrics`/`table`/`list`/`text`. Rendered by the dashboard's own templates — structured data only, XSS-safe by construction |
 
+## 5a. Dashboard UI (builder-based plugin pages) — 4 routes
+
+Plugin pages built with the [Dashboard UI API](DASHBOARD_UI_API.md)
+(`initialize_dashboard_ui` → `DashboardUIToolset` builders →
+`DashboardUIRegistry`). Unknown plugin/page/provider is a MISSING READ
+(**404**, not a client payload fault); action-dispatch failures stay
+`UIError`/`ValueError` → 400 (they are domain outcomes the frontend
+renders inline). Reference example: `tests/fixtures/plugins/config_demo/`.
+
+| Method | Path | Request | `data` payload | ControlAPI | Description |
+|---|---|---|---|---|---|
+| GET | `/api/dashboard-ui/navigation` | — | `[{plugin, page_id, title, icon, order}]` (sorted by `(order, plugin)`) | `dashboard_ui_navigation()` | Sidebar entries for every attached plugin page. Reads the frozen snapshots only — no plugin code runs, so this is safe for every boot/refresh |
+| GET | `/api/dashboard-ui/page` | `?plugin=` (req), `?page_id=` (req) | the page's serialized component tree (`{type, id, …props, children: […]}`) | `dashboard_ui_page(plugin, page_id)` | One page's full builder tree (404 `unknown plugin page` when the plugin has no UI or the id is unknown). Visibility-denied subtrees are PRUNED before the tree crosses the wire (rendered and server-side verdicts match). Actions/data sources serialize as `true` flags — callables never cross the wire |
+| POST | `/api/dashboard-ui/action` | body: `plugin` (req), `component_id` (req), `payload?` (object, default `{}`) | `{success, message, data, field_errors, refresh}` — the normalized `ActionResult` | `dashboard_ui_action(...)` | Visibility-checked dispatch of a component's action callback (buttons `payload {}`, standalone inputs `{"value": …}`, forms `{field_id: value}`). `field_errors` key by field id; `refresh` names component ids whose data the frontend re-fetches. Unknown/hidden component or callback failure → `UIError` → 400 |
+| GET | `/api/dashboard-ui/data` | `?plugin=` (req), `?component_id=` (req) | the provider's JSON-safe result (tables: row-dict lists or `{columns, rows}`; lists: `{label, value}` rows) | `dashboard_ui_data(...)` | Visibility-checked data-provider fetch (lazy — only when the page is shown). Results are JSON-safe and bounded (lists capped at 500, nesting ≤ 8). Unknown plugin/component, hidden, or no provider → `UIError` → **404** |
+
 ## 6. Admin access — 13 routes
 
 The admin panel's store is `core.access_manager.AccessManager` (kv rows
@@ -235,7 +251,7 @@ Stored policies compose on top with max-wins semantics.
 | GET | `/js/*` | none | JS assets (same guards) |
 | GET | `/ws` (Upgrade) | token (when set) | WebSocket upgrade (see below) |
 
-**Route count: 80 JSON routes + 5 static/WS.**
+**Route count: 84 JSON routes + 5 static/WS.**
 
 ---
 

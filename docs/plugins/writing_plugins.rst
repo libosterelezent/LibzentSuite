@@ -6,7 +6,8 @@ The framework ships with **no bundled plugins** — drop a package under
 automatically at boot. A plugin is a self-describing
 :class:`core.plugin_base.PluginBase` subclass: metadata, a settings
 manifest, lifecycle hooks, event handling, and optionally declared
-Discord **self-commands** and **dashboard UI extension** hooks.
+Discord **self-commands**, **dashboard UI extension** hooks and
+**builder-based dashboard pages**.
 
 The complete contract reference is ``knowledgebase/PLUGIN_SYSTEM.md``
 (with ``knowledgebase/PLUGIN_API.md`` as the formal API reference);
@@ -205,6 +206,90 @@ output is XSS-safe by construction):
 ``ui_panels`` contributes framework-level sidebar entries (first
 instance per plugin wins, deduped by id). A crashing provider
 contributes nothing — isolation is the framework's job.
+
+Dashboard UI: builder-based plugin pages
+----------------------------------------
+
+For full pages (tabs, forms, tables, actions) declare ONE optional
+SYNC hook and build a component tree with the
+:class:`core.dashboard_ui.DashboardUIToolset` builders. The complete
+author's guide is ``knowledgebase/DASHBOARD_UI_API.md``; the working
+reference example is ``tests/fixtures/plugins/config_demo/plugin.py``
+(exercised end-to-end by
+``tests/unit/test_dashboard_ui_acceptance.py``).
+
+.. code-block:: python
+
+   from core.dashboard_ui import DashboardUIToolset, ActionResult
+
+   def initialize_dashboard_ui(self, ui: DashboardUIToolset) -> None:
+       page = ui.Page().set_id("myplugin").set_title("My Plugin")
+       section = ui.Section().set_title("Controls")
+       card = ui.Card().set_title("Actions")
+
+       card.add_component(
+           ui.Button(component_id="run")
+           .set_label("Run")
+           .set_variant("primary")
+           .set_action(self._on_run))
+       card.add_component(
+           ui.Metric().set_label("Status").set_value("idle"))
+
+       section.add_component(card)
+       page.add_section(section)
+       self.attach_dashboard_ui(ui.Layout().add_page(page))
+
+   async def _on_run(self, context, payload) -> ActionResult:
+       return ActionResult(success=True, message="done",
+                           refresh=["events-table"])
+
+The essentials:
+
+* **Builders** — fluent setters returning ``self`` (``Layout`` →
+  ``Page`` → ``Tab``/``Section`` → ``Card``/``Row``/``Column`` →
+  ``Text``/``Badge``/``Metric``/``Progress``, the eight input types,
+  ``ListView``/``Table``, ``Button``, ``Form``). Every argument is
+  validated immediately; failed mutations never corrupt the tree.
+* **IDs** — automatic ``uuid4().hex[:12]`` per component, or explicit
+  ``[A-Za-z0-9_-]{1,64}`` (use explicit ids for anything you target:
+  ``refresh`` lists, lookups). Duplicates raise
+  :class:`core.dashboard_ui.DuplicateComponentIdError` at add time and
+  :class:`core.dashboard_ui.TreeValidationError` at attachment.
+* **Actions** — ``set_action(callable)`` IS the registration (direct
+  Python callables, no manual signup). Signature
+  ``(ActionContext, payload) → ActionResult``; sync or async;
+  ``payload`` is ``{}`` for buttons, ``{"value": …}`` for standalone
+  inputs, ``{field_id: value}`` for form submits. ``context.services``
+  is the same paced facade lifecycle hooks use; ``context.account`` is
+  the dashboard's selected account. Callback failures are contained
+  (logged, surfaced as a plain ``UIError``).
+* **Forms** — ``Form.add_field(...)`` (the eight input types only) +
+  ``set_submit_action``; failed validation returns
+  ``ActionResult(success=False, field_errors={field_id: message})``
+  and the form renders each error inline under its input.
+* **Data providers** — ``Table``/``ListView`` +
+  ``set_data_source(callable)`` return JSON-safe rows (lists capped at
+  500, nesting ≤ 8); fetches are lazy and visibility-checked.
+* **Visibility** — ``set_check(callable)`` on ANY component,
+  fail-closed (falsey return OR raised error hides it); ancestor
+  chains compose; applied to the rendered tree AND every server-side
+  request beneath it. Checks express state conditions, not viewer
+  identity (the dashboard has one shared token).
+* **Disabled** — ``set_disabled(bool)`` is UI state, NOT
+  authorization: the server still dispatches a disabled component's
+  action.
+* **Lifecycle & scope** — attach validates + freezes the tree
+  (mutation then raises :class:`core.dashboard_ui.FrozenLayoutError`);
+  updates are explicit (build a fresh tree, re-attach); reload/unload
+  detaches stale registrations; UI-init failures never fail the
+  account activation. ONE UI per plugin (the first account to
+  activate wins) — per-account behavior belongs in callbacks/providers.
+
+Served by ``GET /api/dashboard-ui/navigation``, ``GET
+/api/dashboard-ui/page``, ``POST /api/dashboard-ui/action`` and ``GET
+/api/dashboard-ui/data``; rendered by the dashboard's generic
+component renderer (``static/js/dashboard-ui.js``) — your tree is
+XSS-safe by construction (structured data only, escaped at render).
 
 Persistence helpers (no SQL)
 ----------------------------
