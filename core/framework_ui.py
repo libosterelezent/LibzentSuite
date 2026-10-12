@@ -348,7 +348,7 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
                        .set_icon("M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11")
                        .add_component(ui.Button(component_id="act-tasks-refresh")
                                       .set_label("↻ Refresh").set_variant("ghost")
-                                      .set_action(lambda ctx=None, payload=None: {"refresh": ["act-tasks"]})))
+                                      .set_action(lambda ctx=None, payload=None: {"success": True, "message": "tasks refreshed", "refresh": ["act-tasks"]})))
         .add_component(ui.Table(component_id="act-tasks")
                        .set_columns(["ID", "Account", "Plugin", "Status", "Runs"])
                        .set_key_column("ID")
@@ -364,7 +364,7 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
                        .set_icon("M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z")
                        .add_component(ui.Button(component_id="act-cds-refresh")
                                       .set_label("↻ Refresh").set_variant("ghost")
-                                      .set_action(lambda ctx=None, payload=None: {"refresh": ["act-cds"]})))
+                                      .set_action(lambda ctx=None, payload=None: {"success": True, "message": "cooldowns refreshed", "refresh": ["act-cds"]})))
         .add_component(ui.Table(component_id="act-cds")
                        .set_columns(["Account", "Plugin", "Action", "Remaining", "Total"])
                        .set_key_column("__key")
@@ -381,7 +381,7 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
                        .set_icon("M4 6h16M4 12h16M4 18h10")
                        .add_component(ui.Button(component_id="act-logs-refresh")
                                       .set_label("↻ Refresh").set_variant("ghost")
-                                      .set_action(lambda ctx=None, payload=None: {"refresh": ["act-logs"]})))
+                                      .set_action(lambda ctx=None, payload=None: {"success": True, "message": "logs refreshed", "refresh": ["act-logs"]})))
         .add_component(ui.Text(component_id="act-logs").set_variant("code")
                        .set_value("— refresh to load —")
                        .set_data_source(_logs_data(api))))
@@ -390,7 +390,7 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
                        .set_icon("M9 12l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z")
                        .add_component(ui.Button(component_id="act-audit-refresh")
                                       .set_label("↻ Refresh").set_variant("ghost")
-                                      .set_action(lambda ctx=None, payload=None: {"refresh": ["act-audit"]})))
+                                      .set_action(lambda ctx=None, payload=None: {"success": True, "message": "audit refreshed", "refresh": ["act-audit"]})))
         .add_component(ui.Text(component_id="act-audit").set_variant("code")
                        .set_value("— refresh to load —")
                        .set_data_source(_audit_data(api)))))
@@ -635,14 +635,6 @@ def _build_admin(ui: DashboardUIToolset, api: Any):
                 "removed before the cleanup cascade existed) carry a remove "
                 "action."))
 
-    async def admin_ids_text(ctx=None):
-        try:
-            ov = await api.admin_overview()
-        except Exception:
-            ov = {}
-        ids = ov.get("admins") or []
-        return {"value": ", ".join(str(i) for i in ids) or "— none —"}
-
     async def add_admin(ctx, payload):
         try:
             user_id = int(str(payload.get("adm-add-id")).strip())
@@ -653,12 +645,13 @@ def _build_admin(ui: DashboardUIToolset, api: Any):
         return {"success": True, "message": f"admin {user_id} added",
                 "refresh": ["adm-ids", "adm-accounts"]}
 
-    async def remove_admin(ctx, payload):
+    async def remove_id_row(row, ctx):
+        """✕ on each admin id entry — no typed-input remove form."""
         try:
-            user_id = int(str(payload.get("adm-remove-id")).strip())
+            user_id = int(row)
         except (TypeError, ValueError):
-            return {"success": False, "field_errors": {
-                "adm-remove-id": "Admin id must be an integer Discord user id."}}
+            return {"success": False,
+                    "message": f"{row!r} is not an integer user id"}
         await api.admin_remove_id(user_id, surface="dashboard")
         return {"success": True, "message": f"admin {user_id} removed",
                 "refresh": ["adm-ids", "adm-accounts"]}
@@ -702,42 +695,58 @@ def _build_admin(ui: DashboardUIToolset, api: Any):
                 "message": f"{row} removed from the admin list",
                 "refresh": ["adm-accounts"]}
 
-    top = (ui.Container(component_id="adm-top")
-           .add_component(ui.Column(component_id="adm-ids-col")
-                          .add_component(ui.Header(component_id="adm-ids-h")
-                                         .set_title("Admin user ids"))
-                          .add_component(ui.Text(component_id="adm-ids")
-                                         .set_variant("code").set_value("—")
-                                         .set_data_source(admin_ids_text)))
-           .add_component(ui.Form(component_id="adm-mudae-form", title="Mudae bot id")
-                          .set_submit_action(set_mudae).set_submit_label("Save")
-                          .add_fields(ui.TextInput(component_id="adm-mudae-id")
-                                      .set_label("Bot user id")
-                                      .set_placeholder("integer, or empty to clear")
-                                      .set_max_length(32))))
+    # ── box 1: admin user ids — a LIST with a ✕ on every entry ──────
+    ids_box = (ui.Container(component_id="adm-ids-box").set_gap("10px")
+               .add_component(ui.Header(component_id="adm-ids-h")
+                              .set_title("Admin user ids")
+                              .set_subtitle("Discord users allowed to run "
+                                            "admin commands"))
+               .add_component(ui.Table(component_id="adm-ids")
+                              .set_columns(["User id"])
+                              .set_key_column("User id")
+                              .set_empty_text("no admin ids yet")
+                              .set_data_source(_admin_ids_data(api))
+                              .set_row_actions([
+                                  RowAction("remove", "✕", remove_id_row,
+                                            variant="danger",
+                                            confirm="Remove this admin id?"),
+                              ]))
+               .add_component(ui.Form(component_id="adm-add-form")
+                              .set_title("Add admin id")
+                              .set_submit_action(add_admin)
+                              .set_submit_label("Add")
+                              .add_fields(ui.TextInput(component_id="adm-add-id")
+                                          .set_label("User id")
+                                          .set_placeholder("Discord user id")
+                                          .set_max_length(32))))
 
-    forms = (ui.Container(component_id="adm-forms")
-             .add_component(ui.Form(component_id="adm-add-form", title="Add admin id")
-                            .set_submit_action(add_admin).set_submit_label("Add")
-                            .add_fields(ui.TextInput(component_id="adm-add-id")
-                                        .set_label("User id").set_max_length(32)))
-             .add_component(ui.Form(component_id="adm-remove-form",
-                                    title="Remove admin id")
-                            .set_submit_action(remove_admin).set_submit_label("Remove")
-                            .add_fields(ui.TextInput(component_id="adm-remove-id")
-                                        .set_label("User id").set_max_length(32)))
-             .add_component(ui.Form(component_id="pr-form", title="Set account prefix")
-                            .set_columns(3)
-                            .set_submit_action(set_prefix).set_submit_label("Apply")
-                            .add_fields(ui.TextInput(component_id="pr-account")
-                                        .set_label("Account").set_max_length(64),
-                                        ui.Select(component_id="pr-mode")
-                                        .set_label("Mode")
-                                        .set_options(["mention", "symbol", "both"]),
-                                        ui.TextInput(component_id="pr-symbol")
-                                        .set_label("Symbol")
-                                        .set_placeholder("e.g. $ (symbol/both modes)")
-                                        .set_max_length(8))))
+    # ── box 2: the Mudae bot id ─────────────────────────────────────
+    mudae_box = (ui.Container(component_id="adm-mudae-box").set_gap("10px")
+                 .add_component(ui.Header(component_id="adm-mudae-h")
+                                .set_title("Mudae bot id")
+                                .set_subtitle("The bot every Mudae flow "
+                                              "listens to"))
+                 .add_component(ui.Form(component_id="adm-mudae-form")
+                                .set_submit_action(set_mudae)
+                                .set_submit_label("Save")
+                                .add_fields(ui.TextInput(component_id="adm-mudae-id")
+                                            .set_label("Bot user id")
+                                            .set_placeholder("integer, or empty to clear")
+                                            .set_max_length(32))))
+
+    # ── prefix form: full-width, three fields in a row ──────────────
+    prefix_form = (ui.Form(component_id="pr-form", title="Set account prefix")
+                   .set_columns(3)
+                   .set_submit_action(set_prefix).set_submit_label("Apply")
+                   .add_fields(ui.TextInput(component_id="pr-account")
+                               .set_label("Account").set_max_length(64),
+                               ui.Select(component_id="pr-mode")
+                               .set_label("Mode")
+                               .set_options(["mention", "symbol", "both"]),
+                               ui.TextInput(component_id="pr-symbol")
+                               .set_label("Symbol")
+                               .set_placeholder("e.g. $ (symbol/both modes)")
+                               .set_max_length(8)))
 
     accounts = (ui.Table(component_id="adm-accounts")
                 .set_columns(["Account", "Admin", "Prefix", "Commands"])
@@ -753,17 +762,28 @@ def _build_admin(ui: DashboardUIToolset, api: Any):
 
     page.add_sections(
         ui.Section(component_id="adm-top-sec")
-        .add_component(ui.Grid(component_id="adm-top-grid").set_columns(2).add_component(top)),
-        ui.Section(component_id="adm-forms-sec")
-        .add_component(ui.Grid(component_id="adm-forms-grid")
-                       .set_columns("auto").set_min_child("260px")
-                       .add_component(forms)),
+        .add_component(ui.Grid(component_id="adm-top-grid").set_columns(2)
+                       .add_component(ids_box)
+                       .add_component(mudae_box)),
+        ui.Section(component_id="adm-prefix-sec")
+        .add_component(prefix_form),
         ui.Section(component_id="adm-accounts-sec")
         .add_component(ui.Toolbar(component_id="adm-accounts-bar")
                        .set_title("Account access rows")
                        .set_icon("M17 20h5v-2a4 4 0 0 0-3-3.87M9 20H4v-2a4 4 0 0 1 3-3.87m6-1.13a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"))
         .add_component(accounts))
     return page
+
+
+def _admin_ids_data(api: Any):
+    async def provide(ctx):
+        try:
+            ov = await api.admin_overview()
+        except Exception:
+            ov = {}
+        return {"columns": ["User id"],
+                "rows": [[str(i)] for i in (ov.get("admins") or [])]}
+    return provide
 
 
 def _admin_rows_data(api: Any):

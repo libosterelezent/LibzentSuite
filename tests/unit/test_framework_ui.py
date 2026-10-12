@@ -312,6 +312,32 @@ class TestActions(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.success)
         self.assertIn("adm-add-id", result.field_errors)
 
+    async def test_admin_ids_table_lists_entries(self):
+        reg, api, _ = make_registry()
+        data = await reg.get_data(FRAMEWORK_PLUGIN, "adm-ids", None)
+        self.assertEqual(data, {"columns": ["User id"],
+                                "rows": [["1"], ["2"]]})
+
+    async def test_admin_id_remove_is_a_row_action(self):
+        # removal is a ✕ on each entry — the typed remove form is GONE
+        reg, api, _ = make_registry()
+        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="adm-ids")
+        result = await reg.dispatch_action(
+            FRAMEWORK_PLUGIN, "adm-ids",
+            {"action": "remove", "row": "42"}, ctx)
+        self.assertTrue(result.success)
+        self.assertIn("admin 42 removed", result.message)
+        self.assertIn(("admin_remove_id", 42), api.calls)
+        self.assertIn("adm-ids", result.refresh)
+
+    async def test_typed_remove_form_no_longer_exists(self):
+        from core.dashboard_ui.errors import UIError
+        reg, api, _ = make_registry()
+        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="adm-remove-form")
+        with self.assertRaises(UIError):
+            await reg.dispatch_action(
+                FRAMEWORK_PLUGIN, "adm-remove-form", {"adm-remove-id": "1"}, ctx)
+
     async def test_admin_toggle_row_flips_flag(self):
         reg, api, _ = make_registry()
         ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="adm-accounts")
@@ -327,6 +353,20 @@ class TestActions(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(UIError):
             await reg.dispatch_action(
                 FRAMEWORK_PLUGIN, "token-form", {"token-value": "x"}, ctx)
+
+    async def test_refresh_buttons_report_and_refresh(self):
+        # regression: these used to return a bare {"refresh": [...]} dict
+        # which the registry swallowed — the buttons looked dead
+        reg, api, _ = make_registry()
+        for cid, target in (("act-tasks-refresh", "act-tasks"),
+                            ("act-cds-refresh", "act-cds"),
+                            ("act-logs-refresh", "act-logs"),
+                            ("act-audit-refresh", "act-audit")):
+            ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id=cid)
+            result = await reg.dispatch_action(FRAMEWORK_PLUGIN, cid, {}, ctx)
+            self.assertTrue(result.success, cid)
+            self.assertEqual(result.refresh, [target], cid)
+            self.assertTrue(result.message, cid)
 
     async def test_simulation_run_feeds_report_provider(self):
         reg, api, _ = make_registry()
