@@ -115,6 +115,40 @@ on every container. Multi-child adds are **atomic** — every child is
 validated before any is attached, so a failing batch leaves the tree
 untouched.
 
+### 2.1b Alignment & side-by-side
+
+Every component participates in one small flex vocabulary (whitelisted
+keywords and bounded ints only — no style strings cross the wire):
+
+**On any component** (applies when rendered inside a Row/Column/Container):
+
+| Setter | Meaning |
+|---|---|
+| `set_grow(0–100)` | how eagerly this child takes FREE space side-by-side (equal weights split evenly; 2 vs 1 doubles up). A fixed `set_width` wins while space lasts; grow governs the surplus |
+| `set_shrink(0–100)` | squeeze allowance when space runs short (0 = never) |
+| `set_align_self("auto"\|"start"\|"center"\|"end"\|"stretch"\|"baseline")` | override the parent's cross-axis alignment for this child only |
+
+**On every content container** (Section, Card, Row, Column, Container):
+
+| Setter | Meaning |
+|---|---|
+| `set_align(...)` | CROSS-axis of the children — vertical inside a Row, horizontal inside a Column/vertical Container |
+| `set_justify("start"\|"center"\|"end"\|"between"\|"around"\|"evenly")` | MAIN-axis distribution — horizontal in a Row, vertical in a Column |
+
+```python
+# 1 : 2 : 1 side-by-side split
+ui.Row().add_component(
+    ui.Container().set_grow(1),
+    ui.Container().set_grow(2),   # double share
+    ui.Container().set_grow(1))
+
+# fixed value beside flowing description
+ui.Container().set_direction("horizontal").set_gap("12px").add_component(
+    ui.DisplayText().set_value("99.2%").set_size("xl")
+        .set_tone("ok").set_monospace(True).set_width("120px"),
+    ui.Container().set_grow(1))
+```
+
 ### 2.2 Display components
 
 | Builder | Key setters | Purpose |
@@ -123,6 +157,7 @@ untouched.
 | `Badge` | `set_value`, `set_variant("info"\|"ok"\|"warn"\|"err")` | a status pill |
 | `Metric` | `set_label`, `set_value` (str), `set_sub`, `set_level(""\|"ok"\|"warn"\|"err")`, `set_data_source(callable)` (live) | a label/value readout |
 | `Progress` | `set_value` (number 0–100), `set_label` | a progress bar |
+| `DisplayText` | `set_value`, `set_tone("default"\|"dim"\|"ok"\|"warn"\|"err")`, `set_size("xs"\|"sm"\|"md"\|"lg"\|"xl")`, `set_weight("normal"\|"medium"\|"semibold"\|"bold")`, `set_align("left"\|"center"\|"right")`, `set_monospace(bool)` | read-only presentation text — values with visual weight |
 | `Separator` | `set_variant("solid"\|"dashed")` | a horizontal divider |
 | `Description` | `set_value` | a muted descriptive paragraph |
 | `Header` | `set_title`, `set_subtitle` | a prominent section header |
@@ -157,6 +192,7 @@ changes, payload `{"value": <current>}`).
 
 | Builder | Key setters | Purpose |
 |---|---|---|
+| `Container` | `set_direction("vertical"\|"horizontal")`, `set_gap(size)`, `set_align`, `set_justify` | a neutral untitled grouping box — the alignment primitive; nests (explicit opt-in) |
 | `ListView` | `set_data_source(callable)`, `set_empty_text` | a list fed by a server-side provider |
 | `Table` | `set_columns([...])`, `set_data_source(callable)`, `set_page_size(int)`, `set_empty_text`, `set_key_column(str)`, `set_row_actions([RowAction, ...])` | a paginated table fed by a provider, with optional per-row buttons |
 | `Button` | `set_label`, `set_description`, `set_variant("primary"\|"secondary"\|"danger"\|"ghost")`, `set_confirm(str)`, `set_loading(bool)`, `set_action(callable)` | dispatches an action on click |

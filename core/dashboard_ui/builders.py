@@ -31,6 +31,7 @@ from .components import (
     Card,
     Checkbox,
     Column,
+    Container,
     Form,
     ListView,
     Metric,
@@ -51,6 +52,7 @@ from .components import (
     Toggle,
     Separator,
     Description,
+    DisplayText,
     Header,
     Footer,
 )
@@ -178,6 +180,7 @@ class DashboardUIToolset:
     Row = Row
     RowAction = RowAction
     Column = Column
+    Container = Container
     Text = Text
     Badge = Badge
     Metric = Metric
@@ -195,6 +198,7 @@ class DashboardUIToolset:
     Button = Button
     Separator = Separator
     Description = Description
+    DisplayText = DisplayText
     Header = Header
     Footer = Footer
     Form = Form

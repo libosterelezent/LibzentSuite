@@ -124,6 +124,12 @@ class UIComponent:
         self._disabled = False
         self._width: str | None = None    # CSS size ("300px", "100%", "50vh")
         self._height: str | None = None
+        # side-by-side layout hints (applied when rendered inside a
+        # Row/Column/Container): how much free space this child takes,
+        # whether it may squeeze, and a cross-axis alignment override
+        self._grow: int | None = None
+        self._shrink: int | None = None
+        self._align_self: str | None = None
 
     # --- fluent setters (return self) ---
 
@@ -175,6 +181,43 @@ class UIComponent:
         """Set the component height (CSS size string or px number)."""
         self._check_frozen("set height")
         self._height = _validate_css_size(height, "height")
+        return self
+
+    def set_grow(self, grow) -> "UIComponent":
+        """Side-by-side share: how eagerly this child takes free space.
+
+        A flex-grow weight (0–100 int). 0 keeps the child at its natural/
+        fixed width; equal weights split spare space evenly; 2 vs 1 gives
+        the first child double. Complements ``set_width`` (a fixed width
+        wins while space lasts; grow governs the surplus).
+        """
+        self._check_frozen("set grow")
+        value = _require_int(grow, "grow")
+        if not 0 <= value <= 100:
+            raise UIError(f"grow must be 0-100, got {value}")
+        self._grow = value
+        return self
+
+    def set_shrink(self, shrink) -> "UIComponent":
+        """Squeeze allowance (flex-shrink weight, 0–100; 0 = never)."""
+        self._check_frozen("set shrink")
+        value = _require_int(shrink, "shrink")
+        if not 0 <= value <= 100:
+            raise UIError(f"shrink must be 0-100, got {value}")
+        self._shrink = value
+        return self
+
+    def set_align_self(self, align) -> "UIComponent":
+        """Override the PARENT's cross-axis alignment for this child only.
+
+        One of "auto" (inherit), "start", "center", "end", "stretch",
+        "baseline" — e.g. keep one button centered in a row whose other
+        children align to the top.
+        """
+        self._check_frozen("set align_self")
+        self._align_self = _require_choice(
+            align, ("auto", "start", "center", "end", "stretch", "baseline"),
+            "align_self")
         return self
 
     # --- getters ---
@@ -263,6 +306,12 @@ class UIComponent:
             props["width"] = self._width
         if self._height is not None:
             props["height"] = self._height
+        if self._grow is not None:
+            props["grow"] = self._grow
+        if self._shrink is not None:
+            props["shrink"] = self._shrink
+        if self._align_self is not None:
+            props["align_self"] = self._align_self
         return props
 
     def __repr__(self) -> str:
@@ -408,7 +457,50 @@ class UIContainer(UIComponent):
 
 class _ComponentParent(UIContainer):
     """Shared add/remove API for the free-form content containers
-    (Section, Card, Row, Column); each pins its own allowed types."""
+    (Section, Card, Row, Column, Container); each pins its own allowed
+    types.
+
+    Every content container also carries the two-axis alignment
+    vocabulary its children are laid out by (CSS flex semantics,
+    whitelisted keywords only — never arbitrary style strings):
+
+      * ``set_align``     — CROSS-axis (vertical inside a Row, horizontal
+                            inside a Column/vertical container)
+      * ``set_justify``   — MAIN-axis distribution (horizontal inside a
+                            Row, vertical inside a Column)
+    """
+
+    _CROSS_AXIS = ("start", "center", "end", "stretch", "baseline")
+    _MAIN_AXIS = ("start", "center", "end", "between", "around", "evenly")
+
+    def __init__(self, *, component_id: str = "", **kwargs) -> None:
+        super().__init__(component_id=component_id, **kwargs)
+        self._align: str | None = None
+        self._justify: str | None = None
+
+    def set_align(self, align) -> "_ComponentParent":
+        """Cross-axis alignment of the children ("start"|"center"|"end"|
+        "stretch"|"baseline") — vertical in a Row, horizontal in a
+        Column/vertical Container."""
+        self._check_frozen("set align")
+        self._align = _require_choice(align, self._CROSS_AXIS, "align")
+        return self
+
+    def set_justify(self, justify) -> "_ComponentParent":
+        """Main-axis distribution of the children ("start"|"center"|"end"|
+        "between"|"around"|"evenly") — horizontal in a Row, vertical in a
+        Column/vertical Container."""
+        self._check_frozen("set justify")
+        self._justify = _require_choice(justify, self._MAIN_AXIS, "justify")
+        return self
+
+    def _props(self) -> dict:
+        props = super()._props()
+        if self._align is not None:
+            props["align"] = self._align
+        if self._justify is not None:
+            props["justify"] = self._justify
+        return props
 
     def add_component(self, comp) -> "_ComponentParent":
         self._check_frozen("add a component")

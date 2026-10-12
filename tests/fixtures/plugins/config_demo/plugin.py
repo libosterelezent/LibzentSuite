@@ -272,7 +272,56 @@ class ConfigDemoPlugin(PluginBase):
         data_tab = (ui.Tab().set_id("tab-data").set_title("Data")
                     .add_section(data_section))
 
-        page.add_tabs(general_tab, advanced_tab, data_tab)
+        # ── Tab "Layout": containers, DisplayText, side-by-side ───────
+        layout_section = ui.Section().set_id("layout-section").set_title("Layout")
+
+        # side-by-side with grow ratios: 1 : 2 : 1 splits the row
+        layout_section.add_component(
+            ui.Row().set_id("ratio-row")
+            .add_component(
+                ui.Container().set_id("ratio-left").set_grow(1)
+                .add_component(ui.DisplayText().set_id("rt-left")
+                               .set_value("grow 1").set_tone("dim")
+                               .set_align("center")))
+            .add_component(
+                ui.Container().set_id("ratio-main").set_grow(2)
+                .add_component(ui.DisplayText().set_id("rt-main")
+                               .set_value("grow 2 — double share")
+                               .set_size("lg").set_weight("semibold")
+                               .set_align("center")))
+            .add_component(
+                ui.Container().set_id("ratio-right").set_grow(1)
+                .add_component(ui.DisplayText().set_id("rt-right")
+                               .set_value("grow 1").set_tone("dim")
+                               .set_align("center"))))
+
+        # justification: push the ends apart on the main axis
+        layout_section.add_component(
+            ui.Row().set_id("justify-row").set_justify("between").set_align("center")
+            .add_component(ui.DisplayText().set_id("j-left").set_value("start"))
+            .add_component(ui.DisplayText().set_id("j-mid")
+                           .set_value("justify: between").set_tone("dim")
+                           .set_size("sm"))
+            .add_component(ui.Button().set_id("j-end").set_label("end")
+                           .set_variant("ghost").set_align_self("center")))
+
+        # fixed + flowing: a fixed-width value beside a growing container
+        layout_section.add_component(
+            ui.Container().set_id("split-box").set_direction("horizontal").set_gap("12px")
+            .add_component(ui.DisplayText().set_id("split-value")
+                           .set_value("99.2%").set_size("xl").set_weight("bold")
+                           .set_tone("ok").set_monospace(True).set_width("120px"))
+            .add_component(ui.Container().set_id("split-desc").set_grow(1)
+                           .add_component(ui.DisplayText().set_id("split-note")
+                                          .set_value(
+                                              "fixed 120px value, this side "
+                                              "takes the rest (grow 1)")
+                                          .set_tone("dim").set_size("sm"))))
+
+        layout_tab = (ui.Tab().set_id("tab-layout").set_title("Layout")
+                      .add_section(layout_section))
+
+        page.add_tabs(general_tab, advanced_tab, data_tab, layout_tab)
 
         self.attach_dashboard_ui(ui.Layout().add_page(page))
 

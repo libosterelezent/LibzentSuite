@@ -263,12 +263,43 @@ function duiListHTML(comp, data) {
 }
 
 /* ── The generic renderer ──────────────────────────────────────────────────── */
-// Build inline width/height style attributes from the component's
-// serialized size properties (validated server-side as CSS-safe strings)
+// Build inline layout styles from the component's serialized properties
+// (all validated server-side: CSS-safe size strings, bounded ints and
+// whitelisted keywords — never arbitrary style text crosses the wire).
+const DUI_ALIGN = {auto:"auto", start:"flex-start", center:"center",
+                   end:"flex-end", stretch:"stretch", baseline:"baseline"};
+const DUI_JUSTIFY = {start:"flex-start", center:"center", end:"flex-end",
+                     between:"space-between", around:"space-around",
+                     evenly:"space-evenly"};
+
 function duiSize(comp) {
   let s = "";
   if (comp.width) s += ` width:${esc(comp.width)};`;
   if (comp.height) s += ` height:${esc(comp.height)};`;
+  return s;
+}
+
+// flex participation: how this child behaves INSIDE a Row/Column/Container
+function duiFlex(comp) {
+  let s = "";
+  if (comp.grow != null) s += ` flex-grow:${Math.max(0, Math.round(+comp.grow || 0))};`;
+  if (comp.shrink != null) s += ` flex-shrink:${Math.max(0, Math.round(+comp.shrink || 0))};`;
+  if (DUI_ALIGN[comp.align_self]) s += ` align-self:${DUI_ALIGN[comp.align_self]};`;
+  return s;
+}
+
+// leaves: the .dui-item wrapper is the flex child — size + flex hints
+function duiItemStyle(comp) {
+  const s = duiSize(comp) + duiFlex(comp);
+  return s ? ` style="${s}"` : "";
+}
+
+// containers: same child hints PLUS their own two-axis alignment
+function duiBoxStyle(comp) {
+  let s = duiSize(comp) + duiFlex(comp);
+  if (DUI_ALIGN[comp.align]) s += ` align-items:${DUI_ALIGN[comp.align]};`;
+  if (DUI_JUSTIFY[comp.justify]) s += ` justify-content:${DUI_JUSTIFY[comp.justify]};`;
+  if (comp.gap) s += ` gap:${esc(comp.gap)};`;
   return s ? ` style="${s}"` : "";
 }
 
@@ -282,7 +313,9 @@ function renderDashboardUIComponent(comp, pluginName) {
     case "card": return renderCard(comp, pluginName, disabled);
     case "row": return renderRow(comp, pluginName, disabled);
     case "column": return renderColumn(comp, pluginName, disabled);
+    case "container": return renderContainer(comp, pluginName, disabled);
     case "text": return renderText(comp);
+    case "display-text": return renderDisplayText(comp);
     case "separator": return renderSeparator(comp);
     case "description": return renderDescription(comp);
     case "header": return renderHeader(comp);
@@ -313,31 +346,37 @@ function duiChildren(comp, pluginName, disabled) {
 }
 
 function renderTab(comp, pluginName, disabled) {
-  return `<div class="dui-tab" data-dui-comp="${esc(comp.id)}"${duiSize(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="dui-tab" data-dui-comp="${esc(comp.id)}"${duiBoxStyle(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
     (comp.title ? `<div class="dui-sec-title">${esc(comp.title)}</div>` : "") +
     duiChildren(comp, pluginName, disabled) + `</div>`;
 }
 
 function renderSection(comp, pluginName, disabled) {
-  return `<div class="dui-section" data-dui-comp="${esc(comp.id)}"${duiSize(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="dui-section" data-dui-comp="${esc(comp.id)}"${duiBoxStyle(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
     (comp.title ? `<div class="dui-sec-title">${esc(comp.title)}</div>` : "") +
     (comp.description ? `<p class="sub">${esc(comp.description)}</p>` : "") +
     duiChildren(comp, pluginName, disabled) + `</div>`;
 }
 
 function renderCard(comp, pluginName, disabled) {
-  return `<div class="card dui-card" data-dui-comp="${esc(comp.id)}"${duiSize(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="card dui-card" data-dui-comp="${esc(comp.id)}"${duiBoxStyle(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
     (comp.title ? `<h4>${esc(comp.title)}</h4>` : "") +
     duiChildren(comp, pluginName, disabled) + `</div>`;
 }
 
 function renderRow(comp, pluginName, disabled) {
-  return `<div class="dui-row" data-dui-comp="${esc(comp.id)}"${duiSize(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="dui-row" data-dui-comp="${esc(comp.id)}"${duiBoxStyle(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
     duiChildren(comp, pluginName, disabled) + `</div>`;
 }
 
 function renderColumn(comp, pluginName, disabled) {
-  return `<div class="dui-col" data-dui-comp="${esc(comp.id)}"${duiSize(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="dui-col" data-dui-comp="${esc(comp.id)}"${duiBoxStyle(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
+    duiChildren(comp, pluginName, disabled) + `</div>`;
+}
+
+function renderContainer(comp, pluginName, disabled) {
+  const dir = comp.direction === "horizontal" ? " dui-container-h" : "";
+  return `<div class="dui-container${dir}" data-dui-comp="${esc(comp.id)}"${duiBoxStyle(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
     duiChildren(comp, pluginName, disabled) + `</div>`;
 }
 
@@ -351,6 +390,18 @@ function renderText(comp) {
     case "heading": return `<h4 class="dui-heading" data-dui-comp="${esc(comp.id)}"${live}>${esc(value)}</h4>`;
     default: return `<p class="dui-text" data-dui-comp="${esc(comp.id)}"${live}>${esc(value)}</p>`;
   }
+}
+
+function renderDisplayText(comp) {
+  const tone = ["default", "dim", "ok", "warn", "err"].includes(comp.tone) ? comp.tone : "default";
+  const size = ["xs", "sm", "md", "lg", "xl"].includes(comp.size) ? comp.size : "md";
+  const weights = {normal: 400, medium: 500, semibold: 600, bold: 700};
+  let s = "";
+  if (["left", "center", "right"].includes(comp.align)) s += ` text-align:${comp.align};`;
+  if (weights[comp.weight]) s += ` font-weight:${weights[comp.weight]};`;
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)}>` +
+    `<div class="dui-dt dui-dt-${esc(tone)} dui-dt-${esc(size)}${comp.monospace ? " mono" : ""}"${s ? ` style="${s}"` : ""}>` +
+    `${esc(comp.value ?? "")}</div></div>`;
 }
 
 function renderSeparator(comp) {
@@ -374,13 +425,13 @@ function renderFooter(comp) {
 
 function renderBadge(comp) {
   const variant = ["info", "ok", "warn", "err"].includes(comp.variant) ? comp.variant : "info";
-  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}">` +
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)}>` +
     `<span class="dui-badge dui-badge-${esc(variant)}">${esc(comp.value ?? "")}</span></div>`;
 }
 
 function renderMetric(comp) {
   const level = ["ok", "warn", "err"].includes(comp.level) ? esc(comp.level) : "";
-  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"><div class="metric"${comp.live ? ` data-dui-live="${esc(comp.id)}"` : ""}>` +
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)}><div class="metric"${comp.live ? ` data-dui-live="${esc(comp.id)}"` : ""}>` +
     (comp.label ? `<div class="label">${esc(comp.label)}</div>` : "") +
     `<div class="value ${level}">${esc(comp.value ?? "")}</div>` +
     (comp.sub ? `<div class="sub">${esc(comp.sub)}</div>` : "") +
@@ -414,7 +465,7 @@ async function loadDUILive(pluginName, id, el) {
 
 function renderProgress(comp) {
   const value = Math.max(0, Math.min(100, Math.round(+comp.value || 0)));
-  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}">` +
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)}>` +
     (comp.label ? `<div class="dui-plabel"><span>${esc(comp.label)}</span><span class="dim">${value}%</span></div>` : "") +
     `<div class="dui-prog" role="progressbar" aria-valuenow="${value}" aria-valuemin="0" aria-valuemax="100"><div class="dui-prog-fill" style="width:${value}%"></div></div></div>`;
 }
@@ -432,7 +483,7 @@ function duiHint(comp) {
 function renderButton(comp, disabled) {
   const variant = ["primary", "secondary", "danger", "ghost"].includes(comp.variant) ? comp.variant : "secondary";
   const off = disabled || comp.disabled === true;
-  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)}${off ? ' data-dui-disabled="1"' : ""}>` +
     `<button type="button" class="btn btn-${esc(variant)}${comp.loading ? " busy" : ""}" data-dui-act="${esc(comp.id)}"${off || comp.loading ? " disabled" : ""}>${esc(comp.label || comp.id)}</button>` +
     duiHint(comp) + `</div>`;
 }
@@ -441,7 +492,7 @@ function renderToggle(comp, disabled) {
   const off = disabled || comp.disabled === true;
   const checked = comp.value === true ? " checked" : "";
   const cls = comp.type === "toggle" ? " class=\"dui-switch\"" : "";
-  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}" data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)} data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
     `<label class="pick-row${comp.type === "toggle" ? " dui-switch-row" : ""}">` +
     `<input type="checkbox"${cls}${checked}${off ? " disabled" : ""}${comp.action === true ? ` data-dui-in="${esc(comp.id)}"` : ""}>` +
     `<span class="pl-name">${esc(comp.label || comp.id)}</span>` +
@@ -452,7 +503,7 @@ function renderToggle(comp, disabled) {
 function renderTextInput(comp, disabled) {
   const off = disabled || comp.disabled === true;
   const maxLength = Math.max(0, Math.round(+comp.max_length || 0));
-  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}" data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)} data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
     duiLabel(comp) +
     `<input type="text" value="${esc(comp.value ?? "")}"${comp.placeholder ? ` placeholder="${esc(comp.placeholder)}"` : ""}${maxLength ? ` maxlength="${maxLength}"` : ""}${off ? " disabled" : ""}${comp.action === true ? ` data-dui-in="${esc(comp.id)}"` : ""}>` +
     duiHint(comp) + `</div>`;
@@ -464,7 +515,7 @@ function renderNumberInput(comp, disabled) {
     const n = +v;
     return (v != null && v !== "" && Number.isFinite(n)) ? ` ${name}="${n}"` : "";
   };
-  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}" data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)} data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
     duiLabel(comp) +
     `<input type="number" value="${esc(comp.value ?? "")}"${comp.placeholder ? ` placeholder="${esc(comp.placeholder)}"` : ""}${attr("min", comp.min_value)}${attr("max", comp.max_value)}${attr("step", comp.step)}${off ? " disabled" : ""}${comp.action === true ? ` data-dui-in="${esc(comp.id)}"` : ""}>` +
     duiHint(comp) + `</div>`;
@@ -473,7 +524,7 @@ function renderNumberInput(comp, disabled) {
 function renderTextarea(comp, disabled) {
   const off = disabled || comp.disabled === true;
   const rows = Math.max(1, Math.round(+comp.rows || 3));
-  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}" data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)} data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
     duiLabel(comp) +
     `<textarea rows="${rows}"${comp.placeholder ? ` placeholder="${esc(comp.placeholder)}"` : ""}${off ? " disabled" : ""}${comp.action === true ? ` data-dui-in="${esc(comp.id)}"` : ""}>${esc(comp.value ?? "")}</textarea>` +
     duiHint(comp) + `</div>`;
@@ -495,12 +546,12 @@ function renderSelect(comp, disabled) {
       `<label class="pick-row">` +
       `<input type="radio" name="dui-rg-${esc(comp.id)}" value="${esc(o.value)}"${o.value === current ? " checked" : ""}${off ? " disabled" : ""}${comp.action === true ? ` data-dui-in="${esc(comp.id)}"` : ""}>` +
       `<span class="pl-name">${esc(o.label)}</span></label>`).join("");
-    return `<div class="dui-item" data-dui-comp="${esc(comp.id)}" data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
+    return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)} data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
       duiLabel(comp) + `<div class="picklist">${radios || duiEmpty("no options")}</div>` + duiHint(comp) + `</div>`;
   }
   const opts = duiOptions(comp).map(o =>
     `<option value="${esc(o.value)}"${o.value === current ? " selected" : ""}>${esc(o.label)}</option>`).join("");
-  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}" data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)} data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
     duiLabel(comp) +
     `<select${off ? " disabled" : ""}${comp.action === true ? ` data-dui-in="${esc(comp.id)}"` : ""}>${opts}</select>` +
     duiHint(comp) + `</div>`;
@@ -513,19 +564,19 @@ function renderMultiSelect(comp, disabled) {
     `<label class="pick-row">` +
     `<input type="checkbox" value="${esc(o.value)}"${values.includes(o.value) ? " checked" : ""}${off ? " disabled" : ""}${comp.action === true ? ` data-dui-in="${esc(comp.id)}"` : ""}>` +
     `<span class="pl-name">${esc(o.label)}</span></label>`).join("");
-  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}" data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)} data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
     duiLabel(comp) + `<div class="picklist">${checks || duiEmpty("no options")}</div>` + duiHint(comp) + `</div>`;
 }
 
 /* ── Data leaves (body filled by loadDUIData) ─────────────────────────────── */
 function renderListView(comp) {
-  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}">` +
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)}>` +
     (comp.title ? `<div class="dui-sec-title">${esc(comp.title)}</div>` : "") +
     `<div class="dui-data" data-dui-body="${esc(comp.id)}"></div></div>`;
 }
 
 function renderTable(comp) {
-  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}">` +
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)}>` +
     (comp.title ? `<div class="dui-sec-title">${esc(comp.title)}</div>` : "") +
     `<div class="dui-data" data-dui-body="${esc(comp.id)}"></div></div>`;
 }
@@ -544,7 +595,7 @@ function renderForm(comp, pluginName, disabled) {
 }
 
 function renderUnknown(comp) {
-  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}">` +
+  return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)}>` +
     `<div class="dui-unknown sub">unsupported component type "${esc(comp.type || "?")}"</div></div>`;
 }
 

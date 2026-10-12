@@ -1038,3 +1038,177 @@ class TestWidthHeight(unittest.TestCase):
             inst = cls()
             self.assertTrue(hasattr(inst, "set_width"), f"{name} missing set_width")
             self.assertTrue(hasattr(inst, "set_height"), f"{name} missing set_height")
+
+
+class TestContainerComponent(unittest.TestCase):
+    """The neutral grouping box: direction, gap, alignment, nesting."""
+
+    def _ui(self):
+        from core.dashboard_ui import DashboardUIToolset
+        return DashboardUIToolset()
+
+    def test_defaults_serialize_minimal(self):
+        c = self._ui().Container(component_id="c")
+        self.assertEqual(c._props(), {})   # no chrome, no forced props
+
+    def test_direction_gap_align_justify_serialize(self):
+        c = (self._ui().Container(component_id="c")
+             .set_direction("horizontal").set_gap("12px")
+             .set_align("center").set_justify("between"))
+        self.assertEqual(c._props(), {"direction": "horizontal",
+                                      "gap": "12px",
+                                      "align": "center",
+                                      "justify": "between"})
+
+    def test_gap_accepts_number_as_pixels(self):
+        c = self._ui().Container(component_id="c").set_gap(8)
+        self.assertEqual(c._props()["gap"], "8px")
+
+    def test_direction_rejects_unknown(self):
+        from core.dashboard_ui.errors import UIError
+        with self.assertRaises(UIError):
+            self._ui().Container(component_id="c").set_direction("diagonal")
+
+    def test_holds_content_and_nests_containers(self):
+        ui = self._ui()
+        inner = ui.Container(component_id="inner").add_component(
+            ui.DisplayText(component_id="dt").set_value("x"))
+        outer = ui.Container(component_id="outer").add_component(inner)
+        self.assertEqual(outer._children[0].get_id(), "inner")
+
+    def test_container_in_section_and_row(self):
+        ui = self._ui()
+        ui.Section(component_id="s").add_component(
+            ui.Container(component_id="c1"))
+        ui.Row(component_id="r").add_component(
+            ui.Container(component_id="c2"))
+
+    def test_layout_validates_in_a_full_tree(self):
+        from core.dashboard_ui.registry import DashboardUIRegistry
+        ui = self._ui()
+        page = (ui.Page(component_id="p")
+                .add_section(ui.Section(component_id="s").add_component(
+                    ui.Container(component_id="c")
+                    .set_direction("horizontal")
+                    .add_component(ui.DisplayText(component_id="d")
+                                   .set_value("hi")))))
+        registry = DashboardUIRegistry()
+        registry.attach("t", ui.Layout(component_id="l").add_page(page))
+        snapshot = registry.get_layout("t")
+        self.assertEqual(snapshot["children"][0]["children"][0]
+                         ["children"][0]["type"], "container")
+
+
+class TestDisplayTextComponent(unittest.TestCase):
+    """Read-only presentation text: tone × size × weight × alignment."""
+
+    def _ui(self):
+        from core.dashboard_ui import DashboardUIToolset
+        return DashboardUIToolset()
+
+    def test_full_presentation_serialize(self):
+        d = (self._ui().DisplayText(component_id="d")
+             .set_value("99.2%").set_tone("ok").set_size("xl")
+             .set_weight("bold").set_align("right").set_monospace(True))
+        self.assertEqual(d._props(), {
+            "value": "99.2%", "tone": "ok", "size": "xl",
+            "weight": "bold", "align": "right", "monospace": True})
+
+    def test_invalid_everything_rejected(self):
+        from core.dashboard_ui.errors import UIError
+        dt = self._ui().DisplayText(component_id="d")
+        for bad in (lambda: dt.set_tone("purple"),
+                    lambda: dt.set_size("huge"),
+                    lambda: dt.set_weight("chunky"),
+                    lambda: dt.set_align("justified")):
+            with self.assertRaises(UIError):
+                bad()
+
+    def test_value_must_be_string(self):
+        from core.dashboard_ui.errors import UIError
+        with self.assertRaises(UIError):
+            self._ui().DisplayText(component_id="d").set_value(42)
+
+    def test_participates_in_alignment(self):
+        d = (self._ui().DisplayText(component_id="d").set_value("v")
+             .set_grow(1).set_align_self("center"))
+        props = d._props()
+        self.assertEqual(props["grow"], 1)
+        self.assertEqual(props["align_self"], "center")
+
+
+class TestAlignmentVocabulary(unittest.TestCase):
+    """The two-axis flex vocabulary shared by every component."""
+
+    def _ui(self):
+        from core.dashboard_ui import DashboardUIToolset
+        return DashboardUIToolset()
+
+    def test_grow_shrink_bounds(self):
+        from core.dashboard_ui.errors import UIError
+        b = self._ui().Button(component_id="b")
+        for bad in (-1, 101, 1.5):
+            with self.assertRaises(UIError):
+                b.set_grow(bad)
+        b.set_grow(0)
+        b.set_grow(100)
+        b.set_shrink(0)
+
+    def test_align_self_choices(self):
+        from core.dashboard_ui.errors import UIError
+        b = self._ui().Button(component_id="b")
+        for good in ("auto", "start", "center", "end", "stretch", "baseline"):
+            b.set_align_self(good)
+        with self.assertRaises(UIError):
+            b.set_align_self("middle")
+
+    def test_row_column_align_justify(self):
+        ui = self._ui()
+        r = ui.Row(component_id="r").set_align("baseline").set_justify("evenly")
+        self.assertEqual((r._props()["align"], r._props()["justify"]),
+                         ("baseline", "evenly"))
+        c = ui.Column(component_id="c").set_align("stretch").set_justify("center")
+        self.assertEqual((c._props()["align"], c._props()["justify"]),
+                         ("stretch", "center"))
+        with self.assertRaises(Exception):
+            ui.Row(component_id="r2").set_justify("spaced")
+
+    def test_section_and_card_carry_alignment_too(self):
+        ui = self._ui()
+        s = ui.Section(component_id="s").set_align("center")
+        card = ui.Card(component_id="cd").set_justify("between")
+        self.assertEqual(s._props()["align"], "center")
+        self.assertEqual(card._props()["justify"], "between")
+
+    def test_alignment_available_on_every_component(self):
+        ui = self._ui()
+        for name in ("Layout", "Page", "Tab", "Section", "Card", "Row",
+                     "Column", "Container", "Text", "DisplayText", "Badge",
+                     "Metric", "Checkbox", "Toggle", "TextInput",
+                     "NumberInput", "Textarea", "Select", "RadioGroup",
+                     "MultiSelect", "ListView", "Table", "Progress",
+                     "Button", "Form", "Separator", "Description",
+                     "Header", "Footer"):
+            cls = getattr(ui, name)
+            inst = cls()
+            self.assertTrue(hasattr(inst, "set_grow"), f"{name} missing set_grow")
+            self.assertTrue(hasattr(inst, "set_shrink"), f"{name} missing set_shrink")
+            self.assertTrue(hasattr(inst, "set_align_self"), f"{name} missing set_align_self")
+
+    def test_side_by_side_ratio_tree_validates(self):
+        from core.dashboard_ui.registry import DashboardUIRegistry
+        ui = self._ui()
+        row = (ui.Row(component_id="r")
+               .add_component(ui.Container(component_id="a").set_grow(1))
+               .add_component(ui.Container(component_id="b").set_grow(2))
+               .add_component(ui.Container(component_id="c").set_grow(1)))
+        page = (ui.Page(component_id="p")
+                .add_section(ui.Section(component_id="s").add_component(row)))
+        registry = DashboardUIRegistry()
+        registry.attach("t", ui.Layout(component_id="l").add_page(page))
+        # layout → page → section → row
+        snap_row = (registry.get_layout("t")["children"][0]
+                    ["children"][0]["children"][0])
+        self.assertEqual(snap_row["type"], "row")
+        self.assertEqual([c.get("grow") for c in snap_row["children"]],
+                         [1, 2, 1])

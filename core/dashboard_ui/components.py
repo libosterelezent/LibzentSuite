@@ -20,6 +20,7 @@ from ._base import (
     _require_int,
     _require_number,
     _require_str,
+    _validate_css_size,
     UIComponent,
     UIContainer,
 )
@@ -756,6 +757,121 @@ class Form(UIContainer):
         return errors
 
 
+class Container(_ComponentParent):
+    """A neutral, untitled grouping box — the alignment primitive.
+
+    Unlike Section (titled block) or Card (boxed panel), a Container
+    adds no chrome: it exists to GROUP children and own their layout.
+    ``set_direction`` picks the flow axis; ``set_align``/``set_justify``
+    control the two axes; children claim space with ``set_grow``.
+    Containers may nest (a Container inside a Container is explicit
+    opt-in nesting — the Row-inside-Row prohibition still holds).
+    """
+
+    _type_name = "container"
+    _DIRECTIONS = ("vertical", "horizontal")
+
+    def __init__(self, *, component_id: str = "", **kwargs) -> None:
+        super().__init__(component_id=component_id, **kwargs)
+        self._direction: str | None = None
+        self._gap: str | None = None
+
+    def set_direction(self, direction) -> "Container":
+        """Which way children flow ("vertical" default | "horizontal")."""
+        self._check_frozen("set the direction")
+        self._direction = _require_choice(direction, self._DIRECTIONS, "direction")
+        return self
+
+    def set_gap(self, gap) -> "Container":
+        """Spacing between children (CSS size string or px number)."""
+        self._check_frozen("set the gap")
+        self._gap = _validate_css_size(gap, "gap")
+        return self
+
+    def _props(self) -> dict:
+        props = super()._props()
+        if self._direction is not None:
+            props["direction"] = self._direction
+        if self._gap is not None:
+            props["gap"] = self._gap
+        return props
+
+
+class DisplayText(UIComponent):
+    """Read-only presentation text with tone, size, weight and alignment.
+
+    Distinct from ``Text`` (semantic body copy with variants):
+    DisplayText is for VALUES you want to present with visual weight —
+    a headline number, a status word, a right-aligned figure — and it
+    participates in side-by-side layouts like any component.
+    """
+
+    _type_name = "display-text"
+    _TONES = ("default", "dim", "ok", "warn", "err")
+    _SIZES = ("xs", "sm", "md", "lg", "xl")
+    _WEIGHTS = ("normal", "medium", "semibold", "bold")
+    _ALIGNS = ("left", "center", "right")
+
+    def __init__(self, *, component_id: str = "", **kwargs) -> None:
+        super().__init__(component_id=component_id, **kwargs)
+        self._value: str | None = None
+        self._tone: str | None = None
+        self._size: str | None = None
+        self._weight: str | None = None
+        self._align: str | None = None
+        self._monospace: bool | None = None
+
+    def set_value(self, value) -> "DisplayText":
+        self._check_frozen("set the value")
+        self._value = _require_str(value, "value")
+        return self
+
+    def set_tone(self, tone: str) -> "DisplayText":
+        """Color intent ("default"|"dim"|"ok"|"warn"|"err")."""
+        self._check_frozen("set the tone")
+        self._tone = _require_choice(tone, self._TONES, "tone")
+        return self
+
+    def set_size(self, size: str) -> "DisplayText":
+        """Type scale ("xs"|"sm"|"md"|"lg"|"xl")."""
+        self._check_frozen("set the size")
+        self._size = _require_choice(size, self._SIZES, "size")
+        return self
+
+    def set_weight(self, weight: str) -> "DisplayText":
+        """Font weight ("normal"|"medium"|"semibold"|"bold")."""
+        self._check_frozen("set the weight")
+        self._weight = _require_choice(weight, self._WEIGHTS, "weight")
+        return self
+
+    def set_align(self, align: str) -> "DisplayText":
+        """Self alignment of the text ("left"|"center"|"right")."""
+        self._check_frozen("set the align")
+        self._align = _require_choice(align, self._ALIGNS, "align")
+        return self
+
+    def set_monospace(self, monospace: bool) -> "DisplayText":
+        self._check_frozen("set monospace")
+        self._monospace = _require_bool(monospace, "monospace")
+        return self
+
+    def _props(self) -> dict:
+        props = super()._props()
+        if self._value is not None:
+            props["value"] = self._value
+        if self._tone is not None:
+            props["tone"] = self._tone
+        if self._size is not None:
+            props["size"] = self._size
+        if self._weight is not None:
+            props["weight"] = self._weight
+        if self._align is not None:
+            props["align"] = self._align
+        if self._monospace is not None:
+            props["monospace"] = self._monospace
+        return props
+
+
 # Pin the form's field types now that every field class exists.
 _FIELD_TYPES = (TextInput, NumberInput, Textarea, Select, RadioGroup,
                 MultiSelect, Checkbox, Toggle)
@@ -803,8 +919,10 @@ class Column(_ComponentParent):
 
 # Pin the content containers' child types now that they all exist:
 # Section/Card accept every content component; Row/Column accept the same
-# set minus Row (no nested rows).
-_CONTENT_CHILD_TYPES = (Card, Row, Column, Text, Badge, Metric, Button,
+# set minus Row (no nested rows); Container additionally accepts other
+# Containers (explicit opt-in nesting — see its docstring).
+_CONTENT_CHILD_TYPES = (Card, Row, Column, Container, Text, DisplayText,
+                        Badge, Metric, Button,
                         Checkbox, Toggle, TextInput, NumberInput, Textarea,
                         Select, RadioGroup, MultiSelect, ListView, Table,
                         Progress, Form, Separator, Description, Header, Footer)
@@ -813,6 +931,7 @@ Section._allowed_child_types = _CONTENT_CHILD_TYPES
 Card._allowed_child_types = _CONTENT_CHILD_TYPES
 Row._allowed_child_types = _FLOW_CHILD_TYPES
 Column._allowed_child_types = _FLOW_CHILD_TYPES
+Container._allowed_child_types = _FLOW_CHILD_TYPES   # incl. Containers: opt-in nesting
 
 
 class Tab(UIContainer):

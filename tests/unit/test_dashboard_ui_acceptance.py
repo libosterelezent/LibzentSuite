@@ -381,14 +381,14 @@ class TestConfigDemoExample(unittest.IsolatedAsyncioTestCase):
         await self.manager.deactivate_account("alpha")
 
     # ------------------------------------------------------------ layout
-    async def test_example_registers_one_page_with_three_tabs(self):
+    async def test_example_registers_one_page_with_four_tabs(self):
         self.assertEqual(self.registry.list_plugins(), ["config_demo"])
         page = self.registry.get_layout("config_demo")["children"][0]
         self.assertEqual((page["type"], page["id"]), ("page", "config-demo"))
         self.assertEqual(page["title"], "Config Demo")
         tabs = [c for c in page["children"] if c["type"] == "tab"]
         self.assertEqual([t["title"] for t in tabs],
-                         ["General", "Advanced", "Data"])
+                         ["General", "Advanced", "Data", "Layout"])
         # every input type the API supports is on the page
         for type_name in ("checkbox", "toggle", "text-input",
                           "number-input", "textarea", "select",
@@ -396,9 +396,9 @@ class TestConfigDemoExample(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(
                 _find_comp(page, type_name), f"missing {type_name}")
         # layout containers, data parts and display parts too
-        for type_name in ("row", "column", "table", "list-view",
-                          "metric", "progress", "badge", "text",
-                          "form", "button"):
+        for type_name in ("row", "column", "container", "table",
+                          "list-view", "metric", "progress", "badge",
+                          "text", "display-text", "form", "button"):
             self.assertIsNotNone(
                 _find_comp(page, type_name), f"missing {type_name}")
         # input constraints serialize (bounds + explicit options)
@@ -407,6 +407,19 @@ class TestConfigDemoExample(unittest.IsolatedAsyncioTestCase):
         mode = _find_comp(page, "select")
         self.assertEqual([o["value"] for o in mode["options"]],
                          ["fast", "normal", "slow"])
+        # the alignment vocabulary serializes (grow ratio row + justify)
+        ratio_row = next(r for r in _all_of_type(page, "row")
+                         if r["id"] == "ratio-row")
+        shares = [c.get("grow") for c in ratio_row["children"]]
+        self.assertEqual(shares, [1, 2, 1])
+        justify_row = next(r for r in _all_of_type(page, "row")
+                           if r["id"] == "justify-row")
+        self.assertEqual(justify_row.get("justify"), "between")
+        self.assertEqual(justify_row.get("align"), "center")
+        split_value = next(d for d in _all_of_type(page, "display-text")
+                           if d["id"] == "split-value")
+        self.assertTrue(split_value.get("monospace"))
+        self.assertEqual(split_value.get("width"), "120px")
         # the confirmation + disabled states are part of the snapshot
         purge = next(b for b in _all_of_type(page, "button")
                      if b["id"] == "purge-button")
