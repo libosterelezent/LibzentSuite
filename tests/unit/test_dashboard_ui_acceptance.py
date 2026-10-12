@@ -397,9 +397,9 @@ class TestConfigDemoExample(unittest.IsolatedAsyncioTestCase):
                 _find_comp(page, type_name), f"missing {type_name}")
         # layout containers, data parts and display parts too
         for type_name in ("row", "column", "container", "grid", "alert",
-                          "table", "list-view", "metric", "progress",
-                          "badge", "text", "display-text", "form",
-                          "button"):
+                          "toolbar", "table", "list-view", "metric",
+                          "progress", "badge", "text", "display-text",
+                          "form", "button"):
             self.assertIsNotNone(
                 _find_comp(page, type_name), f"missing {type_name}")
         # input constraints serialize (bounds + explicit options)
@@ -430,6 +430,14 @@ class TestConfigDemoExample(unittest.IsolatedAsyncioTestCase):
         err_alert = next(a for a in _all_of_type(page, "alert")
                          if a["id"] == "al-err")
         self.assertEqual(err_alert.get("variant"), "err")
+        # the toolbar carries a title + trailing action; the gridded
+        # form declares its field columns
+        toolbar = _find_comp(page, "toolbar")
+        self.assertEqual(toolbar["title"], "Toolbar header")
+        self.assertEqual(toolbar["children"][0]["id"], "tb-refresh")
+        grid_form = next(f for f in _all_of_type(page, "form")
+                         if f["id"] == "demo-grid-form")
+        self.assertEqual(grid_form.get("columns"), 3)
         # the confirmation + disabled states are part of the snapshot
         purge = next(b for b in _all_of_type(page, "button")
                      if b["id"] == "purge-button")

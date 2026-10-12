@@ -690,6 +690,7 @@ class Form(UIContainer):
         self._submit_action = None
         self._submit_label: str | None = None
         self._client_action: str | None = None
+        self._field_columns: int | str | None = None
 
     def set_submit_action(self, action) -> "Form":
         self._check_frozen("set the submit action")
@@ -702,12 +703,30 @@ class Form(UIContainer):
         self._submit_label = _require_str(label, "submit label")
         return self
 
+    def set_columns(self, columns) -> "Form":
+        """Lay the FIELDS out in a grid (int 1–4, or "auto") instead of
+        the default vertical stack — the difference between a compact
+        form and a six-field tower."""
+        self._check_frozen("set the columns")
+        if columns == "auto":
+            self._field_columns = "auto"
+            return self
+        value = _require_int(columns, "columns")
+        if value not in self._FORM_GRID_COLUMNS:
+            raise UIError(
+                f"form columns must be 1-4 (or 'auto'), got {value}")
+        self._field_columns = value
+        return self
+
     def set_description(self, description: str) -> "Form":
         self._check_frozen("set the description")
         self._description = _require_str(description, "description")
         return self
 
     _CLIENT_ACTIONS = ("save-token", "save-theme")
+
+    # field-grid columns: int 1-4, or "auto" (fills from ~220px)
+    _FORM_GRID_COLUMNS = (1, 2, 3, 4)
 
     def set_client_action(self, name: str) -> "Form":
         """Handle submission CLIENT-side instead of a server action.
@@ -754,6 +773,8 @@ class Form(UIContainer):
             props["client_action"] = self._client_action
         if getattr(self, "_description", None) is not None:
             props["description"] = self._description
+        if self._field_columns is not None:
+            props["columns"] = self._field_columns
         return props
 
     def _validate(self) -> list[str]:
@@ -792,6 +813,18 @@ class Container(_ComponentParent):
         if self._direction is not None:
             props["direction"] = self._direction
         return props
+
+
+class Toolbar(_ComponentParent):
+    """A header bar: optional title on the left, children on the right.
+
+    THE way to structure section actions — a refresh or add button sits
+    in the bar next to the title instead of floating loose above the
+    content. Children (buttons, selects, badges…) cluster right and
+    never stretch.
+    """
+
+    _type_name = "toolbar"
 
 
 class Grid(_ComponentParent):
@@ -965,15 +998,6 @@ class Section(_ComponentParent):
     def __init__(self, *, component_id: str = "", **kwargs) -> None:
         super().__init__(component_id=component_id, **kwargs)
         self._description: str | None = None
-        self._icon: str | None = None
-
-    def set_icon(self, icon) -> "Section":
-        """Decorative SVG path drawn beside the title (24×24 viewBox
-        path data, same vocabulary as the sidebar icons). Escaped by
-        the renderer; purely decorative."""
-        self._check_frozen("set the icon")
-        self._icon = _require_str(icon, "icon")
-        return self
 
     def set_description(self, description: str) -> "Section":
         self._check_frozen("set the description")
@@ -984,8 +1008,6 @@ class Section(_ComponentParent):
         props = super()._props()
         if self._description is not None:
             props["description"] = self._description
-        if self._icon is not None:
-            props["icon"] = self._icon
         return props
 
 
@@ -1032,8 +1054,8 @@ class Column(_ComponentParent):
 # Section/Card accept every content component; Row/Column accept the same
 # set minus Row (no nested rows); Container additionally accepts other
 # Containers (explicit opt-in nesting — see its docstring).
-_CONTENT_CHILD_TYPES = (Card, Row, Column, Container, Grid, Alert,
-                        Text, DisplayText, Badge, Metric, Button,
+_CONTENT_CHILD_TYPES = (Card, Row, Column, Container, Toolbar, Grid,
+                        Alert, Text, DisplayText, Badge, Metric, Button,
                         Checkbox, Toggle, TextInput, NumberInput, Textarea,
                         Select, RadioGroup, MultiSelect, ListView, Table,
                         Progress, Form, Separator, Description, Header, Footer)
@@ -1044,6 +1066,7 @@ Row._allowed_child_types = _FLOW_CHILD_TYPES
 Column._allowed_child_types = _FLOW_CHILD_TYPES
 Container._allowed_child_types = _FLOW_CHILD_TYPES   # incl. Containers: opt-in nesting
 Grid._allowed_child_types = _FLOW_CHILD_TYPES
+Toolbar._allowed_child_types = _FLOW_CHILD_TYPES
 
 
 class Tab(UIContainer):

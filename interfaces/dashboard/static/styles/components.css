@@ -326,6 +326,33 @@ dialog .dlg-foot { display: flex; gap: var(--sp-2); justify-content: flex-end; p
   responsive via the minmax floor), repeat(n, …) for explicit counts —
   never overridden by media queries, the author chose n */
 
+/* Toolbar — the section header bar: title left, actions right */
+.dui-toolbar { display: flex; align-items: center; gap: var(--sp-3);
+  min-width: 0; padding-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--border); }
+.dui-toolbar-title { font-size: 11px; color: var(--dim); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .04em; flex-shrink: 0;
+  display: inline-flex; align-items: center; gap: 6px; }
+.dui-toolbar-actions { display: flex; align-items: center; gap: var(--sp-2);
+  margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+.dui-toolbar-actions .dui-item { flex: none !important; max-width: none; }
+.dui-toolbar-actions .dui-item .btn { white-space: nowrap; }
+
+/* Form field GRID — the anti-tower: declared columns lay fields out
+   compactly; the submit row stays full-width below */
+.dui-form-grid { display: grid; gap: var(--sp-3); }
+.dui-form-grid .dui-item { min-width: 0; }
+.dui-form-grid .dui-item input, .dui-form-grid .dui-item select,
+.dui-form-grid .dui-item textarea { width: 100%; max-width: none; }
+
+/* Metric CARDS — readouts sit in boxed cells instead of floating */
+.dui-item > .metric { background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r); padding: var(--sp-3) var(--sp-4); height: 100%; }
+
+/* Code blocks (logs, audit, reports, scenario lists) — bounded,
+   scrollable panes instead of page-stretching walls of text */
+.dui-code { padding: var(--sp-3); max-height: 380px; overflow: auto; }
+
 /* Alert — the designed error/notice surface (also used by the renderer
    for failed data providers and page fetches) */
 .dui-alert { display: flex; gap: var(--sp-2); align-items: flex-start;

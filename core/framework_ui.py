@@ -140,7 +140,10 @@ def _build_home(ui: DashboardUIToolset, api: Any):
         .add_component(ui.ListView(component_id="home-attn")
                        .set_empty_text("All accounts healthy — no alerts.")
                        .set_data_source(_attention_data(api))))
-     .add_section(ui.Section(component_id="home-groups-sec", title="Sync Groups")
+     .add_section(ui.Section(component_id="home-groups-sec")
+        .add_component(ui.Toolbar(component_id="home-groups-bar")
+                       .set_title("Sync Groups")
+                       .set_icon("M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"))
         .add_component(ui.Table(component_id="home-groups")
                        .set_columns(["Group", "Members", "Online", "State"])
                        .set_key_column("Group")
@@ -240,15 +243,15 @@ def _build_plugins(ui: DashboardUIToolset, api: Any):
                 "refresh": ["plug-state"]}
 
     (page
-     .add_section(ui.Section(component_id="plug-scan-sec")
-        .add_component(ui.Row(component_id="plug-scan-row")
-           .add_component(ui.Button(component_id="plug-rescan")
-                          .set_label("↻ Rescan plugin directory")
-                          .set_description(
-                              "Re-scan plugins/ for new or externally-changed packages.")
-                          .set_action(rescan))))
-     .add_section(ui.Section(component_id="plug-man-sec", title="Discovered plugins")
+     .add_section(ui.Section(component_id="plug-man-sec")
+        .add_component(ui.Toolbar(component_id="plug-man-bar")
+                       .set_title("Discovered plugins")
                        .set_icon("M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4")
+                       .add_component(ui.Button(component_id="plug-rescan")
+                                      .set_label("↻ Rescan")
+                                      .set_description(
+                                          "Re-scan plugins/ for new or externally-changed packages.")
+                                      .set_action(rescan)))
         .add_component(ui.Table(component_id="plug-manifests")
                        .set_columns(["Plugin", "Version", "Accounts", "Description"])
                        .set_key_column("Plugin")
@@ -260,9 +263,11 @@ def _build_plugins(ui: DashboardUIToolset, api: Any):
                            RowAction("unload", "unload", unload_row, variant="danger",
                                      confirm="Unload this plugin from every account? "
                                              "Assignments are preserved — reload restores them."),
-                       ]))
-        .add_component(ui.Separator(component_id="plug-sep")))
-     .add_section(ui.Section(component_id="plug-state-sec", title="Per-account state")
+                       ])))
+     .add_section(ui.Section(component_id="plug-state-sec")
+        .add_component(ui.Toolbar(component_id="plug-state-bar")
+                       .set_title("Per-account state")
+                       .set_icon("M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2"))
         .add_component(ui.Table(component_id="plug-state")
                        .set_columns(["Account", "Plugin", "Enabled", "Active", "Errors"])
                        .set_key_column("__key")
@@ -338,10 +343,12 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
                 "refresh": ["act-cds"]}
 
     (page
-     .add_section(ui.Section(component_id="act-tasks-sec", title="Tasks")
-        .add_component(ui.Button(component_id="act-tasks-refresh")
-                       .set_label("↻ Refresh").set_variant("ghost")
-                       .set_action(lambda ctx=None, payload=None: {"refresh": ["act-tasks"]}))
+     .add_section(ui.Section(component_id="act-tasks-sec")
+        .add_component(ui.Toolbar(component_id="act-tasks-bar").set_title("Tasks")
+                       .set_icon("M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11")
+                       .add_component(ui.Button(component_id="act-tasks-refresh")
+                                      .set_label("↻ Refresh").set_variant("ghost")
+                                      .set_action(lambda ctx=None, payload=None: {"refresh": ["act-tasks"]})))
         .add_component(ui.Table(component_id="act-tasks")
                        .set_columns(["ID", "Account", "Plugin", "Status", "Runs"])
                        .set_key_column("ID")
@@ -352,10 +359,12 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
                            RowAction("cancel", "cancel", cancel_row, variant="danger",
                                      confirm="Request cancellation for this task?"),
                        ])))
-     .add_section(ui.Section(component_id="act-cds-sec", title="Cooldowns")
-        .add_component(ui.Button(component_id="act-cds-refresh")
-                       .set_label("↻ Refresh").set_variant("ghost")
-                       .set_action(lambda ctx=None, payload=None: {"refresh": ["act-cds"]}))
+     .add_section(ui.Section(component_id="act-cds-sec")
+        .add_component(ui.Toolbar(component_id="act-cds-bar").set_title("Cooldowns")
+                       .set_icon("M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z")
+                       .add_component(ui.Button(component_id="act-cds-refresh")
+                                      .set_label("↻ Refresh").set_variant("ghost")
+                                      .set_action(lambda ctx=None, payload=None: {"refresh": ["act-cds"]})))
         .add_component(ui.Table(component_id="act-cds")
                        .set_columns(["Account", "Plugin", "Action", "Remaining", "Total"])
                        .set_key_column("__key")
@@ -366,18 +375,22 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
                                      confirm="Clear EVERY cooldown this account holds "
                                              "for this plugin?"),
                        ])))
-     .add_section(ui.Section(component_id="act-logs-sec", title="Recent logs")
-        .set_icon("M4 6h16M4 12h16M4 18h10")
-        .add_component(ui.Button(component_id="act-logs-refresh")
-                       .set_label("↻ Refresh logs").set_variant("ghost")
-                       .set_action(lambda ctx=None, payload=None: {"refresh": ["act-logs"]}))
+     .add_section(ui.Section(component_id="act-logs-sec")
+        .add_component(ui.Toolbar(component_id="act-logs-bar")
+                       .set_title("Recent logs")
+                       .set_icon("M4 6h16M4 12h16M4 18h10")
+                       .add_component(ui.Button(component_id="act-logs-refresh")
+                                      .set_label("↻ Refresh").set_variant("ghost")
+                                      .set_action(lambda ctx=None, payload=None: {"refresh": ["act-logs"]})))
         .add_component(ui.Text(component_id="act-logs").set_variant("code")
                        .set_value("— refresh to load —")
                        .set_data_source(_logs_data(api))))
-     .add_section(ui.Section(component_id="act-audit-sec", title="Audit trail")
-        .add_component(ui.Button(component_id="act-audit-refresh")
-                       .set_label("↻ Refresh audit").set_variant("ghost")
-                       .set_action(lambda ctx=None, payload=None: {"refresh": ["act-audit"]}))
+     .add_section(ui.Section(component_id="act-audit-sec")
+        .add_component(ui.Toolbar(component_id="act-audit-bar").set_title("Audit trail")
+                       .set_icon("M9 12l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z")
+                       .add_component(ui.Button(component_id="act-audit-refresh")
+                                      .set_label("↻ Refresh").set_variant("ghost")
+                                      .set_action(lambda ctx=None, payload=None: {"refresh": ["act-audit"]})))
         .add_component(ui.Text(component_id="act-audit").set_variant("code")
                        .set_value("— refresh to load —")
                        .set_data_source(_audit_data(api)))))
@@ -518,6 +531,7 @@ def _build_policies(ui: DashboardUIToolset, api: Any):
             .set_title("Add / update policy")
             .set_description("Policies key on (level, owner, action): setting "
                              "an existing key updates it.")
+            .set_columns(3)
             .set_submit_action(add_policy)
             .set_submit_label("Save policy")
             .add_fields(
@@ -555,7 +569,10 @@ def _build_policies(ui: DashboardUIToolset, api: Any):
            .add_component(floor_form)))
      .add_section(ui.Section(component_id="pol-form-sec")
         .add_component(form))
-     .add_section(ui.Section(component_id="pol-table-sec", title="Stored policies")
+     .add_section(ui.Section(component_id="pol-table-sec")
+        .add_component(ui.Toolbar(component_id="pol-table-bar")
+                       .set_title("Stored policies")
+                       .set_icon("M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"))
         .add_component(ui.Table(component_id="pol-table")
                        .set_columns(["Level", "Owner", "Action", "Interval", "Jitter"])
                        .set_key_column("__key")
@@ -710,6 +727,7 @@ def _build_admin(ui: DashboardUIToolset, api: Any):
                             .add_fields(ui.TextInput(component_id="adm-remove-id")
                                         .set_label("User id").set_max_length(32)))
              .add_component(ui.Form(component_id="pr-form", title="Set account prefix")
+                            .set_columns(3)
                             .set_submit_action(set_prefix).set_submit_label("Apply")
                             .add_fields(ui.TextInput(component_id="pr-account")
                                         .set_label("Account").set_max_length(64),
@@ -740,8 +758,11 @@ def _build_admin(ui: DashboardUIToolset, api: Any):
         .add_component(ui.Grid(component_id="adm-forms-grid")
                        .set_columns("auto").set_min_child("260px")
                        .add_component(forms)),
-        ui.Section(component_id="adm-accounts-sec",
-                   title="Account access rows").add_component(accounts))
+        ui.Section(component_id="adm-accounts-sec")
+        .add_component(ui.Toolbar(component_id="adm-accounts-bar")
+                       .set_title("Account access rows")
+                       .set_icon("M17 20h5v-2a4 4 0 0 0-3-3.87M9 20H4v-2a4 4 0 0 1 3-3.87m6-1.13a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"))
+        .add_component(accounts))
     return page
 
 
@@ -834,9 +855,12 @@ def _build_tools(ui: DashboardUIToolset, api: Any):
                        .set_value("— no scenario run yet —")
                        .set_data_source(lambda ctx: {"value": last_report["log"]
                                                      or "— no scenario run yet —"})))
-     .add_section(ui.Section(component_id="adv-sec", title="Fleet controls")
-        .set_icon("M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z")
-        .add_component(ui.Row(component_id="adv-row")
+     .add_section(ui.Section(component_id="adv-sec")
+        .add_component(ui.Toolbar(component_id="adv-bar")
+                       .set_title("Fleet controls")
+                       .set_icon("M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"))
+        .add_component(ui.Grid(component_id="adv-row")
+                       .set_columns("auto").set_min_child("200px")
            .add_component(ui.Button(component_id="adv-estop")
                           .set_label("■ EMERGENCY STOP").set_variant("danger")
                           .set_confirm("GLOBAL EMERGENCY STOP — this affects ALL "
@@ -855,6 +879,7 @@ def _build_tools(ui: DashboardUIToolset, api: Any):
                        .set_description("Decorative only — accent hue and "
                                         "density, applied instantly in this "
                                         "browser. Layout never changes.")
+                       .set_columns(2)
                        .set_client_action("save-theme")
                        .set_submit_label("Apply")
                        .add_fields(ui.Select(component_id="theme-accent")

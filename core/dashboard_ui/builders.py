@@ -57,6 +57,7 @@ from .components import (
     Footer,
     Grid,
     Alert,
+    Toolbar,
 )
 from .errors import (
     ActionRegistrationError,
@@ -205,4 +206,5 @@ class DashboardUIToolset:
     Footer = Footer
     Grid = Grid
     Alert = Alert
+    Toolbar = Toolbar
     Form = Form

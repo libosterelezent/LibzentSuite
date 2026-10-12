@@ -194,7 +194,8 @@ changes, payload `{"value": <current>}`).
 | Builder | Key setters | Purpose |
 |---|---|---|
 | `Container` | `set_direction("vertical"\|"horizontal")`, `set_gap(size)`, `set_align`, `set_justify` | a neutral untitled grouping box — the alignment primitive; nests (explicit opt-in) |
-| `Grid` | `set_columns(1–6 \|"auto")`, `set_min_child(size)` (auto mode), `set_gap(size)` | STRUCTURED columns — children slot into equal cells that wrap as whole rows (the tidiness primitive; narrow screens collapse via CSS) |
+| `Grid` | `set_columns(1–6 \|"auto")`, `set_min_child(size)` (auto mode), `set_gap(size)` | STRUCTURED columns — children slot into equal cells that wrap as whole rows (the tidiness primitive; auto-fill is inherently responsive) |
+| `Toolbar` | `set_title`, `set_icon`, `set_gap`, `set_align` | the section header bar: title left, actions right — refresh/add buttons sit IN the bar instead of floating above the content |
 | `ListView` | `set_data_source(callable)`, `set_empty_text` | a list fed by a server-side provider |
 | `Table` | `set_columns([...])`, `set_data_source(callable)`, `set_page_size(int)`, `set_empty_text`, `set_key_column(str)`, `set_row_actions([RowAction, ...])` | a paginated table fed by a provider, with optional per-row buttons |
 | `Button` | `set_label`, `set_description`, `set_variant("primary"\|"secondary"\|"danger"\|"ghost")`, `set_confirm(str)`, `set_loading(bool)`, `set_action(callable)` | dispatches an action on click |
@@ -218,6 +219,11 @@ submit entirely in the browser. Supported names: `"save-token"` (the
 dashboard's session-token editor — the token must never round-trip a
 server action) and `"save-theme"` (the decorative theme picker).
 Server plugins have no use for either.
+
+**Form field grids** — `Form.set_columns(3)` (or `"auto"`) lays the
+fields out in a compact grid instead of the default vertical stack; the
+submit row stays full-width below. The difference between a form and a
+field tower.
 
 **The decorative layer** — customization that can NEVER touch
 structure: `Card.set_tone("info"|"ok"|"warn"|"err")` adds an accent

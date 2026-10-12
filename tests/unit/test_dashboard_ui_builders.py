@@ -1323,3 +1323,56 @@ class TestDecorativeLayer(unittest.TestCase):
         ui.Form(component_id="f2").set_client_action("save-theme")
         with self.assertRaises(UIError):
             ui.Form(component_id="f3").set_client_action("save-anything")
+
+
+class TestToolbarAndFormGrid(unittest.TestCase):
+    """The structure primitives: header bars and non-tower forms."""
+
+    def _ui(self):
+        from core.dashboard_ui import DashboardUIToolset
+        return DashboardUIToolset()
+
+    def test_toolbar_serializes_title_icon_gap(self):
+        tb = (self._ui().Toolbar(component_id="tb")
+              .set_title("Tasks").set_icon("M4 6h16").set_gap("8px"))
+        self.assertEqual(tb._props(), {"title": "Tasks",
+                                       "icon": "M4 6h16", "gap": "8px"})
+
+    def test_toolbar_holds_flow_children_not_rows(self):
+        from core.dashboard_ui.errors import InvalidChildError
+        ui = self._ui()
+        ui.Toolbar(component_id="tb").add_component(
+            ui.Button(component_id="b").set_label("go"))
+        with self.assertRaises(InvalidChildError):
+            ui.Toolbar(component_id="tb2").add_component(
+                ui.Row(component_id="r"))
+
+    def test_toolbar_alignment_inherited(self):
+        tb = self._ui().Toolbar(component_id="tb").set_align("center")
+        self.assertEqual(tb._props()["align"], "center")
+
+    def test_form_columns_int_and_auto(self):
+        ui = self._ui()
+        f = ui.Form(component_id="f").set_columns(3)
+        self.assertEqual(f._props()["columns"], 3)
+        f2 = ui.Form(component_id="f2").set_columns("auto")
+        self.assertEqual(f2._props()["columns"], "auto")
+
+    def test_form_columns_bounds(self):
+        from core.dashboard_ui.errors import UIError
+        f = self._ui().Form(component_id="f")
+        for bad in (0, 5, "many"):
+            with self.assertRaises(UIError):
+                f.set_columns(bad)
+
+    def test_stacked_form_omits_columns(self):
+        f = self._ui().Form(component_id="f")
+        self.assertNotIn("columns", f._props())
+
+    def test_icon_on_every_container(self):
+        ui = self._ui()
+        for name in ("Section", "Card", "Row", "Column", "Container",
+                     "Grid", "Toolbar"):
+            inst = getattr(ui, name)(component_id="x")
+            self.assertTrue(hasattr(inst, "set_icon"),
+                            f"{name} missing set_icon")

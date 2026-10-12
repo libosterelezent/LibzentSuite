@@ -478,11 +478,20 @@ class _ComponentParent(UIContainer):
         self._align: str | None = None
         self._justify: str | None = None
         self._gap: str | None = None
+        self._icon: str | None = None
 
     def set_gap(self, gap) -> "_ComponentParent":
         """Spacing between children (CSS size string or px number)."""
         self._check_frozen("set the gap")
         self._gap = _validate_css_size(gap, "gap")
+        return self
+
+    def set_icon(self, icon) -> "_ComponentParent":
+        """Decorative SVG path drawn beside the title (24×24 viewBox
+        path data, same vocabulary as the sidebar icons). Escaped by
+        the renderer; purely decorative."""
+        self._check_frozen("set the icon")
+        self._icon = _require_str(icon, "icon")
         return self
 
     def set_align(self, align) -> "_ComponentParent":
@@ -509,6 +518,8 @@ class _ComponentParent(UIContainer):
             props["justify"] = self._justify
         if self._gap is not None:
             props["gap"] = self._gap
+        if self._icon is not None:
+            props["icon"] = self._icon
         return props
 
     def add_component(self, comp) -> "_ComponentParent":

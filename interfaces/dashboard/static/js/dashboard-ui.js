@@ -313,6 +313,7 @@ function renderDashboardUIComponent(comp, pluginName) {
     case "column": return renderColumn(comp, pluginName, disabled);
     case "container": return renderContainer(comp, pluginName, disabled);
     case "grid": return renderGrid(comp, pluginName, disabled);
+    case "toolbar": return renderToolbar(comp, pluginName, disabled);
     case "text": return renderText(comp);
     case "display-text": return renderDisplayText(comp);
     case "alert": return renderAlert(comp);
@@ -381,6 +382,15 @@ function renderContainer(comp, pluginName, disabled) {
   const dir = comp.direction === "horizontal" ? " dui-container-h" : "";
   return `<div class="dui-container${dir}" data-dui-comp="${esc(comp.id)}"${duiBoxStyle(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
     duiChildren(comp, pluginName, disabled) + `</div>`;
+}
+
+function renderToolbar(comp, pluginName, disabled) {
+  const icon = comp.icon
+    ? `<svg class="dui-sec-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="${esc(comp.icon)}"/></svg>` : "";
+  return `<div class="dui-toolbar" data-dui-comp="${esc(comp.id)}"${duiBoxStyle(comp)}${disabled ? ' data-dui-disabled="1"' : ""}>` +
+    (comp.title ? `<span class="dui-toolbar-title">${icon}${esc(comp.title)}</span>` : "") +
+    `<div class="dui-toolbar-actions">` +
+    duiChildren(comp, pluginName, disabled) + `</div></div>`;
 }
 
 function renderGrid(comp, pluginName, disabled) {
@@ -621,7 +631,19 @@ function renderTable(comp) {
 function renderForm(comp, pluginName, disabled) {
   const off = disabled || comp.disabled === true;
   const fields = (comp.children || []).filter(c => DUI_INPUT_TYPES.includes(c.type));
-  const body = fields.map(f => renderDashboardUIComponent(f, pluginName, off)).join("");
+  let body = fields.map(f => renderDashboardUIComponent(f, pluginName, off)).join("");
+  // field GRID: a declared columns count (or auto-fill) turns the form
+  // tower into a compact grid; submit stays on its own full-width row
+  let gridStyle = "";
+  if (comp.columns === "auto")
+    gridStyle = `grid-template-columns:repeat(auto-fill, minmax(220px, 1fr));`;
+  else {
+    const n = Math.round(+comp.columns);
+    if (Number.isFinite(n) && n >= 1 && n <= 6)
+      gridStyle = `grid-template-columns:repeat(${n}, minmax(0, 1fr));`;
+  }
+  if (gridStyle)
+    body = `<div class="dui-form-grid" style="${gridStyle}">${body}</div>`;
   return `<div class="dui-form" data-dui-comp="${esc(comp.id)}" data-dui-form="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
     (comp.title ? `<div class="dui-sec-title">${esc(comp.title)}</div>` : "") +
     (comp.description ? `<p class="sub">${esc(comp.description)}</p>` : "") +

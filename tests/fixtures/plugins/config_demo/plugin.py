@@ -318,6 +318,20 @@ class ConfigDemoPlugin(PluginBase):
                                               "takes the rest (grow 1)")
                                           .set_tone("dim").set_size("sm"))))
 
+        # toolbar: title left, actions right (refresh no longer floats)
+        layout_section.add_component(
+            ui.Toolbar().set_id("demo-toolbar").set_title("Toolbar header")
+            .add_component(ui.Button().set_id("tb-refresh")
+                           .set_label("↻ Refresh").set_variant("ghost")))
+
+        # form field grid: compact columns instead of a field tower
+        layout_section.add_component(
+            ui.Form().set_id("demo-grid-form").set_title("Gridded form")
+            .set_columns(3).set_submit_label("Submit")
+            .add_fields(ui.TextInput().set_id("gf-a").set_label("Field A"),
+                        ui.TextInput().set_id("gf-b").set_label("Field B"),
+                        ui.TextInput().set_id("gf-c").set_label("Field C")))
+
         # structured grid: equal cells that wrap as whole rows
         layout_section.add_component(
             ui.Grid().set_id("demo-grid").set_columns("auto").set_min_child("160px")
