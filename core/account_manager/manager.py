@@ -2435,6 +2435,9 @@ class AccountManager:
         last known plugin view is kept rather than cleared.
         """
         activated = False
+        account_rt = self._accounts.get(name)
+        attach_generation = (account_rt.runtime.generation
+                             if account_rt is not None else None)
         try:
             outcome = self._plugin_manager.attach_account(
                 name, self._allowed_plugins(name)
@@ -2443,6 +2446,21 @@ class AccountManager:
                 await outcome
         except Exception:
             self._logger.exception("plugin attach failed for %s", name)
+            return False
+        account_rt = self._accounts.get(name)
+        if (account_rt is None
+                or account_rt.runtime.generation != attach_generation
+                or account_rt.runtime.status != AccountStatus.RUNNING
+                or account_rt.runtime.stop_requested):
+            # Stop won the race while attach was parked. Do not leave the
+            # newly attached runtimes active on the stopped account.
+            try:
+                outcome = self._plugin_manager.deactivate_account(name)
+                if inspect.iscoroutine(outcome):
+                    await outcome
+            except Exception:
+                self._logger.exception(
+                    "plugin cleanup after concurrent stop failed for %s", name)
             return False
         self._plugin_attached.add(name)
         # A RUNNING account's plugin set must follow the assignment
