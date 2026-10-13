@@ -114,6 +114,8 @@ class PluginManager:
         self._accounts: Dict[str, Dict[str, PluginRuntime]] = {}
         #: account -> services factory: (plugin_name) -> PluginServices
         self._services: Dict[str, Callable[[str], Any]] = {}
+        # Accounts in reload teardown are closed to fresh dispatch admission.
+        self._reload_blocked: set[str] = set()
         #: strong refs for fire-and-forget dispatch tasks (no GC mid-flight)
         self._pending: Set[asyncio.Task] = set()
         #: account -> in-flight dispatch tasks (quiesced on deactivation)
@@ -330,8 +332,12 @@ class PluginManager:
         self._loader._records.pop(name, None)
         try:
             self._loader.discover()
-        except PluginError:
-            raise   # loader restored the old records; nothing was torn down
+        except BaseException:
+            # The targeted record was removed before discovery; restore it
+            # even for cancellation or unexpected loader failures.
+            if old_record is not None:
+                self._loader._records[name] = old_record
+            raise
         if name not in self._loader.names():
             if old_record is not None:
                 self._loader._records[name] = old_record
@@ -340,6 +346,7 @@ class PluginManager:
         # — captured BEFORE teardown mutates the runtime in place)
         affected = {}
         was_active = {}
+        reload_factories = {}
         for acct, runtimes in self._accounts.items():
             rt = runtimes.get(name)
             if rt is not None:
@@ -347,8 +354,12 @@ class PluginManager:
                 was_active[acct] = rt.active
         # TEARDOWN with the real hooks, one account at a time
         for acct, rt in affected.items():
+            # Close admission before taking the task snapshot. Existing
+            # dispatch drains, but fresh events cannot enter this runtime.
+            self._reload_blocked.add(acct)
+            factory = self._services.pop(acct, None)
+            reload_factories[acct] = factory
             await self._quiesce_dispatch(acct)
-            factory = self._services.get(acct)
             services = factory(name) if factory is not None else None
             ctx = self._context(acct, rt, services)
             rt.ctx = None
@@ -378,6 +389,7 @@ class PluginManager:
         for acct, old_rt in affected.items():
             runtimes = self._accounts.get(acct)
             if runtimes is None:
+                self._reload_blocked.discard(acct)
                 continue   # account gone while we worked
             try:
                 instance = self._loader.create(name)
@@ -392,14 +404,22 @@ class PluginManager:
                 loaded=False, active=False)
             runtimes[name] = rt
             restored += 1
-            if instance is not None and was_active.get(acct):
+            if (instance is not None and was_active.get(acct)
+                    and acct in self._reload_blocked
+                    and acct in self._accounts
+                    and reload_factories.get(acct) is not None):
                 try:
+                    # Re-publish ownership only while reload still owns the
+                    # account; deactivation removes the marker while it runs.
+                    self._services[acct] = reload_factories[acct]
                     await self._activate_one(acct, rt)
+                    self._reload_blocked.discard(acct)
                     reactivated += 1
                 except Exception:
                     self._logger.exception(
                         "plugin %s failed to re-activate on %s after reload",
                         name, acct)
+            self._reload_blocked.discard(acct)
         # the fresh instances take over the live UI for their accounts
         for acct in affected:
             runtimes = self._accounts.get(acct)
@@ -759,6 +779,7 @@ class PluginManager:
         if runtimes is None:
             return
         factory = self._services.pop(account, None)
+        self._reload_blocked.discard(account)
         # GHOST-WRITE GUARD (round-3): bounded-join this account's in-flight
         # dispatch tasks BEFORE the hooks run. A handler that outlives the
         # deactivation could cooldown_set/state_set for a REMOVED account
@@ -1423,7 +1444,7 @@ class PluginManager:
         if self._accounts.get(event.account) is not runtimes:
             return
         factory = self._services.get(event.account)
-        if factory is None:
+        if factory is None or event.account in self._reload_blocked:
             return
         for runtime in runtimes.values():
             if not runtime.enabled or not runtime.active:
