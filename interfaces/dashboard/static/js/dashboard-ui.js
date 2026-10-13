@@ -455,10 +455,12 @@ function duiListRecordsHTML(comp, data, compId) {
   const keyCol = String(comp.key_column || "key");
   // header row: selection slot + labels + trailing actions slot
   // shrinkable tracks: cells wrap internally instead of overflowing the
-  // page; the actions zone is capped and wraps at its own boundary
+  // page. Identity keeps a modest floor and the LARGER fr share (it wins
+  // the surplus at desktop); data columns keep a readable 90px floor;
+  // actions are capped and wrap at their own boundary.
   const gridCols = (selectable ? "28px " : "") +
-    cols.map((c, i) => i === 0 ? "minmax(160px, 1.4fr)" : "minmax(0, 1fr)")
-        .join(" ") + (rowActions.length ? " minmax(200px, 340px)" : "");
+    cols.map((c, i) => i === 0 ? "minmax(140px, 1.6fr)" : "minmax(90px, 1fr)")
+        .join(" ") + (rowActions.length ? " minmax(180px, 320px)" : "");
   const head = `<div class="dui-lrows-head" role="row" style="grid-template-columns:${gridCols}">` +
     (selectable ? `<span class="dui-lrows-sel"></span>` : "") +
     cols.map(c => `<span class="dui-lrows-h" role="columnheader">${esc(c)}</span>`).join("") +

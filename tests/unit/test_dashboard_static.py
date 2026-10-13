@@ -1004,6 +1004,31 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestWidthCollapseRegression(unittest.TestCase):
+    """The width-collapse defect (content squeezed into a left strip):
+    .dui-item carried max-width:480px — the wrapper of EVERY component,
+    capping whole lists/tables at 480px while the viewport sat empty.
+    Inside it, minmax(0,1fr) tracks computed to 0px → vertical text.
+    Pinned so the cap can never silently return."""
+
+    def test_dui_item_has_no_width_cap(self):
+        css = (STATIC_DIR / "styles" / "components.css").read_text()
+        import re
+        m = re.search(r"\.dui-item \{[^}]*\}", css)
+        self.assertIsNotNone(m, ".dui-item rule must exist")
+        self.assertNotIn("max-width: 480", m.group(0),
+                         ".dui-item must never carry the 480px cap")
+        self.assertIn("max-width: none", m.group(0))
+
+    def test_page_fills_panel_no_arbitrary_cap(self):
+        css = (STATIC_DIR / "styles" / "components.css").read_text()
+        import re
+        m = re.search(r"\.dui-page \{[^}]*\}", css)
+        self.assertIsNotNone(m)
+        self.assertIn("width: 100%", m.group(0))
+        self.assertNotIn("max-width: 1280", m.group(0))
+
+
 class TestListRecordsRenderer(unittest.TestCase):
     """Phase 3: accounts render as structured record rows via ListView
     records mode — the aligned list contract."""

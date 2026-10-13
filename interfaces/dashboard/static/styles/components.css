@@ -303,12 +303,11 @@ dialog .dlg-foot { display: flex; gap: var(--sp-2); justify-content: flex-end; p
    page gets identical rhythm. Checkbox/radio choices reuse the structured
    .pick-row grid; the toggle is a switch-skinned checkbox. */
 .dui-page { display: flex; flex-direction: column; gap: var(--sp-5);
-  max-width: 1280px; margin: 0 auto; width: 100%;
-  width: 100%; max-width: 100%; min-width: 0; }
+  width: 100%; min-width: 0; }   /* fills the panel — no arbitrary cap */
 .dui-desc { margin-top: calc(-1 * var(--sp-2)); }
-.dui-section, .dui-tab, .dui-card, .dui-form { display: flex; flex-direction: column;
-  width: 100%; max-width: 100%; min-width: 0;
-  gap: var(--sp-2); min-width: 0; }
+.dui-section, .dui-tab, .dui-card, .dui-form { display: flex;
+  flex-direction: column; width: 100%; min-width: 0;
+  gap: var(--sp-2); }
 .dui-section, .dui-tab { gap: var(--sp-3); }
 .dui-card { background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--r-md); padding: var(--sp-3); gap: var(--sp-2); }
@@ -441,7 +440,9 @@ dialog.dui-modal .dlg-body { max-height: min(70vh, 640px); overflow-y: auto;
   width: 100%; min-width: 0; }
 .dui-col { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; flex: 1; }
 .dui-item { display: flex; flex-direction: column; gap: 4px; min-width: 0;
-  max-width: 480px; }
+  width: 100%; max-width: none; }   /* fills its container — the old
+  480px cap here squeezed EVERY component (whole account lists, plugin
+  tables) into a left strip; narrow reading belongs to leaf inputs */
 .dui-row > .dui-item { max-width: none; flex: 1 1 170px; min-width: 170px; }
 .dui-item > label { font-size: 12px; color: var(--dim); font-weight: 500; }
 .dui-item .hint { font-size: 11px; color: var(--faint); }
@@ -591,7 +592,7 @@ dialog.dui-modal .dlg-body { max-height: min(70vh, 640px); overflow-y: auto;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dui-lrow-chips { flex-direction: row; flex-wrap: wrap; gap: 4px; }
 .dui-lrow-actions { display: flex; align-items: center; justify-content: flex-end;
-  gap: 6px; flex-wrap: wrap; max-width: 340px;
+  gap: 6px; flex-wrap: wrap; max-width: 320px;
   padding: 2px 0; }   /* wraps at a defined boundary, aligned right */
 
 /* Records-mode responsive contract: below 760px the row deliberately
