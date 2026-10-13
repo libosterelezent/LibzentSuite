@@ -523,3 +523,25 @@ dialog.dui-modal .dlg-body { max-height: min(70vh, 640px); overflow-y: auto;
 .dui-switch:checked::after { left: 17px; background: #fff; }
 .dui-switch:disabled { cursor: not-allowed; opacity: .55; }
 .dui-switch-row input[type="checkbox"] { width: auto; }
+
+/* Account-scoped plugin pages: the account picker bar */
+.dui-acct-bar { display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3); margin-bottom: var(--sp-3);
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--r-sm); }
+.dui-acct-label { font-size: 11px; color: var(--dim); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .04em; }
+.dui-acct-bar select { min-width: 180px; }
+
+/* Functional tab bars (role=tablist) — genuine tabs, not containers */
+.dui-tabbar { border-bottom: 1px solid var(--border); margin-bottom: var(--sp-2); }
+.dui-tabbar-row { display: flex; gap: 2px; overflow-x: auto; }
+.dui-tab-btn { padding: 8px 14px; font-size: 13px; color: var(--dim);
+  border-bottom: 2px solid transparent; white-space: nowrap; }
+.dui-tab-btn:hover { color: var(--text); }
+.dui-tab-btn.active { color: var(--accent); border-bottom-color: var(--accent);
+  font-weight: 600; }
+.dui-tab-btn:focus-visible { outline: 2px solid var(--accent);
+  outline-offset: -2px; border-radius: var(--r-sm) var(--r-sm) 0 0; }
+[role="tabpanel"] { animation: dui-fadein .12s ease-in; }
+@keyframes dui-fadein { from { opacity: .4; } to { opacity: 1; } }

@@ -401,3 +401,87 @@ class DashboardUIRouteTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EnforcementRouteTests(unittest.IsolatedAsyncioTestCase):
+    """Spec 9.4: enforcement through the REAL HTTP request path."""
+
+    async def asyncSetUp(self) -> None:
+        self.registry = DashboardUIRegistry()
+        bus = EventBus()
+        self.manager = PluginManager(
+            bus, LOG, SettingsManager(bus),
+            plugin_dir=str(FIXTURES),
+            ui_registry=self.registry)
+        await self.manager.attach_account("alpha", {"probe"})
+        await self.manager.activate_account("alpha", FakeServices("alpha"))
+        self.api = ControlAPI(
+            accounts=object(), plugins=self.manager, profiles=object(),
+            settings=object(), limiter=object(), scheduler=object(),
+            logs=object())
+        self.server = DashboardServer(self.api, token=TOKEN, port=0)
+        self.server.start()
+        self.base = f"http://127.0.0.1:{self.server.bound_port}"
+
+    async def asyncTearDown(self) -> None:
+        self.server.stop()
+
+    def url(self, path: str) -> str:
+        return f"{self.base}{path}"
+
+    async def post(self, path, payload, token=TOKEN):
+        return await asyncio.to_thread(http_post, self.url(path), payload, token)
+
+    async def get(self, path, token=TOKEN):
+        return await asyncio.to_thread(http_get, self.url(path), token)
+
+    async def test_disabled_button_forged_post_refused(self):
+        from core.dashboard_ui import DashboardUIToolset
+        from core.dashboard_ui.errors import UIError
+        ui = DashboardUIToolset()
+        btn = (ui.Button(component_id="locked")
+               .set_label("Locked").set_disabled(True)
+               .set_action(lambda c, p: "should never run"))
+        self.registry.attach("forged", ui.Layout().add_page(
+            ui.Page(component_id="p").add_section(
+                ui.Section().add_component(btn))))
+        status, body = await self.post("/api/dashboard-ui/action", {
+            "plugin": "forged", "component_id": "locked", "payload": {}})
+        self.assertEqual(status, 400)
+        self.assertIn("disabled", get_json(body)["error"])
+
+    async def test_hidden_page_excluded_from_navigation(self):
+        from core.dashboard_ui import DashboardUIToolset
+        ui = DashboardUIToolset()
+        page = ui.Page(component_id="secret").set_title("Secret")
+        page.set_check(lambda ctx: False)
+        self.registry.attach("hider", ui.Layout().add_page(page))
+        status, body = await self.get("/api/dashboard-ui/navigation")
+        entries = get_json(body)["data"]
+        self.assertNotIn(("hider", "secret"),
+                         {(e["plugin"], e["page_id"]) for e in entries})
+
+    async def test_unknown_account_context_is_clean_400(self):
+        # probe's action is a bound method on a LIVE runtime (alpha) —
+        # an invalid account must be rejected before any callback runs
+        from core.dashboard_ui.context import ActionContext
+        btns = self.registry._nodes.get("probe", {})
+        some_btn = next(iter([cid for cid, n in btns.items()
+                              if getattr(n, "_action", None)]), None)
+        self.assertIsNotNone(some_btn, "probe should expose an action")
+        status, body = await self.post("/api/dashboard-ui/action", {
+            "plugin": "probe", "component_id": some_btn, "payload": {},
+            "account": "ghost"})
+        self.assertEqual(status, 400)
+        self.assertIn("invalid account context", get_json(body)["error"])
+
+    async def test_valid_account_context_dispatches_on_live_runtime(self):
+        from core.dashboard_ui.context import ActionContext
+        btns = self.registry._nodes.get("probe", {})
+        some_btn = next(iter([cid for cid, n in btns.items()
+                              if getattr(n, "_action", None)]), None)
+        status, body = await self.post("/api/dashboard-ui/action", {
+            "plugin": "probe", "component_id": some_btn, "payload": {},
+            "account": "alpha"})
+        self.assertEqual(status, 200)
+        self.assertTrue(get_json(body)["data"]["success"])

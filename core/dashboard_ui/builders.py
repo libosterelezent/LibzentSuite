@@ -136,16 +136,32 @@ class Layout(UIContainer):
         ([] when valid). Never raises on tree problems."""
         return self._validate_tree()
 
+    #: resource limits (spec 4.1): an accidental or hostile definition
+    #: cannot build an enormous tree or uncontrolled recursive depth
+    MAX_TREE_COMPONENTS = 1000
+    MAX_TREE_DEPTH = 24
+
     def _validate_tree(self) -> list[str]:
         """BFS the tree collecting structural problems: duplicate ids
         (tree-wide), children of the wrong type, mislinked/orphaned
-        parent pointers, shared parents/cycles, and broken actions."""
+        parent pointers, shared parents/cycles, broken actions, and
+        size/depth limits."""
         errors: list[str] = []
         seen_ids: dict[str, str] = {}
         seen_objs: set[int] = set()
-        queue: deque = deque([(self, self.get_id())])
+        queue: deque = deque([(self, self.get_id(), 0)])
         while queue:
-            node, path = queue.popleft()
+            node, path, depth = queue.popleft()
+            if depth > self.MAX_TREE_DEPTH:
+                errors.append(
+                    f"tree nests deeper than {self.MAX_TREE_DEPTH} levels "
+                    f"(at '{path}')")
+                continue
+            if len(seen_objs) > self.MAX_TREE_COMPONENTS:
+                errors.append(
+                    f"tree exceeds {self.MAX_TREE_COMPONENTS} components "
+                    f"(at '{path}')")
+                return errors
             if id(node) in seen_objs:
                 errors.append(
                     f"component '{node.get_id()}' ({_type_name_of(node)}) is reachable "
@@ -171,7 +187,7 @@ class Layout(UIContainer):
                             f"component '{child.get_id()}' is in the children of "
                             f"'{node.get_id()}' but its parent pointer points at "
                             f"'{child.get_parent().get_id() if child.get_parent() else None}'")
-                    queue.append((child, f"{path}/{child.get_id()}"))
+                    queue.append((child, f"{path}/{child.get_id()}", depth + 1))
         return errors
 
 

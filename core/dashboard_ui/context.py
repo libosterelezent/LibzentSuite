@@ -52,6 +52,8 @@ class CheckContext:
     component_type: str
     #: selected account, when relevant (None = no account context)
     account: Optional[str] = None
+    #: the account's services facade, when an account context exists
+    services: Any = None
 
 
 @dataclass(frozen=True)

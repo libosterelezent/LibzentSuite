@@ -1002,3 +1002,57 @@ class TestRowActionWiring(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRendererHardening(unittest.TestCase):
+    """Spec 9.5: renderer guarantees pinned as static checks."""
+
+    def test_every_component_type_has_renderer(self):
+        js = _js()
+        for ctype in ("page", "tab", "section", "card", "row", "column",
+                      "container", "toolbar", "grid", "tile-view", "modal",
+                      "alert", "text", "display-text", "separator",
+                      "description", "header", "footer", "badge", "metric",
+                      "progress", "button", "checkbox", "toggle",
+                      "text-input", "number-input", "textarea", "select",
+                      "radio-group", "multi-select", "list-view", "table",
+                      "form"):
+            self.assertIn(f'case "{ctype}"', js, f"no renderer for {ctype}")
+
+    def test_tabs_are_functional_not_containers(self):
+        js = _js()
+        self.assertIn('role="tablist"', js)
+        self.assertIn("wireDuiTabs(panel, pluginName);", js)
+        # keyboard navigation + ARIA selection state
+        self.assertIn('"ArrowRight"', js)
+        self.assertIn('"ArrowLeft"', js)
+        self.assertIn('aria-selected', js)
+
+    def test_no_duplicate_handler_registration(self):
+        js = _js()
+        # every dynamic wiring path is idempotent via the wired guard
+        for guard in ("el.dataset.duiWired", "cb.dataset.duiWired",
+                      "btn.dataset.duiWired"):
+            self.assertIn(guard, js)
+
+    def test_disabled_and_visibility_enforced_server_side(self):
+        # the frontend never decides enablement: requests carry only ids
+        js = _js()
+        self.assertNotIn("disabled: true, action:", js)
+
+    def test_escaping_applied_in_attribute_contexts(self):
+        js = _js()
+        # icon paths and row keys are esc()'d inside attributes
+        self.assertIn('d="${esc(iconPath)}"', js)
+        self.assertIn('data-dui-row="${esc(key)}"', js)
+
+    def test_stale_request_guard_present(self):
+        js = _js()
+        self.assertIn("seq !== duiSeq", js)
+        self.assertIn("seq !== fwSeq", js)
+
+    def test_account_scoped_pages_send_validated_account(self):
+        js = _js()
+        self.assertIn("duiPageAccount[pluginName]", js)
+        self.assertIn("body.account = acct", js)
+        self.assertIn("renderDuiAccountPicker", js)

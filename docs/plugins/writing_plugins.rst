@@ -314,3 +314,15 @@ A discovered plugin runs on an account only via a DIRECT assignment
 settings profile per account in the dashboard (Plugins/Profiles tab)
 to ship a reusable settings bundle with a channel scope. Test offline
 with the simulator (``python3 main.py --sim-list``).
+
+
+Dashboard UI runtime guarantees
+    The builder-based Dashboard UI API enforces its contract at runtime:
+    bound-method actions re-bind to the live plugin instance (rejected
+    when no account runtime is active), ``require_account=True`` actions
+    receive a validated account + services context, ``set_disabled`` and
+    visibility checks are enforced server-side (forged requests cannot
+    bypass them), form submissions are schema-validated before the
+    submit callback runs, and synchronous callbacks run in a bounded
+    worker lane in the served stack. Full contract:
+    ``knowledgebase/DASHBOARD_UI_API.md`` §15.

@@ -984,7 +984,7 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
 
     async def open_move(row, ctx):
         _fleet_state["move"] = [row]
-        return {"open_modal": "move-modal", "refresh": ["move-target"]}
+        return {"open_modal": "move-modal", "refresh": ["mv-group"]}
 
     async def open_assign(row, ctx):
         _fleet_state["assign"] = row
@@ -1035,7 +1035,7 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
 
     async def bulk_move(rows, ctx):
         _fleet_state["move"] = list(rows)
-        return {"open_modal": "move-modal", "refresh": ["move-target"]}
+        return {"open_modal": "move-modal", "refresh": ["mv-group"]}
 
     # ── form submits ───────────────────────────────────────────────
     async def submit_add(ctx, payload):
@@ -1643,7 +1643,7 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
 
     async def open_bind(row, ctx):
         _profiles_state["bind"] = row
-        return {"open_modal": "bind-modal", "refresh": ["bind-profiles"]}
+        return {"open_modal": "bind-modal", "refresh": ["bp-profile"]}
 
     async def open_editor(row, ctx):
         _profiles_state["editor"] = {"plugin": row, "name": None, "settings": {}}
@@ -1835,7 +1835,7 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
         plugin, _, name = row.partition("|")
         await api.plugin_profile_delete(plugin, name)
         return {"success": True, "message": f"profile {name} deleted",
-                "refresh": ["prof-tiles", "bind-profiles"]}
+                "refresh": ["prof-tiles", "bp-profile"]}
 
     def _library_tiles(api):
         async def provide(ctx):

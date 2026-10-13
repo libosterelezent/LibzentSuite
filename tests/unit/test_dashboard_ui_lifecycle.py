@@ -4,8 +4,9 @@ Pins the PluginBase integration: ``initialize_dashboard_ui`` /
 ``attach_dashboard_ui`` are optional and backward-compatible (plugins
 without them behave exactly as before), the hook fires during
 activation with a DashboardUIToolset, the registration is usable right
-after activation, cleaned up after deactivation, deduplicated across
-accounts, and an init crash never breaks other plugins or the account.
+after activation, survives deactivation (definition ≠ runtime — Stage
+B), deduplicated across accounts, and an init crash never breaks other
+plugins or the account.
 """
 from __future__ import annotations
 
@@ -149,7 +150,11 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((result.success, result.message),
                          (True, "clicked"))
 
-    async def test_ui_cleaned_up_after_deactivation(self) -> None:
+    async def test_ui_definition_survives_deactivation(self) -> None:
+        """Stage B contract: stopping the last account ends the RUNTIME
+        association but keeps the plugin-wide page definition (the page
+        stays in the sidebar; definitions detach only at plugin unload /
+        reload boundaries)."""
         self._write("withui", _WITH_UI)
         manager = self._manager()
         await manager.attach_account("alpha", {"withui"})
@@ -157,9 +162,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.registry.list_plugins(), ["withui"])
 
         await manager.deactivate_account("alpha")
-        self.assertEqual(self.registry.list_plugins(), [])
-        self.assertIsNone(self.registry.get_layout("withui"))
-        # re-activation registers again (fresh lifecycle)
+        self.assertEqual(self.registry.list_plugins(), ["withui"])
+        self.assertIsNotNone(self.registry.get_layout("withui"))
+        # re-activation must NOT duplicate the registration
         await manager.activate_account("alpha", FakeServices("alpha"))
         self.assertEqual(self.registry.list_plugins(), ["withui"])
 
@@ -200,17 +205,225 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             ActionContext(plugin="withui", component_id="btn"))
         self.assertEqual(ok.message, "clicked")
 
-    async def test_detached_ui_no_longer_dispatches(self) -> None:
+    async def test_callable_categories_after_deactivation(self) -> None:
+        """Documented callable contract: a STATELESS (lambda/function)
+        action keeps dispatching with no active runtime — only
+        runtime-bound methods refuse (see CallbackOwnershipTests)."""
         self._write("withui", _WITH_UI)
         manager = self._manager()
         await manager.attach_account("alpha", {"withui"})
         await manager.activate_account("alpha", FakeServices("alpha"))
         await manager.deactivate_account("alpha")
-        with self.assertRaises(UIError):
-            await self.registry.dispatch_action(
-                "withui", "btn", {},
-                ActionContext(plugin="withui", component_id="btn"))
+        result = await self.registry.dispatch_action(
+            "withui", "btn", {},
+            ActionContext(plugin="withui", component_id="btn"))
+        self.assertTrue(result.success)
+        self.assertEqual(result.message, "clicked")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ══════════════════════════════════════════════════════════ Stage B hardening
+# Callback ownership + account context (spec 2.1/2.2/2.3 regression matrix)
+
+_WITH_BOUND_UI = "\n".join([
+    "name = 'boundui'",
+    "version = '1.0.0'",
+    "def __init__(self):",
+    "    self.marker = 'boot-instance'",
+    "    self.scoped_seen = None",
+    "async def on_load(self, ctx):",
+    "    self.marker = 'live-' + ctx.account",
+    "def initialize_dashboard_ui(self, ui):",
+    "    btn = ui.Button(component_id='btn').set_label('Ping')",
+    "    btn.set_action(self._ping)",
+    "    scoped = ui.Button(component_id='scoped').set_label('Scoped')",
+    "    scoped.set_action(self._scoped, require_account=True)",
+    "    page = ui.Page(component_id='page').set_title('Bound')",
+    "    page.add_section(ui.Section(component_id='sec')",
+    "                     .add_component(btn).add_component(scoped))",
+    "    self.attach_dashboard_ui(ui.Layout().add_page(page))",
+    "async def _ping(self, ctx, payload):",
+    "    return 'ran on ' + self.marker",
+    "async def _scoped(self, ctx, payload):",
+    "    self.scoped_seen = {'account': ctx.account,",
+    "                        'services': getattr(ctx.services, 'account', None)}",
+    "    return 'scoped ok'",
+])
+
+_WITH_PLAIN_UI = "\n".join([
+    "name = 'plainui'",
+    "version = '1.0.0'",
+    "def initialize_dashboard_ui(self, ui):",
+    "    btn = ui.Button(component_id='btn').set_label('Go')",
+    "    btn.set_action(lambda ctx, payload: 'plain ok')",
+    "    page = ui.Page(component_id='page').set_title('Plain')",
+    "    page.add_section(ui.Section(component_id='sec').add_component(btn))",
+    "    self.attach_dashboard_ui(ui.Layout().add_page(page))",
+])
+
+
+class CallbackOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    """Boot-time registrations must never run against the throwaway."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="sm-ui-own-")
+        self.addCleanup(self.tmp.cleanup)
+        self.plugin_dir = Path(self.tmp.name)
+        self.registry = DashboardUIRegistry()
+
+    def _manager(self) -> PluginManager:
+        bus = EventBus()
+        return PluginManager(bus, LOG, SettingsManager(bus),
+                              plugin_dir=str(self.plugin_dir),
+                              ui_registry=self.registry)
+
+    def _write(self, name: str, body: str) -> None:
+        (self.plugin_dir / f"{name}.py").write_text(_plugin_src(body))
+
+    async def test_bound_action_rejected_without_active_runtime(self):
+        self._write("boundui", _WITH_BOUND_UI)
+        manager = self._manager()
+        manager.discover()
+        manager.init_boot_dashboard_uis()
+        # the page EXISTS from boot (nav stays populated)...
+        self.assertIn("boundui", self.registry.list_plugins())
+        # ...but the bound-method action refuses to run on the throwaway
+        with self.assertRaises(UIError) as raised:
+            await self.registry.dispatch_action(
+                "boundui", "btn", {},
+                ActionContext(plugin="boundui", component_id="btn"))
+        self.assertIn("requires an active plugin runtime", str(raised.exception))
+
+    async def test_bound_action_rebinds_to_live_instance(self):
+        self._write("boundui", _WITH_BOUND_UI)
+        manager = self._manager()
+        manager.discover()
+        manager.init_boot_dashboard_uis()
+        await manager.attach_account("alpha", {"boundui"})
+        await manager.activate_account("alpha", FakeServices("alpha"))
+        result = await self.registry.dispatch_action(
+            "boundui", "btn", {},
+            ActionContext(plugin="boundui", component_id="btn"))
+        self.assertEqual(result.message, "ran on live-alpha")
+
+    async def test_plain_function_dispatches_without_runtime(self):
+        # stateless callables keep their normal semantics — documented
+        self._write("plainui", _WITH_PLAIN_UI)
+        manager = self._manager()
+        manager.discover()
+        manager.init_boot_dashboard_uis()
+        result = await self.registry.dispatch_action(
+            "plainui", "btn", {},
+            ActionContext(plugin="plainui", component_id="btn"))
+        self.assertEqual(result.message, "plain ok")
+
+    async def test_two_accounts_one_page_rebinds_per_selection(self):
+        self._write("boundui", _WITH_BOUND_UI)
+        manager = self._manager()
+        manager.discover()
+        manager.init_boot_dashboard_uis()
+        await manager.attach_account("alpha", {"boundui"})
+        await manager.attach_account("beta", {"boundui"})
+        await manager.activate_account("alpha", FakeServices("alpha"))
+        await manager.activate_account("beta", FakeServices("beta"))
+        # ONE page for both accounts (no per-account duplicates)
+        self.assertEqual(self.registry.list_plugins(), ["boundui"])
+        svc_alpha = FakeServices("alpha")
+        svc_beta = FakeServices("beta")
+
+        async def resolve(account, svc):
+            return ActionContext(plugin="boundui", component_id="btn",
+                                 account=account, services=svc)
+
+        result = await self.registry.dispatch_action(
+            "boundui", "btn", {}, await resolve("beta", svc_beta))
+        self.assertEqual(result.message, "ran on live-beta")
+        result = await self.registry.dispatch_action(
+            "boundui", "btn", {}, await resolve("alpha", svc_alpha))
+        self.assertEqual(result.message, "ran on live-alpha")
+
+    async def test_stop_last_account_keeps_ui_rejects_action(self):
+        self._write("boundui", _WITH_BOUND_UI)
+        manager = self._manager()
+        manager.discover()
+        manager.init_boot_dashboard_uis()
+        await manager.attach_account("alpha", {"boundui"})
+        await manager.activate_account("alpha", FakeServices("alpha"))
+        await manager.deactivate_account("alpha")
+        # the DEFINITION survives (sidebar keeps the page)...
+        self.assertIn("boundui", self.registry.list_plugins())
+        # ...the runtime-bound action correctly refuses
+        with self.assertRaises(UIError):
+            await self.registry.dispatch_action(
+                "boundui", "btn", {},
+                ActionContext(plugin="boundui", component_id="btn"))
+
+    async def test_restart_restores_dispatch_without_duplicates(self):
+        self._write("boundui", _WITH_BOUND_UI)
+        manager = self._manager()
+        manager.discover()
+        manager.init_boot_dashboard_uis()
+        await manager.attach_account("alpha", {"boundui"})
+        await manager.activate_account("alpha", FakeServices("alpha"))
+        await manager.deactivate_account("alpha")
+        await manager.activate_account("alpha", FakeServices("alpha"))
+        self.assertEqual(self.registry.list_plugins(), ["boundui"])
+        result = await self.registry.dispatch_action(
+            "boundui", "btn", {},
+            ActionContext(plugin="boundui", component_id="btn"))
+        self.assertEqual(result.message, "ran on live-alpha")
+
+    async def test_require_account_rejected_without_account(self):
+        self._write("boundui", _WITH_BOUND_UI)
+        manager = self._manager()
+        manager.discover()
+        manager.init_boot_dashboard_uis()
+        await manager.attach_account("alpha", {"boundui"})
+        await manager.activate_account("alpha", FakeServices("alpha"))
+        with self.assertRaises(UIError) as raised:
+            await self.registry.dispatch_action(
+                "boundui", "scoped", {},
+                ActionContext(plugin="boundui", component_id="scoped"))
+        self.assertIn("requires an account context", str(raised.exception))
+
+    async def test_require_account_receives_validated_context(self):
+        self._write("boundui", _WITH_BOUND_UI)
+        manager = self._manager()
+        manager.discover()
+        manager.init_boot_dashboard_uis()
+        await manager.attach_account("alpha", {"boundui"})
+        await manager.activate_account("alpha", FakeServices("alpha"))
+        result = await self.registry.dispatch_action(
+            "boundui", "scoped", {},
+            ActionContext(plugin="boundui", component_id="scoped",
+                          account="alpha", services=FakeServices("alpha")))
+        self.assertTrue(result.success)
+        live = manager.active_instance_for("boundui")
+        self.assertEqual(live.scoped_seen,
+                         {"account": "alpha", "services": "alpha"})
+
+    # ------------------------------------------- manager-level validation
+    def test_active_instance_for_validation_matrix(self):
+        self._write("boundui", _WITH_BOUND_UI)
+        manager = self._manager()
+        manager.discover()
+        manager.init_boot_dashboard_uis()
+        from core.errors import PluginError
+        with self.assertRaises(PluginError):
+            manager.active_instance_for("boundui", "ghost")   # unknown
+        self.assertIsNone(manager.active_instance_for("boundui"))  # none active
+        # attach but do NOT activate
+        import asyncio
+        asyncio.get_event_loop_policy()
+        async def prep():
+            await manager.attach_account("alpha", {"boundui"})
+        asyncio.run(prep())
+        with self.assertRaises(PluginError):
+            manager.active_instance_for("boundui", "alpha")   # not active
+        runtime = manager._accounts["alpha"]["boundui"]
+        runtime.enabled = False
+        with self.assertRaises(PluginError):
+            manager.active_instance_for("boundui", "alpha")   # disabled

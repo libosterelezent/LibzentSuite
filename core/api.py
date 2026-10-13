@@ -65,6 +65,7 @@ import time as _time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from .dashboard_ui.context import ActionContext, CheckContext
+from .dashboard_ui.errors import UIError
 from .errors import DatabaseError, SyncGroupError
 from . import plugin_scopes
 from .rate_limit_manager import (
@@ -1379,9 +1380,15 @@ class ControlAPI:
 
     # ------------------------------------------- dashboard UI extension (D)
     async def dashboard_ui_navigation(self) -> List[Dict[str, Any]]:
-        """Plugin pages for the sidebar: [{plugin, page_id, title, icon,
-        order}], sorted by (order, plugin). Reads the frozen snapshots —
-        no plugin code runs, so this is safe for every boot/refresh."""
+        """Plugin pages for the sidebar, VISIBILITY-CHECKED.
+
+        Same fail-closed contract as page retrieval: a page whose check
+        (or an ancestor's) denies is excluded from the sidebar, not just
+        from direct reads. Checks run with account=None here (the nav
+        exists before any account is selected); page checks that depend
+        on an account should allow None to stay reachable, and gate the
+        account-dependent parts with component checks instead.
+        """
         registry = self._plugins.ui_registry
         nav: List[Dict[str, Any]] = []
         for plugin_name in registry.list_plugins():
@@ -1391,37 +1398,76 @@ class ControlAPI:
             for page in (layout.get("children") or []):
                 if page.get("type") != "page":
                     continue
+                page_id = page.get("id", "")
+                if not await registry.check_visibility(
+                        plugin_name, page_id,
+                        CheckContext(plugin=plugin_name,
+                                     component_id=page_id,
+                                     component_type="page")):
+                    continue
                 nav.append({
                     "plugin": plugin_name,
-                    "page_id": page.get("id", ""),
+                    "page_id": page_id,
                     "title": page.get("title", plugin_name),
                     "icon": page.get("icon", ""),
                     "order": page.get("order", 0),
+                    "account_scoped": page.get("account_scoped", False),
                 })
         return sorted(nav, key=lambda n: (n.get("order", 0), n["plugin"]))
 
     async def dashboard_ui_page(self, plugin: str,
-                                page_id: str) -> Optional[Dict[str, Any]]:
+                                page_id: str,
+                                account: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """One page's full serialized component tree; None when the
         plugin has no UI or the page id is unknown (route -> 404).
 
         Visibility is applied to the RENDERED definition: subtrees
         whose (own or ancestor) check denies are pruned from the tree
         before it crosses the wire — the same fail-closed verdicts the
-        dispatch/data surfaces enforce server-side.
+        dispatch/data surfaces enforce server-side. ``account`` (the
+        validated dashboard selection) reaches account-dependent checks.
         """
         registry = self._plugins.ui_registry
+        if account is not None:
+            account, _services = await self._ui_account_context(plugin, account)
         layout = registry.get_layout(plugin)
         if not layout:
             return None
         for page in (layout.get("children") or []):
             if page.get("id") == page_id:
-                return await registry.visible_tree(plugin, page)
+                return await registry.visible_tree(plugin, page,
+                                                   account=account)
         return None
+
+    async def _ui_account_context(self, plugin: str,
+                                  account: Optional[str]):
+        """Validate a browser-supplied account for UI dispatch.
+
+        Returns (account, services) — services is None only for
+        account-less (plugin-wide) dispatch. The account is validated
+        against the plugin manager (known, assigned, enabled, active);
+        the services facade comes from the account's own wiring. Never
+        guessed, never fabricated.
+        """
+        if account is None:
+            return None, None
+        from core.errors import PluginError
+        try:
+            self._plugins.active_instance_for(plugin, account)
+        except PluginError as exc:
+            raise UIError(
+                f"invalid account context for plugin {plugin!r}: {exc}") from exc
+        services = self._plugins.services_for(account, plugin)
+        if services is None:
+            raise UIError(
+                f"account {account!r} has no active services wiring — "
+                f"start the account before account-scoped UI actions")
+        return account, services
 
     async def dashboard_ui_action(self, plugin: str, component_id: str,
                                   payload: Dict[str, Any],
-                                  surface: str = "api") -> Dict[str, Any]:
+                                  surface: str = "api",
+                                  account: Optional[str] = None) -> Dict[str, Any]:
         """Dispatch a registered component action (visibility-checked).
 
         Raises UIError (a ValueError -> honest 400 at the interface) for
@@ -1430,7 +1476,9 @@ class ControlAPI:
         audit vocabulary (api/dashboard) — reserved for mgmt audit wiring.
         """
         registry = self._plugins.ui_registry
-        context = ActionContext(plugin=plugin, component_id=component_id)
+        account, services = await self._ui_account_context(plugin, account)
+        context = ActionContext(plugin=plugin, component_id=component_id,
+                                account=account, services=services)
         result = await registry.dispatch_action(
             plugin, component_id, payload, context)
         return {"success": result.success, "message": result.message,
@@ -1438,17 +1486,21 @@ class ControlAPI:
                 "refresh": result.refresh, "modal": result.modal}
 
     async def dashboard_ui_data(self, plugin: str,
-                                component_id: str) -> Any:
+                                component_id: str,
+                                account: Optional[str] = None) -> Any:
         """Fetch a data-provider result (visibility-checked, JSON-safe).
 
         Raises UIError when the plugin/component is unknown, hidden, or
         declares no provider (the interface distinguishes that from a
-        payload fault: it maps to 404, not 400)."""
+        payload fault: it maps to 404, not 400). ``account`` is the
+        validated dashboard selection for account-scoped pages."""
         registry = self._plugins.ui_registry
-        # the outer context only carries the account; the registry pins a
-        # precise per-component CheckContext for the actual provider call
+        account, _services = await self._ui_account_context(plugin, account)
+        # the outer context carries the validated account; the registry
+        # pins a precise per-component CheckContext per provider call
         context = CheckContext(plugin=plugin, component_id=component_id,
-                               component_type="")
+                               component_type="", account=account,
+                               services=_services)
         return await registry.get_data(plugin, component_id, context)
 
     # ------------------------------------------------------ admin access

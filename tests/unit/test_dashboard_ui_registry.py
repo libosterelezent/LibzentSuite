@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import asyncio
 import unittest
 from pathlib import Path
 
@@ -591,7 +592,8 @@ class PluginScopeTests(unittest.IsolatedAsyncioTestCase):
 
         await manager.deactivate_account("alpha")
         self.assertEqual(self.registry.list_plugins(), ["withui"])
-        # the registered actions still dispatch (beta owns them now)
+        # the definition survived; dispatching against beta's live
+        # runtime still works (and without any runtime it would refuse)
         result = await self.registry.dispatch_action(
             "withui", "btn", {},
             ActionContext(plugin="withui", component_id="btn",
@@ -599,7 +601,11 @@ class PluginScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.message, "clicked")
 
         await manager.deactivate_account("beta")
-        self.assertEqual(self.registry.list_plugins(), [])  # last one out
+        # Stage B: even the LAST account stopping keeps the definition —
+        # detach happens only at plugin unload/reload boundaries
+        self.assertEqual(self.registry.list_plugins(), ["withui"])
+        manager.unload_plugin("withui")
+        self.assertEqual(self.registry.list_plugins(), [])
 
     async def test_ui_init_failure_isolated_and_partial_registration_cleaned(self) -> None:
         self._write_withui()
@@ -675,3 +681,77 @@ class ResultNormalizationEdgeCases(unittest.TestCase):
             {"rows": [1, 2]}, "p", "btn")
         self.assertEqual(result.data, {"rows": [1, 2]})
         self.assertEqual(result.refresh, [])
+
+
+def _ctx(plugin, cid):
+    from core.dashboard_ui.context import ActionContext
+    return ActionContext(plugin=plugin, component_id=cid)
+
+
+class SyncCallbackPolicyTests(unittest.IsolatedAsyncioTestCase):
+    """Spec 5: slow sync callbacks must not freeze the event loop when
+    offloading is enabled; exhaustion/timeout behave predictably."""
+
+    def _registry(self, offload):
+        from core.dashboard_ui.registry import DashboardUIRegistry
+        from core.dashboard_ui import DashboardUIToolset
+        ui = DashboardUIToolset()
+        reg = DashboardUIRegistry(offload_sync=offload)
+        btn = ui.Button(component_id="slow").set_action(
+            lambda ctx, payload: "sync done")
+        fast = ui.Button(component_id="fast").set_action(
+            lambda ctx, payload: "fast done")
+        reg.attach("p", ui.Layout().add_page(
+            ui.Page(component_id="pg").add_section(
+                ui.Section().add_component(btn).add_component(fast))))
+        return reg
+
+    async def test_inline_mode_still_supported(self):
+        reg = self._registry(offload=False)
+        result = await reg.dispatch_action(
+            "p", "slow", {}, _ctx("p", "slow"))
+        self.assertEqual(result.message, "sync done")
+
+    async def test_offloaded_sync_does_not_block_async(self):
+        import time
+        from core.dashboard_ui import DashboardUIToolset
+        ui = DashboardUIToolset()
+        reg = DashboardUIRegistry(offload_sync=True)
+
+        async def slow_async(ctx, payload):
+            await asyncio.sleep(0.25)
+            return "async done"
+
+        sleeper = ui.Button(component_id="sleeper")
+        sleeper.set_action(slow_async)
+        blocker = ui.Button(component_id="blocker")
+        blocker.set_action(lambda ctx, payload: time.sleep(0.25) or "sync done")
+        reg.attach("p", ui.Layout().add_page(
+            ui.Page(component_id="pg").add_section(
+                ui.Section().add_component(sleeper).add_component(blocker))))
+        # run the blocking sync callback and the async one concurrently:
+        # with offloading, the async dispatch completes DURING the sync
+        # sleep instead of after it
+        started = asyncio.get_event_loop().time()
+        await asyncio.gather(
+            reg.dispatch_action("p", "blocker", {}, _ctx("p", "blocker")),
+            reg.dispatch_action("p", "sleeper", {}, _ctx("p", "sleeper")))
+        elapsed = asyncio.get_event_loop().time() - started
+        self.assertLess(elapsed, 0.45,
+                        "async dispatch serialized behind the sync callback")
+
+    async def test_sync_timeout_is_predictable(self):
+        import time
+        from core.dashboard_ui import DashboardUIToolset
+        from core.dashboard_ui.errors import UIError
+        ui = DashboardUIToolset()
+        reg = DashboardUIRegistry(offload_sync=True)
+        reg.SYNC_TIMEOUT_S = 0.1
+        btn = ui.Button(component_id="hog").set_action(
+            lambda ctx, payload: time.sleep(0.5) or "never")
+        reg.attach("p", ui.Layout().add_page(
+            ui.Page(component_id="pg").add_section(
+                ui.Section().add_component(btn))))
+        with self.assertRaises(UIError) as raised:
+            await reg.dispatch_action("p", "hog", {}, _ctx("p", "hog"))
+        self.assertIn("exceeded", str(raised.exception))

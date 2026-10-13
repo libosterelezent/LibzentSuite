@@ -558,3 +558,88 @@ panels until the builder API grows selection/modals.
 Framework actions close over the ControlAPI exclusively (audit and
 validation included) and return `refresh` lists naming the data
 components a mutation touched — the pattern every plugin should follow.
+
+
+---
+
+## 15. Runtime guarantees (hardening contract)
+
+### Callback binding and runtime ownership
+
+`initialize_dashboard_ui` may run on a BOOT-TIME instance (pages exist
+before any account connects). The registry stores the layout and
+resolves callbacks at DISPATCH time:
+
+* **Bound methods** are re-bound BY NAME to the LIVE plugin instance
+  (the account-scoped selection when one is supplied, otherwise the
+  first active runtime). With NO active runtime, a bound-method action
+  is REJECTED ("requires an active plugin runtime") — it never runs on
+  the discarded boot instance.
+* **Plain functions / lambdas / callable objects** run exactly as
+  registered, with or without a runtime. Do not capture per-account
+  state in closures — that is the documented contract.
+
+### Account context
+
+`set_action(cb, require_account=True)` (also `set_submit_action`)
+marks an account-scoped operation: dispatch REQUIRES a validated
+account and receives `context.account` + `context.services` (that
+account's PluginServices facade). Accounts are validated against the
+plugin manager (known, assigned, enabled, active); the account is
+never guessed and services are never fabricated.
+`Page.set_account_scope(True)` makes the dashboard show an account
+picker in the page header; the selection rides every action, provider
+and check request for that page.
+
+### UI definition lifetime
+
+A plugin's page definition registers at boot and SURVIVES account
+stops (the sidebar entry stays; bound actions refuse while no runtime
+is active). Definitions detach only at plugin UNLOAD/RELOAD boundaries
+or framework shutdown. Replacement is atomic: a failed re-attach never
+destroys the previous valid registration.
+
+### Enforcement (not authorization)
+
+* `set_disabled(True)` is enforced SERVER-SIDE: disabled components
+  (and descendants of disabled containers) cannot execute actions or
+  serve data, forged request or not.
+* Visibility checks apply consistently to NAVIGATION (hidden pages are
+  absent from the sidebar), page retrieval (denied subtrees pruned),
+  actions and providers (denied). Checks run with `account=None` in
+  navigation — page checks should allow None to stay reachable and
+  gate account-dependent parts with component checks.
+* The dashboard's auth model is a single SHARED TOKEN: `set_check()`
+  expresses state conditions, not per-viewer identity (see
+  `CheckContext`).
+
+### Validation guarantees
+
+* Forms: required presence, value types, numeric bounds, static-choice
+  membership, text length and unknown keys (static-schema forms) are
+  enforced BEFORE the submit callback runs; errors return as
+  `field_errors` keyed by field id. Fields-provider (dynamic) forms
+  accept their dynamic keys unchecked — the submit callback owns
+  those. Business rules remain the plugin's responsibility.
+* Action results: `data` must be JSON-safe (finite floats, string
+  keys, ≤16 nesting, ≤500-item lists); `refresh` ids must name
+  components in the same layout. Violations raise `ResultValidationError`
+  naming the plugin/component.
+* Trees: ≤1000 components, ≤24 nesting depth (`TreeValidationError`).
+* Icons: SVG path-data charset only, ≤512 chars.
+
+### Synchronous callback policy
+
+Async callbacks await normally. In the SERVED stack, sync callbacks run
+in a bounded worker lane (4 concurrent, 10s timeout) so a slow one
+cannot freeze the event loop; lane exhaustion and timeouts raise
+predictable UIErrors. Offloaded sync callbacks must be thread-safe and
+must not touch event-loop-bound state. Test stacks run sync callbacks
+inline. Cancelling an awaiting task does NOT terminate a running
+synchronous function (documented limitation).
+
+### Tabs are tabs
+
+`Tab` children of a Page render as one accessible tablist (ARIA roles,
+keyboard arrows/Home/End, click switching, lazy data loading in newly
+shown panels). Non-Tab children stay in the flow around the tab set.

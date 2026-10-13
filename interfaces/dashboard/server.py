@@ -981,7 +981,8 @@ class DashboardServer:
             if (method, path) == ("GET", "/api/dashboard-ui/page"):
                 page = await api.dashboard_ui_page(
                     q_str(query, "plugin", path),
-                    q_str(query, "page_id", path))
+                    q_str(query, "page_id", path),
+                    account=q_opt(query, "account"))
                 if page is None:
                     return 404, {"ok": False,
                                  "error": "unknown plugin page"}
@@ -995,6 +996,10 @@ class DashboardServer:
                                  "error": "field 'payload' in POST "
                                           "/api/dashboard-ui/action must "
                                           "be an object"}
+                account = body.get("account")
+                if account is not None and not isinstance(account, str):
+                    return 400, {"ok": False,
+                                 "error": "field 'account' must be a string"}
                 return 200, {
                     "ok": True,
                     "data": await api.dashboard_ui_action(
@@ -1002,13 +1007,15 @@ class DashboardServer:
                         require_str(body, "component_id", path),
                         payload,
                         surface="dashboard",
+                        account=account,
                     ),
                 }
             if (method, path) == ("GET", "/api/dashboard-ui/data"):
                 try:
                     data = await api.dashboard_ui_data(
                         q_str(query, "plugin", path),
-                        q_str(query, "component_id", path))
+                        q_str(query, "component_id", path),
+                        account=q_opt(query, "account"))
                 except UIError as exc:
                     # unknown plugin/component, hidden, or no provider:
                     # the read cannot be served — 404, not a 400

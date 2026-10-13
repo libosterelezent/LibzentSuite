@@ -809,10 +809,15 @@ class Form(UIContainer):
         self._close_on_submit: bool | None = None
         self._data_source = None      # fields provider (schema-driven)
 
-    def set_submit_action(self, action) -> "Form":
+    def set_submit_action(self, action,
+                          require_account: bool = False) -> "Form":
+        """Register the submit callable (see set_action for the
+        account-scoping marker)."""
         self._check_frozen("set the submit action")
         self._submit_action = _require_callable(
             action, "submit action", ActionRegistrationError)
+        self._action_require_account = _require_bool(require_account,
+                                                      "require_account")
         return self
 
     def set_submit_label(self, label: str) -> "Form":
@@ -1378,6 +1383,8 @@ class Page(UIContainer):
         self._description: str | None = None
         self._icon: str | None = None
         self._order: int | None = None
+        self._account_scoped: bool | None = None
+        self._account_scoped: bool | None = None
 
     def set_description(self, description: str) -> "Page":
         self._check_frozen("set the description")
@@ -1387,6 +1394,24 @@ class Page(UIContainer):
     def set_icon(self, icon: str) -> "Page":
         self._check_frozen("set the icon")
         self._icon = _require_str(icon, "icon")
+        return self
+
+    def set_account_scope(self, scoped: bool = True) -> "Page":
+        """Declare this page ACCOUNT-SCOPED: the dashboard shows an
+        account picker in the page header and supplies the validated
+        selection (with its services facade) to every action, provider
+        and check on the page."""
+        self._check_frozen("set the account scope")
+        self._account_scoped = _require_bool(scoped, "account scope")
+        return self
+
+    def set_account_scope(self, scoped: bool = True) -> "Page":
+        """Declare this page ACCOUNT-SCOPED: the dashboard shows an
+        account picker in the page header and supplies the validated
+        selection (with its services facade) to every action, provider
+        and check on the page."""
+        self._check_frozen("set the account scope")
+        self._account_scoped = _require_bool(scoped, "account scope")
         return self
 
     def set_order(self, order: int) -> "Page":
@@ -1444,6 +1469,10 @@ class Page(UIContainer):
             props["icon"] = self._icon
         if self._order is not None:
             props["order"] = self._order
+        if self._account_scoped is not None:
+            props["account_scoped"] = self._account_scoped
+        if self._account_scoped is not None:
+            props["account_scoped"] = self._account_scoped
         return props
 
 

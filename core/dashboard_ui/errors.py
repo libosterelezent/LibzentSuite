@@ -85,3 +85,28 @@ class FrozenLayoutError(UIError):
 
 class ActionRegistrationError(UIError):
     """A non-callable was registered where an action callable is required."""
+
+
+# ════════════════════════════════ Stage B/C hardening: precise categories
+# All are UIErrors (same HTTP convention) — subclasses let callers and
+# tests distinguish WHY an operation was refused.
+
+class ComponentDisabledError(UIError):
+    """A disabled component (or a descendant of one) was invoked —
+    presentation state enforced server-side (spec 3.2)."""
+
+
+class AccountContextError(UIError):
+    """An account-scoped operation lacked a validated account/runtime
+    context, or the supplied account failed validation (spec 2.2)."""
+
+
+class ResultValidationError(UIError):
+    """A callback/provider result failed cross-the-wire validation
+    (non-JSON-safe data, unknown refresh targets — spec 4.3)."""
+
+
+class FormValidationError(UIError):
+    """Reserved for form-schema failures surfaced as structured
+    field_errors (the dispatch returns them; raising is for transport
+    level problems)."""

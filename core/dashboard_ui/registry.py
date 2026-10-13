@@ -45,7 +45,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .builders import Layout, UIContainer
 from .context import ActionContext, ActionResult, CheckContext
-from .errors import TreeValidationError, UIError
+from .errors import (AccountContextError, ComponentDisabledError,
+                   ResultValidationError, TreeValidationError, UIError)
 
 LOG = logging.getLogger("slaughtermudae.dashboard_ui.registry")
 
@@ -66,9 +67,16 @@ class DashboardUIRegistry:
     the same component ID safely.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, offload_sync: bool = False) -> None:
         # plugin_name -> component_id -> action callback
         self._actions: Dict[str, Dict[str, Callable]] = {}
+        # sync-callback execution policy (see _invoke)
+        self._offload_sync = offload_sync
+        self._sync_slots = asyncio.Semaphore(self.SYNC_MAX_CONCURRENT)
+        import concurrent.futures
+        self._sync_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.SYNC_MAX_CONCURRENT,
+            thread_name_prefix="dui-sync")
         # plugin_name -> component_id -> visibility check callable
         self._checks: Dict[str, Dict[str, Callable]] = {}
         # plugin_name -> component_id -> data provider callable
@@ -77,6 +85,8 @@ class DashboardUIRegistry:
         self._layouts: Dict[str, dict] = {}
         # plugin_name -> frozen builder tree (kept for re-serialization)
         self._builders: Dict[str, Layout] = {}
+        # (plugin_name, account|None) -> live plugin instance | None
+        self._instance_resolver: Optional[Callable] = None
         # plugin_name -> component_id -> node (the dispatch index)
         self._nodes: Dict[str, Dict[str, Any]] = {}
 
@@ -188,6 +198,150 @@ class DashboardUIRegistry:
         """Plugin names with an active UI (sorted for determinism)."""
         return sorted(self._layouts)
 
+    # ------------------------------------------------- runtime binding
+    def set_instance_resolver(self, resolver) -> None:
+        """Install ``(plugin_name, account|None) -> instance|None``.
+
+        The plugin manager provides this: it resolves the LIVE plugin
+        instance for a plugin (optionally pinned to one account) so
+        bound-method callbacks registered by a boot-time UI can be
+        REBOUND to the runtime that should execute them. Without a
+        resolver (stripped-down test stacks) bound methods run as
+        registered.
+        """
+        if not callable(resolver):
+            raise UIError("instance resolver must be callable")
+        self._instance_resolver = resolver
+
+    def _bind_runtime_callback(self, plugin_name: str, callback,
+                               account, what: str):
+        """Rebind a bound method to its LIVE plugin runtime.
+
+        Boot-time UI registration instantiates a throwaway plugin object;
+        callbacks registered from it are bound to that discarded instance.
+        Bound methods are rebindable BY NAME against the live instance
+        the plugin manager resolves. Plain functions, closures and
+        callable objects carry their own state and run exactly as
+        registered (the documented contract: do not capture per-account
+        runtime state in closures).
+        """
+        if not inspect.ismethod(callback):
+            return callback
+        resolver = getattr(self, "_instance_resolver", None)
+        if resolver is None:
+            return callback
+        try:
+            live = resolver(plugin_name, account)
+        except UIError:
+            raise
+        except Exception as exc:
+            raise UIError(
+                f"{what} of plugin {plugin_name!r}: runtime context "
+                f"lookup failed ({type(exc).__name__})") from exc
+        if live is None:
+            raise UIError(
+                f"{what} of plugin {plugin_name!r} requires an active "
+                f"plugin runtime — start an account running this plugin")
+        rebound = getattr(live, callback.__name__, None)
+        if not callable(rebound):
+            raise UIError(
+                f"{what} of plugin {plugin_name!r}: live runtime has no "
+                f"method {callback.__name__!r}")
+        return rebound
+
+    MAX_FORM_FIELDS = 64
+
+    def _validate_form_submission(self, form_node, payload: dict) -> Dict[str, str]:
+        """Schema validation for one form submission.
+
+        Guaranteed by the framework (spec 4.4): required presence, value
+        types, numeric bounds, static-choice membership, text length,
+        and unknown keys (static-schema forms only — a fields-provider
+        form accepts its dynamic keys unchecked; the SUBMIT callback
+        owns those). Business rules remain the plugin's responsibility.
+        Returns {field_id: message}; empty = valid.
+        """
+        errors: Dict[str, str] = {}
+        if len(payload) > self.MAX_FORM_FIELDS:
+            return {"_form": f"payload exceeds {self.MAX_FORM_FIELDS} fields"}
+        from .components import (TextInput, NumberInput, Textarea, Select,
+                                 MultiSelect, Checkbox, Toggle)
+        known: Dict[str, Any] = {}
+        for child in getattr(form_node, "_children", []):
+            cid = child.get_id()
+            if cid:
+                known[cid] = child
+        dynamic_ok = getattr(form_node, "_data_source", None) is not None
+        for key in payload:
+            if key not in known and not dynamic_ok:
+                errors[key] = "unknown field for this form"
+        for cid, field in known.items():
+            label = getattr(field, "_label", None) or cid
+            value = payload.get(cid)
+            if isinstance(field, (Checkbox, Toggle)):
+                if value is not None and not isinstance(value, bool):
+                    errors[cid] = f"{label}: must be true or false"
+                continue
+            required = bool(getattr(field, "_required", False))
+            if value is None or value == "":
+                if required:
+                    errors[cid] = f"{label}: required"
+                continue
+            if isinstance(field, NumberInput):
+                if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                        or not math.isfinite(value):
+                    errors[cid] = f"{label}: must be a number"
+                    continue
+                lo = getattr(field, "_min_value", None)
+                hi = getattr(field, "_max_value", None)
+                if lo is not None and value < lo:
+                    errors[cid] = f"{label}: below the minimum of {lo}"
+                elif hi is not None and value > hi:
+                    errors[cid] = f"{label}: above the maximum of {hi}"
+                continue
+            if isinstance(field, (Select, MultiSelect)):
+                options = getattr(field, "_options", None) or []
+                if not options:
+                    continue   # live options: validated by the submit
+                allowed = {str(o.get("value") if isinstance(o, dict) else o)
+                           for o in options}
+                if isinstance(field, MultiSelect):
+                    if not isinstance(value, list) or \
+                            not all(isinstance(v, str) for v in value):
+                        errors[cid] = f"{label}: must be a list of choices"
+                    elif any(v not in allowed for v in value):
+                        errors[cid] = f"{label}: contains an undeclared choice"
+                else:
+                    if not isinstance(value, str):
+                        errors[cid] = f"{label}: must be a choice"
+                    elif value not in allowed and value != "":
+                        errors[cid] = f"{label}: not one of the declared choices"
+                continue
+            if isinstance(field, (TextInput, Textarea)):
+                if not isinstance(value, str):
+                    errors[cid] = f"{label}: must be text"
+                    continue
+                max_len = getattr(field, "_max_length", None)
+                if max_len and len(value) > max_len:
+                    errors[cid] = f"{label}: longer than {max_len} characters"
+        return errors
+
+    @staticmethod
+    def _assert_enabled(plugin_name: str, node, component_id: str) -> None:
+        """Disabled components (or descendants of disabled containers)
+        never execute server-side — the frontend state is presentation,
+        this is the enforcement."""
+        walk = node
+        while walk is not None:
+            if getattr(walk, "_disabled", False):
+                where = ("ancestor "
+                         + (walk.get_id() if walk is not node else ""))
+                raise ComponentDisabledError(
+                    f"component {component_id!r} of plugin "
+                    f"{plugin_name!r} is disabled"
+                    + (f" (by {where})" if walk is not node else ""))
+            walk = getattr(walk, "_parent", None)
+
     # ------------------------------------------------------------- dispatch
     async def dispatch_action(
         self,
@@ -216,11 +370,27 @@ class DashboardUIRegistry:
             raise UIError(
                 f"component {component_id!r} of plugin {plugin_name!r} "
                 f"declares no action")
+        # enforcement, in order: disabled (incl. ancestors), then the
+        # account requirement, then runtime rebinding
+        self._assert_enabled(plugin_name, node, component_id)
+        if getattr(node, "_action_require_account", False) and not account:
+            raise AccountContextError(
+                f"action {component_id!r} of plugin {plugin_name!r} "
+                f"requires an account context — select an account")
+        callback = self._bind_runtime_callback(
+            plugin_name, callback, account,
+            f"action {component_id!r}")
         if payload is None:
             payload = {}
         if not isinstance(payload, dict):
             raise UIError(
                 f"action payload must be a dict, got {type(payload).__name__}")
+        # FORM submissions are schema-validated server-side BEFORE the
+        # callback runs — frontend constraints are usability, not trust
+        if getattr(node, "_type_name", "") == "form":
+            field_errors = self._validate_form_submission(node, payload)
+            if field_errors:
+                return ActionResult(success=False, field_errors=field_errors)
         action_context = ActionContext(
             plugin=plugin_name,
             component_id=component_id,
@@ -241,7 +411,65 @@ class DashboardUIRegistry:
             raise UIError(
                 f"action {component_id!r} of plugin {plugin_name!r} "
                 f"failed: {type(exc).__name__}: {exc}") from exc
-        return self._normalize_result(raw, plugin_name, component_id)
+        result = self._normalize_result(raw, plugin_name, component_id)
+        self._validate_result(result, plugin_name, component_id)
+        return result
+
+    def _validate_result(self, result: "ActionResult",
+                         plugin_name: str, component_id: str) -> None:
+        """Cross-the-wire guarantees for action results (spec 4.3).
+
+        data must be JSON-safe (no non-finite floats, cyclic structures
+        or non-string dict keys); refresh ids must name components that
+        exist in the same plugin's layout. Malformed results raise UIError
+        naming the plugin/component — they never degrade to a fake success.
+        """
+        def walk(value, path, depth):
+            if depth > 16:
+                raise ResultValidationError(
+                    f"action {component_id!r} of {plugin_name!r}: result "
+                    f"data nests deeper than 16 levels at {path}")
+            if value is None or isinstance(value, (str, bool)):
+                return
+            if isinstance(value, float):
+                if not math.isfinite(value):
+                    raise UIError(
+                        f"action {component_id!r} of {plugin_name!r}: result "
+                        f"data contains a non-finite float at {path}")
+                return
+            if isinstance(value, int):
+                return
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    if not isinstance(k, str):
+                        raise UIError(
+                            f"action {component_id!r} of {plugin_name!r}: "
+                            f"result data has a non-string key at {path}")
+                    walk(v, f"{path}.{k}", depth + 1)
+                return
+            if isinstance(value, (list, tuple)):
+                if len(value) > 500:
+                    raise UIError(
+                        f"action {component_id!r} of {plugin_name!r}: result "
+                        f"data list at {path} exceeds 500 items")
+                for i, v in enumerate(value):
+                    walk(v, f"{path}[{i}]", depth + 1)
+                return
+            raise ResultValidationError(
+                f"action {component_id!r} of {plugin_name!r}: result data "
+                f"contains unsupported {type(value).__name__} at {path}")
+        if result.data is not None:
+            walk(result.data, "data", 0)
+        if result.message and not isinstance(result.message, str):
+            raise UIError(
+                f"action {component_id!r} of {plugin_name!r}: message must "
+                f"be a string")
+        known = self._nodes.get(plugin_name, {})
+        for target in result.refresh:
+            if target not in known:
+                raise ResultValidationError(
+                    f"action {component_id!r} of {plugin_name!r}: refresh "
+                    f"names unknown component {target!r}")
 
     async def get_data(
         self,
@@ -271,6 +499,10 @@ class DashboardUIRegistry:
             raise UIError(
                 f"component {component_id!r} of plugin {plugin_name!r} "
                 f"declares no data provider")
+        self._assert_enabled(plugin_name, node, component_id)
+        provider = self._bind_runtime_callback(
+            plugin_name, provider, account,
+            f"data provider {component_id!r}")
         check_context = self._check_context(plugin_name, node, account)
         try:
             raw = await self._invoke(provider, check_context)
@@ -307,8 +539,13 @@ class DashboardUIRegistry:
             plugin_name,
             self._lookup_node(plugin_name, component_id),
             getattr(context, "account", None),
-            cache={})
+            cache={},
+            services=getattr(context, "services", None))
         return bool(allowed)
+
+    def _lookup_node(self, plugin_name: str, component_id: str):
+        """Node or None (visibility is fail-closed on unknown)."""
+        return self._nodes.get(plugin_name, {}).get(component_id)
 
     def _lookup_node(self, plugin_name: str, component_id: str) -> Any:
         """Builder node for one id; None when unknown (denies closed)."""
@@ -329,6 +566,7 @@ class DashboardUIRegistry:
         node: Any,
         account: Optional[str],
         cache: Dict[int, bool],
+        services: Any = None,
     ) -> bool:
         """Ancestor-chain verdict for one builder node (root-first).
 
@@ -358,8 +596,11 @@ class DashboardUIRegistry:
                 cache[key] = True
                 continue
             check_context = self._check_context(
-                plugin_name, candidate, account)
+                plugin_name, candidate, account, services)
             try:
+                check = self._bind_runtime_callback(
+                    plugin_name, check, account,
+                    f"visibility check {candidate.get_id()!r}")
                 allowed = await self._invoke(check, check_context)
             except asyncio.CancelledError:
                 raise
@@ -381,6 +622,7 @@ class DashboardUIRegistry:
         plugin_name: str,
         node: dict,
         account: Optional[str] = None,
+        services: Any = None,
     ) -> Optional[dict]:
         """A copy of a serialized ``node`` with every visibility-denied
         subtree pruned (``None`` when the node itself is denied).
@@ -396,7 +638,8 @@ class DashboardUIRegistry:
         if not self._nodes.get(plugin_name):
             return None
         cache: Dict[int, bool] = {}
-        return await self._visible_copy(plugin_name, node, account, cache)
+        return await self._visible_copy(plugin_name, node, account, cache,
+                                        services=services)
 
     async def _visible_copy(
         self,
@@ -404,18 +647,20 @@ class DashboardUIRegistry:
         node: Any,
         account: Optional[str],
         cache: Dict[int, bool],
+        services: Any = None,
     ) -> Optional[dict]:
         if not isinstance(node, dict):
             return node
         builder = self._lookup_node(plugin_name, node.get("id"))
-        if not await self._chain_allowed(plugin_name, builder, account, cache):
+        if not await self._chain_allowed(plugin_name, builder, account,
+                                         cache, services=services):
             return None
         if "children" in node:
             out = dict(node)
             kept: list = []
             for child in node["children"]:
                 copy = await self._visible_copy(
-                    plugin_name, child, account, cache)
+                    plugin_name, child, account, cache, services)
                 if copy is not None:
                     kept.append(copy)
             out["children"] = kept
@@ -425,13 +670,15 @@ class DashboardUIRegistry:
     # -------------------------------------------------------------- helpers
     @staticmethod
     def _check_context(plugin_name: str, node: Any,
-                       account: Optional[str]) -> CheckContext:
+                       account: Optional[str],
+                       services: Any = None) -> CheckContext:
         """A CheckContext describing one node (the check's own component)."""
         return CheckContext(
             plugin=plugin_name,
             component_id=node.get_id(),
             component_type=getattr(node, "_type_name", type(node).__name__),
             account=account,
+            services=services,
         )
 
     def _find_node(self, plugin_name: str, component_id: str) -> Any:
@@ -447,14 +694,42 @@ class DashboardUIRegistry:
                 f"{plugin_name!r}")
         return node
 
-    @staticmethod
-    async def _invoke(fn: Callable, *args) -> Any:
-        """Call a plugin callable; await it when it returns an awaitable
-        (sync and async checks/actions/providers are both first-class)."""
-        result = fn(*args)
-        if inspect.isawaitable(result):
-            result = await result
-        return result
+    #: sync-callback offloading (constructor-configurable): a bounded
+    #: thread-pool lane for synchronous callbacks so a slow one cannot
+    #: freeze the event loop. Callbacks OFFLOADED this way must be
+    #: thread-safe and must not touch event-loop-bound state — that is
+    #: the documented supported category for sync callbacks in a served
+    #: stack. Cancelling the awaiting task does NOT terminate a running
+    #: synchronous function (documented limitation).
+    SYNC_TIMEOUT_S = 10.0
+    SYNC_MAX_CONCURRENT = 4
+
+    async def _invoke(self, fn: Callable, *args) -> Any:
+        """Call a plugin callable per the execution policy.
+
+        Async callbacks await normally. Sync callbacks run inline when
+        offloading is disabled (test stacks, guaranteed-fast paths);
+        with offloading enabled they run in a bounded worker lane with
+        a timeout, so slow sync work cannot block unrelated requests.
+        """
+        if inspect.iscoroutinefunction(fn):
+            return await fn(*args)
+        probe = fn(*args) if not self._offload_sync else None
+        if probe is not None:
+            if inspect.isawaitable(probe):
+                return await probe
+            return probe
+        # offloaded sync lane (bounded + timed)
+        async with self._sync_slots:
+            loop = asyncio.get_running_loop()
+            try:
+                return await asyncio.wait_for(
+                    loop.run_in_executor(self._sync_executor, fn, *args),
+                    timeout=self.SYNC_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                raise UIError(
+                    f"synchronous callback exceeded "
+                    f"{self.SYNC_TIMEOUT_S}s and was abandoned")
 
     @staticmethod
     def _normalize_result(raw: Any, plugin_name: str,

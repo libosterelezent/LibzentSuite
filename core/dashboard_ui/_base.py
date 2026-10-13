@@ -71,6 +71,9 @@ def _require_int(value, what: str) -> int:
 def _require_number(value, what: str):
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise UIError(f"{what} must be an int or float, got {type(value).__name__}")
+    import math
+    if not math.isfinite(value):
+        raise UIError(f"{what} must be finite, got {value!r}")
     return value
 
 
@@ -486,12 +489,20 @@ class _ComponentParent(UIContainer):
         self._gap = _validate_css_size(gap, "gap")
         return self
 
+    _ICON_RE = __import__("re").compile(
+        r"^[MmZzLlHhVvCcSsQqTtAaEe0-9 ,.\-+]{1,512}$")
+
     def set_icon(self, icon) -> "_ComponentParent":
         """Decorative SVG path drawn beside the title (24×24 viewBox
-        path data, same vocabulary as the sidebar icons). Escaped by
-        the renderer; purely decorative."""
+        path data — narrow path-data charset, ≤512 chars; anything else
+        is rejected so plugin data can never become arbitrary markup)."""
         self._check_frozen("set the icon")
-        self._icon = _require_str(icon, "icon")
+        icon = _require_str(icon, "icon")
+        if not self._ICON_RE.match(icon):
+            raise UIError(
+                "icon must be SVG path data (letters MZLHVCSQTA, digits, "
+                "spaces, commas, dots, + and -)")
+        self._icon = icon
         return self
 
     def set_align(self, align) -> "_ComponentParent":
@@ -546,9 +557,19 @@ class _Interactive(UIComponent):
         super().__init__(component_id=component_id, **kwargs)
         self._action = None
 
-    def set_action(self, action) -> "_Interactive":
+    def set_action(self, action,
+                   require_account: bool = False) -> "_Interactive":
+        """Register the action callable.
+
+        ``require_account=True`` marks the action ACCOUNT-SCOPED: the
+        dashboard must supply a validated account (and dispatch receives
+        that account's services facade) or the action is rejected — the
+        account is never guessed.
+        """
         self._check_frozen("set the action")
         self._action = _require_callable(action, "action", ActionRegistrationError)
+        self._action_require_account = _require_bool(require_account,
+                                                      "require_account")
         return self
 
     def _props(self) -> dict:

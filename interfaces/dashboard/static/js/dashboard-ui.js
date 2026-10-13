@@ -37,6 +37,10 @@ let duiDataCache = {};
 const duiSelection = {};
 /* dynamic form fields: form id -> field defs from a fields provider */
 const duiFormFields = {};
+/* account-scoped pages: plugin -> the dashboard-selected account */
+const duiPageAccount = {};
+/* tab selection: pageKey -> active index */
+const duiTabState = {};
 
 function duiSelected(compId) {
   duiSelection[compId] = duiSelection[compId] || new Set();
@@ -91,6 +95,7 @@ function buildDashboardUINav() {
 async function showDashboardUIPage(entry) {
   const panel = $(duiPanelId(entry));
   if (!panel) return;
+  window.__duiCurrentPageId = entry.page_id;
   // this render replaces the GLOBAL duiComps index — framework tabs
   // must fully re-render when navigated back to (see framework-ui.js)
   $$(".panel[data-fw-rendered]").forEach(p => delete p.dataset.fwRendered);
@@ -107,9 +112,11 @@ async function showDashboardUIPage(entry) {
   panel.innerHTML = `<div class="dui-skel" aria-hidden="true"><div></div><div></div><div></div></div>`;
   const seq = ++duiSeq;
   let page = null;
+  const acct = duiPageAccount[entry.plugin] || "";
   try {
     page = await api("/api/dashboard-ui/page?plugin=" + encodeURIComponent(entry.plugin) +
-                     "&page_id=" + encodeURIComponent(entry.page_id));
+                     "&page_id=" + encodeURIComponent(entry.page_id) +
+                     (acct ? "&account=" + encodeURIComponent(acct) : ""));
   } catch (e) {
     if (seq !== duiSeq) return;
     panel.innerHTML = duiAlertHTML("err", "Page unavailable", e.message);
@@ -122,6 +129,28 @@ async function showDashboardUIPage(entry) {
     return;
   }
   renderDashboardUIPage(page, entry.plugin, panel);
+  // account-scoped page: an account picker in the header supplies the
+  // validated selection for every action/provider/check on the page
+  if (page.account_scoped) renderDuiAccountPicker(entry.plugin, panel);
+}
+
+function renderDuiAccountPicker(pluginName, panel) {
+  if (panel.querySelector("[data-dui-acct-sel]")) return;   // idempotent
+  const bar = document.createElement("div");
+  bar.className = "dui-acct-bar";
+  bar.innerHTML = `<label class="dui-acct-label">Account</label>` +
+    `<select data-dui-acct-sel="${esc(pluginName)}">` +
+    accounts().map(a => `<option value="${esc(a.name)}"${duiPageAccount[pluginName] === a.name ? " selected" : ""}>${esc(a.name)}</option>`).join("") +
+    `</select>`;
+  panel.prepend(bar);
+  const sel = bar.querySelector("select");
+  if (!duiPageAccount[pluginName] && sel.options.length)
+    duiPageAccount[pluginName] = sel.value;
+  sel.addEventListener("change", () => {
+    duiPageAccount[pluginName] = sel.value;
+    const navEntry = duiNav.find(n => n.plugin === pluginName && n.page_id === (window.__duiCurrentPageId || ""));
+    showDashboardUIPage(navEntry || {plugin: pluginName, page_id: window.__duiCurrentPageId, title: pluginName});
+  });
 }
 
 /* ── Page shell ────────────────────────────────────────────────────────────── */
@@ -135,11 +164,79 @@ function renderDashboardUIPage(page, pluginName, panel) {
   let html = `<div class="dui-page">`;
   if (page.description)
     html += `<p class="sub dui-desc">${esc(page.description)}</p>`;
-  html += flow.map(c => renderDashboardUIComponent(c, pluginName)).join("");
+  // Tab children form ONE tablist (genuine tabs — Stage D); sections and
+  // other children stay in the flow around it
+  const tabs = flow.filter(c => c.type === "tab");
+  const rest = flow.filter(c => c.type !== "tab");
+  html += rest.map(c => renderDashboardUIComponent(c, pluginName)).join("");
+  if (tabs.length) html += duiTablistHTML(page, tabs, pluginName);
   html += `</div>`;
   html += modals.map(m => renderModal(m, pluginName)).join("");
   panel.innerHTML = html || '<div class="dui-page"><p class="dim">This page has no content.</p></div>';
   wireDashboardUI(panel, pluginName);
+  wireDuiTabs(panel, pluginName);
+}
+
+function duiTablistHTML(page, tabs, pluginName) {
+  const pageKey = duiSlug(pluginName) + ":" + (page.id || "");
+  const active = duiTabState[pageKey] != null ? duiTabState[pageKey] : 0;
+  const clamp = Math.min(active, tabs.length - 1);
+  const bar = tabs.map((t, i) =>
+    `<button type="button" role="tab" aria-selected="${i === clamp}"` +
+    ` id="dui-tab-${pageKey}-${i}" aria-controls="dui-tabpanel-${pageKey}-${i}"` +
+    ` tabindex="${i === clamp ? 0 : -1}" data-dui-tab="${pageKey}" data-dui-tab-idx="${i}"` +
+    ` class="dui-tab-btn${i === clamp ? " active" : ""}">${esc(t.title || t.id)}</button>`).join("");
+  const panels = tabs.map((t, i) =>
+    `<div role="tabpanel" id="dui-tabpanel-${pageKey}-${i}"` +
+    ` aria-labelledby="dui-tab-${pageKey}-${i}" data-dui-tabpanel="${pageKey}"` +
+    ` data-dui-tabpanel-idx="${i}"${i === clamp ? "" : " hidden"}>` +
+    renderDashboardUIComponent(t, pluginName) + `</div>`).join("");
+  return `<div class="dui-tabbar" role="tablist" aria-label="${esc(page.title || "sections")}">` +
+    `<div class="dui-tabbar-row">${bar}</div></div>${panels}`;
+}
+
+function wireDuiTabs(root, pluginName) {
+  root.querySelectorAll("[data-dui-tab]").forEach(btn => {
+    if (btn.dataset.duiWired) return;
+    btn.dataset.duiWired = "1";
+    const pageKey = btn.dataset.duiTab;
+    const select = (idx, focus) => {
+      const idxN = Math.max(0, Math.min(idx,
+        root.querySelectorAll(`[data-dui-tab="${pageKey}"]`).length - 1));
+      duiTabState[pageKey] = idxN;
+      root.querySelectorAll(`[data-dui-tab="${pageKey}"]`).forEach(b => {
+        const on = +b.dataset.duiTabIdx === idxN;
+        b.classList.toggle("active", on);
+        b.setAttribute("aria-selected", String(on));
+        b.tabIndex = on ? 0 : -1;
+      });
+      root.querySelectorAll(`[data-dui-tabpanel="${pageKey}"]`).forEach(p => {
+        const on = +p.dataset.duiTabpanelIdx === idxN;
+        p.hidden = !on;
+        // LAZY data: bodies inside a newly shown panel load now
+        if (on) p.querySelectorAll("[data-dui-body]").forEach(el => {
+          if (!el.dataset.duiLoaded) loadDUIData(pluginName, el.dataset.duiBody, el);
+        });
+        if (on) p.querySelectorAll("[data-dui-live]").forEach(el => {
+          if (!el.dataset.duiLoaded) loadDUILive(pluginName, el.dataset.duiLive, el);
+        });
+      });
+      if (focus) btn.focus();
+    };
+    btn.addEventListener("click", () => select(+btn.dataset.duiTabIdx, false));
+    btn.addEventListener("keydown", e => {
+      const n = root.querySelectorAll(`[data-dui-tab="${pageKey}"]`).length;
+      const cur = +btn.dataset.duiTabIdx;
+      if (e.key === "ArrowRight") { e.preventDefault(); select((cur + 1) % n, true); }
+      if (e.key === "ArrowLeft") { e.preventDefault(); select((cur - 1 + n) % n, true); }
+      if (e.key === "Home") { e.preventDefault(); select(0, true); }
+      if (e.key === "End") { e.preventDefault(); select(n - 1, true); }
+    });
+  });
+  // mark already-loaded bodies so lazy loading never double-fetches
+  root.querySelectorAll("[data-dui-body]").forEach(el => {
+    if (el.dataset.duiPlugin) el.dataset.duiLoaded = "1";
+  });
 }
 
 function renderModal(comp, pluginName, disabled) {
@@ -160,9 +257,11 @@ function duiIndexComponents(comp) {
 
 /* ── Action dispatch ───────────────────────────────────────────────────────── */
 async function dispatchUIAction(pluginName, componentId, payload) {
-  const result = await post("/api/dashboard-ui/action", {
-    plugin: pluginName, component_id: componentId, payload: payload || {}
-  });
+  const body = {plugin: pluginName, component_id: componentId,
+                payload: payload || {}};
+  const acct = duiPageAccount[pluginName];
+  if (acct) body.account = acct;
+  const result = await post("/api/dashboard-ui/action", body);
   if (result && Array.isArray(result.refresh) && result.refresh.length)
     refreshDashboardUIData(pluginName, result.refresh);
   if (result && result.modal) openDuiModal(result.modal);
@@ -187,12 +286,15 @@ function refreshDashboardUIData(pluginName, ids) {
 /* ── Data providers (list-view / table) ────────────────────────────────────── */
 async function loadDUIData(pluginName, compId, host, quiet) {
   if (!host) return;
+  if (host.dataset) host.dataset.duiLoaded = "1";
   if (!quiet) host.innerHTML = `<div class="dui-skel" aria-hidden="true"><div></div><div></div></div>`;
   if (!quiet) clearFb(host.parentElement);
   let data = null;
   try {
+    const acct = duiPageAccount[pluginName];
     data = await api("/api/dashboard-ui/data?plugin=" + encodeURIComponent(pluginName) +
-                     "&component_id=" + encodeURIComponent(compId));
+                     "&component_id=" + encodeURIComponent(compId) +
+                     (acct ? "&account=" + encodeURIComponent(acct) : ""));
   } catch (e) {
     host.innerHTML = duiAlertHTML("err", "Data unavailable", e.message);
     return;
@@ -519,6 +621,7 @@ function renderDashboardUIComponent(comp, pluginName) {
     case "container": return renderContainer(comp, pluginName, disabled);
     case "grid": return renderGrid(comp, pluginName, disabled);
     case "toolbar": return renderToolbar(comp, pluginName, disabled);
+    case "modal": return renderModal(comp, pluginName, disabled);
     case "tile-view": return renderTileView(comp);
     case "text": return renderText(comp);
     case "display-text": return renderDisplayText(comp);

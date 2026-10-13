@@ -202,15 +202,16 @@ class TestCompleteUIPath(unittest.IsolatedAsyncioTestCase):
             ui.Page(component_id="fp").add_section(
                 ui.Section().add_component(form))))
 
-        # empty required field → structured field_errors, keyed by field id
+        # empty required field → the FRAMEWORK's schema validation fires
+        # before the callback (Stage C): structured field_errors keyed by
+        # field id, callback never sees invalid data
         result = await registry.dispatch_action(
             "forms", "demo-form",
             {"demo-name": "", "demo-count": 3},
             ActionContext(plugin="forms", component_id="demo-form"))
         self.assertFalse(result.success)
-        self.assertEqual(result.message, "fix the fields")
-        self.assertEqual(result.field_errors,
-                         {"demo-name": "name is required"})
+        self.assertIn("demo-name", result.field_errors)
+        self.assertIn("required", result.field_errors["demo-name"])
         # a valid submission clears them
         ok = await registry.dispatch_action(
             "forms", "demo-form", {"demo-name": "abc", "demo-count": 3},
@@ -246,9 +247,11 @@ class TestCompleteUIPath(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data, rows)
 
     # --------------------------------------------------- disabled button
-    async def test_disabled_button_is_ui_state_only(self):
+    async def test_disabled_button_enforced_server_side(self):
         """set_disabled(True) renders the control inert in the frontend
-        but is NOT authorization: the server still dispatches."""
+        AND is enforced at dispatch: a forged POST cannot run the
+        callback. Disabled is still NOT authorization — it is a state
+        rule (spec: server-side enforcement, documented as such)."""
         ui = DashboardUIToolset()
         button = (ui.Button(component_id="locked")
                   .set_label("Locked")
@@ -261,16 +264,32 @@ class TestCompleteUIPath(unittest.IsolatedAsyncioTestCase):
 
         serialized = _find_comp(snapshot, "button")
         self.assertTrue(serialized.get("disabled"))
-        # still visible (no check) and still dispatchable
+        # still VISIBLE (disabled is not hidden)...
         self.assertTrue(await registry.check_visibility(
             "locked", "locked",
             CheckContext(plugin="locked", component_id="locked",
                          component_type="button")))
+        # ...but a forged dispatch is refused
+        with self.assertRaises(UIError) as raised:
+            await registry.dispatch_action(
+                "locked", "locked", {},
+                ActionContext(plugin="locked", component_id="locked"))
+        self.assertIn("disabled", str(raised.exception))
+        # and re-enabling restores dispatch
+        from core.dashboard_ui.errors import FrozenLayoutError
+        with self.assertRaises(FrozenLayoutError):
+            button.set_disabled(False)   # frozen after attach
+        ui2 = DashboardUIToolset()
+        button2 = (ui2.Button(component_id="ok")
+                   .set_label("OK").set_action(self._execute))
+        registry.attach("fresh", ui2.Layout().add_page(
+            ui2.Page(component_id="p2").add_section(
+                ui2.Section().add_component(button2))))
         result = await registry.dispatch_action(
-            "locked", "locked", {},
-            ActionContext(plugin="locked", component_id="locked"))
+            "fresh", "ok", {},
+            ActionContext(plugin="fresh", component_id="ok"))
         self.assertTrue(result.success)
-        self.assertEqual(result.message, "executed")
+
 
 
 class TestRenderedVisibilityPruning(unittest.IsolatedAsyncioTestCase):
@@ -524,23 +543,24 @@ class TestConfigDemoExample(unittest.IsolatedAsyncioTestCase):
             ActionContext(plugin="config_demo", component_id="purge-button"))
         self.assertTrue(purge.success)
         self.assertIn("purged", purge.message)
-        # disabled is UI state only — the server still dispatches
-        locked = await self.registry.dispatch_action(
-            "config_demo", "export-button", {},
-            ActionContext(plugin="config_demo", component_id="export-button"))
-        self.assertTrue(locked.success)
-        self.assertIn("UI hint", locked.message)
+        # disabled is ENFORCED at dispatch — a forged POST is refused
+        with self.assertRaises(UIError) as raised:
+            await self.registry.dispatch_action(
+                "config_demo", "export-button", {},
+                ActionContext(plugin="config_demo",
+                              component_id="export-button"))
+        self.assertIn("disabled", str(raised.exception))
 
-    async def test_example_cleanup_on_deactivation(self):
+    async def test_example_survives_deactivation(self):
+        """Stage B: the page DEFINITION survives deactivation (the nav
+        entry stays); only the runtime association ends."""
         self.assertEqual(self.registry.list_plugins(), ["config_demo"])
         await self.manager.deactivate_account("alpha")
-        self.assertEqual(self.registry.list_plugins(), [])
-        self.assertIsNone(self.registry.get_layout("config_demo"))
-        with self.assertRaises(UIError):
-            await self.registry.dispatch_action(
-                "config_demo", "feature-enabled", {"value": True},
-                ActionContext(plugin="config_demo",
-                              component_id="feature-enabled"))
+        self.assertEqual(self.registry.list_plugins(), ["config_demo"])
+        self.assertIsNotNone(self.registry.get_layout("config_demo"))
+        # re-activation does not duplicate
+        await self.manager.activate_account("alpha", FakeServices("alpha"))
+        self.assertEqual(self.registry.list_plugins(), ["config_demo"])
 
 
 if __name__ == "__main__":

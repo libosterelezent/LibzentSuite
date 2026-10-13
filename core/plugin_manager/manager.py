@@ -116,7 +116,14 @@ class PluginManager:
         self._dispatch_grace_s = dispatch_grace_s
         #: central registry for plugin-attached dashboard UIs (Stage C);
         #: the dashboard routes dispatch through this in Stage D
-        self._ui_registry = ui_registry or DashboardUIRegistry()
+        # offload_sync=True in the served stack: a slow synchronous
+        # plugin callback must never freeze the dashboard's event loop
+        # (bounded lane, see DashboardUIRegistry._invoke)
+        self._ui_registry = ui_registry or DashboardUIRegistry(
+            offload_sync=True)
+        # the registry rebinds boot-time bound-method callbacks onto LIVE
+        # plugin instances at dispatch; this manager is the resolver
+        self._ui_registry.set_instance_resolver(self._resolve_ui_instance)
         # every account-scoped Discord event type routes to plugins; new
         # types are ADDITIVE — plugins filter by isinstance in handle_event
         self._unsubscribe = bus.subscribe(MessageReceived, self._on_message)
@@ -424,6 +431,66 @@ class PluginManager:
                 "boot dashboard UIs registered: %d plugin(s)", registered)
         return registered
 
+    def _resolve_ui_instance(self, plugin_name: str, account=None):
+        """Live plugin instance for UI callback rebinding (registry use).
+
+        ``account=None`` scans active runtimes (first active account
+        wins, insertion order — documented determinism). Returns None
+        when no account runs the plugin. Raises nothing: visibility
+        checks must fail CLOSED on a missing runtime, not crash.
+        """
+        if account is not None:
+            runtimes = self._accounts.get(account)
+            if not runtimes or plugin_name not in runtimes:
+                return None
+        try:
+            return self.active_instance_for(plugin_name, account)
+        except PluginError:
+            return None
+
+    def active_instance_for(self, plugin_name: str, account=None):
+        """VALIDATED live instance for a plugin, optionally per account.
+
+        Raises PluginError naming the exact problem (unknown account,
+        plugin not assigned, disabled, not active) — the dashboard's
+        account-context validation path. ``account=None`` returns the
+        first active instance or None (no error).
+        """
+        if account is not None and account not in self._accounts:
+            raise PluginError(f"unknown account {account!r}")
+        if account is not None:
+            runtime = self._accounts[account].get(plugin_name)
+            if runtime is None:
+                raise PluginError(
+                    f"plugin {plugin_name!r} is not assigned to account "
+                    f"{account!r}")
+            if not runtime.enabled:
+                raise PluginError(
+                    f"plugin {plugin_name!r} is disabled on {account!r}")
+            if not runtime.active or runtime.instance is None:
+                raise PluginError(
+                    f"plugin {plugin_name!r} on {account!r} has no active "
+                    f"runtime — start the account")
+            return runtime.instance
+        for runtimes in self._accounts.values():
+            runtime = runtimes.get(plugin_name)
+            if (runtime is not None and runtime.enabled
+                    and runtime.active and runtime.instance is not None):
+                return runtime.instance
+        return None
+
+    def services_for(self, account: str, plugin_name: str):
+        """The account's services facade for one plugin (or None).
+
+        None means the account has no active service wiring (never
+        started) — dispatch refuses account-scoped actions in that
+        state rather than fabricating a facade.
+        """
+        factory = self._services.get(account)
+        if factory is None:
+            return None
+        return factory(plugin_name)
+
     def _init_dashboard_uis(self, account: str,
                             runtimes: Dict[str, PluginRuntime]) -> None:
         """Offer the dashboard UI toolset to this account's plugins.
@@ -580,13 +647,12 @@ class PluginManager:
                 runtime.loaded = False
                 self._bus.publish_nowait(PluginUnloaded(account=account, plugin=runtime.name))
             runtime.active = False
-        # UI cleanup: detach this account's plugin UIs — but a plugin's UI
-        # is PLUGIN-WIDE, so only detach when NO other account still has
-        # the plugin active (ref-counted by account)
-        for plugin_name in list(runtimes.keys()):
-            if self._ui_active_elsewhere(plugin_name, excluding=account):
-                continue
-            self._ui_registry.detach(plugin_name)
+        # UI lifecycle (Stage B hardening): a stopped account ends its
+        # RUNTIME association only. The plugin-wide UI DEFINITION survives —
+        # the page stays in the sidebar (usable again on restart) and
+        # runtime-bound actions simply refuse while no account runs the
+        # plugin. Definitions detach ONLY at plugin boundaries: unload,
+        # reload (validated replacement) or framework shutdown.
 
     def _ui_active_elsewhere(self, plugin: str, excluding: str) -> bool:
         """True when any OTHER account still holds this plugin active
