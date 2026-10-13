@@ -1004,6 +1004,43 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestListRecordsRenderer(unittest.TestCase):
+    """Phase 3: accounts render as structured record rows via ListView
+    records mode — the aligned list contract."""
+
+    def test_records_branch_in_load(self):
+        js = _js()
+        self.assertIn("duiListRecordsHTML(comp, data, compId)", js)
+        # chosen ONLY when columns are declared (kv mode stays legacy)
+        self.assertIn('comp.type === "list-view" && Array.isArray(comp.columns)',
+                      js)
+
+    def test_row_grid_alignment_contract(self):
+        js = _js()
+        # alignment from the row grid, not per-button margins
+        self.assertIn("grid-template-columns:${gridCols}", js)
+        # four-zone anatomy: selection, cells, trailing actions
+        self.assertIn("dui-lrow-actions", js)
+        self.assertIn("dui-lrow-identity", js)
+        self.assertIn("dui-lrow-sel", js)
+
+    def test_status_never_color_alone(self):
+        js = _js()
+        # dot + TEXT together
+        self.assertIn("dui-lrow-dot", js)
+        self.assertIn("${esc(v.text)}", js)
+
+    def test_fleet_uses_listview_records(self):
+        py = (ROOT / "core" / "framework_ui.py").read_text()
+        self.assertIn('ListView(component_id="acct-list")', py)
+        self.assertIn('.set_columns(["Account", "Status", "Group", "Plugins"])',
+                      py)
+        self.assertIn('ListView(component_id="group-list")', py)
+        # the tile grid is no longer used for accounts
+        self.assertNotIn('TileView(component_id="acct-tiles")', py)
+        self.assertNotIn('TileView(component_id="group-tiles")', py)
+
+
 class TestRendererHardening(unittest.TestCase):
     """Spec 9.5: renderer guarantees pinned as static checks."""
 

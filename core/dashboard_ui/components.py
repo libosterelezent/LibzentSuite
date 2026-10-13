@@ -436,33 +436,6 @@ class MultiSelect(Select):
 
 
 # ------------------------------------------------- display data components
-class ListView(_Interactive):
-    """A dynamic list fed by a server-side data source callable."""
-
-    _type_name = "list-view"
-
-    def __init__(self, *, component_id: str = "", **kwargs) -> None:
-        super().__init__(component_id=component_id, **kwargs)
-        self._data_source = None
-        self._empty_text: str | None = None
-
-    def set_data_source(self, data_source) -> "ListView":
-        self._check_frozen("set the data source")
-        self._data_source = _require_callable(data_source, "data_source")
-        return self
-
-    def set_empty_text(self, text: str) -> "ListView":
-        self._check_frozen("set the empty text")
-        self._empty_text = _require_str(text, "empty_text")
-        return self
-
-    def _props(self) -> dict:
-        props = super()._props()
-        if self._empty_text is not None:
-            props["empty_text"] = self._empty_text
-        return props
-
-
 class RowAction:
     """One per-row button on a :class:`Table`.
 
@@ -574,6 +547,120 @@ class _Selectable:
                     result = await result
                 return result
         return await self._dispatch_row_action(context, payload)
+
+
+class ListView(_Selectable, _Interactive):
+    """A dynamic list fed by a server-side data source callable.
+
+    TWO contracts, chosen by whether columns are declared:
+
+    * **kv mode (default)** — the provider returns a list (or object);
+      each item renders as a label/value row. Backward compatible.
+    * **RECORDS mode** — ``set_columns([...])`` switches the list to
+      structured RECORD ROWS: the provider returns
+      ``{"records": [{"key", "cells": [...]}]}`` with cells parallel to
+      the declared columns. A cell value may be a plain string, a
+      status badge ``{"text", "tone", "meta"?}``, a two-line identity
+      ``{"primary", "secondary"?}``, or chips ``{"chips": [...]}``.
+      THE component for repeated records (accounts, groups, profiles):
+      a readable aligned list — not a table, not a card grid.
+      Row actions, selection and bulk actions share Table's contracts.
+    """
+
+    _type_name = "list-view"
+
+    def __init__(self, *, component_id: str = "", **kwargs) -> None:
+        super().__init__(component_id=component_id, **kwargs)
+        self._data_source = None
+        self._empty_text: str | None = None
+        self._columns: list[str] | None = None
+        self._key_column: str | None = None
+        self._row_actions: list[RowAction] = []
+        self._selectable = False
+        self._bulk_actions: list[BulkAction] = []
+
+    def set_data_source(self, data_source) -> "ListView":
+        self._check_frozen("set the data source")
+        self._data_source = _require_callable(data_source, "data_source")
+        return self
+
+    def set_empty_text(self, text: str) -> "ListView":
+        self._check_frozen("set the empty text")
+        self._empty_text = _require_str(text, "empty_text")
+        return self
+
+    def set_columns(self, columns) -> "ListView":
+        """Declare RECORDS mode: column labels for structured rows."""
+        self._check_frozen("set the columns")
+        if not isinstance(columns, list):
+            raise UIError(f"columns must be a list, got {type(columns).__name__}")
+        for column in columns:
+            _require_str(column, "each column")
+        if not 1 <= len(columns) <= 6:
+            raise UIError(f"records mode needs 1-6 columns, got {len(columns)}")
+        self._columns = list(columns)
+        return self
+
+    def set_key_column(self, column: str) -> "ListView":
+        """Which cell value identifies a record (row actions/selection)."""
+        self._check_frozen("set the key column")
+        self._key_column = _require_str(column, "key column")
+        return self
+
+    def set_row_actions(self, actions) -> "ListView":
+        self._check_frozen("set the row actions")
+        if not isinstance(actions, list):
+            raise UIError(
+                f"row actions must be a list, got {type(actions).__name__}")
+        checked: list[RowAction] = []
+        seen: set[str] = set()
+        for entry in actions:
+            if not isinstance(entry, RowAction):
+                raise UIError("each row action must be a RowAction")
+            if entry.id in seen:
+                raise UIError(f"duplicate row action id {entry.id!r}")
+            seen.add(entry.id)
+            checked.append(entry)
+        self._row_actions = checked
+        if checked and getattr(self, "_action", None) is None:
+            self.set_action(self._dispatch_view_action)
+        return self
+
+    async def _dispatch_row_action(self, context, payload):
+        row = payload.get("row")
+        if not isinstance(row, str) or not row:
+            raise UIError("record action dispatch needs a 'row' key")
+        for entry in self._row_actions:
+            if entry.id == payload.get("action"):
+                result = entry.action(row, context)
+                if hasattr(result, "__await__"):
+                    result = await result
+                return result
+        raise UIError(f"unknown row action {payload.get('action')!r}")
+
+    def _props(self) -> dict:
+        props = super()._props()
+        if self._empty_text is not None:
+            props["empty_text"] = self._empty_text
+        if self._columns is not None:
+            props["columns"] = list(self._columns)
+        if self._key_column is not None:
+            props["key_column"] = self._key_column
+        if self._row_actions:
+            props["row_actions"] = [
+                {"id": a.id, "label": a.label,
+                 "variant": a.variant, "confirm": a.confirm}
+                for a in self._row_actions
+            ]
+        if self._selectable:
+            props["selectable"] = True
+        if self._bulk_actions:
+            props["bulk_actions"] = [
+                {"id": a.id, "label": a.label,
+                 "variant": a.variant, "confirm": a.confirm}
+                for a in self._bulk_actions
+            ]
+        return props
 
 
 class Table(_Selectable, _Interactive):

@@ -997,7 +997,7 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
     async def remove_row(row, ctx):
         await api.accounts_remove(row, surface="dashboard")
         return {"success": True, "message": f"{row} removed",
-                "refresh": ["acct-tiles", "group-tiles", "indep-list"]}
+                "refresh": ["acct-list", "group-list", "indep-list"]}
 
     async def bulk_start(rows, ctx):
         rs = [a for (_, a) in await _run_all(
@@ -1055,7 +1055,7 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
             body["credential"] = cred
         await api.accounts_add(body, surface="dashboard")
         return {"success": True, "message": f"account {name} created",
-                "refresh": ["acct-tiles", "group-tiles", "indep-list"]}
+                "refresh": ["acct-list", "group-list", "indep-list"]}
 
     async def submit_cred(ctx, payload):
         name = _fleet_state.get("cred") or ""
@@ -1067,7 +1067,7 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
                 "fc-cred": "Paste the Discord token."}}
         await api.accounts_set_credential(name, cred, surface="dashboard")
         return {"success": True, "message": f"credential stored for {name}",
-                "refresh": ["acct-tiles", "ad-lines"]}
+                "refresh": ["acct-list", "ad-lines"]}
 
     async def submit_move(ctx, payload):
         names = _fleet_state.get("move") or []
@@ -1086,7 +1086,7 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
         target = "independent" if group in ("", "__independent__") else group
         return {"success": True,
                 "message": f"{len(names)} moved to {target}",
-                "refresh": ["acct-tiles", "group-tiles", "indep-list"]}
+                "refresh": ["acct-list", "group-list", "indep-list"]}
 
     async def submit_assign(ctx, payload):
         name = _fleet_state.get("assign") or ""
@@ -1098,13 +1098,20 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
         await api.accounts_plugins_set(name, plugins, surface="dashboard")
         return {"success": True,
                 "message": f"{name}: {len(plugins)} plugin(s) assigned",
-                "refresh": ["acct-tiles", "ad-plugins", "plug-state"]}
+                "refresh": ["acct-list", "ad-plugins", "plug-state"]}
 
     # ── providers ──────────────────────────────────────────────────
-    def _tiles_data(api):
+    def _acct_records(api):
+        """The account LIST: one aligned record row per account.
+
+        Columns follow the list-row contract: identity (name + id),
+        status (badge + runtime meta), group, plugins. Actions ride the
+        trailing zone with a deliberate hierarchy: run = primary,
+        management = ghost, destructive = danger.
+        """
         async def provide(ctx):
             rows = await _accts()
-            tiles = []
+            records = []
             for a in rows:
                 status = a.get("status") or "unknown"
                 tone = {"running": "ok", "failed": "err",
@@ -1112,22 +1119,26 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
                         "missing_credential": "warn"}.get(status, "info")
                 if not a.get("credential") and tone not in ("err", "warn"):
                     tone = "warn"   # missing credential always flags
-                meta = [["🔑", a.get("credential") or "missing"]]
+                meta_bits = [f"🔑 {a.get('credential') or 'missing'}"]
                 if a.get("uptime_s"):
-                    meta.append(["⏱", _fmt_uptime(a["uptime_s"])])
+                    meta_bits.append(f"⏱ {_fmt_uptime(a['uptime_s'])}")
                 if a.get("latency_ms") is not None:
-                    meta.append(["⚡", f"{a['latency_ms']:.0f}ms"])
+                    meta_bits.append(f"⚡ {a['latency_ms']:.0f}ms")
                 if a.get("cooldowns"):
-                    meta.append(["⏳", str(a["cooldowns"])])
-                chips = []
-                if a.get("sync_group"):
-                    chips.append({"text": a["sync_group"], "kind": "group"})
-                for pname in (a.get("assigned_plugins") or []):
-                    chips.append({"text": pname, "kind": "plugin"})
-                tiles.append({"key": a.get("name", "?"), "title": a.get("name", "?"),
-                              "status": status, "tone": tone,
-                              "meta": meta, "chips": chips})
-            return {"tiles": tiles}
+                    meta_bits.append(f"⏳ {a['cooldowns']}")
+                records.append({
+                    "key": a.get("name", "?"),
+                    "cells": [
+                        {"primary": a.get("name", "?"),
+                         "secondary": str(a.get("user_id") or a.get("discord_id") or "")},
+                        {"text": status, "tone": tone,
+                         "meta": " · ".join(meta_bits)},
+                        {"chips": ([{"text": a["sync_group"], "kind": "group"}]
+                                   if a.get("sync_group") else [])},
+                        {"chips": [{"text": p, "kind": "plugin"}
+                                   for p in (a.get("assigned_plugins") or [])]},
+                    ]})
+            return {"records": records}
         return provide
 
     def _indep_data(api):
@@ -1184,7 +1195,7 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
         account, _, plugin = row.partition("|")
         await api.accounts_plugin_unassign(account, plugin, surface="dashboard")
         return {"success": True, "message": f"{plugin} unassigned from {account}",
-                "refresh": ["ad-plugins", "acct-tiles"]}
+                "refresh": ["ad-plugins", "acct-list"]}
 
     def _details_plugins_rows(api):
         async def provide(ctx):
@@ -1259,7 +1270,7 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
         await api.groups_delete(row, detach_members=bool(count),
                                 surface="dashboard")
         return {"success": True, "message": f"group {row} deleted",
-                "refresh": ["group-tiles", "acct-tiles", "indep-list"]}
+                "refresh": ["group-list", "acct-list", "indep-list"]}
 
     async def group_bulk_run(row, ctx, start=True):
         try:
@@ -1287,7 +1298,7 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
                                 enabled=payload.get("gc-enabled") is not False,
                                 surface="dashboard")
         return {"success": True, "message": f"group {name} created",
-                "refresh": ["group-tiles"]}
+                "refresh": ["group-list"]}
 
     async def submit_group_edit(ctx, payload):
         group = _fleet_state.get("group_edit") or ""
@@ -1303,7 +1314,7 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
         body["enabled"] = payload.get("ge-enabled") is not False
         await api.groups_update(group, body, surface="dashboard")
         return {"success": True, "message": f"group {group} updated",
-                "refresh": ["group-tiles", "gd-lines"]}
+                "refresh": ["group-list", "gd-lines"]}
 
     async def submit_group_member(ctx, payload):
         group = _fleet_state.get("group_members") or ""
@@ -1320,19 +1331,20 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
             return {"success": False,
                     "message": f"{len(results)-len(failed)}/{len(results)} added — {'; '.join(failed[:3])}"}
         return {"success": True, "message": f"{len(chosen)} member(s) added to {group}",
-                "refresh": ["group-tiles", "gd-members", "acct-tiles"]}
+                "refresh": ["group-list", "gd-members", "acct-list"]}
 
     async def remove_member(row, ctx):
         group, _, account = row.partition("|")
         await api.groups_remove_member(group, account, surface="dashboard")
         return {"success": True, "message": f"{account} removed from {group}",
-                "refresh": ["group-tiles", "gd-members", "acct-tiles", "indep-list"]}
+                "refresh": ["group-list", "gd-members", "acct-list", "indep-list"]}
 
-    def _group_tiles(api):
+    def _group_records(api):
+        """Sync groups as aligned record rows (same list contract)."""
         async def provide(ctx):
             groups = await _groups()
             rows = await _accts()
-            tiles = []
+            records = []
             for g in groups:
                 name = g.get("name", "?")
                 members = [a for a in rows if a.get("sync_group") == name]
@@ -1341,19 +1353,23 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
                 tone = ("info" if g.get("enabled") is False
                         else ("ok" if members and online == len(members)
                               else ("err" if online == 0 and members else "warn")))
-                chips = [m["name"] for m in members[:8]]
-                if len(members) > 8:
-                    chips.append(f"+{len(members)-8} more")
-                tiles.append({"key": name, "title": name,
-                              "status": (f"{online}/{count}" if count else "empty")
-                                         + (" · off" if g.get("enabled") is False else ""),
-                              "tone": tone,
-                              "meta": [["👥", f"{count} member{'' if count == 1 else 's'}"
-                                         + (f" · {online} online" if online else "")]]
-                                        + ([["🏷", g["description"]]]
-                                           if g.get("description") else []),
-                              "chips": chips})
-            return {"tiles": tiles}
+                member_chips = [{"text": m["name"], "kind": "plugin"}
+                                for m in members[:6]]
+                if len(members) > 6:
+                    member_chips.append({"text": f"+{len(members)-6} more"})
+                status_txt = (f"{online}/{count} online" if count else "empty")
+                if g.get("enabled") is False:
+                    status_txt += " · disabled"
+                records.append({
+                    "key": name,
+                    "cells": [
+                        {"primary": name,
+                         "secondary": g.get("description") or ""},
+                        {"text": status_txt, "tone": tone,
+                         "meta": f"{count} member{'' if count == 1 else 's'}"},
+                        {"chips": member_chips},
+                    ]})
+            return {"records": records}
         return provide
 
     def _gd_lines(api):
@@ -1404,7 +1420,6 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
         return provide
 
     # ── assemble ───────────────────────────────────────────────────
-    run_toggle = RowAction("run", "start/stop", toggle_run)
     (page
      .add_section(ui.Section(component_id="fleet-accts-sec")
         .add_component(ui.Toolbar(component_id="fleet-accts-bar")
@@ -1414,20 +1429,26 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
                                       .set_label("+ Add Account")
                                       .set_variant("primary")
                                       .set_open_modal("fleet-add-modal")))
-        .add_component(ui.TileView(component_id="acct-tiles")
+        .add_component(ui.ListView(component_id="acct-list")
+                       .set_columns(["Account", "Status", "Group", "Plugins"])
                        .set_key_column("key")
                        .set_empty_text("No accounts yet — add your first "
                                        "Discord account.")
-                       .set_data_source(_tiles_data(api))
+                       .set_data_source(_acct_records(api))
                        .set_row_actions([
-                           run_toggle,
-                           RowAction("details", "details", open_details),
-                           RowAction("cred", "credential", open_cred),
-                           RowAction("group", "group", open_move),
-                           RowAction("plugins", "plugins", open_assign),
-                           RowAction("estop", "estop", estop_row, variant="danger",
+                           RowAction("run", "Start/Stop", toggle_run,
+                                     variant="primary"),
+                           RowAction("details", "Details", open_details,
+                                     variant="ghost"),
+                           RowAction("cred", "Credential", open_cred,
+                                     variant="ghost"),
+                           RowAction("group", "Group", open_move,
+                                     variant="ghost"),
+                           RowAction("plugins", "Plugins", open_assign,
+                                     variant="ghost"),
+                           RowAction("estop", "E-stop", estop_row, variant="danger",
                                      confirm="Emergency stop this account?"),
-                           RowAction("remove", "remove", remove_row, variant="danger",
+                           RowAction("remove", "Remove", remove_row, variant="danger",
                                      confirm="Remove this account? Deletes its "
                                              "credential, cooldowns and state."),
                        ])
@@ -1447,18 +1468,23 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
                                       .set_label("+ Create Group")
                                       .set_variant("primary")
                                       .set_open_modal("group-create-modal")))
-        .add_component(ui.TileView(component_id="group-tiles")
+        .add_component(ui.ListView(component_id="group-list")
+                       .set_columns(["Group", "Status", "Members"])
                        .set_key_column("key")
                        .set_empty_text("No sync groups — create one to let "
                                        "accounts coordinate their pacing.")
-                       .set_data_source(_group_tiles(api))
+                       .set_data_source(_group_records(api))
                        .set_row_actions([
-                           RowAction("open", "open", group_details),
-                           RowAction("edit", "edit", group_edit),
-                           RowAction("addmember", "+ member", group_addmember),
-                           RowAction("start", "start all", group_start),
-                           RowAction("stop", "stop all", group_stop),
-                           RowAction("delete", "delete", group_delete, variant="danger",
+                           RowAction("open", "Open", group_details,
+                                     variant="primary"),
+                           RowAction("edit", "Edit", group_edit, variant="ghost"),
+                           RowAction("addmember", "+ Member", group_addmember,
+                                     variant="ghost"),
+                           RowAction("start", "Start all", group_start,
+                                     variant="ghost"),
+                           RowAction("stop", "Stop all", group_stop,
+                                     variant="ghost"),
+                           RowAction("delete", "Delete", group_delete, variant="danger",
                                      confirm="Delete this group? Accounts are never "
                                              "deleted — members return to independent "
                                              "pacing."),
@@ -1837,28 +1863,31 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
         return {"success": True, "message": f"profile {name} deleted",
                 "refresh": ["prof-tiles", "bp-profile"]}
 
-    def _library_tiles(api):
+    def _library_records(api):
         async def provide(ctx):
             try:
                 profiles = await api.plugin_profiles_list() or []
             except Exception:
                 profiles = []
-            tiles = []
+            records = []
             for p in profiles:
                 plugin = p.get("plugin", "?")
                 name = p.get("name", "?")
-                desc = p.get("description") or ""
                 settings = p.get("settings") or {}
                 scope = settings.get("channels") or {}
                 mode = scope.get("mode", "all") if isinstance(scope, dict) else "all"
                 n_rules = len(scope.get("rules") or []) if isinstance(scope, dict) else 0
                 scope_txt = ("all channels" if mode == "all" or not scope
                              else f"{mode}: {n_rules} guild rule(s)")
-                tiles.append({"key": f"{plugin}|{name}", "title": name,
-                              "status": plugin, "tone": "info",
-                              "meta": [["🏷", desc or "—"],
-                                       ["⇆", scope_txt]]})
-            return {"tiles": tiles}
+                records.append({
+                    "key": f"{plugin}|{name}",
+                    "cells": [
+                        {"primary": name,
+                         "secondary": p.get("description") or "—"},
+                        plugin,
+                        scope_txt,
+                    ]})
+            return {"records": records}
         return provide
 
     def _eff_lines(api):
@@ -1899,13 +1928,14 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
         .add_component(ui.Toolbar(component_id="prof-lib-bar")
                        .set_title("Profile library")
                        .set_icon("M4 6h16M4 12h16M4 18h10"))
-        .add_component(ui.TileView(component_id="prof-lib")
+        .add_component(ui.ListView(component_id="prof-lib")
+                       .set_columns(["Profile", "Plugin", "Scope"])
                        .set_key_column("key")
                        .set_empty_text("no profiles in the library yet")
-                       .set_data_source(_library_tiles(api))
+                       .set_data_source(_library_records(api))
                        .set_row_actions([
-                           RowAction("edit", "edit", edit_profile),
-                           RowAction("delete", "delete", delete_profile, variant="danger",
+                           RowAction("edit", "Edit", edit_profile, variant="primary"),
+                           RowAction("delete", "Delete", delete_profile, variant="danger",
                                      confirm="Delete this profile? Accounts bound "
                                              "to it fall back to plugin defaults."),
                        ])))

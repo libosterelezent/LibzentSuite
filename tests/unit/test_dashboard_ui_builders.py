@@ -1376,3 +1376,70 @@ class TestToolbarAndFormGrid(unittest.TestCase):
             inst = getattr(ui, name)(component_id="x")
             self.assertTrue(hasattr(inst, "set_icon"),
                             f"{name} missing set_icon")
+
+
+class TestListViewRecordsMode(unittest.TestCase):
+    """Phase 3: ListView becomes the record-list component."""
+
+    def _ui(self):
+        from core.dashboard_ui import DashboardUIToolset
+        return DashboardUIToolset()
+
+    def test_kv_mode_unchanged_without_columns(self):
+        lv = self._ui().ListView(component_id="kv").set_empty_text("none")
+        self.assertNotIn("columns", lv._props())
+
+    def test_records_mode_serializes(self):
+        lv = (self._ui().ListView(component_id="accts")
+              .set_columns(["Account", "Status"])
+              .set_key_column("key"))
+        props = lv._props()
+        self.assertEqual(props["columns"], ["Account", "Status"])
+        self.assertEqual(props["key_column"], "key")
+
+    def test_column_bounds(self):
+        from core.dashboard_ui.errors import UIError
+        lv = self._ui().ListView(component_id="x")
+        for bad in ([], ["a"] * 7, "Account"):
+            with self.assertRaises(UIError):
+                lv.set_columns(bad)
+
+    def test_row_and_bulk_actions_share_table_contract(self):
+        from core.dashboard_ui import RowAction, BulkAction
+        lv = (self._ui().ListView(component_id="accts")
+              .set_columns(["A"])
+              .set_row_actions([RowAction("run", "Start", lambda r, c: None)])
+              .set_bulk_actions([BulkAction("start", "Start",
+                                            lambda rows, c: None)]))
+        props = lv._props()
+        self.assertEqual(props["row_actions"][0]["id"], "run")
+        self.assertTrue(props["selectable"])
+        self.assertEqual(props["bulk_actions"][0]["id"], "start")
+
+    async def test_records_dispatch(self):
+        import asyncio
+        from core.dashboard_ui.registry import DashboardUIRegistry
+        from core.dashboard_ui.context import ActionContext
+        seen = []
+
+        def run(key, ctx):
+            seen.append(key)
+            return {"success": True, "message": f"ran {key}"}
+
+        ui = self._ui()
+        lv = (ui.ListView(component_id="accts")
+              .set_columns(["A", "B"]).set_key_column("key")
+              .set_row_actions([RowAction("run", "Start", run)]))
+        registry = DashboardUIRegistry()
+        registry.attach("t", ui.Layout(component_id="l").add_page(
+            ui.Page(component_id="p").add_section(
+                ui.Section(component_id="s").add_component(lv))))
+
+        async def go():
+            result = await registry.dispatch_action(
+                "t", "accts", {"action": "run", "row": "acct-1"},
+                ActionContext(plugin="t", component_id="accts"))
+            self.assertTrue(result.success)
+            self.assertEqual(seen, ["acct-1"])
+
+        asyncio.run(go())

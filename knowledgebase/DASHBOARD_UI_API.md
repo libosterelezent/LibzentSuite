@@ -189,6 +189,45 @@ changes, payload `{"value": <current>}`).
 | `RadioGroup` | (select rendering) | `str` |
 | `MultiSelect` | (select rendering) | `list` |
 
+### Component selection guide (default responsibilities)
+
+| Component | Use it for | Do NOT use it for |
+|---|---|---|
+| **ListView (records mode)** | repeated RECORDS needing readable aligned rows — accounts, groups, profiles, libraries | single summaries; genuinely tabular data |
+| **Table** | genuinely tabular data with stable columns — audit records, task listings, per-account plugin state | record collections where identity/status hierarchy matters (use ListView records) |
+| **Card / TileView** | self-contained summaries and metric panels — a per-plugin binding summary, a status wall | the default representation for every record |
+| **Section** | grouping related content under a heading + spacing contract | a page of one |
+| **Form** | field grouping, validation presentation, submission | loose inputs wired manually |
+| **Button** | one action with consistent hierarchy (primary/secondary/ghost/danger) | navigation |
+| **Tabs** | switching related panels (real selection semantics) | stacking content |
+| **Layout containers** | composition and alignment | child-specific CSS hacks |
+
+**Rendering repeated records — the account-list pattern.** Declare
+columns and return records; each row is an aligned grid (selection |
+identity | status | meta | trailing actions) — not a card, not a table:
+
+```python
+ui.ListView(component_id="accounts")
+  .set_columns(["Account", "Status", "Group", "Plugins"])
+  .set_key_column("key")
+  .set_data_source(accounts_provider)      # -> {"records": [...]}
+  .set_row_actions([RowAction("run", "Start/Stop", run, variant="primary"),
+                    RowAction("remove", "Remove", remove, variant="danger",
+                              confirm="Remove this account?")])
+  .set_bulk_actions([BulkAction("start", "Start", bulk_start)])
+```
+
+A record is `{"key", "cells": [...]}` with cells parallel to the
+columns. Cell values: a plain string; `{"primary", "secondary"?}` for
+identity (strong + mono subline); `{"text", "tone", "meta"?}` for
+status (dot + TEXT — color is never the only signal — plus a muted
+runtime line); `{"chips": [...]}` for assignments (chips wrap within
+their column). Rows share height and alignment from the row GRID;
+actions occupy a capped trailing zone that wraps at a defined boundary
+and never shifts between rows. Below 760px rows deliberately collapse:
+identity + status up top, cells stacked, actions as a full-width row —
+no horizontal page overflow, ever.
+
 ### 2.4 Data + action components
 
 | Builder | Key setters | Purpose |

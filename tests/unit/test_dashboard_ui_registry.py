@@ -755,3 +755,32 @@ class SyncCallbackPolicyTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(UIError) as raised:
             await reg.dispatch_action("p", "hog", {}, _ctx("p", "hog"))
         self.assertIn("exceeded", str(raised.exception))
+
+
+class ComponentDispatcherRebindTests(unittest.IsolatedAsyncioTestCase):
+    """Regression (visual audit): Table/ListView row-action dispatchers
+    are bound methods of the COMPONENT object. With an instance resolver
+    installed and NO live plugin runtime they must still dispatch — only
+    plugin-instance methods refuse without a runtime."""
+
+    async def test_row_action_dispatches_without_runtime(self):
+        import asyncio
+        from core.dashboard_ui import DashboardUIToolset, RowAction
+        from core.dashboard_ui.registry import DashboardUIRegistry
+
+        ui = DashboardUIToolset()
+        lv = (ui.ListView(component_id="rows")
+              .set_columns(["A"]).set_key_column("key")
+              .set_row_actions([RowAction("go", "Go",
+                                          lambda k, c: {"success": True,
+                                                        "message": f"ran {k}"})]))
+        registry = DashboardUIRegistry()
+        registry.attach("p", ui.Layout(component_id="l").add_page(
+            ui.Page(component_id="pg").add_section(
+                ui.Section().add_component(lv))))
+        # resolver installed (as the PluginManager does) that finds nothing
+        registry.set_instance_resolver(lambda plugin, account: None)
+        result = await registry.dispatch_action(
+            "p", "rows", {"action": "go", "row": "r1"}, _ctx("p", "rows"))
+        self.assertTrue(result.success)
+        self.assertEqual(result.message, "ran r1")

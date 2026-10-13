@@ -545,3 +545,64 @@ dialog.dui-modal .dlg-body { max-height: min(70vh, 640px); overflow-y: auto;
   outline-offset: -2px; border-radius: var(--r-sm) var(--r-sm) 0 0; }
 [role="tabpanel"] { animation: dui-fadein .12s ease-in; }
 @keyframes dui-fadein { from { opacity: .4; } to { opacity: 1; } }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ListView RECORDS mode — the record-list layout contract (accounts etc.)
+   Row anatomy: [selection] | identity (strong) | status | meta cells |
+   actions (trailing, right-aligned). Alignment comes from the row GRID —
+   never from per-button margins. Status = dot + TEXT (never color alone).
+   ═══════════════════════════════════════════════════════════════════════════ */
+.dui-lrows { display: flex; flex-direction: column; gap: 6px; min-width: 0;
+  overflow-x: auto; }   /* final guard: never page-level overflow */
+.dui-lrows-head, .dui-lrow {
+  display: grid; align-items: center; column-gap: var(--sp-3); min-width: 0; }
+.dui-lrows-head {
+  padding: 0 var(--sp-3) 4px;
+  font-size: 11px; color: var(--dim); font-weight: 600;
+  text-transform: uppercase; letter-spacing: .04em; }
+.dui-lrows-h { overflow-wrap: anywhere; }
+.dui-lrows-h-actions { text-align: right; }
+.dui-lrow {
+  background: var(--surface); border: 1px solid var(--border);
+  border-left: 3px solid var(--border2);
+  border-radius: var(--r); padding: var(--sp-2) var(--sp-3);
+  min-height: 52px; transition: border-color .12s, box-shadow .12s; }
+.dui-lrow:hover { border-color: var(--border2); box-shadow: var(--shadow); }
+.dui-lrow-sel { display: flex; align-items: center; }
+.dui-lrow-sel input { width: 14px; height: 14px; }
+.dui-lrow-cell { font-size: 13px; color: var(--dim); min-width: 0;
+  overflow-wrap: anywhere; display: flex; flex-direction: column;
+  gap: 2px; justify-content: center; }
+.dui-lrow-identity { min-width: 0; }
+.dui-lrow-primary { font-size: 14px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dui-lrow-secondary { font-size: 11px; color: var(--faint);
+  font-family: var(--mono); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.dui-lrow-status-line { display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 500; color: var(--text); }
+.dui-lrow-dot { width: 8px; height: 8px; border-radius: 50%;
+  background: var(--dim); flex-shrink: 0; }
+.dui-dot-ok { background: var(--ok); }
+.dui-dot-warn { background: var(--warn); }
+.dui-dot-err { background: var(--err); }
+.dui-dot-info { background: var(--accent); }
+.dui-lrow-status-meta { font-size: 11px; color: var(--faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dui-lrow-chips { flex-direction: row; flex-wrap: wrap; gap: 4px; }
+.dui-lrow-actions { display: flex; align-items: center; justify-content: flex-end;
+  gap: 6px; flex-wrap: wrap; max-width: 340px;
+  padding: 2px 0; }   /* wraps at a defined boundary, aligned right */
+
+/* Records-mode responsive contract: below 760px the row deliberately
+   collapses to identity+status up top, meta cells stacked, actions a
+   full-width predictable row — never horizontal page overflow. */
+@media (max-width: 760px) {
+  .dui-lrows-head { display: none; }   /* column labels collapse away */
+  .dui-lrow { display: flex; flex-wrap: wrap; row-gap: var(--sp-2); }
+  .dui-lrow-sel { order: -2; }
+  .dui-lrow-identity { order: -1; flex: 1 1 100%; }
+  .dui-lrow-status { flex: 1 1 100%; }
+  .dui-lrow-actions { flex: 1 1 100%; justify-content: flex-start;
+    padding-top: var(--sp-2); border-top: 1px solid var(--border); }
+}

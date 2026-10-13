@@ -568,26 +568,34 @@ class TestFleetPage(unittest.IsolatedAsyncioTestCase):
         ids = [p["id"] for p in layout["children"]]
         self.assertEqual(sorted(ids), sorted(FRAMEWORK_VIEWS))
 
-    async def test_account_tiles_provider(self):
+    async def test_account_records_provider(self):
         reg, api = make_fleet_registry()
-        data = await reg.get_data(FRAMEWORK_PLUGIN, "acct-tiles", None)
-        keys = [t["key"] for t in data["tiles"]]
+        data = await reg.get_data(FRAMEWORK_PLUGIN, "acct-list", None)
+        keys = [r["key"] for r in data["records"]]
         self.assertEqual(keys, ["a1", "a2"])
-        self.assertEqual(data["tiles"][0]["tone"], "ok")
-        self.assertEqual(data["tiles"][1]["tone"], "warn")  # no credential
+        # identity cell: strong primary + mono secondary id
+        self.assertEqual(data["records"][0]["cells"][0]["primary"], "a1")
+        # status cell: text + tone (+ runtime meta line)
+        status = data["records"][1]["cells"][1]
+        self.assertEqual(status["text"], "stopped")
+        self.assertEqual(status["tone"], "warn")   # no credential
+        self.assertIn("🔑 missing", status["meta"])
+        # assignments: group chips + plugin chips
+        self.assertEqual(data["records"][0]["cells"][2]["chips"],
+                         [{"text": "g1", "kind": "group"}])
 
-    async def test_group_tiles_provider(self):
+    async def test_group_records_provider(self):
         reg, api = make_fleet_registry()
-        data = await reg.get_data(FRAMEWORK_PLUGIN, "group-tiles", None)
-        self.assertEqual(data["tiles"][0]["key"], "g1")
-        self.assertEqual(data["tiles"][0]["status"], "1/1")
+        data = await reg.get_data(FRAMEWORK_PLUGIN, "group-list", None)
+        self.assertEqual(data["records"][0]["key"], "g1")
+        self.assertIn("1/1", data["records"][0]["cells"][1]["text"])
 
     async def test_details_row_action_opens_modal(self):
         from core import framework_ui
         reg, api = make_fleet_registry()
-        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="acct-tiles")
+        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="acct-list")
         result = await reg.dispatch_action(
-            FRAMEWORK_PLUGIN, "acct-tiles",
+            FRAMEWORK_PLUGIN, "acct-list",
             {"action": "details", "row": "a1"}, ctx)
         self.assertEqual(result.modal, "acct-details-modal")
         self.assertEqual(framework_ui._fleet_state["details"], "a1")
@@ -596,9 +604,9 @@ class TestFleetPage(unittest.IsolatedAsyncioTestCase):
 
     async def test_bulk_start_dispatches_each(self):
         reg, api = make_fleet_registry()
-        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="acct-tiles")
+        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="acct-list")
         result = await reg.dispatch_action(
-            FRAMEWORK_PLUGIN, "acct-tiles",
+            FRAMEWORK_PLUGIN, "acct-list",
             {"action": "start", "rows": ["a1", "a2"]}, ctx)
         self.assertTrue(result.success)
         self.assertIn(("start", "a1"), api.fleet_calls)
@@ -607,9 +615,9 @@ class TestFleetPage(unittest.IsolatedAsyncioTestCase):
     async def test_bulk_move_opens_move_modal(self):
         from core import framework_ui
         reg, api = make_fleet_registry()
-        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="acct-tiles")
+        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="acct-list")
         result = await reg.dispatch_action(
-            FRAMEWORK_PLUGIN, "acct-tiles",
+            FRAMEWORK_PLUGIN, "acct-list",
             {"action": "move", "rows": ["a1"]}, ctx)
         self.assertEqual(result.modal, "move-modal")
         self.assertEqual(framework_ui._fleet_state["move"], ["a1"])
@@ -627,13 +635,13 @@ class TestFleetPage(unittest.IsolatedAsyncioTestCase):
 
     async def test_group_actions_route(self):
         reg, api = make_fleet_registry()
-        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="group-tiles")
+        ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="group-list")
         result = await reg.dispatch_action(
-            FRAMEWORK_PLUGIN, "group-tiles",
+            FRAMEWORK_PLUGIN, "group-list",
             {"action": "open", "row": "g1"}, ctx)
         self.assertEqual(result.modal, "group-details-modal")
         result = await reg.dispatch_action(
-            FRAMEWORK_PLUGIN, "group-tiles",
+            FRAMEWORK_PLUGIN, "group-list",
             {"action": "start", "row": "g1"}, ctx)
         self.assertTrue(result.success)
         self.assertIn(("start", "a1"), api.fleet_calls)

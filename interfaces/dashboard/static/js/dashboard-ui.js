@@ -301,10 +301,12 @@ async function loadDUIData(pluginName, compId, host, quiet) {
   }
   duiDataCache[compId] = data;
   const comp = duiComps[compId] || {};
-  const html = comp.type === "table" ? duiTableHTML(comp, data, compId)
-                                     : (comp.type === "tile-view"
-                                        ? duiTilesHTML(comp, data, compId)
-                                        : duiListHTML(comp, data));
+  let html;
+  if (comp.type === "table") html = duiTableHTML(comp, data, compId);
+  else if (comp.type === "tile-view") html = duiTilesHTML(comp, data, compId);
+  else if (comp.type === "list-view" && Array.isArray(comp.columns))
+    html = duiListRecordsHTML(comp, data, compId);
+  else html = duiListHTML(comp, data);
   host.innerHTML = html || "";
   wireDUIMore(host, compId);
   // row-action buttons render WITH the data (inside the body) — they
@@ -433,6 +435,83 @@ function duiTilesHTML(comp, data, compId) {
       (lines ? `<div class="dui-tile-lines">${lines}</div>` : "") + acts + `</div>`;
   }).join("");
   return duiBulkBarHTML(comp, compId) + `<div class="dui-tiles">${cards}</div>`;
+}
+
+/* ── ListView RECORDS mode: aligned record rows (the account-list
+   contract). Four zones per row: selection | cells (identity first,
+   strong) | actions (trailing, aligned). Status badges carry TEXT —
+   color is never the only signal. ─────────────────────────────────── */
+function duiListRecordsHTML(comp, data, compId) {
+  let records = null;
+  if (data && !Array.isArray(data) && typeof data === "object")
+    records = Array.isArray(data.records) ? data.records : null;
+  else if (Array.isArray(data)) records = data;
+  if (!records)
+    return duiEmpty("records data must be a list or a {records: […]} object");
+  if (!records.length) return duiEmpty(comp.empty_text);
+  const cols = Array.isArray(comp.columns) ? comp.columns : [];
+  const rowActions = Array.isArray(comp.row_actions) ? comp.row_actions : [];
+  const selectable = comp.selectable === true;
+  const keyCol = String(comp.key_column || "key");
+  // header row: selection slot + labels + trailing actions slot
+  // shrinkable tracks: cells wrap internally instead of overflowing the
+  // page; the actions zone is capped and wraps at its own boundary
+  const gridCols = (selectable ? "28px " : "") +
+    cols.map((c, i) => i === 0 ? "minmax(160px, 1.4fr)" : "minmax(0, 1fr)")
+        .join(" ") + (rowActions.length ? " minmax(200px, 340px)" : "");
+  const head = `<div class="dui-lrows-head" role="row" style="grid-template-columns:${gridCols}">` +
+    (selectable ? `<span class="dui-lrows-sel"></span>` : "") +
+    cols.map(c => `<span class="dui-lrows-h" role="columnheader">${esc(c)}</span>`).join("") +
+    (rowActions.length ? `<span class="dui-lrows-h dui-lrows-h-actions"></span>` : "") +
+    `</div>`;
+  const rows = records.map(rec => {
+    if (!rec || typeof rec !== "object") return "";
+    const key = String(rec[keyCol] ?? rec.key ?? "");
+    const cells = Array.isArray(rec.cells) ? rec.cells : [];
+    const sel = selectable
+      ? `<label class="dui-lrow-sel" title="Select for bulk actions">` +
+        `<input type="checkbox" data-dui-sel="${esc(compId)}" data-dui-key="${esc(key)}"${duiSelected(compId).has(key) ? " checked" : ""}></label>` : "";
+    const cellHtml = cols.map((_, i) => {
+      const v = cells[i];
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        if ("primary" in v || "secondary" in v)
+          return `<span class="dui-lrow-cell dui-lrow-identity">` +
+            `<span class="dui-lrow-primary">${esc(v.primary ?? "")}</span>` +
+            (v.secondary ? `<span class="dui-lrow-secondary">${esc(v.secondary)}</span>` : "") +
+            `</span>`;
+        if ("chips" in v) {
+          const chips = (Array.isArray(v.chips) ? v.chips : []).map(c => {
+            const text = (c && typeof c === "object") ? c.text : c;
+            const kind = (c && typeof c === "object" &&
+                          ["group", "plugin", "ok", "warn", "err"].includes(c.kind))
+              ? ` ${esc(c.kind)}` : "";
+            return `<span class="chip${kind}">${esc(text)}</span>`;
+          }).join(" ");
+          return `<span class="dui-lrow-cell dui-lrow-chips">${chips}</span>`;
+        }
+        if ("text" in v) {
+          const tone = ["ok", "warn", "err", "info"].includes(v.tone) ? v.tone : null;
+          return `<span class="dui-lrow-cell dui-lrow-status">` +
+            `<span class="dui-lrow-status-line${tone ? ` st-${tone === "ok" ? "online" : tone === "err" ? "offline" : tone === "warn" ? "warning" : "info"}` : ""}">` +
+            `<span class="dui-lrow-dot${tone ? ` dui-dot-${tone}` : ""}" aria-hidden="true"></span>` +
+            `${esc(v.text)}</span>` +
+            (v.meta ? `<span class="dui-lrow-status-meta">${esc(v.meta)}</span>` : "") +
+            `</span>`;
+        }
+      }
+      return `<span class="dui-lrow-cell">${duiCell(v)}</span>`;
+    }).join("");
+    const acts = rowActions.length
+      ? `<span class="dui-lrow-actions">` + rowActions.map(a =>
+          `<button type="button" class="btn btn-sm btn-${esc(a.variant || "secondary")}"` +
+          ` data-dui-rowact="${esc(compId)}" data-dui-raction="${esc(a.id)}"` +
+          ` data-dui-row="${esc(key)}"${a.confirm ? ` title="${esc(a.confirm)}"` : ""}>${esc(a.label)}</button>`).join("") +
+        `</span>` : "";
+    return `<div class="dui-lrow" role="row" data-dui-key="${esc(key)}" style="grid-template-columns:${gridCols}">` +
+      sel + cellHtml + acts + `</div>`;
+  }).join("");
+  return duiBulkBarHTML(comp, compId) +
+    `<div class="dui-lrows" role="rowgroup">${head}${rows}</div>`;
 }
 
 function duiBulkBarHTML(comp, compId) {

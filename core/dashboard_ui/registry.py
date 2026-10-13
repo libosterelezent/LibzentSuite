@@ -230,18 +230,23 @@ class DashboardUIRegistry:
         resolver = getattr(self, "_instance_resolver", None)
         if resolver is None:
             return callback
+        bound_on = getattr(callback, "__self__", None)
+        # COMPONENT-INTERNAL dispatchers (Table/TileView/ListView
+        # _dispatch_view_action) are bound to the component object, not
+        # a plugin — they must NEVER rebind or refuse; they are the
+        # channel that routes to the actual row action.
+        if not hasattr(bound_on, "initialize_dashboard_ui"):
+            return callback
         # Only rebind methods bound to a PLUGIN instance (the class of
         # the resolved live runtime). A method bound to a collaborator
         # object (self.helper.do) is NOT name-rebindable — it runs as
         # registered, per the documented callable contract.
-        bound_on = getattr(callback, "__self__", None)
-        if bound_on is not None and resolver is not None:
-            try:
-                probe = resolver(plugin_name, account)
-                if probe is not None and not isinstance(bound_on, type(probe)):
-                    return callback
-            except Exception:
-                pass   # the plain resolution below reports properly
+        try:
+            probe = resolver(plugin_name, account)
+            if probe is not None and not isinstance(bound_on, type(probe)):
+                return callback
+        except Exception:
+            pass   # the plain resolution below reports properly
         try:
             live = resolver(plugin_name, account)
         except UIError:
