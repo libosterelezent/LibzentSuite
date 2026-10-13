@@ -5,7 +5,6 @@ import logging
 import sys
 import unittest
 from pathlib import Path
-from types import SimpleNamespace as NS
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "fixtures"))
 
@@ -34,7 +33,7 @@ class TestReloadPlugin(unittest.IsolatedAsyncioTestCase):
         await mgr.activate_account("alpha", FakeServices())
         self.assertIn("probe", mgr._accounts["alpha"])
 
-        out = mgr.reload_plugin("probe")
+        out = await mgr.reload_plugin("probe")
         self.assertEqual(out["restored_accounts"], 1)
         self.assertIn("probe", mgr._accounts["alpha"])
         # UI re-registered
@@ -45,22 +44,62 @@ class TestReloadPlugin(unittest.IsolatedAsyncioTestCase):
         mgr.discover()
         from core.errors import PluginError
         with self.assertRaises(PluginError):
-            mgr.reload_plugin("nope")
+            await mgr.reload_plugin("nope")
 
     async def test_reload_preserves_disabled_flag(self):
         mgr = make_manager()
         mgr.discover()
         await mgr.attach_account("alpha", allowed={"probe"})
         await mgr.set_enabled("alpha", "probe", False)
-        mgr.reload_plugin("probe")
+        await mgr.reload_plugin("probe")
         rt = mgr._accounts["alpha"]["probe"]
         self.assertFalse(rt.enabled)
 
     async def test_reload_with_no_accounts(self):
         mgr = make_manager()
         mgr.discover()
-        out = mgr.reload_plugin("probe")
+        out = await mgr.reload_plugin("probe")
         self.assertEqual(out["restored_accounts"], 0)
+
+    async def test_reload_reactivates_live_instance(self):
+        # H1 regression: reload used to restore instance=None corpses —
+        # on an active account the plugin received ZERO events (and the
+        # enable toggle forcibly disabled it) until an account restart
+        mgr = make_manager()
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        await mgr.activate_account("alpha", FakeServices())
+        rt = mgr._accounts["alpha"]["probe"]
+        self.assertTrue(rt.active)
+
+        out = await mgr.reload_plugin("probe")
+
+        self.assertEqual(out["restored_accounts"], 1)
+        self.assertEqual(out["reactivated_accounts"], 1)
+        rt = mgr._accounts["alpha"]["probe"]
+        self.assertIsNotNone(rt.instance, "restored runtime must be live")
+        self.assertTrue(rt.active, "reload must re-activate running plugins")
+
+    async def test_reload_failure_preserves_live_state(self):
+        # H3/seam 2.5: a broken re-import must NOT tear down the working
+        # copy — validation happens before any detach
+        mgr = make_manager()
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        await mgr.activate_account("alpha", FakeServices())
+        bad = mgr._loader._dir / "probe" / "__init__.py"
+        good = bad.read_text()
+        bad.write_text("def broken(:\n")
+        try:
+            from core.errors import PluginError
+            with self.assertRaises(PluginError):
+                # discover fails; reload must propagate WITHOUT teardown
+                await mgr.reload_plugin("__rescan__")
+        finally:
+            bad.write_text(good)
+        rt = mgr._accounts["alpha"]["probe"]
+        self.assertTrue(rt.active, "failed rescan must not deactivate")
+        self.assertIn("probe", mgr.ui_registry.list_plugins())
 
 
 class TestUnloadPlugin(unittest.IsolatedAsyncioTestCase):
@@ -101,7 +140,7 @@ class TestUnloadPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rt.loaded)
 
         # reload re-discovers and restores
-        out = mgr.reload_plugin("probe")
+        out = await mgr.reload_plugin("probe")
         self.assertEqual(out["restored_accounts"], 1)
         self.assertIn("probe", mgr._accounts["alpha"])
 

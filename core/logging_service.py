@@ -99,10 +99,13 @@ def stop_stderr_pipeline() -> None:
     listener is drained + joined. Called from :meth:`LogService.stop_persistence`
     (the service shutdown seam) and at process exit.
     """
-    global _STDERR_LISTENER, _STDERR_QUEUE_HANDLER
+    global _STDERR_LISTENER, _STDERR_QUEUE_HANDLER, _STDERR_CONFIGURED
     with _STDERR_PIPELINE_LOCK:
         listener, qhandler = _STDERR_LISTENER, _STDERR_QUEUE_HANDLER
         _STDERR_LISTENER = _STDERR_QUEUE_HANDLER = None
+        # allow configure_stderr() to re-arm later (boot -> sim -> boot
+        # cycles left the flag latched and the second arm was a no-op)
+        _STDERR_CONFIGURED = False
     if qhandler is not None:
         logging.getLogger("slaughtermudae").removeHandler(qhandler)
     if listener is not None:
@@ -248,7 +251,11 @@ class LogService:
         calls it before database.close), so it stops cleanly here too.
         """
         await self._persist.stop(timeout)
-        stop_stderr_pipeline()
+        # NOTE: stop_stderr_pipeline is deliberately NOT called here —
+        # the pipeline is process-global (one module-level listener for
+        # every LogService in the process); stopping it per-service let
+        # simulator teardown silence the PRODUCTION console. Framework
+        # .shutdown owns the one true stop.
 
     def record(
         self,
@@ -281,7 +288,10 @@ class LogService:
                     "message": "<unloggable message>", "account": account,
                     "plugin": plugin, "task_id": task_id, "event": event}
         if severity not in SEVERITIES:
-            severity = "INFO"
+            # fail LOUD: a crash-level report ("CRITICAL", "FATAL", a
+            # typo'd severity from a caller) downgraded to INFO was
+            # invisible to ERROR-filtered tails
+            severity = "ERROR"
         if len(message) > _MESSAGE_CAP:  # ring + DB rows bounded per entry
             message = message[:_MESSAGE_CAP] + f"…(+{len(message) - _MESSAGE_CAP} chars)"
         with self._lock:

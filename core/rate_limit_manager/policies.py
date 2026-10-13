@@ -23,7 +23,9 @@ at construction time — finite numbers (NaN previously slipped through float
 comparisons and poisoned buckets), sane caps so a stray 1e9 can not wedge the
 fleet, and precise human-readable RatePolicyError messages.
 
-The *safety floor* (MIN_ACTION_INTERVAL — no policy faster than 1.5s/action)
+The *safety floor* (MIN_ACTION_INTERVAL — the validation minimum; the
+shipped default floor comes from the config/boot wiring, and a fleet
+operator can raise it at any time via the dashboard)
 is enforced by the manager (engine.py) at set time, not here: RatePolicy
 itself only guarantees structural sanity so a malformed object can never
 exist, even programmatically.

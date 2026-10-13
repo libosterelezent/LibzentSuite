@@ -298,13 +298,22 @@ class PluginManager:
         # re-attaches on every one) and plain (re)attaches
         self._sync_commands(account)
 
-    def reload_plugin(self, name: str) -> Dict[str, Any]:
-        """Hot-reload one plugin: detach → re-import → re-attach to accounts.
+    async def reload_plugin(self, name: str) -> Dict[str, Any]:
+        """Hot-reload one plugin: validate → teardown → restore LIVE runtimes.
 
-        Preserves per-account assignments and enabled flags. The plugin's
-        dashboard UI is re-registered at boot level. Returns a summary
-        dict. Raises PluginError when the plugin is unknown or the
-        re-import fails (the OLD state is preserved on failure).
+        Preserves per-account assignments and enabled flags. Contract
+        (audit-hardened):
+        - the re-import is VALIDATED FIRST — a broken plugin file must
+          not unload the working copy (the loader restores the previous
+          records when a scan fails);
+        - teardown fires the real hooks (on_disable/on_unload) and
+          quiesces in-flight dispatch for each affected account;
+        - the restored runtime carries a LIVE instance, and accounts
+          where the plugin was active are re-activated immediately —
+          reload used to leave ``instance=None, active=False`` corpses
+          that received zero events until an account restart.
+        Returns a summary dict. Raises PluginError when the plugin is
+        unknown or the re-import fails (the OLD state is preserved).
         """
         if name == "__rescan__":
             # special key: full re-scan without targeting one plugin
@@ -314,58 +323,94 @@ class PluginManager:
             self._logger.info("plugin directory rescan: %d plugin(s)", len(found))
             return {"plugin": "__rescan__", "discovered": found,
                     "restored_accounts": 0}
-        # always re-scan: an unloaded plugin was removed from _records,
-        # so we need a fresh discovery to pick it up again
-        self._loader.discover()
+        # VALIDATE the fresh import BEFORE touching any live state: pop
+        # the record and re-scan. A failing scan restores the previous
+        # records (loader contract) and the runtimes/UI are untouched.
+        old_record = self._loader._records.get(name)
+        self._loader._records.pop(name, None)
+        try:
+            self._loader.discover()
+        except PluginError:
+            raise   # loader restored the old records; nothing was torn down
         if name not in self._loader.names():
+            if old_record is not None:
+                self._loader._records[name] = old_record
             raise PluginError(f"unknown plugin {name!r}")
-        # snapshot the affected accounts so we can restore
-        affected = {
-            acct: dict((pname, rt) for pname, rt in runtimes.items()
-                       if pname == name)
-            for acct, runtimes in self._accounts.items() if name in runtimes
-        }
-        # detach the plugin from every account (preserving other plugins)
-        for acct in list(affected):
-            rt = self._accounts.get(acct, {}).pop(name, None)
-            if rt is not None and rt.active:
-                # fire on_disable + on_unload for a clean teardown
+        # snapshot the affected accounts (runtime + whether it was live
+        # — captured BEFORE teardown mutates the runtime in place)
+        affected = {}
+        was_active = {}
+        for acct, runtimes in self._accounts.items():
+            rt = runtimes.get(name)
+            if rt is not None:
+                affected[acct] = rt
+                was_active[acct] = rt.active
+        # TEARDOWN with the real hooks, one account at a time
+        for acct, rt in affected.items():
+            await self._quiesce_dispatch(acct)
+            factory = self._services.get(acct)
+            services = factory(name) if factory is not None else None
+            ctx = self._context(acct, rt, services)
+            rt.ctx = None
+            if rt.active and rt.enabled and rt.instance is not None:
                 try:
-                    if rt.instance is not None:
-                        import asyncio
-                        if asyncio.get_event_loop().is_running():
-                            # can't await here (sync method) — the hooks
-                            # fire on next activation instead
-                            pass
+                    await self._hook(acct, rt, rt.instance.on_disable,
+                                     ctx, "on_disable")
+                except Exception:
+                    pass   # recorded; still unload
+            if rt.loaded and rt.instance is not None:
+                try:
+                    await self._hook(acct, rt, rt.instance.on_unload,
+                                     ctx, "on_unload")
                 except Exception:
                     pass
-        # unregister the UI
+                self._bus.publish_nowait(
+                    PluginUnloaded(account=acct, plugin=name))
+            rt.active = False
+            rt.loaded = False
+            self._accounts[acct].pop(name, None)
+        # unregister the stale UI; the boot pass below re-registers it
         self._ui_registry.detach(name)
-        # re-import: remove from loader's records, re-scan, pick up the
-        # fresh module
-        self._loader._records.pop(name, None)
-        self._loader.discover()   # re-scan picks up the changed module
-        if name not in self._loader.names():
-            raise PluginError(
-                f"plugin {name!r} disappeared after re-scan — the old "
-                f"instance was detached")
-        # re-register the boot UI
         self.init_boot_dashboard_uis()
-        # re-attach to every affected account
+        # RESTORE with live instances; re-activate where it was running
         restored = 0
-        for acct, was in affected.items():
-            if acct not in self._accounts:
+        reactivated = 0
+        for acct, old_rt in affected.items():
+            runtimes = self._accounts.get(acct)
+            if runtimes is None:
                 continue   # account gone while we worked
-            old_rt = was.get(name)
+            try:
+                instance = self._loader.create(name)
+            except Exception:
+                self._logger.exception(
+                    "plugin %s failed to construct on %s after reload",
+                    name, acct)
+                instance = None
             rt = PluginRuntime(
-                name=name, instance=None,
+                name=name, instance=instance,
                 enabled=old_rt.enabled if old_rt else True,
                 loaded=False, active=False)
-            self._accounts[acct][name] = rt
+            runtimes[name] = rt
             restored += 1
+            if instance is not None and was_active.get(acct):
+                try:
+                    await self._activate_one(acct, rt)
+                    reactivated += 1
+                except Exception:
+                    self._logger.exception(
+                        "plugin %s failed to re-activate on %s after reload",
+                        name, acct)
+        # the fresh instances take over the live UI for their accounts
+        for acct in affected:
+            runtimes = self._accounts.get(acct)
+            if runtimes is not None and name in runtimes \
+                    and runtimes[name].active:
+                self._init_dashboard_uis(acct, runtimes)
         self._logger.info(
-            "plugin %s reloaded (restored on %d account(s))", name, restored)
-        return {"plugin": name, "restored_accounts": restored}
+            "plugin %s reloaded (restored on %d account(s), "
+            "re-activated on %d)", name, restored, reactivated)
+        return {"plugin": name, "restored_accounts": restored,
+                "reactivated_accounts": reactivated}
 
     def unload_plugin(self, name: str) -> Dict[str, Any]:
         """Unload one plugin: detach from every account, unregister UI.
@@ -786,7 +831,16 @@ class PluginManager:
                 "cancelled %d dispatch task(s) still running on %s after "
                 "%.2fs grace", len(stragglers), account, self._dispatch_grace_s,
             )
-            await asyncio.gather(*stragglers, return_exceptions=True)
+            # bounded re-reap: a handler that swallows CancelledError
+            # (bare except, shield, long finally) must not hang
+            # deactivation forever — log survivors and move on
+            _, undead = await asyncio.wait(
+                stragglers, timeout=self._dispatch_grace_s)
+            for task in undead:
+                self._logger.warning(
+                    "dispatch task on %s survived cancel; abandoning "
+                    "(task=%s)", account, getattr(task, "get_name",
+                                                  lambda: repr(task))())
 
     # ------------------------------------------------------------- mutation
     async def set_enabled(self, account: str, plugin: str, enabled: bool) -> None:

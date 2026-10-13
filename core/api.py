@@ -225,14 +225,20 @@ class ControlAPI:
             name = account["name"]
             if "credential" not in account:
                 account["credential"] = self._credential_state(name)
-            if "cooldowns" not in account and self._cooldowns is not None:
-                try:
-                    # FINAL-PHASE (F3): memory-only count (the mirror is
-                    # boot-restored + mutation-written; resync absorbs
-                    # external edits) — no per-second DB scan per account
-                    account["cooldowns"] = self._cooldowns.active_count_for(name)
-                except Exception:
-                    account["cooldowns"] = 0
+        if self._cooldowns is not None:
+            try:
+                # FINAL-PHASE (F3): memory-only counts (the mirror is
+                # boot-restored + mutation-written; resync absorbs
+                # external edits) — ONE O(C) pass for all accounts, not
+                # a per-account scan of every row (O(N×C) at the 1 Hz
+                # status poll)
+                counts = self._cooldowns.active_counts_all()
+            except Exception:
+                counts = {}
+            for account in accounts:
+                if isinstance(account, dict) and account.get("name") \
+                        and "cooldowns" not in account:
+                    account["cooldowns"] = counts.get(account["name"], 0)
         return accounts
 
     def _credential_state(self, name: str) -> Optional[str]:
@@ -611,7 +617,17 @@ class ControlAPI:
             raise ValueError("field 'description' must be a string")
         self._validate_plugins_known([plugin])
         cleaned = self._validate_profile_settings(plugin, settings)
-        record = await repo.create(plugin, name.strip(), description, cleaned)
+        try:
+            record = await repo.create(
+                plugin, name.strip(), description, cleaned)
+        except DatabaseError as exc:
+            # duplicate (plugin, name) is a client conflict, not a 500 —
+            # mirror the update path's conversion
+            if "already exists" in str(exc):
+                raise ValueError(
+                    f"profile {name.strip()!r} already exists for plugin "
+                    f"{plugin!r}") from exc
+            raise
         self._audit_mgmt(
             "system", "mgmt:plugin_profile.created", surface,
             extra=f"plugin={plugin} profile={record.name}")
@@ -1088,6 +1104,8 @@ class ControlAPI:
         if plugin != "__rescan__" and plugin not in self._plugins.names():
             raise ValueError(f"unknown plugin {plugin!r}")
         out = self._plugins.reload_plugin(plugin)
+        if inspect.iscoroutine(out):
+            out = await out
         self._audit_mgmt("system", "mgmt:plugin.reloaded", surface,
                          extra=f"plugin={plugin}")
         return out
@@ -1677,7 +1695,8 @@ class ControlAPI:
         level: str = "global",
         owner: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Set a policy. Enforces the safety floor: < 1.5s/action is REJECTED.
+        """Set a policy. Enforces the safety floor: an interval at or below the
+        configured floor is REJECTED (see the Policies page for the value).
 
         Engine mutation first (memory takes effect immediately), then the
         awaited repository write — best-effort exactly like the old engine
@@ -1722,7 +1741,7 @@ class ControlAPI:
         return self._limiter.warnings()
 
     async def ratelimit_set_floor(self, seconds: float) -> Dict[str, Any]:
-        """Raise the pacing floor (can never drop below 1.5s; persisted)."""
+        """Raise the pacing floor (never below MIN_ACTION_INTERVAL; persisted)."""
         floor = self._limiter.set_floor(seconds)
         await self._persist_floor(floor)
         return {"floor": floor}
@@ -1769,7 +1788,7 @@ class ControlAPI:
 
     async def _persist_floor(self, floor: float) -> None:
         """Persist the raised floor (kv): a restart must not silently revert
-        a post-incident safety measure to the 1.5s default."""
+        a post-incident safety measure to the configured default floor."""
         kv = getattr(self._database, "kv", None) \
             if self._database is not None else None
         if kv is None:

@@ -116,11 +116,16 @@ class UIComponent:
     _type_name = "component"   # serialization name, overridden per class
     _INTERACTIVE = False       # True on components that carry actions
 
-    def __init__(self, *, component_id: str = "", **kwargs) -> None:
+    def __init__(self, *, component_id: str = "", title: str | None = None,
+                 **kwargs) -> None:
         if component_id:
             self._validate_id(component_id)
         self._id = component_id or self._generate_id()
-        self._title: str | None = None
+        self._title: str | None = title if title is not None else None
+        if kwargs:
+            raise UIError(
+                f"unknown constructor argument(s) {sorted(kwargs)} — "
+                f"the builder API uses fluent setters")
         self._check = None          # visibility check callable
         self._parent = None         # set by the owning parent on add
         self._frozen = False        # set by the registry on attachment

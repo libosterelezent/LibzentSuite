@@ -112,7 +112,10 @@ SECURITY_HEADERS = (
     ("Cache-Control", "no-store"),
 )
 #: how long a route coroutine may take on the main loop before we 504
-ROUTE_TIMEOUT_S = 10.0
+# strictly greater than the UI registry's SYNC_TIMEOUT_S (10.0) + queue
+# margin: an equal budget phantom-504'd actions that queued behind other
+# sync callbacks and STILL succeeded (retry = double-apply)
+ROUTE_TIMEOUT_S = 13.0
 #: wall-clock budget for ONE partially-arrived websocket frame to complete
 #: (slow-dribble guard: a frame header that starts arriving must finish)
 WS_FRAME_DEADLINE_S = 30.0
@@ -909,6 +912,11 @@ class DashboardServer:
                 "ok": False,
                 "error": f"{method} {path} timed out after {timeout:.0f}s (may still complete)",
             }
+        except concurrent.futures.CancelledError:
+            # loop shutdown racing a request — CancelledError is a
+            # BaseException and used to escape into handle_error as a
+            # raw traceback with no response
+            return 503, {"ok": False, "error": "server shutting down"}
         except Exception as exc:
             LOG.exception("dashboard API call failed: %s %s", method, path)
             return 500, {"ok": False, "error": f"internal error ({type(exc).__name__})"}
@@ -1676,14 +1684,23 @@ def _make_handler(server: "DashboardServer") -> type:
         server_version = "STMudae"
         sys_version = ""
 
-        def send_error(self, code: int, message: Optional[str] = None,
-                       explain: Optional[str] = None) -> None:  # noqa: N802
+        def end_headers(self) -> None:  # noqa: N802
             # stdlib error pages (501 for unimplemented methods, malformed
-            # request 400s) bypass _respond — carry the security headers too.
+            # request 400s) bypass _respond — this override carries the
+            # security headers onto EVERY response, including them.
+            # (Appending after send_error() returned was a no-op: the
+            # headers had already been flushed.)
             try:
-                super().send_error(code, message, explain)
                 for header, value in SECURITY_HEADERS:
                     self.send_header(header, value)
+            except OSError:
+                pass
+            super().end_headers()
+
+        def send_error(self, code: int, message: Optional[str] = None,
+                       explain: Optional[str] = None) -> None:  # noqa: N802
+            try:
+                super().send_error(code, message, explain)
             except OSError:
                 pass  # peer vanished mid-error — nothing to answer
 
@@ -1759,8 +1776,8 @@ def _make_handler(server: "DashboardServer") -> type:
                 data = payload if isinstance(payload, bytes) else str(payload).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", content_type)
-            for header, value in SECURITY_HEADERS:
-                self.send_header(header, value)
+            # security headers ride the end_headers() override — one
+            # source of truth covering _respond AND stdlib error pages
             if close or self.close_connection:
                 # tell the client the socket will not be reused (a drained
                 # GET body / rejected request leaves no parseable stream)
@@ -1834,7 +1851,13 @@ def _make_handler(server: "DashboardServer") -> type:
                         extra = -1
                     if extra:
                         remaining = extra
+                        deadline = _time.monotonic() + HTTP_BODY_DEADLINE_S
                         while remaining > 0 and remaining <= 16 * MAX_BODY_BYTES:
+                            if _time.monotonic() > deadline:
+                                # trickle-drain pinned a handler thread
+                                # for hours without this bound
+                                self.close_connection = True
+                                break
                             try:
                                 chunk = self.rfile.read(min(remaining, 65536))
                             except OSError:
@@ -1906,7 +1929,11 @@ def _make_handler(server: "DashboardServer") -> type:
                     # drain a bounded amount so the client's send completes,
                     # then reject (a bare early-close breaks the client's write)
                     remaining = length
+                    deadline = _time.monotonic() + HTTP_BODY_DEADLINE_S
                     while remaining > 0 and remaining <= 16 * MAX_BODY_BYTES:
+                        if _time.monotonic() > deadline:
+                            self.close_connection = True
+                            break
                         try:
                             chunk = self.rfile.read(min(remaining, 65536))
                         except OSError:

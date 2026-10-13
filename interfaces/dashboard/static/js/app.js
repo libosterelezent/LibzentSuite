@@ -61,6 +61,7 @@ const UI = {
     render();
   },
   tab(name) {
+    if (!$("tab-accounts")) return;   // fleet is a framework page — no legacy tabs
     $$("#panel-fleet .tabbar .tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===name));
     currentFleetTab = name;
     $("tab-accounts").classList.toggle("hidden",name!=="accounts");
@@ -150,6 +151,7 @@ function renderTick() {
 
 /* ── WebSocket ─────────────────────────────────────────────────────────────── */
 let wsRetryTimer = null;
+let wsLastMsg = 0;   // last frame received — half-open corpse detection
 function connectWS() {
   // A stale watchdog from a previous attempt must never close the NEXT
   // socket while it is still connecting.
@@ -166,20 +168,24 @@ function connectWS() {
   const sock = ws;  // closure capture: this watchdog only ever retires ITS socket
   wsWatchdog = setTimeout(()=>{ if(sock.readyState===WebSocket.CONNECTING) sock.close(); }, 5000);
   ws.onopen = () => {
-    clearTimeout(wsWatchdog); wsRetries = 0;
+    clearTimeout(wsWatchdog); wsRetries = 0; wsLastMsg = Date.now();
     $("wsdot").classList.add("on"); $("connmsg").textContent = "live";
   };
+  ws.onerror = () => {};   // recovery is onclose's job; no console noise
   ws.onmessage = ev => {
+    wsLastMsg = Date.now();   // half-open detection (see wsStale below)
     let msg; try { msg = JSON.parse(ev.data); } catch { return; }
     try {
       if (msg.type === "stats") {
+        // record BEFORE computing the signature: a malformed row must
+        // never freeze live data by throwing inside the sig computation
+        lastStats = msg;
         const sig = JSON.stringify((msg.accounts||[]).map(a=>[
           a.name,a.status,a.enabled,a.credential,a.sync_group,
           (a.assigned_plugins||[]).join(","),
           JSON.stringify(a.plugin_profiles||{}),
           a.latency_ms!=null?Math.round(a.latency_ms/10):null,
           Math.floor((a.uptime_s??0)/60), a.cooldowns??0]));
-        lastStats = msg;
         // Only full-render when the STRUCTURAL signature changed (status
         // flip, account add/remove, credential change, plugin assignment,
         // PROFILE BINDING change, minute-level uptime, latency bucket,
@@ -405,9 +411,23 @@ function wire() {
   // visible or the network returns (connectWS cancels any pending
   // backoff itself; only a truly dead socket triggers a reconnect).
   const wsDead = () => !ws || ws.readyState === WebSocket.CLOSED;
-  window.addEventListener("online", () => { if (wsDead()) connectWS(); });
+  // Half-open detection: after OS sleep / interface flaps TCP can sit
+  // half-open for minutes with readyState OPEN and NO frames arriving —
+  // the header shows "live" while nothing updates. A visible tab with
+  // no message for 15s means the socket is a corpse: retire it and
+  // reconnect (no ping frames on this stack; the 1s stats tick means a
+  // healthy connection ALWAYS beats 15s).
+  const wsStale = () => ws && ws.readyState === WebSocket.OPEN
+                         && wsLastMsg && (Date.now() - wsLastMsg > 15000);
+  const wsReanimate = () => {
+    if (!wsStale()) return;
+    ws.onclose = null; try { ws.close(); } catch {}
+    ws = null; connectWS();
+  };
+  window.addEventListener("online", () => { if (wsDead()) connectWS(); else wsReanimate(); });
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && wsDead()) connectWS();
+    if (document.visibilityState !== "visible") return;
+    if (wsDead()) connectWS(); else wsReanimate();
   });
 
   // Global search (accounts, groups, plugins — all esc()'d)

@@ -45,7 +45,7 @@ from .credential_service import CredentialService
 from .credentials import Credentials
 from .errors import RatePolicyError, UnsafePolicyError
 from .event_bus import EventBus
-from .logging_service import LogService, ServiceLogger, attach_stdlib_bridge, configure_stderr, detach_stdlib_bridge
+from .logging_service import LogService, ServiceLogger, attach_stdlib_bridge, configure_stderr, detach_stdlib_bridge, stop_stderr_pipeline
 from .plugin_manager import PluginManager
 from .plugin_state import PluginStateService
 from .profile_manager import ProfileManager
@@ -243,6 +243,9 @@ class Framework:
             ("stdlib bridge", self._detach_bridge),
             ("plugin manager", self._close_plugins),
             ("database", self.database.close),
+            # LAST: the stderr pipeline is process-global; stopping it
+            # before the steps above silenced their final warnings
+            ("stderr pipeline", stop_stderr_pipeline),
         )
         interrupted: Optional[BaseException] = None
         for label, step in steps:

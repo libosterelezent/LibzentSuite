@@ -421,6 +421,9 @@ class SimWorld:
                     user_ns = SimpleNamespace(
                         id=user_id, name=self.users.get(user_id, ""))
                     for client in list(self.subscribers):
+                        _sees = getattr(client, "can_see", None)
+                        if _sees is not None and not _sees(channel_id):
+                            continue   # foreign DM pair — invisible live
                         handler = getattr(client, "reaction_event", None)
                         if handler is None:
                             handler = getattr(client, "on_reaction", None)
@@ -452,8 +455,14 @@ class SimWorld:
                     dto = self._to_dto(message)  # frozen DTO boundary: live
                     for client in list(self.subscribers):  # adapters push the
                         # self-filter: live adapters never echo your own
-                        # edits/deletes back as events (fidelity parity)
-                        if client.user_id != message.author_id and client.on_message_edit is not None:
+                        # edits/deletes back as events (fidelity parity);
+                        # DM edits are visible ONLY to pair members (an
+                        # unrelated account's gateway never sees the channel)
+                        _sees = getattr(client, "can_see", None)
+                        if (client.user_id != message.author_id
+                                and client.on_message_edit is not None
+                                and (_sees is None
+                                     or _sees(message.channel_id))):
                             try:
                                 client.on_message_edit(dto)
                             except Exception:
@@ -481,7 +490,10 @@ class SimWorld:
                 if message.id == message_id:
                     messages.pop(index)
                     for client in list(self.subscribers):
-                        if client.user_id != message.author_id and client.on_message_delete is not None:
+                        _sees = getattr(client, "can_see", None)
+                        if (client.user_id != message.author_id
+                                and client.on_message_delete is not None
+                                and (_sees is None or _sees(channel_id))):
                             try:
                                 client.on_message_delete(
                                     message_id, channel_id, message.guild_id, message)

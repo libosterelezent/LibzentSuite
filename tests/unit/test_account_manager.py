@@ -489,26 +489,40 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         supervisor keeps retrying at the max delay instead of dying
         silently and leaving the account RECONNECTING forever."""
         settings = _fast_reconnect_settings()
+        # NOTE: _reconnect_settings clamps max with a 0.1s floor — the
+        # effective max here is 0.1, NOT the 0.05 written below.
         settings.overrides["alpha"] = {
             "reconnect_initial_delay": 0.01,
             "reconnect_max_delay": 0.05,
             "reconnect_multiplier": 1e300,  # **2 already overflows float
         }
         h = make_manager(settings=settings)
+        # deterministic clock: record delays instead of sleeping (the
+        # wall-clock polling shape was the suite's known ~1-in-8 flake —
+        # three jittered backoffs of 0.1-0.15s vs a 2.0s poll budget on
+        # a loaded runner). Seed the jitter RNG too, so bounds are exact.
+        recorded: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            recorded.append(seconds)
+            await asyncio.sleep(0)   # yield: never busy-spin the loop
+
+        h.manager._sleep = fake_sleep
+        h.manager._typing_rng = __import__("random").Random(0)
         await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         runtime = h.manager.get("alpha").runtime
         h.factory.client_kwargs["fail_connect"] = True  # reconnects fail
         runtime.client.drop("socket closed")
-        # bounded POLL for the retry evidence (stale-start audit: the old
-        # fixed 0.4s sleep was marginally flaky under suite load — jittered
-        # backoff of ~0.24s worst-case plus event-loop contention)
-        await _poll_until(lambda: len(h.factory.clients) >= 4, timeout=2.0)
+        # retries proceed instantly under the fake sleep — poll only for
+        # the COUNT of attempts, never wall-clock
+        await _poll_until(lambda: len(recorded) >= 3, timeout=2.0)
+        # overflow clamps to max (0.1 floor) with x[1.0,1.5) jitter
+        self.assertTrue(all(0.1 <= d <= 0.15 for d in recorded),
+                        f"delays escaped the clamp: {recorded}")
         supervisor = runtime.supervisor
         self.assertIsNotNone(supervisor)
         self.assertFalse(supervisor.done())  # alive, still driving retries
-        await _poll_until(
-            lambda: runtime.status == AccountStatus.RECONNECTING, timeout=2.0)
         self.assertGreaterEqual(len(h.factory.clients), 4)  # kept retrying
         await h.manager.stop("alpha")
         self.assertEqual(runtime.status, AccountStatus.STOPPED)

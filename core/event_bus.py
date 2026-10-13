@@ -390,8 +390,10 @@ class EventBus:
             if loop.time() >= deadline:
                 if self._queue or self._control_queue:
                     LOG.warning(
-                        "bus drain timeout: %d events undelivered, "
-                        "%d dropped-total", len(self._queue), self._dropped)
+                        "bus drain timeout: %d events undelivered "
+                        "(+%d undelivered control-plane, %d dropped-total)",
+                        len(self._queue), len(self._control_queue),
+                        self._dropped)
                 return
 
     def publish_nowait(self, event: Event) -> Optional["asyncio.Task[None]"]:
@@ -455,7 +457,13 @@ class EventBus:
             except asyncio.CancelledError:
                 if (cancellation_attributable()
                         and outer_cancel_pending(unknown=True)):
-                    self._queue.appendleft(event)  # put it back; we're dying
+                    # requeue onto the lane the event came from — a
+                    # control-plane ack re-queued onto the main deque
+                    # lost its drop protection
+                    if self._is_control(event):
+                        self._control_queue.appendleft(event)
+                    else:
+                        self._queue.appendleft(event)
                     raise
                 # 3.10 (no Task.cancelling): the cancel is unattributable.
                 # Requeue-and-die here used to WEDGE the bus — every

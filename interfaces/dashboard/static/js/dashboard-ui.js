@@ -308,7 +308,7 @@ async function loadDUIData(pluginName, compId, host, quiet) {
     html = duiListRecordsHTML(comp, data, compId);
   else html = duiListHTML(comp, data);
   host.innerHTML = html || "";
-  wireDUIMore(host, compId);
+  wireDUIMore(host, compId, pluginName);
   // row-action buttons render WITH the data (inside the body) — they
   // did not exist when wireDashboardUI ran, so wire them HERE on every
   // load/refresh or they are dead DOM
@@ -618,7 +618,7 @@ function wireDUIRowActions(root, pluginName) {
 }
 
 /* Reveal the rows a page_size hid (works off the cached provider result). */
-function wireDUIMore(host, compId) {
+function wireDUIMore(host, compId, pluginName) {
   const btn = host.querySelector("[data-dui-more]");
   if (!btn) return;
   btn.onclick = () => {
@@ -626,7 +626,15 @@ function wireDUIMore(host, compId) {
     const fresh = duiTableHTML({ ...comp, page_size: 0 }, duiDataCache[compId], compId);
     const box = host.querySelector(".dui-data") || host;
     box.innerHTML = fresh;
-    wireDUIMore(box, compId);
+    // the regenerated table contains NEW row-action buttons and
+    // selection checkboxes — without re-wiring, every control below
+    // the fold is dead after expanding
+    wireDUIMore(box, compId, pluginName);
+    if (pluginName) {
+      wireDUIRowActions(box, pluginName);
+      wireDuiSelection(box, pluginName, compId);
+      updateDuiBulkBar(compId);
+    }
   };
 }
 

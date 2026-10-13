@@ -21,6 +21,11 @@
   #sidebar { display: none; }
   #sidebar.open { display: flex; position: fixed; inset: 0; z-index: 100;
     background: var(--surface); padding-top: 60px; }
+  #sidebar.open .brand span, #sidebar.open .nav-item span:not(.badge) { display: block; }
+  #sidebar.open .nav-item { justify-content: flex-start; padding: 7px 12px; }
+  .dui-form-grid { grid-template-columns: 1fr !important; }
+  .dui-form-grid .dui-item input { min-width: 0; }
+  .dui-tiles { grid-template-columns: 1fr; }
   #menu-btn { display: flex; }
   #hdr { padding: var(--sp-2) var(--sp-3); gap: var(--sp-2); }
   #hdr .page-title { font-size: 14px; }

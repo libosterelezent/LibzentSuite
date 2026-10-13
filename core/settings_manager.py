@@ -106,8 +106,16 @@ class Setting:
                     f"string is {len(coerced)} chars, longer than the "
                     f"max {limit}",
                 )
-        if self.type in ("int", "float") and math.isinf(coerced):
-            raise SettingsValidationError(self.name, f"{value!r} is not a finite number")
+        if self.type in ("int", "float"):
+            try:
+                nonfinite = math.isinf(coerced)
+            except OverflowError:
+                # a giant int (10**400) overflows float conversion —
+                # surface a validation error, not a crash
+                nonfinite = True
+            if nonfinite:
+                raise SettingsValidationError(
+                    self.name, f"{value!r} is not a finite number")
         if self.min_value is not None and coerced < self.min_value:
             raise SettingsValidationError(self.name, f"{coerced} < min {self.min_value}")
         if self.max_value is not None and coerced > self.max_value:

@@ -41,7 +41,8 @@ _DEPENDENT_TABLES = ("account_settings", "plugin_settings", "plugin_states",
 #: kv rows keyed by PREFIX (PHASE-4 S3-G5 defense-in-depth): plugin state
 #: lives in kv under these prefixes; the service-level cascade is primary,
 #: the repo-level sweep is the backstop for unwired/limited services.
-_KV_PREFIX_SWEEPS = ("pstate:account:{name}:", "pstate:account_plugin:{name}/")
+_KV_PREFIX_SWEEPS = ("pstate:account:{name}:", "pstate:account_plugin:{name}/",
+                     "access:account:{name}")
 
 
 class AccountsRepository(BaseRepository):

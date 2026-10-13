@@ -41,8 +41,8 @@ class StubAPI:
     async def plugins_manifests(self):
         return [{"name": "probe", "version": "2.0", "description": "fixture"}]
 
-    async def plugins_state(self):
-        return [{"account": "a1", "plugin": "probe", "enabled": True,
+    async def plugins_state(self, account):
+        return [{"name": "probe", "enabled": True,
                  "active": True, "error_count": 0}]
 
     async def plugins_reload(self, plugin, surface="api"):
@@ -54,7 +54,8 @@ class StubAPI:
         self.calls.append(("plugins_unload", plugin))
         return {"detached_accounts": 1}
 
-    async def plugins_set_enabled(self, account, plugin, enabled, surface="api"):
+    async def plugins_set_enabled(self, account, plugin, enabled):
+        # real ControlAPI takes no surface kwarg
         self.calls.append(("plugins_set_enabled", account, plugin, enabled))
         return {}
 
@@ -493,8 +494,8 @@ class FleetStubAPI(StubAPI):
     async def groups_get(self, group):
         return dict(self._snap) if group == "g1" else None
 
-    async def groups_create(self, name, description="", enabled=True, surface="api"):
-        self.fleet_calls.append(("g-create", name)); return {}
+    async def groups_create(self, payload, surface="api"):
+        self.fleet_calls.append(("g-create", payload)); return {}
 
     async def groups_update(self, group, payload, surface="api"):
         self.fleet_calls.append(("g-update", group, payload)); return {}
@@ -502,10 +503,10 @@ class FleetStubAPI(StubAPI):
     async def groups_delete(self, group, detach_members=False, surface="api"):
         self.fleet_calls.append(("g-delete", group, detach_members)); return {}
 
-    async def groups_add_member(self, group, account, surface="api"):
+    async def groups_add_account(self, group, account, surface="api"):
         self.fleet_calls.append(("g-add", group, account)); return {}
 
-    async def groups_remove_member(self, group, account, surface="api"):
+    async def groups_remove_account(self, group, account, surface="api"):
         self.fleet_calls.append(("g-remove", group, account)); return {}
 
     async def groups_set_account(self, account, group, surface="api"):

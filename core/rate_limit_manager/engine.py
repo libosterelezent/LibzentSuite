@@ -653,7 +653,7 @@ class RateLimitManager:
         return f"{level}|{owner or ''}|{action}" in self._removed_defaults
 
     def set_floor(self, seconds: float) -> float:
-        """Raise the safety floor (never lower, never below 1.5s).
+        """Raise the safety floor (never lower, never below MIN_ACTION_INTERVAL).
 
         Raises:
             RatePolicyError: when seconds would LOWER the floor, is below the
@@ -749,7 +749,11 @@ class RateLimitManager:
             self._groups[account] = str(group).strip()
         if previous is not None and previous != self._groups.get(account):
             self._drop_group_stamps(previous)
-        self._wake_all()  # group membership changes every member's pacing
+        if previous != self._groups.get(account):
+            # only wake on a REAL membership change — boot-restore's
+            # no-op re-registration of N accounts used to fire N
+            # fleet-wide wakes
+            self._wake_all()
 
     def _drop_group_stamps(self, group: Optional[str]) -> None:
         """Drop a group's shared pacing stamps when its LAST member left.
@@ -1183,6 +1187,13 @@ class RateLimitManager:
         for key in [k for k, until in self._account_cooldowns.items()
                     if until <= now]:
             del self._account_cooldowns[key]
+        # plugin-supplied action strings would otherwise grow _last_fire
+        # without bound (and stats() sorts all of it every second); any
+        # stamp older than the largest possible block is inert — an
+        # interval at or below MAX_INTERVAL yields a block of <= 0.
+        cutoff = now - MAX_INTERVAL
+        for key in [k for k, ts in self._last_fire.items() if ts <= cutoff]:
+            del self._last_fire[key]
 
     # -------------------------------------------------------------- reporting
     def stats(self) -> dict:

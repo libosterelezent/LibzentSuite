@@ -239,7 +239,14 @@ class CredentialService:
                 # PHASE-4 (S5-L1): the account's credential was DELETED
                 # while we were parked on the repo write — writing the
                 # caches now would poison memory with a token the
-                # operator just removed (mirror of the resolve() guard)
+                # operator just removed (mirror of the resolve() guard).
+                # The repo UPSERT may still have committed AFTER the
+                # delete — tombstone it or a later resolve() would
+                # resurrect the deleted token from SQLite.
+                try:
+                    await self._repo.delete(account)
+                except Exception:
+                    pass
                 return
             self._db_accounts.add(account)
         self._memory[account] = token

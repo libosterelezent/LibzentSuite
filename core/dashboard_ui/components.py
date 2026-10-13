@@ -734,11 +734,10 @@ class Table(_Selectable, _Interactive):
             seen.add(entry.id)
             checked.append(entry)
         self._row_actions = checked
-        if checked:
-            # row buttons dispatch through the table's own action channel
-            # with {"action": <id>, "row": <key>}; the dispatcher routes
-            # to the right RowAction callable below.
-            self.set_action(self._dispatch_row_action)
+        if checked and getattr(self, "_action", None) is None:
+            # row/bulk buttons dispatch through the table's own action
+            # channel; _dispatch_view_action routes bulk first, then rows
+            self.set_action(self._dispatch_view_action)
         return self
 
     async def _dispatch_row_action(self, context, payload):
@@ -1404,8 +1403,14 @@ class Tab(UIContainer):
         self._icon: str | None = None
 
     def set_icon(self, icon: str) -> "Tab":
+        """Set the sidebar icon (SVG path data, narrow charset)."""
         self._check_frozen("set the icon")
-        self._icon = _require_str(icon, "icon")
+        icon = _require_str(icon, "icon")
+        if not _ComponentParent._ICON_RE.match(icon):
+            raise UIError(
+                "icon must be SVG path data (letters MZLHVCSQTA, digits, "
+                "spaces, commas, dots, + and -)")
+        self._icon = icon
         return self
 
     def add_section(self, section) -> "Tab":
@@ -1479,8 +1484,14 @@ class Page(UIContainer):
         return self
 
     def set_icon(self, icon: str) -> "Page":
+        """Set the sidebar icon (SVG path data, narrow charset)."""
         self._check_frozen("set the icon")
-        self._icon = _require_str(icon, "icon")
+        icon = _require_str(icon, "icon")
+        if not _ComponentParent._ICON_RE.match(icon):
+            raise UIError(
+                "icon must be SVG path data (letters MZLHVCSQTA, digits, "
+                "spaces, commas, dots, + and -)")
+        self._icon = icon
         return self
 
     def set_account_scope(self, scoped: bool = True) -> "Page":
