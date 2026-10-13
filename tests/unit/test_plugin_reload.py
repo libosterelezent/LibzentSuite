@@ -147,3 +147,75 @@ class TestUnloadPlugin(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestActivationSettleAndReloadUndo(unittest.IsolatedAsyncioTestCase):
+    """Review pass-2 #1 + #2: teardown paths must settle in-flight
+    activations and the reload undo must actually deactivate."""
+
+    def _mgr(self):
+        return make_manager()
+
+    async def test_deactivate_waits_for_inflight_activation(self):
+        import asyncio
+        mgr = self._mgr()
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        rt = mgr._accounts["alpha"]["probe"]
+        parked = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_on_enable(*a):
+            parked.set()
+            await release.wait()
+
+        rt.instance.on_enable = slow_on_enable
+        activating = asyncio.create_task(
+            mgr.activate_account("alpha", FakeServices()))
+        await parked.wait()                     # activation mid-hook
+        deactivating = asyncio.create_task(mgr.deactivate_account("alpha"))
+        await asyncio.sleep(0.05)
+        self.assertFalse(deactivating.done(),
+                         "deactivate must WAIT for the activation to settle")
+        release.set()
+        await activating
+        await deactivating
+        self.assertFalse(rt.active, "post-settle deactivate takes effect")
+        # and the account's services were consumed by the deactivate
+        self.assertNotIn("alpha", mgr._services)
+
+    async def test_reload_undo_deactivates_when_services_vanish(self):
+        import asyncio
+        mgr = self._mgr()
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        await mgr.activate_account("alpha", FakeServices())
+        rt = mgr._accounts["alpha"]["probe"]
+        parked = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_on_enable(*a):
+            parked.set()
+            await release.wait()
+
+        rt.instance.on_enable = slow_on_enable
+        # park the reload's re-activation inside the hook
+        old_create = mgr._loader.create
+
+        def create_parked(name):
+            inst = old_create(name)
+            if name == "probe":
+                inst.on_enable = slow_on_enable
+            return inst
+
+        mgr._loader.create = create_parked
+        reloading = asyncio.create_task(mgr.reload_plugin("probe"))
+        await parked.wait()                     # re-activation mid-hook
+        mgr._services.pop("alpha", None)        # the concurrent stop's mark
+        release.set()
+        out = await reloading
+        self.assertEqual(out["reactivated_accounts"], 0)
+        new_rt = mgr._accounts["alpha"]["probe"]
+        self.assertFalse(new_rt.active,
+                         "undo must deactivate the half-activated replacement")
+        self.assertFalse(new_rt.loaded)

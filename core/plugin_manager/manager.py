@@ -137,6 +137,12 @@ class PluginManager:
         #: activated — no hooks, no unregister. deactivate_account stays
         #: lock-free (attach calls it UNDER this lock).
         self._mutation_lock = asyncio.Lock()
+        #: per-account activation-in-flight markers (set = idle): a stop/
+        #: removal/deactivation landing during an in-flight activation
+        #: WAITS for it to settle first — otherwise the activation's
+        #: resumed hooks set active=True on a runtime the deactivator
+        #: already walked past (an orphan nobody supervises)
+        self._activation_events: Dict[str, asyncio.Event] = {}
         self._ui_registry = ui_registry or DashboardUIRegistry(
             offload_sync=True)
         # the registry rebinds boot-time bound-method callbacks onto LIVE
@@ -377,6 +383,7 @@ class PluginManager:
         # dispatch gates and run on the instance mid-unload); then the
         # in-flight tasks drain; then the hooks fire on captured state.
         for acct, rt in affected.items():
+            await self._await_activation_settled(acct)
             rt.active = False   # blocks new dispatch admission NOW
             self._accounts[acct].pop(name, None)
             await self._quiesce_dispatch(acct)
@@ -428,17 +435,22 @@ class PluginManager:
             # account would leave an unsupervised active plugin behind
             if (instance is not None and was_active.get(acct)
                     and self._services.get(acct) is not None):
+                ok = False
                 try:
                     await self._activate_one(acct, rt)
-                    if self._services.get(acct) is None:
-                        # the account went down DURING activation — undo
-                        raise PluginError(
-                            f"account {acct!r} deactivated mid-reload")
-                    reactivated += 1
+                    ok = True
                 except Exception:
                     self._logger.exception(
                         "plugin %s failed to re-activate on %s after reload",
                         name, acct)
+                if self._services.get(acct) is None:
+                    # the account went down DURING activation — run the
+                    # per-runtime teardown EXPLICITLY (raising into a
+                    # logging-only except left the replacement active,
+                    # hooks fired, on a stopped account — review pass-2 #2)
+                    await self._teardown_runtime(acct, rt)
+                elif ok:
+                    reactivated += 1
             # the hub must reflect the REPLACEMENT's command declarations
             # even when it was not re-activated (review finding #13)
             self._sync_commands(acct)
@@ -487,6 +499,7 @@ class PluginManager:
         """
         self._accounts.pop(account, None)
         self._services.pop(account, None)
+        self._activation_events.pop(account, None)
         # dispatch bookkeeping: any task still queued dies at the services
         # gate in _dispatch (the account's services are gone)
         self._pending_by_account.pop(account, None)
@@ -502,19 +515,48 @@ class PluginManager:
         ``(plugin_name) -> services`` (duck-checked) — each plugin gets its
         own facade either way.
         """
-        runtimes = self._accounts.get(account)
-        if runtimes is None:
-            raise PluginError(f"account {account!r} has no attached plugins (attach first)")
-        factory = self._services_factory(services)
-        self._services[account] = factory
-        for runtime in runtimes.values():
-            if not runtime.enabled:
-                continue
-            await self._activate_one(account, runtime)
-        # UI lifecycle: offer the toolset to plugins that declare a UI
-        # (after on_load/on_enable — actions may reflect plugin state)
-        self._init_dashboard_uis(account, runtimes)
+        # serialize against a prior in-flight activation on this account
+        await self._await_activation_settled(account)
+        ev = self._activation_events.get(account)
+        if ev is None:
+            ev = asyncio.Event()
+            ev.set()
+            self._activation_events[account] = ev
+        ev.clear()
+        try:
+            runtimes = self._accounts.get(account)
+            if runtimes is None:
+                raise PluginError(f"account {account!r} has no attached plugins (attach first)")
+            factory = self._services_factory(services)
+            self._services[account] = factory
+            for runtime in runtimes.values():
+                if not runtime.enabled:
+                    continue
+                await self._activate_one(account, runtime)
+            # UI lifecycle: offer the toolset to plugins that declare a UI
+            # (after on_load/on_enable — actions may reflect plugin state)
+            self._init_dashboard_uis(account, runtimes)
+        finally:
+            ev.set()
         self._logger.info("activated plugins on %s", account)
+
+    async def _await_activation_settled(self, account: str,
+                                        timeout: float = 5.0) -> None:
+        """Bounded wait for any in-flight activation on ``account``.
+
+        Deactivation, removal and reload call this BEFORE touching the
+        account's runtimes: an activation parked in on_load/on_enable
+        would otherwise resume AFTER their teardown pass and leave an
+        active, hook-fired runtime behind (review pass-2 #1)."""
+        ev = self._activation_events.get(account)
+        if ev is None or ev.is_set():
+            return
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            self._logger.warning(
+                "activation of %s did not settle within %.1fs; proceeding",
+                account, timeout)
 
     def init_boot_dashboard_uis(self) -> int:
         """Register plugin dashboard UIs at DISCOVERY time (no account).
@@ -797,6 +839,7 @@ class PluginManager:
         is going down (otherwise a plugin could be left ``active`` on a
         stopped account).
         """
+        await self._await_activation_settled(account)
         runtimes = self._accounts.get(account)
         if runtimes is None:
             return
@@ -1051,6 +1094,34 @@ class PluginManager:
                         "ui_panels failed for %s — skipped",
                         plugin_name, exc_info=True)
         return sorted(panels.values(), key=lambda p: p["id"])
+
+    async def _teardown_runtime(self, account: str,
+                                runtime: PluginRuntime) -> None:
+        """Fire one runtime's unload hooks and reset its flags.
+
+        Used by the reload path when the account went down mid-activation:
+        the account-level deactivate has already run, so nothing else
+        would ever clean up the half-activated replacement."""
+        factory = self._services.get(account)
+        services = factory(runtime.name) if factory is not None else None
+        ctx = self._context(account, runtime, services)
+        runtime.ctx = None
+        if runtime.active and runtime.enabled and runtime.instance is not None:
+            try:
+                await self._hook(account, runtime,
+                                 runtime.instance.on_disable, ctx, "on_disable")
+            except Exception:
+                pass   # recorded; still unload
+        if runtime.loaded and runtime.instance is not None:
+            try:
+                await self._hook(account, runtime,
+                                 runtime.instance.on_unload, ctx, "on_unload")
+            except Exception:
+                pass
+            self._bus.publish_nowait(
+                PluginUnloaded(account=account, plugin=runtime.name))
+        runtime.active = False
+        runtime.loaded = False
 
     def states(self, account: str) -> List[Dict[str, Any]]:
         """Per-account plugin state for both UIs (sorted by name)."""

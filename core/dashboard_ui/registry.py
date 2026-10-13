@@ -236,6 +236,19 @@ class DashboardUIRegistry:
         # a plugin — they must NEVER rebind or refuse; they are the
         # channel that routes to the actual row action.
         if not hasattr(bound_on, "initialize_dashboard_ui"):
+            # component-internal dispatcher: offer per-dispatch
+            # preparation so a NESTED plugin callback (the preserved
+            # explicit action) rebinds to the live runtime too
+            prep = getattr(bound_on, "_prepare_dispatch", None)
+            if callable(prep):
+                try:
+                    prepared = prep(resolver, plugin_name, account)
+                except UIError:
+                    raise
+                except Exception:
+                    prepared = None   # prep is best-effort
+                if prepared is not None:
+                    return prepared
             return callback
         # resolve ONCE (the manager's resolver walks live runtimes —
         # doubled calls doubled the cost of every dispatch)

@@ -91,6 +91,15 @@ def _start_stderr_pipeline() -> None:
             atexit.register(stop_stderr_pipeline)
 
 
+def stderr_pipeline_active() -> bool:
+    """True while the process-global stderr listener is running.
+
+    Lets a framework build know whether IT owns the pipeline (it
+    configured it) or is borrowing one another live build started —
+    only the owner ever stops it (review pass-2 #3)."""
+    return _STDERR_LISTENER is not None
+
+
 def stop_stderr_pipeline() -> None:
     """Stop the stderr listener thread and detach its queue handler.
 

@@ -523,7 +523,7 @@ class DuplicateIdTests(unittest.TestCase):
         first = Button(component_id="one")
         second = Badge(component_id="two")
         section.add_components(first, second)
-        with self.assertRaises(DuplicateComponentIdError) as ctx:
+        with self.assertRaises(DuplicateComponentIdError) as _:
             second.set_id("one")
         self.assertEqual(second.get_id(), "two")  # unchanged
         self.assertIn("one", section._child_ids)
@@ -1424,6 +1424,7 @@ class TestListViewRecordsMode(unittest.TestCase):
 
     async def test_records_dispatch(self):
         import asyncio
+        from core.dashboard_ui import RowAction
         from core.dashboard_ui.registry import DashboardUIRegistry
         from core.dashboard_ui.context import ActionContext
         seen = []
@@ -1449,3 +1450,50 @@ class TestListViewRecordsMode(unittest.TestCase):
             self.assertEqual(seen, ["acct-1"])
 
         asyncio.run(go())
+
+
+# ---------------------------------------------- 15. view-action routing
+class ViewActionRoutingTests(unittest.TestCase):
+    """Review #11 + pass-2 #5: route by id; matched-row rejections
+    propagate; id-less payloads reach the preserved explicit action."""
+
+    def _table(self):
+        from core.dashboard_ui import RowAction
+        seen = []
+
+        def explicit(ctx, payload):
+            seen.append(payload)
+            return {"via": "explicit"}
+
+        tbl = (Table(component_id="rt1").set_columns(["A"])
+               .set_action(explicit)
+               .set_row_actions([
+                   RowAction("go", "Go",
+                             lambda row, ctx: {"via": "row", "row": row}),
+                   RowAction("no", "No",
+                             lambda row, ctx: (_ for _ in ()).throw(
+                                 UIError("cannot poke this user")))]))
+        return tbl, seen
+
+    def test_matched_row_rejection_propagates(self):
+        import asyncio
+        tbl, seen = self._table()
+        with self.assertRaises(UIError) as cm:
+            asyncio.run(tbl._action({}, {"action": "no", "row": "r1"}))
+        self.assertIn("cannot poke", str(cm.exception))
+        self.assertEqual(seen, [], "rejections must not reroute")
+
+    def test_matched_row_dispatches_and_unmatched_falls_back(self):
+        import asyncio
+        tbl, seen = self._table()
+        out = asyncio.run(tbl._action({}, {"action": "go", "row": "r1"}))
+        self.assertEqual(out, {"via": "row", "row": "r1"})
+        out = asyncio.run(tbl._action({}, {"action": "zzz", "row": "r1"}))
+        self.assertEqual(out, {"via": "explicit"})
+
+    def test_idless_payload_reaches_explicit_action(self):
+        import asyncio
+        tbl, seen = self._table()
+        out = asyncio.run(tbl._action({}, {"field": 1}))
+        self.assertEqual(out, {"via": "explicit"})
+        self.assertEqual(seen, [{"field": 1}])
