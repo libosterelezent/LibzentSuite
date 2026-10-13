@@ -41,8 +41,7 @@ _DEPENDENT_TABLES = ("account_settings", "plugin_settings", "plugin_states",
 #: kv rows keyed by PREFIX (PHASE-4 S3-G5 defense-in-depth): plugin state
 #: lives in kv under these prefixes; the service-level cascade is primary,
 #: the repo-level sweep is the backstop for unwired/limited services.
-_KV_PREFIX_SWEEPS = ("pstate:account:{name}:", "pstate:account_plugin:{name}/",
-                     "access:account:{name}")
+_KV_PREFIX_SWEEPS = ("pstate:account:{name}:", "pstate:account_plugin:{name}/")
 
 
 class AccountsRepository(BaseRepository):
@@ -195,6 +194,13 @@ class AccountsRepository(BaseRepository):
                     await conn.execute(
                         "DELETE FROM kv WHERE key LIKE ? ESCAPE '\\'",
                         (pattern,))
+                # access rows (admin flag / perms / prefix / user_id) live
+                # under 'access:account:<name>' — an EXACT-match delete,
+                # never a prefix sweep: 'access:account:bob%' would also
+                # wipe bob2/bobby's authorization rows (review finding #5)
+                await conn.execute(
+                    "DELETE FROM kv WHERE key = ?",
+                    (f"access:account:{name}",))
         return existed
 
     # -------------------------------------------------------------- profiles

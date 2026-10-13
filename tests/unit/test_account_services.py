@@ -615,3 +615,86 @@ class CredentialKeyRotationTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+
+class CredentialDeleteGenerationTests(unittest.IsolatedAsyncioTestCase):
+    """Review #4: deletion generations are PER-ACCOUNT — deleting one
+    account must not trigger another account's in-flight store
+    tombstone (the service-wide counter made store('beta') delete its
+    own freshly written ciphertext when alpha was deleted mid-write)."""
+
+    def _service(self) -> "CredentialService":
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from core.credential_service import CredentialService
+        tmp = tempfile.mkdtemp(prefix="sm-cred-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.repo = _PausingRepo()
+        return CredentialService(self.repo, key_path=Path(tmp) / "k.key")
+
+    async def test_unrelated_delete_does_not_tombstone_inflight_store(self):
+        svc = self._service()
+        await svc.store("alpha", "tok-alpha")
+        self.repo.pause()
+        store_task = asyncio.create_task(svc.store("beta", "tok-beta"))
+        await self.repo.wait_paused()      # beta's store parked mid-write
+        await svc.delete("alpha")          # UNRELATED account deleted
+        self.repo.resume()
+        await store_task
+        # beta's ciphertext must SURVIVE (the old service-wide generation
+        # made store() think beta was deleted and tombstone its row)
+        self.assertEqual(await svc.resolve("beta"), "tok-beta")
+        self.assertIsNone(await svc.resolve("alpha"))
+
+    async def test_own_account_delete_still_tombstones(self):
+        svc = self._service()
+        self.repo.pause()
+        store_task = asyncio.create_task(svc.store("alpha", "tok-alpha"))
+        await self.repo.wait_paused()
+        await svc.delete("alpha")          # the SAME account deleted
+        self.repo.resume()
+        await store_task
+        self.assertIsNone(await svc.resolve("alpha"))
+
+
+class _PausingRepo:
+    """Repo double with a gate inside store(): a test parks an in-flight
+    store while a delete commits, then resumes."""
+
+    def __init__(self):
+        self._rows: dict = {}
+        self._gate = asyncio.Event()
+        self._gate.set()                  # unpaused by default
+        self._paused = asyncio.Event()
+
+    def pause(self):
+        self._gate.clear()
+        self._paused.clear()
+
+    async def wait_paused(self):
+        await self._paused.wait()
+
+    def resume(self):
+        self._gate.set()
+
+    async def store(self, account, ciphertext):
+        if not self._gate.is_set():
+            self._paused.set()          # signal parked WHILE still parked
+            await self._gate.wait()     # release
+        self._rows[account] = ciphertext
+
+    async def load(self, account):
+        if not self._gate.is_set():
+            self._paused.set()
+            await self._gate.wait()
+        return self._rows.get(account)
+
+    async def delete(self, account):
+        # deliberately NOT gated: the delete commits while a store is
+        # parked — that interleaving is exactly what these tests probe
+        return self._rows.pop(account, None) is not None
+
+    async def accounts(self):
+        return sorted(self._rows)

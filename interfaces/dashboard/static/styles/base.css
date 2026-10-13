@@ -91,7 +91,8 @@ input[type="checkbox"] { accent-color: var(--accent2); }
 .st-connecting::before, .st-reconnecting::before { background: var(--accent); }
 .st-stopped, .st-created, .st-offline { color: var(--dim); background: rgba(126,138,160,.12); }
 .st-stopped::before, .st-created::before, .st-offline::before { background: var(--dim); }
-.st-failed, .st-failed::before, .st-error::before { background: var(--err); }
+.st-failed, .st-error { color: var(--err); background: rgba(248,113,113,.12); }
+.st-failed::before, .st-error::before { background: var(--err); }
 .st-cooldown, .st-warning { color: var(--warn); background: rgba(251,191,36,.12); }
 .st-cooldown::before, .st-warning::before { background: var(--warn); }
 .st-missing_credential, .st-invalid_credential { color: var(--err); background: rgba(248,113,113,.15); }

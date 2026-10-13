@@ -14,9 +14,13 @@ function api(path, opts={}) {
   if (token()) headers["X-Dashboard-Token"] = token();
   // A hung request must never permanently disable its caller (withBusy
   // leaves action buttons spinning forever on a stalled fetch) — abort
-  // after 15s and surface a clear message.
+  // and surface a clear message. Default 15s; callers may pass a larger
+  // {timeoutMs} for routes the SERVER itself grants a longer budget
+  // (the simulation run route gets 200s server-side — a 15s client
+  // abort reported healthy long runs as timed out, review finding #9).
+  const limit = opts.timeoutMs || (path === "/api/simulation/run" ? 210000 : 15000);
   const ctrl = new AbortController();
-  const timer = setTimeout(()=>ctrl.abort(), 15000);
+  const timer = setTimeout(()=>ctrl.abort(), limit);
   return fetch(path, {...opts, signal: ctrl.signal, headers}).then(async r => {
     if (r.status===401) throw new Error("401 — set the dashboard token (Tools → Advanced)");
     let body; try { body = await r.json(); } catch { throw new Error(`HTTP ${r.status}`); }

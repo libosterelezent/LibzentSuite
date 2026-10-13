@@ -1855,6 +1855,11 @@ class AccountManager:
                         or _looks_like_auth_error(exc)):
                     rt.status = AccountStatus.INVALID_CREDENTIAL
                     rt.last_error = f"{type(exc).__name__}: {exc}"
+                    if rt.client is not None:
+                        # _connect_client assigns rt.client BEFORE connect()
+                        # raises — the failed client (and its run task) must
+                        # not linger on an account nobody supervises
+                        self._discard_half_built_client(name, rt)
                     self._lifecycle_commit(
                         "reconnect", name, ok=False, invalid_credential=True)
                     self._logger.error(
@@ -2465,6 +2470,22 @@ class AccountManager:
                 self._logger.exception(
                     "plugin re-activation after attach failed for %s "
                     "(plugins stay inactive until the next start)", name)
+            if rt.runtime.stop_requested:
+                # a stop() completed DURING the activation await (review
+                # finding #3): its teardown ran before these hooks fired —
+                # deactivate again so no active plugin outlives the stop
+                self._logger.warning(
+                    "stop landed during attach-activation of %s; "
+                    "deactivating its plugins", name)
+                try:
+                    outcome = self._plugin_manager.deactivate_account(name)
+                    if inspect.iscoroutine(outcome):
+                        await outcome
+                    activated = False
+                except Exception:
+                    self._logger.exception(
+                        "post-stop deactivation failed for %s (plugins "
+                        "may linger active until the next stop)", name)
         return activated
 
     def _allowed_plugins(self, name: str) -> set:

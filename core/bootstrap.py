@@ -446,6 +446,11 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     # only enqueues, so it never blocks on SQLite
     await logs.start_persistence(database.logs)
     cleanups.append(("log persistence", logs.stop_persistence))
+    # failed builds never reach Framework.shutdown's step list — without
+    # this the process-global stderr listener survives a half-built
+    # framework (review finding #10; idempotent with shutdown's final
+    # step, which remains the ordered path on success)
+    cleanups.append(("stderr pipeline", stop_stderr_pipeline))
     attach_stdlib_bridge(logs)  # plugin/stdlib logger records -> structured page
     cleanups.append(("stdlib bridge", detach_stdlib_bridge))
     bus = EventBus()

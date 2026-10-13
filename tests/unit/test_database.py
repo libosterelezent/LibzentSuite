@@ -367,6 +367,27 @@ class TestRatePolicies(AsyncDatabaseTestCase):
             await self.db.policies.get("account_plugin", "axb/x", "dm"))
 
 
+    async def test_delete_sweeps_access_row_exact_match(self) -> None:
+        """Review #5: the access row is deleted by EXACT key, never a
+        prefix sweep — deleting 'bob' must not wipe bobby's admin row."""
+        await self.db.accounts.add("bob", token_ref="T1")
+        await self.db.kv.set("access:account:bob", {"is_admin": True})
+        await self.db.kv.set("access:account:bobby", {"is_admin": True})
+        await self.db.kv.set("access:account:bob2", {"prefix_mode": "mention"})
+        # pstate rows still sweep by prefix (their keys carry separators)
+        await self.db.kv.set("pstate:account:bob:plug/x", {"a": 1})
+        await self.db.kv.set("pstate:account:bobby:plug/x", {"b": 2})
+        await self.db.accounts.delete("bob")
+        self.assertIsNone(await self.db.kv.get("access:account:bob"))
+        self.assertEqual(await self.db.kv.get("access:account:bobby"),
+                         {"is_admin": True})
+        self.assertEqual(await self.db.kv.get("access:account:bob2"),
+                         {"prefix_mode": "mention"})
+        self.assertIsNone(await self.db.kv.get("pstate:account:bob:plug/x"))
+        self.assertEqual(await self.db.kv.get("pstate:account:bobby:plug/x"),
+                         {"b": 2})
+
+
 class TestAuditAndLogs(AsyncDatabaseTestCase):
     async def test_audit_recent_oldest_first_and_prune(self) -> None:
         db = Database(self.path, audit_keep=5)

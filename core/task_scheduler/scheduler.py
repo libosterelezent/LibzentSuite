@@ -476,9 +476,10 @@ class TaskScheduler:
                 _, stuck = await asyncio.wait(
                     list(self._lanes.values()), timeout=5.0)
                 for lane in stuck:
+                    label = lane.get_name() if hasattr(lane, "get_name") \
+                        else repr(lane)
                     self._log("WARNING", "scheduler",
-                              f"lane {getattr(lane, 'get_name', repr)(lane)} "
-                              f"did not settle within 5s of stop")
+                              f"lane {label} did not settle within 5s of stop")
             # join every pending finish tail (sync-cancel, lane and sweep
             # tails alike; bounded — each tail is at most one awaited
             # repo.add) so their history rows land BEFORE the caller

@@ -527,9 +527,25 @@ class _Selectable:
         self._bulk_actions = checked
         if checked:
             self._selectable = True
-            if getattr(self, "_action", None) is None:
-                self.set_action(self._dispatch_view_action)
+            if not self._action_is_view_dispatcher():
+                prev = getattr(self, "_action", None)
+                if prev is not None:
+                    self._explicit_action = prev
+                    self._explicit_require_account = getattr(
+                        self, "_action_require_account", False)
+                self.set_action(
+                    self._dispatch_view_action,
+                    require_account=bool(getattr(
+                        self, "_explicit_require_account", False)))
         return self
+
+    def _action_is_view_dispatcher(self) -> bool:
+        """True when the installed action is this component's internal
+        row/bulk router (never treat it as an author's explicit action)."""
+        action = getattr(self, "_action", None)
+        return action is not None and getattr(
+            action, "__func__", None
+        ) is getattr(type(self), "_dispatch_view_action", None)
 
     async def _dispatch_view_action(self, context, payload):
         payload = payload or {}
@@ -546,7 +562,20 @@ class _Selectable:
                 if hasattr(result, "__await__"):
                     result = await result
                 return result
-        return await self._dispatch_row_action(context, payload)
+        try:
+            return await self._dispatch_row_action(context, payload)
+        except UIError:
+            # not a row action either — an author's EXPLICIT action (set
+            # before row/bulk actions installed this dispatcher) still
+            # gets the payload; without this it silently received
+            # {action, row} shapes it never asked for (review finding #11)
+            explicit = getattr(self, "_explicit_action", None)
+            if explicit is None:
+                raise
+            result = explicit(context, payload)
+            if hasattr(result, "__await__"):
+                result = await result
+            return result
 
 
 class ListView(_Selectable, _Interactive):
@@ -622,8 +651,22 @@ class ListView(_Selectable, _Interactive):
             seen.add(entry.id)
             checked.append(entry)
         self._row_actions = checked
-        if checked and getattr(self, "_action", None) is None:
-            self.set_action(self._dispatch_view_action)
+        if checked and not self._action_is_view_dispatcher():
+            # the row/bulk router OWNS the dispatch channel whenever row
+            # actions exist — even over an author's explicit action (that
+            # action is preserved as the dispatcher's fallback, review
+            # finding #11: with the old guard, set_action().set_row_actions()
+            # left row buttons submitting {action, row} into the author's
+            # callback)
+            prev = getattr(self, "_action", None)
+            if prev is not None:
+                self._explicit_action = prev
+                self._explicit_require_account = getattr(
+                    self, "_action_require_account", False)
+            self.set_action(
+                self._dispatch_view_action,
+                require_account=bool(getattr(
+                    self, "_explicit_require_account", False)))
         return self
 
     async def _dispatch_row_action(self, context, payload):
@@ -734,10 +777,22 @@ class Table(_Selectable, _Interactive):
             seen.add(entry.id)
             checked.append(entry)
         self._row_actions = checked
-        if checked and getattr(self, "_action", None) is None:
-            # row/bulk buttons dispatch through the table's own action
-            # channel; _dispatch_view_action routes bulk first, then rows
-            self.set_action(self._dispatch_view_action)
+        if checked and not self._action_is_view_dispatcher():
+            # the row/bulk router OWNS the dispatch channel whenever row
+            # actions exist — even over an author's explicit action (that
+            # action is preserved as the dispatcher's fallback, review
+            # finding #11: with the old guard, set_action().set_row_actions()
+            # left row buttons submitting {action, row} into the author's
+            # callback)
+            prev = getattr(self, "_action", None)
+            if prev is not None:
+                self._explicit_action = prev
+                self._explicit_require_account = getattr(
+                    self, "_action_require_account", False)
+            self.set_action(
+                self._dispatch_view_action,
+                require_account=bool(getattr(
+                    self, "_explicit_require_account", False)))
         return self
 
     async def _dispatch_row_action(self, context, payload):
@@ -1099,8 +1154,22 @@ class TileView(_Selectable, _Interactive):
             seen.add(entry.id)
             checked.append(entry)
         self._row_actions = checked
-        if checked and getattr(self, "_action", None) is None:
-            self.set_action(self._dispatch_view_action)
+        if checked and not self._action_is_view_dispatcher():
+            # the row/bulk router OWNS the dispatch channel whenever row
+            # actions exist — even over an author's explicit action (that
+            # action is preserved as the dispatcher's fallback, review
+            # finding #11: with the old guard, set_action().set_row_actions()
+            # left row buttons submitting {action, row} into the author's
+            # callback)
+            prev = getattr(self, "_action", None)
+            if prev is not None:
+                self._explicit_action = prev
+                self._explicit_require_account = getattr(
+                    self, "_action_require_account", False)
+            self.set_action(
+                self._dispatch_view_action,
+                require_account=bool(getattr(
+                    self, "_explicit_require_account", False)))
         return self
 
     async def _dispatch_row_action(self, context, payload):
