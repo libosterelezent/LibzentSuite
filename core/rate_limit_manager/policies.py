@@ -152,9 +152,10 @@ def parse_scope(
             )
         return "global", None
     if not isinstance(owner, str) or not owner.strip():
+        kind = ("account name" if level == "account"
+                else "plugin name" if level == "plugin" else "'account/plugin'")
         raise RatePolicyError(
-            f"policy level {level!r} requires an owner "
-            f"({'account name' if level == 'account' else 'plugin name' if level == 'plugin' else '\"account/plugin\"'})"
+            f"policy level {level!r} requires an owner ({kind})"
         )
     owner = owner.strip()
     if level == "account_plugin":

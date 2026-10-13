@@ -18,6 +18,11 @@ function getAttention() {
   return items;
 }
 
+/* renderHome's async plugin-stat fetches race the synchronous innerHTML
+   reset — this seq counter drops results from superseded renders (the
+   duiSeq pattern from dashboard-ui.js). */
+let homeStatsSeq = 0;
+
 function renderHome() {
   const attn = getAttention();
   const el = $("home-attn"); el.innerHTML = "";
@@ -36,7 +41,7 @@ function renderHome() {
   $("home-metrics").innerHTML = `
     <div class="metric"><div class="label">Accounts</div><div class="value ${running===total?"ok":running===0?"err":"warn"}">${running}/${total}</div><div class="sub">online</div></div>
     <div class="metric"><div class="label">Groups</div><div class="value">${groupCount}</div><div class="sub">sync groups</div></div>
-    <div class="metric"><div class="label">Tasks</div><div class="value">${t.running??0}</div><div class="sub">${t.queued??0} queued</div></div>
+    <div class="metric"><div class="label">Tasks</div><div class="value">${Number(t.running??0)}</div><div class="sub">${Number(t.queued??0)} queued</div></div>
     <div class="metric"><div class="label">Cooldowns</div><div class="value">${Object.keys(cds).length}</div><div class="sub">active</div></div>`;
   const gr = $("home-groups"); gr.innerHTML = "";
   for (const g of groupsList.slice().sort((a,b)=>(b.member_count||0)-(a.member_count||0))) {
@@ -53,8 +58,10 @@ function renderHome() {
   // are rebuilt with it on every renderHome (no accumulation — the old
   // sibling-insert survived innerHTML rebuilds and duplicated)
   const statAccount = accounts().length ? accounts()[0].name : "";
+  const seq = ++homeStatsSeq;
   if (statAccount) {
     loadPluginStats(statAccount).then(cards => {
+      if (seq !== homeStatsSeq) return;  // a newer render superseded this fetch
       if (cards.length && currentView === "home") {
         const m = $("home-metrics");
         if (m) m.innerHTML += pluginStatsHTML(cards);
@@ -157,7 +164,7 @@ function renderTaskTable() {
   if (!filtered.length) { tbl.innerHTML="<tbody><tr><td style='text-align:center;padding:20px;color:var(--dim)'>No active tasks</td></tr></tbody>"; return; }
   tbl.innerHTML = `<thead><tr><th>Account</th><th>Plugin</th><th>Action</th><th>Status</th><th>Priority</th><th>Age</th><th></th></tr></thead><tbody>` +
     filtered.map(t=>`<tr><td>${esc(t.account)}</td><td>${esc(t.plugin)}</td><td>${esc(t.action)}</td>
-      <td><span class="chip task-${esc(t.status)}">${esc(t.status)}</span></td><td>${t.priority??""}</td><td>${esc(fmtAge(t.submitted_at))}</td>
+      <td><span class="chip task-${esc(t.status)}">${esc(t.status)}</span></td><td>${esc(String(t.priority??""))}</td><td>${esc(fmtAge(t.submitted_at))}</td>
       <td>${t.status==="queued"||t.status==="running"?`<button class="btn btn-ghost btn-sm" data-cancel="${esc(t.id)}">cancel</button>`:""}</td></tr>`).join("")+"</tbody>";
   // innerHTML-serialized buttons carry no handlers — bind after parsing
   tbl.querySelectorAll("[data-cancel]").forEach(b=>b.onclick=()=>post("/api/tasks/cancel",{task_id:+b.dataset.cancel}).then(loadTasks).catch(e=>toast(e.message)));
@@ -165,8 +172,9 @@ function renderTaskTable() {
   if (taskHistory.length) {
     hist.innerHTML = `<thead><tr><th>Account</th><th>Plugin</th><th>Status</th><th>Duration</th><th>Finished</th></tr></thead><tbody>` +
       taskHistory.slice(0,20).map(t=>`<tr><td>${esc(t.account)}</td><td>${esc(t.plugin)}</td>
-        <td><span class="chip task-${esc(t.status)}">${esc(t.status)}</span></td><td>${t.duration_s!=null?t.duration_s.toFixed(1)+"s":"-"}</td><td>${esc(fmtAge(t.finished_at))}</td></tr>`).join("")+"</tbody>";
+        <td><span class="chip task-${esc(t.status)}">${esc(t.status)}</span></td><td>${t.duration_s!=null?Number(t.duration_s).toFixed(1)+"s":"-"}</td><td>${esc(fmtAge(t.finished_at))}</td></tr>`).join("")+"</tbody>";
   }
+  else hist.innerHTML = "";
 }
 
 function renderCooldowns(cds) {

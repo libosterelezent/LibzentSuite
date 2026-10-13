@@ -1,7 +1,7 @@
 # Module `core.access_manager`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `core/access_manager.py`
 
@@ -58,6 +58,8 @@ Fail-closed semantics:
 - `async def set_mudae_bot_id(self, user_id: Optional[int]) -> None`
 - `async def all_account_rows(self) -> Dict[str, Dict[str, Any]]`
   - Every access row keyed by account name (adminlist verb + the
+- `async def forget_account(self, name: str) -> None`
+  - Removal cascade: delete the account's access row (admin flag,
 - `async def is_admin_id(self, user_id: Optional[int]) -> bool`
   - Admin = id in the admin list OR the user id of an
 - `async def set_account_user_id(self, name: str, user_id: Optional[int]) -> None`

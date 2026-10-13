@@ -1,7 +1,7 @@
 # Module `adapters.discord.client`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `adapters/discord/client.py`
 
@@ -78,6 +78,8 @@ NOTE: selfbots violate Discord ToS; the framework keeps pacing conservative.
 
 ### `IdentifyGate`
 
+- `def release(self) -> None`
+  - Return one fleet slot (a client's PERMANENT teardown).
 - `async def acquire(self, shard_id=None, *, initial: bool=False) -> None` — side effects: `sleeps`
   - Space consecutive IDENTIFYs by ``effective_interval`` seconds.
 - `def effective_interval(self) -> float`

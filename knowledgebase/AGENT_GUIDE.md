@@ -74,7 +74,8 @@ Config → Database → LogService(+db sink) → EventBus → RateLimitManager �
 SettingsManager → AuditRecorder → TaskScheduler (late-bound sender) →
 PluginManager → ProfileManager → AccountManager (restores persisted
 accounts) → sender bound → `scheduler.start()` → SimulationRunner →
-ControlAPI → RemoteControl. Shutdown reverses with logging-order care
+ControlAPI (+ `COMMAND_HUB.api_provider` bridging the self-command
+verbs). Shutdown reverses with logging-order care
 (`Framework.shutdown`). Architectural narrative: root `ARCHITECTURE.md`
 ("Boot flow"), `docs/architecture/lifecycle.rst` in the Sphinx tree.
 

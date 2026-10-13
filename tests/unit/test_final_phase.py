@@ -175,8 +175,19 @@ class MemoryFirstStatusTests(unittest.IsolatedAsyncioTestCase):
     async def test_cooldown_tombstones_purged_on_expiry(self) -> None:
         now = {"t": 1000.0}
         class FakeRepo:
-            async def upsert(self, **kw): pass
-            async def get(self, *a, now=None, **k): return None
+            # coherent double: rows stored by upsert are visible to get
+            # (a repo that "forgets" rows it just wrote reads as a
+            # concurrent delete to the set() race guard)
+            def __init__(self): self.rows = {}
+            async def upsert(self, **kw):
+                self.rows[(kw["account"], kw["plugin"],
+                           kw["cooldown_key"])] = dict(kw)
+            async def get(self, *a, now=None, **k):
+                row = self.rows.get(tuple(a))
+                if row is None or (now is not None
+                                   and row["expires_at"] <= now):
+                    return None
+                return dict(row)
             async def clear_expired_for(self, *a, **k): return 0
             async def active_for(self, *a, **k): return []
             async def active_all(self, now=None): return []

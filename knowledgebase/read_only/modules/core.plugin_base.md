@@ -1,7 +1,7 @@
 # Module `core.plugin_base`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `core/plugin_base.py`
 
@@ -66,6 +66,10 @@ declared handler to the per-account plugin instance before invocation
   - Stat cards this plugin contributes to the Home tab.
 - `async def ui_panels(self, ctx: 'PluginContext') -> Sequence['UIPanel']`
   - Sidebar panels this plugin contributes.
+- `def initialize_dashboard_ui(self, ui: 'DashboardUIToolset') -> None`
+  - Optional hook for declaring this plugin's dashboard interface.
+- `def attach_dashboard_ui(self, layout: 'Layout') -> None`
+  - Attach a completed UI layout to the framework.
 - `async def on_load(self, ctx: 'PluginContext') -> None` *(plugin API)*
   - Called once when the plugin is first enabled on an account.
 - `async def on_enable(self, ctx: 'PluginContext') -> None` *(plugin API)*

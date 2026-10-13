@@ -101,8 +101,10 @@ HELP: Dict[str, Tuple[str, str]] = {
     "plugins": (
         "list|state <account>|enable <account> <plugin>"
         "|disable <account> <plugin>|settings <account>"
-        "|set <account> <plugin> <key> <value>",
-        "plugin management",
+        "|set <account> <plugin> <key> <value>"
+        "|clear <account> <plugin> <key>",
+        "plugin management ('clear' resets one setting to its lower"
+        " layer/default, unmasking profile + plugin defaults)",
     ),
     "profiles": (
         "list|create <name> <plugin ...>|delete <name>"
@@ -122,7 +124,9 @@ HELP: Dict[str, Tuple[str, str]] = {
         "show|stats|set <action> <interval> [jitter_min jitter_max] [level owner]"
         "|clear <level> <owner> <action>|effective <action> [account] [plugin]"
         "|warnings|floor <seconds>|lane [on [rate]|off|rate <s>]",
-        "rate policies (safety floor: 1.5s/action; lane: server-wide sequential sends)",
+        "rate policies (safety floor: 1.5s/action). The send lane is"
+        " REMOVED — 'ratelimit lane' still answers as a documented compat"
+        " stub (sync groups + per-account pacing replaced it)",
     ),
     "tasks": (
         "list [status]|cancel <id>|history [n]"
@@ -236,7 +240,14 @@ async def run_command(api: Any, line: str) -> Optional[str]:
         if args and args[0].lower() in ("resume", "unhalt"):
             if len(args) > 1:
                 raise UsageError("usage: estop [resume]")
-            return _result(await api.system_resume(), verb="resume")
+            out = await api.system_resume()
+            # the payload embeds the whole post-resume status snapshot:
+            # render it as its own block instead of one key=value blob
+            status = out.pop("status", None) if isinstance(out, dict) else None
+            text = _result(out, verb="resume")
+            if isinstance(status, dict):
+                text += "\n" + format_status(status)
+            return text
         if args:
             raise UsageError("usage: estop [resume]")
         return _result(await api.emergency_stop_all(surface="cli"),
@@ -273,6 +284,7 @@ _PLUGINS_USAGE = {
     "disable": "plugins disable <account> <plugin>",
     "settings": "plugins settings <account>",
     "set": "plugins set <account> <plugin> <key> <value>",
+    "clear": "plugins clear <account> <plugin> <key>",
 }
 _PROFILES_USAGE = {
     "list": "profiles list",
@@ -553,7 +565,7 @@ async def _cooldowns_group(api: Any, args: List[str]) -> str:
 
 
 async def _plugins_group(api: Any, args: List[str]) -> str:
-    """plugins list|state|enable|disable|settings|set."""
+    """plugins list|state|enable|disable|settings|set|clear."""
     sub, rest = _sub(_PLUGINS_USAGE, args, "plugins")
     ctx = f"plugins {sub}"
     if sub == "list":
@@ -571,6 +583,14 @@ async def _plugins_group(api: Any, args: List[str]) -> str:
         account, plugin, key, value = _exact(rest, 4, ctx)
         return _result(
             await api.plugins_set_setting(account, plugin, key, value), verb="set"
+        )
+    if sub == "clear":
+        # parity with the dashboard's value:null reset: the CLI needs its
+        # own verb because shlex cannot express a JSON null argument
+        account, plugin, key = _exact(rest, 3, ctx)
+        return _result(
+            await api.plugins_clear_setting(account, plugin, key),
+            verb="cleared",
         )
     raise UsageError(f"plugins: unknown subcommand {sub!r}")  # pragma: no cover
 
@@ -1071,7 +1091,20 @@ def format_group_snapshot(snapshot: dict) -> str:
 
 
 def format_lane(lane: dict) -> str:
-    """Lane state -> display lines (sequential sends: spacing + pause flag)."""
+    """Lane state -> display lines (the send lane is REMOVED).
+
+    The backend keeps ratelimit_lane/ratelimit_set_lane as documented
+    compat stubs whose payloads carry ``removed``/``note``/``reason`` —
+    render those VERBATIM so nobody reads the stub as a live "off" lane
+    (legacy non-removed payloads still render the old detail view).
+    """
+    if lane.get("removed"):
+        text = ("  send lane: REMOVED — fleet lane replaced by sync groups"
+                " + per-account pacing")
+        note = lane.get("note") or lane.get("reason") or ""
+        if note:
+            text += f"\n      {note}"
+        return text
     if not lane.get("enabled"):
         return "  send lane: off (sends are paced per-account only)"
     state = "PAUSED — all outbound actions hold" if lane.get("paused") else "active"
@@ -1126,8 +1159,9 @@ def format_effective(effective: dict) -> str:
         if interval is not None and src_interval is not None:
             if abs(float(src_interval) - float(interval)) < 1e-9:
                 mark = "  <- pacing source"
+        src_text = "-" if src_interval is None else f"{float(src_interval):.2f}s"
         lines.append(
-            f"      {scope:<24}{float(src_interval or 0):.2f}s{mark}"
+            f"      {scope:<24}{src_text}{mark}"
         )
     return "\n".join(lines)
 
@@ -1340,7 +1374,13 @@ def _fmt_val(value: Any) -> str:
 
 
 def _fmt_policy(interval: Any, jitter_min: Any = 0.0, jitter_max: Any = 0.0) -> str:
-    """Interval + jitter -> '2.50s +0.20..0.80s' (jitter omitted when zero)."""
+    """Interval + jitter -> '2.50s +0.20..0.80s' (jitter omitted when zero).
+
+    ``interval=None`` (no applicable policy) renders as the explicit
+    unpaced marker — never as the bare string 'None'.
+    """
+    if interval is None:
+        return "- (unpaced)"
     try:
         text = f"{float(interval):.2f}s"
         lo, hi = float(jitter_min or 0.0), float(jitter_max or 0.0)

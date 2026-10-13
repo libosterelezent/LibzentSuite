@@ -76,11 +76,13 @@ file:lineno + byte counts — neither captures argument or object values).
 
 ## Design notes
 
-- `TimedProxy` instrumentation wraps collaborators at constructor seams —
-  NEVER client objects (the account manager's staleness guards compare
-  `rt.client is client`; a proxy would defeat them).
-- The simulator's pacing floor (1.5s) dominates wall time in traffic
-  scenarios — compare per-stage CPU and events/s, not raw wall.
+- Stage timing rides the explicit `PerfCollector.stage()` seams — no
+  proxy instrumentation, and NEVER client objects (the account manager's
+  staleness guards compare `rt.client is client`; a proxy would defeat
+  them).
+- The simulator's learned pacing defaults (~2.5-3.0 s/action) dominate
+  wall time in traffic scenarios — compare per-stage CPU and events/s,
+  not raw wall.
 - REPL/dashboard integration is deliberately absent: an in-process bench
   would measure (and perturb) the live stack. `--bench` runs pre-boot in
   an isolated process, mirroring `--sim`.

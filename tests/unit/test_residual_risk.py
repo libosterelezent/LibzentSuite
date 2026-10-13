@@ -134,7 +134,11 @@ class SchedulerPressureTests(unittest.IsolatedAsyncioTestCase):
             gate = scheduler._limiter.block_acquires()
             task = scheduler.submit("alpha", "roll", "message",
                                     channel_id=1, content="x")
-            task.submitted_at = _time.time() - 25.0  # backdate: age axis
+            # backdate: age axis — BOTH clocks (age math reads the
+            # monotonic twin; the wall stamp is display/history only and
+            # an NTP step must not latch the level high)
+            task.submitted_at = _time.time() - 25.0
+            task.submitted_mono = _time.monotonic() - 25.0
             await asyncio.sleep(0.05)
             self.assertEqual(scheduler.pressure()["level"], "CRITICAL")
             gate.set()

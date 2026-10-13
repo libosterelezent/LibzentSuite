@@ -4,7 +4,8 @@
 # Run tests:    python3 -m unittest discover -s tests -t .
 #
 # The framework runs multi-account Discord automation with conservative
-# pacing (1.5s/action floor, human-like jitter, fleet-wide serialization)
+# pacing (learned per-action defaults ~2.5-3.0s as the effective safety
+# net, hard 0.05s floor, human-like jitter, fleet-wide serialization)
 # and full server-limit respect. discord.py-self is the user-account
 # client library this project is built around — it is imported lazily
 # (adapters/discord/client.py), so simulations and tests work without a

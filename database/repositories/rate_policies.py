@@ -18,7 +18,7 @@ from typing import List, Optional
 
 from core.errors import DatabaseError
 
-from database.models import POLICY_LEVELS, RatePolicyRecord
+from database.models import RatePolicyRecord
 
 from .base import BaseRepository
 

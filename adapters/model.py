@@ -168,9 +168,14 @@ class DiscordMessageReference:
     the forwarded content as ``message_snapshots`` on the message itself
     (discord.py-self message.py:2101; ``reference.resolved`` stays None),
     and that snapshot is hydrated into ``referenced`` additively (the ids
-    stay on the reference; nothing is fetched). ``type_name`` is the
-    stable projection of the library's MessageReferenceType ("reply" |
-    "forward"; the fork's "default" aliases value 0 = reply).
+    stay on the reference; nothing is fetched). TRUNCATION: only
+    ``snapshots[0]`` is hydrated — a multi-message forward's remaining
+    snapshots are dropped (bounding one DTO per reference); check
+    ``snapshot_count`` (the number of snapshots the event carried, 1 when
+    absent) against the hydrated ``referenced`` to detect that.
+    ``type_name`` is the stable projection of the library's
+    MessageReferenceType ("reply" | "forward"; the fork's "default"
+    aliases value 0 = reply).
     """
 
     message_id: Optional[int] = None
@@ -178,6 +183,9 @@ class DiscordMessageReference:
     guild_id: Optional[int] = None
     type_name: str = "reply"
     referenced: Optional["DiscordMessage"] = None
+    #: how many message_snapshots the raw event carried (1 when absent) —
+    #: lets plugins detect multi-forward truncation of ``referenced``
+    snapshot_count: int = 1
 
 
 # ------------------------------------------------------------------- message
@@ -488,11 +496,11 @@ def convert_message(
                 and not getattr(resolved, "_deleted", False)
                 and not hasattr(resolved, "_parent")):
             referenced = resolved
+    snapshots = getattr(message, "message_snapshots", None) or ()
     if referenced is None and reference is not None:
         # round-3 F4-4: a FORWARD keeps its content in message_snapshots
         # (the fork leaves reference.resolved None) — hydrate additively
         # from the snapshot so the forwarded content is not invisible
-        snapshots = getattr(message, "message_snapshots", None) or ()
         if snapshots and _reference_type_name(reference) == "forward":
             referenced = _forward_snapshot_view(snapshots[0], reference)
     if _depth >= _MAX_REFERENCED_DEPTH:
@@ -507,19 +515,37 @@ def convert_message(
             _optional_int(getattr(ref, "guild_id", None)),
         )
 
+    def _ref_channel_id(ref_msg: Any) -> Optional[int]:
+        # the referenced message may expose channel_id directly (snapshot
+        # views, other DTOs) or only channel.id (library Message objects)
+        if ref_msg is None:
+            return None
+        direct = _optional_int(getattr(ref_msg, "channel_id", None))
+        if direct is not None:
+            return direct
+        channel = getattr(ref_msg, "channel", None)
+        return _optional_int(getattr(channel, "id", None)) if channel is not None else None
+
     ref_message_id, ref_channel_id, ref_guild_id = _ref_ids(reference)
     reference_dto = None
     if reference is not None or referenced is not None:
         reference_dto = DiscordMessageReference(
             message_id=ref_message_id
             or (_optional_int(getattr(referenced, "id", None)) if referenced else None),
-            channel_id=ref_channel_id,
+            # symmetric fallback: message_id falls back to referenced.id,
+            # channel_id falls back to referenced's channel (the old
+            # asymmetry left channel_id None for id-only references)
+            channel_id=ref_channel_id or _ref_channel_id(referenced),
             guild_id=ref_guild_id or (_optional_int(getattr(guild, "id", None)) if guild else None),
             type_name=_reference_type_name(reference),
             referenced=(
-                convert_message(referenced, dm=False, _depth=_depth + 1)
+                # references share the outer message's channel in virtually
+                # all cases (same-channel replies/forwards) — inherit the
+                # OUTER dm flag so DM-channel references are not mislabeled
+                convert_message(referenced, dm=dm, _depth=_depth + 1)
                 if referenced is not None else None
             ),
+            snapshot_count=len(snapshots) or 1,
         )
 
     return DiscordMessage(
@@ -561,29 +587,9 @@ def convert_message(
     )
 
 
-def convert_reaction(
-    *, message_id: int, channel_id: int, guild_id: Optional[int],
-    user_id: int, emoji: Any, dm: bool = False, raw: Any = None,
-) -> dict:
-    """Stable reaction payload for the ReactionAdded event (§9).
-
-    Returns a plain dict (the event layer is core-side and must not import
-    adapter types): ids + the printable emoji + optional raw handle.
-    """
-    return {
-        "message_id": int(message_id),
-        "channel_id": int(channel_id),
-        "guild_id": guild_id,
-        "user_id": int(user_id),
-        "emoji": _emoji_repr(emoji),
-        "dm": bool(dm),
-        "raw": raw,
-    }
-
-
 __all__ = [
     "DiscordUser", "DiscordChannel", "DiscordEmbed", "DiscordEmbedField",
     "DiscordComponent", "DiscordAttachment", "DiscordReaction",
     "DiscordMessageReference", "DiscordMessage",
-    "convert_message", "convert_component", "convert_embed", "convert_reaction",
+    "convert_message", "convert_component", "convert_embed",
 ]

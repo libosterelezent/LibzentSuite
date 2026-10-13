@@ -1,7 +1,7 @@
 # Module `adapters.simulator.client`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `adapters/simulator/client.py`
 
@@ -58,6 +58,8 @@ Behaviour highlights (audit-proven unless noted):
   - World-backed equivalent of the live client's in-memory cache.
 - `def receive(self, message: WorldMessage) -> None`
   - World push -> framework callback (ignores our own messages).
+- `def reaction_event(self, kind: str, message_id: int, channel_id: int, guild_id: 'int | None', user_id: int, emoji: str, raw: Any) -> None`
+  - World reaction dispatch -> on_reaction. The world pushes EVERY
 - `async def add_reaction(self, channel_id: int, message_id: int, emoji: str) -> Any`
   - React via the world (echoes a ReactionAdded to other subscribers).
 - `async def click_button(self, channel_id: int, message_id: int, custom_id: str) -> Any`

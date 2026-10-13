@@ -1,7 +1,7 @@
 # Module `database.repositories.accounts`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `database/repositories/accounts.py`
 
@@ -10,8 +10,9 @@ AccountsRepository — the persistent account registry (spec §1).
 
 One row per account in ``accounts`` plus membership rows in
 ``account_profiles``. Dependent per-account tables (``account_settings``,
-``plugin_settings``, ``plugin_states``, ``account_profiles``) are keyed by
-account NAME — the public key everywhere — and removed explicitly by
+``plugin_settings``, ``plugin_states``, ``account_profiles``,
+``account_plugins``) are keyed by account NAME — the public key
+everywhere — and removed explicitly by
 :meth:`AccountsRepository.delete` (the schema declares no foreign keys, so
 the cascade is manual, exactly like the audited old implementation).
 

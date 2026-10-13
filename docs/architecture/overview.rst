@@ -35,8 +35,9 @@ Database (async `connect()` opens the connection and runs migrations) → LogSer
 stdlib bridge) → EventBus → RateLimitManager (config policies, lane from
 kv) → SettingsManager → AuditRecorder → TaskScheduler (late-bound sender)
 → PluginManager.discover → ProfileManager → AccountManager (restores
-persisted accounts) → sender bound → scheduler start → RemoteControl →
-ControlAPI → surface (REPL / one-shot CLI / dashboard / headless).
+persisted accounts) → sender bound → scheduler start →
+ControlAPI (self-command hub bridged via ``COMMAND_HUB.api_provider``) →
+surface (REPL / one-shot CLI / dashboard / headless).
 
 Full digest: ``knowledgebase/ARCHITECTURE.md`` and
 ``knowledgebase/RUNTIME_LIFECYCLE.md`` — if you maintain a local

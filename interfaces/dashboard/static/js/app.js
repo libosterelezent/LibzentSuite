@@ -102,11 +102,12 @@ function render() {
   // back to onboarding because this guard covered all views).
   const hasAccts = accounts().length > 0;
   if (!hasAccts && currentView==="home") { showPanel("panel-onboard"); return; }
-  // Plugin dashboard-UI pages ("dui-*" views) manage their OWN panel
-  // activation + content — showPanel()'s fallback to panel-home was
-  // silently bouncing idle users off plugin pages every ~10s WS tick
-  // when the panel was briefly absent during a buildNav rebuild.
-  if (!currentView.startsWith("dui-")) showPanel("panel-"+currentView);
+  // Plugin dashboard-UI pages ("dui-*" views) and simple plugin panels
+  // ("plugin-*" views) manage their OWN panel activation + content —
+  // showPanel()'s fallback to panel-home was silently bouncing idle
+  // users off plugin pages every ~10s WS tick when the panel was
+  // briefly absent during a buildNav rebuild.
+  if (!currentView.startsWith("dui-") && !currentView.startsWith("plugin-")) showPanel("panel-"+currentView);
   // The main tabs that migrated to the builder API render through the
   // generic framework pages; the rest keep their hand-coded renderers.
   if (isFrameworkView(currentView)) {
@@ -150,6 +151,9 @@ function renderTick() {
 /* ── WebSocket ─────────────────────────────────────────────────────────────── */
 let wsRetryTimer = null;
 function connectWS() {
+  // A stale watchdog from a previous attempt must never close the NEXT
+  // socket while it is still connecting.
+  clearTimeout(wsWatchdog);
   // Browsers cannot set headers on a WebSocket upgrade, so the token MUST
   // ride the URL as ?token= — the same auth the server accepts for REST.
   const proto = location.protocol==="https:"?"wss":"ws";
@@ -159,7 +163,8 @@ function connectWS() {
   if (wsRetryTimer) { clearTimeout(wsRetryTimer); wsRetryTimer = null; }
   if (ws) { ws.onclose = null; try { ws.close(); } catch {} ws = null; }
   try { ws = new WebSocket(url); } catch { return handleWsClosed(); }
-  wsWatchdog = setTimeout(()=>{ if(ws.readyState===WebSocket.CONNECTING) ws.close(); }, 5000);
+  const sock = ws;  // closure capture: this watchdog only ever retires ITS socket
+  wsWatchdog = setTimeout(()=>{ if(sock.readyState===WebSocket.CONNECTING) sock.close(); }, 5000);
   ws.onopen = () => {
     clearTimeout(wsWatchdog); wsRetries = 0;
     $("wsdot").classList.add("on"); $("connmsg").textContent = "live";
@@ -196,7 +201,12 @@ function handleWsClosed() {
   $("wsdot").classList.remove("on"); $("connmsg").textContent = "disconnected";
   if (wsRetries < 10) { wsRetries++; $("connmsg").textContent=`reconnecting (${wsRetries}/10)…`;
     wsRetryTimer = setTimeout(()=>{ wsRetryTimer=null; connectWS(); }, Math.min(1000*Math.pow(2,wsRetries),30000)); }
-  else $("connmsg").textContent = "connection lost — set the token in Tools → Advanced";
+  else {
+    // After the 10th fast attempt, never give up for good: fall back to
+    // a slow keep-trying timer — the server/token may come back later.
+    $("connmsg").textContent = "connection lost — retrying every 60s…";
+    wsRetryTimer = setTimeout(()=>{ wsRetryTimer=null; connectWS(); }, 60000);
+  }
 }
 let taskRefreshTimer = null;
 function scheduleTaskRefresh() {
@@ -306,14 +316,18 @@ function wire() {
   $("task-refresh").onclick = loadTasks;
   $("log-backfill").onclick = async () => {
     try { const entries = await api("/api/logs?n=200"+($("log-acct").value?"&account="+encodeURIComponent($("log-acct").value):""))||[];
+      $("logbox").innerHTML="";   // replace, never stack on repeated clicks
       for (const e of entries) logLine(e); } catch(e) { showErr(e.message); }
   };
   $("log-clear").onclick = () => { $("logbox").innerHTML=""; };
   $("log-acct").onchange = () => { $("logbox").innerHTML=""; };
+  $("log-sev").onchange = () => { $("logbox").innerHTML=""; };
   $("audit-backfill").onclick = async () => {
     try { const entries = await api("/api/audit?n=200"+($("audit-acct").value?"&account="+encodeURIComponent($("audit-acct").value):""))||[];
+      $("auditbox").innerHTML="";
       for (const e of entries) auditLine(e); } catch(e) { showErr(e.message); }
   };
+  $("audit-acct").onchange = () => { $("auditbox").innerHTML=""; };
 
   // Stored policies (real /api/ratelimit/* endpoints)
   $("rl-add").onclick = () => {
@@ -328,8 +342,10 @@ function wire() {
     clearFb(form);
     const interval = parseFloat($("rp-interval").value);
     if (!Number.isFinite(interval) || interval<=0) { setFb($("rp-interval").closest(".field"),"error","Interval must be a positive number of seconds."); return; }
-    const body = { action:$("rp-action").value, interval,
-      jitter_min: parseFloat($("rp-jmin").value)||0, jitter_max: parseFloat($("rp-jmax").value)||0,
+    const jmin = parseFloat($("rp-jmin").value)||0, jmax = parseFloat($("rp-jmax").value)||0;
+    if (jmin<0 || jmax<0) { setFb($("rp-jmin").closest(".field"),"error","Jitter must be zero or positive seconds."); return; }
+    if (jmin>jmax) { setFb($("rp-jmax").closest(".field"),"error","Jitter min must not exceed jitter max."); return; }
+    const body = { action:$("rp-action").value, interval, jitter_min:jmin, jitter_max:jmax,
       level:$("rp-level").value };
     const owner = $("rp-owner").value.trim(); if (owner) body.owner = owner;
     try { await withBusy($("rp-submit"), post("/api/ratelimit/set", body)); $("dlg-policy").close(); await loadPolicies(); }
@@ -382,6 +398,16 @@ function wire() {
   document.addEventListener("keydown", e => {
     if ((e.ctrlKey||e.metaKey) && e.key==="k") { $("search").focus(); e.preventDefault(); }
     if (e.key==="Escape") { $$(".menu.open").forEach(m=>m.classList.remove("open")); $("sidebar").classList.remove("open"); }
+  });
+
+  // Connectivity re-arm: background tabs and OS sleep/network loss can
+  // drop the socket silently — try again the moment the tab becomes
+  // visible or the network returns (connectWS cancels any pending
+  // backoff itself; only a truly dead socket triggers a reconnect).
+  const wsDead = () => !ws || ws.readyState === WebSocket.CLOSED;
+  window.addEventListener("online", () => { if (wsDead()) connectWS(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && wsDead()) connectWS();
   });
 
   // Global search (accounts, groups, plugins — all esc()'d)

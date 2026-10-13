@@ -1,7 +1,7 @@
 # Module `core.rate_limit_manager.engine`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `core/rate_limit_manager/engine.py`
 
@@ -24,12 +24,12 @@ Waiting model (three stages inside ``acquire``, in order):
    heap + sequence-number waiter pattern ported from the old limiter
    (Grant.reason == "pacing").
 3. JITTER — one uniform draw from the effective jitter window, made BEFORE
-   admission (right after ``effective()``) and slept AFTER the grant. The
-   draw travels through the waiter entry (and the lane), and every spacing
-   clock is stamped at ``grant + jitter`` — the EXPECTED wire instant — so
-   consecutive WIRE sends stay >= the effective interval apart no matter
-   how the draws differ (a post-grant-only draw let a smaller second jitter
-   compress the wire gap to ``interval - jitter_max`` and even invert it).
+    admission (right after ``effective()``) and slept AFTER the grant. The
+    draw travels through the waiter entry, and every spacing clock is
+    stamped at ``grant + jitter`` — the EXPECTED wire instant — so
+    consecutive WIRE sends stay >= the effective interval apart no matter
+    how the draws differ (a post-grant-only draw let a smaller second jitter
+    compress the wire gap to ``interval - jitter_max`` and even invert it).
 
 Determinism seams (all time flows through them — see INTEGRATION.md):
 
@@ -41,24 +41,31 @@ Determinism seams (all time flows through them — see INTEGRATION.md):
 * ``jitter_seed``— seeds the jitter RNG for reproducible draws.
 
 Wake mechanics: waiters park on ``_wait_either`` which sleeps through the
-seam but returns EARLY when the shared wake event fires. The event is set
-whenever policies change (set/clear/floor) or a server cooldown lands, so
-sleeping waiters recompute their remaining wait instead of oversleeping.
-_grant_ready also wakes successors after any grant so the next waiter in
-priority order re-evaluates immediately. A bounded poll (POLL_INTERVAL)
-backstops non-head waiters against lost wakes — correctness never depends
-on the wake.
+seam but returns EARLY when the waiter's OWN pacing-key wake event fires.
+Events are PER KEY (a dict mapping pacing key -> asyncio.Event), so a grant
+wakes ONLY the granting key's waiters (successors re-evaluate immediately;
+unrelated keys never re-park — the old single shared event made every grant
+and every acquire() finally wake the whole fleet, O(waiters x grants) churn).
+Mutations that can affect every key — policy set/clear, floor change, server
+cooldown registration, group change, account prune — wake ALL key events.
+Events are created lazily on first park and dropped when a key's last waiter
+exits, so the table stays sized to the live waiter set. A bounded poll
+(POLL_INTERVAL) backstops non-head waiters against lost wakes — correctness
+never depends on the wake.
 
 Other documented decisions (INTEGRATION.md: pick the safest option):
 
 - effective() interval is max(all applicable policies, floor) — a stored
   policy can never pace faster than the floor even after set_floor()
-  raised it past existing policy intervals.
+  raised it past existing policy intervals. With NO stored policy the
+  LEARNED per-action default applies — and any stored policy REPLACES
+  (displaces) that default instead of composing max() with it, so a
+  prefixrate override can deliberately pace below the study rate.
 - waiters of one pacing key do NOT block other keys (per-account pacing),
   exactly as the pinned contract states.
 - persistence is NOT the engine's job anymore: ``set_policy``/
-  ``clear_policy``/``set_lane_*`` mutate MEMORY ONLY (sync, wake waiters);
-  the ControlAPI layer persists policy edits, and :meth:`load_persisted`
+  ``clear_policy`` mutate MEMORY ONLY (sync, wake waiters); the ControlAPI
+  layer persists policy edits, and :meth:`load_persisted`
   (awaited once at boot, after ``database.connect()``) loads the stored
   rows into memory. Pacing safety never depends on the database.
 - single-event-loop assumption, like the audited limiter (no locks).
@@ -94,7 +101,7 @@ Other documented decisions (INTEGRATION.md: pick the safest option):
 ### `RateLimitManager`
 
 - `async def load_persisted(self) -> None` — side effects: `db_write, network`
-  - Boot path: read the stored policies + lane config into memory.
+  - Boot path: read the stored policies (+ persisted floor/tombstones).
 - `def set_policy(self, policy: RatePolicy, level: str='global', owner: Optional[str]=None) -> RatePolicy`
   - Store a RatePolicy at (level, owner) — memory only (the ControlAPI
 - `def set_policy_values(self, action: str, interval: float, jitter_min: float=0.0, jitter_max: float=0.0, level: str='global', owner: Optional[str]=None) -> RatePolicy` — side effects: `db_write`
@@ -130,4 +137,4 @@ Other documented decisions (INTEGRATION.md: pick the safest option):
 - `def stats(self) -> dict`
   - JSON-safe snapshot for the UI: floor, policies, active cooldowns,
 - `def warnings(self) -> List[dict]`
-  - Advisory safety review of every stored policy.
+  - Advisory safety review of the configuration.

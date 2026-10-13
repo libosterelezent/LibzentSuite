@@ -98,6 +98,10 @@ MAX_BODY_BYTES = 1_000_000
 #: per-connection socket timeout for plain HTTP requests (slow-loris guard);
 #: an upgraded WebSocket detaches the socket and manages its own timeouts
 HTTP_SOCKET_TIMEOUT_S = 30.0
+# TOTAL deadline for reading one request body: per-recv timeouts reset on
+# every byte, so a 1-byte-per-29s trickle could otherwise pin a handler
+# slot for length × timeout ( defeating the slow-loris guard ).
+HTTP_BODY_DEADLINE_S = 30.0
 #: hostnames a loopback-bound dashboard accepts in the Host header
 LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
 #: response headers for every reply (clickjacking / sniffing / caching hardening)
@@ -254,6 +258,31 @@ def require_int(body: Dict[str, Any], key: str, route: str) -> int:
     raise ValueError(f"field '{key}' in POST {route} must be an integer, got {value!r}")
 
 
+def require_json_list(body: Dict[str, Any], key: str, route: str) -> List[Any]:
+    """Required list field whose items must all be integers.
+
+    AUDIT FIX: /api/admin/ids/set and /api/admin/perms/set referenced
+    this helper before it existed — both routes 500'd with a NameError.
+    Mirrors require_int's strictness per item (bools rejected, integral
+    floats tolerated) and produces an actionable 400 otherwise.
+    """
+    value = require_field(body, key, route)
+    if not isinstance(value, list):
+        raise ValueError(f"field '{key}' in POST {route} must be a list of integers")
+    out: List[int] = []
+    for item in value:
+        if isinstance(item, bool):
+            raise ValueError(f"field '{key}' in POST {route} must contain integers, got {item!r}")
+        if isinstance(item, int):
+            out.append(item)
+        elif isinstance(item, float) and item.is_integer():
+            out.append(int(item))
+        else:
+            raise ValueError(
+                f"field '{key}' in POST {route} must contain integers, got {item!r}")
+    return out
+
+
 def q_str(query: Dict[str, List[str]], key: str, route: str) -> str:
     """Required non-empty query-string parameter (actionable 400 when absent)."""
     value = (query.get(key) or [""])[0].strip()
@@ -324,13 +353,17 @@ def event_as_dict(event: Event) -> Dict[str, Any]:
 class WebSocketClient:
     """One browser connection: outbound queue drained by its reader thread."""
 
-    def __init__(self, sock: socket.socket, server: "DashboardServer") -> None:
+    def __init__(self, sock: socket.socket, server: "DashboardServer",
+                 initial_buffer: bytes = b"") -> None:
         self._sock = sock
         self._server = server
         self._sendq: "thread_queue.SimpleQueue[Tuple[str, bytes]]" = thread_queue.SimpleQueue()
         self.alive = True
         self._refresh_inflight = False
         self._last_refresh = 0.0
+        # bytes read past the handshake while still in the buffered reader —
+        # pipelined first frames the upgrade must not lose
+        self._initial_buffer = bytes(initial_buffer)
 
     def push_text(self, text: str) -> None:
         """Queue a text frame (thread-safe; sent by the owning reader loop).
@@ -357,10 +390,13 @@ class WebSocketClient:
     def serve(self) -> None:
         """Reader loop (runs in the handler thread that did the upgrade)."""
         self._sock.settimeout(0.25)
-        buffer = b""
+        buffer = self._initial_buffer
+        self._initial_buffer = b""
         partial_since: Optional[float] = None  # arrival clock of a partial frame
         try:
-            while self.alive:
+            while self.alive and not self._server._clients_closed:
+                # AUDIT: a client stranded by a stop()-race registration must
+                # not idle in recv ticks forever holding a handler slot.
                 self._drain()
                 try:
                     chunk = self._sock.recv(4096)
@@ -615,15 +651,22 @@ class DashboardServer:
                 broadcaster.get_loop().call_soon_threadsafe(broadcaster.cancel)
             except RuntimeError:  # ERROR AUDIT: loop already closed
                 pass
-            self._broadcaster = None
-        if self._log_unsub is not None:
-            self._log_unsub()
-            self._log_unsub = None
-        if self._audit_unsub is not None:
-            self._audit_unsub()
-            self._audit_unsub = None
+        # AUDIT FIX: the handles above were swapped into locals under the
+        # lock — unsubscribe via THOSE. (The previous code re-read the
+        # already-nulled attributes, so the unsubs were dead code and the
+        # log/audit/bus subscriptions leaked past stop().)
+        if log_unsub is not None:
+            try:
+                log_unsub()
+            except Exception:
+                pass
+        if audit_unsub is not None:
+            try:
+                audit_unsub()
+            except Exception:
+                pass
         self._audit_recorder = None
-        for unsub in self._task_unsubs:
+        for unsub in task_unsubs:
             try:
                 unsub()
             except Exception:
@@ -710,10 +753,18 @@ class DashboardServer:
         loop = self._loop
         if loop is None or loop.is_closed():
             return
+        # PERF: the zero-clients check must happen on the LOOP side (inside
+        # _push), not here — checking the roster from the firing thread
+        # drops events that race a just-landing registration (the loop-side
+        # re-check preserves FIFO ordering and still skips the per-event
+        # JSON serialization when nobody is attached).
 
         def _push() -> None:
+            clients = list(self._clients)
+            if not clients:
+                return
             text = _dumps(payload)
-            for client in list(self._clients):
+            for client in clients:
                 client.push_text(text)
 
         try:
@@ -729,6 +780,16 @@ class DashboardServer:
 
     async def _register(self, client: WebSocketClient) -> None:
         if not client.alive or self._clients_closed:  # no ghosts, and none
+            # after stop() tore the sockets down
+            if client.alive:
+                # AUDIT: a client that upgraded right as stop() flipped the
+                # flag would otherwise park its handler thread in recv ticks
+                # forever — kill the socket so serve() unblocks.
+                client.alive = False
+                try:
+                    client._sock.shutdown(socket.SHUT_RDWR)  # noqa: SLF001 — own class
+                except OSError:
+                    pass
             return  # after stop() tore the sockets down
         self._clients.append(client)
         LOG.info("websocket client connected (%d online)", len(self._clients))
@@ -772,7 +833,8 @@ class DashboardServer:
                     self._stats_ts = _time.monotonic()
                 client.push_text(snapshot)
             except Exception as exc:  # never kill anything downstream
-                client.push_json({"type": "error", "error": str(exc)})
+                LOG.warning("stats snapshot push failed: %s", exc)
+                client.push_json({"type": "error", "error": "status snapshot failed"})
 
         try:
             return asyncio.run_coroutine_threadsafe(_fetch_and_push(), self._loop)
@@ -849,7 +911,7 @@ class DashboardServer:
             }
         except Exception as exc:
             LOG.exception("dashboard API call failed: %s %s", method, path)
-            return 500, {"ok": False, "error": f"internal error: {exc}"}
+            return 500, {"ok": False, "error": f"internal error ({type(exc).__name__})"}
 
     async def _route(
         self, method: str, path: str, body: Dict[str, Any], query: Dict[str, List[str]]
@@ -866,7 +928,7 @@ class DashboardServer:
             if (method, path) == ("GET", "/api/status"):
                 return 200, {"ok": True, "data": await api.status()}
             if (method, path) == ("POST", "/api/estop"):
-                return 200, {"ok": True, "data": await api.emergency_stop_all()}
+                return 200, {"ok": True, "data": await api.emergency_stop_all(surface="dashboard")}
             if (method, path) == ("POST", "/api/shutdown"):
                 if self._exit_signal:
                     # scheduler + accounts stop now; the PROCESS exits through
@@ -1544,15 +1606,17 @@ class DashboardServer:
 
             return 404, {"ok": False, "error": f"no route {method} {path}"}
         except DatabaseError as exc:
-            # server-side persistence fault: NOT the client's bad request
-            return 500, {"ok": False, "error": f"database error: {exc}"}
+            # server-side persistence fault: NOT the client's bad request.
+            # Detail goes to the log; the client gets the class only.
+            LOG.error("dashboard route database error: %s %s: %s", method, path, exc)
+            return 500, {"ok": False, "error": f"database error ({type(exc).__name__})"}
         except (ValueError, RuntimeError) as exc:
             # domain errors -> honest 400 (AccountError/SchedulerError are
             # RuntimeError; RatePolicy/Setting/Profile validation ValueError)
             return 400, {"ok": False, "error": str(exc)}
         except Exception as exc:  # unexpected -> honest 500 + traceback
             LOG.exception("dashboard route failed: %s %s", method, path)
-            return 500, {"ok": False, "error": f"internal error: {exc}"}
+            return 500, {"ok": False, "error": f"internal error ({type(exc).__name__})"}
 
 
 class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
@@ -1602,6 +1666,26 @@ def _make_handler(server: "DashboardServer") -> type:
         # body when ThreadingHTTPServer closed the connection mid-read)
         protocol_version = "HTTP/1.1"
         timeout = HTTP_SOCKET_TIMEOUT_S  # stalled requests free their thread
+        # AUDIT: unbuffered reads — nothing may sit in a userspace read
+        # buffer past the request headers, or bytes a WS client pipelined
+        # with its handshake would be lost when the socket is detached
+        # (they now stay in the kernel buffer, visible after detach).
+        rbufsize = 0
+        # AUDIT: the default banner leaks the stdlib/Python version on every
+        # response (incl. stdlib-generated error pages).
+        server_version = "STMudae"
+        sys_version = ""
+
+        def send_error(self, code: int, message: Optional[str] = None,
+                       explain: Optional[str] = None) -> None:  # noqa: N802
+            # stdlib error pages (501 for unimplemented methods, malformed
+            # request 400s) bypass _respond — carry the security headers too.
+            try:
+                super().send_error(code, message, explain)
+                for header, value in SECURITY_HEADERS:
+                    self.send_header(header, value)
+            except OSError:
+                pass  # peer vanished mid-error — nothing to answer
 
         def _authorized(self, provided: Optional[str]) -> bool:
             """Accept the token via X-Dashboard-Token header OR ?token= query.
@@ -1836,22 +1920,55 @@ def _make_handler(server: "DashboardServer") -> type:
                     )
                     return
                 if length:
+                    deadline = _time.monotonic() + HTTP_BODY_DEADLINE_S
                     try:
-                        raw = self.rfile.read(length)
+                        # ROUND-3 AUDIT: read in chunks under a TOTAL deadline
+                        # — a peer trickling 1 byte per recv-timeout could
+                        # otherwise pin this handler slot for length×timeout.
+                        chunks = []
+                        remaining = length
+                        while remaining > 0:
+                            if _time.monotonic() > deadline:
+                                raise OSError("body deadline exceeded")
+                            chunk = self.rfile.read(min(remaining, 65536))
+                            if not chunk:
+                                # EOF with a short body: keep the pinned
+                                # contract — parse what arrived and let the
+                                # JSON layer reject it with 400
+                                break
+                            chunks.append(chunk)
+                            remaining -= len(chunk)
+                        raw = b"".join(chunks)
                     except OSError:
                         # ROUND-2 AUDIT: lying Content-Length (claim 5, send 3,
                         # hold the socket) pinned this thread for the full
                         # socket timeout and then crashed it with a traceback —
-                        # answer 408 and close instead
+                        # answer 408 and close instead (also covers the
+                        # dribble deadline above)
                         self._reject(408, {
                             "ok": False,
                             "error": "request body incomplete (connection stalled)",
+                        })
+                        return
+                    ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                    if ctype not in ("", "application/json"):
+                        # AUDIT: classic JSON-CSRF enabler (text/plain forms);
+                        # origin checks already block browsers, this is
+                        # defense-in-depth for future non-loopback deploys.
+                        self._respond(415, {
+                            "ok": False,
+                            "error": "Content-Type must be application/json for API POSTs",
                         })
                         return
                     try:
                         body = json.loads(raw.decode("utf-8"))
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         self._respond(400, {"ok": False, "error": "invalid JSON body"})
+                        return
+                    except RecursionError:
+                        # AUDIT: a deeply-nested [[[[… body raises this from
+                        # the JSON scanners — answer, don't crash the thread.
+                        self._respond(400, {"ok": False, "error": "JSON nesting too deep"})
                         return
                     if not isinstance(body, dict):
                         self._respond(400, {"ok": False, "error": "request body must be a JSON object"})
@@ -1922,13 +2039,20 @@ def _make_handler(server: "DashboardServer") -> type:
             # the stdlib keep-alive loop must never try to read another
             # request from the detached file object after serve() returns
             self.close_connection = True
+            # AUDIT: bytes already buffered in rfile when the 101 is sent
+            # (client pipelined its first frames with the handshake) belong
+            # to the WS stream — hand them to the client instead of losing
+            # them with the detached reader. peek() would BLOCK waiting for
+            # more wire bytes, so the socket is flipped non-blocking for the
+            # harvest and restored afterwards.
+            leftover = b""
             try:
                 self.connection.sendall(handshake)
             except OSError:
                 return  # peer vanished before the 101 — nothing to serve
             fd = self.connection.detach()  # we own the socket now
             sock = socket.socket(fileno=fd)
-            client = WebSocketClient(sock, server)
+            client = WebSocketClient(sock, server, initial_buffer=leftover)
             try:
                 server.register_threadsafe(client)
             except Exception:

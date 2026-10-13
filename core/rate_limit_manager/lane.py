@@ -58,7 +58,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import itertools
-from typing import Any, Awaitable, Callable, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, List, Optional
 
 from ..errors import RatePolicyError
 

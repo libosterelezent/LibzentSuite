@@ -1,7 +1,7 @@
 # Module `interfaces.cli.commands`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `interfaces/cli/commands.py`
 
@@ -85,7 +85,7 @@ Decisions for things INTEGRATION.md left open (documented per the contract):
 - `def format_group_snapshot(snapshot: dict) -> str`
   - Group snapshot (api.groups_snapshot) -> the full group page.
 - `def format_lane(lane: dict) -> str`
-  - Lane state -> display lines (sequential sends: spacing + pause flag).
+  - Lane state -> display lines (the send lane is REMOVED).
 - `def format_policies(policies: List[dict]) -> str`
   - Stored policies (api.ratelimit_policies) -> scope/action/policy table.
 - `def format_effective(effective: dict) -> str`

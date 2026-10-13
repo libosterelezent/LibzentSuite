@@ -212,8 +212,9 @@ Notable seams (documented in the module):
 * **Logger shape**: managers mix stdlib-style and `LogService`-style calls — the runner injects
   `ServiceLogger` adapters over `LogService.record` so both work and structured entries still
   flow to `log_lines` / the Logs page.
-* A **real `ControlAPI` + `RemoteControl`** are wired so scenarios can exercise Discord-side
-  management exactly like production.
+* A **real `ControlAPI` + `RemoteControl`** (the retired mention bridge — the
+  `control_mention` scenario) are wired so scenarios can exercise Discord-side
+  management.
 * Scenario policies are **clamped to the 1.5s safety floor** — simulations never configure unsafe
   pacing.
 * Observability subscriptions attach **before** any traffic; a temporary `StdlibBridge` feeds

@@ -573,7 +573,7 @@ waiter immediately.
   `POST /api/ratelimit/lane`, which pre-validates the number and turns the
   error into an honest 400; CLI `ratelimit lane rate <s>`);
 - tests (`tests/unit/test_rate_lane.py`: pause/resume, wake + recompute,
-  validation). The Discord-side `RemoteControl` `lane` command is READ-ONLY
+  validation). The Discord-side self-command `lane` verb is READ-ONLY
   (`api.ratelimit_lane()` status display) — it does not change the prefixrate.
 
 ### Callees

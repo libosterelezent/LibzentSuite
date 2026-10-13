@@ -9,6 +9,7 @@ __all__ = [
     "AccountRuntime",
     "AccountStatus",
     "AccountPluginServices",
+    "MessageWaiterRegistry",
     "DiscordCache",
     "ChannelInfo",
     "TaskAckRegistry",

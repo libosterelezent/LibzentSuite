@@ -141,7 +141,10 @@ class CoalescedDispatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_stats_shape(self) -> None:
         bus = EventBus()
         stats = bus.stats()
-        self.assertEqual(set(stats), {"queued", "dispatched", "dropped"})
+        self.assertEqual(set(stats), {
+            "queued", "control_queued", "dispatched", "dropped",
+            "control_dropped", "unattributed_cancels",
+        })
 
 
 if __name__ == "__main__":

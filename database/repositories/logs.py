@@ -58,7 +58,11 @@ def _log_row(entry: Dict[str, Any]) -> tuple:
         entry.get("plugin"),
         entry.get("task_id"),
         entry.get("event"),
-        str(entry.get("message") or ""),
+        # capped like _audit_row's 500-char content: a huge formatted
+        # exception traceback must not bloat every row; 2000 chars keep
+        # the richer context log messages carry while the trail stays
+        # bounded (audit content is 500).
+        str(entry.get("message") or "")[:2000],
     )
 
 
@@ -131,7 +135,9 @@ class LogRepository(BaseRepository):
 
         Accepts the LogEntry.as_dict() shape; missing fields default safely.
         Severity is upper-cased so dashboard filters match regardless of who
-        wrote the row. Raises DatabaseError for a non-dict entry.
+        wrote the row; message is truncated to 2000 chars (audit's content
+        cap is 500 — logs carry richer text, still bounded). Raises
+        DatabaseError for a non-dict entry.
         """
         row = _log_row(entry)
         async with self._tx("append log entry") as conn:

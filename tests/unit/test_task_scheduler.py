@@ -487,12 +487,17 @@ class TestRetry(SchedulerTestBase):
         self.assertEqual([e.task_id for e in failed], [task.id])
 
     async def test_timeout_retries_then_times_out(self) -> None:
+        """Budget-expiry is TERMINAL and never auto-retried: the sender may
+        already have the request on the wire (cancelling the wait cannot
+        un-send it), so a retry would DUPLICATE the message — the primary
+        anti-flag hazard for this framework. The sender is therefore
+        invoked EXACTLY ONCE even with retry budget left."""
         task = self.scheduler.submit("alpha", "p", "message", timeout=0.05, retries=1)
         self.sender.outcomes.extend([("sleep", 0.5), ("sleep", 0.5)])
         await self.settle(0.4)
         self.assertEqual(task.status, "timed_out")
-        self.assertEqual(len(self.sender.calls), 2)
-        self.assertEqual(task.attempts, 1)
+        self.assertEqual(len(self.sender.calls), 1)  # NO duplicate send
+        self.assertEqual(task.attempts, 0)           # no retry consumed
         self.assertEqual(self.sleeps, [])
 
     async def test_server_rate_limit_retries_once_even_with_retries_zero(self) -> None:
@@ -697,9 +702,14 @@ class TestStopSingleFlight(SchedulerTestBase):
 
 # --------------------------------------------- exactly-once races (round 2)
 class TestExactlyOnceRaces(SchedulerTestBase):
-    async def test_timeout_retry_then_success_records_exactly_once(self) -> None:
+    async def test_retry_then_success_records_exactly_once(self) -> None:
+        """Retries that are still legal (ConnectionError: provably not on
+        the wire) keep the exactly-once recording contract: one row and
+        one audit row across both attempts. (The former timeout-then-ok
+        variant is gone: budget expiry is now terminal — see
+        test_timeout_retries_then_times_out.)"""
         task = self.scheduler.submit("alpha", "p", "message", timeout=0.05, retries=1)
-        self.sender.outcomes.extend([("sleep", 0.5), ("ok", None)])
+        self.sender.outcomes.extend([("raise", ConnectionError("reset")), ("ok", None)])
         await self.settle(0.4)
         self.assertEqual(task.status, "completed")
         self.assertEqual(len(self.repo.add_calls), 1)  # one row, two sends
@@ -806,6 +816,7 @@ class TestStressExactlyOnce(SchedulerTestBase):
         audited = {
             t.id for t in tasks
             if t.action in ("message", "dm") and t.sender_ran
+            and t.wire_sent is not False  # pre-wire failures are unaudited
         }
         self.assertEqual(len(self.audit.calls), len(audited))
         for account in accounts:

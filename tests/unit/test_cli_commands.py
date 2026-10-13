@@ -860,8 +860,13 @@ class TestRepl(unittest.IsolatedAsyncioTestCase):
         out = io.StringIO()
         repl = Repl(ExplodingApi(), stdin=io.StringIO("status\n"), stdout=out)
         await repl.run()
-        self.assertIn("error: boom with newline", out.getvalue())
+        # bare RuntimeError is NOT a domain error (it would mask internal
+        # failures): the type name stays, the message is collapsed to
+        # ONE line and no traceback leaks
+        self.assertIn("error: RuntimeError: boom with newline",
+                      out.getvalue())
         self.assertNotIn("Traceback", out.getvalue())
+        self.assertNotIn("\nboom", out.getvalue())
 
     async def test_render_error_keeps_type_for_non_domain(self) -> None:
         self.assertIn("KeyError", render_error(KeyError("x")))
@@ -1177,7 +1182,9 @@ class TestRunOnceExitCodes(unittest.IsolatedAsyncioTestCase):
 
         out = io.StringIO()
         self.assertEqual(await run_once(BoomApi(), ["status"], stdout=out), 1)
-        self.assertIn("error: boom", out.getvalue())
+        # bare RuntimeError is NOT domain: the type name stays (internal
+        # failures must not mask as curated error text), no traceback
+        self.assertIn("error: RuntimeError: boom", out.getvalue())
         self.assertNotIn("Traceback", out.getvalue())
 
     async def test_failing_estop_exit_one(self) -> None:

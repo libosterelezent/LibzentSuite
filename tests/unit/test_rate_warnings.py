@@ -10,7 +10,6 @@ import unittest
 from core.event_bus import EventBus
 from core.rate_limit_manager import MIN_ACTION_INTERVAL, RatePolicy, RateLimitManager
 from core.rate_limit_manager.warnings import (
-    NARROW_JITTER_SPREAD,
     describe_scope,
     evaluate_policy,
     evaluate_policies,
@@ -152,14 +151,15 @@ class TestManagerWarnings(unittest.TestCase):
 
     def test_one_entry_per_stored_policy(self):
         manager = make_manager()
-        manager.set_policy_values("message", 2.0)                       # no_jitter
+        manager.set_policy_values("message", 2.0)                       # no_jitter + faster_than_learned
         manager.set_policy_values("poke", 4.0, 0.5, 2.0)                # clean
-        manager.set_policy_values("dm", 2.5, 0.5, 0.6, level="account", owner="alpha")
+        manager.set_policy_values("dm", 3.0, 0.5, 0.6, level="account", owner="alpha")
         warnings = manager.warnings()
-        self.assertEqual(codes(warnings), ["narrow_jitter", "no_jitter"])
+        self.assertEqual(
+            codes(warnings), ["faster_than_learned", "narrow_jitter", "no_jitter"])
         # entries sort danger > warn > info
         levels = [w["level"] for w in warnings]
-        self.assertEqual(levels, ["info", "info"])
+        self.assertEqual(levels, ["warn", "info", "info"])
         # the message identifies the owning scope
         scoped = [w for w in warnings if "alpha" in w["message"]]
         self.assertEqual(len(scoped), 1)
@@ -169,7 +169,7 @@ class TestManagerWarnings(unittest.TestCase):
         manager.set_policy_values("message", 1.0, 0.5, 2.0)   # legal at the 0.05s floor
         manager.set_floor(2.5)                                 # then the floor rises above it
         warnings = manager.warnings()
-        self.assertEqual(codes(warnings), ["below_floor"])
+        self.assertEqual(codes(warnings), ["below_floor", "faster_than_learned"])
         self.assertEqual(warnings[0]["level"], "danger")
         self.assertIn("2.50s", warnings[0]["message"])
 

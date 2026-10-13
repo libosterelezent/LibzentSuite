@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import statistics
 import sys
@@ -137,9 +136,24 @@ async def _rate_once() -> float:
     clock = ManualClock()
     mgr = RateLimitManager(bus=None, logger=None, clock=clock, jitter_seed=1)
 
+    # the engine sleeps post-grant jitter for REAL (asyncio.sleep) — with
+    # the learned default jitter window that would add 0.2-0.8s of wall
+    # time per acquire under the frozen ManualClock. Route the documented
+    # _sleep seam at the clock instead: every timed wait becomes an
+    # instant clock advance, so the bench measures pure engine overhead.
+    async def _clock_sleep(seconds: float) -> None:
+        if seconds > 0:
+            clock.advance(seconds)
+
+    mgr._sleep = _clock_sleep
+
     async def run() -> None:
+        # learned default for "message" (no stored policy) is 2.6s — a
+        # fixed advance below the effective interval leaves a real
+        # asyncio.sleep pending and hangs the bench
+        step = mgr.effective_interval("message", account="acct") + 0.1
         for _ in range(N_ACQUIRES):
-            clock.advance(2.0)  # past every pacing clock -> zero real wait
+            clock.advance(step)  # past every pacing clock -> zero real wait
             grant = await mgr.acquire("message", account="acct")
             assert grant.wait_s == 0.0
 

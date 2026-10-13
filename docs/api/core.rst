@@ -52,8 +52,11 @@ Credentials views
 -----------------
 .. automodule:: core.credentials
    :members: Credentials
-.. automodule:: core.framework_credentials
-   :members: FrameworkCredentials
+
+``AccountPluginServices.credentials`` returns the credentials view the
+account manager was constructed with (the injected ``Credentials``); the
+former ``core.framework_credentials.FrameworkCredentials`` wrapper was
+never constructed anywhere and has been removed.
 
 Legacy profile records (retained future infrastructure)
 --------------------------------------------------------

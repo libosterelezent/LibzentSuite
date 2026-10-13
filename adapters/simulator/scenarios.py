@@ -299,8 +299,10 @@ def _checks_channel_gone(audit: List[dict], world: SimWorld) -> List[str]:
     failures: List[str] = []
     if world.channel_exists(SYNTHETIC_GUILD_CHANNEL):
         failures.append("trigger channel still exists - deletion never happened")
-    dm_channel = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
-    if not world.messages_of(dm_channel):
+    # NON-MUTATING lookup: dm_channel_for would CREATE the channel inside
+    # what must stay a pure post-mortem check
+    dm_channel = world.peek_dm_channel(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+    if not (dm_channel is not None and world.messages_of(dm_channel)):
         failures.append("no Mudae DM pages arrived - the flow never started (test is void)")
     chunks = _delivered_chunks(world)
     if chunks:

@@ -1,7 +1,7 @@
 # Module `core.logging_service`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `core/logging_service.py`
 
@@ -91,6 +91,8 @@ does zero extra work and never warns (simulator/headless boots).
 
 ## Functions
 
+- `def stop_stderr_pipeline() -> None`
+  - Stop the stderr listener thread and detach its queue handler.
 - `def configure_stderr(level: int=logging.INFO) -> None`
   - Attach one human-readable stderr handler to the logger tree (idempotent).
 - `def attach_stdlib_bridge(service: 'LogService', logger_name: str='slaughtermudae') -> StdlibBridge`

@@ -14,8 +14,10 @@ Design notes:
     audit-note contract ``attempts={attempts + 1}`` render the total number
     of sends, and keeps the retry budget at ``1 + max_retries`` tries.
   * ``cancelled`` is the cooperative cancel flag. ``cancel()`` sets it and
-    the account worker aborts at the next checkpoint (after the rate-limit
-    grant wait, or right after the sender returns).
+    the account worker aborts at its next checkpoint; a lane parked inside
+    ``limiter.acquire`` is preempted via ``cancel_event`` (the acquire is
+    raced against it and aborted), so a cancel never waits out a pacing
+    cooldown.
   * ``as_dict()`` is the JSON-safe snapshot used for task listings, the
     history repository row, and stats — floats are rounded.
 """
@@ -67,7 +69,12 @@ class Task:
         channel_id / user_id / content: action payload (message targets a
             channel, dm targets a user; other actions may carry either).
         priority: queue priority (core.priority.Priority value).
-        submitted_at / started_at / finished_at: wall-clock timestamps.
+        submitted_at / started_at / finished_at: wall-clock timestamps
+            (display/history only — never used for elapsed-age math: a
+            backward NTP step would latch derived signals high).
+        submitted_mono: monotonic twin of submitted_at; every AGE
+            computation (pressure, queue-wait samples, LOW aging) must
+            read this field, not the wall clock.
         attempts: retries used so far (0 until a retry is scheduled).
         max_retries: how many retries are allowed after the first failure.
         timeout_s: per-attempt asyncio.wait_for budget for the sender.
@@ -77,6 +84,11 @@ class Task:
         grant_wait_ms / grant_jitter_ms: pacing wait + jitter the rate
             limiter applied for the (latest) grant, in milliseconds.
         cancelled: cooperative cancel flag, checked between phases.
+        cancel_event: per-task asyncio.Event created by the scheduler when
+            the lane starts driving the task; cancel() sets it so a lane
+            parked inside limiter.acquire (429 cooldowns park for up to
+            MAX_INTERVAL=86400s) is preempted instead of wedging the
+            account for a day.
     """
 
     id: int
@@ -92,6 +104,8 @@ class Task:
     message_id: Optional[int] = None
     priority: int = Priority.NORMAL
     submitted_at: float = field(default_factory=time.time)
+    #: monotonic twin of submitted_at — the ONLY clock age math may use
+    submitted_mono: float = field(default_factory=time.monotonic, repr=False)
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
     attempts: int = 0
@@ -103,11 +117,24 @@ class Task:
     grant_wait_ms: float = 0.0
     grant_jitter_ms: float = 0.0
     cancelled: bool = False
+    #: preemption channel for cancel-while-parked-in-acquire (see class
+    #: docstring); plain attribute, never persisted
+    cancel_event: Any = field(default=None, repr=False, compare=False)
     #: True once the sender was actually invoked (any attempt) — only
     #: tasks that touched the API may produce an outbound audit row: a
     #: cancel while queued/parked on the grant AND a failure before the
     #: send (limiter error) never sent, so both must stay unaudited.
     sender_ran: bool = False
+    #: Tri-state wire classification for the audit gate. None = unknown
+    #: (default: the sender started but its outcome does not prove
+    #: whether a request reached the wire — budget-expiry timeout, cancel
+    #: mid-send, ambiguous failures; audited, the SAFE direction for
+    #: pacing). True = a wire send completed (sender returned a result).
+    #: False = PROVABLY pre-wire (the terminal failure's error kind is in
+    #: the scheduler's pre-wire set: account lookup / run-state check /
+    #: cache validation / DM resolution all failed before any client
+    #: call) — no audit row may exist for a send that never happened.
+    wire_sent: Optional[bool] = None
 
     @property
     def is_terminal(self) -> bool:

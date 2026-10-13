@@ -1,7 +1,7 @@
 # Module `adapters.model`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `adapters/model.py`
 
@@ -84,5 +84,3 @@ rather than triggering fetches.
   - Library channel object -> stable DiscordChannel projection.
 - `def convert_message(message: Any, *, dm: bool, viewer_id: Optional[int]=None, _depth: int=0) -> DiscordMessage`
   - Library message -> rich DiscordMessage (pure, non-blocking, no fetch).
-- `def convert_reaction(*, message_id: int, channel_id: int, guild_id: Optional[int], user_id: int, emoji: Any, dm: bool=False, raw: Any=None) -> dict`
-  - Stable reaction payload for the ReactionAdded event (§9).

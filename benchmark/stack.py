@@ -6,11 +6,10 @@ a concurrent live process safe. Fakes/simulation only — no real Discord.
 """
 from __future__ import annotations
 
-import asyncio
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace as NS
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from benchmark.collector import PerfCollector
 

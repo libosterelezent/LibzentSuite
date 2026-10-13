@@ -10,6 +10,16 @@ Taxonomy (recalibrated for Discord-driven pacing):
     narrow_jitter(info) a jitter range exists but its spread is < 0.3s —
                  still metronome-like; widen it
 
+Two further codes are composed in by the ENGINE (RateLimitManager.warnings,
+not this module — they need the learned-default table):
+
+    faster_than_learned (warn) a stored policy's interval is below the
+                 learned zero-throttle rate for its action: it REPLACES the
+                 learned default wherever it applies (deliberate
+                 displacement, but worth a second look)
+    default_no_jitter   (info) an action paced by the learned default has
+                 zero effective jitter — metronomic default pacing
+
 The historical "aggressive < 3s" lint and the always-present floor info
 entry were REMOVED: pacing is Discord-driven (bucket-aware blocking is
 the primary constraint and the floor enforces the minimum), so a

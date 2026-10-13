@@ -198,20 +198,20 @@ async def run_suite(args: NS) -> Dict[str, Any]:
             # per-run trackers reset for the next repeat
             scenario.run._rss_series = getattr(
                 scenario.run, "_rss_series", []) and []
-        result = run_results[0]
-        if repeats > 1:
-            from benchmark.report import aggregate_repeats
-            result["repeat"] = aggregate_repeats(run_results)
-            result["passed"] = all(r.get("passed") for r in run_results)
-        if all_spikes:
-            result["spikes"] = all_spikes[:20]
-            result["spikes_truncated"] = len(all_spikes) > 20
-        if getattr(args, "capture_spikes", False):
-            result["profiled"] = True  # DEEP_DIAGNOSTIC: compare-excluded
-        result["name"] = name
-        result["cycles"] = cycles
-        result.setdefault("mode", run_mode)
-        report["scenarios"].append(result)
+            result = run_results[0]
+            if repeats > 1:
+                from benchmark.report import aggregate_repeats
+                result["repeat"] = aggregate_repeats(run_results)
+                result["passed"] = all(r.get("passed") for r in run_results)
+            if all_spikes:
+                result["spikes"] = all_spikes[:20]
+                result["spikes_truncated"] = len(all_spikes) > 20
+            if getattr(args, "capture_spikes", False):
+                result["profiled"] = True  # DEEP_DIAGNOSTIC: compare-excluded
+            result["name"] = name
+            result["cycles"] = cycles
+            result.setdefault("mode", run_mode)
+            report["scenarios"].append(result)
         report["meta"]["duration_s"] = round(time.perf_counter() - started, 2)
         return report
     finally:

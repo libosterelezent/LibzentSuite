@@ -24,24 +24,24 @@ respects server-provided rate-limit information.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 # RICH MODEL (adapters/model.py) — the full stable projection (embeds,
 # components, attachments, reactions, reference, author/channel/guild,
 # created_at, runtime-only raw escape hatch). Re-exported here so every
 # existing ``from adapters.base import DiscordMessage`` keeps working.
-from .model import (  # noqa: F401 — compatibility re-exports
-    DiscordAttachment,
-    DiscordChannel,
-    DiscordComponent,
-    DiscordEmbed,
-    DiscordEmbedField,
-    DiscordMessage,
-    DiscordMessageReference,
-    DiscordReaction,
-    DiscordUser,
-    convert_message,
+from .model import (  # compatibility re-exports (``as``-alias = PEP 484
+    # re-export convention; pyflakes, unlike flake8, ignores ``noqa``)
+    DiscordAttachment as DiscordAttachment,
+    DiscordChannel as DiscordChannel,
+    DiscordComponent as DiscordComponent,
+    DiscordEmbed as DiscordEmbed,
+    DiscordEmbedField as DiscordEmbedField,
+    DiscordMessage as DiscordMessage,
+    DiscordMessageReference as DiscordMessageReference,
+    DiscordReaction as DiscordReaction,
+    DiscordUser as DiscordUser,
+    convert_message as convert_message,
 )
 
 
@@ -106,4 +106,9 @@ class ClientFactory(Protocol):
     def __call__(self, name: str, token: str) -> Any: ...
 
 
-__all__ = ["DiscordClient", "DiscordMessage", "ClientFactory"]
+__all__ = [
+    "DiscordClient", "DiscordMessage", "ClientFactory",
+    "DiscordAttachment", "DiscordChannel", "DiscordComponent", "DiscordEmbed",
+    "DiscordEmbedField", "DiscordMessageReference", "DiscordReaction",
+    "DiscordUser", "convert_message",
+]

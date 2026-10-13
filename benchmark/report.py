@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 import statistics
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 SCHEMA = "sm-bench/1"
 
@@ -91,7 +91,14 @@ def _verdict(metric: str, before: float, after: float) -> str:
     rel, abs_ = TOLERANCES.get(metric, (0.15, 0.0))
     delta = after - before
     band = max(abs(before * rel), abs_)
-    lower_is_better = metric.startswith(("rss_", "cpu_", "lag_", "wall_"))
+    # lower-is-better: resource/lag metrics plus the END-STATE counters
+    # (tasks_end/threads_end — growth is a leak, not an improvement) and
+    # counter-style custom metrics by suffix (_failures/_dropped/_errors,
+    # and the bare custom.dropped / custom.errors spellings)
+    lower_is_better = metric.startswith(
+        ("rss_", "cpu_", "lag_", "wall_", "tasks_", "threads_")
+    ) or metric.rsplit(".", 1)[-1].endswith(
+        ("failures", "dropped", "errors"))
     if abs(delta) <= band:
         return "unchanged"
     if delta > 0:
@@ -103,8 +110,15 @@ def compare(before: Dict[str, Any], after: Dict[str, Any]) -> str:
     """Human before/after/Δ table across scenarios + metrics."""
     lines = ["BASELINE COMPARE", "=" * 78]
     overall_regressed = False
-    for scen in after.get("scenarios", []):
+    after_scenarios = after.get("scenarios") or []
+    if not after_scenarios:
+        raise ValueError(
+            "compare: the new report has zero scenarios — nothing to "
+            "compare (truncated or misconfigured run?)")
+    seen: List[str] = []
+    for scen in after_scenarios:
         name = scen.get("name", "?")
+        seen.append(name)
         if scen.get("profiled"):
             lines.append(f"{name}: profiled run — excluded from compare")
             continue
@@ -125,6 +139,13 @@ def compare(before: Dict[str, Any], after: Dict[str, Any]) -> str:
                 overall_regressed = True
             lines.append(f"  {metric:<28} {b:>12.3f} -> {a:>12.3f}"
                          f"  [{verdict}]")
+    for prev in before.get("scenarios", []):
+        name = prev.get("name", "?")
+        if name in seen or prev.get("profiled"):
+            continue
+        overall_regressed = True
+        lines.append(f"{name}: MISSING — in the baseline but absent from "
+                     "the new report")
     lines.append("=" * 78)
     lines.append("OVERALL: REGRESSED — rerun with --repeat 3 (medians)"
                  if overall_regressed else "OVERALL: ok (within tolerances)")

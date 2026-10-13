@@ -132,8 +132,9 @@ One conversion at the boundary, project-owned forever after:
 
 1. **Surfaces → ControlAPI, nothing else.** `interfaces.cli.commands.run_command`
    "calls ONLY `core.api.ControlAPI` methods"; the dashboard's REST routes map
-   1:1 to ControlAPI; `RemoteControl._execute` dispatches an allowlist to the
-   same API. Parity by construction.
+   1:1 to ControlAPI; the self-command layer's Framework verbs reach the same
+   API through the bootstrap-registered `COMMAND_HUB.api_provider`. Parity by
+   construction.
 2. **ControlAPI → managers** (duck-typed delegation; no manager imports at
    runtime — `core/api.py` imports manager types only under `TYPE_CHECKING`).
 3. **Plugins → PluginServices only.** `core.plugin_base.PluginBase` plugins
@@ -229,16 +230,16 @@ for payload in config.accounts: accounts.add_account(...)
 scheduler.start()
 simulation_runner ||= SimulationRunner(plugin_dir, credentials)   # best-effort
 api = ControlAPI(..., access=access)
-remote_control = RemoteControl(...).start()       # if credentials.remote_control_enabled
+COMMAND_HUB.api_provider = lambda: api            # Framework verbs -> the ONE API
 return Framework(...)
 ```
 
 The scheduler↔accounts cycle (scheduler needs `accounts.send_hook`; accounts
 needs the scheduler for submits/cancels) is broken by the late-bound
 `sender_box` — the same seam `adapters.simulator.runner.SimulationRunner.run`
-uses. Note the real order against the boot list in some docs: ControlAPI is
-built **before** RemoteControl (RemoteControl receives a
-`lambda: api` provider), and the SimulationRunner is constructed before both.
+uses. The SimulationRunner is constructed before the ControlAPI. (The
+retired RemoteControl bridge is no longer wired in production — only the
+simulator stack constructs it, for the `control_mention` scenario.)
 
 ## Failure-isolation spine (why the topology holds)
 
@@ -280,9 +281,11 @@ fail closed on checker errors.
 **One-time env migration** (`migrate_from_credentials`, run by the
 bootstrap): when the stored admin list is empty it is seeded from
 `OWNER_USER_IDS`, after which the env value is IGNORED for
-authorization. `core.framework_credentials.FrameworkCredentials` is the
-documented DB-first duck-type (`owner_user_ids` = admins, `mudae_bot_id`
-DB-first) handed to plugin services in place of the raw env view.
+authorization. Plugins see credentials through
+`AccountPluginServices.credentials`, which returns the injected
+credentials view (the env `Credentials` object in the live bootstrap
+stack); the former `core.framework_credentials.FrameworkCredentials`
+wrapper was never constructed anywhere and has been removed.
 
 Surfaces: dashboard Admin tab (`/api/admin/*`), the admin-only
 self-command verbs (`adminlist`, `adminperms`, `adminprefix`). Flow

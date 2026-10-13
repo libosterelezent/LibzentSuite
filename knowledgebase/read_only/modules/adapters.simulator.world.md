@@ -1,7 +1,7 @@
 # Module `adapters.simulator.world`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `adapters/simulator/world.py`
 
@@ -50,6 +50,8 @@ The world owns:
   - Simulate a channel deletion.
 - `def dm_channel_for(self, user_a: int, user_b: int) -> int`
   - Deterministic, symmetric DM channel id for a user pair.
+- `def peek_dm_channel(self, user_a: int, user_b: int) -> Optional[int]`
+  - Non-creating DM channel lookup: the pair's channel id, or None
 - `def add_response(self, command: str, pages: List[str]) -> None`
   - Register a scripted response: exact command string -> DM pages.
 - `def dm_pairs_of(self, channel_id: int) -> List[Tuple[int, int]]`

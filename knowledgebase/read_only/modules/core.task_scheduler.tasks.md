@@ -1,7 +1,7 @@
 # Module `core.task_scheduler.tasks`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `core/task_scheduler/tasks.py`
 
@@ -22,8 +22,10 @@ Design notes:
     audit-note contract ``attempts={attempts + 1}`` render the total number
     of sends, and keeps the retry budget at ``1 + max_retries`` tries.
   * ``cancelled`` is the cooperative cancel flag. ``cancel()`` sets it and
-    the account worker aborts at the next checkpoint (after the rate-limit
-    grant wait, or right after the sender returns).
+    the account worker aborts at its next checkpoint; a lane parked inside
+    ``limiter.acquire`` is preempted via ``cancel_event`` (the acquire is
+    raced against it and aborted), so a cancel never waits out a pacing
+    cooldown.
   * ``as_dict()`` is the JSON-safe snapshot used for task listings, the
     history repository row, and stats — floats are rounded.
 ```

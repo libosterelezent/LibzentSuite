@@ -16,7 +16,7 @@ import os
 import pstats
 import tracemalloc
 from contextlib import contextmanager
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Tuple
 
 
 @contextmanager

@@ -1,7 +1,7 @@
 # Module `core.task_scheduler.scheduler`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `core/task_scheduler/scheduler.py`
 
@@ -46,10 +46,16 @@ crashes. History-repo and audit failures are likewise isolated (try/except
 + log).
 
 Retry classification (INTEGRATION contract): ``ServerRateLimit`` is
-reported to the limiter then retried; ``ConnectionError`` /
-``TimeoutError`` / ``asyncio.TimeoutError`` retry (timeout marks the final
-status "timed_out"); ``FlowBlocked`` and everything else fail immediately
-with the reason.
+reported to the limiter then retried; ``ConnectionError`` retries;
+``FlowBlocked`` and everything else fail immediately with the reason.
+Timeouts — budget expiry (``asyncio.TimeoutError`` from the outer
+``wait_for``) AND sender-internal ``TimeoutError`` alike — are TERMINAL
+(status "timed_out", never auto-retried): a timed-out sender may already
+have the request on the wire, and cancelling the wait cannot un-send it,
+so an automatic retry would DUPLICATE the message (the primary
+anti-flag hazard for a selfbot framework). The two sources are not
+distinguishable at the scheduler seam, so the safe default applies to
+both (documented decision).
 Retries carry NO scheduler delay — they re-enter limiter.acquire immediately; the limiter's cooldown + interval own every delay (pacing is exclusively the limiter's job)
 through the ``_sleep`` seam (deterministic tests) and are capped at
 ``1 + max_retries`` total attempts.
@@ -59,6 +65,7 @@ through the ``_sleep`` seam (deterministic tests) and are capped at
 
 | Symbol | Kind | Public | Purpose (first doc line) |
 |---|---|---|---|
+| `_AcquireCancelled` | exception | no | limiter.acquire raised CancelledError without being cancelled by us. |
 | `_GrantGate` | class | no | Shared priority turnstile ordering ENTRY into limiter.acquire. |
 | `TaskScheduler` | class | yes | Centralized task queue with one serialized worker lane per account. |
 
@@ -94,4 +101,4 @@ through the ``_sleep`` seam (deterministic tests) and are capped at
 - `def stats(self) -> dict`
   - Scheduler counters from in-memory tallies (UI Overview page).
 - `def pressure(self) -> dict`
-  - Soft pressure signal (FINAL-PHASE G2; pure, no mutation).
+  - Soft pressure signal (FINAL-PHASE G2; pure, no task mutation).

@@ -120,8 +120,12 @@ python3 main.py accounts list          # one-shot command mode
 | **Admin** | framework admin ids, per-account command permissions + prefixes (mention/symbol/both), Mudae bot id |
 | **Tools** | task queue/history, offline simulations, emergency stop, shutdown |
 
-Everything the dashboard does, the CLI also does (`python3 main.py …`) and
-vice versa — same API underneath, so pick whichever you like.
+Nearly everything works from both (`python3 main.py …` or the dashboard —
+same API underneath, so pick whichever you like). Dashboard-only today:
+admin-panel management, plugin-profile editing, per-account channel
+lists, the effective-settings view and bulk plugin-set; the CLI covers
+accounts/credentials/plugins/profiles-bindings/ratelimit/cooldowns/
+tasks/simulation/logs/audit/estop/status/groups.
 
 Debugging a live issue? Add `--debug`: DEBUG-level logs, Discord gateway
 lines (reconnect/close codes), DB worker timings, scheduler pressure.
@@ -264,7 +268,7 @@ plugins/               your plugins (the framework ships with none — the
                        directory may be empty; test fixtures live under
                        tests/fixtures/)
 benchmark/             the benchmark subsystem (scenarios, profiling modes)
-tests/unit|integration|simulation|stress   1264-test offline suite
+tests/unit|integration|simulation|stress   ~1800-test offline suite
 config/                global settings, rate policies, account files
 main.py                entrypoint
 ```
@@ -410,7 +414,7 @@ execution log, the audit trail and pass/fail checks. Scenarios:
 `estop_halt`.
 
 `benchmark/` (see `benchmark/README.md`): scenarios incl. cold boot,
-N-account start/stop, restart/delete churn, message bursts; loop-lag
+N-account start/stop, restart churn, message bursts; loop-lag
 histograms; leak verdicts from trend analysis; `--repeat` medians,
 `--profile` (main-thread cProfile), `--tracemalloc` (allocation sites),
 `--capture-spikes` (diagnostic snapshots); baselines + tolerance-aware
@@ -418,15 +422,19 @@ compare; DB worker telemetry.
 
 ## Management surfaces
 
-- CLI: `accounts|credentials|plugins|profiles|ratelimit|cooldowns|tasks|simulation|logs|audit|estop|status|help|quit`
+- CLI: `accounts|credentials|plugins|profiles|ratelimit|cooldowns|tasks|simulation|logs|audit|estop|status|groups|help|quit`
 - Dashboard REST: 1:1 with ControlAPI; WebSocket pushes stats/log/audit/task
   events live (complete reference: `knowledgebase/API_ENDPOINTS.md`)
 - Self-commands: framework verbs (`pg`, `say`, `help`, `prefixrate`,
   `adminlist`, `adminperms`, `adminprefix`) + every plugin-declared
   `COMMANDS` verb — gated per account by the admin-panel access lists
-- Mention prefix (allowlisted, self-throttled, replies paced)
+- Mention prefix (`mention` prefix mode of the same self-command layer —
+  same access gate, replies paced)
 
-All of them hit the same ControlAPI — parity by construction.
+All of them hit the same ControlAPI; CLI↔dashboard parity holds for the
+verb groups listed above, but admin-panel management, plugin-profile
+editing, per-account channel lists, the effective-settings view and bulk
+plugin-set remain dashboard-only.
 
 ## Documentation
 
@@ -446,8 +454,8 @@ All of them hit the same ControlAPI — parity by construction.
 
 One REST call per entity ever (DM/user cache in SQLite, migration 002);
 no double-resolution on DM sends; stale-cache healing on TargetGone;
-optional typing indicator (default off); mention-prefix management
-owner-only and self-throttled; N-account IDENTIFY pacing with per-IP
+optional typing indicator (default off); chat commands gated by the
+admin-panel access lists (fail-closed); N-account IDENTIFY pacing with per-IP
 budget; per-account 429 cooldowns with fleet-wide global-limit handling;
 reconnect backoff with jitter and flap-escalation; event-loop-friendly
 everything (queued persistence, bounded dispatch slices).

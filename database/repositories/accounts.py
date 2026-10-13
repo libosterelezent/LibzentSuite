@@ -2,8 +2,9 @@
 
 One row per account in ``accounts`` plus membership rows in
 ``account_profiles``. Dependent per-account tables (``account_settings``,
-``plugin_settings``, ``plugin_states``, ``account_profiles``) are keyed by
-account NAME — the public key everywhere — and removed explicitly by
+``plugin_settings``, ``plugin_states``, ``account_profiles``,
+``account_plugins``) are keyed by account NAME — the public key
+everywhere — and removed explicitly by
 :meth:`AccountsRepository.delete` (the schema declares no foreign keys, so
 the cascade is manual, exactly like the audited old implementation).
 
@@ -32,9 +33,11 @@ _INSERT = """
 
 
 #: per-account tables (keyed by account NAME) removed by ``delete``
+#: (``account_plugins`` included: an orphaned row would let a re-created
+#: same-named account silently inherit the dead account's plugin grants)
 _DEPENDENT_TABLES = ("account_settings", "plugin_settings", "plugin_states",
                      "account_profiles", "api_cache", "credentials",
-                     "cooldowns")
+                     "cooldowns", "account_plugins")
 #: kv rows keyed by PREFIX (PHASE-4 S3-G5 defense-in-depth): plugin state
 #: lives in kv under these prefixes; the service-level cascade is primary,
 #: the repo-level sweep is the backstop for unwired/limited services.
@@ -161,9 +164,10 @@ class AccountsRepository(BaseRepository):
         """Delete an account AND every dependent row; True when it existed.
 
         Cascades (all in one transaction): account_settings, plugin_settings,
-        plugin_states, account_profiles, api_cache, credentials (the
-        encrypted token must never outlive its account) and cooldowns. The
-        account's profiles themselves and other accounts' rows are untouched.
+        plugin_states, account_profiles, account_plugins, api_cache,
+        credentials (the encrypted token must never outlive its account)
+        and cooldowns. The account's profiles themselves and other
+        accounts' rows are untouched.
         """
         async with self._tx(f"delete account {name!r}") as conn:
             async with conn.execute(
@@ -174,11 +178,22 @@ class AccountsRepository(BaseRepository):
                 for table in _DEPENDENT_TABLES:
                     await conn.execute(f"DELETE FROM {table} WHERE account = ?", (name,))
                 # PHASE-4 (S3-G5): kv plugin-state prefix sweep (backstop —
-                # the PluginStateService cascade is the primary path)
+                # the PluginStateService cascade is the primary path).
+                # LIKE wildcards in the account NAME ('\', '%', '_') are
+                # escaped exactly like kv.py's delete_prefix(): unescaped,
+                # '_' is any-single-char and deleting 'alfa_bot' also
+                # swept 'alfaXbot' rows — silent cross-account data loss.
                 for prefix in _KV_PREFIX_SWEEPS:
+                    pattern = (
+                        prefix.format(name=name)
+                        .replace("\\", "\\\\")
+                        .replace("%", "\\%")
+                        .replace("_", "\\_")
+                        + "%"
+                    )
                     await conn.execute(
-                        "DELETE FROM kv WHERE key LIKE ?",
-                        (prefix.format(name=name) + "%",))
+                        "DELETE FROM kv WHERE key LIKE ? ESCAPE '\\'",
+                        (pattern,))
         return existed
 
     # -------------------------------------------------------------- profiles

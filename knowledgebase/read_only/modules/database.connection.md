@@ -1,7 +1,7 @@
 # Module `database.connection`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `database/connection.py`
 
@@ -62,7 +62,7 @@ Repos never manage cursors/commits themselves.
 ### `DatabaseConnection`
 
 - `def connected(self) -> bool`
-- `async def connect(self) -> None`
+- `async def connect(self) -> None` — side effects: `network`
   - Open the connection and apply pragmas (idempotent, race-free).
 - `async def close(self, timeout: float=CLOSE_TIMEOUT_S) -> None`
   - Close the connection (idempotent; safe during shutdown).

@@ -496,7 +496,7 @@ await ctx.services.state_set("wins", wins + 1)
 
 | Member | Type | Meaning |
 |---|---|---|
-| `credentials` | `core.credentials.Credentials` | fleet credentials — `.mudae_bot_id: int` (required int, `.env` `MUDAE_BOT_ID`), `.owner_user_ids: frozenset[int]` (comma-separated `OWNER_USER_IDS`), `.get(key)` / `.require(key)` / `.token_for(account)`. Never hardcode ids. |
+| `credentials` | `core.credentials.Credentials` | fleet credentials — `.mudae_bot_id: int` (required int, `.env` `MUDAE_BOT_ID`), `.owner_user_ids: frozenset[int]` (the admin-ids view — DB admin list, env `OWNER_USER_IDS` is only the one-time seed), `.get(key)` / `.require(key)` / `.token_for(account)`. Never hardcode ids. |
 | `account` | `str` | the account this facade belongs to |
 | `plugin` | `str` | the plugin name the facade was created for |
 | `settings` | `Dict[str, Any]` | **live** resolved settings dict — the very object `ctx.settings` refers to; refreshed in place by `PluginManager.set_setting` |

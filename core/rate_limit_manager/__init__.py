@@ -14,7 +14,11 @@ Design decisions (documented per the INTEGRATION ground rules):
 * interval+pacing instead of the audited token buckets; priority waiter
   heap, wake events, NaN validation and jitter seeding are ported ideas.
 * effective() composes policy levels by MAX interval (never faster than ANY
-  applicable level) and never paces faster than the safety floor.
+  applicable level) and never paces faster than the safety floor. With NO
+  stored policy the LEARNED per-action default applies — and any stored
+  policy REPLACES (displaces) that default rather than composing max()
+  with it, so prefixrate overrides can deliberately pace below the study
+  rate; the floor still applies on every path.
 * persistence is best-effort: pacing safety never depends on the database.
 """
 from .engine import (

@@ -55,10 +55,11 @@ and (c) a management command. Every hop names the real symbol from
 
 Also subscribed to `MessageReceived` (not drawn):
 
-* `core.remote_control.RemoteControl._on_message` — mention-prefix
-  management (its own hard filter first: `core.remote_control.
-  RemoteControl._extract_command` checks the message starts with THIS
-  account's own `<@uid>`/`<@!uid>` mention, then `owner_user_ids`).
+* `core.remote_control.RemoteControl._on_message` — RETIRED from
+  production (mention-prefix commands now arrive via the client's
+  `ext.commands` layer into the self-command hub, gated by
+  `AccessManager.can_invoke`); the bus subscriber survives only in the
+  simulator stack (`control_mention` scenario).
 * `core.bootstrap._wire_event_logging`'s `_on_event` — deliberately NOT
   interested: `MessageReceived` is excluded from `_LOGGED_EVENTS` as too
   chatty; lifecycle events become structured log lines instead.
@@ -236,10 +237,10 @@ flow-abort contract survives.
  │  LogService/AuditRecorder subscribers + Task* bus events)      │
  └────────────────────────────┼────────────────────────────────────┘
                               │
- ┌─ Discord mention ──────────┼───────────────────────────────────┐
- │ MessageReceived → core.remote_control.RemoteControl._on_message│
- │   → own-mention + owner check → _handle → _execute              │
- └────────────────────────────┬────────────────────────────────────┘
+ ┌─ Discord chat cmd ─────────┼───────────────────────────────────┐
+ │ client ext.commands → SelfCommandHub.invoke → can_invoke gate  │
+ │   (per-account prefix; AccessManager.can_invoke gate)          │
+ └────────────────────────────┬───────────────────────────────────┘
                               ▼
         core.api.ControlAPI   ("the ONE application surface",
                               JSON-safe in/out, strict bools via parse_bool)
@@ -283,7 +284,9 @@ Worked examples, end to end:
   → `runtime.settings[key]` mutated IN PLACE — the LIVE dict shared with
   `PluginContext.settings` and `AccountPluginServices.settings`, so the
   change is visible to running plugins with no restart.
-* **`@alpha estop`** (from Discord) → `RemoteControl._execute` →
+* **`@alpha estop`** (from Discord, mention prefix) → the client's
+  `ext.commands` layer → `SelfCommandHub.invoke` (`AccessManager`
+  gate) →
   `ControlAPI.accounts_emergency_stop("alpha")` →
   `AccountManager.emergency_stop` (synchronous cancel + background stop);
   the reply string is submitted as a NORMAL-priority `message` task —

@@ -1,7 +1,7 @@
 # Module `core.account_manager.manager`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `core/account_manager/manager.py`
 
@@ -124,7 +124,7 @@ name. This matches the A6 hand-off contract and should be reconciled with A3.
   - Connect one account, activate its plugins, spawn the supervisor.
 - `def lifecycle_stats(self) -> Dict[str, Any]`
   - Governor stats for status surfaces ({} when unlimited).
-- `async def stop(self, name: str, *, _bypass_lifecycle: bool=False) -> Dict[str, Any]` — side effects: `publishes_event`
+- `async def stop(self, name: str, *, _bypass_lifecycle: bool=False) -> Dict[str, Any]` — side effects: `creates_tasks, publishes_event`
   - Stop one account (idempotent; plugins deactivated first).
 - `async def start_all(self, *, stagger: float=5.0) -> Dict[str, Any]` — side effects: `creates_tasks, sleeps, publishes_event`
   - Start every ENABLED account through the bounded lifecycle scheduler.

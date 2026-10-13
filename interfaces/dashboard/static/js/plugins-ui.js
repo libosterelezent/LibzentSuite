@@ -59,6 +59,10 @@ function boundProfileOf(account, plugin) {
 
 function renderPlugins() {
   const grid = $("plugin-grid"); if (!grid) return;
+  // Focus guard (same as renderAdmin): a WS tick must not rebuild the
+  // quick-bind selects out from under a half-used one — data stays
+  // stale only while focused.
+  if (grid.querySelector("select:focus, input:focus, textarea:focus")) return;
   grid.innerHTML = "";
   if (manifestsFailed) { grid.innerHTML=emptyState("Plugins Unavailable","The plugins list could not be loaded — see the error toasts. The rest of the dashboard remains usable."); return; }
   if (!manifests.length) { grid.innerHTML=emptyState("No Plugins","No plugins discovered in the plugins directory."); return; }

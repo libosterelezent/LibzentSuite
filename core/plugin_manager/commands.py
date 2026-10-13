@@ -45,18 +45,10 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from ..errors import (
-    AccountError,
-    CredentialsError,
-    PluginError,
-    ProfileError,
-    RatePolicyError,
-    SettingsValidationError,
-)
+from ..errors import DOMAIN_ERRORS
 from ..plugin_base import ArgSpec, CommandContext, CommandSpec, usage_line
 
 LOG = logging.getLogger("slaughtermudae.selfcommands")
@@ -82,10 +74,7 @@ FRAMEWORK_CATEGORY = "Framework"
 #: else is an internal failure that raises on — the executor masks it.
 #: NOTE: bare RuntimeError is deliberately NOT domain — typed domain
 #: errors that subclass RuntimeError (AccountError etc.) still render.
-_DOMAIN_ERRORS = (
-    AccountError, CredentialsError, PluginError, ProfileError,
-    RatePolicyError, SettingsValidationError, ValueError,
-)
+_DOMAIN_ERRORS = DOMAIN_ERRORS
 
 
 class PacingBackend:
@@ -231,6 +220,7 @@ async def _prefixrate_handler(ctx: CommandContext, args: List[str]) -> str:
                              f"(got {args[0]!r})") from None
         if seconds <= 0:
             raise ValueError("prefixrate must be > 0 seconds")
+        await _require_admin(ctx)  # mutation branch: admin-only
         previous = backend.set(ctx.account, seconds)
         if previous is None:
             raise ValueError("the limiter rejected the value")
@@ -365,9 +355,11 @@ async def _accounts_handler(ctx: CommandContext, args: List[str]) -> str:
             f"{rt.get('cached_dms')}d (client cache)"
         )
     if sub == "start" and len(rest) == 1:
+        await _require_admin(ctx)  # fleet-wide mutation: admin-only
         await api.accounts_start(rest[0])
         return f"started {rest[0]}"
     if sub == "stop" and len(rest) == 1:
+        await _require_admin(ctx)  # fleet-wide mutation: admin-only
         await api.accounts_stop(rest[0])
         return f"stopped {rest[0]}"
     return "usage: accounts list|info <n>|start <n>|stop <n>"
@@ -390,6 +382,7 @@ async def _plugins_handler(ctx: CommandContext, args: List[str]) -> str:
     plugin, flag = args[1], (args[2].lower() if len(args) > 2 else "")
     if flag not in ("on", "off"):
         return "usage: plugins <account> <plugin> on|off"
+    await _require_admin(ctx)  # fleet-wide mutation: admin-only
     await api.plugins_set_enabled(account, plugin, flag == "on")
     return f"{plugin} {'enabled' if flag == 'on' else 'disabled'} on {account}"
 
@@ -612,30 +605,13 @@ def render_help(specs: Sequence[CommandSpec]) -> str:
 
     Plugin categories first (sorted, title-cased), then Utilities, then
     No Category; inside a category commands are name-sorted and the
-    help column is aligned to the longest name.
+    help column is aligned to the longest name. Category groups are
+    separated by ONE blank line so :func:`_paginate_help` can split on
+    group boundaries — this is the page-1 view of the same rendering
+    the ``help`` verb paginates.
     """
-    groups: Dict[str, List[CommandSpec]] = {}
-    for spec in specs:
-        category = spec.category or NO_CATEGORY
-        groups.setdefault(category, []).append(spec)
-    plugin_categories = sorted(
-        c for c in groups if c not in (UTILITIES_CATEGORY, NO_CATEGORY))
-    ordered = plugin_categories + [
-        c for c in (UTILITIES_CATEGORY, NO_CATEGORY) if c in groups]
-    width = max((len(s.name) for s in specs), default=0) + 2
-    width = max(width, 10)
-    lines: List[str] = []
-    for category in ordered:
-        header = category if category == NO_CATEGORY else category.upper()
-        lines.append(header)
-        for spec in sorted(groups[category], key=lambda s: s.name):
-            desc = spec.help
-            if len(desc) > HELP_DESC_WIDTH:
-                desc = desc[: HELP_DESC_WIDTH - 1].rstrip() + "…"
-            lines.append(f"    {spec.name.ljust(width)}{desc}")
-    body = "\n".join(lines) if lines else "no commands registered"
-    pages = _paginate_help(body)
-    return pages[0] if len(pages) == 1 else pages[0] + f"\n(help 2 for more…)"
+    pages = _paginate_help(_render_help_body(specs))
+    return pages[0] if len(pages) == 1 else pages[0] + "\n(help 2 for more…)"
 
 
 #: max description width in the help listing (25 chars + ellipsis)
@@ -662,13 +638,12 @@ def _paginate_help(body: str) -> List[str]:
     return pages or ["no commands registered"]
 
 
-def help_page_count(specs: Sequence[CommandSpec]) -> int:
-    """How many pages the current registry's help renders into."""
-    return len(_paginate_help(_render_help_body(specs)))
-
-
 def _render_help_body(specs: Sequence[CommandSpec]) -> str:
-    """Full unpaginated help body (grouped, aligned, truncated)."""
+    """Full unpaginated help body (grouped, aligned, truncated).
+
+    Category groups are joined with a BLANK line (``"\\n\\n"``) — the
+    boundary :func:`_paginate_help` splits on.
+    """
     groups: Dict[str, List[CommandSpec]] = {}
     for spec in specs:
         category = spec.category or NO_CATEGORY
@@ -679,16 +654,17 @@ def _render_help_body(specs: Sequence[CommandSpec]) -> str:
         c for c in (UTILITIES_CATEGORY, NO_CATEGORY) if c in groups]
     width = max((len(s.name) for s in specs), default=0) + 2
     width = max(width, 10)
-    lines: List[str] = []
+    blocks: List[str] = []
     for category in ordered:
         header = category if category == NO_CATEGORY else category.upper()
-        lines.append(header)
+        lines: List[str] = [header]
         for spec in sorted(groups[category], key=lambda s: s.name):
             desc = spec.help
             if len(desc) > HELP_DESC_WIDTH:
                 desc = desc[: HELP_DESC_WIDTH - 1].rstrip() + "…"
             lines.append(f"    {spec.name.ljust(width)}{desc}")
-    return "\n".join(lines) if lines else "no commands registered"
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) if blocks else "no commands registered"
 
 
 # --------------------------------------------------------------------- hub
@@ -741,6 +717,14 @@ class SelfCommandHub:
         """Drop the binding if THIS manager still owns it (shutdown)."""
         if self._manager is manager:
             self._manager = None
+
+    @property
+    def bound_manager(self) -> Any:
+        """The currently bound plugin manager (None when unbound).
+
+        Read-only view for callers that must save/restore the process
+        binding around a temporary manager (the simulation runner)."""
+        return self._manager
 
     # ----------------------------------------------------------- publish
     def refresh(self, account: str) -> None:

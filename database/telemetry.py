@@ -80,8 +80,11 @@ class DbTelemetry:
             self._hists[kind][bisect.bisect_left(_BUCKETS_MS, ms)] += 1
             if ms > self._max_s.get(kind, 0.0) * 1000.0:
                 self._max_s[kind] = seconds
-            if len(self._ring) < self._ring.maxlen:
-                self._ring.append((kind, round(ms, 3), ok))
+            # append UNCONDITIONALLY: deque(maxlen=...) evicts the OLDEST
+            # entry on its own — the old len<maxlen guard froze the ring
+            # at the FIRST 1024 records, so the "tail forensics window"
+            # kept showing boot-time entries forever.
+            self._ring.append((kind, round(ms, 3), ok))
 
     def reset(self) -> None:
         with self._lock:

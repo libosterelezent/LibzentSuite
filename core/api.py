@@ -72,7 +72,6 @@ from .rate_limit_manager import (
     KV_FLOOR_KEY,
     KV_LANE_KEY,
     KV_REMOVED_KEY,
-    MAX_PREFIXRATE,
 )
 
 if TYPE_CHECKING:  # duck-typed at runtime — no manager imports here
@@ -86,7 +85,6 @@ if TYPE_CHECKING:  # duck-typed at runtime — no manager imports here
     from .profile_manager import ProfileManager
     from .rate_limit_manager import RateLimitManager
     from .settings_manager import SettingsManager
-    from .sync_group_manager import SyncGroupManager
     from .task_scheduler import TaskScheduler
 
 LOG = logging.getLogger("slaughtermudae.api")
@@ -160,6 +158,9 @@ class ControlAPI:
         self._cooldowns = cooldowns
         self._sync_groups = sync_groups
         self._access = access
+        # NOTE: started_at is accepted (core/bootstrap passes it) but the
+        # value is never read — uptime derives from _booted_at below; kept
+        # for the bootstrap call-site contract.
         self._started_at = started_at
         self._booted_at = _time.time()
         # FINAL-PHASE (F3): authoritative reconciliation cadence (bounds
@@ -176,9 +177,9 @@ class ControlAPI:
         """Overview snapshot: accounts + rate limits + tasks + warnings.
 
         Account rows are enriched with their credential status
-        ("db"|"env"|None) and the number of active persistent cooldowns —
-        both filled in ONLY when the manager snapshot lacks them, so a
-        manager that already knows never gets second-guessed.
+        ("db"|"missing"|None) and the number of active persistent
+        cooldowns — both filled in ONLY when the manager snapshot lacks
+        them, so a manager that already knows never gets second-guessed.
         """
         await self._maybe_reconcile()  # FINAL-PHASE (F3): bounded staleness
         return {
@@ -235,7 +236,11 @@ class ControlAPI:
         return accounts
 
     def _credential_state(self, name: str) -> Optional[str]:
-        """'db' | 'env' | 'missing' | None (no service wired). Never a value."""
+        """'db' | 'missing' | None (no service wired). Never a value.
+
+        ('env' no longer exists at runtime — the encrypted store is the
+        sole source and .env tokens only enter via import-env.)
+        """
         if self._credentials_svc is None:
             return None
         try:
@@ -316,8 +321,21 @@ class ControlAPI:
         Cascade (spec §32): the account's stored credential and every one
         of its persistent cooldowns are deleted afterwards, each guarded —
         the removal itself must never fail because a service is unwired.
+
+        ABORTED removals (the manager detected a same-named account was
+        re-created mid-cascade) skip the whole cascade AND the removed
+        audit row: those backstops are name-keyed, so running them would
+        delete the NEW account's credential/cooldown/access state.
         """
         out = await _resolved(self._accounts.remove_account(name))
+        if isinstance(out, dict) and (
+            out.get("recreated") or not out.get("removed", True)
+        ):
+            # the manager preserved a re-created same-named account —
+            # cascading now would destroy ITS state
+            self._audit_mgmt(name, "mgmt:account.remove-aborted", surface,
+                             extra="recreated=true")
+            return out
         self._audit_mgmt(name, "mgmt:account.removed", surface)
         # Access row cascade: clear the admin/perms/prefix row so the
         # Admin page doesn't show deleted accounts
@@ -1548,7 +1566,12 @@ class ControlAPI:
         return out
 
     async def admin_perms(self, account: str,
-                          surface: str = "api") -> Dict[str, Any]:
+                           surface: str = "api") -> Dict[str, Any]:
+        """Read the per-account command-permission list.
+
+        ``surface`` is reserved (mgmt audit vocabulary): reads are not
+        audited — only the perms_set/add/remove mutations are.
+        """
         access = self._require_access()
         return {"account": account,
                 "allowed_user_ids": await access.allowed_user_ids(account)}
@@ -1583,7 +1606,12 @@ class ControlAPI:
         return out
 
     async def admin_prefix(self, account: str,
-                           surface: str = "api") -> Dict[str, Any]:
+                            surface: str = "api") -> Dict[str, Any]:
+        """Read the per-account self-command prefix configuration.
+
+        ``surface`` is reserved (mgmt audit vocabulary): reads are not
+        audited — only admin_prefix_set is.
+        """
         access = self._require_access()
         return {"account": account,
                 **await access.prefix_config(account)}
@@ -1599,7 +1627,12 @@ class ControlAPI:
         return out
 
     async def admin_mudae_id(self,
-                             surface: str = "api") -> Dict[str, Any]:
+                              surface: str = "api") -> Dict[str, Any]:
+        """Read the framework-level Mudae bot id.
+
+        ``surface`` is reserved (mgmt audit vocabulary): reads are not
+        audited — only admin_mudae_id_set is.
+        """
         access = self._require_access()
         return {"mudae_bot_id": await access.mudae_bot_id()}
 
@@ -1734,20 +1767,6 @@ class ControlAPI:
             LOG.warning("could not delete rate policy %r at %s/%s: %s",
                         action, level, owner or "-", exc)
 
-    async def _persist_lane(self, lane: Dict[str, Any]) -> None:
-        """Persist the lane config under the ``ratelimit:lane`` kv key."""
-        kv = getattr(self._database, "kv", None) \
-            if self._database is not None else None
-        if kv is None:
-            return
-        try:
-            await kv.set(LANE_KV_KEY, {
-                "enabled": bool(lane.get("enabled", False)),
-                "prefixrate": float(lane.get("prefixrate", 0.0) or 0.0),
-            })
-        except Exception as exc:
-            LOG.warning("could not persist send-lane configuration: %s", exc)
-
     async def _persist_floor(self, floor: float) -> None:
         """Persist the raised floor (kv): a restart must not silently revert
         a post-incident safety measure to the 1.5s default."""
@@ -1791,31 +1810,6 @@ class ControlAPI:
                     sync(entries)
             except Exception as exc:
                 LOG.warning("could not persist cleared-policy tombstone: %s", exc)
-
-    @staticmethod
-    def _parse_lane_bool(value: Any) -> bool:
-        if isinstance(value, bool):
-            return value
-        raise ValueError(f"field 'enabled' must be a boolean, got {value!r}")
-
-    @staticmethod
-    def _parse_lane_number(value: Any) -> float:
-        """Validate prefixrate FULLY (type + engine range) BEFORE any lane
-        mutation — the engine's own RatePolicyError used to land after
-        ``enabled`` had already been applied (partial mutation)."""
-        try:
-            number = float(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"field 'prefixrate' must be a number, got {value!r}") from exc
-        if number != number or number in (float("inf"), float("-inf")):
-            raise ValueError(f"field 'prefixrate' must be finite, got {value!r}")
-        if number < 0:
-            raise ValueError(f"field 'prefixrate' must be >= 0 (0 pauses the lane), got {value!r}")
-        if number > MAX_PREFIXRATE:
-            raise ValueError(
-                f"field 'prefixrate' {number:g}s exceeds the "
-                f"{MAX_PREFIXRATE:g}s cap")
-        return number
 
     # ------------------------------------------------------------------ tasks
     async def tasks_list(

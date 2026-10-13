@@ -377,31 +377,50 @@ class TestCredentials(_TmpCase):
 
 
 class TestBootstrapRobustness(_TmpCase):
-    def _config(self, bad: bool) -> Path:
+    def _config(self) -> Path:
         cfg = self.dir / "cfg"
         cfg.mkdir()
-        if bad:
-            (cfg / "rate_limits.json").write_text(json.dumps(
-                {"global": {"message": {"interval": "oops"}}}))
         return cfg
 
     async def test_failed_build_releases_everything(self) -> None:
         db = Database(self.dir / "b.db")
         creds = Credentials.from_values({"MUDAE_BOT_ID": "1"})
-        with self.assertRaises(ValueError):
-            await build(config_dir=str(self._config(True)),
-                        plugin_dir=str(FIXTURE_PLUGINS),
-                        client_factory=lambda n, t: None, credentials=creds,
-                        database=db, quiet=True)
+
+        # a mid-build failure AFTER some cleanups registered (a malformed
+        # rate_limits spec used to be the trigger, but it is now — by
+        # design — a skip-and-warn, so fail a later boot step instead)
+        async def boom(*args, **kwargs):
+            raise ValueError("mid-build failure")
+
+        with mock.patch("core.bootstrap._seed_config_defaults", boom):
+            with self.assertRaises(ValueError):
+                await build(config_dir=str(self._config()),
+                            plugin_dir=str(FIXTURE_PLUGINS),
+                            client_factory=lambda n, t: None, credentials=creds,
+                            database=db, quiet=True)
         self.assertFalse(db.connection.connected)
         root = logging.getLogger("slaughtermudae")
         from core.logging_service import StdlibBridge
         self.assertFalse([h for h in root.handlers if isinstance(h, StdlibBridge)])
 
+    async def test_malformed_policy_spec_no_longer_bricks_boot(self) -> None:
+        db = Database(self.dir / "m.db")
+        creds = Credentials.from_values({"MUDAE_BOT_ID": "1"})
+        cfg = self.dir / "cfg-mal"
+        cfg.mkdir()
+        (cfg / "rate_limits.json").write_text(json.dumps(
+            {"global": {"message": {"interval": "oops"}}}))
+        fw = await build(config_dir=str(cfg),
+                         plugin_dir=str(FIXTURE_PLUGINS),
+                         client_factory=lambda n, t: None, credentials=creds,
+                         database=db, quiet=True)
+        await fw.shutdown()
+        self.assertFalse(db.connection.connected)
+
     async def test_shutdown_survives_failing_step_and_closes_db(self) -> None:
         db = Database(self.dir / "s.db")
         creds = Credentials.from_values({"MUDAE_BOT_ID": "1"})
-        fw = await build(config_dir=str(self._config(False)),
+        fw = await build(config_dir=str(self._config()),
                          plugin_dir=str(FIXTURE_PLUGINS),
                          client_factory=lambda n, t: None, credentials=creds,
                          database=db, quiet=True)
@@ -417,7 +436,7 @@ class TestBootstrapRobustness(_TmpCase):
     async def test_boot_logs_are_persisted(self) -> None:
         db = Database(self.dir / "l.db")
         creds = Credentials.from_values({"MUDAE_BOT_ID": "1"})
-        fw = await build(config_dir=str(self._config(False)),
+        fw = await build(config_dir=str(self._config()),
                          plugin_dir=str(FIXTURE_PLUGINS),
                          client_factory=lambda n, t: None, credentials=creds,
                          database=db, quiet=True)

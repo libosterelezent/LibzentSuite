@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import stat
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
@@ -121,7 +122,18 @@ class _TaskGuard:
         if task is not None and self._owner is task:
             yield False
             return
-        if not await self.acquire_bounded(LOCK_WAIT_TIMEOUT_S):
+        # G1: GUARD_WAIT — the producer the telemetry module docstring
+        # promises (caller-side cross-task queuing). Only the bounded
+        # acquire is timed — the re-enter fast path above never waits —
+        # and ok=False marks the timeout so failed waits land in the
+        # error counters like every other failure kind.
+        if TELEMETRY.enabled:
+            _t0 = perf_counter()
+            acquired = await self.acquire_bounded(LOCK_WAIT_TIMEOUT_S)
+            TELEMETRY.record("guard_wait", perf_counter() - _t0, ok=acquired)
+        else:
+            acquired = await self.acquire_bounded(LOCK_WAIT_TIMEOUT_S)
+        if not acquired:
             raise DatabaseError(
                 f"database lock not acquired within {LOCK_WAIT_TIMEOUT_S}s: "
                 f"task {task!r} waited for the connection held by "
@@ -150,8 +162,23 @@ def _touch_private(path: Path) -> None:
     """Create the DB file with owner-only permissions BEFORE sqlite opens it
     (no window where a fresh database is world-readable)."""
     try:
-        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+        # O_EXCL: the create must atomically FAIL when the name already
+        # exists — a plain O_CREAT would happily open (and chmod-probe)
+        # through a symlink an attacker parked at the database path.
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
         os.close(fd)
+    except FileExistsError:
+        # a normal restart finds the previous boot's REGULAR file — fine.
+        # Anything else (a symlink squat would aim the database at another
+        # file) is refused loud, never followed: lstat does not resolve it.
+        try:
+            mode = os.lstat(str(path)).st_mode
+        except OSError:
+            return  # vanished mid-check: sqlite will surface the real state
+        if not stat.S_ISREG(mode):
+            raise DatabaseError(
+                f"refusing database path {str(path)!r}: existing entry "
+                f"is not a regular file (symlink?)")
     except OSError:
         pass
 
@@ -193,23 +220,37 @@ class DatabaseConnection:
             # issues BEGIN IMMEDIATE explicitly (see module docstring);
             # single statements run in autocommit exactly as before, where
             # execute() committed each one anyway.
-            conn = await aiosqlite.connect(str(self._path), isolation_level=None)
+            # FINAL-PHASE (F7 follow-up): the umask is tightened AROUND the
+            # open + pragma sequence so the -wal/-shm sidecars SQLite
+            # creates here (journal_mode=WAL) are BORN 0600 — the later
+            # chmod in Database.connect() still tightens pre-existing
+            # looser files, but until now a fresh sidecar sat world-
+            # readable for that whole first window. Saved and restored,
+            # never just set: the process keeps its umask. Concurrent
+            # connects on OTHER connections can interleave restores; the
+            # only reachable end state is {original, 0o077} — never a
+            # umask looser than either caller wanted.
+            _umask = os.umask(0o077)
             try:
-                conn.row_factory = aiosqlite.Row
-                for pragma in PRAGMAS:
-                    # entries are either full "PRAGMA x=y" strings or (name, value)
-                    statement = pragma if isinstance(pragma, str) else (
-                        f"PRAGMA {pragma[0]}={pragma[1]}")
-                    await conn.execute(statement)
-                await conn.commit()
-            except BaseException:
-                # never leak the worker thread when setup fails (it would keep
-                # the interpreter alive at exit)
+                conn = await aiosqlite.connect(str(self._path), isolation_level=None)
                 try:
-                    await conn.close()
-                except Exception:
-                    pass
-                raise
+                    conn.row_factory = aiosqlite.Row
+                    for pragma in PRAGMAS:
+                        # entries are either full "PRAGMA x=y" strings or (name, value)
+                        statement = pragma if isinstance(pragma, str) else (
+                            f"PRAGMA {pragma[0]}={pragma[1]}")
+                        await conn.execute(statement)
+                    await conn.commit()
+                except BaseException:
+                    # never leak the worker thread when setup fails (it would keep
+                    # the interpreter alive at exit)
+                    try:
+                        await conn.close()
+                    except Exception:
+                        pass
+                    raise
+            finally:
+                os.umask(_umask)
             self._conn = conn
             TELEMETRY.set_worker_thread(conn)  # G1: worker TID for thread CPU
 
@@ -286,12 +327,19 @@ class DatabaseConnection:
         async with self._guard.hold():
             conn = self._require()
             if TELEMETRY.enabled:
+                # ok=False on failure — the execute()/write() pattern: read
+                # errors must land in the error counters too, not vanish
+                # into a finally that always records ok
                 _t0 = perf_counter()
+                _ok = True
                 try:
                     async with conn.execute(sql, tuple(params)) as cursor:
                         return list(await cursor.fetchall())
+                except BaseException:
+                    _ok = False
+                    raise
                 finally:
-                    TELEMETRY.record("read", perf_counter() - _t0)
+                    TELEMETRY.record("read", perf_counter() - _t0, ok=_ok)
             async with conn.execute(sql, tuple(params)) as cursor:
                 return list(await cursor.fetchall())
 
@@ -301,11 +349,15 @@ class DatabaseConnection:
             conn = self._require()
             if TELEMETRY.enabled:
                 _t0 = perf_counter()
+                _ok = True
                 try:
                     async with conn.execute(sql, tuple(params)) as cursor:
                         return await cursor.fetchone()
+                except BaseException:
+                    _ok = False
+                    raise
                 finally:
-                    TELEMETRY.record("read", perf_counter() - _t0)
+                    TELEMETRY.record("read", perf_counter() - _t0, ok=_ok)
             async with conn.execute(sql, tuple(params)) as cursor:
                 return await cursor.fetchone()
 

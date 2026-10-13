@@ -34,7 +34,7 @@ class _TmpCase(unittest.IsolatedAsyncioTestCase):
 class SchedulerStopSingleFlight(_TmpCase):
     async def test_concurrent_stops_join_and_resume_survives(self) -> None:
         from tests.unit.test_task_scheduler import (
-            FakeAudit, FakeLimiter, FakeLogger, FakeSender)
+            FakeAudit, FakeLimiter, FakeLogger)
 
         bus = EventBus()
         started = asyncio.Event()
@@ -192,7 +192,10 @@ class ZombieClientGuards(_TmpCase):
         runtime.client.drop("socket closed")
         await asyncio.sleep(0.15)
         self.assertEqual(runtime.status, AccountStatus.FAILED)
-        self.assertFalse(runtime.lost.is_set())
+        # stale-start audit: lost is SET on the no-supervisor FAILED path —
+        # the recovery signal (start() clears it before connecting, so the
+        # restart below is never spuriously woken by it)
+        self.assertTrue(runtime.lost.is_set())
         # start() can heal a FAILED account (no RECONNECTING wedge)
         await h.manager.start("alpha")
         self.assertEqual(runtime.status, AccountStatus.RUNNING)

@@ -66,7 +66,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -610,6 +609,24 @@ class AccountManager:
         )
         return account.status_dict()
 
+    def _removal_aborted(self, name: str,
+                         account: Account) -> Optional[Dict[str, Any]]:
+        """Identity guard for the removal cascade (stale-start audit).
+
+        The cascade has many await windows; a same-named account re-added
+        during one of them re-occupies the registry slot. Every
+        name-keyed destructive step re-verifies that no DIFFERENT Account
+        object owns the name before acting (the name is normally ABSENT
+        here — we popped it — so only a genuine re-creation trips this).
+        """
+        current = self._accounts.get(name)
+        if current is not None and current is not account:
+            self._logger.error(
+                "removal of %s aborted: account re-created mid-cascade — "
+                "preserving the new account's state", name)
+            return {"removed": False, "name": name, "recreated": True}
+        return None
+
     async def remove_account(self, name: str) -> Dict[str, Any]:
         """Remove a STOPPED account: detach plugins, cancel supervisor, delete.
 
@@ -672,6 +689,13 @@ class AccountManager:
         except Exception:
             self._logger.exception(
                 "plugin deactivation on remove failed for %s", name)
+        # Stale-start audit: re-verify identity before every name-keyed
+        # destructive step below — the awaits above (and each one that
+        # follows) are windows in which a same-named account may have been
+        # RE-ADDED, and these steps would otherwise hit the NEW account.
+        aborted = self._removal_aborted(name, account)
+        if aborted is not None:
+            return aborted
         if self._scheduler is not None:
             try:  # drop queued/parked tasks so nothing fires against a
                 # re-created same-named account later
@@ -687,6 +711,9 @@ class AccountManager:
                 except Exception:
                     self._logger.exception(
                         "lane cleanup failed for %s", name)
+        aborted = self._removal_aborted(name, account)
+        if aborted is not None:
+            return aborted
         stale_client = rt.client
         rt.client = None
         if stale_client is not None:  # FAILED account never stopped: no leak
@@ -697,26 +724,25 @@ class AccountManager:
         # (deactivate already ran BEFORE the lane cleanup above — round-3
         # reorder; the pre-round-3 duplicate deactivate block that lived
         # here was a merge artifact from the isolation audit)
+        aborted = self._removal_aborted(name, account)
+        if aborted is not None:
+            return aborted
         try:
             outcome = self._plugin_manager.detach_account(name)
             if inspect.iscoroutine(outcome):  # tolerant: sync pinned, async OK
                 await outcome
         except Exception:
             self._logger.exception("plugin detach failed for %s", name)
-        # PHASE-4 (S1-F3): the cascade above has multiple awaits — a
-        # same-named account may have been RE-ADDED while we were parked,
-        # and the destructive steps below (credential delete, cooldowns,
-        # plugin state, mirrors, the repo row itself) would destroy the
-        # NEW account's data. Re-verify registry identity before every
-        # destructive write; abort the remainder on mismatch. (The name is
-        # normally ABSENT here — we popped it — so only a genuinely
-        # different Account object re-occupying the name trips this.)
-        current = self._accounts.get(name)
-        if current is not None and current is not account:
-            self._logger.error(
-                "removal of %s aborted: account re-created mid-cascade — "
-                "preserving the new account's state", name)
-            return {"removed": False, "name": name, "recreated": True}
+        # PHASE-4 (S1-F3): final identity check before the remaining
+        # destructive writes below (credential delete, cooldowns, plugin
+        # state, mirrors, the repo row itself) — the cascade has had many
+        # await windows above, and those writes would destroy the NEW
+        # account's data. (The name is normally ABSENT here — we popped
+        # it — so only a genuinely different Account object re-occupying
+        # the name trips this.)
+        aborted = self._removal_aborted(name, account)
+        if aborted is not None:
+            return aborted
         # the new account (if any) owns the flag now — only clear ours
         self._plugin_attached.discard(name)
         if self._api_cache is not None:
@@ -1065,10 +1091,17 @@ class AccountManager:
         try:
             await self._connect_client(name, rt)
         except asyncio.CancelledError:
-            if rt.stop_requested or rt.generation != gen:
+            if rt.stop_requested:
                 # a stop()/restart raced the start: not a failure
                 rt.status = AccountStatus.STOPPED
                 self._discard_half_built_client(name, rt)
+                raise
+            if rt.generation != gen:
+                # Stale-start audit: only stop/estop/remove set
+                # stop_requested — a bare generation bump here means a
+                # NEWER START owns the account (a completed stop + restart
+                # raced this one). Its teardown already released our
+                # client; never touch the newer owner's rt state.
                 raise
             rt.status = AccountStatus.FAILED
             rt.last_error = "start cancelled"
@@ -1077,14 +1110,20 @@ class AccountManager:
             raise  # process-level signals are never swallowed here
         except _StaleGeneration:
             # A newer lifecycle operation owns this account now (stop,
-            # restart, remove). Abort quietly: no status write, no
-            # AccountFailed, no classification — never fight the owner.
-            self._discard_half_built_client(name, rt)
+            # restart, remove — or a newer START). Abort quietly: no status
+            # write, no AccountFailed, no classification — never fight the
+            # owner. Teardown split (stale-start audit): only a stop-shaped
+            # owner (stop_requested set) may discard rt.client; when a
+            # newer START owns the account, rt.client/status are ITS state
+            # — and _connect_client already disconnected OUR client before
+            # raising, so there is nothing left to release either way.
+            if rt.stop_requested:
+                self._discard_half_built_client(name, rt)
             self._logger.info(
                 "start of %s superseded by newer lifecycle operation", name)
             return account.status_dict()
         except Exception as exc:
-            if rt.stop_requested or rt.generation != gen:
+            if rt.stop_requested:
                 # stop() completed while connect() was parked: its teardown
                 # already ran (rt.client was None then). This is a benign
                 # race — NOT an account failure: leave STOPPED and never
@@ -1093,13 +1132,23 @@ class AccountManager:
                 self._discard_half_built_client(name, rt)
                 self._logger.info("account %s start aborted by concurrent stop", name)
                 raise AccountError(f"account {name!r} start cancelled by stop") from exc
+            if rt.generation != gen:
+                # Stale-start audit: a NEWER START owns the account — never
+                # clobber its status/client/plugins with this (older)
+                # start's failure. rt.client either already went through
+                # the newer owner's teardown or belongs to it.
+                self._logger.info(
+                    "start of %s superseded by newer lifecycle operation", name)
+                raise AccountError(
+                    f"account {name!r} start superseded by a newer "
+                    "lifecycle operation") from exc
             self._start_failed(name, rt, exc)
             if isinstance(exc, (AccountError, CredentialsError)):
                 raise
             raise AccountError(
                 f"account {name!r} failed to connect: {exc}"
             ) from exc
-        if rt.stop_requested or rt.generation != gen:
+        if rt.stop_requested:
             # K2 (S1-C1/S10-C1): the racing stop() may have completed BEFORE
             # rt.client was assigned (e.g. while we awaited token resolution),
             # so its disconnect never saw this client. Disconnect HERE or the
@@ -1114,8 +1163,14 @@ class AccountManager:
                     self._logger.exception(
                         "abort-disconnect failed for %s", name)
             rt.status = AccountStatus.STOPPED
-            self._discard_half_built_client(name, rt)
             self._logger.info("account %s start aborted by concurrent stop", name)
+            return account.status_dict()
+        if rt.generation != gen:
+            # Stale-start audit: the generation bump came from a NEWER
+            # START (only stop/estop/remove set stop_requested, and they
+            # were ruled out above). rt.client/status/plugins belong to
+            # that newer owner now — leave them untouched.
+            self._log_superseded_start(name)
             return account.status_dict()
         rt.status = AccountStatus.RUNNING
         rt.started_at = time.monotonic()
@@ -1125,10 +1180,17 @@ class AccountManager:
         # plugins: re-attach with the CURRENT profile grants (assignments
         # take effect on the next start — ported semantics), then activate
         await self._attach_plugins(name)
-        if rt.stop_requested or rt.generation != gen:
+        if rt.stop_requested:
             # PHASE-4 (S1-F1): stop landed during the attach await — the
             # NEW runtimes must not be activated on a stopped account.
             self._abort_stale_start(name, rt)
+            return account.status_dict()
+        if rt.generation != gen:
+            # Stale-start audit: a newer START owns the account (its own
+            # attach/activate already ran). Stand down log-only — a
+            # full teardown would deactivate/drop the NEWER start's
+            # plugins, services and client.
+            self._log_superseded_start(name)
             return account.status_dict()
         try:
             outcome = self._plugin_manager.activate_account(
@@ -1140,28 +1202,41 @@ class AccountManager:
             self._logger.exception(
                 "plugin activation failed for %s (account keeps running)", name
             )
-        if rt.stop_requested or rt.generation != gen:
+        if rt.stop_requested:
             # PHASE-4 (S1-F1): stop() raced the ACTIVATION await. Without
             # this, freshly activated plugins (their background loops!)
             # keep running on a stopped, supervisor-less account. Clean up
             # everything this start created: hooks, services, client.
             self._abort_stale_start(name, rt)
             return account.status_dict()
+        if rt.generation != gen:
+            # Stale-start audit: a newer START activated its own plugin set
+            # on this account while we were parked — deactivating or
+            # tearing anything down here would kill THE NEWER start's
+            # runtime. Stand down log-only.
+            self._log_superseded_start(name)
+            return account.status_dict()
         self._bus.publish_nowait(AccountConnected(account=name))
         self._lifecycle_commit("start", name, ok=True)
+        if rt.stop_requested:
+            self._abort_stale_start(name, rt)
+            return account.status_dict()
         if rt.generation != gen:
             # ownership changed between the publish and the spawn: the
             # newer owner spawns its own supervisor — never spawn a second
-            self._abort_stale_start(name, rt)
+            self._log_superseded_start(name)
             return account.status_dict()
+        # K5 (S1-C4) + stale-start audit: clear any surviving prior-
+        # generation supervisor UNCONDITIONALLY. With reconnect disabled
+        # the spawn below is skipped, and a live old supervisor would
+        # wedge the account RECONNECTING on the next drop (_on_disconnect
+        # takes its branch because rt.supervisor is set, but the old
+        # driver then exits on its generation check — nobody reconnects).
+        old = rt.supervisor
+        rt.supervisor = None
+        if old is not None and not old.done():
+            old.cancel()
         if self._reconnect_settings(name)["enabled"]:
-            # K5 (S1-C4): a stand-down (FAILED) or interrupted reconnect
-            # leaves the OLD supervisor alive and polling `lost`; spawning
-            # over it would orphan that task → dual supervisors → client
-            # ping-pong on the next drop. Cancel any live one first.
-            old = rt.supervisor
-            if old is not None and not old.done():
-                old.cancel()
             rt.supervisor = asyncio.create_task(
                 self._supervise(name, rt),
                 name=f"supervise-{name}#g{gen}",
@@ -1229,6 +1304,20 @@ class AccountManager:
         """Governor stats for status surfaces ({} when unlimited)."""
         return self._lifecycle.stats() if self._lifecycle is not None else {}
 
+    def _log_superseded_start(self, name: str) -> None:
+        """Log-only stand-down for a start superseded by a NEWER start.
+
+        Stale-start audit: when the generation bump came from a newer
+        START (stop_requested stays False — only stop/estop/remove set it),
+        rt.client, rt.status, the plugin activations and the services
+        facades all belong to that newer owner. The stale start must not
+        touch any of them; its own half-built client was already released
+        by ``_connect_client``'s stale path before it raised.
+        """
+        self._logger.info(
+            "start of %s superseded by a newer start; leaving the newer "
+            "owner's client/status/plugins untouched", name)
+
     def _abort_stale_start(self, name: str, rt: AccountRuntime) -> None:
         """PHASE-4 cleanup for a start() that lost ownership mid-flight.
 
@@ -1236,6 +1325,7 @@ class AccountManager:
         would otherwise run invisible to lifecycle control), drops the
         services facades it created, discards its client, and settles
         STOPPED — without publishing lifecycle events a second time.
+        STOP-shaped supersession only (caller verified stop_requested).
         """
         rt.status = AccountStatus.STOPPED
         try:
@@ -1244,7 +1334,7 @@ class AccountManager:
                 task = asyncio.get_running_loop().create_task(
                     outcome, name=f"stale-start-deactivate-{name}")
                 self._background.add(task)
-                task.add_done_callback(self._background.discard)
+                task.add_done_callback(self._reap_background)
         except Exception:
             self._logger.exception(
                 "stale-start plugin cleanup failed for %s", name)
@@ -1326,7 +1416,14 @@ class AccountManager:
                 if inspect.iscoroutine(outcome):  # pinned sync; async tolerated
                     # FINAL-PHASE (F4): a hung plugin hook must not wedge a
                     # fleet halt — bounded, then continue the teardown.
-                    await asyncio.wait_for(asyncio.shield(outcome), timeout=5.0)
+                    # Stale-start audit: capture the shielded coroutine as a
+                    # TRACKED background task BEFORE awaiting — a timeout
+                    # cancels only the shield, and an unreferenced inner
+                    # task would orphan (its exception never retrieved).
+                    inner = asyncio.ensure_future(outcome)
+                    self._background.add(inner)
+                    inner.add_done_callback(self._reap_background)
+                    await asyncio.wait_for(asyncio.shield(inner), timeout=5.0)
             except asyncio.TimeoutError:
                 self._logger.error(
                     "plugin deactivation timed out for %s (continuing "
@@ -1339,8 +1436,13 @@ class AccountManager:
                 try:
                     # FINAL-PHASE (F4): bounded disconnect — a hung library
                     # close must not hold a stop_all semaphore slot forever.
+                    # Stale-start audit: track the shield's inner task so a
+                    # timeout never orphans it (see deactivate above).
+                    disconnecting = asyncio.ensure_future(client.disconnect())
+                    self._background.add(disconnecting)
+                    disconnecting.add_done_callback(self._reap_background)
                     await asyncio.wait_for(
-                        asyncio.shield(client.disconnect()), timeout=10.0)
+                        asyncio.shield(disconnecting), timeout=10.0)
                 except asyncio.TimeoutError:
                     self._logger.error(
                         "client disconnect timed out for %s (force-reaping)",
@@ -1484,6 +1586,13 @@ class AccountManager:
                 flight.set_result(report)
             return report
         finally:
+            # Stale-start audit: a CANCELLED sweep must resolve the flight —
+            # joiners are parked on `await asyncio.shield(flight)` and would
+            # hang forever on an unresolved future. Cancelling it propagates
+            # the cancellation to every joiner (shield passes an INNER
+            # cancellation through to the outer await).
+            if not flight.done():
+                flight.cancel()
             self._start_all_flight = None
 
     async def stop_all(self) -> Dict[str, Any]:
@@ -1724,7 +1833,7 @@ class AccountManager:
                     "reconnect attempt failed for %s: %s", name, rt.last_error
                 )
                 continue
-            if rt.stop_requested or rt.generation != gen:
+            if rt.stop_requested:
                 # K3 (S1-C2): a stop() completed WHILE we were inside
                 # connect() — its disconnect may have raced past this fresh
                 # client. Do not resurrect the account: tear the client down
@@ -1737,6 +1846,15 @@ class AccountManager:
                     except Exception:
                         self._logger.exception(
                             "reconnect-abort disconnect failed for %s", name)
+                return
+            if rt.generation != gen:
+                # Stale-start audit: the generation bump came from a NEWER
+                # START (stop_requested was ruled out above). rt.client and
+                # rt.status belong to the newer owner — leave them
+                # untouched; our own fresh client was already released by
+                # _connect_client's stale path before it returned.
+                self._logger.info(
+                    "reconnect of %s superseded by a newer start", name)
                 return
             rt.status = AccountStatus.RUNNING
             rt.started_at = time.monotonic()  # uptime = current connection
@@ -1794,7 +1912,12 @@ class AccountManager:
         await client.connect()
         if rt.generation != gen:
             # a stop() completed while connect() was parked: tear the fresh
-            # client down rather than letting the caller install state
+            # client down rather than letting the caller install state. If
+            # rt still points at THIS client, hand it back first (the stop's
+            # own teardown may not have reached it yet) so the stale
+            # callers' discard paths see None and never double-disconnect.
+            if rt.client is client:
+                rt.client = None
             try:
                 await client.disconnect()
             except Exception:
@@ -1903,9 +2026,17 @@ class AccountManager:
                     # spawned, or it DIED of an unexpected exception —
                     # PHASE-4 S2 #6: a dead supervisor must not wedge the
                     # account in RECONNECTING forever): FAILED keeps
-                    # start() usable for automation,
-                    # and `lost` stays clear (nothing waits on it)
+                    # start() usable for automation.
+                    # Stale-start audit: ALSO set ``lost`` — a gateway drop
+                    # inside start()'s attach/activate window (supervisor
+                    # spawned moments later) must be recoverable: the
+                    # supervisor reconnects only on status==RECONNECTING or
+                    # lost.is_set(). No stale-wake hazard: start() clears
+                    # ``lost`` before connecting and stop() clears it on
+                    # completion, so this set is only observable by a
+                    # supervisor of the SAME generation.
                     rt.status = AccountStatus.FAILED
+                    rt.lost.set()
                 else:
                     rt.status = AccountStatus.RECONNECTING
                     rt.lost.set()

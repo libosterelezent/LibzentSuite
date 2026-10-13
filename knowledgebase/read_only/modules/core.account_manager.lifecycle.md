@@ -1,7 +1,7 @@
 # Module `core.account_manager.lifecycle`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `e30911d798609b426fb1dd4042e3d01f93102752`. Regenerate; do not hand-edit.
+> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
 
 **Path:** `core/account_manager/lifecycle.py`
 
@@ -59,6 +59,8 @@ Costs (defaults derived from measured behavior, not magic):
 
 - `def try_acquire(self) -> Tuple[bool, float]`
   - (ok, retry_after_s) for one token.
+- `def peek(self) -> Tuple[bool, float]`
+  - (ok, retry_after_s) WITHOUT consuming a token (no state write).
 
 ### `LifecycleGovernor`
 
