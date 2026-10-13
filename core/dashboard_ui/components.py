@@ -1492,15 +1492,6 @@ class Page(UIContainer):
         self._account_scoped = _require_bool(scoped, "account scope")
         return self
 
-    def set_account_scope(self, scoped: bool = True) -> "Page":
-        """Declare this page ACCOUNT-SCOPED: the dashboard shows an
-        account picker in the page header and supplies the validated
-        selection (with its services facade) to every action, provider
-        and check on the page."""
-        self._check_frozen("set the account scope")
-        self._account_scoped = _require_bool(scoped, "account scope")
-        return self
-
     def set_order(self, order: int) -> "Page":
         self._check_frozen("set the order")
         self._order = _require_int(order, "order")

@@ -560,10 +560,6 @@ class DashboardUIRegistry:
             services=getattr(context, "services", None))
         return bool(allowed)
 
-    def _lookup_node(self, plugin_name: str, component_id: str):
-        """Node or None (visibility is fail-closed on unknown)."""
-        return self._nodes.get(plugin_name, {}).get(component_id)
-
     def _lookup_node(self, plugin_name: str, component_id: str) -> Any:
         """Builder node for one id; None when unknown (denies closed)."""
         if not self._nodes.get(plugin_name):

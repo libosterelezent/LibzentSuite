@@ -999,11 +999,6 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
         return {"success": True, "message": f"{row} removed",
                 "refresh": ["acct-list", "group-list", "indep-list"]}
 
-    async def bulk_start(rows, ctx):
-        rs = [a for (_, a) in await _run_all(
-            [lambda n=n: api.accounts_start(n, surface="dashboard") for n in rows])]
-        return rs
-
     async def _run_all(calls):
         import asyncio
         results = await asyncio.gather(*[c() for c in calls], return_exceptions=True)
@@ -1804,7 +1799,6 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
         if not name:
             return {"success": False, "field_errors": {
                 "pe-name": "Profile name is required."}}
-        import json as _json
         # schema-driven fields arrive typed under their setting names;
         # the only raw JSON left is the channel scope
         schema = await _schema_for(api, plugin)

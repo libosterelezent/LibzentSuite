@@ -685,8 +685,9 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     try:
         attach_framework_ui(plugins.ui_registry, api)
     except Exception:
-        LOG.exception("framework UI attach failed — dashboard falls back "
-                      "to the legacy panels")
+        logging.getLogger("slaughtermudae.bootstrap").exception(
+            "framework UI attach failed — dashboard falls back "
+            "to the legacy panels")
     return Framework(
         api=api, bus=bus, logs=logs, limiter=limiter, scheduler=scheduler,
         accounts=accounts, plugins=plugins, profiles=profiles, settings=settings,

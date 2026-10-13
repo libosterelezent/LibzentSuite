@@ -64,6 +64,20 @@ from .errors import (
 from .registry import DashboardUIRegistry
 
 __all__ = [
+    "Container",
+    "RowAction",
+    "Description",
+    "DisplayText",
+    "Footer",
+    "Grid",
+    "Alert",
+    "Toolbar",
+    "Modal",
+    "TileView",
+    "BulkAction",
+    "Header",
+    "Separator",
+
     "DashboardUIToolset",
     "DashboardUIRegistry",
     "CheckContext",
