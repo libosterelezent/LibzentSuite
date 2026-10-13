@@ -121,7 +121,8 @@ class UIComponent:
         if component_id:
             self._validate_id(component_id)
         self._id = component_id or self._generate_id()
-        self._title: str | None = title if title is not None else None
+        self._title: str | None = (
+            _require_str(title, "title") if title is not None else None)
         if kwargs:
             raise UIError(
                 f"unknown constructor argument(s) {sorted(kwargs)} — "

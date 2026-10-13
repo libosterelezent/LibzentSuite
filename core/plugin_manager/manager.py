@@ -424,6 +424,7 @@ class PluginManager:
             runtimes = self._accounts.get(acct)
             if runtimes is None:
                 continue   # account gone while we worked
+            profile_layers = await self._bound_profile_settings(acct)
             try:
                 instance = self._loader.create(name)
             except Exception:
@@ -437,6 +438,23 @@ class PluginManager:
                 loaded=False, active=False)
             runtimes[name] = rt
             restored += 1
+            # resolve settings NOW — same contract as attach_account
+            # (fail-fast on bad config; the effective-settings view and
+            # a stopped account's states() keep truthful values). The
+            # re-activation below re-resolves for the live view anyway.
+            try:
+                rt.settings = self._settings.resolve(
+                    name, self._schema_for(name),
+                    account=acct,
+                    profile=profile_layers.get(name),
+                )
+            except Exception as exc:
+                rt.enabled = False
+                rt.last_error = f"settings: {type(exc).__name__}: {exc}"
+                rt.error_count += 1
+                self._logger.error(
+                    "plugin %s on %s failed settings resolution after "
+                    "reload; disabled (%s)", name, acct, exc)
             # REVALIDATE liveness, not the pre-teardown snapshot (review
             # finding #2): deactivate_account (account stop) pops the
             # services entry during our awaits — activating on a stopped
@@ -508,7 +526,10 @@ class PluginManager:
         self._accounts.pop(account, None)
         self._services.pop(account, None)
         self._activation_events.pop(account, None)
-        self._activation_epoch.pop(account, None)
+        # NOTE: the EPOCH is deliberately NOT popped — it is a fence
+        # marker for stragglers of a removed account; clearing it here
+        # made a fenced late activation compare 0 == captured-0 and
+        # resurrect its runtime after removal finished
         # dispatch bookkeeping: any task still queued dies at the services
         # gate in _dispatch (the account's services are gone)
         self._pending_by_account.pop(account, None)
@@ -540,6 +561,7 @@ class PluginManager:
             factory = self._services_factory(services)
             self._services[account] = factory
             epoch = self._activation_epoch.get(account, 0)
+            fenced = False
             for runtime in runtimes.values():
                 if not runtime.enabled:
                     continue
@@ -549,9 +571,12 @@ class PluginManager:
                     # settle timeout while its hook was parked — undo the
                     # commit so the account stays down
                     await self._teardown_runtime(account, runtime)
+                    fenced = True
             # UI lifecycle: offer the toolset to plugins that declare a UI
             # (after on_load/on_enable — actions may reflect plugin state)
-            self._init_dashboard_uis(account, runtimes)
+            # — never for a fenced activation (the account is gone/down)
+            if not fenced:
+                self._init_dashboard_uis(account, runtimes)
         finally:
             ev.set()
         self._logger.info("activated plugins on %s", account)

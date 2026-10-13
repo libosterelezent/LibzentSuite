@@ -258,3 +258,50 @@ class TestActivationEpochFence(unittest.IsolatedAsyncioTestCase):
         await mgr.activate_account("alpha", FakeServices())
         rt = mgr._accounts["alpha"]["probe"]
         self.assertTrue(rt.active)   # no timeout → no fence → normal path
+
+
+class TestSummaryRoundThree(unittest.IsolatedAsyncioTestCase):
+    """Review-summary round 3: removal-path fence, reload settings."""
+
+    async def test_fenced_straggler_cannot_resurrect_after_detach(self):
+        import asyncio
+        mgr = make_manager()
+        mgr._activation_settle_timeout_s = 0.05
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        rt = mgr._accounts["alpha"]["probe"]
+        parked = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_on_enable(*a):
+            parked.set()
+            await release.wait()
+
+        rt.instance.on_enable = slow_on_enable
+        activating = asyncio.create_task(
+            mgr.activate_account("alpha", FakeServices()))
+        await parked.wait()
+        await mgr.deactivate_account("alpha")   # times out → epoch fence
+        mgr.detach_account("alpha")             # removal's detach pops maps
+        release.set()
+        await activating
+        self.assertFalse(rt.active,
+                         "fence must survive detach — the epoch marker is "
+                         "deliberately retained past account removal")
+
+    async def test_reload_restores_resolved_settings(self):
+        mgr = make_manager()
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        await mgr.activate_account("alpha", FakeServices())
+        rt = mgr._accounts["alpha"]["probe"]
+        self.assertTrue(rt.settings,
+                        "precondition: activation resolved settings")
+        await mgr.deactivate_account("alpha")   # stopped account
+        out = await mgr.reload_plugin("probe")
+        self.assertEqual(out["restored_accounts"], 1)
+        new_rt = mgr._accounts["alpha"]["probe"]
+        self.assertTrue(
+            new_rt.settings,
+            "reload resolves settings at restore (attach contract) — "
+            "not only for re-activated runtimes")
