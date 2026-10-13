@@ -219,3 +219,42 @@ class TestActivationSettleAndReloadUndo(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(new_rt.active,
                          "undo must deactivate the half-activated replacement")
         self.assertFalse(new_rt.loaded)
+
+
+class TestActivationEpochFence(unittest.IsolatedAsyncioTestCase):
+    """Review pass-3 #2: a hook that outlives the settle timeout must not
+    resurrect its runtime after teardown finished."""
+
+    async def test_late_activation_is_fenced(self):
+        import asyncio
+        mgr = make_manager()
+        mgr._activation_settle_timeout_s = 0.05   # fence almost at once
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        rt = mgr._accounts["alpha"]["probe"]
+        parked = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_on_enable(*a):
+            parked.set()
+            await release.wait()
+
+        rt.instance.on_enable = slow_on_enable
+        activating = asyncio.create_task(
+            mgr.activate_account("alpha", FakeServices()))
+        await parked.wait()                     # activation mid-hook
+        await mgr.deactivate_account("alpha")   # settle times out → fence
+        self.assertEqual(mgr._activation_epoch.get("alpha"), 1)
+        release.set()                           # the straggler resumes NOW
+        await activating                        # completes, fenced, no raise
+        self.assertFalse(rt.active,
+                         "fenced activation must not resurrect the runtime")
+        self.assertFalse(rt.loaded)
+
+    async def test_fast_activation_is_unaffected(self):
+        mgr = make_manager()
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        await mgr.activate_account("alpha", FakeServices())
+        rt = mgr._accounts["alpha"]["probe"]
+        self.assertTrue(rt.active)   # no timeout → no fence → normal path

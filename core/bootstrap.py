@@ -45,7 +45,7 @@ from .credential_service import CredentialService
 from .credentials import Credentials
 from .errors import RatePolicyError, UnsafePolicyError
 from .event_bus import EventBus
-from .logging_service import LogService, ServiceLogger, attach_stdlib_bridge, configure_stderr, detach_stdlib_bridge, stderr_pipeline_active, stop_stderr_pipeline
+from .logging_service import LogService, ServiceLogger, attach_stdlib_bridge, claim_stderr_pipeline, detach_stdlib_bridge, release_stderr_pipeline
 from .plugin_manager import PluginManager
 from .plugin_state import PluginStateService
 from .profile_manager import ProfileManager
@@ -184,7 +184,7 @@ class Framework:
                  plugin_state: Any = None,
                  sync_groups: Any = None,
                  cooldown_resync_stop: Optional[Callable[[], Any]] = None,
-                 owns_stderr: bool = False,
+                 claims_stderr: bool = False,
                  ) -> None:
         self.api = api
         self.bus = bus
@@ -206,9 +206,9 @@ class Framework:
         self.sync_groups = sync_groups
         #: stops the periodic cooldown-resync task (set by _assemble)
         self._cooldown_resync_stop = cooldown_resync_stop
-        # True when THIS framework configured the process-global stderr
-        # pipeline — only the owner's shutdown stops it
-        self._owns_stderr = owns_stderr
+        # this framework holds one CLAIM on the process-global stderr
+        # pipeline — shutdown releases it (the last release stops)
+        self._claims_stderr = claims_stderr
         self._shut_down = False
 
     async def shutdown(self) -> None:
@@ -248,11 +248,11 @@ class Framework:
             ("plugin manager", self._close_plugins),
             ("database", self.database.close),
         ]
-        if self._owns_stderr:
-            # LAST: the stderr pipeline is process-global; only its OWNER
-            # stops it (a borrower stopping it silenced a live framework),
-            # and stopping before the steps above silenced their warnings
-            steps.append(("stderr pipeline", stop_stderr_pipeline))
+        if self._claims_stderr:
+            # LAST: release this framework's claim on the process-global
+            # pipeline (the LAST release stops it) — placing it after the
+            # steps above keeps their final warnings on the console
+            steps.append(("stderr pipeline", release_stderr_pipeline))
         steps = tuple(steps)
         interrupted: Optional[BaseException] = None
         for label, step in steps:
@@ -366,13 +366,14 @@ async def build(
     import time as _time
 
     if not quiet:
-        # OWNERSHIP (review pass-2 #3): the pipeline is process-global —
-        # this build only owns (and ever stops) the pipeline IT started;
-        # a build borrowing a live one leaves it alone
-        stderr_owned = not stderr_pipeline_active()
-        configure_stderr()
+        # CLAIM (review pass-3 #1): every non-quiet build registers as a
+        # USER of the process-global pipeline — creating it when idle,
+        # borrowing it when live. The listener stops only when the LAST
+        # live claim releases (an exclusive owner stopping on its own
+        # shutdown silenced frameworks built after it).
+        stderr_claimed = claim_stderr_pipeline()
     else:
-        stderr_owned = False
+        stderr_claimed = False
     credentials = credentials or Credentials.from_file(env_file)
     config = load_config(config_dir)
 
@@ -393,7 +394,7 @@ async def build(
             simulation_runner=simulation_runner,
             credential_key_path=credential_key_path,
             env_file=env_file, db_path=db_path,
-            stderr_owned=stderr_owned)
+            stderr_claimed=stderr_claimed)
     except BaseException:
         for label, undo in reversed(cleanups):
             try:
@@ -425,7 +426,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
                     client_factory: Optional[Callable[[str, str], Any]],
                     simulation_runner: Any,
                     credential_key_path: Optional[Path] = None,
-                    env_file: str = ".env", stderr_owned: bool = False,
+                    env_file: str = ".env", stderr_claimed: bool = False,
                     db_path: str = "state/slaughter.db") -> Framework:
     """Wire every manager over an already-connected database."""
 
@@ -462,11 +463,10 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     cleanups.append(("log persistence", logs.stop_persistence))
     # failed builds never reach Framework.shutdown's step list — without
     # this the process-global stderr listener survives a half-built
-    # framework (review finding #10). ONLY the build that STARTED the
-    # pipeline stops it: an unconditional rollback cleanup silenced a
-    # pipeline another live framework owns (review pass-2 #3).
-    if stderr_owned:
-        cleanups.append(("stderr pipeline", stop_stderr_pipeline))
+    # framework (review finding #10). The rollback RELEASES this build's
+    # claim; the listener stops only when no live claim remains.
+    if stderr_claimed:
+        cleanups.append(("stderr pipeline", release_stderr_pipeline))
     attach_stdlib_bridge(logs)  # plugin/stdlib logger records -> structured page
     cleanups.append(("stdlib bridge", detach_stdlib_bridge))
     bus = EventBus()
@@ -719,5 +719,5 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         credential_service=credential_service, cooldowns=cooldowns,
         plugin_state=plugin_state, sync_groups=sync_groups,
         cooldown_resync_stop=_stop_cooldown_resync_task,
-        owns_stderr=stderr_owned,
+        claims_stderr=stderr_claimed,
     )

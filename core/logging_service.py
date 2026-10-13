@@ -63,6 +63,12 @@ _STDERR_CONFIGURED = False
 #: that called record()/logger.log().
 _STDERR_QUEUE: "queue.SimpleQueue[logging.LogRecord]" = queue.SimpleQueue()
 _STDERR_PIPELINE_LOCK = threading.Lock()
+#: live framework CLAIMS on the process-global pipeline (review pass-3
+#: #1): exclusive ownership let the FIRST build's shutdown stop the
+#: pipeline while a second, live framework was still using it — the
+#: listener now stops only when the LAST claim releases.
+_STDERR_USERS = 0
+_STDERR_USERS_LOCK = threading.Lock()
 _STDERR_LISTENER: Optional[logging.handlers.QueueListener] = None
 _STDERR_QUEUE_HANDLER: Optional[logging.handlers.QueueHandler] = None
 _STDERR_ATEXIT_ARMED = False
@@ -92,12 +98,37 @@ def _start_stderr_pipeline() -> None:
 
 
 def stderr_pipeline_active() -> bool:
-    """True while the process-global stderr listener is running.
-
-    Lets a framework build know whether IT owns the pipeline (it
-    configured it) or is borrowing one another live build started —
-    only the owner ever stops it (review pass-2 #3)."""
+    """True while the process-global stderr listener is running."""
     return _STDERR_LISTENER is not None
+
+
+def claim_stderr_pipeline() -> bool:
+    """Register one framework user of the process-global pipeline.
+
+    Returns True when the CALLER created the pipeline (atomic with the
+    configuration). Every successful build claims — borrower or creator
+    — and must release exactly once (shutdown or build rollback)."""
+    global _STDERR_USERS
+    with _STDERR_USERS_LOCK:
+        created = not stderr_pipeline_active()
+        if created:
+            configure_stderr()
+        _STDERR_USERS += 1
+        return created
+
+
+def release_stderr_pipeline() -> None:
+    """Release one user's claim; the LAST release stops the pipeline.
+
+    Idempotent per caller by contract (a framework releases once); a
+    stray extra release is a no-op so a failed build's rollback can
+    never silence a live framework."""
+    global _STDERR_USERS
+    with _STDERR_USERS_LOCK:
+        if _STDERR_USERS > 0:
+            _STDERR_USERS -= 1
+        if _STDERR_USERS == 0 and stderr_pipeline_active():
+            stop_stderr_pipeline()
 
 
 def stop_stderr_pipeline() -> None:

@@ -143,6 +143,13 @@ class PluginManager:
         #: resumed hooks set active=True on a runtime the deactivator
         #: already walked past (an orphan nobody supervises)
         self._activation_events: Dict[str, asyncio.Event] = {}
+        #: activation EPOCHS: bumped when a teardown proceeds past an
+        #: unsettled activation — the in-flight activation fences on it
+        #: and undoes its commits instead of resurrecting state after
+        #: teardown finished (review pass-3 #2)
+        self._activation_epoch: Dict[str, int] = {}
+        #: bounded wait for in-flight activations (injectable for tests)
+        self._activation_settle_timeout_s: float = 5.0
         self._ui_registry = ui_registry or DashboardUIRegistry(
             offload_sync=True)
         # the registry rebinds boot-time bound-method callbacks onto LIVE
@@ -383,7 +390,8 @@ class PluginManager:
         # dispatch gates and run on the instance mid-unload); then the
         # in-flight tasks drain; then the hooks fire on captured state.
         for acct, rt in affected.items():
-            await self._await_activation_settled(acct)
+            await self._await_activation_settled(
+                acct, timeout=self._activation_settle_timeout_s)
             rt.active = False   # blocks new dispatch admission NOW
             self._accounts[acct].pop(name, None)
             await self._quiesce_dispatch(acct)
@@ -500,6 +508,7 @@ class PluginManager:
         self._accounts.pop(account, None)
         self._services.pop(account, None)
         self._activation_events.pop(account, None)
+        self._activation_epoch.pop(account, None)
         # dispatch bookkeeping: any task still queued dies at the services
         # gate in _dispatch (the account's services are gone)
         self._pending_by_account.pop(account, None)
@@ -516,7 +525,8 @@ class PluginManager:
         own facade either way.
         """
         # serialize against a prior in-flight activation on this account
-        await self._await_activation_settled(account)
+        await self._await_activation_settled(
+            account, timeout=self._activation_settle_timeout_s)
         ev = self._activation_events.get(account)
         if ev is None:
             ev = asyncio.Event()
@@ -529,10 +539,16 @@ class PluginManager:
                 raise PluginError(f"account {account!r} has no attached plugins (attach first)")
             factory = self._services_factory(services)
             self._services[account] = factory
+            epoch = self._activation_epoch.get(account, 0)
             for runtime in runtimes.values():
                 if not runtime.enabled:
                     continue
                 await self._activate_one(account, runtime)
+                if self._activation_epoch.get(account, 0) != epoch:
+                    # FENCED: a teardown proceeded past this activation's
+                    # settle timeout while its hook was parked — undo the
+                    # commit so the account stays down
+                    await self._teardown_runtime(account, runtime)
             # UI lifecycle: offer the toolset to plugins that declare a UI
             # (after on_load/on_enable — actions may reflect plugin state)
             self._init_dashboard_uis(account, runtimes)
@@ -554,9 +570,16 @@ class PluginManager:
         try:
             await asyncio.wait_for(ev.wait(), timeout=timeout)
         except asyncio.TimeoutError:
+            # FENCE the straggler: teardown proceeds now, and the epoch
+            # bump makes the still-running activation abort/undo its
+            # remaining commits when its hook finally returns — a hook
+            # cannot be cancelled (it runs in the caller's task), but it
+            # must not resurrect state after teardown
+            self._activation_epoch[account] = \
+                self._activation_epoch.get(account, 0) + 1
             self._logger.warning(
-                "activation of %s did not settle within %.1fs; proceeding",
-                account, timeout)
+                "activation of %s did not settle within %.1fs; proceeding "
+                "(the late activation will be fenced)", account, timeout)
 
     def init_boot_dashboard_uis(self) -> int:
         """Register plugin dashboard UIs at DISCOVERY time (no account).
@@ -839,7 +862,8 @@ class PluginManager:
         is going down (otherwise a plugin could be left ``active`` on a
         stopped account).
         """
-        await self._await_activation_settled(account)
+        await self._await_activation_settled(
+            account, timeout=self._activation_settle_timeout_s)
         runtimes = self._accounts.get(account)
         if runtimes is None:
             return
