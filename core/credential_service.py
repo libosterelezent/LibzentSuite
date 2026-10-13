@@ -53,7 +53,9 @@ class CredentialService:
         self._memory: dict = {}       # runtime cache: account -> plaintext (§14)
         self._runtime_sources: dict = {}  # account -> "db" | "env"
         self._db_accounts: set = set()  # accounts with a stored credential
-        self._delete_generation: int = 0  # PHASE-4 await-race guard (S5-L1)
+        # Deletion generations are per account: deleting B must not tombstone
+        # an in-flight store for A.
+        self._delete_generation: dict = {}
         #: True once refresh() read the stored-account list: distinguishes
         #: "no credentials stored" (empty set, KNOWN) from "not looked yet"
         self._db_accounts_known = False
@@ -233,9 +235,9 @@ class CredentialService:
             raise CredentialsError("credential value must not be empty")
         ciphertext = self.fernet.encrypt(token.encode())
         if self._repo is not None:
-            del_gen = self._delete_generation
+            del_gen = self._delete_generation.get(account, 0)
             await self._repo.store(account, ciphertext)
-            if self._delete_generation != del_gen:
+            if self._delete_generation.get(account, 0) != del_gen:
                 # PHASE-4 (S5-L1): the account's credential was DELETED
                 # while we were parked on the repo write — writing the
                 # caches now would poison memory with a token the
@@ -269,7 +271,7 @@ class CredentialService:
             except Exception:
                 pass
         if self._repo is not None:
-            del_gen = self._delete_generation
+            del_gen = self._delete_generation.get(account, 0)
             ciphertext = await self._repo.load(account)
             if ciphertext is not None:
                 try:
@@ -279,7 +281,7 @@ class CredentialService:
                         f"stored credential for {account!r} cannot be "
                         "decrypted (master key changed? re-enter it)"
                     ) from exc
-                if self._delete_generation != del_gen:
+                if self._delete_generation.get(account, 0) != del_gen:
                     # PHASE-4 (S5-L1): the account's credential was DELETED
                     # while we were parked on the repo load — do not
                     # re-cache the plaintext for the rest of the process.
@@ -298,8 +300,10 @@ class CredentialService:
         self._memory.pop(account, None)
         self._runtime_sources.pop(account, None)
         self._db_accounts.discard(account)
-        self._delete_generation += 1  # PHASE-4 (S5-L1): invalidate in-flight
-        # resolves so a parked repo load cannot re-cache the plaintext
+        self._delete_generation[account] = \
+            self._delete_generation.get(account, 0) + 1
+        # invalidate in-flight resolves for this account so a parked repo
+        # load cannot re-cache the plaintext
         existed = await self._repo.delete(account) \
             if self._repo is not None else False
         return existed
