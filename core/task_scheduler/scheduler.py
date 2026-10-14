@@ -470,7 +470,16 @@ class TaskScheduler:
                 if not lane.done():
                     lane.cancel()
             if self._lanes:
-                await asyncio.gather(*self._lanes.values(), return_exceptions=True)
+                # bounded: a lane whose finish tail parks on a stuck DB
+                # write must not hang stop() forever ("stop() never
+                # hangs" contract); the tails below are joined bounded
+                _, stuck = await asyncio.wait(
+                    list(self._lanes.values()), timeout=5.0)
+                for lane in stuck:
+                    label = lane.get_name() if hasattr(lane, "get_name") \
+                        else repr(lane)
+                    self._log("WARNING", "scheduler",
+                              f"lane {label} did not settle within 5s of stop")
             # join every pending finish tail (sync-cancel, lane and sweep
             # tails alike; bounded — each tail is at most one awaited
             # repo.add) so their history rows land BEFORE the caller

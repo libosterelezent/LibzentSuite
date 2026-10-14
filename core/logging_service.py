@@ -63,6 +63,12 @@ _STDERR_CONFIGURED = False
 #: that called record()/logger.log().
 _STDERR_QUEUE: "queue.SimpleQueue[logging.LogRecord]" = queue.SimpleQueue()
 _STDERR_PIPELINE_LOCK = threading.Lock()
+#: live framework CLAIMS on the process-global pipeline (review pass-3
+#: #1): exclusive ownership let the FIRST build's shutdown stop the
+#: pipeline while a second, live framework was still using it — the
+#: listener now stops only when the LAST claim releases.
+_STDERR_USERS = 0
+_STDERR_USERS_LOCK = threading.Lock()
 _STDERR_LISTENER: Optional[logging.handlers.QueueListener] = None
 _STDERR_QUEUE_HANDLER: Optional[logging.handlers.QueueHandler] = None
 _STDERR_ATEXIT_ARMED = False
@@ -91,6 +97,40 @@ def _start_stderr_pipeline() -> None:
             atexit.register(stop_stderr_pipeline)
 
 
+def stderr_pipeline_active() -> bool:
+    """True while the process-global stderr listener is running."""
+    return _STDERR_LISTENER is not None
+
+
+def claim_stderr_pipeline() -> bool:
+    """Register one framework user of the process-global pipeline.
+
+    Returns True when the CALLER created the pipeline (atomic with the
+    configuration). Every successful build claims — borrower or creator
+    — and must release exactly once (shutdown or build rollback)."""
+    global _STDERR_USERS
+    with _STDERR_USERS_LOCK:
+        created = not stderr_pipeline_active()
+        if created:
+            configure_stderr()
+        _STDERR_USERS += 1
+        return created
+
+
+def release_stderr_pipeline() -> None:
+    """Release one user's claim; the LAST release stops the pipeline.
+
+    Idempotent per caller by contract (a framework releases once); a
+    stray extra release is a no-op so a failed build's rollback can
+    never silence a live framework."""
+    global _STDERR_USERS
+    with _STDERR_USERS_LOCK:
+        if _STDERR_USERS > 0:
+            _STDERR_USERS -= 1
+        if _STDERR_USERS == 0 and stderr_pipeline_active():
+            stop_stderr_pipeline()
+
+
 def stop_stderr_pipeline() -> None:
     """Stop the stderr listener thread and detach its queue handler.
 
@@ -99,10 +139,13 @@ def stop_stderr_pipeline() -> None:
     listener is drained + joined. Called from :meth:`LogService.stop_persistence`
     (the service shutdown seam) and at process exit.
     """
-    global _STDERR_LISTENER, _STDERR_QUEUE_HANDLER
+    global _STDERR_LISTENER, _STDERR_QUEUE_HANDLER, _STDERR_CONFIGURED
     with _STDERR_PIPELINE_LOCK:
         listener, qhandler = _STDERR_LISTENER, _STDERR_QUEUE_HANDLER
         _STDERR_LISTENER = _STDERR_QUEUE_HANDLER = None
+        # allow configure_stderr() to re-arm later (boot -> sim -> boot
+        # cycles left the flag latched and the second arm was a no-op)
+        _STDERR_CONFIGURED = False
     if qhandler is not None:
         logging.getLogger("slaughtermudae").removeHandler(qhandler)
     if listener is not None:
@@ -248,7 +291,11 @@ class LogService:
         calls it before database.close), so it stops cleanly here too.
         """
         await self._persist.stop(timeout)
-        stop_stderr_pipeline()
+        # NOTE: stop_stderr_pipeline is deliberately NOT called here —
+        # the pipeline is process-global (one module-level listener for
+        # every LogService in the process); stopping it per-service let
+        # simulator teardown silence the PRODUCTION console. Framework
+        # .shutdown owns the one true stop.
 
     def record(
         self,
@@ -281,7 +328,10 @@ class LogService:
                     "message": "<unloggable message>", "account": account,
                     "plugin": plugin, "task_id": task_id, "event": event}
         if severity not in SEVERITIES:
-            severity = "INFO"
+            # fail LOUD: a crash-level report ("CRITICAL", "FATAL", a
+            # typo'd severity from a caller) downgraded to INFO was
+            # invisible to ERROR-filtered tails
+            severity = "ERROR"
         if len(message) > _MESSAGE_CAP:  # ring + DB rows bounded per entry
             message = message[:_MESSAGE_CAP] + f"…(+{len(message) - _MESSAGE_CAP} chars)"
         with self._lock:

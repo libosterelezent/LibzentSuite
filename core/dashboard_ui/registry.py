@@ -236,17 +236,22 @@ class DashboardUIRegistry:
         # a plugin — they must NEVER rebind or refuse; they are the
         # channel that routes to the actual row action.
         if not hasattr(bound_on, "initialize_dashboard_ui"):
+            # component-internal dispatcher: offer per-dispatch
+            # preparation so a NESTED plugin callback (the preserved
+            # explicit action) rebinds to the live runtime too
+            prep = getattr(bound_on, "_prepare_dispatch", None)
+            if callable(prep):
+                try:
+                    prepared = prep(resolver, plugin_name, account)
+                except UIError:
+                    raise
+                except Exception:
+                    prepared = None   # prep is best-effort
+                if prepared is not None:
+                    return prepared
             return callback
-        # Only rebind methods bound to a PLUGIN instance (the class of
-        # the resolved live runtime). A method bound to a collaborator
-        # object (self.helper.do) is NOT name-rebindable — it runs as
-        # registered, per the documented callable contract.
-        try:
-            probe = resolver(plugin_name, account)
-            if probe is not None and not isinstance(bound_on, type(probe)):
-                return callback
-        except Exception:
-            pass   # the plain resolution below reports properly
+        # resolve ONCE (the manager's resolver walks live runtimes —
+        # doubled calls doubled the cost of every dispatch)
         try:
             live = resolver(plugin_name, account)
         except UIError:
@@ -255,6 +260,10 @@ class DashboardUIRegistry:
             raise UIError(
                 f"{what} of plugin {plugin_name!r}: runtime context "
                 f"lookup failed ({type(exc).__name__})") from exc
+        if live is not None and not isinstance(bound_on, type(live)):
+            # bound to a collaborator (self.helper.do) — not name-
+            # rebindable; runs as registered per the documented contract
+            return callback
         if live is None:
             raise UIError(
                 f"{what} of plugin {plugin_name!r} requires an active "
@@ -727,18 +736,28 @@ class DashboardUIRegistry:
         """
         if inspect.iscoroutinefunction(fn):
             return await fn(*args)
-        probe = fn(*args) if not self._offload_sync else None
-        if probe is not None:
-            if inspect.isawaitable(probe):
-                return await probe
-            return probe
+        if not self._offload_sync:
+            # inline lane: run and await the result if it's an awaitable
+            # (callable instances with async __call__, partials of async
+            # functions). A None return is a COMPLETE result — it must
+            # not fall through to the executor lane (the old probe check
+            # double-executed every sync callback returning None).
+            result = fn(*args)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
         # offloaded sync lane (bounded + timed)
         async with self._sync_slots:
             loop = asyncio.get_running_loop()
             try:
-                return await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     loop.run_in_executor(self._sync_executor, fn, *args),
                     timeout=self.SYNC_TIMEOUT_S)
+                # the offloaded callable may still return an awaitable
+                # (async __call__ / partial): await it here, on the loop
+                if inspect.isawaitable(result):
+                    result = await result
+                return result
             except asyncio.TimeoutError:
                 raise UIError(
                     f"synchronous callback exceeded "

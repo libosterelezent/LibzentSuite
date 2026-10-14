@@ -258,3 +258,87 @@ class TestCooldownSetClearRace(_TmpCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StderrClaimWiringTests(unittest.IsolatedAsyncioTestCase):
+    """Review pass-4 #1/#2: a BORROWING build must release its claim, and
+    an early boot failure must not leak one (the claim is registered
+    before any fallible step)."""
+
+    def setUp(self) -> None:
+        import logging
+        import tempfile
+        from pathlib import Path
+        from core import logging_service as m
+        self._m = m
+        self.tmp = tempfile.TemporaryDirectory(prefix="sm-claims-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        # snapshot the process-global state
+        self.users = m._STDERR_USERS
+        self.listener = m._STDERR_LISTENER
+        self.configured = m._STDERR_CONFIGURED
+        lg = logging.getLogger("slaughtermudae")
+        self.handlers = list(lg.handlers)
+        self.propagate = lg.propagate
+
+    def _restore(self) -> None:
+        import logging
+        m = self._m
+        m._STDERR_USERS = self.users
+        m._STDERR_LISTENER = self.listener
+        m._STDERR_CONFIGURED = self.configured
+        lg = logging.getLogger("slaughtermudae")
+        lg.handlers[:] = self.handlers
+        lg.propagate = self.propagate
+
+    async def _build(self, *, env_file=None, config_dir=None):
+        from core import bootstrap
+        env = str(env_file or self.root / "absent.env")
+        cfg = str(config_dir or self.root / "config")
+        return await bootstrap.build(
+            env_file=env, config_dir=cfg,
+            db_path=str(self.root / "claims.db"),
+            plugin_dir="tests/fixtures/plugins",
+            quiet=False)
+
+    async def test_borrowing_build_releases_its_claim(self) -> None:
+        try:
+            m = self._m
+            m.stop_stderr_pipeline()          # known idle floor
+            fw1 = await self._build()         # CREATOR
+            self.assertTrue(m.stderr_pipeline_active())
+            fw2 = await self._build()         # BORROWER (own db below)
+            self.assertTrue(m.stderr_pipeline_active())
+            await fw1.shutdown()              # owner gone first
+            self.assertTrue(
+                m.stderr_pipeline_active(),
+                "the borrowing framework keeps the pipeline alive")
+            await fw2.shutdown()
+            self.assertFalse(m.stderr_pipeline_active(),
+                             "the last claim stops the listener")
+        finally:
+            self._restore()
+
+    async def test_early_failure_releases_the_claim(self) -> None:
+        m = self._m
+        m.stop_stderr_pipeline()
+        # a symlinked .env is hard-rejected by Credentials.from_file —
+        # a failure that lands AFTER the claim but BEFORE _assemble
+        real_env = self.root / "real.env"
+        real_env.write_text("DASHBOARD_TOKEN=x\n", encoding="utf-8")
+        linked = self.root / "linked.env"
+        linked.symlink_to(real_env)
+        fw = None
+        try:
+            fw = await self._build(env_file=linked)
+            self.fail("a symlinked env must fail the build")
+        except Exception:
+            pass
+        finally:
+            if fw is not None:      # never returned, but stay safe
+                await fw.shutdown()
+            self._restore()
+        self.assertEqual(m._STDERR_USERS, 0,
+                         "the failed build released its claim")
+        self.assertFalse(m.stderr_pipeline_active())

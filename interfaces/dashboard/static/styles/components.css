@@ -15,8 +15,6 @@
 /* Liquid grids — no fixed widths, children can always shrink */
 .grid { display: grid; gap: var(--gap); min-width: 0; }
 .grid-2 { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
-.grid-3 { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
-.grid-4 { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
 
 /* ══════════════════════════════ Account card (tile) ════════════════════════
    Dense by design: identity+status+group first, one meta line, compact
@@ -106,7 +104,8 @@
 .pick-row.active { border-color: var(--accent2); background: rgba(91,163,245,.12); }
 .pick-row input[type="checkbox"], .pick-row input[type="radio"] {
   width: 15px; height: 15px; margin: 0; justify-self: center; }
-.pick-row .pl-name { font-weight: 600; white-space: nowrap; min-width: 0; }
+.pick-row .pl-name { font-weight: 600; white-space: nowrap; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .pick-row .pl-desc { color: var(--faint); font-size: 11px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .pick-row .pl-meta { display: inline-flex; align-items: center; gap: 6px;
@@ -310,7 +309,7 @@ dialog .dlg-foot { display: flex; gap: var(--sp-2); justify-content: flex-end; p
   gap: var(--sp-2); }
 .dui-section, .dui-tab { gap: var(--sp-3); }
 .dui-card { background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--r-md); padding: var(--sp-3); gap: var(--sp-2); }
+  border-radius: var(--r); padding: var(--sp-3); gap: var(--sp-2); }
 .dui-card > h4 { font-size: 11px; color: var(--dim); text-transform: uppercase;
   letter-spacing: .08em; margin-bottom: 2px; }
 .dui-sec-title { font-size: 11px; color: var(--dim); text-transform: uppercase;
@@ -387,7 +386,7 @@ dialog.dui-modal .dlg-body { max-height: min(70vh, 640px); overflow-y: auto;
   display: inline-flex; align-items: center; gap: 6px; }
 .dui-toolbar-actions { display: flex; align-items: center; gap: var(--sp-2);
   margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
-.dui-toolbar-actions .dui-item { flex: none !important; max-width: none; }
+.dui-toolbar-actions .dui-item { flex: none; width: auto; max-width: none; }
 .dui-toolbar-actions .dui-item .btn { white-space: nowrap; }
 
 /* Form field GRID — the anti-tower: declared columns lay fields out
@@ -404,7 +403,6 @@ dialog.dui-modal .dlg-body { max-height: min(70vh, 640px); overflow-y: auto;
 
 /* Code blocks (logs, audit, reports, scenario lists) — bounded,
    scrollable panes instead of page-stretching walls of text */
-.dui-code { padding: var(--sp-3); max-height: 380px; overflow: auto; }
 
 /* Alert — the designed error/notice surface (also used by the renderer
    for failed data providers and page fetches) */
@@ -444,6 +442,9 @@ dialog.dui-modal .dlg-body { max-height: min(70vh, 640px); overflow-y: auto;
   480px cap here squeezed EVERY component (whole account lists, plugin
   tables) into a left strip; narrow reading belongs to leaf inputs */
 .dui-row > .dui-item { max-width: none; flex: 1 1 170px; min-width: 170px; }
+/* horizontal containers: leaves shrink to content instead of stacking
+   one-per-line (the width:100% base makes every child wrap otherwise) */
+.dui-container-h > .dui-item { width: auto; flex: 0 1 auto; }
 .dui-item > label { font-size: 12px; color: var(--dim); font-weight: 500; }
 .dui-item .hint { font-size: 11px; color: var(--faint); }
 .dui-req { color: var(--err); }
@@ -462,6 +463,7 @@ dialog.dui-modal .dlg-body { max-height: min(70vh, 640px); overflow-y: auto;
 .dui-rowacts .btn { margin-left: 4px; }
 .dui-heading { font-size: 14px; font-weight: 600; margin: 0; }
 .dui-code { background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm);
+  max-height: 380px; overflow: auto; overflow-wrap: anywhere;
   padding: var(--sp-2) var(--sp-3); margin: 0; overflow-x: auto;
   white-space: pre-wrap; overflow-wrap: anywhere; }
 .dui-unknown { border: 1px dashed var(--border); border-radius: var(--r-sm);
@@ -523,7 +525,7 @@ dialog.dui-modal .dlg-body { max-height: min(70vh, 640px); overflow-y: auto;
 .dui-switch:checked { background: var(--accent2); border-color: var(--accent2); }
 .dui-switch:checked::after { left: 17px; background: #fff; }
 .dui-switch:disabled { cursor: not-allowed; opacity: .55; }
-.dui-switch-row input[type="checkbox"] { width: auto; }
+.dui-switch-row input[type="checkbox"] { width: 34px; height: 19px; }
 
 /* Account-scoped plugin pages: the account picker bar */
 .dui-acct-bar { display: flex; align-items: center; gap: var(--sp-2);

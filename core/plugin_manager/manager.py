@@ -51,6 +51,10 @@ from .commands import COMMAND_HUB, MAX_REPLY_CHARS, FRAMEWORK_PLUGIN
 from .commands import RegisteredCommand
 from .loader import PluginLoader
 
+#: "no factory provided" for _teardown_runtime (None is a VALID factory
+#: answer — deactivate passes its already-popped factory explicitly)
+_UNSET_FACTORY = object()
+
 
 @dataclass
 class PluginRuntime:
@@ -131,6 +135,28 @@ class PluginManager:
         # offload_sync=True in the served stack: a slow synchronous
         # plugin callback must never freeze the dashboard's event loop
         # (bounded lane, see DashboardUIRegistry._invoke)
+        #: serializes ACCOUNT-MAP REBUILDS (attach_account vs reload_plugin,
+        #: review finding #8): an attach parked mid-build used to wholesale-
+        #: assign its dict and silently discard a runtime reload had just
+        #: activated — no hooks, no unregister. deactivate_account stays
+        #: lock-free (attach calls it UNDER this lock).
+        self._mutation_lock = asyncio.Lock()
+        #: per-account activation-in-flight markers (set = idle): a stop/
+        #: removal/deactivation landing during an in-flight activation
+        #: WAITS for it to settle first — otherwise the activation's
+        #: resumed hooks set active=True on a runtime the deactivator
+        #: already walked past (an orphan nobody supervises)
+        self._activation_events: Dict[str, asyncio.Event] = {}
+        #: activation EPOCHS: bumped when a teardown proceeds past an
+        #: unsettled activation — the in-flight activation fences on it
+        #: and undoes its commits instead of resurrecting state after
+        #: teardown finished (review pass-3 #2)
+        self._activation_epoch: Dict[str, int] = {}
+        #: bounded wait for in-flight activations (injectable for tests)
+        self._activation_settle_timeout_s: float = 5.0
+        #: bounded wait for an in-flight teardown before taking it over
+        #: from an interrupted owner (injectable for tests)
+        self._teardown_wait_timeout_s: float = 5.0
         self._ui_registry = ui_registry or DashboardUIRegistry(
             offload_sync=True)
         # the registry rebinds boot-time bound-method callbacks onto LIVE
@@ -236,6 +262,11 @@ class PluginManager:
         replacing them, so a failed-start → restart cycle doesn't leave
         orphaned plugin instances running.
         """
+        async with self._mutation_lock:
+            return await self._attach_locked(account, allowed)
+
+    async def _attach_locked(self, account: str,
+                             allowed: Optional[Set[str]] = None) -> None:
         # deactivate old runtimes (fire on_disable/on_unload on any that
         # were active — a restart after a failed start may have left them)
         if account in self._accounts:
@@ -298,13 +329,22 @@ class PluginManager:
         # re-attaches on every one) and plain (re)attaches
         self._sync_commands(account)
 
-    def reload_plugin(self, name: str) -> Dict[str, Any]:
-        """Hot-reload one plugin: detach → re-import → re-attach to accounts.
+    async def reload_plugin(self, name: str) -> Dict[str, Any]:
+        """Hot-reload one plugin: validate → teardown → restore LIVE runtimes.
 
-        Preserves per-account assignments and enabled flags. The plugin's
-        dashboard UI is re-registered at boot level. Returns a summary
-        dict. Raises PluginError when the plugin is unknown or the
-        re-import fails (the OLD state is preserved on failure).
+        Preserves per-account assignments and enabled flags. Contract
+        (audit-hardened):
+        - the re-import is VALIDATED FIRST — a broken plugin file must
+          not unload the working copy (the loader restores the previous
+          records when a scan fails);
+        - teardown fires the real hooks (on_disable/on_unload) and
+          quiesces in-flight dispatch for each affected account;
+        - the restored runtime carries a LIVE instance, and accounts
+          where the plugin was active are re-activated immediately —
+          reload used to leave ``instance=None, active=False`` corpses
+          that received zero events until an account restart.
+        Returns a summary dict. Raises PluginError when the plugin is
+        unknown or the re-import fails (the OLD state is preserved).
         """
         if name == "__rescan__":
             # special key: full re-scan without targeting one plugin
@@ -314,58 +354,137 @@ class PluginManager:
             self._logger.info("plugin directory rescan: %d plugin(s)", len(found))
             return {"plugin": "__rescan__", "discovered": found,
                     "restored_accounts": 0}
-        # always re-scan: an unloaded plugin was removed from _records,
-        # so we need a fresh discovery to pick it up again
-        self._loader.discover()
-        if name not in self._loader.names():
-            raise PluginError(f"unknown plugin {name!r}")
-        # snapshot the affected accounts so we can restore
-        affected = {
-            acct: dict((pname, rt) for pname, rt in runtimes.items()
-                       if pname == name)
-            for acct, runtimes in self._accounts.items() if name in runtimes
-        }
-        # detach the plugin from every account (preserving other plugins)
-        for acct in list(affected):
-            rt = self._accounts.get(acct, {}).pop(name, None)
-            if rt is not None and rt.active:
-                # fire on_disable + on_unload for a clean teardown
-                try:
-                    if rt.instance is not None:
-                        import asyncio
-                        if asyncio.get_event_loop().is_running():
-                            # can't await here (sync method) — the hooks
-                            # fire on next activation instead
-                            pass
-                except Exception:
-                    pass
-        # unregister the UI
-        self._ui_registry.detach(name)
-        # re-import: remove from loader's records, re-scan, pick up the
-        # fresh module
+        # the account map is rebuilt under the same lock attach_account
+        # holds — an in-flight attach's wholesale assignment would
+        # otherwise discard what we restore here (no hooks, no cleanup)
+        async with self._mutation_lock:
+            return await self._reload_locked(name)
+
+    async def _reload_locked(self, name: str) -> Dict[str, Any]:
+        # VALIDATE the fresh import BEFORE touching any live state: pop
+        # the record and re-scan. A failing scan must leave BOTH the
+        # live runtimes AND the loader record intact — the loader's own
+        # rollback snapshot is taken AFTER this pop, so the record is
+        # restored HERE (review finding #6: a failed re-scan used to
+        # leave the plugin "unknown" for create()/names() while its
+        # runtime kept running).
+        old_record = self._loader._records.get(name)
         self._loader._records.pop(name, None)
-        self._loader.discover()   # re-scan picks up the changed module
+        try:
+            self._loader.discover()
+        except BaseException:
+            if old_record is not None:
+                self._loader._records[name] = old_record
+            raise   # nothing was torn down; the working copy is intact
         if name not in self._loader.names():
-            raise PluginError(
-                f"plugin {name!r} disappeared after re-scan — the old "
-                f"instance was detached")
-        # re-register the boot UI
+            if old_record is not None:
+                self._loader._records[name] = old_record
+            raise PluginError(f"unknown plugin {name!r}")
+        # snapshot the affected accounts (runtime + liveness captured
+        # BEFORE teardown mutates the runtime in place)
+        affected = {}
+        was_active = {}
+        was_loaded = {}
+        for acct, runtimes in self._accounts.items():
+            rt = runtimes.get(name)
+            if rt is not None:
+                affected[acct] = rt
+                was_active[acct] = rt.active
+                was_loaded[acct] = rt.loaded
+        # TEARDOWN: the runtime is marked unavailable to NEW dispatch and
+        # popped from the account map FIRST (review finding #1: events
+        # admitted after the quiesce snapshot could still pass the
+        # dispatch gates and run on the instance mid-unload); then the
+        # in-flight tasks drain; then the hooks fire on captured state.
+        for acct, rt in affected.items():
+            await self._await_activation_settled(
+                acct, timeout=self._activation_settle_timeout_s)
+            rt.active = False   # blocks new dispatch admission NOW
+            self._accounts[acct].pop(name, None)
+            await self._quiesce_dispatch(acct)
+            # ONE coordinated teardown path (exactly-once hooks even when
+            # the late activation's compensation arrives mid-unload)
+            await self._teardown_runtime(
+                acct, rt,
+                was_active=was_active.get(acct, False),
+                was_loaded=was_loaded.get(acct, False))
+        # unregister the stale UI; the boot pass below re-registers it
+        self._ui_registry.detach(name)
         self.init_boot_dashboard_uis()
-        # re-attach to every affected account
+        # RESTORE with live instances; re-activate where it was running
         restored = 0
-        for acct, was in affected.items():
-            if acct not in self._accounts:
+        reactivated = 0
+        for acct, old_rt in affected.items():
+            runtimes = self._accounts.get(acct)
+            if runtimes is None:
                 continue   # account gone while we worked
-            old_rt = was.get(name)
+            profile_layers = await self._bound_profile_settings(acct)
+            try:
+                instance = self._loader.create(name)
+            except Exception:
+                self._logger.exception(
+                    "plugin %s failed to construct on %s after reload",
+                    name, acct)
+                instance = None
             rt = PluginRuntime(
-                name=name, instance=None,
+                name=name, instance=instance,
                 enabled=old_rt.enabled if old_rt else True,
                 loaded=False, active=False)
-            self._accounts[acct][name] = rt
+            runtimes[name] = rt
             restored += 1
+            # resolve settings NOW — same contract as attach_account
+            # (fail-fast on bad config; the effective-settings view and
+            # a stopped account's states() keep truthful values). The
+            # re-activation below re-resolves for the live view anyway.
+            try:
+                rt.settings = self._settings.resolve(
+                    name, self._schema_for(name),
+                    account=acct,
+                    profile=profile_layers.get(name),
+                )
+            except Exception as exc:
+                rt.enabled = False
+                rt.last_error = f"settings: {type(exc).__name__}: {exc}"
+                rt.error_count += 1
+                self._logger.error(
+                    "plugin %s on %s failed settings resolution after "
+                    "reload; disabled (%s)", name, acct, exc)
+            # REVALIDATE liveness, not the pre-teardown snapshot (review
+            # finding #2): deactivate_account (account stop) pops the
+            # services entry during our awaits — activating on a stopped
+            # account would leave an unsupervised active plugin behind
+            if (instance is not None and was_active.get(acct)
+                    and self._services.get(acct) is not None):
+                ok = False
+                try:
+                    await self._activate_one(acct, rt)
+                    ok = True
+                except Exception:
+                    self._logger.exception(
+                        "plugin %s failed to re-activate on %s after reload",
+                        name, acct)
+                if self._services.get(acct) is None:
+                    # the account went down DURING activation — run the
+                    # per-runtime teardown EXPLICITLY (raising into a
+                    # logging-only except left the replacement active,
+                    # hooks fired, on a stopped account — review pass-2 #2)
+                    await self._teardown_runtime(acct, rt)
+                elif ok:
+                    reactivated += 1
+            # the hub must reflect the REPLACEMENT's command declarations
+            # even when it was not re-activated (review finding #13)
+            self._sync_commands(acct)
+        # the fresh instances take over the live UI for their accounts
+        for acct in affected:
+            runtimes = self._accounts.get(acct)
+            if runtimes is not None and name in runtimes \
+                    and runtimes[name].active:
+                self._init_dashboard_uis(acct, runtimes)
         self._logger.info(
-            "plugin %s reloaded (restored on %d account(s))", name, restored)
-        return {"plugin": name, "restored_accounts": restored}
+            "plugin %s reloaded (restored on %d account(s), "
+            "re-activated on %d)", name, restored, reactivated)
+        return {"plugin": name, "restored_accounts": restored,
+                "reactivated_accounts": reactivated}
 
     def unload_plugin(self, name: str) -> Dict[str, Any]:
         """Unload one plugin: detach from every account, unregister UI.
@@ -400,6 +519,11 @@ class PluginManager:
         """
         self._accounts.pop(account, None)
         self._services.pop(account, None)
+        self._activation_events.pop(account, None)
+        # NOTE: the EPOCH is deliberately NOT popped — it is a fence
+        # marker for stragglers of a removed account; clearing it here
+        # made a fenced late activation compare 0 == captured-0 and
+        # resurrect its runtime after removal finished
         # dispatch bookkeeping: any task still queued dies at the services
         # gate in _dispatch (the account's services are gone)
         self._pending_by_account.pop(account, None)
@@ -415,19 +539,96 @@ class PluginManager:
         ``(plugin_name) -> services`` (duck-checked) — each plugin gets its
         own facade either way.
         """
-        runtimes = self._accounts.get(account)
-        if runtimes is None:
-            raise PluginError(f"account {account!r} has no attached plugins (attach first)")
-        factory = self._services_factory(services)
-        self._services[account] = factory
-        for runtime in runtimes.values():
-            if not runtime.enabled:
-                continue
-            await self._activate_one(account, runtime)
-        # UI lifecycle: offer the toolset to plugins that declare a UI
-        # (after on_load/on_enable — actions may reflect plugin state)
-        self._init_dashboard_uis(account, runtimes)
+        # serialize against a prior in-flight activation on this account
+        await self._await_activation_settled(
+            account, timeout=self._activation_settle_timeout_s)
+        ev = self._activation_events.get(account)
+        if ev is None:
+            ev = asyncio.Event()
+            ev.set()
+            self._activation_events[account] = ev
+        ev.clear()
+        try:
+            runtimes = self._accounts.get(account)
+            if runtimes is None:
+                raise PluginError(f"account {account!r} has no attached plugins (attach first)")
+            factory = self._services_factory(services)
+            self._services[account] = factory
+            epoch = self._activation_epoch.get(account, 0)
+            fenced = False
+            # SNAPSHOT + identity recheck: a concurrent reload (or detach)
+            # pops/replaces dict entries while hooks are parked —
+            # iterating the live dict raised, and activating a detached
+            # runtime would resurrect an invisible orphan
+            for runtime in list(runtimes.values()):
+                if (self._accounts.get(account, {}).get(runtime.name)
+                        is not runtime):
+                    continue   # replaced or removed while we were parked
+                if not runtime.enabled:
+                    continue
+                await self._activate_one(account, runtime)
+                if (self._accounts.get(account, {})
+                        .get(runtime.name) is not runtime):
+                    # a RELOAD (or detach) replaced this runtime while its
+                    # hook was parked: the OLD instance just committed
+                    # active=True but is no longer reachable through the
+                    # account map — nothing would ever run its unload
+                    # hooks, leaking whatever on_enable started. Tear it
+                    # down directly, scoped to THIS runtime only (the
+                    # account itself is still up — no account-wide fence).
+                    await self._teardown_runtime(account, runtime)
+                    continue
+                if self._activation_epoch.get(account, 0) != epoch:
+                    # FENCED: a teardown proceeded past this activation's
+                    # settle timeout while its hook was parked — undo the
+                    # commit so the account stays down, and STOP: the
+                    # remaining runtimes must not run their hooks on a
+                    # down account just to be torn down after
+                    await self._teardown_runtime(account, runtime)
+                    fenced = True
+                    break
+            # UI lifecycle: offer the toolset to plugins that declare a UI
+            # (after on_load/on_enable — actions may reflect plugin state)
+            # — never for a fenced activation (the account is gone/down)
+            if not fenced:
+                self._init_dashboard_uis(account, runtimes)
+        finally:
+            ev.set()
         self._logger.info("activated plugins on %s", account)
+
+    async def _await_activation_settled(self, account: str,
+                                        timeout: float = 5.0, *,
+                                        fence: bool = False) -> None:
+        """Bounded wait for any in-flight activation on ``account``.
+
+        Deactivation, removal and reload call this BEFORE touching the
+        account's runtimes: an activation parked in on_load/on_enable
+        would otherwise resume AFTER their teardown pass and leave an
+        active, hook-fired runtime behind (review pass-2 #1).
+
+        ``fence=True`` (deactivation/removal ONLY — the callers that
+        actually tear the account down) arms the epoch undo on timeout.
+        Reload and re-activation wait but never fence: their timing out
+        must not unload plugins on an account that is still RUNNING
+        (review pass-4 #4)."""
+        ev = self._activation_events.get(account)
+        if ev is None or ev.is_set():
+            return
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            if fence:
+                # teardown proceeds now; the epoch bump makes the
+                # still-running activation abort/undo its remaining
+                # commits when its hook finally returns — a hook cannot
+                # be cancelled (it runs in the caller's task), but it
+                # must not resurrect state after teardown
+                self._activation_epoch[account] = \
+                    self._activation_epoch.get(account, 0) + 1
+            self._logger.warning(
+                "activation of %s did not settle within %.1fs; proceeding%s",
+                account, timeout,
+                " (the late activation will be fenced)" if fence else "")
 
     def init_boot_dashboard_uis(self) -> int:
         """Register plugin dashboard UIs at DISCOVERY time (no account).
@@ -617,6 +818,13 @@ class PluginManager:
                 "cannot activate", runtime.name, account,
             )
             return
+        # ANY activation attempt re-arms the teardown lifecycle (review
+        # pass-8 #4): the unload marker must clear when the LOAD begins —
+        # clearing only after on_enable meant a fresh on_load followed by
+        # a failing on_enable left _unload_done set, and the later
+        # deactivation skipped on_unload for the newly loaded resources
+        runtime._disable_done = False
+        runtime._unload_done = False
         services = self._services.get(account, lambda _n: None)(runtime.name)
         runtime.ctx = None  # PHASE-4 (S7-L1): new facade -> rebuild cache
         try:
@@ -710,6 +918,8 @@ class PluginManager:
         is going down (otherwise a plugin could be left ``active`` on a
         stopped account).
         """
+        await self._await_activation_settled(
+            account, timeout=self._activation_settle_timeout_s, fence=True)
         runtimes = self._accounts.get(account)
         if runtimes is None:
             return
@@ -720,23 +930,12 @@ class PluginManager:
         # AFTER the account manager's removal cascades ran — ghost rows a
         # re-created same-name account would silently inherit.
         await self._quiesce_dispatch(account)
-        for runtime in runtimes.values():
-            services = factory(runtime.name) if factory is not None else None
-            ctx = self._context(account, runtime, services)
-            runtime.ctx = None  # PHASE-4 (S7-L1): services unwired below
-            if runtime.active and runtime.enabled:
-                try:
-                    await self._hook(account, runtime, runtime.instance.on_disable, ctx, "on_disable")
-                except Exception:
-                    pass  # recorded; still unload
-            if runtime.loaded:
-                try:
-                    await self._hook(account, runtime, runtime.instance.on_unload, ctx, "on_unload")
-                except Exception:
-                    pass
-                runtime.loaded = False
-                self._bus.publish_nowait(PluginUnloaded(account=account, plugin=runtime.name))
-            runtime.active = False
+        # SNAPSHOT: a concurrent reload pops/replaces dict entries while
+        # hooks are parked (live-dict iteration raised) — and every
+        # runtime unloads through the ONE coordinated path
+        for runtime in list(runtimes.values()):
+            await self._teardown_runtime(
+                account, runtime, services_factory=factory)
         # UI lifecycle (merged contract): a stopped account ends its
         # RUNTIME association only — the plugin-wide UI DEFINITION always
         # survives deactivation (the page stays in the sidebar, usable
@@ -786,7 +985,16 @@ class PluginManager:
                 "cancelled %d dispatch task(s) still running on %s after "
                 "%.2fs grace", len(stragglers), account, self._dispatch_grace_s,
             )
-            await asyncio.gather(*stragglers, return_exceptions=True)
+            # bounded re-reap: a handler that swallows CancelledError
+            # (bare except, shield, long finally) must not hang
+            # deactivation forever — log survivors and move on
+            _, undead = await asyncio.wait(
+                stragglers, timeout=self._dispatch_grace_s)
+            for task in undead:
+                self._logger.warning(
+                    "dispatch task on %s survived cancel; abandoning "
+                    "(task=%s)", account, getattr(task, "get_name",
+                                                  lambda: repr(task))())
 
     # ------------------------------------------------------------- mutation
     async def set_enabled(self, account: str, plugin: str, enabled: bool) -> None:
@@ -956,6 +1164,133 @@ class PluginManager:
                         plugin_name, exc_info=True)
         return sorted(panels.values(), key=lambda p: p["id"])
 
+    async def _teardown_runtime(self, account: str,
+                                runtime: PluginRuntime, *,
+                                was_active: Optional[bool] = None,
+                                was_loaded: Optional[bool] = None,
+                                services_factory: Any = _UNSET_FACTORY,
+                                ) -> None:
+        """Fire one runtime's unload hooks and reset its flags — EXACTLY
+        ONCE per runtime, coordinated.
+
+        Every teardown path (deactivate, reload, the late-activation
+        compensation) routes through here. A per-runtime event serializes
+        concurrent attempts: a second teardown arriving while the first
+        is still awaiting an unload hook WAITS (bounded) and then leaves
+        — firing on_unload twice ran non-idempotent plugin cleanup
+        concurrently (review pass-6).
+
+        ``was_active``/``was_loaded`` default to the runtime's CURRENT
+        flags; callers that mutated flags earlier (reload blocks
+        dispatch by flipping ``active`` before draining) pass their
+        captured snapshot instead. ``services_factory`` defaults to the
+        account's live entry; deactivate passes the factory it already
+        popped (its hooks must still see the facades)."""
+        if was_active is None:
+            was_active = runtime.active
+        if was_loaded is None:
+            was_loaded = runtime.loaded
+        if services_factory is _UNSET_FACTORY:
+            services_factory = self._services.get(account)
+        # ATOMIC CLAIM loop: exactly ONE caller ever owns a teardown
+        # attempt at a time. Ownership = an unset event + the owning
+        # task, assigned with no await between the check and the claim
+        # (single event loop ⇒ atomic). Everything else waits.
+        waited = False
+        while True:
+            ev = getattr(runtime, "_teardown_event", None)
+            owner = getattr(runtime, "_teardown_task", None)
+            abandoned = (ev is not None and not ev.is_set()
+                         and owner is not None and owner.done())
+            if (ev is None or ev.is_set()
+                    or owner is None or owner.done()):
+                # idle, completed-and-idle, or an ABANDONED attempt —
+                # claim it. When taking over an abandoned attempt, MERGE
+                # its owed-hook record into ours: the interruptor already
+                # cleared the lifecycle flags, so this caller's fresh
+                # snapshot alone would SKIP the unfinished cleanup
+                # (review pass-8 #1). A completed attempt's stale record
+                # is never merged (its hooks already ran).
+                if abandoned:
+                    owe_a, owe_l = getattr(
+                        runtime, "_teardown_owe", (False, False))
+                    was_active = bool(was_active) or owe_a
+                    was_loaded = bool(was_loaded) or owe_l
+                    self._logger.warning(
+                        "taking over the abandoned teardown of %s on %s",
+                        runtime.name, account)
+                ev = runtime._teardown_event = asyncio.Event()
+                runtime._teardown_task = asyncio.current_task()
+                runtime._teardown_owe = (bool(was_active), bool(was_loaded))
+                break
+            # a LIVE attempt is in flight — wait bounded for its outcome
+            if waited:
+                return   # bounded patience: the live owner owns the hooks
+            waited = True
+            try:
+                await asyncio.wait_for(
+                    ev.wait(), timeout=self._teardown_wait_timeout_s)
+            except asyncio.TimeoutError:
+                self._logger.warning(
+                    "teardown of %s on %s did not settle within %.1fs",
+                    runtime.name, account, self._teardown_wait_timeout_s)
+            if ev.is_set():
+                # that attempt COMPLETED — the hooks ran exactly once
+                return
+            # unset event + done owner = abandoned — loop once more; the
+            # claim branch above performs the merge and the atomic claim
+        # — we own the attempt from here —
+        try:
+            services = (services_factory(runtime.name)
+                        if callable(services_factory) else None)
+            ctx = self._context(account, runtime, services)
+            runtime.ctx = None
+            # per-hook done markers: a takeover re-runs ONLY the hooks
+            # the interrupted owner never finished (markers are set
+            # right after each await returns — cancellation cannot land
+            # between the await completing and the marker assignment)
+            if (was_active and runtime.enabled
+                    and runtime.instance is not None
+                    and not getattr(runtime, "_disable_done", False)):
+                try:
+                    await self._hook(account, runtime,
+                                     runtime.instance.on_disable, ctx,
+                                     "on_disable")
+                except Exception:
+                    pass   # recorded; still unload
+                runtime._disable_done = True
+            if (was_loaded and runtime.instance is not None
+                    and not getattr(runtime, "_unload_done", False)):
+                try:
+                    await self._hook(account, runtime,
+                                     runtime.instance.on_unload, ctx,
+                                     "on_unload")
+                except Exception:
+                    pass
+                runtime._unload_done = True
+                self._bus.publish_nowait(
+                    PluginUnloaded(account=account, plugin=runtime.name))
+            runtime.active = False
+            runtime.loaded = False
+        except BaseException:
+            # INTERRUPTED (cancellation, KI/SystemExit, or an unexpected
+            # error outside the hook guards): reset the lifecycle flags
+            # so nothing downstream sees an active runtime, and leave
+            # the owed-hook record (minus what completed) with the
+            # event UNSET and the owning task DONE — the abandoned
+            # state the claim loop takes over
+            runtime.active = False
+            runtime.loaded = False
+            owe_a, owe_l = runtime._teardown_owe
+            runtime._teardown_owe = (
+                owe_a and not getattr(runtime, "_disable_done", False),
+                owe_l and not getattr(runtime, "_unload_done", False))
+            raise
+        else:
+            # COMPLETED: signal every waiter (the else clause runs only
+            # when no exception escaped the body)
+            ev.set()
+
     def states(self, account: str) -> List[Dict[str, Any]]:
         """Per-account plugin state for both UIs (sorted by name)."""
         runtimes = self._accounts.get(account, {})
@@ -964,6 +1299,10 @@ class PluginManager:
                 "name": rt.name,
                 "enabled": rt.enabled,
                 "loaded": rt.loaded,
+                # "active" = hooks fired + dispatch-eligible (a loaded
+                # runtime on a stopped account is NOT active) — the
+                # Plugins page renders this distinction
+                "active": rt.active,
                 "settings": dict(rt.settings),
                 "last_error": rt.last_error,
                 "error_count": rt.error_count,

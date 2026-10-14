@@ -246,19 +246,19 @@ def _build_plugins(ui: DashboardUIToolset, api: Any):
 
     async def toggle_row(row, ctx):
         account, _, plugin = row.partition("|")
+        current = None
         try:
-            state = await api.plugins_state()
+            state = await api.plugins_state(account)
         except Exception:
             state = []
-        current = None
         for entry in (state or []):
-            if entry.get("account") == account and entry.get("plugin") == plugin:
+            if entry.get("name") == plugin:
                 current = entry.get("enabled")
                 break
         if current is None:
             return {"success": False,
                     "message": f"{plugin!r} is not attached to {account!r}"}
-        await api.plugins_set_enabled(account, plugin, not current, surface="dashboard")
+        await api.plugins_set_enabled(account, plugin, not current)
         return {"success": True,
                 "message": f"{plugin} {'enabled' if not current else 'disabled'} on {account}",
                 "refresh": ["plug-state"]}
@@ -324,18 +324,23 @@ def _manifests_data(api: Any):
 
 def _plugin_state_data(api: Any):
     async def provide(ctx):
-        try:
-            state = await api.plugins_state()
-        except Exception:
-            state = []
         rows = []
-        for e in (state or []):
-            # __key cell past the visible columns: "account|plugin"
-            rows.append([e.get("account", "?"), e.get("plugin", "?"),
-                         "yes" if e.get("enabled") else "no",
-                         "yes" if e.get("active") else "no",
-                         str(e.get("error_count", 0)),
-                         f"{e.get('account', '?')}|{e.get('plugin', '?')}"])
+        try:
+            accounts = await api.accounts_list()
+        except Exception:
+            accounts = []
+        for acct in accounts:
+            try:
+                state = await api.plugins_state(acct.get("name", ""))
+            except Exception:
+                continue
+            for e in (state or []):
+                # __key cell past the visible columns: "account|plugin"
+                rows.append([acct.get("name", "?"), e.get("name", "?"),
+                             "yes" if e.get("enabled") else "no",
+                             "yes" if e.get("active") else "no",
+                             str(e.get("error_count", 0)),
+                             f"{acct.get('name', '?')}|{e.get('name', '?')}"])
         return {"columns": ["Account", "Plugin", "Enabled", "Active", "Errors"],
                 "rows": rows}
     return provide
@@ -701,9 +706,15 @@ def _build_admin(ui: DashboardUIToolset, api: Any):
     async def toggle_admin_row(row, ctx):
         try:
             ov = await api.admin_overview()
-        except Exception:
-            ov = {}
+        except Exception as exc:
+            # NEVER default the flag on a read failure — an empty overview
+            # made is_admin False and a "toggle" silently GRANTED admin
+            return {"success": False,
+                    "message": f"account overview unavailable ({exc})"}
         row_data = ((ov.get("accounts") or {}).get(row)) or {}
+        if not row_data:
+            return {"success": False,
+                    "message": f"account {row!r} not found in overview"}
         is_admin = bool(row_data.get("is_admin"))
         await api.admin_account_flag(row, not is_admin, surface="dashboard")
         return {"success": True,
@@ -999,14 +1010,6 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
         return {"success": True, "message": f"{row} removed",
                 "refresh": ["acct-list", "group-list", "indep-list"]}
 
-    async def _run_all(calls):
-        import asyncio
-        results = await asyncio.gather(*[c() for c in calls], return_exceptions=True)
-        out = []
-        for r in results:
-            out.append(("err", str(r)) if isinstance(r, Exception) else ("ok", r))
-        return out
-
     async def bulk_run(rows, ctx, start=True):
         calls = [(api.accounts_start if start else api.accounts_stop)
                  (n, surface="dashboard") for n in rows]
@@ -1174,17 +1177,6 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
             return out
         return provide
 
-    def _details_plugins(api):
-        async def provide(ctx):
-            name = _fleet_state.get("details")
-            rows = await _accts()
-            a = next((x for x in rows if x.get("name") == name), None)
-            if not a:
-                return {"columns": ["Plugin"], "rows": []}
-            return {"columns": ["Plugin"],
-                    "rows": [[p] for p in (a.get("assigned_plugins") or [])]}
-        return provide
-
     async def unassign_plugin(row, ctx):
         # row arrives as "account|plugin" via the __key cell
         account, _, plugin = row.partition("|")
@@ -1288,10 +1280,11 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
         if not name:
             return {"success": False, "field_errors": {
                 "gc-name": "Group name is required."}}
-        await api.groups_create(name,
-                                description=str(payload.get("gc-desc") or ""),
-                                enabled=payload.get("gc-enabled") is not False,
-                                surface="dashboard")
+        await api.groups_create(
+            {"name": name,
+             "description": str(payload.get("gc-desc") or ""),
+             "enabled": payload.get("gc-enabled") is not False},
+            surface="dashboard")
         return {"success": True, "message": f"group {name} created",
                 "refresh": ["group-list"]}
 
@@ -1320,7 +1313,7 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
             return {"success": False, "field_errors": {
                 "gm-accounts": "Select at least one account."}}
         results = await _run_all_static([
-            api.groups_add_member(group, n, surface="dashboard") for n in chosen])
+            api.groups_add_account(group, n, surface="dashboard") for n in chosen])
         failed = [str(e) for e in results if isinstance(e, Exception)]
         if failed:
             return {"success": False,
@@ -1330,7 +1323,7 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
 
     async def remove_member(row, ctx):
         group, _, account = row.partition("|")
-        await api.groups_remove_member(group, account, surface="dashboard")
+        await api.groups_remove_account(group, account, surface="dashboard")
         return {"success": True, "message": f"{account} removed from {group}",
                 "refresh": ["group-list", "gd-members", "acct-list", "indep-list"]}
 
@@ -1803,19 +1796,29 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
         # the only raw JSON left is the channel scope
         schema = await _schema_for(api, plugin)
         settings: Dict[str, Any] = {}
+        field_errors: Dict[str, str] = {}
         for s in schema or ():
             sname = getattr(s, "name", None)
             if not sname or sname not in payload:
                 continue
             raw_v = payload.get(sname)
-            if getattr(s, "type", "str") == "int":
-                settings[sname] = int(raw_v)
-            elif getattr(s, "type", "str") == "float":
-                settings[sname] = float(raw_v)
-            elif getattr(s, "type", "str") == "bool":
-                settings[sname] = bool(raw_v)
-            else:
-                settings[sname] = str(raw_v)
+            try:
+                if getattr(s, "type", "str") == "int":
+                    settings[sname] = int(raw_v)
+                elif getattr(s, "type", "str") == "float":
+                    settings[sname] = float(raw_v)
+                elif getattr(s, "type", "str") == "bool":
+                    settings[sname] = bool(raw_v)
+                else:
+                    settings[sname] = str(raw_v)
+            except (TypeError, ValueError):
+                # a malformed dynamic-field value is a FIELD error —
+                # killing the whole action with a raw UIError left the
+                # editor with no indication which value was bad
+                field_errors[sname] = (
+                    f"must be a valid {getattr(s, 'type', 'str')}")
+        if field_errors:
+            return {"success": False, "field_errors": field_errors}
         # channel scope: mode select + per-guild selections → the
         # reserved settings structure (validated by plugin_scopes)
         mode = str(payload.get("pe-scope-mode") or "all")

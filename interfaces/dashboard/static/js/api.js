@@ -12,12 +12,24 @@
 function api(path, opts={}) {
   const headers = {"Content-Type":"application/json", ...opts.headers};
   if (token()) headers["X-Dashboard-Token"] = token();
-  return fetch(path, {...opts, headers}).then(async r => {
+  // A hung request must never permanently disable its caller (withBusy
+  // leaves action buttons spinning forever on a stalled fetch) — abort
+  // and surface a clear message. Default 15s; callers may pass a larger
+  // {timeoutMs} for routes the SERVER itself grants a longer budget
+  // (the simulation run route gets 200s server-side — a 15s client
+  // abort reported healthy long runs as timed out, review finding #9).
+  const limit = opts.timeoutMs || (path === "/api/simulation/run" ? 210000 : 15000);
+  const ctrl = new AbortController();
+  const timer = setTimeout(()=>ctrl.abort(), limit);
+  return fetch(path, {...opts, signal: ctrl.signal, headers}).then(async r => {
     if (r.status===401) throw new Error("401 — set the dashboard token (Tools → Advanced)");
     let body; try { body = await r.json(); } catch { throw new Error(`HTTP ${r.status}`); }
     if (!body.ok) throw new Error(body.error || `HTTP ${r.status}`);
     return body.data;
-  });
+  }).catch(e => {
+    if (e && e.name === "AbortError") throw new Error("request timed out");
+    throw e;
+  }).finally(() => clearTimeout(timer));
 }
 function post(path, body={}) { return api(path, {method:"POST", body:JSON.stringify(body)}); }
 

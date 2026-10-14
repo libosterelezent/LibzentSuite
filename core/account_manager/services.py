@@ -189,6 +189,11 @@ class TaskAckRegistry:
         future = self.register(task_id)
         try:
             return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.CancelledError:
+            # the CALLER was cancelled (not a timeout): drop the entry or
+            # it lingers until a terminal event that may never come
+            self._futures.pop(task_id, None)
+            raise
         except asyncio.TimeoutError:
             self._futures.pop(task_id, None)
             cancel = getattr(self._scheduler, "cancel", None)
@@ -239,7 +244,7 @@ class MessageWaiterRegistry:
             try:
                 handler(event)
             except Exception:  # isolation: the waiter owns its failure
-                pass
+                LOG.debug("message waiter raised", exc_info=True)
 
     def add(self, account: str,
             handler: Callable[[MessageReceived], None]) -> Callable[[], None]:

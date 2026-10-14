@@ -113,6 +113,10 @@ class PluginLoader:
         duplicate setting key, invalid plugin name).
         """
         self._purge_stale_parents()
+        # snapshot the previous generation: a FAILED re-scan restores it
+        # in the except handler (wiping records while ``_discovered``
+        # stayed True bricked every runtime lookup until restart)
+        self._discover_snapshot = dict(self._records)
         self._records = {}
         if not self._dir.is_dir():
             raise PluginError(f"plugin directory not found: {self._dir}")
@@ -167,10 +171,12 @@ class PluginLoader:
         except BaseException:
             # FAILED discover: purge THIS generation's synthetic modules
             # too (retries would otherwise accumulate a dead parent per
-            # attempt) and drop the partial records — the loader stays
-            # retry-able with a clean slate
+            # attempt) and restore the PREVIOUS records — wiping them
+            # while ``_discovered`` stays True left a bricked loader
+            # (every runtime lookup raised "unknown plugin") until
+            # process restart.
             self._purge_stale_parents()
-            self._records = {}
+            self._records = getattr(self, "_discover_snapshot", {}) or {}
             raise
         self._discovered = True
         LOG.info(

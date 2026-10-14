@@ -396,6 +396,10 @@ class AccountManager:
         # by default via the typing_probability account setting = 0.0)
         import random as _random
         self._typing_rng = _random.Random()
+        # sleep seam: tests substitute an instant recorder so backoff
+        # timing assertions are deterministic (no wall-clock polling —
+        # the old shape was the suite's known ~1-in-8 flake)
+        self._sleep = asyncio.sleep
 
         self._accounts: Dict[str, Account] = {}
         #: accounts WE attached to the plugin manager (and have not yet
@@ -718,9 +722,18 @@ class AccountManager:
         rt.client = None
         if stale_client is not None:  # FAILED account never stopped: no leak
             try:
-                await stale_client.disconnect()
+                # bounded like stop()'s 10s disconnect: a hung library
+                # close used to park the whole removal cascade forever
+                # (registry already popped — every retry hit "unknown")
+                await asyncio.wait_for(stale_client.disconnect(), 10.0)
             except Exception:
                 self._logger.warning("stale client close failed for %s", name)
+                cancel = getattr(stale_client, "_cancel_run_task", None)
+                if cancel is not None:
+                    try:
+                        await cancel()
+                    except Exception:
+                        pass
         # (deactivate already ran BEFORE the lane cleanup above — round-3
         # reorder; the pre-round-3 duplicate deactivate block that lived
         # here was a merge artifact from the isolation audit)
@@ -1179,7 +1192,7 @@ class AccountManager:
         self._logger.info("account %s running (user_id=%s)", name, rt.user_id)
         # plugins: re-attach with the CURRENT profile grants (assignments
         # take effect on the next start — ported semantics), then activate
-        await self._attach_plugins(name)
+        attach_activated = await self._attach_plugins(name)
         if rt.stop_requested:
             # PHASE-4 (S1-F1): stop landed during the attach await — the
             # NEW runtimes must not be activated on a stopped account.
@@ -1192,16 +1205,21 @@ class AccountManager:
             # plugins, services and client.
             self._log_superseded_start(name)
             return account.status_dict()
-        try:
-            outcome = self._plugin_manager.activate_account(
-                name, self._services_factory(name)
-            )
-            if inspect.iscoroutine(outcome):  # pinned sync; async tolerated
-                await outcome
-        except Exception:
-            self._logger.exception(
-                "plugin activation failed for %s (account keeps running)", name
-            )
+        if attach_activated:
+            # _attach_plugins already activated the fresh set (RUNNING
+            # account) — activating again would fire hooks twice
+            pass
+        else:
+            try:
+                outcome = self._plugin_manager.activate_account(
+                    name, self._services_factory(name)
+                )
+                if inspect.iscoroutine(outcome):  # pinned sync; async tolerated
+                    await outcome
+            except Exception:
+                self._logger.exception(
+                    "plugin activation failed for %s (account keeps running)", name
+                )
         if rt.stop_requested:
             # PHASE-4 (S1-F1): stop() raced the ACTIVATION await. Without
             # this, freshly activated plugins (their background loops!)
@@ -1556,13 +1574,17 @@ class AccountManager:
                 if account is None or account.runtime.generation != snap_gen:
                     overtaken.append(name)  # stop/estop/remove won the race
                     return
-                # admission pacing (no per-account sleep): wait until the
-                # next slot, then push it one stagger into the future
+                # admission pacing: RESERVE the slot synchronously first,
+                # then sleep to it. Computing the deadline after an await
+                # collapsed every sleeper onto the same slot (they all
+                # woke at once and proceeded together), defeating the
+                # stagger — and exhausting the governor's start bucket on
+                # mid-size fleets.
                 now = time.monotonic()
-                if now < admission[0]:
-                    await asyncio.sleep(admission[0] - now)
-                admission[0] = max(admission[0], time.monotonic()) + (
-                    stagger if stagger > 0 else 0.0)
+                slot = max(admission[0], now)
+                admission[0] = slot + (stagger if stagger > 0 else 0.0)
+                if slot > now:
+                    await asyncio.sleep(slot - now)
                 account = self._accounts.get(name)
                 if account is None or account.runtime.generation != snap_gen:
                     overtaken.append(name)  # a stop landed during the wait
@@ -1803,7 +1825,7 @@ class AccountManager:
             self._logger.warning(
                 "account %s reconnect attempt %d in %.2fs", name, attempt + 1, delay
             )
-            await asyncio.sleep(delay)
+            await self._sleep(delay)
             if rt.stop_requested or rt.generation != gen:
                 return
             try:
@@ -1823,6 +1845,26 @@ class AccountManager:
                 if rt.stop_requested or rt.generation != gen:
                     # stop() won the race: its teardown already ran. Never
                     # resurrect status/publish past a completed stop.
+                    return
+                # F1.1: a FATAL gateway close (4004/4010-4014) or an
+                # auth-shaped login failure is permanent — retrying a
+                # revoked token forever burned a login() per backoff and
+                # left the account in permanent RECONNECTING
+                probe = rt.client
+                if (getattr(probe, "fatal_close", False)
+                        or _looks_like_auth_error(exc)):
+                    rt.status = AccountStatus.INVALID_CREDENTIAL
+                    rt.last_error = f"{type(exc).__name__}: {exc}"
+                    if rt.client is not None:
+                        # _connect_client assigns rt.client BEFORE connect()
+                        # raises — the failed client (and its run task) must
+                        # not linger on an account nobody supervises
+                        self._discard_half_built_client(name, rt)
+                    self._lifecycle_commit(
+                        "reconnect", name, ok=False, invalid_credential=True)
+                    self._logger.error(
+                        "reconnect for %s abandoned: credential rejected",
+                        name)
                     return
                 attempt += 1
                 if not rt.stop_requested:
@@ -2072,6 +2114,12 @@ class AccountManager:
             # (bad token?)" style error is NOT a credential failure, and
             # STOPPED must never regress to FAILED/INVALID_CREDENTIAL.
             return
+        if rt.client is not None:
+            # the gateway CONNECTED but a later step raised (cache ingest,
+            # activation, ...) — a live websocket on a FAILED account is a
+            # zombie session nobody owns until stop()/remove() happens
+            # to be called
+            self._discard_half_built_client(name, rt)
         if isinstance(exc, CredentialsError):
             rt.status = AccountStatus.MISSING_CREDENTIAL
         elif _looks_like_auth_error(exc):
@@ -2372,8 +2420,13 @@ class AccountManager:
             del self._services[key]
 
     # --------------------------------------------------------------- plugins
-    async def _attach_plugins(self, name: str) -> None:
+    async def _attach_plugins(self, name: str) -> bool:
         """attach_account with the account's CURRENT plugin assignments.
+
+        Returns True when the plugins were (re-)activated here (a
+        RUNNING account follows assignments immediately) — callers that
+        would otherwise activate right after (``start``) must skip
+        their own activation then, or hooks fire twice.
 
         The allowed set is ALWAYS concrete now (a direct read of the
         in-memory assignment mirror — zero assignments attach zero
@@ -2386,6 +2439,7 @@ class AccountManager:
         ``_refresh_plugins``); a failed attach leaves it unmarked so the
         last known plugin view is kept rather than cleared.
         """
+        activated = False
         try:
             outcome = self._plugin_manager.attach_account(
                 name, self._allowed_plugins(name)
@@ -2394,8 +2448,45 @@ class AccountManager:
                 await outcome
         except Exception:
             self._logger.exception("plugin attach failed for %s", name)
-            return
+            return False
         self._plugin_attached.add(name)
+        # A RUNNING account's plugin set must follow the assignment
+        # IMMEDIATELY (documented contract) — attach_account rebuilds
+        # runtimes as inactive and deactivates the old set, so without
+        # re-activation every mid-run assign/unassign/set silently
+        # stopped ALL of the account's plugins until the next start.
+        rt = self._accounts.get(name)
+        if (rt is not None
+                and rt.runtime.status == AccountStatus.RUNNING
+                and not rt.runtime.stop_requested):
+            try:
+                self._drop_services(name)
+                outcome = self._plugin_manager.activate_account(
+                    name, self._services_factory(name))
+                if inspect.iscoroutine(outcome):
+                    await outcome
+                activated = True
+            except Exception:
+                self._logger.exception(
+                    "plugin re-activation after attach failed for %s "
+                    "(plugins stay inactive until the next start)", name)
+            if rt.runtime.stop_requested:
+                # a stop() completed DURING the activation await (review
+                # finding #3): its teardown ran before these hooks fired —
+                # deactivate again so no active plugin outlives the stop
+                self._logger.warning(
+                    "stop landed during attach-activation of %s; "
+                    "deactivating its plugins", name)
+                try:
+                    outcome = self._plugin_manager.deactivate_account(name)
+                    if inspect.iscoroutine(outcome):
+                        await outcome
+                    activated = False
+                except Exception:
+                    self._logger.exception(
+                        "post-stop deactivation failed for %s (plugins "
+                        "may linger active until the next stop)", name)
+        return activated
 
     def _allowed_plugins(self, name: str) -> set:
         """The account's DIRECT plugin assignments — NEVER None.

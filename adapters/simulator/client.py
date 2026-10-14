@@ -285,8 +285,20 @@ class SimClient:
         _publish_raw_reaction self-filter (adapters/discord/client.py)."""
         if self.on_reaction is None or user_id == self.user_id:
             return
+        if not self.can_see(channel_id):
+            return  # a DM conversation between other accounts
         self.on_reaction(
             kind, message_id, channel_id, guild_id, user_id, emoji, raw)
+
+    def can_see(self, channel_id: int) -> bool:
+        """Gateway-truth visibility: a client only ever sees channels it
+        participates in — foreign DM pairs are invisible live, so the
+        sim must not leak them either (reactions/edits/deletes used to
+        fan out to EVERY subscriber)."""
+        if channel_id not in self._world.dm_channels:
+            return True   # guild channels are public
+        pairs = self._world.dm_pairs_of(channel_id)
+        return not pairs or self.user_id in pairs[0]
 
     # ------------------------------------------------- capability actions
     async def add_reaction(self, channel_id: int, message_id: int, emoji: str) -> Any:

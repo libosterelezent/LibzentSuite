@@ -73,9 +73,14 @@ class AccessManager:
         raw = await self._kv.get(account_key(name))
         if not isinstance(raw, dict):
             return dict(DEFAULT_ACCOUNT_ROW)
-        # merge over defaults so older rows gain new keys
+        # merge over defaults so older rows gain new keys. ``user_id``
+        # is preserved explicitly: it lives outside DEFAULT_ACCOUNT_ROW,
+        # and losing it silently revoked the admin-account grant on
+        # every subsequent flag/perms/prefix write (fail-closed, but
+        # wrong).
         row = dict(DEFAULT_ACCOUNT_ROW)
         row.update({k: v for k, v in raw.items() if k in row})
+        row["user_id"] = raw.get("user_id")
         return row
 
     async def _write(self, name: str, row: Dict[str, Any]) -> None:
@@ -288,7 +293,12 @@ class AccessManager:
     async def forget_account(self, name: str) -> None:
         """Removal cascade: delete the account's access row (admin flag,
         perms, prefix) so the Admin page doesn't show deleted accounts."""
-        await self._kv.delete(account_key(name))
+        # under the lock: an unlocked delete racing an in-flight locked
+        # mutation (parked on its kv await) let the mutation re-write
+        # the row AFTER the delete — resurrecting perms for a removed
+        # account
+        async with self._lock:
+            await self._kv.delete(account_key(name))
         self._prefix_cache.pop(name, None)
         self._log.info("access row cleared for removed account %s", name)
 

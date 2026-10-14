@@ -45,7 +45,7 @@ from .credential_service import CredentialService
 from .credentials import Credentials
 from .errors import RatePolicyError, UnsafePolicyError
 from .event_bus import EventBus
-from .logging_service import LogService, ServiceLogger, attach_stdlib_bridge, configure_stderr, detach_stdlib_bridge
+from .logging_service import LogService, ServiceLogger, attach_stdlib_bridge, claim_stderr_pipeline, detach_stdlib_bridge, release_stderr_pipeline
 from .plugin_manager import PluginManager
 from .plugin_state import PluginStateService
 from .profile_manager import ProfileManager
@@ -184,6 +184,7 @@ class Framework:
                  plugin_state: Any = None,
                  sync_groups: Any = None,
                  cooldown_resync_stop: Optional[Callable[[], Any]] = None,
+                 claims_stderr: bool = False,
                  ) -> None:
         self.api = api
         self.bus = bus
@@ -205,6 +206,9 @@ class Framework:
         self.sync_groups = sync_groups
         #: stops the periodic cooldown-resync task (set by _assemble)
         self._cooldown_resync_stop = cooldown_resync_stop
+        # this framework holds one CLAIM on the process-global stderr
+        # pipeline — shutdown releases it (the last release stops)
+        self._claims_stderr = claims_stderr
         self._shut_down = False
 
     async def shutdown(self) -> None:
@@ -226,7 +230,7 @@ class Framework:
         if self._shut_down:
             return
         self._shut_down = True
-        steps = (
+        steps = [
             ("scheduler", lambda: self.scheduler.stop(drain=True)),
             ("cooldown resync", self._stop_cooldown_resync),
             ("bus drain", self.bus.drain),
@@ -243,7 +247,13 @@ class Framework:
             ("stdlib bridge", self._detach_bridge),
             ("plugin manager", self._close_plugins),
             ("database", self.database.close),
-        )
+        ]
+        if self._claims_stderr:
+            # LAST: release this framework's claim on the process-global
+            # pipeline (the LAST release stops it) — placing it after the
+            # steps above keeps their final warnings on the console
+            steps.append(("stderr pipeline", release_stderr_pipeline))
+        steps = tuple(steps)
         interrupted: Optional[BaseException] = None
         for label, step in steps:
             try:
@@ -355,28 +365,35 @@ async def build(
     """
     import time as _time
 
-    if not quiet:
-        configure_stderr()
-    credentials = credentials or Credentials.from_file(env_file)
-    config = load_config(config_dir)
-
-    from database.db import Database
-
-    database = database if database is not None else Database(db_path)
-    await database.connect()  # open + pragmas + migrations, FIRST
-
-    # PARTIAL-BUILD CLEANUP: anything failing from here on must release what
-    # was already started (DB connection thread, log/audit drain workers,
-    # stdlib bridge, lanes) — otherwise a failed boot leaks
-    # them and a real aiosqlite connection can keep the process from exiting
+    # CLAIM (review pass-3 #1, wiring fixed pass-4 #1/#2): every
+    # non-quiet build registers as a USER of the process-global pipeline
+    # — creating it when idle, borrowing it when live; the listener
+    # stops only when the LAST live claim releases. The claim is HELD
+    # regardless of whether this build created the pipeline (the call's
+    # return value only reports creation — gating the release on it let
+    # a borrower increment the count and never release it), and the
+    # release is registered BEFORE any fallible step so an early boot
+    # failure cannot leak the claim.
     cleanups: list = []
+    if not quiet:
+        claim_stderr_pipeline()
+        cleanups.append(("stderr pipeline", release_stderr_pipeline))
+    stderr_claimed = not quiet
     try:
+        credentials = credentials or Credentials.from_file(env_file)
+        config = load_config(config_dir)
+
+        from database.db import Database
+
+        database = database if database is not None else Database(db_path)
+        await database.connect()  # open + pragmas + migrations, FIRST
         return await _assemble(
             cleanups, _time, credentials, config, database,
             plugin_dir=plugin_dir, client_factory=client_factory,
             simulation_runner=simulation_runner,
             credential_key_path=credential_key_path,
-            env_file=env_file, db_path=db_path)
+            env_file=env_file, db_path=db_path,
+            stderr_claimed=stderr_claimed)
     except BaseException:
         for label, undo in reversed(cleanups):
             try:
@@ -408,7 +425,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
                     client_factory: Optional[Callable[[str, str], Any]],
                     simulation_runner: Any,
                     credential_key_path: Optional[Path] = None,
-                    env_file: str = ".env",
+                    env_file: str = ".env", stderr_claimed: bool = False,
                     db_path: str = "state/slaughter.db") -> Framework:
     """Wire every manager over an already-connected database."""
 
@@ -695,4 +712,5 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         credential_service=credential_service, cooldowns=cooldowns,
         plugin_state=plugin_state, sync_groups=sync_groups,
         cooldown_resync_stop=_stop_cooldown_resync_task,
+        claims_stderr=stderr_claimed,
     )

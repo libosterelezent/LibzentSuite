@@ -194,6 +194,13 @@ class AccountsRepository(BaseRepository):
                     await conn.execute(
                         "DELETE FROM kv WHERE key LIKE ? ESCAPE '\\'",
                         (pattern,))
+                # access rows (admin flag / perms / prefix / user_id) live
+                # under 'access:account:<name>' — an EXACT-match delete,
+                # never a prefix sweep: 'access:account:bob%' would also
+                # wipe bob2/bobby's authorization rows (review finding #5)
+                await conn.execute(
+                    "DELETE FROM kv WHERE key = ?",
+                    (f"access:account:{name}",))
         return existed
 
     # -------------------------------------------------------------- profiles

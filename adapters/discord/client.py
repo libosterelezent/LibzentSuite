@@ -1142,6 +1142,11 @@ class RealDiscordClient:
                 pass
         await self._cancel_run_task()
         self._release_identify_slot()
+        # allow a later connect() on the same instance — the client
+        # object was single-use otherwise ('disconnect() before starting
+        # another session' on a fresh connect after a clean disconnect)
+        self._client = None
+        self._discord = None
 
     # ------------------------------------------------------------- messaging
     def _require_client(self) -> Any:

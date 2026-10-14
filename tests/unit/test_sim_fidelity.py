@@ -82,6 +82,30 @@ class DmPairScoping(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(alpha_seen), 2)
         self.assertEqual(len(beta_seen), 1)
 
+    async def test_foreign_account_does_not_see_dm_reactions_edits_deletes(self):
+        # the message-path leak was fixed earlier; reactions/edits/deletes
+        # used to fan out to EVERY subscriber — impossible live (a foreign
+        # account's gateway never sees the pair's channel)
+        world = _world(responder_id=SYNTHETIC_MUDAE_ID)
+        alpha = await _connected(world, SYNTHETIC_ALPHA_ID)
+        beta = await _connected(world, SYNTHETIC_BETA_ID)
+        beta_rx: list = []
+        alpha_rx: list = []
+        beta.on_reaction = lambda *a, **k: beta_rx.append(("reaction", a))
+        beta.on_message_edit = lambda dto: beta_rx.append(("edit", dto))
+        beta.on_message_delete = lambda *a: beta_rx.append(("delete", a))
+        alpha.on_reaction = lambda *a, **k: alpha_rx.append(("reaction", a))
+
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        msg = world.deliver(dm, SYNTHETIC_MUDAE_ID, "page", dm=True)
+        world.react(SYNTHETIC_MUDAE_ID, msg.id, "❤")  # reactor: pair member
+        # (alpha reacting would be self-filtered by the client)
+        world.edit_message(msg.id, "edited page")
+        world.delete_message(msg.id)
+
+        self.assertEqual(beta_rx, [], "foreign account saw DM traffic")
+        self.assertEqual(len(alpha_rx), 1)  # pair member sees the reaction
+
     async def test_dm_pair_other_member_still_receives(self):
         world = _world()
         alpha = await _connected(world, SYNTHETIC_ALPHA_ID)

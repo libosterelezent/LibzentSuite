@@ -472,3 +472,43 @@ class TestRound2Audit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StderrPipelineClaims(unittest.TestCase):
+    """Review pass-3 #1: the listener stops only when the LAST live
+    framework claim releases — an owner shutting down first must not
+    silence a framework built after it."""
+
+    def test_last_release_stops_first_does_not(self):
+        import logging
+        from core import logging_service as m
+        # snapshot + restore the process-global state (the pipeline AND
+        # the stdlib logger it touches — configure_stderr flips
+        # propagate, which the pipeline stop does not restore)
+        users_before = m._STDERR_USERS
+        listener_before = m._STDERR_LISTENER
+        configured_before = m._STDERR_CONFIGURED
+        lg = logging.getLogger("slaughtermudae")
+        handlers_before = list(lg.handlers)
+        propagate_before = lg.propagate
+        try:
+            m.stop_stderr_pipeline()          # known idle floor
+            created = m.claim_stderr_pipeline()
+            self.assertTrue(created, "first claim creates the pipeline")
+            self.assertTrue(m.stderr_pipeline_active())
+            borrowed = m.claim_stderr_pipeline()
+            self.assertFalse(borrowed, "second claim borrows")
+            m.release_stderr_pipeline()       # OWNER (first) shuts down
+            self.assertTrue(
+                m.stderr_pipeline_active(),
+                "the live borrower keeps the pipeline after the owner exits")
+            m.release_stderr_pipeline()       # last claim releases
+            self.assertFalse(m.stderr_pipeline_active())
+            m.release_stderr_pipeline()       # stray release is a no-op
+            self.assertFalse(m.stderr_pipeline_active())
+        finally:
+            m._STDERR_USERS = users_before
+            m._STDERR_LISTENER = listener_before
+            m._STDERR_CONFIGURED = configured_before
+            lg.handlers[:] = handlers_before
+            lg.propagate = propagate_before

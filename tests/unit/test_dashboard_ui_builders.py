@@ -68,8 +68,8 @@ def _setter_specs():
     return [
         (Layout, [("set_title", "T"), ("set_check", _action())]),
         (Page, [("set_title", "T"), ("set_description", "D"),
-                ("set_icon", "{icon}"), ("set_order", 2), ("set_check", _action())]),
-        (Tab, [("set_title", "T"), ("set_icon", "star")]),
+                ("set_icon", "M3 3h18v18H3z"), ("set_order", 2), ("set_check", _action())]),
+        (Tab, [("set_title", "T"), ("set_icon", "M12 2l3 7h7l-5.5 4.5")]),
         (Section, [("set_title", "T"), ("set_description", "D")]),
         (Card, [("set_title", "T")]),
         (Row, []),
@@ -159,10 +159,16 @@ class EmptyInitializationTests(unittest.TestCase):
         names = [cls().to_dict()["type"] for cls in ALL_COMPONENT_CLASSES]
         self.assertEqual(len(names), len(set(names)))
 
-    def test_kwargs_argument_is_accepted(self) -> None:
-        # The base contract accepts **kwargs; unknown ones are ignored.
-        Button(component_id="b1", future_flag=True)
-        Section(component_id="s1", anything="goes")
+    def test_kwargs_argument_is_rejected_with_hint(self) -> None:
+        # The constructor accepts title= (a real setter exists) and
+        # rejects unknown kwargs — silently swallowing them dropped
+        # titles and hid plugin-author typos (audit finding 1.1).
+        btn = Button(component_id="b1", title="Run")
+        self.assertEqual(btn.to_dict().get("title"), "Run")
+        with self.assertRaises(UIError):
+            Button(component_id="b1", future_flag=True)
+        with self.assertRaises(UIError):
+            Section(component_id="s1", anything="goes")
 
 
 # --------------------------------------------------- 2. generated ids
@@ -517,7 +523,7 @@ class DuplicateIdTests(unittest.TestCase):
         first = Button(component_id="one")
         second = Badge(component_id="two")
         section.add_components(first, second)
-        with self.assertRaises(DuplicateComponentIdError) as ctx:
+        with self.assertRaises(DuplicateComponentIdError) as _:
             second.set_id("one")
         self.assertEqual(second.get_id(), "two")  # unchanged
         self.assertIn("one", section._child_ids)
@@ -611,7 +617,7 @@ class SerializationTests(unittest.TestCase):
         return (
             Layout(component_id="root")
             .add_page(
-                Page(component_id="home").set_title("Home").set_icon("{i}").set_order(1)
+                Page(component_id="home").set_title("Home").set_icon("M3 3h18v18H3z").set_order(1)
                 .add_section(
                     Section(component_id="status").set_title("Status").set_description("d")
                     .add_component(Metric(component_id="m1").set_label("Accounts")
@@ -628,7 +634,7 @@ class SerializationTests(unittest.TestCase):
                     .add_component(Row(component_id="r1").add_component(
                         Column(component_id="c1").add_component(Text(component_id="cell"))))
                 )
-                .add_tab(Tab(component_id="tab1").set_title("Advanced").set_icon("*")
+                .add_tab(Tab(component_id="tab1").set_title("Advanced").set_icon("M6 6l12 12")
                          .add_section(Section(component_id="ts1")))
             )
             .add_page(
@@ -1418,6 +1424,7 @@ class TestListViewRecordsMode(unittest.TestCase):
 
     async def test_records_dispatch(self):
         import asyncio
+        from core.dashboard_ui import RowAction
         from core.dashboard_ui.registry import DashboardUIRegistry
         from core.dashboard_ui.context import ActionContext
         seen = []
@@ -1443,3 +1450,50 @@ class TestListViewRecordsMode(unittest.TestCase):
             self.assertEqual(seen, ["acct-1"])
 
         asyncio.run(go())
+
+
+# ---------------------------------------------- 15. view-action routing
+class ViewActionRoutingTests(unittest.TestCase):
+    """Review #11 + pass-2 #5: route by id; matched-row rejections
+    propagate; id-less payloads reach the preserved explicit action."""
+
+    def _table(self):
+        from core.dashboard_ui import RowAction
+        seen = []
+
+        def explicit(ctx, payload):
+            seen.append(payload)
+            return {"via": "explicit"}
+
+        tbl = (Table(component_id="rt1").set_columns(["A"])
+               .set_action(explicit)
+               .set_row_actions([
+                   RowAction("go", "Go",
+                             lambda row, ctx: {"via": "row", "row": row}),
+                   RowAction("no", "No",
+                             lambda row, ctx: (_ for _ in ()).throw(
+                                 UIError("cannot poke this user")))]))
+        return tbl, seen
+
+    def test_matched_row_rejection_propagates(self):
+        import asyncio
+        tbl, seen = self._table()
+        with self.assertRaises(UIError) as cm:
+            asyncio.run(tbl._action({}, {"action": "no", "row": "r1"}))
+        self.assertIn("cannot poke", str(cm.exception))
+        self.assertEqual(seen, [], "rejections must not reroute")
+
+    def test_matched_row_dispatches_and_unmatched_falls_back(self):
+        import asyncio
+        tbl, seen = self._table()
+        out = asyncio.run(tbl._action({}, {"action": "go", "row": "r1"}))
+        self.assertEqual(out, {"via": "row", "row": "r1"})
+        out = asyncio.run(tbl._action({}, {"action": "zzz", "row": "r1"}))
+        self.assertEqual(out, {"via": "explicit"})
+
+    def test_idless_payload_reaches_explicit_action(self):
+        import asyncio
+        tbl, seen = self._table()
+        out = asyncio.run(tbl._action({}, {"field": 1}))
+        self.assertEqual(out, {"via": "explicit"})
+        self.assertEqual(seen, [{"field": 1}])

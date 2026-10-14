@@ -221,9 +221,21 @@ class CooldownService:
         in-process truth is immediate; external edits are picked up by
         the periodic resync instead of a per-second DB scan.
         """
+        return self.active_counts_all().get(account, 0)
+
+    def active_counts_all(self) -> dict:
+        """One O(C) pass computing EVERY account's active count.
+
+        status() needs the count for all accounts per build; calling
+        active_count_for per account was O(N accounts x C rows) — a
+        500-account fleet with 10k rows stalled the loop ~300ms/s.
+        """
         now = self._now()
-        return sum(1 for r in self._active.values()
-                   if r["account"] == account and r["expires_at"] > now)
+        counts: dict = {}
+        for r in self._active.values():
+            if r["expires_at"] > now:
+                counts[r["account"]] = counts.get(r["account"], 0) + 1
+        return counts
 
     async def resync(self) -> int:
         """Rebuild the memory mirror from the repository (DB wins per key).

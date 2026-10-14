@@ -10,6 +10,8 @@ core.dashboard_ui.builders), not from here.
 """
 from __future__ import annotations
 
+import inspect
+
 from ._base import (
     _ComponentParent,
     _InputField,
@@ -527,25 +529,109 @@ class _Selectable:
         self._bulk_actions = checked
         if checked:
             self._selectable = True
-            if getattr(self, "_action", None) is None:
-                self.set_action(self._dispatch_view_action)
+            if not self._action_is_view_dispatcher():
+                prev = getattr(self, "_action", None)
+                if prev is not None:
+                    self._explicit_action = prev
+                    self._explicit_require_account = getattr(
+                        self, "_action_require_account", False)
+                self.set_action(
+                    self._dispatch_view_action,
+                    require_account=bool(getattr(
+                        self, "_explicit_require_account", False)))
         return self
 
-    async def _dispatch_view_action(self, context, payload):
+    def _prepare_dispatch(self, resolver, plugin_name, account):
+        """Per-dispatch dispatcher with the preserved explicit action
+        rebound to the LIVE plugin runtime.
+
+        The registry rebinds only the REGISTERED action; the explicit
+        action nested inside this component-internal dispatcher would
+        otherwise stay bound to the discarded boot instance (review
+        pass-2 #4). Returns None when there is nothing nested to rebind
+        (dispatch then runs exactly as registered)."""
+        explicit = getattr(self, "_explicit_action", None)
+        rebound = self._rebind_nested(explicit, resolver, plugin_name,
+                                      account)
+        if rebound is None:
+            return None
+
+        async def dispatcher(context, payload):
+            return await self._dispatch_view_action(context, payload,
+                                                    rebound)
+        return dispatcher
+
+    @staticmethod
+    def _rebind_nested(cb, resolver, plugin_name, account):
+        """Mirror the registry's bound-method rebinding for a nested
+        callback. Plain functions, closures and collaborator-bound
+        methods run exactly as registered (documented contract)."""
+        if cb is None or not inspect.ismethod(cb):
+            return None
+        bound_on = cb.__self__
+        if not hasattr(bound_on, "initialize_dashboard_ui"):
+            return None   # not a plugin-instance method
+        try:
+            live = resolver(plugin_name, account)
+        except Exception:
+            return None
+        if live is None or not isinstance(bound_on, type(live)):
+            return None
+        target = getattr(live, cb.__name__, None)
+        return target if callable(target) else None
+
+    def _action_is_view_dispatcher(self) -> bool:
+        """True when the installed action is this component's internal
+        row/bulk router (never treat it as an author's explicit action)."""
+        action = getattr(self, "_action", None)
+        return action is not None and getattr(
+            action, "__func__", None
+        ) is getattr(type(self), "_dispatch_view_action", None)
+
+    async def _dispatch_view_action(self, context, payload,
+                                    _explicit="unset"):
+        """Route one action payload: bulk → row → preserved explicit.
+
+        Routing is decided by action id BEFORE any callback runs: a
+        MATCHED row callback's UIError is its own rejection and must
+        propagate — catching it used to reroute the rejection into the
+        explicit action (review pass-2 #5). Id-less payloads (the
+        component's own action button submits no id) belong to the
+        preserved explicit action when one exists.
+        """
+        if _explicit == "unset":
+            _explicit = getattr(self, "_explicit_action", None)
         payload = payload or {}
         action_id = payload.get("action")
         rows = payload.get("rows")
         if not isinstance(action_id, str) or not action_id:
+            if callable(_explicit):
+                result = _explicit(context, payload)
+                if hasattr(result, "__await__"):
+                    result = await result
+                return result
             raise UIError("view action dispatch needs an 'action' id")
         if action_id == "__selection__":
             # selection changed client-side — nothing to do server-side
             return {"success": True}
-        for entry in getattr(self, "_bulk_actions", []):
+        for entry in getattr(self, "_bulk_actions", None) or []:
             if entry.id == action_id:
                 result = entry.action(list(rows or []), context)
                 if hasattr(result, "__await__"):
                     result = await result
                 return result
+        if any(entry.id == action_id
+               for entry in getattr(self, "_row_actions", None) or []):
+            # matched row id — its exceptions (validation rejections
+            # included) propagate unchanged
+            return await self._dispatch_row_action(context, payload)
+        if callable(_explicit):
+            result = _explicit(context, payload)
+            if hasattr(result, "__await__"):
+                result = await result
+            return result
+        # no route matched — the row dispatcher raises the precise
+        # unknown-action error
         return await self._dispatch_row_action(context, payload)
 
 
@@ -622,8 +708,22 @@ class ListView(_Selectable, _Interactive):
             seen.add(entry.id)
             checked.append(entry)
         self._row_actions = checked
-        if checked and getattr(self, "_action", None) is None:
-            self.set_action(self._dispatch_view_action)
+        if checked and not self._action_is_view_dispatcher():
+            # the row/bulk router OWNS the dispatch channel whenever row
+            # actions exist — even over an author's explicit action (that
+            # action is preserved as the dispatcher's fallback, review
+            # finding #11: with the old guard, set_action().set_row_actions()
+            # left row buttons submitting {action, row} into the author's
+            # callback)
+            prev = getattr(self, "_action", None)
+            if prev is not None:
+                self._explicit_action = prev
+                self._explicit_require_account = getattr(
+                    self, "_action_require_account", False)
+            self.set_action(
+                self._dispatch_view_action,
+                require_account=bool(getattr(
+                    self, "_explicit_require_account", False)))
         return self
 
     async def _dispatch_row_action(self, context, payload):
@@ -734,11 +834,22 @@ class Table(_Selectable, _Interactive):
             seen.add(entry.id)
             checked.append(entry)
         self._row_actions = checked
-        if checked:
-            # row buttons dispatch through the table's own action channel
-            # with {"action": <id>, "row": <key>}; the dispatcher routes
-            # to the right RowAction callable below.
-            self.set_action(self._dispatch_row_action)
+        if checked and not self._action_is_view_dispatcher():
+            # the row/bulk router OWNS the dispatch channel whenever row
+            # actions exist — even over an author's explicit action (that
+            # action is preserved as the dispatcher's fallback, review
+            # finding #11: with the old guard, set_action().set_row_actions()
+            # left row buttons submitting {action, row} into the author's
+            # callback)
+            prev = getattr(self, "_action", None)
+            if prev is not None:
+                self._explicit_action = prev
+                self._explicit_require_account = getattr(
+                    self, "_action_require_account", False)
+            self.set_action(
+                self._dispatch_view_action,
+                require_account=bool(getattr(
+                    self, "_explicit_require_account", False)))
         return self
 
     async def _dispatch_row_action(self, context, payload):
@@ -1100,8 +1211,22 @@ class TileView(_Selectable, _Interactive):
             seen.add(entry.id)
             checked.append(entry)
         self._row_actions = checked
-        if checked and getattr(self, "_action", None) is None:
-            self.set_action(self._dispatch_view_action)
+        if checked and not self._action_is_view_dispatcher():
+            # the row/bulk router OWNS the dispatch channel whenever row
+            # actions exist — even over an author's explicit action (that
+            # action is preserved as the dispatcher's fallback, review
+            # finding #11: with the old guard, set_action().set_row_actions()
+            # left row buttons submitting {action, row} into the author's
+            # callback)
+            prev = getattr(self, "_action", None)
+            if prev is not None:
+                self._explicit_action = prev
+                self._explicit_require_account = getattr(
+                    self, "_action_require_account", False)
+            self.set_action(
+                self._dispatch_view_action,
+                require_account=bool(getattr(
+                    self, "_explicit_require_account", False)))
         return self
 
     async def _dispatch_row_action(self, context, payload):
@@ -1404,8 +1529,14 @@ class Tab(UIContainer):
         self._icon: str | None = None
 
     def set_icon(self, icon: str) -> "Tab":
+        """Set the sidebar icon (SVG path data, narrow charset)."""
         self._check_frozen("set the icon")
-        self._icon = _require_str(icon, "icon")
+        icon = _require_str(icon, "icon")
+        if not _ComponentParent._ICON_RE.match(icon):
+            raise UIError(
+                "icon must be SVG path data (letters MZLHVCSQTA, digits, "
+                "spaces, commas, dots, + and -)")
+        self._icon = icon
         return self
 
     def add_section(self, section) -> "Tab":
@@ -1479,8 +1610,14 @@ class Page(UIContainer):
         return self
 
     def set_icon(self, icon: str) -> "Page":
+        """Set the sidebar icon (SVG path data, narrow charset)."""
         self._check_frozen("set the icon")
-        self._icon = _require_str(icon, "icon")
+        icon = _require_str(icon, "icon")
+        if not _ComponentParent._ICON_RE.match(icon):
+            raise UIError(
+                "icon must be SVG path data (letters MZLHVCSQTA, digits, "
+                "spaces, commas, dots, + and -)")
+        self._icon = icon
         return self
 
     def set_account_scope(self, scoped: bool = True) -> "Page":
