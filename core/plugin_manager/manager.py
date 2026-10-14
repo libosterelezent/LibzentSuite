@@ -562,16 +562,26 @@ class PluginManager:
             self._services[account] = factory
             epoch = self._activation_epoch.get(account, 0)
             fenced = False
-            for runtime in runtimes.values():
+            # SNAPSHOT + identity recheck: a concurrent reload (or detach)
+            # pops/replaces dict entries while hooks are parked —
+            # iterating the live dict raised, and activating a detached
+            # runtime would resurrect an invisible orphan
+            for runtime in list(runtimes.values()):
+                if (self._accounts.get(account, {}).get(runtime.name)
+                        is not runtime):
+                    continue   # replaced or removed while we were parked
                 if not runtime.enabled:
                     continue
                 await self._activate_one(account, runtime)
                 if self._activation_epoch.get(account, 0) != epoch:
                     # FENCED: a teardown proceeded past this activation's
                     # settle timeout while its hook was parked — undo the
-                    # commit so the account stays down
+                    # commit so the account stays down, and STOP: the
+                    # remaining runtimes must not run their hooks on a
+                    # down account just to be torn down after
                     await self._teardown_runtime(account, runtime)
                     fenced = True
+                    break
             # UI lifecycle: offer the toolset to plugins that declare a UI
             # (after on_load/on_enable — actions may reflect plugin state)
             # — never for a fenced activation (the account is gone/down)
@@ -582,29 +592,38 @@ class PluginManager:
         self._logger.info("activated plugins on %s", account)
 
     async def _await_activation_settled(self, account: str,
-                                        timeout: float = 5.0) -> None:
+                                        timeout: float = 5.0, *,
+                                        fence: bool = False) -> None:
         """Bounded wait for any in-flight activation on ``account``.
 
         Deactivation, removal and reload call this BEFORE touching the
         account's runtimes: an activation parked in on_load/on_enable
         would otherwise resume AFTER their teardown pass and leave an
-        active, hook-fired runtime behind (review pass-2 #1)."""
+        active, hook-fired runtime behind (review pass-2 #1).
+
+        ``fence=True`` (deactivation/removal ONLY — the callers that
+        actually tear the account down) arms the epoch undo on timeout.
+        Reload and re-activation wait but never fence: their timing out
+        must not unload plugins on an account that is still RUNNING
+        (review pass-4 #4)."""
         ev = self._activation_events.get(account)
         if ev is None or ev.is_set():
             return
         try:
             await asyncio.wait_for(ev.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            # FENCE the straggler: teardown proceeds now, and the epoch
-            # bump makes the still-running activation abort/undo its
-            # remaining commits when its hook finally returns — a hook
-            # cannot be cancelled (it runs in the caller's task), but it
-            # must not resurrect state after teardown
-            self._activation_epoch[account] = \
-                self._activation_epoch.get(account, 0) + 1
+            if fence:
+                # teardown proceeds now; the epoch bump makes the
+                # still-running activation abort/undo its remaining
+                # commits when its hook finally returns — a hook cannot
+                # be cancelled (it runs in the caller's task), but it
+                # must not resurrect state after teardown
+                self._activation_epoch[account] = \
+                    self._activation_epoch.get(account, 0) + 1
             self._logger.warning(
-                "activation of %s did not settle within %.1fs; proceeding "
-                "(the late activation will be fenced)", account, timeout)
+                "activation of %s did not settle within %.1fs; proceeding%s",
+                account, timeout,
+                " (the late activation will be fenced)" if fence else "")
 
     def init_boot_dashboard_uis(self) -> int:
         """Register plugin dashboard UIs at DISCOVERY time (no account).
@@ -888,7 +907,7 @@ class PluginManager:
         stopped account).
         """
         await self._await_activation_settled(
-            account, timeout=self._activation_settle_timeout_s)
+            account, timeout=self._activation_settle_timeout_s, fence=True)
         runtimes = self._accounts.get(account)
         if runtimes is None:
             return

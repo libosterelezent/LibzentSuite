@@ -305,3 +305,95 @@ class TestSummaryRoundThree(unittest.IsolatedAsyncioTestCase):
             new_rt.settings,
             "reload resolves settings at restore (attach contract) — "
             "not only for re-activated runtimes")
+
+
+class TestPassFourFenceSemantics(unittest.IsolatedAsyncioTestCase):
+    """Review pass-4 #3/#4: the fence arms only for real teardown, and a
+    fenced activation stops starting the remaining plugins."""
+
+    def _two_runtime_mgr(self):
+        mgr = make_manager()
+        mgr.discover()
+        return mgr
+
+    async def test_fenced_activation_does_not_start_remaining(self):
+        import asyncio
+        from core.plugin_manager.manager import PluginRuntime
+        mgr = self._two_runtime_mgr()
+        mgr._activation_settle_timeout_s = 0.05
+        await mgr.attach_account("alpha", allowed=set())
+        hooked = []
+
+        class FakeInst:
+            async def on_load(self, *a): hooked.append("load2")
+            async def on_enable(self, *a): hooked.append("enable2")
+
+        # the fake plugin is unknown to the loader — give it an empty
+        # schema so _activate_one passes settings resolution (it disables
+        # unknown plugins BEFORE running any hook otherwise)
+        orig_schema = mgr._schema_for
+        mgr._schema_for = \
+            lambda n: () if n == "fake2" else orig_schema(n)
+        runtimes = mgr._accounts.setdefault("alpha", {})
+        runtimes["probe"] = PluginRuntime(name="probe", instance=None,
+                                          enabled=False)  # skip via disabled
+        runtimes["fake2"] = PluginRuntime(name="fake2", instance=FakeInst(),
+                                          enabled=True)
+
+        parked = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_enable(*a):
+            parked.set()
+            await release.wait()
+
+        # park INSIDE the first enabled runtime (fake2) by ordering:
+        # dict order = probe(disabled, skipped), fake2 first enabled
+        runtimes["fake2"].instance.on_enable = slow_enable
+        activating = asyncio.create_task(
+            mgr.activate_account("alpha", FakeServices()))
+        await parked.wait()
+        await mgr.deactivate_account("alpha")   # timeout → fence
+        release.set()
+        await activating
+        self.assertEqual(hooked, ["load2"],
+                         "no further hooks after the fence (only the "
+                         "parked one ran on_load)")
+
+    async def test_reload_timeout_does_not_fence_running_account(self):
+        import asyncio
+        from core.plugin_manager.manager import PluginRuntime
+        mgr = self._two_runtime_mgr()
+        mgr._activation_settle_timeout_s = 0.05
+        await mgr.attach_account("alpha", allowed=set())
+        orig_schema = mgr._schema_for
+        mgr._schema_for = \
+            lambda n: () if n == "slowplug" else orig_schema(n)
+        runtimes = mgr._accounts.setdefault("alpha", {})
+        probe_rt = PluginRuntime(name="probe", instance=None, enabled=False)
+        runtimes["probe"] = probe_rt
+
+        parked = asyncio.Event()
+        release = asyncio.Event()
+
+        class SlowInst:
+            async def on_load(self, *a): pass
+            async def on_enable(self, *a):
+                parked.set()
+                await release.wait()
+
+        slow_rt = PluginRuntime(name="slowplug", instance=SlowInst(),
+                                enabled=True)
+        runtimes["slowplug"] = slow_rt
+
+        activating = asyncio.create_task(
+            mgr.activate_account("alpha", FakeServices()))
+        await parked.wait()                     # slowplug mid-on_enable
+        # reload probe while the activation is unsettled — must NOT fence
+        out = await mgr.reload_plugin("probe")
+        release.set()
+        await activating
+        self.assertEqual(out["restored_accounts"], 1)
+        self.assertTrue(slow_rt.active,
+                        "a reload timing out must not unload plugins on a "
+                        "still-running account (fence is teardown-only)")

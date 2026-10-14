@@ -365,29 +365,28 @@ async def build(
     """
     import time as _time
 
-    if not quiet:
-        # CLAIM (review pass-3 #1): every non-quiet build registers as a
-        # USER of the process-global pipeline — creating it when idle,
-        # borrowing it when live. The listener stops only when the LAST
-        # live claim releases (an exclusive owner stopping on its own
-        # shutdown silenced frameworks built after it).
-        stderr_claimed = claim_stderr_pipeline()
-    else:
-        stderr_claimed = False
-    credentials = credentials or Credentials.from_file(env_file)
-    config = load_config(config_dir)
-
-    from database.db import Database
-
-    database = database if database is not None else Database(db_path)
-    await database.connect()  # open + pragmas + migrations, FIRST
-
-    # PARTIAL-BUILD CLEANUP: anything failing from here on must release what
-    # was already started (DB connection thread, log/audit drain workers,
-    # stdlib bridge, lanes) — otherwise a failed boot leaks
-    # them and a real aiosqlite connection can keep the process from exiting
+    # CLAIM (review pass-3 #1, wiring fixed pass-4 #1/#2): every
+    # non-quiet build registers as a USER of the process-global pipeline
+    # — creating it when idle, borrowing it when live; the listener
+    # stops only when the LAST live claim releases. The claim is HELD
+    # regardless of whether this build created the pipeline (the call's
+    # return value only reports creation — gating the release on it let
+    # a borrower increment the count and never release it), and the
+    # release is registered BEFORE any fallible step so an early boot
+    # failure cannot leak the claim.
     cleanups: list = []
+    if not quiet:
+        claim_stderr_pipeline()
+        cleanups.append(("stderr pipeline", release_stderr_pipeline))
+    stderr_claimed = not quiet
     try:
+        credentials = credentials or Credentials.from_file(env_file)
+        config = load_config(config_dir)
+
+        from database.db import Database
+
+        database = database if database is not None else Database(db_path)
+        await database.connect()  # open + pragmas + migrations, FIRST
         return await _assemble(
             cleanups, _time, credentials, config, database,
             plugin_dir=plugin_dir, client_factory=client_factory,
@@ -461,12 +460,6 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     # only enqueues, so it never blocks on SQLite
     await logs.start_persistence(database.logs)
     cleanups.append(("log persistence", logs.stop_persistence))
-    # failed builds never reach Framework.shutdown's step list — without
-    # this the process-global stderr listener survives a half-built
-    # framework (review finding #10). The rollback RELEASES this build's
-    # claim; the listener stops only when no live claim remains.
-    if stderr_claimed:
-        cleanups.append(("stderr pipeline", release_stderr_pipeline))
     attach_stdlib_bridge(logs)  # plugin/stdlib logger records -> structured page
     cleanups.append(("stdlib bridge", detach_stdlib_bridge))
     bus = EventBus()
