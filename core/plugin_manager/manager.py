@@ -51,6 +51,10 @@ from .commands import COMMAND_HUB, MAX_REPLY_CHARS, FRAMEWORK_PLUGIN
 from .commands import RegisteredCommand
 from .loader import PluginLoader
 
+#: "no factory provided" for _teardown_runtime (None is a VALID factory
+#: answer — deactivate passes its already-popped factory explicitly)
+_UNSET_FACTORY = object()
+
 
 @dataclass
 class PluginRuntime:
@@ -395,25 +399,12 @@ class PluginManager:
             rt.active = False   # blocks new dispatch admission NOW
             self._accounts[acct].pop(name, None)
             await self._quiesce_dispatch(acct)
-            factory = self._services.get(acct)
-            services = factory(name) if factory is not None else None
-            ctx = self._context(acct, rt, services)
-            rt.ctx = None
-            if was_active.get(acct) and rt.enabled and rt.instance is not None:
-                try:
-                    await self._hook(acct, rt, rt.instance.on_disable,
-                                     ctx, "on_disable")
-                except Exception:
-                    pass   # recorded; still unload
-            if was_loaded.get(acct) and rt.instance is not None:
-                try:
-                    await self._hook(acct, rt, rt.instance.on_unload,
-                                     ctx, "on_unload")
-                except Exception:
-                    pass
-                self._bus.publish_nowait(
-                    PluginUnloaded(account=acct, plugin=name))
-            rt.loaded = False
+            # ONE coordinated teardown path (exactly-once hooks even when
+            # the late activation's compensation arrives mid-unload)
+            await self._teardown_runtime(
+                acct, rt,
+                was_active=was_active.get(acct, False),
+                was_loaded=was_loaded.get(acct, False))
         # unregister the stale UI; the boot pass below re-registers it
         self._ui_registry.detach(name)
         self.init_boot_dashboard_uis()
@@ -929,23 +920,12 @@ class PluginManager:
         # AFTER the account manager's removal cascades ran — ghost rows a
         # re-created same-name account would silently inherit.
         await self._quiesce_dispatch(account)
-        for runtime in runtimes.values():
-            services = factory(runtime.name) if factory is not None else None
-            ctx = self._context(account, runtime, services)
-            runtime.ctx = None  # PHASE-4 (S7-L1): services unwired below
-            if runtime.active and runtime.enabled:
-                try:
-                    await self._hook(account, runtime, runtime.instance.on_disable, ctx, "on_disable")
-                except Exception:
-                    pass  # recorded; still unload
-            if runtime.loaded:
-                try:
-                    await self._hook(account, runtime, runtime.instance.on_unload, ctx, "on_unload")
-                except Exception:
-                    pass
-                runtime.loaded = False
-                self._bus.publish_nowait(PluginUnloaded(account=account, plugin=runtime.name))
-            runtime.active = False
+        # SNAPSHOT: a concurrent reload pops/replaces dict entries while
+        # hooks are parked (live-dict iteration raised) — and every
+        # runtime unloads through the ONE coordinated path
+        for runtime in list(runtimes.values()):
+            await self._teardown_runtime(
+                account, runtime, services_factory=factory)
         # UI lifecycle (merged contract): a stopped account ends its
         # RUNTIME association only — the plugin-wide UI DEFINITION always
         # survives deactivation (the page stays in the sidebar, usable
@@ -1175,32 +1155,74 @@ class PluginManager:
         return sorted(panels.values(), key=lambda p: p["id"])
 
     async def _teardown_runtime(self, account: str,
-                                runtime: PluginRuntime) -> None:
-        """Fire one runtime's unload hooks and reset its flags.
+                                runtime: PluginRuntime, *,
+                                was_active: Optional[bool] = None,
+                                was_loaded: Optional[bool] = None,
+                                services_factory: Any = _UNSET_FACTORY,
+                                ) -> None:
+        """Fire one runtime's unload hooks and reset its flags — EXACTLY
+        ONCE per runtime, coordinated.
 
-        Used by the reload path when the account went down mid-activation:
-        the account-level deactivate has already run, so nothing else
-        would ever clean up the half-activated replacement."""
-        factory = self._services.get(account)
-        services = factory(runtime.name) if factory is not None else None
-        ctx = self._context(account, runtime, services)
-        runtime.ctx = None
-        if runtime.active and runtime.enabled and runtime.instance is not None:
+        Every teardown path (deactivate, reload, the late-activation
+        compensation) routes through here. A per-runtime event serializes
+        concurrent attempts: a second teardown arriving while the first
+        is still awaiting an unload hook WAITS (bounded) and then leaves
+        — firing on_unload twice ran non-idempotent plugin cleanup
+        concurrently (review pass-6).
+
+        ``was_active``/``was_loaded`` default to the runtime's CURRENT
+        flags; callers that mutated flags earlier (reload blocks
+        dispatch by flipping ``active`` before draining) pass their
+        captured snapshot instead. ``services_factory`` defaults to the
+        account's live entry; deactivate passes the factory it already
+        popped (its hooks must still see the facades)."""
+        if was_active is None:
+            was_active = runtime.active
+        if was_loaded is None:
+            was_loaded = runtime.loaded
+        if services_factory is _UNSET_FACTORY:
+            services_factory = self._services.get(account)
+        ev = getattr(runtime, "_teardown_event", None)
+        if ev is None:
+            ev = runtime._teardown_event = asyncio.Event()
+        elif not ev.is_set():
+            # another path is already unloading THIS runtime (e.g. the
+            # reload's on_unload still awaiting while the late
+            # activation's compensation arrived) — let it finish and
+            # skip; the hooks run exactly once
             try:
-                await self._hook(account, runtime,
-                                 runtime.instance.on_disable, ctx, "on_disable")
-            except Exception:
-                pass   # recorded; still unload
-        if runtime.loaded and runtime.instance is not None:
-            try:
-                await self._hook(account, runtime,
-                                 runtime.instance.on_unload, ctx, "on_unload")
-            except Exception:
-                pass
-            self._bus.publish_nowait(
-                PluginUnloaded(account=account, plugin=runtime.name))
-        runtime.active = False
-        runtime.loaded = False
+                await asyncio.wait_for(ev.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                self._logger.warning(
+                    "teardown of %s on %s did not settle within 5s",
+                    runtime.name, account)
+            return
+        try:
+            services = (services_factory(runtime.name)
+                        if callable(services_factory) else None)
+            ctx = self._context(account, runtime, services)
+            runtime.ctx = None
+            if (was_active and runtime.enabled
+                    and runtime.instance is not None):
+                try:
+                    await self._hook(account, runtime,
+                                     runtime.instance.on_disable, ctx,
+                                     "on_disable")
+                except Exception:
+                    pass   # recorded; still unload
+            if was_loaded and runtime.instance is not None:
+                try:
+                    await self._hook(account, runtime,
+                                     runtime.instance.on_unload, ctx,
+                                     "on_unload")
+                except Exception:
+                    pass
+                self._bus.publish_nowait(
+                    PluginUnloaded(account=account, plugin=runtime.name))
+            runtime.active = False
+            runtime.loaded = False
+        finally:
+            ev.set()
 
     def states(self, account: str) -> List[Dict[str, Any]]:
         """Per-account plugin state for both UIs (sorted by name)."""

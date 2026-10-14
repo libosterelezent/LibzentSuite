@@ -434,3 +434,54 @@ class TestPassFiveReloadDuringPendingHook(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(new_rt.active,
                          "was_active was False at reload snapshot time")
         self.assertEqual(out["restored_accounts"], 1)
+
+
+class TestPassSixSingleTeardown(unittest.IsolatedAsyncioTestCase):
+    """Review pass-6: on_unload must run EXACTLY once per runtime even
+    when reload's unload and the late activation's compensation overlap."""
+
+    async def test_unload_hook_runs_once_when_reload_and_straggler_overlap(self):
+        import asyncio
+        mgr = make_manager()
+        mgr._activation_settle_timeout_s = 0.05
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        rt = mgr._accounts["alpha"]["probe"]
+        enable_parked = asyncio.Event()
+        enable_release = asyncio.Event()
+        unload_parked = asyncio.Event()
+        unload_release = asyncio.Event()
+        calls = {"on_unload": 0, "on_disable": 0}
+
+        async def slow_enable(*a):
+            enable_parked.set()
+            await enable_release.wait()
+
+        async def slow_unload(*a):
+            calls["on_unload"] += 1
+            unload_parked.set()
+            await unload_release.wait()
+
+        async def count_disable(*a):
+            calls["on_disable"] += 1
+
+        rt.instance.on_enable = slow_enable
+        rt.instance.on_unload = slow_unload
+        rt.instance.on_disable = count_disable
+        activating = asyncio.create_task(
+            mgr.activate_account("alpha", FakeServices()))
+        await enable_parked.wait()             # activation mid-on_enable
+        reloading = asyncio.create_task(mgr.reload_plugin("probe"))
+        await unload_parked.wait()             # reload mid-on_unload
+        enable_release.set()                   # straggler resumes NOW
+        await asyncio.sleep(0.05)              # compensation parks on the
+        #                                   same runtime's teardown event
+        unload_release.set()                   # reload's unload finishes
+        await activating
+        out = await reloading
+        self.assertEqual(calls["on_unload"], 1,
+                         "on_unload must run exactly once despite both "
+                         "paths arriving at the same runtime")
+        self.assertFalse(rt.active)
+        self.assertFalse(rt.loaded)
+        self.assertEqual(out["restored_accounts"], 1)
