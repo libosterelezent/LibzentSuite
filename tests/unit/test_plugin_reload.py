@@ -397,3 +397,40 @@ class TestPassFourFenceSemantics(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(slow_rt.active,
                         "a reload timing out must not unload plugins on a "
                         "still-running account (fence is teardown-only)")
+
+
+class TestPassFiveReloadDuringPendingHook(unittest.IsolatedAsyncioTestCase):
+    """Review pass-5: reloading the plugin whose activation hook is
+    pending must not leave the OLD instance active-but-orphaned."""
+
+    async def test_reload_of_pending_plugin_orphans_nothing(self):
+        import asyncio
+        mgr = make_manager()
+        mgr._activation_settle_timeout_s = 0.05
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        old_rt = mgr._accounts["alpha"]["probe"]
+        parked = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_enable(*a):
+            parked.set()
+            await release.wait()
+
+        old_rt.instance.on_enable = slow_enable
+        activating = asyncio.create_task(
+            mgr.activate_account("alpha", FakeServices()))
+        await parked.wait()                     # probe mid-on_enable
+        out = await mgr.reload_plugin("probe")  # settle times out, no fence
+        release.set()                           # the straggler resumes NOW
+        await activating
+        new_rt = mgr._accounts["alpha"]["probe"]
+        self.assertIsNot(new_rt, old_rt, "reload installed the replacement")
+        self.assertFalse(
+            old_rt.active,
+            "the replaced instance must not stay active (orphan with "
+            "fired hooks — nothing would ever unload it)")
+        self.assertFalse(old_rt.loaded)
+        self.assertFalse(new_rt.active,
+                         "was_active was False at reload snapshot time")
+        self.assertEqual(out["restored_accounts"], 1)

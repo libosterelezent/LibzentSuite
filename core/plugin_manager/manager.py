@@ -573,6 +573,17 @@ class PluginManager:
                 if not runtime.enabled:
                     continue
                 await self._activate_one(account, runtime)
+                if (self._accounts.get(account, {})
+                        .get(runtime.name) is not runtime):
+                    # a RELOAD (or detach) replaced this runtime while its
+                    # hook was parked: the OLD instance just committed
+                    # active=True but is no longer reachable through the
+                    # account map — nothing would ever run its unload
+                    # hooks, leaking whatever on_enable started. Tear it
+                    # down directly, scoped to THIS runtime only (the
+                    # account itself is still up — no account-wide fence).
+                    await self._teardown_runtime(account, runtime)
+                    continue
                 if self._activation_epoch.get(account, 0) != epoch:
                     # FENCED: a teardown proceeded past this activation's
                     # settle timeout while its hook was parked — undo the
