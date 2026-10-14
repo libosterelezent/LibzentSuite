@@ -818,6 +818,13 @@ class PluginManager:
                 "cannot activate", runtime.name, account,
             )
             return
+        # ANY activation attempt re-arms the teardown lifecycle (review
+        # pass-8 #4): the unload marker must clear when the LOAD begins —
+        # clearing only after on_enable meant a fresh on_load followed by
+        # a failing on_enable left _unload_done set, and the later
+        # deactivation skipped on_unload for the newly loaded resources
+        runtime._disable_done = False
+        runtime._unload_done = False
         services = self._services.get(account, lambda _n: None)(runtime.name)
         runtime.ctx = None  # PHASE-4 (S7-L1): new facade -> rebuild cache
         try:
@@ -861,10 +868,6 @@ class PluginManager:
                 load_done = True
             await self._hook(account, runtime, runtime.instance.on_enable, ctx, "on_enable")
             runtime.active = True
-            # reactivation re-arms the teardown lifecycle: the next
-            # deactivation must fire on_disable/on_unload again
-            runtime._disable_done = False
-            runtime._unload_done = False
             if first_load:  # a re-enable is not a load: PluginEnabledChanged
                 self._bus.publish_nowait(PluginLoaded(account=account, plugin=runtime.name))
         except asyncio.CancelledError:
@@ -1189,12 +1192,41 @@ class PluginManager:
             was_loaded = runtime.loaded
         if services_factory is _UNSET_FACTORY:
             services_factory = self._services.get(account)
-        ev = getattr(runtime, "_teardown_event", None)
-        if ev is None:
-            ev = runtime._teardown_event = asyncio.Event()
-        elif not ev.is_set():
-            # another path owns an IN-FLIGHT teardown of this runtime —
-            # wait bounded for its outcome
+        # ATOMIC CLAIM loop: exactly ONE caller ever owns a teardown
+        # attempt at a time. Ownership = an unset event + the owning
+        # task, assigned with no await between the check and the claim
+        # (single event loop ⇒ atomic). Everything else waits.
+        waited = False
+        while True:
+            ev = getattr(runtime, "_teardown_event", None)
+            owner = getattr(runtime, "_teardown_task", None)
+            abandoned = (ev is not None and not ev.is_set()
+                         and owner is not None and owner.done())
+            if (ev is None or ev.is_set()
+                    or owner is None or owner.done()):
+                # idle, completed-and-idle, or an ABANDONED attempt —
+                # claim it. When taking over an abandoned attempt, MERGE
+                # its owed-hook record into ours: the interruptor already
+                # cleared the lifecycle flags, so this caller's fresh
+                # snapshot alone would SKIP the unfinished cleanup
+                # (review pass-8 #1). A completed attempt's stale record
+                # is never merged (its hooks already ran).
+                if abandoned:
+                    owe_a, owe_l = getattr(
+                        runtime, "_teardown_owe", (False, False))
+                    was_active = bool(was_active) or owe_a
+                    was_loaded = bool(was_loaded) or owe_l
+                    self._logger.warning(
+                        "taking over the abandoned teardown of %s on %s",
+                        runtime.name, account)
+                ev = runtime._teardown_event = asyncio.Event()
+                runtime._teardown_task = asyncio.current_task()
+                runtime._teardown_owe = (bool(was_active), bool(was_loaded))
+                break
+            # a LIVE attempt is in flight — wait bounded for its outcome
+            if waited:
+                return   # bounded patience: the live owner owns the hooks
+            waited = True
             try:
                 await asyncio.wait_for(
                     ev.wait(), timeout=self._teardown_wait_timeout_s)
@@ -1202,18 +1234,12 @@ class PluginManager:
                 self._logger.warning(
                     "teardown of %s on %s did not settle within %.1fs",
                     runtime.name, account, self._teardown_wait_timeout_s)
-            if not getattr(runtime, "_teardown_interrupted", False):
-                # COMPLETED elsewhere — the hooks ran exactly once
+            if ev.is_set():
+                # that attempt COMPLETED — the hooks ran exactly once
                 return
-            # the owner was INTERRUPTED (cancelled mid-hook — e.g. the
-            # account manager's bounded stop abandoning deactivate): it
-            # is no longer running, so taking over the remaining work
-            # never runs hooks concurrently. Fall through.
-            self._logger.warning(
-                "taking over the interrupted teardown of %s on %s",
-                runtime.name, account)
-        # we own the teardown from here
-        runtime._teardown_interrupted = False
+            # unset event + done owner = abandoned — loop once more; the
+            # claim branch above performs the merge and the atomic claim
+        # — we own the attempt from here —
         try:
             services = (services_factory(runtime.name)
                         if callable(services_factory) else None)
@@ -1249,17 +1275,21 @@ class PluginManager:
         except BaseException:
             # INTERRUPTED (cancellation, KI/SystemExit, or an unexpected
             # error outside the hook guards): reset the lifecycle flags
-            # so nothing downstream sees an active runtime, mark the
-            # attempt interrupted and DO NOT signal completion — a
-            # waiting teardown takes over the remainder
+            # so nothing downstream sees an active runtime, and leave
+            # the owed-hook record (minus what completed) with the
+            # event UNSET and the owning task DONE — the abandoned
+            # state the claim loop takes over
             runtime.active = False
             runtime.loaded = False
-            runtime._teardown_interrupted = True
+            owe_a, owe_l = runtime._teardown_owe
+            runtime._teardown_owe = (
+                owe_a and not getattr(runtime, "_disable_done", False),
+                owe_l and not getattr(runtime, "_unload_done", False))
             raise
-        finally:
-            if not getattr(runtime, "_teardown_interrupted", False):
-                ev.set()   # COMPLETED (an interrupted attempt leaves the
-                            # event unset: "in flight, needs a takeover")
+        else:
+            # COMPLETED: signal every waiter (the else clause runs only
+            # when no exception escaped the body)
+            ev.set()
 
     def states(self, account: str) -> List[Dict[str, Any]]:
         """Per-account plugin state for both UIs (sorted by name)."""

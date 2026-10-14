@@ -553,3 +553,144 @@ class TestPassSevenTeardownTakeover(unittest.IsolatedAsyncioTestCase):
         rt.instance.on_unload = lambda *a: calls.append(1)
         await mgr._teardown_runtime("alpha", rt)   # second caller skips
         self.assertEqual(calls, [], "completed hooks must not re-run")
+
+
+class TestPassEightClaimLoop(unittest.IsolatedAsyncioTestCase):
+    """Review pass-8: atomic single-owner claims, owed-hook records,
+    reactivation re-arming, and load-start marker clears."""
+
+    async def _active_runtime(self, mgr):
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        await mgr.activate_account("alpha", FakeServices())
+        return mgr._accounts["alpha"]["probe"]
+
+    async def test_retry_after_cancellation_completes_cleanup(self):
+        # pass-8 #1: the retry starts only AFTER the cancellation — its
+        # was_* snapshot sees the cleared flags, so the owed-hook record
+        # must carry what the interrupted attempt still owed
+        import asyncio
+        mgr = make_manager()
+        mgr._teardown_wait_timeout_s = 0.05
+        rt = await self._active_runtime(mgr)
+        parked = asyncio.Event()
+        calls = {"on_disable": 0, "on_unload": 0}
+
+        async def slow_disable(*a):
+            calls["on_disable"] += 1
+            if calls["on_disable"] == 1:
+                parked.set()
+                await asyncio.sleep(3600)
+
+        async def count_unload(*a):
+            calls["on_unload"] += 1
+
+        rt.instance.on_disable = slow_disable
+        rt.instance.on_unload = count_unload
+        owner = asyncio.create_task(mgr._teardown_runtime("alpha", rt))
+        await parked.wait()
+        owner.cancel()                       # bounded stop abandons it
+        try:
+            await owner
+        except asyncio.CancelledError:
+            pass
+        self.assertFalse(rt.active)          # flags reset by the interrupt
+        # the retry arrives with NO waiter alive at cancel time
+        await mgr._teardown_runtime("alpha", rt)
+        self.assertEqual(calls["on_unload"], 1,
+                         "the retry must finish the interrupted cleanup")
+
+    async def test_three_overlapping_callers_single_hook_run(self):
+        # pass-8 #2: three callers, the owner cancelled mid-hook —
+        # exactly one takeover claims; the others wait for its outcome
+        import asyncio
+        mgr = make_manager()
+        mgr._teardown_wait_timeout_s = 0.05
+        rt = await self._active_runtime(mgr)
+        parked = asyncio.Event()
+        release = asyncio.Event()
+        calls = {"on_disable": 0, "on_unload": 0}
+
+        async def slow_disable(*a):
+            calls["on_disable"] += 1
+            if calls["on_disable"] == 1:
+                parked.set()
+                await asyncio.sleep(3600)
+
+        async def slow_unload(*a):
+            calls["on_unload"] += 1
+            if calls["on_unload"] == 1:
+                await release.wait()
+
+        rt.instance.on_disable = slow_disable
+        rt.instance.on_unload = slow_unload
+        owner = asyncio.create_task(mgr._teardown_runtime("alpha", rt))
+        await parked.wait()
+        w1 = asyncio.create_task(mgr._teardown_runtime("alpha", rt))
+        w2 = asyncio.create_task(mgr._teardown_runtime("alpha", rt))
+        await asyncio.sleep(0.02)
+        owner.cancel()
+        try:
+            await owner
+        except asyncio.CancelledError:
+            pass
+        done, pending = await asyncio.wait([w1, w2], timeout=3.0)
+        if pending:                          # one may still be waiting on
+            release.set()                    # the takeover's slow unload
+            done, pending = await asyncio.wait([w1, w2], timeout=3.0)
+        release.set()
+        self.assertFalse(pending)
+        self.assertFalse(rt.active)
+        self.assertFalse(rt.loaded)
+        self.assertEqual(calls["on_unload"], 1,
+                         "exactly one unload across owner + takeover")
+
+    async def test_concurrent_deactivation_after_reactivation(self):
+        # pass-8 #3: a completed teardown leaves the event set — the
+        # next lifecycle's concurrent teardowns must still serialize
+        import asyncio
+        mgr = make_manager()
+        rt = await self._active_runtime(mgr)
+        await mgr._teardown_runtime("alpha", rt)   # completes (event set)
+        await mgr._activate_one("alpha", rt)       # reactivation re-arms
+        self.assertTrue(rt.active)
+        calls = []
+
+        async def counted(*a):
+            calls.append(1)
+
+        rt.instance.on_unload = counted
+        await asyncio.wait([asyncio.create_task(
+            mgr._teardown_runtime("alpha", rt)) for _ in range(3)],
+            timeout=3.0)
+        self.assertEqual(len(calls), 1,
+                         "concurrent teardowns after reactivation run "
+                         "the unload exactly once")
+
+    async def test_failed_reenable_still_unloads(self):
+        # pass-8 #4: on_load succeeds, on_enable FAILS after a prior
+        # completed teardown — the later unload must still run for the
+        # freshly loaded resources
+        mgr = make_manager()
+        rt = await self._active_runtime(mgr)
+        await mgr.deactivate_account("alpha")       # completed teardown
+        self.assertTrue(getattr(rt, "_unload_done", False))
+        unloaded = []
+
+        async def fail_enable(*a):
+            raise RuntimeError("boom")
+
+        async def count_unload(*a):
+            unloaded.append(1)
+
+        rt.instance.on_enable = fail_enable
+        rt.instance.on_unload = count_unload
+        try:
+            await mgr._activate_one("alpha", rt)
+        except Exception:
+            pass
+        self.assertTrue(rt.loaded)                  # the fresh load stuck
+        await mgr._teardown_runtime("alpha", rt)
+        self.assertEqual(unloaded, [1],
+                         "the marker cleared at load start, so the new "
+                         "load's unload runs despite the failed enable")
