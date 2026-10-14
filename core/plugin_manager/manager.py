@@ -154,6 +154,9 @@ class PluginManager:
         self._activation_epoch: Dict[str, int] = {}
         #: bounded wait for in-flight activations (injectable for tests)
         self._activation_settle_timeout_s: float = 5.0
+        #: bounded wait for an in-flight teardown before taking it over
+        #: from an interrupted owner (injectable for tests)
+        self._teardown_wait_timeout_s: float = 5.0
         self._ui_registry = ui_registry or DashboardUIRegistry(
             offload_sync=True)
         # the registry rebinds boot-time bound-method callbacks onto LIVE
@@ -858,6 +861,10 @@ class PluginManager:
                 load_done = True
             await self._hook(account, runtime, runtime.instance.on_enable, ctx, "on_enable")
             runtime.active = True
+            # reactivation re-arms the teardown lifecycle: the next
+            # deactivation must fire on_disable/on_unload again
+            runtime._disable_done = False
+            runtime._unload_done = False
             if first_load:  # a re-enable is not a load: PluginEnabledChanged
                 self._bus.publish_nowait(PluginLoaded(account=account, plugin=runtime.name))
         except asyncio.CancelledError:
@@ -1186,43 +1193,73 @@ class PluginManager:
         if ev is None:
             ev = runtime._teardown_event = asyncio.Event()
         elif not ev.is_set():
-            # another path is already unloading THIS runtime (e.g. the
-            # reload's on_unload still awaiting while the late
-            # activation's compensation arrived) — let it finish and
-            # skip; the hooks run exactly once
+            # another path owns an IN-FLIGHT teardown of this runtime —
+            # wait bounded for its outcome
             try:
-                await asyncio.wait_for(ev.wait(), timeout=5.0)
+                await asyncio.wait_for(
+                    ev.wait(), timeout=self._teardown_wait_timeout_s)
             except asyncio.TimeoutError:
                 self._logger.warning(
-                    "teardown of %s on %s did not settle within 5s",
-                    runtime.name, account)
-            return
+                    "teardown of %s on %s did not settle within %.1fs",
+                    runtime.name, account, self._teardown_wait_timeout_s)
+            if not getattr(runtime, "_teardown_interrupted", False):
+                # COMPLETED elsewhere — the hooks ran exactly once
+                return
+            # the owner was INTERRUPTED (cancelled mid-hook — e.g. the
+            # account manager's bounded stop abandoning deactivate): it
+            # is no longer running, so taking over the remaining work
+            # never runs hooks concurrently. Fall through.
+            self._logger.warning(
+                "taking over the interrupted teardown of %s on %s",
+                runtime.name, account)
+        # we own the teardown from here
+        runtime._teardown_interrupted = False
         try:
             services = (services_factory(runtime.name)
                         if callable(services_factory) else None)
             ctx = self._context(account, runtime, services)
             runtime.ctx = None
+            # per-hook done markers: a takeover re-runs ONLY the hooks
+            # the interrupted owner never finished (markers are set
+            # right after each await returns — cancellation cannot land
+            # between the await completing and the marker assignment)
             if (was_active and runtime.enabled
-                    and runtime.instance is not None):
+                    and runtime.instance is not None
+                    and not getattr(runtime, "_disable_done", False)):
                 try:
                     await self._hook(account, runtime,
                                      runtime.instance.on_disable, ctx,
                                      "on_disable")
                 except Exception:
                     pass   # recorded; still unload
-            if was_loaded and runtime.instance is not None:
+                runtime._disable_done = True
+            if (was_loaded and runtime.instance is not None
+                    and not getattr(runtime, "_unload_done", False)):
                 try:
                     await self._hook(account, runtime,
                                      runtime.instance.on_unload, ctx,
                                      "on_unload")
                 except Exception:
                     pass
+                runtime._unload_done = True
                 self._bus.publish_nowait(
                     PluginUnloaded(account=account, plugin=runtime.name))
             runtime.active = False
             runtime.loaded = False
+        except BaseException:
+            # INTERRUPTED (cancellation, KI/SystemExit, or an unexpected
+            # error outside the hook guards): reset the lifecycle flags
+            # so nothing downstream sees an active runtime, mark the
+            # attempt interrupted and DO NOT signal completion — a
+            # waiting teardown takes over the remainder
+            runtime.active = False
+            runtime.loaded = False
+            runtime._teardown_interrupted = True
+            raise
         finally:
-            ev.set()
+            if not getattr(runtime, "_teardown_interrupted", False):
+                ev.set()   # COMPLETED (an interrupted attempt leaves the
+                            # event unset: "in flight, needs a takeover")
 
     def states(self, account: str) -> List[Dict[str, Any]]:
         """Per-account plugin state for both UIs (sorted by name)."""

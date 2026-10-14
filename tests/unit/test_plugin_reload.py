@@ -485,3 +485,71 @@ class TestPassSixSingleTeardown(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rt.active)
         self.assertFalse(rt.loaded)
         self.assertEqual(out["restored_accounts"], 1)
+
+
+class TestPassSevenTeardownTakeover(unittest.IsolatedAsyncioTestCase):
+    """Review pass-7: a CANCELLED teardown must not look completed — the
+    waiting teardown takes over and finishes the cleanup."""
+
+    async def test_interrupted_teardown_is_taken_over(self):
+        import asyncio
+        mgr = make_manager()
+        mgr._teardown_wait_timeout_s = 0.05
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        await mgr.activate_account("alpha", FakeServices())
+        rt = mgr._accounts["alpha"]["probe"]
+        self.assertTrue(rt.active)
+        disable_parked = asyncio.Event()
+        calls = {"on_disable": 0, "on_unload": 0}
+
+        async def slow_disable(*a):
+            calls["on_disable"] += 1
+            if calls["on_disable"] == 1:
+                disable_parked.set()
+                await asyncio.sleep(3600)   # parked until cancelled
+
+        async def count_unload(*a):
+            calls["on_unload"] += 1
+
+        rt.instance.on_disable = slow_disable
+        rt.instance.on_unload = count_unload
+
+        # task A owns the teardown and parks inside on_disable
+        owner = asyncio.create_task(mgr.deactivate_account("alpha"))
+        await disable_parked.wait()
+        # task B arrives while A is mid-hook — it waits for A's outcome
+        waiter = asyncio.create_task(mgr._teardown_runtime("alpha", rt))
+        await asyncio.sleep(0.02)
+        self.assertFalse(waiter.done())
+        # A is CANCELLED mid-hook (the bounded stop abandoning deactivate)
+        owner.cancel()
+        try:
+            await owner
+        except asyncio.CancelledError:
+            pass
+        # B times out on the (deliberately unset) event, sees the
+        # interruption marker and TAKES OVER the remaining work
+        await waiter
+        self.assertFalse(rt.active,
+                         "the takeover must finish the interrupted cleanup")
+        self.assertFalse(rt.loaded)
+        self.assertGreaterEqual(calls["on_disable"], 1)
+        self.assertEqual(calls["on_unload"], 1)
+
+    async def test_completed_teardown_is_not_redone(self):
+        import asyncio
+        mgr = make_manager()
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        await mgr.activate_account("alpha", FakeServices())
+        rt = mgr._accounts["alpha"]["probe"]
+        await mgr.deactivate_account("alpha")      # completes normally
+        self.assertFalse(rt.active)
+        # the done-markers pin the completed hooks
+        self.assertTrue(getattr(rt, "_disable_done", False))
+        self.assertTrue(getattr(rt, "_unload_done", False))
+        calls = []
+        rt.instance.on_unload = lambda *a: calls.append(1)
+        await mgr._teardown_runtime("alpha", rt)   # second caller skips
+        self.assertEqual(calls, [], "completed hooks must not re-run")
