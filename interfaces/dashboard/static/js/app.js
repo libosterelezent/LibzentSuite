@@ -4,20 +4,20 @@
    boot. Loaded LAST: everything it references is already defined.
    ═══════════════════════════════════════════════════════════════════════════ */
 
-const NAV = [
-  {id:"home", label:"Home", icon:"M3 12l9-9 9 9v9a2 2 0 0 1-2 2h-4v-7h-6v7H5a2 2 0 0 1-2-2z"},
-  {id:"fleet", label:"Accounts & Groups", icon:"M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"},
-  {id:"plugins", label:"Plugins", icon:"M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94z"},
-  {id:"profiles", label:"Profiles", icon:"M12 2L2 7l10 5 10-5-10-5zM2 12l10 5 10-5M2 17l10 5 10-5"},
-  {id:"activity", label:"Activity", icon:"M22 12h-4l-3 9L9 3l-3 9H2"},
-  {id:"policies", label:"Policies", icon:"M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"},
-  {id:"admin", label:"Admin", icon:"M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"},
-  {id:"tools", label:"Tools", icon:"M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94z"},
-];
-const TITLES = {home:"Home",fleet:"Accounts & Groups",plugins:"Plugins",profiles:"Profiles",activity:"Activity",policies:"Policies",admin:"Admin",tools:"Tools"};
+/* NAV/TITLES are DATA, not structure: populated from the server's
+   /api/dashboard-ui/navigation ($framework pages), so adding a page in
+   Python never requires touching this file again (review: "separate the
+   customisation from the internal structure"). Until the fetch lands
+   the sidebar is intentionally empty for one tick. */
+let NAV = [];
+let TITLES = {};
+const FALLBACK_ICONS = {
+  home: "M3 12l9-9 9 9v9a2 2 0 0 1-2 2h-4v-7h-6v7H5a2 2 0 0 1-2-2z",
+};
 
 function buildNav() {
   const nav = $("snav"); nav.innerHTML = "";
+  if (!NAV.length) return;   // nav data not loaded yet — rebuilt on arrival
   for (const item of NAV) {
     const a = document.createElement("button");
     a.className = "nav-item" + (item.id===currentView?" active":"");
@@ -55,7 +55,9 @@ const UI = {
     if (dt && dt.open) dt.close();
     if (dt) dt.querySelector(".dlg-body").innerHTML = "";
     showPanel("panel-"+view);
-    $("page-title").textContent = TITLES[view]||view;
+    $("page-title").textContent = TITLES[view]
+      || (NAV.find(n => n.id === view) || {}).label
+      || view;
     buildNav(); $("sidebar").classList.remove("open");
     if (LOADERS[view]) { LOADERS[view](); delete LOADERS[view]; }
     render();
@@ -461,7 +463,11 @@ try {
   if (qtoken) { secretStore.setItem("dash_token",qtoken.trim()); $("adv-token").value=qtoken.trim(); history.replaceState(null,"",location.pathname); }
 
   applyDashTheme();   // decorative layer: persisted accent + density
-  buildNav(); wire(); connectWS();
+  wire(); connectWS();
+  // fetch the server's navigation: it feeds NAV/TITLES (framework pages)
+  // AND the plugin pages, then rebuilds the sidebar — after which the
+  // current view renders (its panel now exists)
+  loadDashboardUINav().then(() => { buildNav(); render(); });
   // Activate the initial view — .panel{display:none} means NOTHING is
   // visible until UI.go() adds .active; without this the first paint is
   // a blank main area (nav clicks would also fix it, but first load

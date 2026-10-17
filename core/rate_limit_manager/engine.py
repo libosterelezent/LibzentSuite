@@ -111,6 +111,13 @@ DEFAULT_ACTION_INTERVALS: Dict[str, float] = {
 #: and never inherit this window.
 DEFAULT_JITTER: Tuple[float, float] = (0.2, 0.8)
 
+#: default interval for actions with NO learned default AND no stored
+#: policy: they used to pace at the bare floor (0.05 s — up to 20
+#: sends/s/account, perfectly metronomic). A stored policy at ANY scope
+#: still REPLACES this fallback entirely (it composes with the floor
+#: alone, exactly like the learned defaults).
+UNSTUDIED_ACTION_INTERVAL = 1.2
+
 _LEVEL_RANK: Dict[str, int] = {name: i for i, name in enumerate(POLICY_LEVELS)}
 
 #: FINAL-PHASE (F2): hard bound on the effective-config memo. The natural
@@ -608,8 +615,12 @@ class RateLimitManager:
                 [self._floor] + [p.interval for _, _, p in applicable]
             )
         else:
+            # unstudied action: the conservative 1.2 s default (never the
+            # bare floor) — displaced by any stored policy, like the
+            # learned defaults
             interval = max(
-                self._floor, DEFAULT_ACTION_INTERVALS.get(action, 0.0))
+                self._floor,
+                DEFAULT_ACTION_INTERVALS.get(action, UNSTUDIED_ACTION_INTERVAL))
         if applicable:
             jmin = max(p.jitter_min for _, _, p in applicable)
             jmax = max(p.jitter_max for _, _, p in applicable)

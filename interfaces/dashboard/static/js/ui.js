@@ -11,12 +11,33 @@
    this one), clearFb removes it. A structural re-render rebuilds the DOM
    without the slot, which is exactly the "stale errors must not survive
    a state refresh" rule. */
-function setFb(container, level, text) {
+const FB_TONE_GLYPH = { error: "✕", warn: "⚠", ok: "✓", busy: "ℹ" };
+
+function setFb(container, level, text, opts) {
   if (!container) return;
+  const o = opts || {};
   let f = container.querySelector(":scope [data-fb]");
   if (!f) { f = document.createElement("div"); f.dataset.fb = "1"; container.appendChild(f); }
-  f.className = "fb fb-" + level;
-  f.textContent = text;
+  if (o.float) {
+    // AWARENESS CONTRACT (knowledgebase/DESIGN_AWARENESS.md §1): the
+    // message is an ANCHORED OVERLAY under the control — it never
+    // pushes layout, caps its width, wraps long text and dismisses
+    // itself. The container becomes the positioning anchor.
+    container.classList.add("fb-anchor");
+    f.classList.add("fb-float");
+    // success dismisses itself (4s, industry norm); errors stay until
+    // the next action or a click — they must remain actionable
+    o.autoMs = o.autoMs !== undefined ? o.autoMs
+             : (level === "ok" ? 4000 : (level === "error" ? 8000 : 0));
+  }
+  f.className = "fb fb-" + level + (o.float ? " fb-float" : "");
+  f.setAttribute("role", level === "error" ? "alert" : "status");
+  f.textContent = (FB_TONE_GLYPH[level] ? FB_TONE_GLYPH[level] + "  " : "") + text;
+  if (o.float && o.autoMs) {
+    clearTimeout(f._fbTimer);
+    f._fbTimer = setTimeout(() => { if (f.isConnected) f.remove(); }, o.autoMs);
+  }
+  f.onclick = () => f.remove();   // click-to-dismiss (all levels)
   return f;
 }
 function clearFb(container) {
@@ -28,6 +49,15 @@ function clearFb(container) {
 function flashFb(container, text) {
   const f = setFb(container, "ok", text);
   if (f) setTimeout(() => { if (f.isConnected) f.remove(); }, 2500);
+}
+/* FLOAT variants (DESIGN_AWARENESS.md §1): anchored overlays under the
+   control — they never push layout. Errors stay 8s (actionable) or
+   until clicked; success self-dismisses at 4s. */
+function setFbFloat(container, level, text) {
+  return setFb(container, level, text, { float: true });
+}
+function flashFbFloat(container, text) {
+  return setFb(container, "ok", text, { float: true });
 }
 /* busy state for a button while its action runs (.btn.busy shows a spinner) */
 function withBusy(btnEl, promise) {

@@ -57,6 +57,18 @@ function openDuiModal(modalId) {
 async function loadDashboardUINav() {
   try { duiNav = await api("/api/dashboard-ui/navigation") || []; }
   catch { duiNav = []; }
+  // SINGLE SOURCE OF TRUTH (review: "separate customisation from
+  // structure"): the server's navigation defines the framework
+  // sidebar — labels, icons, order. app.js consumes NAV/TITLES.
+  if (typeof NAV !== "undefined") {
+    NAV = duiNav.filter(e => e.plugin === "$framework").map(e => ({
+      id: e.page_id, label: e.title || e.page_id,
+      icon: e.icon || (typeof FALLBACK_ICONS !== "undefined"
+                        ? (FALLBACK_ICONS[e.page_id] || null) : null)
+                      || DUI_DEFAULT_ICON,
+    }));
+    TITLES = Object.fromEntries(NAV.map(n => [n.id, n.label]));
+  }
   buildDashboardUINav();
 }
 
@@ -557,12 +569,12 @@ function wireDuiSelection(root, pluginName, compId) {
           { action: btn.dataset.duiBaction, rows }));
         if (!res) return;
         if (res.field_errors && Object.keys(res.field_errors).length)
-          setFb(host, "error", Object.values(res.field_errors).join("; "));
+          setFbFloat(host, "error", Object.values(res.field_errors).join("; "));
         else if (res.message)
-          res.success ? flashFb(host, res.message) : setFb(host, "error", res.message);
+          res.success ? flashFbFloat(host, res.message) : setFbFloat(host, "error", res.message);
         if (res.success !== false && !(res.field_errors && Object.keys(res.field_errors).length))
           duiSelection[compId] = new Set();   // bulk ops consume the selection
-      } catch (e) { setFb(host, "error", e.message); }
+      } catch (e) { setFbFloat(host, "error", e.message); }
     };
     btn.onclick = () => {
       const rows = duiSelected(compId);
@@ -605,10 +617,10 @@ function wireDUIRowActions(root, pluginName) {
           { action: el.dataset.duiRaction, row: el.dataset.duiRow }));
         if (!res) return;
         if (res.field_errors && Object.keys(res.field_errors).length)
-          setFb(host, "error", Object.values(res.field_errors).join("; "));
+          setFbFloat(host, "error", Object.values(res.field_errors).join("; "));
         else if (res.message)
-          res.success ? flashFb(host, res.message) : setFb(host, "error", res.message);
-      } catch (e) { setFb(host, "error", e.message); }
+          res.success ? flashFbFloat(host, res.message) : setFbFloat(host, "error", res.message);
+      } catch (e) { setFbFloat(host, "error", e.message); }
     };
     el.onclick = () => {
       if (def.confirm) confirmAction("Confirm", def.confirm, fire);
@@ -1162,10 +1174,10 @@ function wireDashboardUI(root, pluginName) {
         const res = await withBusy(el, dispatchUIAction(pluginName, id, {}));
         if (!res) return;
         if (res.field_errors && Object.keys(res.field_errors).length)
-          setFb(host, "error", Object.values(res.field_errors).join("; "));
+          setFbFloat(host, "error", Object.values(res.field_errors).join("; "));
         else if (res.message)
-          res.success ? flashFb(host, res.message) : setFb(host, "error", res.message);
-      } catch (e) { setFb(host, "error", e.message); }
+          res.success ? flashFbFloat(host, res.message) : setFbFloat(host, "error", res.message);
+      } catch (e) { setFbFloat(host, "error", e.message); }
     };
     const comp = duiComps[id] || {};
     el.onclick = () => {
@@ -1184,8 +1196,8 @@ function wireDashboardUI(root, pluginName) {
       try {
         const res = await dispatchUIAction(pluginName, id, { value: duiFieldValue(comp, host) });
         if (res && res.message)
-          res.success ? flashFb(host, res.message) : setFb(host, "error", res.message);
-      } catch (e) { setFb(host, "error", e.message); }
+          res.success ? flashFbFloat(host, res.message) : setFbFloat(host, "error", res.message);
+      } catch (e) { setFbFloat(host, "error", e.message); }
     });
   });
 
@@ -1239,16 +1251,16 @@ function wireDashboardUI(root, pluginName) {
       // server-side)
       if (comp.client_action === "save-token") {
         const tok = String(payload["token-value"] || "").trim();
-        if (!tok) { setFb(formEl, "error", "Token required."); return; }
+        if (!tok) { setFbFloat(formEl, "error", "Token required."); return; }
         secretStore.setItem("dash_token", tok);
         wsRetries = 0; connectWS();
-        flashFb(formEl, "token saved — reconnecting…");
+        flashFbFloat(formEl, "token saved — reconnecting…");
         return;
       }
       if (comp.client_action === "save-theme") {
         applyDashTheme(String(payload["theme-accent"] || ""),
                        String(payload["theme-density"] || ""));
-        flashFb(formEl, "theme applied");
+        flashFbFloat(formEl, "theme applied");
         return;
       }
       try {
@@ -1261,13 +1273,13 @@ function wireDashboardUI(root, pluginName) {
             if (slot) setFb(slot, "error", res.field_errors[fid]);
           }
         if (res.message)
-          res.success ? flashFb(formEl, res.message) : setFb(formEl, "error", res.message);
+          res.success ? flashFbFloat(formEl, res.message) : setFbFloat(formEl, "error", res.message);
         if (comp.close_on_submit && res.success !== false
             && !(res.field_errors && Object.keys(res.field_errors).length)) {
           const dlg = formEl.closest("dialog");
           if (dlg) dlg.close();
         }
-      } catch (e) { setFb(formEl, "error", e.message); }
+      } catch (e) { setFbFloat(formEl, "error", e.message); }
     };
   });
 

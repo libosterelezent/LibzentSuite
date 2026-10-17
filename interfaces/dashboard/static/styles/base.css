@@ -11,7 +11,14 @@
   --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 
   /* spacing scale — every gap/padding in the dashboard uses these */
-  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 20px; --sp-6: 24px;
+  --sp-1: 4px; --sp-1-5: 6px; --sp-2: 8px; --sp-2-5: 10px; --sp-3: 12px;
+  --sp-4: 16px; --sp-5: 20px; --sp-6: 24px;
+  /* type scale — every font-size in the dashboard uses these */
+  --fs-2xs: 10px; --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13px; --fs-base: 14px;
+  --fs-lg: 15px; --fs-xl: 16px; --fs-2xl: 18px; --fs-3xl: 21px; --fs-4xl: 24px;
+  /* tone extras */
+  --surface2-rgb: 26, 33, 44;
+  --plugin: #c084fc; --plugin-rgb: 192, 132, 252;
 
   --r: 10px; --r-sm: 6px; --r-lg: 14px;
   --gap: var(--sp-3); --gap-sm: var(--sp-2); --gap-lg: var(--sp-5);
@@ -42,7 +49,7 @@ a:hover { text-decoration: underline; }
 
 button { font: inherit; cursor: pointer; border: none; background: none; color: inherit; }
 input, select, textarea { font: inherit; color: var(--text); background: var(--surface2);
-  border: 1px solid var(--border); border-radius: var(--r-sm); padding: 5px 9px; outline: none; min-width: 0; }
+  border: 1px solid var(--border); border-radius: var(--r-sm); padding: var(--sp-1) var(--sp-2); outline: none; min-width: 0; }
 input:focus-visible, select:focus-visible, textarea:focus-visible {
   outline: 2px solid var(--accent); outline-offset: -1px; }
 .dui-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -56,18 +63,18 @@ input[type="checkbox"] { accent-color: var(--accent2); }
 .trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
 /* ═════════════════════════════════ Buttons ═════════════════════════════════ */
-.btn { display: inline-flex; align-items: center; justify-content: center; gap: 5px;
-  height: var(--ctrl-h); padding: 0 12px; border-radius: var(--r-sm);
-  font-size: 13px; font-weight: 500; transition: all .15s; white-space: nowrap; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-1);
+  height: var(--ctrl-h); padding: 0 var(--sp-3); border-radius: var(--r-sm);
+  font-size: var(--fs-md); font-weight: 500; transition: all .15s; white-space: nowrap; }
 .btn-primary { background: var(--accent2); color: #fff; }
 .btn-primary:hover { background: var(--accent); }
 .btn-secondary { background: var(--surface3); color: var(--text); border: 1px solid var(--border); }
 .btn-secondary:hover { background: var(--border); }
 .btn-danger { background: var(--err2); color: #fff; }
 .btn-danger:hover { background: var(--err); }
-.btn-ghost { color: var(--dim); padding: 0 8px; height: 28px; }
+.btn-ghost { color: var(--dim); padding: 0 var(--sp-2); height: 28px; }
 .btn-ghost:hover { color: var(--text); background: var(--surface2); }
-.btn-sm { height: 26px; padding: 0 9px; font-size: 12px; }
+.btn-sm { height: 26px; padding: 0 var(--sp-2); font-size: var(--fs-sm); }
 .btn:disabled, .btn.busy { opacity: .55; cursor: not-allowed; pointer-events: none; }
 .btn.busy { position: relative; color: transparent; }
 .btn.busy::after { content: ''; position: absolute; width: 12px; height: 12px;
@@ -77,8 +84,8 @@ input[type="checkbox"] { accent-color: var(--accent2); }
 .btn .icon { width: 14px; height: 14px; }
 
 /* ═════════════════════════════ Status badges ═══════════════════════════════ */
-.st { display: inline-flex; align-items: center; gap: 5px; font-size: 11px;
-  font-weight: 600; padding: 1px 7px; border-radius: 99px; white-space: nowrap; }
+.st { display: inline-flex; align-items: center; gap: var(--sp-1); font-size: var(--fs-xs);
+  font-weight: 600; padding: 1px var(--sp-1-5); border-radius: 99px; white-space: nowrap; }
 .st::before { content: ''; width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
 .st-running, .st-online { color: var(--ok); background: rgba(52,211,153,.12); }
 .st-info { color: var(--accent); background: rgba(91,163,245,.12); }
@@ -98,16 +105,16 @@ input[type="checkbox"] { accent-color: var(--accent2); }
 .st-missing_credential, .st-invalid_credential { color: var(--err); background: rgba(248,113,113,.15); }
 .st-missing_credential::before, .st-invalid_credential::before { background: var(--err); }
 
-.scope { display: inline-flex; align-items: center; font-size: 10px; font-weight: 700;
-  padding: 2px 6px; border-radius: 4px; text-transform: uppercase; letter-spacing: .05em;
+.scope { display: inline-flex; align-items: center; font-size: var(--fs-2xs); font-weight: 700;
+  padding: 2px var(--sp-1-5); border-radius: 4px; text-transform: uppercase; letter-spacing: .05em;
   background: var(--surface3); color: var(--dim); font-family: var(--mono); }
 .scope-global { color: var(--accent); background: rgba(91,163,245,.1); }
 .scope-account { color: var(--ok); background: rgba(52,211,153,.1); }
 .scope-plugin { color: #c084fc; background: rgba(192,132,252,.1); }
 
 /* Chips */
-.chip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px;
-  padding: 1px 8px; border-radius: 99px; background: var(--surface3); color: var(--dim);
+.chip { display: inline-flex; align-items: center; gap: var(--sp-1); font-size: var(--fs-xs);
+  padding: 1px var(--sp-2); border-radius: 99px; background: var(--surface3); color: var(--dim);
   white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .chip.group { background: rgba(251,191,36,.1); color: var(--warn); cursor: pointer; }
 .chip.plugin { background: rgba(52,211,153,.1); color: var(--ok); }
@@ -119,9 +126,9 @@ input[type="checkbox"] { accent-color: var(--accent2); }
 
 /* ═════════════════════════════════ Forms ═══════════════════════════════════ */
 .form { display: flex; flex-direction: column; gap: var(--sp-3); max-width: 480px; }
-.form .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.form .field label { font-size: 12px; color: var(--dim); font-weight: 500; }
-.form .field .hint { font-size: 11px; color: var(--faint); }
+.form .field { display: flex; flex-direction: column; gap: var(--sp-1); min-width: 0; }
+.form .field label { font-size: var(--fs-sm); color: var(--dim); font-weight: 500; }
+.form .field .hint { font-size: var(--fs-xs); color: var(--faint); }
 .form .field input, .form .field select { height: var(--ctrl-h); }
 .form-actions { display: flex; gap: var(--sp-2); justify-content: flex-end; margin-top: var(--sp-2); flex-wrap: wrap; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
@@ -129,8 +136,8 @@ input[type="checkbox"] { accent-color: var(--accent2); }
 /* ═══════════════════════ Inline feedback (errors move to their action) ═════
    Scoped feedback replaces the old global error strip: every card, form,
    dialog and action group renders its own [data-fb] slot. */
-.fb { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; line-height: 1.4;
-  padding: 5px 8px; border-radius: var(--r-sm); margin-top: var(--sp-2);
+.fb { display: flex; align-items: flex-start; gap: var(--sp-1-5); font-size: var(--fs-sm); line-height: 1.4;
+  padding: var(--sp-1) var(--sp-2); border-radius: var(--r-sm); margin-top: var(--sp-2);
   overflow-wrap: anywhere; }
 .fb-error { color: var(--err); background: rgba(248,113,113,.09); border: 1px solid rgba(248,113,113,.28); }
 .fb-ok { color: var(--ok); background: rgba(52,211,153,.09); border: 1px solid rgba(52,211,153,.28); }
@@ -143,6 +150,15 @@ input[type="checkbox"] { accent-color: var(--accent2); }
    must force its own full-width line instead of a squeezed flex item. */
 .lrow .fb { grid-column: 1 / -1; margin-top: 4px; }
 #bulkbar .fb, .row > .fb { flex: 1 1 100%; }
+
+/* ── FLOAT feedback (DESIGN_AWARENESS.md §1): the message anchors under
+   its control as an overlay — it NEVER pushes layout (the "button error
+   bloats the card" bug). Caps: 2-line-ish width 340px, wraps inside,
+   click dismisses, success auto-dismisses (JS timers). */
+.fb-anchor { position: relative; }
+.fb-float { position: absolute; top: calc(100% + var(--sp-1)); left: var(--sp-2);
+  width: max-content; max-width: min(340px, 90vw); z-index: 40;
+  box-shadow: var(--shadow); cursor: pointer; }
 
 /* Spacing normalization: parents with their own gaps must not also pay
    the generic margin — .field (4px gap) and .form (12px gap) position the
@@ -157,8 +173,8 @@ input[type="checkbox"] { accent-color: var(--accent2); }
   display: flex; flex-direction: column; gap: var(--sp-2);
   width: min(400px, calc(100vw - var(--sp-6))); pointer-events: none; }
 .toast { background: var(--surface2); border: 1px solid var(--border);
-  border-left: 3px solid var(--err); color: var(--text); padding: 8px 12px;
-  border-radius: var(--r-sm); font-size: 12.5px; box-shadow: var(--shadow);
+  border-left: 3px solid var(--err); color: var(--text); padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm); font-size: var(--fs-sm); box-shadow: var(--shadow);
   overflow-wrap: anywhere; animation: fadeIn .15s; }
 .toast-ok { border-left-color: var(--ok); }
 .toast-info { border-left-color: var(--accent); }
@@ -168,6 +184,8 @@ input[type="checkbox"] { accent-color: var(--accent2); }
    height. Layout, structure and components are untouched — decoration
    only. Applied as html[data-density="compact"] by applyDashTheme(). */
 html[data-density="compact"] {
-  --sp-2: 6px; --sp-3: 8px; --sp-4: 12px; --sp-5: 14px; --sp-6: 16px;
+  --sp-1-5: 5px; --sp-2: 6px; --sp-2-5: 8px; --sp-3: 8px; --sp-4: 12px;
+  --sp-5: 14px; --sp-6: 16px;
+  --fs-2xl: 16px; --fs-3xl: 19px; --fs-4xl: 21px;
   --gap: var(--sp-2); --gap-sm: 4px; --ctrl-h: 30px;
 }

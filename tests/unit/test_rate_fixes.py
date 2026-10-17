@@ -238,8 +238,9 @@ class LearnedDefaultJitter(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(grant2.jitter_s, DEFAULT_JITTER[1])
 
     async def test_unknown_action_keeps_zero_jitter(self):
-        """Actions without a learned default stay at the floor with zero
-        jitter (the documented no-default branch)."""
+        """Actions without a learned default pace at the conservative
+        UNSTUDIED_ACTION_INTERVAL (1.2 s) with zero jitter — the
+        documented no-default branch (never the bare floor)."""
         manager = _plain_manager()
         rng = self._FixedRng(0.5)
         manager._jitter_rng = rng
@@ -285,3 +286,29 @@ class LaneDeprecation(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class UnstudiedActionDefaultTests(unittest.IsolatedAsyncioTestCase):
+    """The default rate for unstudied actions is 1.2 s (never the bare
+    floor); learned defaults and stored policies keep their contracts."""
+
+    def test_unstudied_effective_is_the_conservative_default(self):
+        from core.rate_limit_manager import UNSTUDIED_ACTION_INTERVAL
+        from core.rate_limit_manager.engine import RateLimitManager
+        manager = RateLimitManager(EventBus(), StubLogger(), None)
+        self.assertEqual(UNSTUDIED_ACTION_INTERVAL, 1.2)
+        self.assertEqual(manager.effective("poke")["interval"], 1.2)
+        # learned defaults are untouched by the fallback
+        self.assertEqual(manager.effective("message")["interval"], 2.6)
+
+    def test_floor_above_default_dominates(self):
+        from core.rate_limit_manager.engine import RateLimitManager
+        manager = RateLimitManager(
+            EventBus(), StubLogger(), None, floor=3.0)
+        self.assertEqual(manager.effective("poke")["interval"], 3.0)
+
+    def test_stored_policy_displaces_the_default(self):
+        from core.rate_limit_manager.engine import RateLimitManager
+        manager = RateLimitManager(EventBus(), StubLogger(), None)
+        manager.set_policy_values("poke", 0.5)   # deliberate faster pace
+        self.assertEqual(manager.effective("poke")["interval"], 0.5)

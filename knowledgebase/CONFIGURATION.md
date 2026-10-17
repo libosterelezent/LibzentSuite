@@ -129,7 +129,7 @@ stored layer.
 | Concern | Rule |
 |---|---|
 | Safety floor | `MIN_ACTION_INTERVAL = 0.05 s` — an absolute sanity minimum against zero-delay tight loops (Discord's own per-route bucket limits, read by the library on write routes, are the ACTUAL pacing constraint since the learned-pacing study). The floor is **raise-only** (`ratelimit floor`) and persists in kv (`ratelimit:floor`) so a restart cannot revert a post-incident raise |
-| Composition | Effective interval = **max** across every applicable level (global / account / plugin / `account_plugin`); never below the floor; actions with NO stored policy fall back to the learned default |
+| Composition | Effective interval = **max** across every applicable level (global / account / plugin / `account_plugin`); never below the floor; actions with NO stored policy fall back to the learned default, or the **1.2 s unstudied-action default** when the action has no learned default either |
 | Persistence | Stored in the `rate_limit_policies` table (levels: `global`, `account`, `plugin`, `account_plugin` with owner `<account>/<plugin>`); a CLEARED first-boot default is tombstoned (`ratelimit:removed`) so it cannot be re-seeded on the next boot |
 | Boot precedence | DB rows load first; then every action defined **in this file** is re-applied and re-persisted — the **file wins at every boot for the actions it defines**. Runtime changes for actions *not* in the file persist in the DB and survive restarts |
 | Mutability | Runtime via `ratelimit set|clear|floor` (CLI) or `POST /api/ratelimit/*` (dashboard) or the `prefixrate` self-command (per-account message interval); takes effect immediately, wakes parked waiters |

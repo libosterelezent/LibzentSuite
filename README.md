@@ -207,7 +207,7 @@ Pacing composes on every outbound action — the strictest wins:
 |---|---|
 | **Sync-group clock** | accounts in one group serialize against each other |
 | **Per-account pacing** | each account's own minimum interval + jitter per action |
-| **Learned defaults** | with no policy stored: message 2.6 s, dm 2.6 s, reaction 2.5 s, component 3.0 s (measured zero-throttle rates — fallback, not policy) |
+| **Learned defaults** | with no policy stored: message 2.6 s, dm 2.6 s, reaction 2.5 s, component 3.0 s (measured zero-throttle rates — fallback, not policy); any other action defaults to **1.2 s** |
 
 Plus: a hard sanity floor nothing can go below, server 429s always earn
 paced retries (with per-account + fleet throttle telemetry on the

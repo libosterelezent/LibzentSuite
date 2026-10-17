@@ -20,7 +20,7 @@
 
 const FRAMEWORK_PLUGIN = "$framework";
 const FRAMEWORK_VIEWS = new Set(["home", "fleet", "plugins", "activity",
-                                "policies", "admin", "tools", "profiles"]);
+                                "policies", "admin", "tools", "profiles", "design"]);
 let fwSeq = 0;
 let fwLastRefresh = 0;
 
@@ -29,8 +29,18 @@ function isFrameworkView(view) {
 }
 
 async function renderFrameworkTab(view) {
-  const panel = $("panel-" + view);
-  if (!panel) return;
+  // panels are created on demand — a new framework page needs NO
+  // index.html mount (the old "if (!panel) return" silently skipped
+  // any view without a hand-written static panel)
+  let panel = $("panel-" + view);
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.className = "panel";
+    panel.id = "panel-" + view;
+    $("content").appendChild(panel);
+  }
+  showPanel("panel-" + view);   // own panel activates HERE, not via a
+                                // static mount that may not exist
   // duiComps is a GLOBAL index of the LAST rendered page — every OTHER
   // framework view's marker must die here or returning to it would take
   // the quiet-refresh path against the wrong component index (tiles

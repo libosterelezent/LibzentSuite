@@ -442,19 +442,19 @@ class TestEffectiveComposition(unittest.TestCase):
         # bare action: global only
         self.assertEqual(self.manager.effective("poke")["interval"], 2.0)
 
-    def test_empty_case_falls_back_to_floor(self):
+    def test_empty_case_falls_back_to_unstudied_default(self):
         eff = self.manager.effective("unknown-action")
-        self.assertEqual(eff["interval"], 0.05)
+        self.assertEqual(eff["interval"], 1.2)   # max(floor, 1.2 default)
         self.assertEqual(eff["jitter"], [0.0, 0.0])
         self.assertEqual(eff["sources"], [])
         self.assertEqual(eff["action"], "unknown-action")
 
-    def test_unknown_action_for_account_with_no_policy_is_floor(self):
+    def test_unknown_action_for_account_uses_unstudied_default(self):
         # "poke" now has a LEARNED default (rate study); a genuinely
-        # unconfigured action still paces at the floor
+        # unconfigured action paces at the 1.2 s unstudied default
         fresh = make_manager()
-        eff = fresh.effective("poke", account="alpha", plugin="soulcopy")
-        self.assertEqual(eff["interval"], 0.05)
+        eff = fresh.effective("other", account="alpha", plugin="soulcopy")
+        self.assertEqual(eff["interval"], 1.2)
         self.assertEqual(eff["sources"], [])
 
     def test_learned_default_applies_without_policy(self):
@@ -464,7 +464,7 @@ class TestEffectiveComposition(unittest.TestCase):
         eff = fresh.effective("message")
         self.assertEqual(eff["interval"], 2.6)   # rate-study derived
         self.assertEqual(eff["sources"], [])     # a default, not a policy
-        self.assertEqual(fresh.effective("poke")["interval"], 0.05)
+        self.assertEqual(fresh.effective("other")["interval"], 1.2)
 
     def test_losing_level_jitter_cannot_speed_up_winner(self):
         """MAX-across-levels: account_plugin LOSES to global on interval,

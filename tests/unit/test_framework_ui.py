@@ -159,7 +159,7 @@ def make_registry():
 class TestAttach(unittest.TestCase):
     def test_registers_every_main_tab_page(self):
         reg, api, count = make_registry()
-        self.assertEqual(count, 8)
+        self.assertEqual(count, len(FRAMEWORK_VIEWS))
         self.assertIn(FRAMEWORK_PLUGIN, reg.list_plugins())
         layout = reg.get_layout(FRAMEWORK_PLUGIN)
         page_ids = [p["id"] for p in (layout.get("children") or [])]
@@ -168,7 +168,8 @@ class TestAttach(unittest.TestCase):
     def test_reattach_replaces_atomically(self):
         reg, api, _ = make_registry()
         # a second attach replaces without error (validation-first)
-        self.assertEqual(attach_framework_ui(reg, StubAPI()), 8)
+        self.assertEqual(
+            attach_framework_ui(reg, StubAPI()), len(FRAMEWORK_VIEWS))
         self.assertIn(FRAMEWORK_PLUGIN, reg.list_plugins())
 
     def test_reservered_name_cannot_collide_with_real_plugins(self):

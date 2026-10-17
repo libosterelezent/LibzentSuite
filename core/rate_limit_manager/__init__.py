@@ -30,6 +30,7 @@ from .engine import (
     ManualClock,
     RateLimitManager,
     SystemClock,
+    UNSTUDIED_ACTION_INTERVAL,
 )
 from .lane import MAX_PREFIXRATE, GlobalSendLane
 from .policies import MIN_ACTION_INTERVAL, RatePolicy
@@ -39,6 +40,7 @@ __all__ = [
     "RatePolicy",
     "Grant",
     "MIN_ACTION_INTERVAL",
+    "UNSTUDIED_ACTION_INTERVAL",
     "GlobalSendLane",
     "MAX_PREFIXRATE",
     "Clock",

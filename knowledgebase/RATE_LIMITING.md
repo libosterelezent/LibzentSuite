@@ -13,9 +13,11 @@ rewrite keeps the same safety goal with a simpler mental model. It combines:
    account_plugin rules, composed by MAX interval, clamped by the safety floor;
 2. **learned default intervals** (`engine.DEFAULT_ACTION_INTERVALS`) — when
    NO policy is stored for an action, the measured zero-throttle rates apply
-   (message 2.6 s, dm 2.6 s, reaction 2.5 s, component 3.0 s); they are
-   FALLBACKS, not policy — stored policies compose on top with max-wins
-   semantics;
+   (message 2.6 s, dm 2.6 s, reaction 2.5 s, component 3.0 s); actions with
+   NO learned default fall back to the conservative **1.2 s unstudied-action
+   default** (`engine.UNSTUDIED_ACTION_INTERVAL`) — never the bare floor;
+   both are FALLBACKS, not policy — stored policies compose on top with
+   max-wins semantics;
 3. **pacing engine** (`engine.py`) — priority waiter heaps per pacing key,
    server-provided cooldowns, post-grant jitter, and two pacing scopes
    (per-TASK and per-ACCOUNT/GROUP); **429 telemetry** (`hits_429` per
@@ -39,7 +41,8 @@ stub (`{"removed": true, ...}`).
                            ("__global__"|account, action)          reason="pacing"
                            ("group:<name>", action) when grouped
                            interval = MAX(all applicable policies, floor,
-                                          learned default when unpolicied)
+                                          learned default when unpolicied,
+                                          1.2 s for unstudied actions)
                            waiters granted in (priority, seq) order
                                       |
                   grant -> stamp last_fire on EVERY pacing key
@@ -78,6 +81,7 @@ can never make itself FASTER than a global rule — only slower. Levels mirror
 | Constant | Value | Meaning |
 |---|---|---|
 | `MIN_ACTION_INTERVAL` | `0.05` | hard sanity floor (an absolute minimum against zero-delay tight loops — Discord's own per-route bucket limits are the ACTUAL pacing constraint since the learned-rate study); enforced at SET time by the manager, not by `RatePolicy` |
+| `UNSTUDIED_ACTION_INTERVAL` | `1.2` | the DEFAULT RATE for actions with no learned default and no stored policy (they used to pace at the bare floor — 0.05 s, up to 20 sends/s/account); displaced by any stored policy, exactly like the learned defaults |
 | `MAX_INTERVAL` | `86400.0` | one-day-per-action sanity cap |
 | `MAX_JITTER` | `3600.0` | one-hour jitter sanity cap |
 
@@ -113,7 +117,8 @@ Module helpers:
   0.0]` when none apply;
 - `sources` lists every applicable `{level, owner, interval}` (deterministic
   order: level rank, then owner);
-- with NO policy at all the result is the floor with empty sources — still safe.
+- with NO policy at all the result is `max(floor, learned default or the
+  1.2 s unstudied default)` with empty sources — still safe.
 
 Applicability per level: `global` always; `account` when `owner == account`;
 `plugin` when `owner == plugin`; `account_plugin` when

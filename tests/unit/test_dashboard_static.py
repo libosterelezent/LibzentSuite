@@ -205,19 +205,29 @@ class TestAccountPluginsModel(unittest.TestCase):
         for gone in ("openProfilePicker", "effectiveCaps",
                      "Effective Capabilities"):
             self.assertNotIn(gone, js, f"legacy {gone} must stay removed")
-        # the NEW tab: nav entry between Plugins and Activity + title
-        nav = re.search(r"const NAV = \[(.*?)\];", js, re.S)
-        self.assertIsNotNone(nav, "NAV array missing")
-        ids = re.findall(r'id:"([a-z]+)"', nav.group(0))
-        self.assertEqual(ids.count("profiles"), 1,
-                         "NAV must carry exactly one profiles entry")
-        self.assertEqual(ids.index("profiles"), ids.index("plugins") + 1,
+        # the NEW tab: nav is DATA now — the sidebar is built from the
+        # server's navigation API, so the order contract lives in
+        # core.framework_ui.FRAMEWORK_VIEWS and app.js must CONSUME it
+        from core.framework_ui import FRAMEWORK_VIEWS
+        views = list(FRAMEWORK_VIEWS)
+        self.assertEqual(views.count("profiles"), 1,
+                         "exactly one profiles page")
+        self.assertEqual(views.index("profiles"), views.index("plugins") + 1,
                          "Profiles sits between Plugins and Activity")
-        self.assertEqual(ids.index("activity"), ids.index("profiles") + 1,
-                         "Profiles sits between Plugins and Activity")
-        titles = re.search(r"const TITLES = \{(.*?)\};", js, re.S)
-        self.assertIsNotNone(titles, "TITLES map missing")
-        self.assertIn('profiles:"Profiles"', titles.group(0))
+        self.assertRegex(js, r"let NAV = \[\];",
+                         "app.js must consume the dynamic NAV (no hardcoded "
+                         "page list — that is the breaking-hardcode class)")
+        # TITLES is data too: labels come from the server's page titles,
+        # so assert the REGISTRY carries them (attach count == views)
+        from core.framework_ui import attach_framework_ui
+        from core.dashboard_ui.registry import DashboardUIRegistry
+        reg = DashboardUIRegistry(offload_sync=False)
+        count = attach_framework_ui(reg, None)
+        self.assertEqual(count, len(views))
+        titles = [p["title"] for p in (
+            reg.get_layout("$framework").get("children") or [])]
+        self.assertIn("Profiles", titles)
+        self.assertIn("Design", titles)
 
     def test_no_profiles_state_or_loader(self):
         js = _js()
@@ -588,7 +598,7 @@ class TestStartupRobustness(unittest.TestCase):
         UI.go(...) once, otherwise the first paint is a blank main area
         until the user clicks a nav item."""
         js = _js()
-        boot = js.split("buildNav(); wire(); connectWS();")[1].split(
+        boot = js.split("loadDashboardUINav().then(() => { buildNav(); render(); });")[1].split(
             "Promise.all")[0]
         self.assertIn("UI.go(", boot,
                       "boot must activate the initial panel view")
