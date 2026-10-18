@@ -1,5 +1,5 @@
 {
-  "_comment": "Rate-limit policies (learned defaults from the live rate study \u2014 see TIMING derivation): message sends 2.6s account-global (sustained zero-throttle), dm 2.6s, reaction 2.5s (shared account bucket \u2014 serial only), component 3.0s. accounts.<name> overrides per account; prefixrate command sets the account's message interval at runtime.",
+  "_comment": "Rate-limit policies (learned defaults from the live rate study \u2014 see TIMING derivation): message sends 2.6s account-global (sustained zero-throttle), dm 2.6s, reaction 2.5s (shared account bucket \u2014 serial only), button 3.0s. accounts.<name> overrides per account; prefixrate command sets the account's message interval at runtime.",
   "global": {
     "message": {
       "interval": 2.6,
@@ -22,7 +22,7 @@
         0.4
       ]
     },
-    "component": {
+    "button": {
       "interval": 3.0,
       "jitter": [
         0.1,

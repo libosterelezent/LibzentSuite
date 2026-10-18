@@ -101,7 +101,7 @@ DEFAULT_ACTION_INTERVALS: Dict[str, float] = {
     "message": 2.6,    # sustained zero-throttle send rate, account-global
     "dm": 2.6,
     "reaction": 2.5,   # shared account bucket — serial only
-    "component": 3.0,  # interaction route — independent bucket
+    "button": 3.0,     # interaction route — independent bucket
 }
 
 #: jitter window paired with the learned defaults (no-policy traffic):

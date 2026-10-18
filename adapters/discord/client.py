@@ -1137,7 +1137,8 @@ class RealDiscordClient:
             # drop this client's registry subscription (a reconnect's fresh
             # client re-subscribes with its own rebuild callback)
             try:
-                COMMAND_HUB.unsubscribe(self._account)
+                COMMAND_HUB.unsubscribe(
+                    self._account, self.set_plugin_commands)
             except Exception:
                 pass
         await self._cancel_run_task()

@@ -796,9 +796,19 @@ class SelfCommandHub:
             self._stats[account] = stats_provider
         self.refresh(account)
 
-    def unsubscribe(self, account: str) -> None:
+    def unsubscribe(
+        self,
+        account: str,
+        rebuild: Optional[Callable[[List[CommandSpec]], None]] = None,
+    ) -> None:
         """The client disconnected/stopped: drop its callback and stats
-        provider (a reconnect re-subscribes both)."""
+        provider (a reconnect re-subscribes both).
+
+        ``rebuild`` makes the drop OWNERSHIP-aware: a stale client's late
+        disconnect must not remove the subscription a newer client
+        already installed under the same account name."""
+        if rebuild is not None and self._subscribers.get(account) != rebuild:
+            return
         self._subscribers.pop(account, None)
         self._stats.pop(account, None)
 

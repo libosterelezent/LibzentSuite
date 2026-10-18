@@ -227,12 +227,16 @@ class BindingTests(PluginProfilesTestBase):
         self.assertEqual(await self.bindings.all_assignments(),
                          {"alpha": ["roll"]})
 
-    async def test_set_plugins_replacement_clears_bindings(self) -> None:
+    async def test_set_plugins_replacement_keeps_bindings_of_kept_plugins(
+            self) -> None:
         await self.bindings.assign_plugin("alpha", "roll")
+        await self.bindings.assign_plugin("alpha", "gone")
         await self.bindings.set_profile("alpha", "roll", "grind")
-        await self.bindings.set_plugins("alpha", ["roll"])  # delete+insert
+        await self.bindings.set_plugins("alpha", ["roll", "new"])
         self.assertEqual(await self.bindings.bindings("alpha"),
-                         {"roll": None})
+                         {"roll": "grind", "new": None})
+        await self.bindings.set_plugins("alpha", [])
+        self.assertEqual(await self.bindings.bindings("alpha"), {})
 
 
 # --------------------------------------------------------------- restart

@@ -562,7 +562,7 @@ def _build_policies(ui: DashboardUIToolset, api: Any):
             .set_submit_label("Save policy")
             .add_fields(
                 ui.Select(component_id="pol-action").set_label("Action")
-                .set_options(["message", "dm", "reaction", "component"]),
+                .set_options(["message", "dm", "reaction", "button"]),
                 ui.NumberInput(component_id="pol-interval").set_label("Interval (s)")
                 .set_min_value(1.5).set_step(0.1).set_required(True)
                 .set_description("Hard floor 1.5s — anything lower is rejected."),

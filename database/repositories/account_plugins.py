@@ -77,11 +77,22 @@ class AccountPluginsRepository(BaseRepository):
         """
         cleaned = sorted({p for p in (plugins or [])})
         async with self._tx(f"set plugins of account {account!r}") as conn:
-            await conn.execute(
-                "DELETE FROM account_plugins WHERE account = ?", (account,)
-            )
+            # Diff rather than wipe: plugins that stay assigned keep their
+            # profile binding (account_plugins.profile).
+            if cleaned:
+                marks = ",".join("?" * len(cleaned))
+                await conn.execute(
+                    "DELETE FROM account_plugins WHERE account = ?"
+                    f" AND plugin NOT IN ({marks})",
+                    (account, *cleaned),
+                )
+            else:
+                await conn.execute(
+                    "DELETE FROM account_plugins WHERE account = ?", (account,)
+                )
             await conn.executemany(
-                "INSERT INTO account_plugins (account, plugin) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO account_plugins (account, plugin)"
+                " VALUES (?, ?)",
                 [(account, plugin) for plugin in cleaned],
             )
         return cleaned
