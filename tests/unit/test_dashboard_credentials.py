@@ -150,7 +150,8 @@ def http_get(url: str, token: str | None = TOKEN) -> tuple[int, str]:
         with urllib.request.urlopen(request, timeout=5) as response:
             return response.status, response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8")
+        with exc:
+            return exc.code, exc.read().decode("utf-8")
 
 
 def http_post(url: str, payload, token: str | None = TOKEN) -> tuple[int, str]:
@@ -163,7 +164,8 @@ def http_post(url: str, payload, token: str | None = TOKEN) -> tuple[int, str]:
         with urllib.request.urlopen(request, timeout=10) as response:
             return response.status, response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8")
+        with exc:
+            return exc.code, exc.read().decode("utf-8")
 
 
 def get_json(text: str) -> dict:
