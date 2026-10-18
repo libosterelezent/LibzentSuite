@@ -325,7 +325,8 @@ class ArtifactSecurityTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "scan.json")
             to_json(report, path)
-            text = open(path).read()
+            with open(path) as fh:
+                text = fh.read()
         self.assertNotIn("bench-tok", text)
         key = Path("state/credentials.key")
         if key.is_file():
