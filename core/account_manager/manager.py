@@ -66,6 +66,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -146,7 +147,11 @@ _BACKOFF_EXPONENT_CAP = 32
 #: login-failure text markers used to classify INVALID_CREDENTIAL (the live
 #: client surfaces library LoginFailures as plain AccountError strings, so
 #: message text is the portable detection seam — documented heuristic)
-_AUTH_ERROR_MARKERS = ("bad token", "401", "improper token")
+_AUTH_ERROR_MARKERS = ("bad token", "improper token")
+
+#: a bare HTTP 401 as its own token — NOT a substring of an account name
+#: or id ("alt401", "1401234") that merely rides in an error message
+_AUTH_401_RE = re.compile(r"(?<![\w-])401(?![\w-])")
 
 
 def _looks_like_auth_error(exc: BaseException) -> bool:
@@ -160,7 +165,8 @@ def _looks_like_auth_error(exc: BaseException) -> bool:
     walker: Optional[BaseException] = exc
     while walker is not None and seen < 5:  # bounded cause chain walk
         text = str(walker).lower()
-        if any(marker in text for marker in _AUTH_ERROR_MARKERS):
+        if (any(marker in text for marker in _AUTH_ERROR_MARKERS)
+                or _AUTH_401_RE.search(text)):
             return True
         walker = walker.__cause__ or walker.__context__
         seen += 1
@@ -592,16 +598,21 @@ class AccountManager:
         # persist the capability rows, THEN mirror them into the record the
         # attach path reads (a failed write keeps the account fail-closed:
         # zero plugins until an explicit assignment lands)
+        persisted = True
         if self._account_plugins is not None:
             try:
                 await self._account_plugins.set_plugins(
                     name, list(dict.fromkeys(plugins or [])))
             except Exception:
+                persisted = False
                 self._logger.exception(
                     "could not persist plugin assignments for new account %r",
                     name,
                 )
-        account.assigned_plugins = sorted({p for p in (plugins or [])})
+        # fail-closed: memory must never claim assignments the database
+        # lost (they would run this session, then vanish on restart)
+        account.assigned_plugins = (
+            sorted({p for p in (plugins or [])}) if persisted else [])
         fresh = await self._repo_get(name)
         if fresh is not None:
             account.record = fresh
@@ -1838,6 +1849,7 @@ class AccountManager:
                 if rt.stop_requested or rt.generation != gen:
                     return
                 rt.status = AccountStatus.FAILED
+                rt.lost.clear()  # stand down: the supervisor must not re-enter
                 rt.last_error = f"reconnect interrupted: {exc}"
                 self._logger.error("reconnect for %s interrupted: %r", name, exc)
                 return
@@ -1854,6 +1866,10 @@ class AccountManager:
                 if (getattr(probe, "fatal_close", False)
                         or _looks_like_auth_error(exc)):
                     rt.status = AccountStatus.INVALID_CREDENTIAL
+                    # stand down: with ``lost`` still set the supervisor
+                    # re-entered this loop at once and retried the revoked
+                    # token every ~1s until stop()
+                    rt.lost.clear()
                     rt.last_error = f"{type(exc).__name__}: {exc}"
                     if rt.client is not None:
                         # _connect_client assigns rt.client BEFORE connect()

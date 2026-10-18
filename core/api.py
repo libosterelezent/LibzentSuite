@@ -68,6 +68,7 @@ from .dashboard_ui.context import ActionContext, CheckContext
 from .dashboard_ui.errors import UIError
 from .errors import DatabaseError, PluginError, SyncGroupError
 from . import plugin_scopes
+from .rate_limit_manager.policies import parse_scope
 from .rate_limit_manager import (
     KV_FLOOR_KEY,
     KV_LANE_KEY,
@@ -686,6 +687,7 @@ class ControlAPI:
             # the rename cascade moved every bound account's pointer in
             # the DB — the in-memory records must follow (F3 pattern)
             await self._refresh_all_plugin_profiles()
+        await self._refresh_live_settings(None, plugin)
         self._audit_mgmt(
             "system", "mgmt:plugin_profile.updated", surface,
             extra=f"plugin={plugin} profile={updated.name}")
@@ -703,6 +705,7 @@ class ControlAPI:
         existed = bool(await repo.delete(plugin, name))
         if existed:  # the cascade NULLed bound accounts' bindings in the DB
             await self._refresh_all_plugin_profiles()
+            await self._refresh_live_settings(None, plugin)
         self._audit_mgmt(
             "system", "mgmt:plugin_profile.deleted", surface,
             extra=f"plugin={plugin} profile={name} existed={existed}")
@@ -749,6 +752,7 @@ class ControlAPI:
                     f"(known: {known})")
         await self._binding_repo().set_profile(account, plugin, profile)
         self._set_account_plugin_profile(account, plugin, profile)
+        await self._refresh_live_settings(account, plugin)
         self._audit_mgmt(
             account, "mgmt:account.plugin_profile", surface,
             extra=f"plugin={plugin} profile={profile or '-'}")
@@ -772,7 +776,8 @@ class ControlAPI:
     ) -> Dict[str, Any]:
         """Effective settings for one (account, plugin), fully merged.
 
-        Merge order (highest wins): plugin Setting defaults <- the bound
+        Merge order (highest wins): plugin Setting defaults <- the global
+        layer <- the bound
         profile's settings (minus the reserved ``channels`` key) <- the
         account's per-plugin overrides (plugin_settings rows). The
         profile's channel scope rides along under ``"channels"`` (None =
@@ -792,6 +797,18 @@ class ControlAPI:
             setting.name: setting.validate(setting.default)
             for setting in self._plugin_schema(plugin)
         }
+        # the GLOBAL layer sits between the defaults and the profile —
+        # exactly where SettingsManager.resolve applies it, so this view
+        # agrees with what the running plugin actually uses
+        layers_view = getattr(self._settings, "layers_view", None)
+        if callable(layers_view):
+            try:
+                global_layer = (layers_view().get("global") or {}).get(plugin) or {}
+            except Exception:
+                global_layer = {}
+            for key, value in global_layer.items():
+                if key != reserved:
+                    merged[key] = value
         profile_name: Optional[str] = None
         scope: Optional[Dict[str, Any]] = None
         binding_repo = self._binding_repo()
@@ -862,6 +879,19 @@ class ControlAPI:
         except Exception:
             LOG.debug("plugin profile memory refresh failed for %r", account,
                       exc_info=True)
+
+    async def _refresh_live_settings(self, account: Optional[str] = None,
+                                     plugin: Optional[str] = None) -> None:
+        """Push a profile-layer change into RUNNING plugins' settings."""
+        refresh = getattr(self._plugins, "refresh_settings", None)
+        if not callable(refresh):
+            return
+        try:
+            out = refresh(account, plugin)
+            if inspect.iscoroutine(out):
+                await out
+        except Exception:
+            LOG.debug("live settings refresh failed", exc_info=True)
 
     async def _refresh_all_plugin_profiles(self) -> None:
         """Re-read EVERY account's bindings into the memory records.
@@ -1712,8 +1742,12 @@ class ControlAPI:
         pacing safety never depends on the database.
         """
         action = (action or "").strip()
-        if owner is not None:
+        # normalize EXACTLY like the engine (parse_scope) so the persisted
+        # row / tombstone key is the one the engine stores — 'alpha / foo'
+        # and 'alpha/foo' must not be two different DB rows
+        if isinstance(owner, str):
             owner = owner.strip() or None
+        level, owner = parse_scope(level, owner)
         policy = self._limiter.set_policy_values(
             action, interval, jitter_min, jitter_max, level, owner
         )
@@ -1727,8 +1761,9 @@ class ControlAPI:
         # normalize FIRST: the engine strips internally and the repo delete
         # must target the same key or the row silently survives a "clear"
         action = (action or "").strip()
-        if owner is not None:
+        if isinstance(owner, str):
             owner = owner.strip() or None
+        level, owner = parse_scope(level, owner)
         removed = self._limiter.clear_policy(level, owner, action)
         await self._forget_policy(level, owner, action)
         await self._write_removed_defaults(level, owner, action, removed=True)

@@ -938,14 +938,17 @@ class DashboardServer:
             if (method, path) == ("POST", "/api/estop"):
                 return 200, {"ok": True, "data": await api.emergency_stop_all(surface="dashboard")}
             if (method, path) == ("POST", "/api/shutdown"):
+                data = await api.shutdown()
                 if self._exit_signal:
                     # scheduler + accounts stop now; the PROCESS exits through
                     # the graceful path — a delayed SIGINT (what Ctrl-C sends)
                     # unwinds run_app: REPL readline raises KeyboardInterrupt /
                     # headless's signal handler sets its stop event, and the
                     # finally-block owns the ordered teardown (persistence
-                    # drains, then db.close). The delay lets this response
-                    # reach the browser first. Opt-in (main.py) so embedded
+                    # drains, then db.close). The timer starts only AFTER the
+                    # shutdown above completes (it can take seconds: drains,
+                    # disconnects), and its delay lets this response reach
+                    # the browser first. Opt-in (main.py) so embedded
                     # servers (tests) never signal their host process.
                     def _request_exit() -> None:
                         os.kill(os.getpid(), signal.SIGINT)
@@ -953,7 +956,7 @@ class DashboardServer:
                     timer = threading.Timer(0.25, _request_exit)
                     timer.daemon = True  # never fire during interpreter exit
                     timer.start()
-                return 200, {"ok": True, "data": await api.shutdown()}
+                return 200, {"ok": True, "data": data}
             if (method, path) == ("POST", "/api/resume"):
                 return 200, {"ok": True, "data": await api.system_resume()}
             # -------------------------------------------------------------- accounts
@@ -968,7 +971,7 @@ class DashboardServer:
                 # is the account status dict, never the value. A duplicate
                 # name is a conflict, not a bad request.
                 try:
-                    return 200, {"ok": True, "data": await api.accounts_add(body)}
+                    return 200, {"ok": True, "data": await api.accounts_add(body, surface="dashboard")}
                 except AccountError as exc:
                     if "already exists" in str(exc):
                         return 409, {"ok": False, "error": str(exc)}
@@ -976,7 +979,7 @@ class DashboardServer:
             if (method, path) == ("POST", "/api/accounts/remove"):
                 return 200, {
                     "ok": True,
-                    "data": await api.accounts_remove(require_str(body, "name", path)),
+                    "data": await api.accounts_remove(require_str(body, "name", path), surface="dashboard"),
                 }
             if (method, path) == ("GET", "/api/accounts/info"):
                 return 200, {
@@ -994,17 +997,17 @@ class DashboardServer:
             if (method, path) == ("POST", "/api/accounts/start"):
                 return 200, {
                     "ok": True,
-                    "data": await api.accounts_start(body_opt_str(body, "account", path)),
+                    "data": await api.accounts_start(body_opt_str(body, "account", path), surface="dashboard"),
                 }
             if (method, path) == ("POST", "/api/accounts/stop"):
                 return 200, {
                     "ok": True,
-                    "data": await api.accounts_stop(body_opt_str(body, "account", path)),
+                    "data": await api.accounts_stop(body_opt_str(body, "account", path), surface="dashboard"),
                 }
             if (method, path) == ("POST", "/api/accounts/emergency-stop"):
                 return 200, {
                     "ok": True,
-                    "data": await api.accounts_emergency_stop(require_str(body, "name", path)),
+                    "data": await api.accounts_emergency_stop(require_str(body, "name", path), surface="dashboard"),
                 }
             if (method, path) == ("POST", "/api/accounts/credential"):
                 # credential VALUE: one-way (request -> CredentialService).

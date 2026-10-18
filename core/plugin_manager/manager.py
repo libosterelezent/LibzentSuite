@@ -116,6 +116,10 @@ class PluginManager:
         self.plugin_state = plugin_state
         #: account -> plugin name -> PluginRuntime
         self._accounts: Dict[str, Dict[str, PluginRuntime]] = {}
+        #: per-account allowlist from the last attach (None = all), so a
+        #: reload can restore an UNLOADED plugin that a later re-attach
+        #: dropped from the account (it is no longer in loader.names())
+        self._attach_allowed: Dict[str, Optional[Set[str]]] = {}
         #: account -> services factory: (plugin_name) -> PluginServices
         self._services: Dict[str, Callable[[str], Any]] = {}
         #: strong refs for fire-and-forget dispatch tasks (no GC mid-flight)
@@ -320,6 +324,7 @@ class PluginManager:
                     runtime.name, account, exc,
                 )
         self._accounts[account] = runtimes
+        self._attach_allowed[account] = None if allowed is None else set(allowed)
         self._logger.info(
             "attached %d plugin(s) to %s (allowed=%s)",
             len(runtimes), account, sorted(allowed) if allowed is not None else "all",
@@ -391,6 +396,14 @@ class PluginManager:
                 affected[acct] = rt
                 was_active[acct] = rt.active
                 was_loaded[acct] = rt.loaded
+        # accounts that are ASSIGNED the plugin but hold no runtime for it
+        # (it was unloaded, then a re-attach rebuilt the map without it)
+        orphaned = [
+            acct for acct, runtimes in self._accounts.items()
+            if name not in runtimes
+            and (self._attach_allowed.get(acct, set()) is None
+                 or name in (self._attach_allowed.get(acct) or ()))
+        ]
         # TEARDOWN: the runtime is marked unavailable to NEW dispatch and
         # popped from the account map FIRST (review finding #1: events
         # admitted after the quiesce snapshot could still pass the
@@ -399,6 +412,11 @@ class PluginManager:
         for acct, rt in affected.items():
             await self._await_activation_settled(
                 acct, timeout=self._activation_settle_timeout_s)
+            # re-read AFTER the settle: an activation that was mid-hook at
+            # snapshot time has finished by now, and teardown/re-activate
+            # decisions on the stale flags skipped on_disable/on_unload
+            was_active[acct] = rt.active
+            was_loaded[acct] = rt.loaded
             rt.active = False   # blocks new dispatch admission NOW
             self._accounts[acct].pop(name, None)
             await self._quiesce_dispatch(acct)
@@ -414,7 +432,8 @@ class PluginManager:
         # RESTORE with live instances; re-activate where it was running
         restored = 0
         reactivated = 0
-        for acct, old_rt in affected.items():
+        for acct, old_rt in (list(affected.items())
+                             + [(a, None) for a in orphaned]):
             runtimes = self._accounts.get(acct)
             if runtimes is None:
                 continue   # account gone while we worked
@@ -437,11 +456,20 @@ class PluginManager:
             # a stopped account's states() keep truthful values). The
             # re-activation below re-resolves for the live view anyway.
             try:
-                rt.settings = self._settings.resolve(
+                resolved = self._settings.resolve(
                     name, self._schema_for(name),
                     account=acct,
                     profile=profile_layers.get(name),
                 )
+                # keep the dict IDENTITY: the account's cached services
+                # facade holds the previous runtime's dict, which must
+                # stay a live view of the replacement's settings
+                carried = getattr(old_rt, "settings", None)
+                if isinstance(carried, dict):
+                    carried.clear()
+                    carried.update(resolved)
+                    resolved = carried
+                rt.settings = resolved
             except Exception as exc:
                 rt.enabled = False
                 rt.last_error = f"settings: {type(exc).__name__}: {exc}"
@@ -475,7 +503,7 @@ class PluginManager:
             # even when it was not re-activated (review finding #13)
             self._sync_commands(acct)
         # the fresh instances take over the live UI for their accounts
-        for acct in affected:
+        for acct in list(affected) + orphaned:
             runtimes = self._accounts.get(acct)
             if runtimes is not None and name in runtimes \
                     and runtimes[name].active:
@@ -506,9 +534,11 @@ class PluginManager:
                 rt = runtimes.get(name)
                 if rt is None:
                     continue
-                was_active, was_loaded = rt.active, rt.loaded
                 await self._await_activation_settled(
                     acct, timeout=self._activation_settle_timeout_s)
+                # read the flags AFTER the settle (a mid-hook activation
+                # finishes there; stale flags skipped the unload hooks)
+                was_active, was_loaded = rt.active, rt.loaded
                 rt.active = False   # blocks new dispatch admission NOW
                 await self._quiesce_dispatch(acct)
                 await self._teardown_runtime(
@@ -532,6 +562,7 @@ class PluginManager:
         were active; detach only clears bookkeeping.
         """
         self._accounts.pop(account, None)
+        self._attach_allowed.pop(account, None)
         self._services.pop(account, None)
         self._activation_events.pop(account, None)
         # NOTE: the EPOCH is deliberately NOT popped — it is a fence
@@ -1052,6 +1083,43 @@ class PluginManager:
         runtime.settings[key] = validated  # live view (contexts share the dict)
         return validated
 
+    async def refresh_settings(self, account: Optional[str] = None,
+                               plugin: Optional[str] = None) -> int:
+        """Re-resolve the LIVE settings of attached runtimes (in place).
+
+        Profile bind/rebind/clear and profile edits/deletes change the
+        profile layer of the merge, but resolution otherwise only runs at
+        attach/activate/reload — a running plugin kept stale values while
+        the effective-settings view showed the new ones. ``account`` /
+        ``plugin`` narrow the scope (None = all). A runtime whose new
+        merge fails validation keeps its previous values (logged).
+        Returns the number of runtimes refreshed.
+        """
+        refreshed = 0
+        for acct, runtimes in list(self._accounts.items()):
+            if account is not None and acct != account:
+                continue
+            targets = [rt for name, rt in runtimes.items()
+                       if (plugin is None or name == plugin)
+                       and rt.instance is not None]
+            if not targets:
+                continue
+            profile_layers = await self._bound_profile_settings(acct)
+            for rt in targets:
+                try:
+                    resolved = self._settings.resolve(
+                        rt.name, self._schema_for(rt.name),
+                        account=acct, profile=profile_layers.get(rt.name))
+                except Exception as exc:
+                    self._logger.error(
+                        "settings refresh failed for %s on %s; keeping the "
+                        "previous values (%s)", rt.name, acct, exc)
+                    continue
+                rt.settings.clear()   # in place: contexts share this dict
+                rt.settings.update(resolved)
+                refreshed += 1
+        return refreshed
+
     async def clear_setting(self, account: str, plugin: str, key: str) -> Any:
         """Remove one account-layer override; live view falls back to the
         next layer (profile/global/plugin default) — mirrors
@@ -1103,7 +1171,7 @@ class PluginManager:
         runtime = self._accounts.get(account)
         if not runtime:
             return cards
-        for plugin_name, entry in runtime.items():
+        for plugin_name, entry in list(runtime.items()):
             if not entry.enabled or not entry.active:
                 continue
             instance = entry.instance
@@ -1140,8 +1208,8 @@ class PluginManager:
         dispatch context.
         """
         panels: Dict[str, Dict[str, Any]] = {}
-        for account, runtime in self._accounts.items():
-            for plugin_name, entry in runtime.items():
+        for account, runtime in list(self._accounts.items()):
+            for plugin_name, entry in list(runtime.items()):
                 if not entry.enabled or not entry.active:
                     continue
                 instance = entry.instance
@@ -1724,8 +1792,8 @@ class PluginManager:
         factory = self._services.get(event.account)
         if factory is None:
             return
-        for runtime in runtimes.values():
-            if not runtime.enabled or not runtime.active:
+        for runtime in list(runtimes.values()):  # snapshot: reload mutates the live dict across awaits
+            if not runtime.enabled or not runtime.active or runtime.instance is None:
                 continue
             # PHASE-4 (S7-L1): the context (logger lookup + dataclass) is
             # cached per runtime — all its inputs are stable per activation

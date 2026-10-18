@@ -1138,7 +1138,9 @@ class RateLimitManager:
                 f"clamping the cooldown to {MAX_INTERVAL:g}s",
             )
             wait = MAX_INTERVAL
-        account, action = self._validate_acquire_args(account, action, None)[:2]
+        action, account = self._validate_acquire_args(action, account, None)[:2]
+        if account is None:
+            raise RatePolicyError("account must not be None")
         # 429 telemetry (the ONLY observable throttle signal on user
         # accounts — successes carry no rate headers)
         self._hits_429[account] = self._hits_429.get(account, 0) + 1

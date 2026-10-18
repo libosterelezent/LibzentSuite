@@ -437,6 +437,19 @@ class RealDiscordClient:
     def account(self, name: str) -> None:
         self._account = str(name or "")
 
+    @property
+    def _commands_on(self) -> bool:
+        """Is the self-command layer built for this client?
+
+        On when the env-level prefix is set OR the admin panel's access
+        gate is wired — the panel's per-account prefix mode/symbol is
+        the real configuration surface, and keying on the (usually
+        commented-out) env prefix alone left the whole layer dead on a
+        default install. Still fail-closed: the invoker gate rejects
+        everyone not allow-listed or admin.
+        """
+        return bool(self._command_prefix) or self._access_checker is not None
+
     # ------------------------------------------------------------- lifecycle
     def _resolve_prefix(self, _ext_commands: Any):
         """Resolve THIS account's command prefix from the admin-panel
@@ -502,7 +515,7 @@ class RealDiscordClient:
         # invoker gate (allowed_invoker) — fail-closed. With no prefix,
         # behavior is exactly today's (plain Client, no command
         # machinery).
-        if self._command_prefix:
+        if self._commands_on:
             from discord.ext import commands as _ext_commands
             prefix = self._resolve_prefix(_ext_commands)
             # ONE contained construction (audit fix): the old blind retry
@@ -545,7 +558,7 @@ class RealDiscordClient:
         # get no reply at all). The plugin EVENT path keeps the
         # self-echo filter below: a command never becomes a plugin
         # event, and a plugin's own output never re-triggers anything.
-        if self._command_prefix:
+        if self._commands_on:
             self._install_command_layer(discord)
         self._ready = asyncio.Event()
         self._startup_error = None
@@ -604,7 +617,7 @@ class RealDiscordClient:
             # This runs BEFORE the self-echo filter: commands and events
             # are SEPARATE paths (a command never becomes a plugin event,
             # and the account's own output never re-triggers plugins).
-            if self._command_prefix:
+            if self._commands_on:
                 try:
                     await self._client.process_commands(message)
                 except Exception:
@@ -1133,7 +1146,7 @@ class RealDiscordClient:
                 await self._client.close()
             except Exception as exc:  # closing a half-open client can throw
                 self._logger.warning("live client close raised %s", exc)
-        if self._command_prefix:
+        if self._commands_on:
             # drop this client's registry subscription (a reconnect's fresh
             # client re-subscribes with its own rebuild callback)
             try:
@@ -1303,11 +1316,21 @@ class RealDiscordClient:
         """Message object by ids — cache first, fetch on miss (the ONE
         plugin-demanded fetch for button/reaction actions; §15)."""
         client = self._require_client()
+        # the library's own message cache (public ``cached_messages``):
+        # a hit costs ZERO API calls. (``channel.get_message`` does not
+        # exist on discord.py channels, so the old guard never matched
+        # and every action paid a REST fetch.)
+        try:
+            for cached in reversed(list(getattr(client, "cached_messages", ()) or ())):
+                if getattr(cached, "id", None) == message_id:
+                    return cached
+        except Exception:
+            pass
         channel = client.get_channel(channel_id)
         if channel is None:
             channel = await client.fetch_channel(channel_id)
-        message = channel.get_message(message_id) if hasattr(
-            channel, "get_message") else None
+        getter = getattr(channel, "get_message", None)  # forks/test doubles
+        message = getter(message_id) if callable(getter) else None
         if message is None:
             message = await channel.fetch_message(message_id)
         return message
@@ -1315,7 +1338,13 @@ class RealDiscordClient:
     async def add_reaction(self, channel_id: int, message_id: int, emoji: str) -> Any:
         """React to a message (kakerareact capability; pipeline-paced)."""
         try:
-            message = await self._resolve_message(channel_id, message_id)
+            channel = self._require_client().get_channel(channel_id)
+            partial = getattr(channel, "get_partial_message", None)
+            if callable(partial):
+                # reacting needs only the ids — no fetch at all
+                message = partial(message_id)
+            else:
+                message = await self._resolve_message(channel_id, message_id)
             await message.add_reaction(emoji)
         except Exception as exc:
             mapped = self._map_send_error(exc, channel_id)

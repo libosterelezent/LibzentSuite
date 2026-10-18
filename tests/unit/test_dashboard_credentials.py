@@ -94,7 +94,7 @@ class FakeControlAPI:
             out["credential"] = "db"  # status only — never the value
         return out
 
-    async def accounts_remove(self, name):
+    async def accounts_remove(self, name, surface="api"):
         self._record("accounts_remove", name)
         return {"removed": name}
 

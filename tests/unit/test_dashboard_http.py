@@ -314,11 +314,11 @@ class FakeControlAPI:
         self._record("accounts_list")
         return ACCOUNTS
 
-    async def accounts_add(self, payload):
+    async def accounts_add(self, payload, surface="api"):
         self._record("accounts_add", payload)
         return {"name": payload["name"], "enabled": True, "sync_group": payload.get("sync_group")}
 
-    async def accounts_remove(self, name):
+    async def accounts_remove(self, name, surface="api"):
         self._record("accounts_remove", name)
         return {"removed": name}
 
@@ -330,15 +330,15 @@ class FakeControlAPI:
         self._record("accounts_enable", name, enabled)
         return {"name": name, "enabled": enabled}
 
-    async def accounts_start(self, name=None):
+    async def accounts_start(self, name=None, surface="api"):
         self._record("accounts_start", name)
         return {"started": [name] if name else ["alpha", "beta"]}
 
-    async def accounts_stop(self, name=None):
+    async def accounts_stop(self, name=None, surface="api"):
         self._record("accounts_stop", name)
         return {"stopped": [name] if name else ["alpha", "beta"]}
 
-    async def accounts_emergency_stop(self, name):
+    async def accounts_emergency_stop(self, name, surface="api"):
         self._record("accounts_emergency_stop", name)
         return {"account": name, "cancelled": 2, "stopped": True}
 

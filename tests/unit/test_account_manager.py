@@ -419,6 +419,36 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.stop("alpha")
         self.assertEqual(len(h.factory.clients), 2)  # no extra reconnects
 
+    async def test_revoked_token_on_reconnect_stands_down(self) -> None:
+        """A credential rejected DURING a reconnect is abandoned once —
+        the supervisor must not re-enter the loop (lost cleared) and
+        hammer the login every tick."""
+        h = make_manager(settings=_fast_reconnect_settings())
+        await h.manager.add_account("alpha")
+        await h.manager.start("alpha")
+        first = h.manager.get("alpha").runtime.client
+        h.manager._client_factory = RejectingFactory()  # type: ignore[attr-defined]
+        first.drop("socket closed")
+        runtime = h.manager.get("alpha").runtime
+        for _ in range(100):
+            if runtime.status == AccountStatus.INVALID_CREDENTIAL:
+                break
+            await asyncio.sleep(0.02)
+        self.assertEqual(runtime.status, AccountStatus.INVALID_CREDENTIAL)
+        built = len(h.manager._client_factory.clients)  # type: ignore[attr-defined]
+        await asyncio.sleep(0.5)
+        self.assertEqual(len(h.manager._client_factory.clients), built)  # type: ignore[attr-defined]
+        self.assertFalse(runtime.lost.is_set())
+        await h.manager.stop("alpha")
+
+    def test_auth_marker_ignores_401_inside_names(self) -> None:
+        from core.account_manager.manager import _looks_like_auth_error
+        self.assertTrue(_looks_like_auth_error(Exception("HTTP 401 Unauthorized")))
+        self.assertTrue(_looks_like_auth_error(Exception("Improper token passed")))
+        self.assertFalse(_looks_like_auth_error(
+            Exception("client for account 'alt401' did not connect")))
+        self.assertFalse(_looks_like_auth_error(Exception("user 1401234 gone")))
+
     async def test_drop_reason_recorded(self) -> None:
         h = make_manager(settings=_fast_reconnect_settings())
         await h.manager.add_account("alpha")

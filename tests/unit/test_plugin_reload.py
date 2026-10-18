@@ -139,6 +139,35 @@ class TestUnloadPlugin(unittest.IsolatedAsyncioTestCase):
         await mgr.unload_plugin("probe")
         self.assertEqual(fired, ["unload"])
 
+    async def test_reload_restores_unloaded_plugin_after_reattach(self):
+        mgr = make_manager()
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        await mgr.unload_plugin("probe")
+        # an account restart / assignment change rebuilds the map from
+        # loader.names(), which no longer lists the unloaded plugin
+        await mgr.attach_account("alpha", allowed={"probe"})
+        self.assertNotIn("probe", mgr._accounts["alpha"])
+        out = await mgr.reload_plugin("probe")
+        self.assertEqual(out["restored_accounts"], 1)
+        self.assertIsNotNone(mgr._accounts["alpha"]["probe"].instance)
+
+    async def test_refresh_settings_updates_live_dict_in_place(self):
+        mgr = make_manager()
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        await mgr.activate_account("alpha", FakeServices())
+        rt = mgr._accounts["alpha"]["probe"]
+        live = rt.settings
+        self.assertEqual(live["trigger"], "go")
+
+        async def bound(account):
+            return {"probe": {"trigger": "fast"}}
+        mgr._bound_profile_settings = bound
+        self.assertEqual(await mgr.refresh_settings("alpha", "probe"), 1)
+        self.assertIs(rt.settings, live)          # identity preserved
+        self.assertEqual(live["trigger"], "fast")
+
     async def test_unload_unknown_plugin_is_noop(self):
         mgr = make_manager()
         mgr.discover()
