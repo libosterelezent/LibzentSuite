@@ -29,9 +29,11 @@ components that exist today.
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from typing import Any, Dict, List
 
 from core.dashboard_ui import DashboardUIToolset, RowAction, BulkAction
+from core.dashboard_ui.context import current_view_id
 from core.dashboard_ui.registry import DashboardUIRegistry
 
 #: reserved registry plugin name for the framework's own pages
@@ -41,13 +43,52 @@ FRAMEWORK_PLUGIN = "$framework"
 FRAMEWORK_VIEWS = ("home", "fleet", "plugins", "profiles", "activity",
                    "policies", "admin", "tools", "design")
 
+class _ViewState:
+    """Dict-like modal context, scoped to the requesting dashboard VIEW.
+
+    Which row a modal is looking at was one process-wide dict, so a
+    second open tab (or a phone) overwrote the first tab's selection and
+    a pasted token could land on the wrong account. Every read/write now
+    resolves to the bucket of the current request's view id
+    (:func:`current_view_id`, set by the dashboard server); requests with
+    no view id share one legacy bucket (CLI/tests/old clients). Buckets
+    are LRU-bounded so abandoned tabs cannot grow memory.
+    """
+
+    MAX_VIEWS = 64
+
+    def __init__(self, defaults: Dict[str, Any]) -> None:
+        self._defaults = dict(defaults)
+        self._buckets: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+
+    def _bucket(self) -> Dict[str, Any]:
+        key = current_view_id() or ""
+        bucket = self._buckets.get(key)
+        if bucket is None:
+            bucket = self._buckets[key] = dict(self._defaults)
+            while len(self._buckets) > self.MAX_VIEWS:
+                self._buckets.popitem(last=False)
+        else:
+            self._buckets.move_to_end(key)
+        return bucket
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._bucket().get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._bucket()[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._bucket()[key] = value
+
+
 #: context-modal state: which row each modal is looking at (set by the
-#: opening action, read by the modal's data providers)
-_fleet_state: Dict[str, Any] = {"details": None, "cred": None, "move": None,
-                                "assign": None, "group_details": None,
-                                "group_edit": None, "group_members": None}
-_profiles_state: Dict[str, Any] = {"account": None, "bind": None,
-                                   "editor": None, "effective": None}
+#: opening action, read by the modal's data providers) — per dashboard view
+_fleet_state = _ViewState({"details": None, "cred": None, "move": None,
+                           "assign": None, "group_details": None,
+                           "group_edit": None, "group_members": None})
+_profiles_state = _ViewState({"account": None, "bind": None,
+                              "editor": None, "effective": None})
 
 
 def attach_framework_ui(registry: DashboardUIRegistry, api: Any) -> int:

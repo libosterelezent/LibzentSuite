@@ -9,8 +9,18 @@
    (see accounts.js openPluginPicker). See app.js connectWS().
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* One id per page load (= per browser tab). The server keys per-view UI
+   state (which row a modal is looking at) on it so two open tabs can't
+   cross-wire each other's modal actions. Not an identity. */
+const VIEW_ID = (() => {
+  try {
+    const a = new Uint8Array(12); crypto.getRandomValues(a);
+    return Array.from(a, b => b.toString(16).padStart(2, "0")).join("");
+  } catch { return "v" + Math.random().toString(36).slice(2) + Date.now().toString(36); }
+})();
+
 function api(path, opts={}) {
-  const headers = {"Content-Type":"application/json", ...opts.headers};
+  const headers = {"Content-Type":"application/json", "X-Dashboard-View": VIEW_ID, ...opts.headers};
   if (token()) headers["X-Dashboard-Token"] = token();
   // A hung request must never permanently disable its caller (withBusy
   // leaves action buttons spinning forever on a stalled fetch) — abort

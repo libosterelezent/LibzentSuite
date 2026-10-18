@@ -22,8 +22,30 @@ dashboard itself.
 """
 from __future__ import annotations
 
+import contextvars
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+#: id of the dashboard VIEW (browser tab) serving the current request.
+#: NOT an identity (auth is one shared token) — it only keeps per-view
+#: UI state (which row a modal is looking at) from bleeding between two
+#: open tabs. Set by the dashboard server around each request; callbacks
+#: read it through :func:`current_view_id`.
+_VIEW_ID: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "dashboard_view_id", default=None)
+
+_VIEW_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def clean_view_id(raw: Any) -> Optional[str]:
+    """A client-supplied view id if well-formed, else None."""
+    return raw if isinstance(raw, str) and _VIEW_ID_RE.match(raw) else None
+
+
+def current_view_id() -> Optional[str]:
+    """The current request's dashboard view id (None = unknown/legacy)."""
+    return _VIEW_ID.get()
 
 
 @dataclass(frozen=True)

@@ -1992,6 +1992,8 @@ class AccountManager:
         per-account admin flag can gate (best effort: never fails a connect)."""
         if not user_id:
             return
+        if name not in getattr(self, "_accounts", {name: None}):
+            return  # removed mid-connect: never resurrect its access row
         try:
             from ..plugin_manager.commands import COMMAND_HUB
             access = COMMAND_HUB.access

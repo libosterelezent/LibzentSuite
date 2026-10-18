@@ -754,3 +754,39 @@ class TestProfilesPage(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(create_calls)
 
 
+
+
+class ViewScopedStateTests(unittest.TestCase):
+    def test_two_views_do_not_share_modal_selection(self):
+        from core import framework_ui
+        from core.dashboard_ui.context import _VIEW_ID
+        state = framework_ui._ViewState({"cred": None})
+        t = _VIEW_ID.set("tabA")
+        try:
+            state["cred"] = "alpha"
+            _VIEW_ID.set("tabB")
+            self.assertIsNone(state.get("cred"))
+            state["cred"] = "beta"
+            _VIEW_ID.set("tabA")
+            self.assertEqual(state.get("cred"), "alpha")
+        finally:
+            _VIEW_ID.reset(t)
+
+    def test_views_are_lru_bounded(self):
+        from core import framework_ui
+        from core.dashboard_ui.context import _VIEW_ID
+        state = framework_ui._ViewState({"x": 0})
+        for i in range(state.MAX_VIEWS + 10):
+            t = _VIEW_ID.set(f"v{i}")
+            try:
+                state["x"] = i
+            finally:
+                _VIEW_ID.reset(t)
+        self.assertLessEqual(len(state._buckets), state.MAX_VIEWS)
+
+    def test_view_id_header_value_is_sanitised(self):
+        from core.dashboard_ui.context import clean_view_id
+        self.assertEqual(clean_view_id("abc-123_X"), "abc-123_X")
+        self.assertIsNone(clean_view_id("a b"))
+        self.assertIsNone(clean_view_id("x" * 65))
+        self.assertIsNone(clean_view_id(None))

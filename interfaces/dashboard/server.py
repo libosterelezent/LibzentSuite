@@ -76,6 +76,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from core.api import ControlAPI
+from core.dashboard_ui.context import _VIEW_ID, clean_view_id
 from core.dashboard_ui.errors import UIError
 from core.errors import AccountError, DatabaseError
 from core.event_bus import (
@@ -885,6 +886,7 @@ class DashboardServer:
         path: str,
         body: Dict[str, Any],
         query: Optional[Dict[str, List[str]]] = None,
+        view_id: Optional[str] = None,
     ) -> Tuple[int, Dict[str, Any]]:
         """Execute an API call on the main loop; returns (http_status, payload).
 
@@ -895,7 +897,8 @@ class DashboardServer:
         if self._loop is None or self._loop.is_closed():
             return 503, {"ok": False, "error": "main loop unavailable"}
         future = asyncio.run_coroutine_threadsafe(
-            self._route(method, path, body, query or {}), self._loop
+            self._route_in_view(method, path, body, query or {}, view_id),
+            self._loop,
         )
         # scenario runs outlive the generic route budget (the runner itself
         # bounds them at ~185s incl. teardown) — a 10s 504 would drop the
@@ -920,6 +923,18 @@ class DashboardServer:
         except Exception as exc:
             LOG.exception("dashboard API call failed: %s %s", method, path)
             return 500, {"ok": False, "error": f"internal error ({type(exc).__name__})"}
+
+    async def _route_in_view(
+        self, method: str, path: str, body: Dict[str, Any],
+        query: Dict[str, List[str]], view_id: Optional[str],
+    ) -> Tuple[int, Dict[str, Any]]:
+        """Run :meth:`_route` with the request's dashboard view id bound
+        (per-tab modal state in the framework UI reads it)."""
+        token = _VIEW_ID.set(clean_view_id(view_id))
+        try:
+            return await self._route(method, path, body, query)
+        finally:
+            _VIEW_ID.reset(token)
 
     async def _route(
         self, method: str, path: str, body: Dict[str, Any], query: Dict[str, List[str]]
@@ -2015,7 +2030,9 @@ def _make_handler(server: "DashboardServer") -> type:
                 if server._token is None:
                     self._respond(403, {"ok": False, "error": CREDENTIAL_GATE_MESSAGE})
                     return
-            status, payload = server.call(method, path, body, query)
+            status, payload = server.call(
+                method, path, body, query,
+                view_id=self.headers.get("X-Dashboard-View"))
             self._respond(status, payload)
 
         def _handle_websocket(self, query: Dict[str, List[str]]) -> None:
