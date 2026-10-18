@@ -118,13 +118,6 @@ async def _seed_config_defaults(limiter: RateLimitManager, config: ProjectConfig
         try:
             interval, jmin, jmax = _policy_triple(action, spec, where)
             limiter.set_policy_values(action, interval, jmin, jmax, level, owner)
-        except ValueError as exc:
-            # a malformed spec (e.g. interval "fast") must not brick the
-            # boot either — skip THIS policy with a warning, matching the
-            # UnsafePolicyError/RatePolicyError handlers below
-            ROOT_LOGGER.warning(
-                "skipping invalid config default for %s %s (%s)",
-                where, action, exc)
         except UnsafePolicyError as exc:
             # a below-floor config value must not brick the boot — clamp to
             # the floor like load_persisted does for hand-edited DB rows
@@ -141,13 +134,14 @@ async def _seed_config_defaults(limiter: RateLimitManager, config: ProjectConfig
                 ROOT_LOGGER.warning(
                     "skipping invalid config default for %s %s (%s)",
                     where, action, exc)
-        except RatePolicyError as exc:
-            # a malformed spec (e.g. an inverted jitter pair) must not brick
-            # the whole boot either — skip THIS policy with a warning,
-            # consistent with the floor clamp above
+        except ValueError as exc:
+            # a malformed spec (e.g. interval "fast") must not brick the
+            # boot either — skip THIS policy with a warning, matching the
+            # floor clamp above (RatePolicyError is a ValueError too)
             ROOT_LOGGER.warning(
                 "skipping invalid config default for %s %s (%s)",
                 where, action, exc)
+
 
     for action, spec in (config.policies.get("global") or {}).items():
         _seed(action, spec, "global", None, "global")

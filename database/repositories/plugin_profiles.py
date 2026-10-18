@@ -66,6 +66,7 @@ class PluginProfilesRepository(BaseRepository):
             raise DatabaseError("plugin name must be a non-empty string")
         if not isinstance(name, str) or not name.strip():
             raise DatabaseError("profile name must be a non-empty string")
+        name = name.strip()   # store AND read back the same canonical name
         payload = self._encode(settings or {}, plugin, name)
         now = time.time()
         async with self._tx(f"create plugin profile {plugin!r}/{name!r}") as conn:
@@ -74,7 +75,7 @@ class PluginProfilesRepository(BaseRepository):
                     "INSERT INTO plugin_profiles"
                     " (plugin, name, description, settings_json,"
                     "  created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (plugin, name.strip(), description or "", payload, now, now),
+                    (plugin, name, description or "", payload, now, now),
                 )
             except sqlite3.IntegrityError as exc:
                 raise DatabaseError(

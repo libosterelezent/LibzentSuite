@@ -304,6 +304,19 @@ class TestPersistQueue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([x["n"] for x in repo.singles], [0, 1, 3, 4])
         self.assertEqual(pq.stats()["db_failures"], 1)
 
+    async def test_cancelled_stop_leaves_queue_restartable(self) -> None:
+        repo = self.Repo()
+        pq = PersistQueue("t")
+        await pq.start(repo, batch=10, interval=0.01)
+        stopper = asyncio.ensure_future(pq.stop(2.0))
+        await asyncio.sleep(0)          # parked inside stop()'s first wait
+        stopper.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await stopper
+        self.assertFalse(pq._stopping)  # used to stay True forever
+        self.assertTrue(pq._draining.done())
+        await asyncio.wait_for(pq.stop(1.0), 2.0)   # must not hang or join a dead future
+
     async def test_overflow_counted(self) -> None:
         pq = PersistQueue("t", max_inflight=3)
         for i in range(5):

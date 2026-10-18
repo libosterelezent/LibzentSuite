@@ -432,7 +432,18 @@ class EventBus:
                 return self._dispatcher
             self._queue.append(event)
         if self._dispatcher is None or self._dispatcher.done():
-            self._dispatcher = asyncio.get_running_loop().create_task(
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # no loop: the caller treats this as "not published" (and
+                # logs it dropped) — un-enqueue, or the event would still
+                # be delivered later by the next publish's dispatcher
+                target = (self._control_queue if self._is_control(event)
+                          else self._queue)
+                if target and target[-1] is event:
+                    target.pop()
+                raise
+            self._dispatcher = loop.create_task(
                 self._drain_queue(), name="eventbus-dispatch")
         return self._dispatcher
 

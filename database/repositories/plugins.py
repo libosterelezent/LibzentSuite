@@ -19,7 +19,7 @@ from core.errors import DatabaseError
 
 from database.models import PluginMetadata
 
-from .base import BaseRepository, loads_tolerant
+from .base import CORRUPT, BaseRepository, loads_tolerant
 
 __all__ = ["PluginRepository"]
 
@@ -136,9 +136,9 @@ class PluginRepository(BaseRepository):
             (account, plugin),
         ):
             value = loads_tolerant(
-                row["value_json"], None, f"plugin_settings[{account!r}/{plugin!r}].{row['key']}"
+                row["value_json"], CORRUPT, f"plugin_settings[{account!r}/{plugin!r}].{row['key']}"
             )
-            if value is not None:
+            if value is not CORRUPT:
                 out[row["key"]] = value
         return out
 
@@ -195,9 +195,9 @@ class PluginRepository(BaseRepository):
             "SELECT account, plugin, key, value_json FROM plugin_settings ORDER BY account, plugin, key"
         ):
             value = loads_tolerant(
-                row["value_json"], None,
+                row["value_json"], CORRUPT,
                 f"plugin_settings[{row['account']!r}/{row['plugin']!r}].{row['key']}",
             )
-            if value is not None:
+            if value is not CORRUPT:
                 out.setdefault(row["account"], {}).setdefault(row["plugin"], {})[row["key"]] = value
         return out

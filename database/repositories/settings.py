@@ -18,7 +18,7 @@ from typing import Any, Dict, List
 
 from core.errors import DatabaseError
 
-from .base import BaseRepository, loads_tolerant
+from .base import CORRUPT, BaseRepository, loads_tolerant
 
 __all__ = ["AccountSettingsRepository"]
 
@@ -37,8 +37,8 @@ class AccountSettingsRepository(BaseRepository):
             "SELECT key, value_json FROM account_settings WHERE account = ? ORDER BY key",
             (name,),
         ):
-            value = loads_tolerant(row["value_json"], None, f"account_settings[{name!r}].{row['key']}")
-            if value is not None:
+            value = loads_tolerant(row["value_json"], CORRUPT, f"account_settings[{name!r}].{row['key']}")
+            if value is not CORRUPT:
                 out[row["key"]] = value
         return out
 

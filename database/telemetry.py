@@ -67,7 +67,12 @@ class DbTelemetry:
     # ------------------------------------------------------------- control
     def set_worker_thread(self, thread: Any) -> None:
         """Capture the aiosqlite worker's kernel TID (thread CPU source)."""
-        self._worker_tid = getattr(thread, "ident", None)
+        # aiosqlite < 0.22: the connection IS the worker Thread; >= 0.22:
+        # it holds the thread as ``_thread``. /proc/self/task needs the
+        # KERNEL tid (native_id) — Python's ``ident`` is not that.
+        worker = getattr(thread, "_thread", thread)
+        self._worker_tid = (getattr(worker, "native_id", None)
+                            or getattr(worker, "ident", None))
 
     def record(self, kind: str, seconds: float, ok: bool = True) -> None:
         if not self.enabled:
@@ -105,10 +110,16 @@ class DbTelemetry:
         for i, n in enumerate(hist):
             cumulative += n
             if cumulative >= target:
-                low = _BUCKETS_MS[i]
-                high = _BUCKETS_MS[min(i + 1, len(_BUCKETS_MS) - 1)]
-                width = (high - low) if high != float("inf") else 1.0
-                return round(low + width / 2.0, 3)
+                # bisect_left puts a sample in bucket i when
+                # edges[i-1] < ms <= edges[i]
+                low = _BUCKETS_MS[i - 1] if i else 0.0
+                high = _BUCKETS_MS[i]
+                if high == float("inf"):
+                    # open-ended overflow bucket: report its finite lower
+                    # edge (inf is not JSON-serialisable and not a number
+                    # worth showing)
+                    return round(low, 3)
+                return round(low + (high - low) / 2.0, 3)
         return round(self._max_s.get(kind, 0.0) * 1000.0, 3)
 
     def snapshot(self) -> Dict[str, Any]:

@@ -112,6 +112,12 @@ class CooldownService:
                 # COPY, not alias: the repo owns its row objects (a test
                 # double or in-process cache may hand back the stored dict)
                 self._active[key] = dict(fresh)
+            else:
+                # the repository holds NO live row: cleared concurrently,
+                # or this set() was zero/negative-duration (born expired,
+                # filtered by the read). Either way memory must not keep a
+                # previous, longer cooldown for the key.
+                self._active.pop(key, None)
         else:
             self._active[key] = row
         # log the COERCED duration: the raw argument may be a numeric
@@ -206,11 +212,16 @@ class CooldownService:
                 if r["account"] == account and r["expires_at"] > now
                 and (plugin is None or r["plugin"] == plugin)]
         if self._repo is not None:
+            by_key = {(r["account"], r["plugin"], r["cooldown_key"]): i
+                      for i, r in enumerate(rows)}
             for row in await self._repo.active_for(account, plugin=plugin,
                                                    now=now):
                 key = (account, row["plugin"], row["cooldown_key"])
-                if key not in self._active:
+                at = by_key.get(key)
+                if at is None:
                     rows.append(row)
+                elif row["expires_at"] > rows[at]["expires_at"]:
+                    rows[at] = row   # extended by another process: DB wins
         rows.sort(key=lambda r: r["expires_at"])
         return rows
 

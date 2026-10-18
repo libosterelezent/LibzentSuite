@@ -479,7 +479,7 @@ class TaskScheduler:
                 for lane in stuck:
                     label = lane.get_name() if hasattr(lane, "get_name") \
                         else repr(lane)
-                    self._log("WARNING", "scheduler",
+                    self._log("warning", "scheduler",
                               f"lane {label} did not settle within 5s of stop")
             # join every pending finish tail (sync-cancel, lane and sweep
             # tails alike; bounded — each tail is at most one awaited
@@ -841,7 +841,7 @@ class TaskScheduler:
                 and time.monotonic() - self._last_pressure_warn >= 60.0):
             self._last_pressure_warn = time.monotonic()
             self._log(
-                "warning",
+                "warning", "scheduler",
                 f"scheduler pressure {pressure['level']}: depth="
                 f"{pressure['depth']} accounts={pressure['accounts']} "
                 f"oldest={pressure['oldest_queued_age_s']:.1f}s "
@@ -899,8 +899,10 @@ class TaskScheduler:
         self._depth_hwm = max(self._depth_hwm, depth)
         n = max(1, len({t.account for t in queued}))
         try:
-            floor = float(getattr(self._limiter, "floor_value",
-                                  lambda: 1.5)())
+            # ``floor_value`` is a property on RateLimitManager (a method
+            # on some doubles): accept both
+            raw_floor = getattr(self._limiter, "floor_value", 1.5)
+            floor = float(raw_floor() if callable(raw_floor) else raw_floor)
         except Exception:
             floor = 1.5
         oldest = max((now - t.submitted_mono for t in queued), default=0.0)

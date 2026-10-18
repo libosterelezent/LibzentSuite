@@ -179,10 +179,16 @@ class PersistQueue:
         self._draining = asyncio.get_running_loop().create_future()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, float(timeout))
-        await asyncio.wait({worker}, timeout=min(0.5, max(0.0, float(timeout))))
-        worker.cancel()  # no-op when it already exited gracefully
-        await asyncio.gather(worker, return_exceptions=True)
         try:
+            # EVERYTHING that awaits sits inside the try: a stop() that is
+            # itself cancelled mid-wait must still resolve ``_draining`` and
+            # clear ``_stopping`` (a later stop joined a never-resolved
+            # future and returned without draining; a later start() spun
+            # forever on ``while self._stopping``)
+            await asyncio.wait(
+                {worker}, timeout=min(0.5, max(0.0, float(timeout))))
+            worker.cancel()  # no-op when it already exited gracefully
+            await asyncio.gather(worker, return_exceptions=True)
             await self._drain_inline(loop, deadline)
         finally:
             if not self._draining.done():

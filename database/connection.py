@@ -384,7 +384,21 @@ class DatabaseConnection:
             if not outer:
                 yield conn
                 return
-            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                await conn.execute("BEGIN IMMEDIATE")
+            except BaseException:
+                # cancelled (or failed) while the BEGIN round-trip was in
+                # flight: the worker thread may still execute it, which
+                # would leave the SHARED connection inside an open
+                # transaction ("cannot start a transaction within a
+                # transaction" on every later write). The ROLLBACK queues
+                # behind the BEGIN on the same worker, so it always lands
+                # after it; "no transaction is active" is harmless here.
+                try:
+                    await conn.execute("ROLLBACK")
+                except BaseException:
+                    LOG.debug("begin-abort rollback failed", exc_info=True)
+                raise
             if TELEMETRY.enabled:
                 _t0 = perf_counter()
                 _ok = True

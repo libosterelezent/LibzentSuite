@@ -1194,8 +1194,10 @@ def format_history(tasks: List[dict]) -> str:
         tail = "-"
         if task.get("error"):
             tail = f"error: {task['error']}"
-        elif task.get("result_summary"):
-            tail = str(task["result_summary"])
+        elif task.get("result_summary") or task.get("summary"):
+            # in-memory rows say result_summary; repository history rows
+            # (TaskHistoryRepository.recent) say summary
+            tail = str(task.get("result_summary") or task.get("summary"))
         dur = f"{float(duration):.1f}s" if duration is not None else "-"
         lines.append(
             f"  #{str(task.get('id', '?')):<5}{str(task.get('status', '-')):<11}"

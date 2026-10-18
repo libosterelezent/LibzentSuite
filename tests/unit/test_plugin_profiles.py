@@ -239,6 +239,13 @@ class BindingTests(PluginProfilesTestBase):
         self.assertEqual(await self.bindings.bindings("alpha"), {})
 
 
+class NameNormalisationTests(PluginProfilesTestBase):
+    async def test_create_with_padded_name_returns_the_stored_record(self) -> None:
+        record = await self.repo.create("roll", " fast ", "d", {})
+        self.assertEqual(record.name, "fast")
+        self.assertIsNotNone(await self.repo.get("roll", "fast"))
+
+
 # --------------------------------------------------------------- restart
 class RestartTests(PluginProfilesTestBase):
     async def test_profiles_and_bindings_survive_restart(self) -> None:

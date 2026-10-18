@@ -21,7 +21,8 @@ import sys
 from core.bootstrap import build
 
 
-async def run_sim(name: str | None, list_only: bool) -> int:
+async def run_sim(name: str | None, list_only: bool,
+                  plugin_dir: str = "plugins") -> int:
     """Run scenario(s) through the offline SimulationRunner (no network)."""
     from adapters.simulator import SCENARIOS, SimulationRunner
 
@@ -29,7 +30,7 @@ async def run_sim(name: str | None, list_only: bool) -> int:
         for scenario in SCENARIOS.values():
             print(f"  {scenario.name:<22}{scenario.description}")
         return 0
-    runner = SimulationRunner()
+    runner = SimulationRunner(plugin_dir=plugin_dir)
     if name is None:
         print("available scenarios (--sim <name>):")
         for scenario in SCENARIOS.values():
@@ -59,6 +60,10 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
         logging.getLogger("slaughtermudae").setLevel(logging.DEBUG)
         logging.getLogger("discord").setLevel(logging.INFO)
         os.environ.setdefault("SM_DB_TELEMETRY", "1")
+        # the TELEMETRY singleton read the env var at IMPORT time (before
+        # this point), so setting the variable alone enabled nothing
+        from database.telemetry import TELEMETRY
+        TELEMETRY.enabled = True
         logging.getLogger("slaughtermudae").info(
             "DEBUG MODE: slaughtermudae tree at DEBUG, discord at INFO, "
             "DB worker telemetry enabled")
@@ -251,7 +256,7 @@ def main() -> int:
                   file=sys.stderr)
             return 2
         try:
-            return asyncio.run(run_sim(args.sim or None, args.sim_list))
+            return asyncio.run(run_sim(args.sim or None, args.sim_list, args.plugins))
         except KeyboardInterrupt:
             return 130
     if args.bench is not None:

@@ -172,3 +172,65 @@ class TestLogMessageCap(AsyncDatabaseTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCancelDuringBeginDoesNotWedgeConnection(AsyncDatabaseTestCase):
+    async def test_cancel_during_begin_then_write_still_works(self) -> None:
+        async def writer():
+            async with self.db.connection.write():
+                await asyncio.sleep(10)
+
+        for ticks in (0, 1, 2, 3, 5):
+            task = asyncio.ensure_future(writer())
+            for _ in range(ticks):
+                await asyncio.sleep(0)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            await asyncio.sleep(0.05)
+            await self.db.kv.set(f"k{ticks}", ticks)   # used to fail: tx stuck
+            self.assertEqual(await self.db.kv.get(f"k{ticks}"), ticks)
+
+
+class TestTelemetryPercentiles(unittest.TestCase):
+    def test_percentiles_stay_within_observed_range_and_json_safe(self) -> None:
+        import json
+        t = DbTelemetry()
+        t.enabled = True
+        for _ in range(10):
+            t.record("read", 0.00005)          # 0.05 ms
+        snap = t.snapshot()
+        self.assertLessEqual(snap["read_ms"]["p50"], 0.1)
+        t.record("commit", 0.5)                # 500 ms: overflow bucket
+        snap = t.snapshot()
+        self.assertNotEqual(snap["commit_ms"]["p95"], float("inf"))
+        json.dumps(snap, allow_nan=False)
+
+
+class TestMigrationToleratedAlterKeepsOtherStatements(AsyncDatabaseTestCase):
+    async def test_existing_column_does_not_lose_profile_table(self) -> None:
+        await self.db.close()
+        import sqlite3
+        raw = sqlite3.connect(self.path)
+        raw.execute("DROP TABLE IF EXISTS plugin_profiles")
+        raw.execute("DELETE FROM schema_migrations WHERE version >= 7")
+        raw.commit()
+        cols = [r[1] for r in raw.execute("PRAGMA table_info(account_plugins)")]
+        self.assertIn("profile", cols)         # column survives the rollback
+        raw.close()
+        db2 = Database(self.path)
+        await db2.connect()
+        self.addAsyncCleanup(db2.close)
+        await db2.plugin_profiles.create("roll", "fast", "d", {})
+
+
+class TestStoredNullSettingSurvivesRead(AsyncDatabaseTestCase):
+    async def test_json_null_override_is_not_dropped(self) -> None:
+        await self.db.plugins.set_setting("alpha", "roll", "limit", None)
+        self.assertEqual(await self.db.plugins.settings("alpha", "roll"),
+                         {"limit": None})
+        self.assertEqual(
+            (await self.db.plugins.all_account_settings())["alpha"]["roll"],
+            {"limit": None})

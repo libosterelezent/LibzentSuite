@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -171,8 +172,15 @@ class Database:
                 except Exception:
                     pass
                 if tolerated:
+                    # the column already exists, but the failed script
+                    # rolled back EVERYTHING in it — re-run the remaining
+                    # (idempotent) statements without the ALTERs, or the
+                    # tables created next to them would silently never
+                    # exist while the version is stamped applied
+                    rest = re.sub(r"ALTER\s+TABLE\b[^;]*;", "", sql,
+                                  flags=re.IGNORECASE)
                     await db.executescript(
-                        f"BEGIN IMMEDIATE;\n{stamp}\nCOMMIT;")
+                        f"BEGIN IMMEDIATE;\n{rest}\n{stamp}\nCOMMIT;")
                     return
                 if isinstance(exc, Exception):
                     raise DatabaseError(

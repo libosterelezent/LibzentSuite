@@ -20,6 +20,11 @@ LOG = logging.getLogger("slaughtermudae.database")
 __all__ = ["BaseRepository", "loads_tolerant"]
 
 
+#: sentinel default for callers that must tell a stored JSON ``null`` (a real
+#: value) from a corrupt/missing payload (which returns the default)
+CORRUPT = object()
+
+
 def loads_tolerant(raw: Optional[str], default: Any, context: str) -> Any:
     """``json.loads`` with a safety net: corrupt/missing values return ``default``.
 

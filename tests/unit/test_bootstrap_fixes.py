@@ -210,6 +210,25 @@ class TestSeedConfigDefaultsMalformed(unittest.IsolatedAsyncioTestCase):
         await _seed_config_defaults(limiter, config, _Db())  # must not raise
 
 
+    async def test_below_floor_default_is_clamped_not_skipped(self):
+        limiter = RateLimitManager(
+            EventBus(), ServiceLogger(LogService(), "rl"), None)
+        limiter.set_floor(5.0)
+
+        class _Policies:
+            async def list(self):
+                return []
+
+        class _Db:
+            policies = _Policies()
+
+        config = ProjectConfig(policies={
+            "global": {"message": {"interval": 2.6}}})
+        await _seed_config_defaults(limiter, config, _Db())
+        stored = [p for p in limiter.policies() if p["action"] == "message"]
+        self.assertEqual([p["interval"] for p in stored], [5.0])
+
+
 # ------------------------------------------------ cooldown set/clear race
 class SlowCooldownRepo:
     """Cooldown repo double whose upsert() PARKS after the repo write."""
@@ -254,6 +273,37 @@ class TestCooldownSetClearRace(_TmpCase):
         svc = CooldownService(repo)
         await svc.set("alpha", "p", "k", 60)
         self.assertTrue(await svc.is_active("alpha", "p", "k"))
+
+    async def test_zero_duration_replaces_previous_cooldown(self):
+        from database.db import Database
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            svc = CooldownService(db.cooldowns)
+            await svc.set("alpha", "p", "k", 100)
+            self.assertTrue(await svc.is_active("alpha", "p", "k"))
+            await svc.set("alpha", "p", "k", 0)     # shorten to "now"
+            self.assertFalse(await svc.is_active("alpha", "p", "k"))
+        finally:
+            await db.close()
+
+    async def test_active_for_prefers_extended_db_row(self):
+        from database.db import Database
+        now = [1000.0]
+        db = Database(":memory:")
+        await db.connect()
+        try:
+            svc = CooldownService(db.cooldowns, time_fn=lambda: now[0])
+            await svc.set("alpha", "p", "k", 10)
+            # another process extends the same key in the database
+            await db.cooldowns.upsert(
+                account="alpha", plugin="p", cooldown_key="k",
+                started_at=now[0], expires_at=now[0] + 100,
+                source="x", reason="", metadata=None)
+            rows = await svc.active_for("alpha")
+            self.assertEqual([r["expires_at"] for r in rows], [1100.0])
+        finally:
+            await db.close()
 
 
 if __name__ == "__main__":

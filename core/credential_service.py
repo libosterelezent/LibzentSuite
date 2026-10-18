@@ -290,6 +290,12 @@ class CredentialService:
                     # while we were parked on the repo load — do not
                     # re-cache the plaintext for the rest of the process.
                     return token
+                fresher = self._memory.get(account)
+                if fresher is not None:
+                    # a store() landed while we were parked on the repo
+                    # load: the ciphertext we read is the OLD token —
+                    # never overwrite the rotated one in memory
+                    return fresher
                 self._memory[account] = token
                 self._runtime_sources[account] = "db"
                 return token

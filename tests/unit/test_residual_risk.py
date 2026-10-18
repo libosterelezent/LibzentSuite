@@ -146,6 +146,25 @@ class SchedulerPressureTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await scheduler.stop(drain=False)
 
+    async def test_stats_survives_pressure_warning_and_reads_floor_property(self) -> None:
+        import time as _time
+        scheduler = self._scheduler()
+        scheduler._limiter.floor_value = 10.0       # property, not a method
+        scheduler.start()
+        try:
+            gate = scheduler._limiter.block_acquires()
+            task = scheduler.submit("alpha", "roll", "message",
+                                    channel_id=1, content="x")
+            task.submitted_mono = _time.monotonic() - 25.0
+            await asyncio.sleep(0.05)
+            self.assertEqual(scheduler.pressure()["pacing_floor_s"], 10.0)
+            scheduler._last_pressure_warn = 0.0
+            scheduler.stats()                       # used to raise TypeError
+            gate.set()
+            await asyncio.sleep(0.2)
+        finally:
+            await scheduler.stop(drain=False)
+
     async def test_stats_is_pure_observer(self) -> None:
         scheduler = self._scheduler()
         scheduler.start()
