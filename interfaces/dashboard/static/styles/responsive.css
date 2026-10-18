@@ -80,6 +80,15 @@
   dialog .dlg-foot .btn { flex: 1; }
 
   .dui-section { padding: var(--sp-3); border-radius: var(--r); }
+  /* Rows stack on phones: every field gets the full width; buttons keep theirs */
+  .dui-row > .dui-item { flex: 1 1 100%; min-width: 0; }
+  .dui-row > .dui-item:has(> .btn) { flex: 1 1 auto; }
+  .dui-item input[type="text"], .dui-item input[type="number"], .dui-item select,
+  .dui-item textarea { min-width: 0; max-width: 100%; }
+  .dui-grid:has(.dui-form) { grid-template-columns: 1fr !important; }   /* author-chosen column counts yield to the phone */
+  .dui-toolbar { flex-wrap: wrap; row-gap: var(--sp-2); }
+  .dui-toolbar-actions { margin-left: 0; justify-content: flex-start; }
+  .dui-code { font-size: 11px; max-height: 320px; }
   .dui-page { gap: var(--sp-3); }
 
   /* touch targets */
@@ -129,3 +138,4 @@
   #shell { display: block; }
   body { background: #fff; color: #000; }
 }
+@media (max-width: 767px) { .dui-page { padding-top: var(--sp-1-5); } }

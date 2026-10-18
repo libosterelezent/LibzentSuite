@@ -657,3 +657,26 @@ html[data-theme="light"] .logbox { background: var(--surface2); }
 .dui-lrow-status-line::before { display: none; }   /* the .dui-lrow-dot is the indicator */
 .dui-lrow { border-left-width: 3px; }
 .dui-lrows-head { padding-left: calc(var(--sp-3) + 3px); }
+
+/* ═══════════════════════ Revamp polish, pass 2 (audit fixes) ═══════════════
+   Buttons keep their natural width (a Row used to stretch Emergency Stop /
+   Rescan across a third of the page), Rows align metrics with forms, form
+   controls fill their column, headers read as headers, ghost buttons look
+   like buttons. */
+.dui-item > .btn { align-self: flex-start; }
+.dui-row > .dui-item:has(> .btn), .dui-toolbar-actions > .dui-item { flex: 0 0 auto; width: auto; min-width: 0; }
+.dui-toolbar-actions > .dui-item { align-items: flex-end; }
+.dui-toolbar-actions .dui-item .hint { text-align: right; }
+.dui-row .dui-item > .metric, .dui-row > .dui-item .metric { height: auto; }
+.dui-form .dui-item input[type="text"], .dui-form .dui-item input[type="number"],
+.dui-form .dui-item input[type="password"], .dui-form .dui-item select,
+.dui-form .dui-item textarea { max-width: none; width: 100%; }
+.dui-item input[type="text"], .dui-item input[type="number"],
+.dui-item select, .dui-item textarea { min-width: min(200px, 100%); }
+.dui-header h3 { font-size: var(--fs-lg); font-weight: 650; letter-spacing: -.01em; }
+.dui-header > :not(h3) { color: var(--dim); font-size: var(--fs-sm); }
+.dui-item .btn-ghost { border: 1px solid var(--border); }
+.dui-item .btn-ghost:hover { border-color: var(--border2); }
+.dui-code { font-family: var(--mono); font-size: var(--fs-xs); line-height: 1.55; }
+.dui-empty { background: transparent; }
+.dui-grid:has(.dui-form) { align-items: start; }

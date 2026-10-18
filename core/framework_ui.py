@@ -501,6 +501,19 @@ def _cooldowns_data(api: Any):
     return provide
 
 
+def _clock(ts: Any) -> str:
+    """Epoch seconds (or an already-formatted value) -> local ``HH:MM:SS``.
+
+    The log/audit tails carry raw epoch floats, which read as noise
+    ("1792333104.107") in the stream; anything that is not a number is
+    shown untouched.
+    """
+    try:
+        return time.strftime("%H:%M:%S", time.localtime(float(ts)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return str(ts)
+
+
 def _logs_data(api: Any):
     async def provide(ctx):
         try:
@@ -509,9 +522,9 @@ def _logs_data(api: Any):
             entries = []
         lines = []
         for e in (entries or []):
-            lines.append(f"[{e.get('ts', e.get('time', ''))}] "
-                         f"{str(e.get('account') or 'system'):12} "
-                         f"{str(e.get('level') or 'info'):5} "
+            lines.append(f"{_clock(e.get('ts', e.get('time', '')))}  "
+                         f"{str(e.get('account') or 'system'):10} "
+                         f"{str(e.get('level') or 'info').upper():5} "
                          f"{e.get('message', e.get('msg', ''))}")
         return {"value": "\n".join(lines) or "— no log entries —"}
     return provide
@@ -525,8 +538,8 @@ def _audit_data(api: Any):
             entries = []
         lines = []
         for e in (entries or []):
-            lines.append(f"[{e.get('ts', e.get('time', ''))}] "
-                         f"{str(e.get('account') or 'system'):12} "
+            lines.append(f"{_clock(e.get('ts', e.get('time', '')))}  "
+                         f"{str(e.get('account') or 'system'):10} "
                          f"{e.get('event', '?')}"
                          + (f" — {e.get('detail')}" if e.get("detail") else ""))
         return {"value": "\n".join(lines) or "— no audit entries —"}

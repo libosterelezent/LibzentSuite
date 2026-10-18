@@ -107,6 +107,12 @@
   let waited = 0;
   const poll = setInterval(() => {
     waited += 100;
-    if (NAV.length || waited > 6000) { clearInterval(poll); routeFromHash(); syncTitle(); }
+    if (NAV.length || waited > 6000) {
+      clearInterval(poll); routeFromHash();
+      // the first UI.go() ran before NAV existed and fell back to the raw id
+      const entry = NAV.find(n => n.id === currentView);
+      if (entry) $("page-title").textContent = entry.label;
+      syncTitle();
+    }
   }, 100);
 })();
