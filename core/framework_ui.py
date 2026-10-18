@@ -1253,7 +1253,7 @@ def _build_tools(ui: DashboardUIToolset, api: Any):
                        .set_submit_label("Apply")
                        .add_fields(ui.Select(component_id="theme-accent")
                                    .set_label("Accent")
-                                   .set_options(["blue", "violet", "green",
+                                   .set_options(["indigo", "blue", "violet", "green",
                                                  "amber", "rose", "cyan"]),
                                    ui.Select(component_id="theme-density")
                                    .set_label("Density")

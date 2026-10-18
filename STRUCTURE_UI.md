@@ -26,7 +26,9 @@ _______________________________________________________________________
 Layout Intro :-
 To have the screen size aware layout we used liquid layout that adjust the UI components and elements according to the devices screen.
 
-Sidebar :- 
+Shell (revamped): the sidebar has three modes — full (desktop, user-collapsible to an icon rail via the header chevron, persisted), rail (tablet), and a true drawer on phones (bounded width, close button, labelled items, dimmed backdrop, swipe-left/Esc/backdrop-tap to close, body scroll lock). The header carries the page title, search (Ctrl K or /), a connection pill, a light/dark/auto theme toggle (persisted; follows the OS until chosen) and the settings gear. Pages are deep-linkable (#fleet, #activity, …) with working back/forward. Behaviour lives in js/shell.js; design tokens (both themes) in styles/base.css.
+
+Sidebar (original review notes) :- 
 side bar expands when the screen has enough space, and collapses when screen is at a midium size, fully hides when the dashboard is opened in mobiles by showing a upper-left corner button, there is a glitch on it and that is when sidebar is opened in phones it unnecessarily occupies the entire screen only icons were shown with no text beside them which makes it ugly. Conclusion: the overall structure is good but improvement is needed in phone screens do not overlap the entire sidebar over the browser screen make it responsive with close x on top and pc-like aligned items.
 
 Main Content :-

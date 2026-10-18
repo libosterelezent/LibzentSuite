@@ -471,8 +471,8 @@ function duiListRecordsHTML(comp, data, compId) {
   // the surplus at desktop); data columns keep a readable 90px floor;
   // actions are capped and wrap at their own boundary.
   const gridCols = (selectable ? "28px " : "") +
-    cols.map((c, i) => i === 0 ? "minmax(140px, 1.6fr)" : "minmax(90px, 1fr)")
-        .join(" ") + (rowActions.length ? " minmax(180px, 320px)" : "");
+    cols.map((c, i) => i === 0 ? "minmax(140px, 1.6fr)" : "minmax(72px, 1fr)")
+        .join(" ") + (rowActions.length ? " minmax(180px, 540px)" : "");
   const head = `<div class="dui-lrows-head" role="row" style="grid-template-columns:${gridCols}">` +
     (selectable ? `<span class="dui-lrows-sel"></span>` : "") +
     cols.map(c => `<span class="dui-lrows-h" role="columnheader">${esc(c)}</span>`).join("") +

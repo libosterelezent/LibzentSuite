@@ -405,6 +405,10 @@ function wire() {
   });
   document.addEventListener("keydown", e => {
     if ((e.ctrlKey||e.metaKey) && e.key==="k") { $("search").focus(); e.preventDefault(); }
+    if (e.key==="/" && !e.ctrlKey && !e.metaKey && !e.altKey) {   // "/" jumps to search outside fields
+      const tag = (e.target.tagName||"").toLowerCase();
+      if (!["input","textarea","select"].includes(tag) && !e.target.isContentEditable) { $("search").focus(); e.preventDefault(); }
+    }
     if (e.key==="Escape") { $$(".menu.open").forEach(m=>m.classList.remove("open")); $("sidebar").classList.remove("open"); }
   });
 
@@ -460,7 +464,7 @@ function bulkLifecycle(path) {
 /* ── Init ──────────────────────────────────────────────────────────────────── */
 try {
   const qtoken = new URLSearchParams(location.search).get("token");
-  if (qtoken) { secretStore.setItem("dash_token",qtoken.trim()); $("adv-token").value=qtoken.trim(); history.replaceState(null,"",location.pathname); }
+  if (qtoken) { secretStore.setItem("dash_token",qtoken.trim()); $("adv-token").value=qtoken.trim(); history.replaceState(null,"",location.pathname+location.hash); }
 
   applyDashTheme();   // decorative layer: persisted accent + density
   wire(); connectWS();

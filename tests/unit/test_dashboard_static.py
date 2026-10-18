@@ -50,7 +50,7 @@ TOKEN = "static-test-token"
 #: JS modules in the exact dependency order index.html loads them.
 JS_FILES = ["state.js", "api.js", "ui.js", "accounts.js", "groups.js",
             "views.js", "plugins-ui.js", "admin-ui.js", "plugin-ui.js",
-            "dashboard-ui.js", "framework-ui.js", "app.js"]
+            "dashboard-ui.js", "framework-ui.js", "app.js", "shell.js"]
 #: every stylesheet index.html links.
 CSS_FILES = ["base.css", "layout.css", "components.css", "responsive.css"]
 
@@ -857,8 +857,8 @@ class TestApiCompatibility(unittest.TestCase):
 
     def test_css_custom_props_are_valid(self):
         css = _css()
-        self.assertIn("--border2: #364160", css,
-                      "the --border2 hex typo (#36416o) must stay fixed")
+        self.assertRegex(css, r"--border2: #[0-9a-fA-F]{6}",
+                         "--border2 must be a well-formed hex color")
         # hex color candidates: #tokens containing at least one digit (CSS
         # id selectors in this sheet contain none), all chars must be hex
         tokens = re.findall(r"#[0-9A-Za-z]{3,8}\b", css)

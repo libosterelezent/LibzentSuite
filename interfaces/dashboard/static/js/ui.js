@@ -145,6 +145,7 @@ function openDetailsPopup(title) {
    localStorage (non-sensitive, unlike the session token).
    ═══════════════════════════════════════════════════════════════════════════ */
 const DASH_ACCENTS = {
+  indigo: ["#818cf8", "#5b66e6"],
   blue:   ["#5ba3f5", "#3d7fd0"],
   violet: ["#a78bfa", "#7c5ce0"],
   green:  ["#34d399", "#059669"],
@@ -152,14 +153,20 @@ const DASH_ACCENTS = {
   rose:   ["#fb7185", "#e11d48"],
   cyan:   ["#22d3ee", "#0891b2"],
 };
+/* "#rrggbb" → "r, g, b" for the rgba(var(--accent-rgb), a) tints */
+function hexToRgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255].join(", ");
+}
 
 function applyDashTheme(accent, density) {
   const root = document.documentElement;
   const name = DASH_ACCENTS[accent] ? accent
-    : (localStorage.getItem("dash_accent") || "blue");
+    : (localStorage.getItem("dash_accent") || "indigo");
   const pair = DASH_ACCENTS[name];
   root.style.setProperty("--accent", pair[0]);
   root.style.setProperty("--accent2", pair[1]);
+  root.style.setProperty("--accent-rgb", hexToRgb(pair[0]));
   localStorage.setItem("dash_accent", name);
   const dens = ["comfortable", "compact"].includes(density) ? density
     : (localStorage.getItem("dash_density") || "comfortable");
