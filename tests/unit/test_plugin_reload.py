@@ -110,7 +110,7 @@ class TestUnloadPlugin(unittest.IsolatedAsyncioTestCase):
         await mgr.attach_account("beta", allowed={"probe"})
         await mgr.activate_account("alpha", FakeServices())
 
-        out = mgr.unload_plugin("probe")
+        out = await mgr.unload_plugin("probe")
         self.assertEqual(out["detached_accounts"], 2)
         # runtime entries stay (marked inactive) so reload can restore
         rt_a = mgr._accounts.get("alpha", {}).get("probe")
@@ -123,10 +123,26 @@ class TestUnloadPlugin(unittest.IsolatedAsyncioTestCase):
         # UI unregistered
         self.assertNotIn("probe", mgr.ui_registry.list_plugins())
 
+    async def test_unload_fires_teardown_hooks(self):
+        mgr = make_manager()
+        mgr.discover()
+        await mgr.attach_account("alpha", allowed={"probe"})
+        await mgr.activate_account("alpha", FakeServices())
+        inst = mgr._accounts["alpha"]["probe"].instance
+        fired = []
+        orig = inst.on_unload
+
+        async def spy(ctx):
+            fired.append("unload")
+            return await orig(ctx)
+        inst.on_unload = spy
+        await mgr.unload_plugin("probe")
+        self.assertEqual(fired, ["unload"])
+
     async def test_unload_unknown_plugin_is_noop(self):
         mgr = make_manager()
         mgr.discover()
-        out = mgr.unload_plugin("nope")
+        out = await mgr.unload_plugin("nope")
         self.assertEqual(out["detached_accounts"], 0)
 
     async def test_unload_then_reload_restores(self):
@@ -135,7 +151,7 @@ class TestUnloadPlugin(unittest.IsolatedAsyncioTestCase):
         await mgr.attach_account("alpha", allowed={"probe"})
         await mgr.activate_account("alpha", FakeServices())
 
-        mgr.unload_plugin("probe")
+        await mgr.unload_plugin("probe")
         rt = mgr._accounts["alpha"]["probe"]
         self.assertFalse(rt.loaded)
 
@@ -694,3 +710,28 @@ class TestPassEightClaimLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unloaded, [1],
                          "the marker cleared at load start, so the new "
                          "load's unload runs despite the failed enable")
+
+
+class TestLoaderRollback(unittest.TestCase):
+    def test_failed_discover_keeps_records_and_old_modules(self):
+        import tempfile
+        from core.errors import PluginError
+        from core.plugin_manager.loader import PluginLoader
+        loader = PluginLoader(Path("tests/fixtures/plugins"))
+        loader.discover()
+        before = dict(loader._records)
+        parents = list(loader._parent_names)
+        self.assertTrue(before)
+        # missing directory: raises, records untouched
+        good_dir = loader._dir
+        loader._dir = Path(tempfile.gettempdir()) / "no-such-plugin-dir-xyz"
+        with self.assertRaises(PluginError):
+            loader.discover()
+        loader._dir = good_dir
+        self.assertEqual(loader._records, before)
+        self.assertEqual(loader._parent_names, parents)
+        self.assertTrue(any(m.startswith(parents[0]) for m in sys.modules))
+        # successful rescan purges the previous generation
+        loader.discover()
+        self.assertFalse(any(m == parents[0] or m.startswith(parents[0] + ".")
+                             for m in sys.modules))

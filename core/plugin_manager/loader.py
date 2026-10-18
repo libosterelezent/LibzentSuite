@@ -36,7 +36,7 @@ import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Type
+from typing import Dict, List, Optional, Type
 
 from ..errors import PluginError
 from ..plugin_base import ArgSpec, CommandSpec, PluginBase
@@ -80,7 +80,7 @@ class PluginLoader:
         #: other dirs never touch each other's modules)
         self._parent_names: List[str] = []
 
-    def _purge_stale_parents(self) -> None:
+    def _purge_stale_parents(self, parents: Optional[List[str]] = None) -> None:
         """Drop THIS loader's previous synthetic parents from sys.modules.
 
         Every discover() builds a fresh parent (unique via ``_PARENT_SEQ``);
@@ -89,7 +89,10 @@ class PluginLoader:
         long-lived processes that rescan). Classes/instances created from
         those modules stay functional — only the import registry entry goes.
         """
-        for parent in self._parent_names:
+        if parents is None:
+            parents = self._parent_names
+            self._parent_names = []
+        for parent in parents:
             for modname in [
                 m for m in sys.modules
                 if m == parent
@@ -97,7 +100,6 @@ class PluginLoader:
                 or m.startswith(parent + "_")
             ]:
                 sys.modules.pop(modname, None)
-        self._parent_names = []
 
     @property
     def directory(self) -> Path:
@@ -112,14 +114,24 @@ class PluginLoader:
         be imported, or the tree is inconsistent (duplicate plugin name,
         duplicate setting key, invalid plugin name).
         """
-        self._purge_stale_parents()
-        # snapshot the previous generation: a FAILED re-scan restores it
-        # in the except handler (wiping records while ``_discovered``
-        # stayed True bricked every runtime lookup until restart)
-        self._discover_snapshot = dict(self._records)
-        self._records = {}
+        # validate BEFORE touching any state: a missing directory must not
+        # wipe the records of a working generation
         if not self._dir.is_dir():
             raise PluginError(f"plugin directory not found: {self._dir}")
+        try:
+            entries = sorted(self._dir.iterdir())
+        except OSError as exc:
+            raise PluginError(
+                f"cannot list plugin directory {self._dir}: {exc}") from exc
+        # snapshot the previous generation: a FAILED re-scan restores it
+        # (records AND its synthetic modules — the previous generation's
+        # lazy relative imports keep working) instead of bricking every
+        # runtime lookup until restart. Its modules are purged only once
+        # the new scan succeeds.
+        previous_parents = self._parent_names
+        self._parent_names = []
+        self._discover_snapshot = dict(self._records)
+        self._records = {}
         # synthetic parent package so '<dir>/<name>/__init__.py' plugins can
         # use relative imports ('from .plugin import X') without sys.path
         parent_name = f"_mudae_plugroot_{next(_PARENT_SEQ)}"
@@ -128,7 +140,7 @@ class PluginLoader:
         parent.__path__ = [str(self._dir)]
         sys.modules[parent_name] = parent
         candidates: List[tuple] = []
-        for entry in sorted(self._dir.iterdir()):
+        for entry in entries:
             if entry.name.startswith(("_", ".")):
                 continue
             # dotted dir names can't be imported as packages — skip them
@@ -176,8 +188,10 @@ class PluginLoader:
             # (every runtime lookup raised "unknown plugin") until
             # process restart.
             self._purge_stale_parents()
+            self._parent_names = previous_parents
             self._records = getattr(self, "_discover_snapshot", {}) or {}
             raise
+        self._purge_stale_parents(previous_parents)
         self._discovered = True
         LOG.info(
             "discovered %d plugin(s) in %s: %s",

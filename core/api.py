@@ -66,7 +66,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from .dashboard_ui.context import ActionContext, CheckContext
 from .dashboard_ui.errors import UIError
-from .errors import DatabaseError, SyncGroupError
+from .errors import DatabaseError, PluginError, SyncGroupError
 from . import plugin_scopes
 from .rate_limit_manager import (
     KV_FLOOR_KEY,
@@ -1101,11 +1101,17 @@ class ControlAPI:
         instead (no single plugin targeted) — the Plugins page's rescan
         button.
         """
-        if plugin != "__rescan__" and plugin not in self._plugins.names():
-            raise ValueError(f"unknown plugin {plugin!r}")
-        out = self._plugins.reload_plugin(plugin)
-        if inspect.iscoroutine(out):
-            out = await out
+        # no names() pre-check: an UNLOADED plugin is not in the discovered
+        # set yet must stay reloadable; the manager re-scans and rejects
+        # genuinely unknown names itself
+        try:
+            out = self._plugins.reload_plugin(plugin)
+            if inspect.iscoroutine(out):
+                out = await out
+        except PluginError as exc:
+            if str(exc).startswith("unknown plugin"):
+                raise ValueError(f"unknown plugin {plugin!r}") from exc
+            raise
         self._audit_mgmt("system", "mgmt:plugin.reloaded", surface,
                          extra=f"plugin={plugin}")
         return out
@@ -1115,6 +1121,8 @@ class ControlAPI:
         """Unload a plugin (detach everywhere, unregister UI; assignments
         stay in the DB so reload restores them)."""
         out = self._plugins.unload_plugin(plugin)
+        if inspect.iscoroutine(out):
+            out = await out
         self._audit_mgmt("system", "mgmt:plugin.unloaded", surface,
                          extra=f"plugin={plugin}")
         return out

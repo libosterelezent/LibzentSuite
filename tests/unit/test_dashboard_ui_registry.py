@@ -604,7 +604,7 @@ class PluginScopeTests(unittest.IsolatedAsyncioTestCase):
         # Stage B: even the LAST account stopping keeps the definition —
         # detach happens only at plugin unload/reload boundaries
         self.assertEqual(self.registry.list_plugins(), ["withui"])
-        manager.unload_plugin("withui")
+        await manager.unload_plugin("withui")
         self.assertEqual(self.registry.list_plugins(), [])
 
     async def test_ui_init_failure_isolated_and_partial_registration_cleaned(self) -> None:

@@ -241,3 +241,22 @@ class TestOverview(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ------------------------------------------------- connect records user id
+class TestConnectRecordsUserId(unittest.IsolatedAsyncioTestCase):
+    async def test_account_manager_records_user_id_for_admin_gate(self):
+        import logging
+        from core.account_manager import AccountManager
+        from core.plugin_manager.commands import COMMAND_HUB
+
+        am = make()
+        await am.set_admin_flag("alpha", True)
+        saved, COMMAND_HUB.access = COMMAND_HUB.access, am
+        try:
+            stub = type("S", (), {"_logger": logging.getLogger("t")})()
+            await AccountManager._record_access_user_id(stub, "alpha", 777)
+            await AccountManager._record_access_user_id(stub, "alpha", None)
+        finally:
+            COMMAND_HUB.access = saved
+        self.assertTrue(await am.is_admin_id(777))

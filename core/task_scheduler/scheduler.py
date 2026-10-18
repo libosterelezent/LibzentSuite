@@ -122,14 +122,15 @@ _HEAP_STALE_COMPACT_THRESHOLD = 16
 #: pacing checks as real send times). Everything else (including
 #: ambiguous kinds like AccessDenied, which Discord answers to a request
 #: already on the wire) stays audited — over-auditing only delays the
-#: next send; under-auditing paces too fast.
+#: next send; under-auditing paces too fast. ConnectionError and
+#: TargetGone are therefore NOT listed: the adapter also raises them
+#: AFTER the request reached Discord (HTTP 5xx, button-click timeout,
+#: NotFound on send), so they are ambiguous.
 _PRE_WIRE_ERROR_KINDS = frozenset({
     "AccountError",     # unknown account (sender pre-flight)
-    "ConnectionError",  # account not RUNNING (pre-flight in send_hook)
     "SchedulerError",   # unsupported action (dispatch table miss)
     "FetchRequired",    # DM target unresolvable from cache (pre-wire)
     "CacheInvalid",     # cache validation failed (pre-wire)
-    "TargetGone",       # cached channel/target vanished (validation)
 })
 
 

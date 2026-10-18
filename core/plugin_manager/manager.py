@@ -486,27 +486,41 @@ class PluginManager:
         return {"plugin": name, "restored_accounts": restored,
                 "reactivated_accounts": reactivated}
 
-    def unload_plugin(self, name: str) -> Dict[str, Any]:
-        """Unload one plugin: detach from every account, unregister UI.
+    async def unload_plugin(self, name: str) -> Dict[str, Any]:
+        """Unload one plugin: tear down on every account, unregister UI.
 
-        Per-account settings and ASSIGNMENTS are preserved in the
-        database — reload_plugin restores them. The plugin is removed
-        from the discovered set and will not be offered again until
-        discover() re-scans or reload_plugin is called.
+        Same quiesce-then-hooks path as reload (new dispatch blocked,
+        in-flight tasks drained, ``on_disable``/``on_unload`` fired
+        exactly once), so nothing ``on_enable`` started leaks. Per-account
+        settings and ASSIGNMENTS are preserved in the database — the
+        runtime entries stay (inactive, no instance) and reload_plugin
+        restores them. The plugin is removed from the discovered set and
+        will not be offered again until discover() re-scans or
+        reload_plugin is called.
         """
         if not self._discovered:
             self.discover()
-        detached = 0
-        for acct, runtimes in list(self._accounts.items()):
-            rt = runtimes.get(name)
-            if rt is not None:
+        async with self._mutation_lock:
+            detached = 0
+            for acct, runtimes in list(self._accounts.items()):
+                rt = runtimes.get(name)
+                if rt is None:
+                    continue
+                was_active, was_loaded = rt.active, rt.loaded
+                await self._await_activation_settled(
+                    acct, timeout=self._activation_settle_timeout_s)
+                rt.active = False   # blocks new dispatch admission NOW
+                await self._quiesce_dispatch(acct)
+                await self._teardown_runtime(
+                    acct, rt, was_active=was_active, was_loaded=was_loaded)
                 rt.loaded = False
                 rt.active = False
                 rt.instance = None
+                self._sync_commands(acct)
                 detached += 1
-        self._ui_registry.detach(name)
-        # remove from the loader so it's not re-offered
-        self._loader._records.pop(name, None)
+            self._ui_registry.detach(name)
+            # remove from the loader so it's not re-offered
+            self._loader._records.pop(name, None)
         self._logger.info(
             "plugin %s unloaded (detached from %d account(s))", name, detached)
         return {"plugin": name, "detached_accounts": detached}

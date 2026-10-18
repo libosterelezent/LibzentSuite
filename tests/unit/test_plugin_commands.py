@@ -849,6 +849,29 @@ class TestPrefixRateCommand(unittest.IsolatedAsyncioTestCase):
         self._saved_access = COMMAND_HUB.access
         COMMAND_HUB.access = AdminAccess()
         self.addCleanup(setattr, COMMAND_HUB, "access", self._saved_access)
+        # hermetic: a leaked process-wide api_provider would reroute the
+        # set through another test's ControlAPI/limiter
+        saved_api = COMMAND_HUB.api_provider
+        COMMAND_HUB.api_provider = None
+        self.addCleanup(setattr, COMMAND_HUB, "api_provider", saved_api)
+
+    async def test_set_goes_through_control_api_when_wired(self) -> None:
+        from core.plugin_manager.commands import COMMAND_HUB, PacingBackend
+        from core.rate_limit_manager import RateLimitManager
+        from core.event_bus import EventBus
+        import logging
+        lim = RateLimitManager(EventBus(), logging.getLogger("t"), None)
+        calls = []
+
+        class FakeApi:
+            async def ratelimit_set(self, *args, **kw):
+                calls.append((args, kw))
+        COMMAND_HUB.pacing = PacingBackend(lim)
+        COMMAND_HUB.api_provider = lambda: FakeApi()
+        reply = await _prefixrate_handler(_ctx("alpha"), ["3"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]["owner"], "alpha")
+        self.assertIn("2.60s → 3.00s", reply)
 
     async def test_show_without_args(self) -> None:
         from core.plugin_manager.commands import COMMAND_HUB, PacingBackend

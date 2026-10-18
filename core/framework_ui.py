@@ -924,11 +924,11 @@ def _build_design(ui: DashboardUIToolset, api: Any):
         .set_description("Toolbar, Button variants, disabled state")
         .add_component(ui.Toolbar(component_id="dg-toolbar").set_title("Toolbar")
             .add_component(_dg_demo_button(ui, "↻ Refresh", "dg-tb-refresh"))
-            .add_component(ui.Button(component_id="dg-tb-danger").set_label("Delete").set_variant("danger")))
+            .add_component(_dg_demo_button(ui, "Delete", "dg-tb-danger").set_variant("danger")))
         .add_component(ui.Row(component_id="dg-row-btns")
-            .add_component(ui.Button(component_id="dg-btn-plain").set_label("Plain"))
-            .add_component(ui.Button(component_id="dg-btn-primary").set_label("Primary").set_variant("primary"))
-            .add_component(ui.Button(component_id="dg-btn-danger").set_label("Danger").set_variant("danger"))
+            .add_component(_dg_demo_button(ui, "Plain", "dg-btn-plain"))
+            .add_component(_dg_demo_button(ui, "Primary", "dg-btn-primary").set_variant("primary"))
+            .add_component(_dg_demo_button(ui, "Danger", "dg-btn-danger").set_variant("danger"))
             .add_component(ui.Button(component_id="dg-btn-disabled").set_label("Disabled").set_disabled(True))
             .add_component(ui.Button(component_id="dg-btn-modal").set_label("Open modal…").set_open_modal("dg-modal"))))
 
@@ -1045,6 +1045,20 @@ def _build_design(ui: DashboardUIToolset, api: Any):
                 "rows": [["alpha", "online", "2m"], ["beta", "offline", "1h"],
                          ["gamma", "cooldown", "9m"], ["delta", "online", "now"]]}
 
+    async def _records(ctx=None):
+        tones = {"online": "ok", "offline": "muted", "cooldown": "warn"}
+        return {"records": [
+            {"key": name, "cells": [
+                {"primary": name, "secondary": seen},
+                {"text": status, "tone": tones.get(status, "muted")},
+                {"chips": ["probe"]}, "—"]}
+            for name, status, seen in [
+                ("alpha", "online", "2m"), ("beta", "offline", "1h"),
+                ("gamma", "cooldown", "9m")]]}
+
+    async def _no_records(ctx=None):
+        return {"records": []}
+
     async def _tiles(ctx=None):
         return [{"title": "libo", "status": "online", "meta": "12 plugins",
                  "chips": ["probe", "soulcopy"], "lines": [["uptime", "3h 12m"]]},
@@ -1077,7 +1091,7 @@ def _build_design(ui: DashboardUIToolset, api: Any):
         .add_component(ui.ListView(component_id="dg-records")
                        .set_columns(["Account", "Status", "Plugins", "Group"])
                        .set_key_column("Account")
-                       .set_data_source(_rows)
+                       .set_data_source(_records)
                        .set_empty_text("no records")))
 
     data.add_section(
@@ -1088,7 +1102,7 @@ def _build_design(ui: DashboardUIToolset, api: Any):
                        .set_empty_text("nothing here yet"))
         .add_component(ui.ListView(component_id="dg-records-empty")
                        .set_columns(["A", "B"]).set_key_column("A")
-                       .set_data_source(lambda ctx=None: {"columns": ["A", "B"], "rows": []})
+                       .set_data_source(_no_records)
                        .set_empty_text("no records match")))
 
     page.add_tab(data)
@@ -1325,6 +1339,10 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
         if not cred:
             return {"success": False, "field_errors": {
                 "fc-cred": "Paste the Discord token."}}
+        # one-shot: the selection is consumed, so a later submit from a
+        # modal that was never re-opened cannot silently overwrite this
+        # account's credential again
+        _fleet_state["cred"] = None
         await api.accounts_set_credential(name, cred, surface="dashboard")
         return {"success": True, "message": f"credential stored for {name}",
                 "refresh": ["acct-list", "ad-lines"]}

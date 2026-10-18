@@ -207,7 +207,7 @@ async def _prefixrate_handler(ctx: CommandContext, args: List[str]) -> str:
     """Show or set THIS account's send pacing (message-action interval).
 
     ``prefixrate`` -> the current effective interval; ``prefixrate 2.0``
-    -> set it (float seconds; per-account policy override, persists).
+    -> set it (float seconds; per-account policy override, persisted when the ControlAPI is wired).
     """
     backend = COMMAND_HUB.pacing
     if backend is None:
@@ -221,9 +221,26 @@ async def _prefixrate_handler(ctx: CommandContext, args: List[str]) -> str:
         if seconds <= 0:
             raise ValueError("prefixrate must be > 0 seconds")
         await _require_admin(ctx)  # mutation branch: admin-only
-        previous = backend.set(ctx.account, seconds)
-        if previous is None:
-            raise ValueError("the limiter rejected the value")
+        provider = COMMAND_HUB.api_provider
+        api = provider() if callable(provider) else provider
+        if api is not None:
+            # through the ControlAPI so the override is PERSISTED (the
+            # engine alone is memory-only) and survives a restart
+            previous = backend.get(ctx.account)
+            try:
+                await api.ratelimit_set(
+                    "message", seconds, 0.1, 0.5,
+                    level="account", owner=ctx.account)
+            except _DOMAIN_ERRORS as exc:
+                raise ValueError(str(exc)) from exc
+            except ValueError:
+                raise
+            if previous is None:
+                previous = seconds
+        else:
+            previous = backend.set(ctx.account, seconds)
+            if previous is None:
+                raise ValueError("the limiter rejected the value")
         note = ""
         if seconds < 2.6:
             note = ("\n⚠ below the measured safe rate (~2.6s) — expect "

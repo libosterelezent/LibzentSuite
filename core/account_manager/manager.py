@@ -1969,6 +1969,20 @@ class AccountManager:
             raise AccountError(f"client for account {name!r} did not connect")
         rt.user_id = getattr(client, "user_id", None)
         rt.cache.ingest_snapshot(client.cached_snapshot())
+        await self._record_access_user_id(name, rt.user_id)
+
+    async def _record_access_user_id(self, name: str, user_id: Any) -> None:
+        """Record the account's Discord id on its access row so the
+        per-account admin flag can gate (best effort: never fails a connect)."""
+        if not user_id:
+            return
+        try:
+            from ..plugin_manager.commands import COMMAND_HUB
+            access = COMMAND_HUB.access
+            if access is not None:
+                await access.set_account_user_id(name, user_id)
+        except Exception as exc:
+            self._logger.debug("access user_id record failed for %s: %s", name, exc)
 
     def _wire_client(self, name: str, rt: AccountRuntime, client: Any) -> None:
         """Wire client callbacks BEFORE connect (pinned ordering).
