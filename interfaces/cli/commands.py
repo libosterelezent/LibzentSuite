@@ -142,6 +142,15 @@ HELP: Dict[str, Tuple[str, str]] = {
 }
 
 
+
+def _col(value: Any, width: int) -> str:
+    """Left-pad a table cell to ``width`` — but ALWAYS keep a separating
+    space: a plain ``{value:<N}`` lets a value at/over the width run into
+    the next column ("alpha_long_nameonline")."""
+    text = str(value)
+    return text.ljust(width) if len(text) < width else text + " "
+
+
 def help_text() -> str:
     """Render the HELP registry as aligned text (with an error footer).
 
@@ -150,9 +159,9 @@ def help_text() -> str:
     """
     lines = ["commands:"]
     for name, (sig, desc) in sorted(HELP.items()):
-        lines.append(f"  {name:<12}{desc}")
+        lines.append(f"  {_col(name, 12)}{desc}")
         if sig:
-            lines.append(f"  {'':<12}usage: {name} {sig}")
+            lines.append(f"  {_col('', 12)}usage: {name} {sig}")
     lines.append(
         "  errors print as one 'error: ...' line and never exit the REPL;"
         " 'quit' shuts everything down first"
@@ -832,7 +841,7 @@ async def _simulation_group(api: Any, args: List[str]) -> str:
         if not scenarios:
             return "  (no scenarios available)"
         return "\n".join(
-            f"  {str(s.get('name', '?')):<24}{s.get('description', '')}"
+            f"  {_col(str(s.get('name', '?')), 24)}{s.get('description', '')}"
             for s in scenarios
         )
     # run
@@ -892,7 +901,7 @@ def format_accounts(accounts: List[dict]) -> str:
         enabled = account.get("enabled")
         flag = "" if enabled is None else (" [enabled]" if enabled else " [disabled]")
         lines.append(
-            f"  {name:<16}{state:<14}id={_fmt_val(uid) if uid is not None else '-'}{flag}"
+            f"  {_col(name, 16)}{_col(state, 14)}id={_fmt_val(uid) if uid is not None else '-'}{flag}"
         )
         plugins = account.get("assigned_plugins") or []
         if plugins:
@@ -946,7 +955,7 @@ def format_account_info(details: dict) -> str:
         for plugin in plugins:
             state = plugin.get("enabled")
             flag = "enabled" if state else "disabled" if state is not None else "-"
-            lines.append(f"{str(plugin.get('name', '?')):<14}{flag}")
+            lines.append(f"{_col(str(plugin.get('name', '?')), 14)}{flag}")
     else:
         lines.append("(none assigned — 'accounts plugin-add <account> <plugin>')")
     section("Profiles (informational)")
@@ -961,7 +970,7 @@ def format_account_info(details: dict) -> str:
             jitter = info.get("jitter") or [0.0, 0.0]
             source = info.get("source", "-")
             lines.append(
-                f"{str(action):<14}{_fmt_policy(info.get('interval'), jitter[0], jitter[1]):<22}{source}"
+                f"{_col(str(action), 14)}{_col(_fmt_policy(info.get('interval'), jitter[0], jitter[1]), 22)}{source}"
             )
     else:
         lines.append("(no actions paced)")
@@ -1040,7 +1049,7 @@ def format_profiles(profiles: List[dict]) -> str:
         plugins = ", ".join(str(p) for p in profile.get("plugins") or []) or "-"
         desc = profile.get("description") or ""
         lines.append(
-            f"  {str(profile.get('name', '?')):<18}[{plugins}]"
+            f"  {_col(str(profile.get('name', '?')), 18)}[{plugins}]"
             + (f" — {desc}" if desc else "")
         )
     return "\n".join(lines)
@@ -1056,7 +1065,7 @@ def format_groups(groups: List[dict]) -> str:
         flag = "" if group.get("enabled", True) else " [disabled]"
         desc = group.get("description") or ""
         lines.append(
-            f"  {str(group.get('name', '?')):<18}{count} member(s){flag}"
+            f"  {_col(str(group.get('name', '?')), 18)}{count} member(s){flag}"
             + (f" — {desc}" if desc else "")
         )
     return "\n".join(lines)
@@ -1081,7 +1090,7 @@ def format_group_snapshot(snapshot: dict) -> str:
             if isinstance(member, dict):
                 status = member.get("status") or "-"
                 lines.append(
-                    f"    {str(member.get('name', '?')):<18}{status}"
+                    f"    {_col(str(member.get('name', '?')), 18)}{status}"
                 )
             else:
                 lines.append(f"    {member}")
@@ -1132,7 +1141,7 @@ def format_policies(policies: List[dict]) -> str:
         if policy.get("owner"):
             scope += f"/{policy['owner']}"
         lines.append(
-            f"  {scope:<24}{str(policy.get('action', '?')):<16}"
+            f"  {_col(scope, 24)}{_col(str(policy.get('action', '?')), 16)}"
             f"{_fmt_policy(policy.get('interval'), *(policy.get('jitter') or [0.0, 0.0]))}"
         )
     return "\n".join(lines)
@@ -1161,7 +1170,7 @@ def format_effective(effective: dict) -> str:
                 mark = "  <- pacing source"
         src_text = "-" if src_interval is None else f"{float(src_interval):.2f}s"
         lines.append(
-            f"      {scope:<24}{src_text}{mark}"
+            f"      {_col(scope, 24)}{src_text}{mark}"
         )
     return "\n".join(lines)
 
@@ -1174,9 +1183,9 @@ def format_tasks(tasks: List[dict]) -> str:
     for task in tasks:
         channel = task.get("channel_id")
         lines.append(
-            f"  #{str(task.get('id', '?')):<5}{str(task.get('status', '-')):<11}"
-            f"{str(task.get('account') or '-'):<12}{str(task.get('plugin') or '-'):<12}"
-            f"{str(task.get('action') or '-'):<10}"
+            f"  #{_col(str(task.get('id', '?')), 5)}{_col(str(task.get('status', '-')), 11)}"
+            f"{_col(str(task.get('account') or '-'), 12)}{_col(str(task.get('plugin') or '-'), 12)}"
+            f"{_col(str(task.get('action') or '-'), 10)}"
             f"ch={channel if channel is not None else '-'}"
         )
     return "\n".join(lines)
@@ -1200,9 +1209,9 @@ def format_history(tasks: List[dict]) -> str:
             tail = str(task.get("result_summary") or task.get("summary"))
         dur = f"{float(duration):.1f}s" if duration is not None else "-"
         lines.append(
-            f"  #{str(task.get('id', '?')):<5}{str(task.get('status', '-')):<11}"
-            f"{str(task.get('account') or '-'):<12}{str(task.get('plugin') or '-'):<12}"
-            f"{str(task.get('action') or '-'):<10}{dur:>7}  {tail}"
+            f"  #{_col(str(task.get('id', '?')), 5)}{_col(str(task.get('status', '-')), 11)}"
+            f"{_col(str(task.get('account') or '-'), 12)}{_col(str(task.get('plugin') or '-'), 12)}"
+            f"{_col(str(task.get('action') or '-'), 10)}{dur:>7}  {tail}"
         )
     return "\n".join(lines)
 
@@ -1224,8 +1233,8 @@ def format_logs(entries: List[dict]) -> str:
             context.append(f"event={entry['event']}")
         suffix = ("  (" + " ".join(context) + ")") if context else ""
         lines.append(
-            f"  {_hms(entry.get('ts'))} {str(entry.get('severity', '-')):<8}"
-            f"{str(entry.get('source', '-')):<18}{entry.get('message', '')}{suffix}"
+            f"  {_hms(entry.get('ts'))} {_col(str(entry.get('severity', '-')), 8)}"
+            f"{_col(str(entry.get('source', '-')), 18)}{entry.get('message', '')}{suffix}"
         )
     return "\n".join(lines)
 
@@ -1246,8 +1255,8 @@ def format_audit(entries: List[dict]) -> str:
         wait = entry.get("wait_ms") or 0.0
         jitter = entry.get("jitter_ms") or 0.0
         lines.append(
-            f"  {_hms(entry.get('ts'))} {arrow} {str(entry.get('account') or '-'):<10}"
-            f"{str(entry.get('action') or '-'):<10}"
+            f"  {_hms(entry.get('ts'))} {arrow} {_col(str(entry.get('account') or '-'), 10)}"
+            f"{_col(str(entry.get('action') or '-'), 10)}"
             f"ch={channel if channel is not None else '-'}  {content!r}"
             f" (wait {float(wait):.0f}ms, jitter {float(jitter):.0f}ms)"
         )
@@ -1267,7 +1276,7 @@ def format_warnings(warnings: List[dict]) -> str:
     for warning in warnings:
         level = str(warning.get("level", "")).lower()
         icon = icons.get(level, "[?]")
-        lines.append(f"  {icon} {str(warning.get('code', '?')):<16}{warning.get('message', '')}")
+        lines.append(f"  {icon} {_col(str(warning.get('code', '?')), 16)}{warning.get('message', '')}")
     return "\n".join(lines)
 
 
@@ -1315,7 +1324,7 @@ def format_credential_status(rows: List[dict]) -> str:
     for row in rows:
         state = row.get("credential")
         state_text = labels.get(state, str(state or "missing"))
-        lines.append(f"  {str(row.get('name', '?')):<20}credential: {state_text}")
+        lines.append(f"  {_col(str(row.get('name', '?')), 20)}credential: {state_text}")
     return "\n".join(lines)
 
 
@@ -1342,9 +1351,9 @@ def format_cooldowns(rows: List[dict]) -> str:
     lines: List[str] = []
     for row in rows:
         lines.append(
-            f"  {str(row.get('account', '?')):<16}"
-            f"{str(row.get('plugin') or '-'):<16}"
-            f"{str(row.get('cooldown_key') or '-'):<20}"
+            f"  {_col(str(row.get('account', '?')), 16)}"
+            f"{_col(str(row.get('plugin') or '-'), 16)}"
+            f"{_col(str(row.get('cooldown_key') or '-'), 20)}"
             f"{_fmt_duration(row.get('remaining_s') or 0.0):>10}"
             f"  {str(row.get('source') or '-')}"
         )

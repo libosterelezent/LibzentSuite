@@ -1302,3 +1302,11 @@ class TestFloorCapDisplay(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ColumnSeparationTests(unittest.TestCase):
+    def test_overlong_cell_never_runs_into_the_next_column(self):
+        from interfaces.cli.commands import _col
+        self.assertEqual(_col("ab", 5), "ab   ")
+        self.assertEqual(_col("a-very-long-account-name", 8),
+                         "a-very-long-account-name ")
