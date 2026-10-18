@@ -680,3 +680,12 @@ html[data-theme="light"] .logbox { background: var(--surface2); }
 .dui-code { font-family: var(--mono); font-size: var(--fs-xs); line-height: 1.55; }
 .dui-empty { background: transparent; }
 .dui-grid:has(.dui-form) { align-items: start; }
+
+/* Row-level destructive actions are outlined (filled on hover): a solid red
+   button on every row of a list drowned out the actual primary actions. */
+.dui-rowacts .btn-danger, .dui-lrow-actions .btn-danger, .dui-tile-actions .btn-danger,
+.acct-card .actions .btn-danger, .group-card .actions .btn-danger {
+  background: transparent; color: var(--err); border: 1px solid rgba(248,113,113,.4); box-shadow: none; }
+.dui-rowacts .btn-danger:hover, .dui-lrow-actions .btn-danger:hover, .dui-tile-actions .btn-danger:hover,
+.acct-card .actions .btn-danger:hover, .group-card .actions .btn-danger:hover {
+  background: var(--err2); color: #fff; border-color: var(--err2); filter: none; }
