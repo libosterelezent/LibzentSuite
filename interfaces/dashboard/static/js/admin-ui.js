@@ -89,7 +89,7 @@ function adminAccountRow(name, row, isStale) {
       <input data-perm-input="${esc(name)}" type="text" placeholder="discord user id" style="width:180px">
       <button class="btn btn-secondary btn-sm" data-add-perm="${esc(name)}">+ Allow</button>
       <span class="spacer" style="flex:1"></span>
-      <select data-prefix-mode="${esc(name)}" style="width:110px">
+      <select data-prefix-mode="${esc(name)}" aria-label="Prefix mode for ${esc(name)}" style="width:110px">
         ${["mention","symbol","both"].map(m => `<option value="${m}" ${row.prefix_mode===m?"selected":""}>${m}</option>`).join("")}
       </select>
       <input data-prefix-symbol="${esc(name)}" type="text" placeholder="sm!" value="${esc(row.prefix_symbol||"")}" style="width:70px" maxlength="4">
@@ -103,11 +103,11 @@ function wireAdmin() {
   if (adminCard) adminCard.onclick = async () => {
     const v = $("admin-id-input").value.trim();
     if (!v || !/^\d+$/.test(v)) { setFb(adminCard.closest(".card"), "error", "Enter a numeric Discord user id."); return; }
-    try { await post("/api/admin/ids/add", {user_id: parseInt(v, 10)}); await loadAdmin(); }
+    try { await withBusy(adminCard, post("/api/admin/ids/add", {user_id: parseInt(v, 10)})); showHeaderPrompt("admin id added"); await loadAdmin(); }
     catch (e) { setFb(adminCard.closest(".card"), "error", e.message); }
   };
   $$("[data-rm-admin]").forEach(b => b.onclick = async () => {
-    try { await post("/api/admin/ids/remove", {user_id: parseInt(b.dataset.rmAdmin, 10)}); await loadAdmin(); }
+    try { await withBusy(b, post("/api/admin/ids/remove", {user_id: parseInt(b.dataset.rmAdmin, 10)})); showHeaderPrompt("admin id removed"); await loadAdmin(); }
     catch (e) { toast(e.message); }
   });
   const mudaeSave = $("mudae-id-save");
@@ -115,20 +115,21 @@ function wireAdmin() {
     const raw = $("mudae-id-input").value.trim();
     const body = raw === "" ? {mudae_bot_id: null} : {mudae_bot_id: parseInt(raw, 10)};
     if (raw !== "" && !/^\d+$/.test(raw)) { setFb(mudaeSave.closest(".card"), "error", "Mudae id must be numeric."); return; }
-    try { await post("/api/admin/mudae-id/set", body); flashFb(mudaeSave.closest(".card"), "saved"); await loadAdmin(); }
+    try { await withBusy(mudaeSave, post("/api/admin/mudae-id/set", body)); showHeaderPrompt("Mudae bot id saved"); await loadAdmin(); }
     catch (e) { setFb(mudaeSave.closest(".card"), "error", e.message); }
   };
   $$("[data-forget-acct]").forEach(b => b.onclick = async () => {
     const name = b.dataset.forgetAcct;
     try {
-      await post("/api/admin/forget-account", {account: name});
-      flashFb(b.closest(".card2"), `removed ${name} from admin list`);
+      await withBusy(b, post("/api/admin/forget-account", {account: name}));
+      showHeaderPrompt(`"${name}" removed from the admin list`);
       await loadAdmin();
     } catch (e) { setFb(b.closest(".card2"), "error", e.message); }
   });
   $$("[data-flag-admin]").forEach(b => b.onclick = async () => {
     try {
-      await post("/api/admin/account-flag", {account: b.dataset.flagAdmin, is_admin: b.dataset.val === "true"});
+      await withBusy(b, post("/api/admin/account-flag", {account: b.dataset.flagAdmin, is_admin: b.dataset.val === "true"}));
+      showHeaderPrompt(`admin flag ${b.dataset.val === "true" ? "granted to" : "revoked from"} "${b.dataset.flagAdmin}"`);
       await loadAdmin();
     } catch (e) { toast(e.message); }
   });
@@ -136,18 +137,18 @@ function wireAdmin() {
     const input = document.querySelector(`[data-perm-input="${CSS.escape(b.dataset.addPerm)}"]`);
     const v = (input?.value || "").trim();
     if (!v || !/^\d+$/.test(v)) { setFb(b.closest(".card2"), "error", "Enter a numeric Discord user id."); return; }
-    try { await post("/api/admin/perms/add", {account: b.dataset.addPerm, user_id: parseInt(v, 10)}); await loadAdmin(); }
+    try { await withBusy(b, post("/api/admin/perms/add", {account: b.dataset.addPerm, user_id: parseInt(v, 10)})); showHeaderPrompt(`command permission granted on "${b.dataset.addPerm}"`); await loadAdmin(); }
     catch (e) { setFb(b.closest(".card2"), "error", e.message); }
   });
   $$("[data-rm-perm]").forEach(b => b.onclick = async () => {
-    try { await post("/api/admin/perms/remove", {account: b.dataset.acct, user_id: parseInt(b.dataset.rmPerm, 10)}); await loadAdmin(); }
+    try { await withBusy(b, post("/api/admin/perms/remove", {account: b.dataset.acct, user_id: parseInt(b.dataset.rmPerm, 10)})); showHeaderPrompt(`command permission revoked on "${b.dataset.acct}"`); await loadAdmin(); }
     catch (e) { toast(e.message); }
   });
   $$("[data-set-prefix]").forEach(b => b.onclick = async () => {
     const name = b.dataset.setPrefix;
     const mode = document.querySelector(`[data-prefix-mode="${CSS.escape(name)}"]`)?.value || "mention";
     const symbol = document.querySelector(`[data-prefix-symbol="${CSS.escape(name)}"]`)?.value?.trim() || "";
-    try { await post("/api/admin/prefix/set", {account: name, mode, symbol}); flashFb(b.closest(".card2"), `prefix → ${mode}${symbol ? " "+symbol : ""}`); await loadAdmin(); }
+    try { await withBusy(b, post("/api/admin/prefix/set", {account: name, mode, symbol})); showHeaderPrompt(`prefix for "${name}" set to ${mode}`); await loadAdmin(); }
     catch (e) { setFb(b.closest(".card2"), "error", e.message); }
   });
 }
