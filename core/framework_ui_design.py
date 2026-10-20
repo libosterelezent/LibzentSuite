@@ -266,11 +266,7 @@ def _build_design(ui: DashboardUIToolset, api: Any):
         .set_description("Every data component's empty_text")
         .add_component(ui.Table(component_id="dg-table-empty").set_columns(["A", "B"])
                        .set_data_source(lambda ctx=None: {"columns": ["A", "B"], "rows": []})
-                       .set_empty_text("nothing here yet"))
-        .add_component(ui.ListView(component_id="dg-records-empty")
-                       .set_columns(["A", "B"]).set_key_column("A")
-                       .set_data_source(_no_records)
-                       .set_empty_text("no records match")))
+                       .set_empty_text("nothing here yet")))
 
     page.add_tab(data)
     return page
