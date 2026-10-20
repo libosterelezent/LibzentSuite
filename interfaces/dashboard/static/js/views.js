@@ -167,7 +167,7 @@ function renderTaskTable() {
       <td><span class="chip task-${esc(t.status)}">${esc(t.status)}</span></td><td>${esc(String(t.priority??""))}</td><td>${esc(fmtAge(t.submitted_at))}</td>
       <td>${t.status==="queued"||t.status==="running"?`<button class="btn btn-ghost btn-sm" data-cancel="${esc(t.id)}">cancel</button>`:""}</td></tr>`).join("")+"</tbody>";
   // innerHTML-serialized buttons carry no handlers — bind after parsing
-  tbl.querySelectorAll("[data-cancel]").forEach(b=>b.onclick=()=>post("/api/tasks/cancel",{task_id:+b.dataset.cancel}).then(loadTasks).catch(e=>toast(e.message)));
+  tbl.querySelectorAll("[data-cancel]").forEach(b=>b.onclick=()=>withBusy(b, post("/api/tasks/cancel",{task_id:+b.dataset.cancel})).then(loadTasks).catch(e=>toast(e.message)));
   const hist = $("task-history");
   if (taskHistory.length) {
     hist.innerHTML = `<thead><tr><th>Account</th><th>Plugin</th><th>Status</th><th>Duration</th><th>Finished</th></tr></thead><tbody>` +
@@ -193,7 +193,7 @@ function renderCooldowns(cds) {
   list.querySelectorAll("[data-cda]").forEach(b=>b.onclick=()=>{
     const body = {account:b.dataset.cda, plugin:b.dataset.cdp};
     if (b.dataset.cdk) body.cooldown_key = b.dataset.cdk;
-    post("/api/cooldowns/clear",body).then(loadCooldowns).catch(e=>toast(e.message));
+    withBusy(b, post("/api/cooldowns/clear",body)).then(loadCooldowns).catch(e=>toast(e.message));
   });
 }
 
