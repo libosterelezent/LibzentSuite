@@ -1128,3 +1128,164 @@ class TestRendererHardening(unittest.TestCase):
         self.assertIn("duiPageAccount[pluginName]", js)
         self.assertIn("body.account = acct", js)
         self.assertIn("renderDuiAccountPicker", js)
+
+class TestPromptSystemContracts(unittest.TestCase):
+    """User-directed prompt-system contracts (Oct 2026 round). The
+    floating feedback chips must ALWAYS be anchored + aligned under
+    their triggering control, only ONE may be visible at a time, they
+    must be opaque (readable over any content), and add/remove /
+    high-priority outcomes must surface the 5s header prompt. These
+    static assertions pin the mechanism so the original failure mode -
+    form-bottom-anchored, translucent, stacked prompts - cannot
+    silently return."""
+
+    def test_float_calls_carry_anchor_and_align(self):
+        """Every setFbFloat/flashFbFloat call passes >= 3 top-level
+        arguments: (container, text-or-level, ..., anchorEl, alignEl).
+        A 2-argument call is the old form-bottom-anchored bug."""
+        import re as _re
+
+        def top_level_args(call_body: str):
+            args, depth, cur = [], 0, []
+            for ch in call_body:
+                if ch in "([{":
+                    depth += 1
+                elif ch in ")]}":
+                    depth -= 1
+                if ch == "," and depth == 0:
+                    args.append("".join(cur).strip())
+                    cur = []
+                else:
+                    cur.append(ch)
+            args.append("".join(cur).strip())
+            return [a for a in args]
+
+        for name in ("dashboard-ui.js", "admin-ui.js", "views.js",
+                     "accounts.js", "groups.js", "app.js"):
+            js = _js_file(name)
+            for match in _re.finditer(
+                    r"(?:set|flash)FbFloat\(([^()]*(?:\([^()]*(?:\([^()]*\))?\))?)\)",
+                    js):
+                call = match.group(1)
+                args = top_level_args(call)
+                min_args = 4 if match.group(0).startswith("setFbFloat") else 3
+                self.assertGreaterEqual(
+                    len(args), min_args,
+                    f"{name}: unanchored float call "
+                    f"{match.group(0)[:70]!r} - every float must pass "
+                    f"anchorEl (+ alignEl for setFbFloat)")
+
+    def test_single_float_purge_and_alignment_exist(self):
+        ui = _js_file("ui.js")
+        self.assertIn('querySelectorAll(".fb-float[data-fb]")', ui,
+                      "the most-recent-wins purge (no overlapping "
+                      "prompts) must stay in the float branch")
+        self.assertIn("fbAnchorFor", ui)
+        self.assertIn("alignEl", ui,
+                      "chips must align to their triggering element")
+
+    def test_floats_are_opaque(self):
+        css = _css()
+        self.assertIn(".fb-float {", css)
+        self.assertIn("background: var(--surface)",
+                      css.split(".fb-float {", 1)[1].split("}", 1)[0],
+                      "float chips must be OPAQUE surface chips - the "
+                      "translucent tint let page content bleed through")
+
+    def test_header_prompt_surface_and_usage(self):
+        ui = _js_file("ui.js")
+        self.assertIn("function showHeaderPrompt", ui)
+        self.assertIn("?5000", ui.replace(" ", ""),
+                      "header prompt default duration must be 5s")
+        for name in ("app.js", "accounts.js", "groups.js", "admin-ui.js",
+                     "plugins-ui.js"):
+            self.assertIn("showHeaderPrompt(", _js_file(name),
+                          f"{name} must surface add/remove outcomes via "
+                          f"the header prompt")
+        css = _css()
+        self.assertIn("#hdr-prompt", css)
+        self.assertIn("position: fixed", css)
+
+    def test_component_chip_paths_unchanged(self):
+        """The component-level chips stay: field errors render inline on
+        their slot; dui-act/dui-in handlers keep their anchors."""
+        js = _js_file("dashboard-ui.js")
+        self.assertIn('setFb(slot, "error", err)', js)
+        self.assertIn('fbAnchorFor(el)', js)
+
+class TestButtonHintNeverOverlaps(unittest.TestCase):
+    """User guard: button descriptions must NEVER render as visible hint
+    text — inside the fixed-height Toolbar they overlap the content
+    below. They render as native tooltips (title attribute) instead,
+    which cannot overlap by construction."""
+
+    def test_button_renderer_uses_tooltip_not_hint(self):
+        js = _js_file("dashboard-ui.js")
+        render_btn = js.split("function renderButton", 1)[1].split(
+            "\nfunction ", 1)[0]
+        self.assertNotIn("duiHint(comp)", render_btn,
+                         "renderButton must not emit a visible hint")
+        self.assertIn('title="${esc(comp.description)}"', render_btn,
+                      "button descriptions must become native tooltips")
+
+    def test_toolbar_hint_overlay_rules_gone(self):
+        """The overlay experiment was rejected - the base toolbar hint
+        rules stay exactly as designed (in-flow, right-aligned) because
+        toolbar buttons no longer emit hints at all."""
+        css = _css()
+        self.assertNotIn(
+            ".dui-toolbar-actions .dui-item .hint { position: absolute",
+            css)
+
+class TestDuiTableExpansionAndKeys(unittest.TestCase):
+    """User-reported Design-tab table bugs: (1) expanding via 'show all'
+    collapsed on the next WS stats tick because loadDUIData re-rendered
+    from the ORIGINAL page_size; (2) tables without a key column gave
+    EVERY row the same empty selection key, so checking one checkbox
+    marked its neighbours too. Both mechanisms are pinned here."""
+
+    def test_expansion_survives_data_refresh(self):
+        js = _js_file("dashboard-ui.js")
+        self.assertIn("const duiExpanded = {};", js,
+                      "per-component expansion store missing")
+        self.assertIn("duiExpanded[compId] = true;", js,
+                      "'show all' must record the expansion")
+        table_fn = js.split("function duiTableHTML", 1)[1].split(
+            "\nfunction ", 1)[0]
+        self.assertIn("duiExpanded[compId] ? 0", table_fn,
+                      "duiTableHTML must honour the stored expansion "
+                      "over the declared page_size")
+
+    def test_keyless_rows_get_unique_selection_keys(self):
+        js = _js_file("dashboard-ui.js")
+        table_fn = js.split("function duiTableHTML", 1)[1].split(
+            "\nfunction ", 1)[0]
+        self.assertIn('"#" + rowIndex', table_fn,
+                      "keyless rows need a synthetic unique key - an "
+                      "empty key made one checkbox mark all others")
+        tiles_fn = js.split("function duiTilesHTML", 1)[1].split(
+            "\nfunction ", 1)[0]
+        self.assertIn('"#" + tileIndex', tiles_fn,
+                      "TileView shares the same keyless-row hazard")
+
+class TestSelectAllAndAutoCollapse(unittest.TestCase):
+    """User request: tables get a header SELECT-ALL (with partial-
+    selection indeterminate state), and expanded tables auto-collapse
+    when the active view moves away."""
+
+    def test_header_select_all_wired(self):
+        js = _js_file("dashboard-ui.js")
+        table_fn = js.split("function duiTableHTML", 1)[1].split(
+            "\nfunction ", 1)[0]
+        self.assertIn('data-dui-selall=', table_fn,
+                      "selectable tables must render a header select-all")
+        self.assertIn("syncDuiSelAll", js,
+                      "partial selection must reflect as indeterminate")
+        self.assertIn("indeterminate", js)
+
+    def test_navigation_resets_expansion(self):
+        self.assertIn("function duiResetExpansions",
+                      _js_file("dashboard-ui.js"))
+        app = _js()
+        self.assertIn("duiResetExpansions()", app,
+                      "UI.go must collapse expansions when navigating")
