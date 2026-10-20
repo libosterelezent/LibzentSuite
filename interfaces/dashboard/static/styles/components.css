@@ -207,7 +207,12 @@ dialog .dlg-foot { display: flex; gap: var(--sp-2); justify-content: flex-end; p
   box-shadow: var(--shadow-lg); max-height: 300px; overflow-y: auto; z-index: 30; display: none; }
 #search-results.open { display: block; }
 #search-results .result { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-1-5) var(--sp-3);
-  cursor: pointer; font-size: var(--fs-md); overflow-wrap: anywhere; }
+  cursor: pointer; font-size: var(--fs-md); overflow-wrap: anywhere;
+  /* QA ticket 7: results are real <button>s now (keyboard reachable) —
+     strip the UA chrome so they render exactly as the old divs did */
+  width: 100%; border: 0; background: none; color: inherit;
+  font-family: inherit; text-align: left; }
+#search-results .result:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 #search-results .result:hover { background: var(--surface3); }
 #search-results .result .type { font-size: var(--fs-2xs); color: var(--faint); text-transform: uppercase;
   margin-left: auto; }
@@ -559,7 +564,7 @@ dialog.dui-modal .dlg-body { max-height: min(70vh, 640px); overflow-y: auto;
 .dui-tab-btn { padding: var(--sp-2) var(--sp-3); font-size: var(--fs-md); color: var(--dim);
   border-bottom: 2px solid transparent; white-space: nowrap; }
 .dui-tab-btn:hover { color: var(--text); }
-.dui-tab-btn.active { color: var(--accent); border-bottom-color: var(--accent);
+.dui-tab-btn.active { color: var(--text); border-bottom-color: var(--accent);
   font-weight: 600; }
 .dui-tab-btn:focus-visible { outline: 2px solid var(--accent);
   outline-offset: -2px; border-radius: var(--r-sm) var(--r-sm) 0 0; }
