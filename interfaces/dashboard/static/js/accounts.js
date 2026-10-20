@@ -140,8 +140,8 @@ function wireAccountActions(root, a) {
       if (act==="estop") confirmAction("Emergency Stop",`Emergency stop ${a.name}?`,
         ()=>withBusy(mb, post("/api/accounts/emergency-stop",{name:a.name})).catch(e=>setFb(root,"error",e.message)));
       if (act==="remove") confirmAction("Remove Account",`Remove ${a.name}? This deletes its credential, cooldowns and state.`,
-        ()=>post("/api/accounts/remove",{name:a.name})
-          .then(()=>{ clearFb(root); afterAccountsRest(); })
+        ()=>withBusy(mb, post("/api/accounts/remove",{name:a.name}))
+          .then(()=>{ showHeaderPrompt(`account "${a.name}" removed`); clearFb(root); afterAccountsRest(); })
           .catch(e=>setFb(root,"error",e.message)));
       if (act==="plugins") openPluginPicker(a.name);
       if (act==="group") openGroupPicker(`Move to group — ${a.name}`, a.sync_group||null,
