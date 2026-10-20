@@ -312,8 +312,6 @@ def _build_plugins(ui: DashboardUIToolset, api: Any):
                        .set_icon("M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4")
                        .add_component(ui.Button(component_id="plug-rescan")
                                       .set_label("↻ Rescan")
-                                      .set_description(
-                                          "Re-scan plugins/ for new or externally-changed packages.")
                                       .set_action(rescan)))
         .add_component(ui.Table(component_id="plug-manifests")
                        .set_columns(["Plugin", "Version", "Accounts", "Description"])
@@ -412,6 +410,7 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
 
     (page
      .add_section(ui.Section(component_id="act-tasks-sec")
+        .set_width("30%")
         .add_component(ui.Toolbar(component_id="act-tasks-bar").set_title("Tasks")
                        .set_icon("M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11")
                        .add_component(ui.Button(component_id="act-tasks-refresh")
@@ -428,6 +427,7 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
                                      confirm="Request cancellation for this task?"),
                        ])))
      .add_section(ui.Section(component_id="act-cds-sec")
+        .set_width("35%")
         .add_component(ui.Toolbar(component_id="act-cds-bar").set_title("Cooldowns")
                        .set_icon("M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z")
                        .add_component(ui.Button(component_id="act-cds-refresh")
@@ -444,6 +444,7 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
                                              "for this plugin?"),
                        ])))
      .add_section(ui.Section(component_id="act-logs-sec")
+        .set_width("35%")
         .add_component(ui.Toolbar(component_id="act-logs-bar")
                        .set_title("Recent logs")
                        .set_icon("M4 6h16M4 12h16M4 18h10")
@@ -454,6 +455,7 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
                        .set_value("— refresh to load —")
                        .set_data_source(_logs_data(api))))
      .add_section(ui.Section(component_id="act-audit-sec")
+        .set_width("35%")
         .add_component(ui.Toolbar(component_id="act-audit-bar").set_title("Audit trail")
                        .set_icon("M9 12l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z")
                        .add_component(ui.Button(component_id="act-audit-refresh")
