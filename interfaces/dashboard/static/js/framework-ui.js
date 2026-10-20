@@ -49,13 +49,32 @@ async function renderFrameworkTab(view) {
     if (p !== panel) delete p.dataset.fwRendered;
   });
   const seq = ++fwSeq;
-  panel.innerHTML = `<div class="dui-skel" aria-hidden="true"><div></div><div></div><div></div></div>`;
+  // QA ticket 1a: the pre-auth static Tools panel holds the ONLY token
+  // entry point (#token-card) — replacing it with a skeleton that then
+  // 401s into an error alert bricks the first-run experience. Keep the
+  // static content until the page fetch actually succeeds.
+  const staticFallback = view === "tools" && panel.querySelector("#token-card");
+  if (!staticFallback) {
+    panel.innerHTML = `<div class="dui-skel" aria-hidden="true"><div></div><div></div><div></div></div>`;
+  }
   let page = null;
   try {
     page = await api("/api/dashboard-ui/page?plugin=" + encodeURIComponent(FRAMEWORK_PLUGIN) +
                      "&page_id=" + encodeURIComponent(view));
   } catch (e) {
     if (seq !== fwSeq) return;
+    if (staticFallback && typeof token === "function" && !token()) {
+      // no token: the page fetch can NEVER succeed — surface a hint
+      // above the surviving static content instead of wiping it
+      if (!panel.querySelector("[data-fw-auth-note]")) {
+        const note = document.createElement("div");
+        note.dataset.fwAuthNote = "1";
+        note.innerHTML = duiAlertHTML("warn", "Sign-in required",
+          "This page loads once the dashboard token is set — use the token card below.");
+        panel.prepend(note);
+      }
+      return;
+    }
     panel.innerHTML = duiAlertHTML("err", "Page unavailable",
                                    e.message || String(e));
     return;
