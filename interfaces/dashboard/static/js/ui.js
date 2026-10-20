@@ -22,9 +22,67 @@ function setFb(container, level, text, opts) {
     // AWARENESS CONTRACT (knowledgebase/DESIGN_AWARENESS.md §1): the
     // message is an ANCHORED OVERLAY under the control — it never
     // pushes layout, caps its width, wraps long text and dismisses
-    // itself. The container becomes the positioning anchor.
-    container.classList.add("fb-anchor");
+    // itself. The container becomes the positioning anchor, or — when
+    // the caller passes anchorEl — a SPECIFIC element (the triggering
+    // button's row): a form-level anchor drops the message hundreds of
+    // pixels below the button the user actually clicked (user-reported
+    // fix directive #1: errors belong under the component).
+    const anchorRaw = (o.anchorEl && o.anchorEl !== container) ? o.anchorEl : container;
+    // a BUTTON must never parent the chip (invalid HTML, click bleed,
+    // clipped painting) — route button anchors through the dedicated
+    // after-button slot instead
+    const anchor = (anchorRaw && anchorRaw.tagName === "BUTTON"
+                    && typeof fbAnchorFor === "function")
+      ? fbAnchorFor(anchorRaw) : anchorRaw;
+    if (f.parentElement !== anchor) {
+      container.querySelectorAll(":scope [data-fb]").forEach(el => el.remove());
+      anchor.querySelectorAll(":scope [data-fb]").forEach(el => el.remove());
+      f = document.createElement("div"); f.dataset.fb = "1"; anchor.appendChild(f);
+    }
+    // USER FIX DIRECTIVE #3: exactly ONE float visible at any moment —
+    // a new prompt removes every other floating chip (two rapid clicks
+    // on different buttons must never stack overlapping prompts; the
+    // most recent message wins). Inline field errors are unaffected.
+    document.querySelectorAll(".fb-float[data-fb]").forEach(el => {
+      if (el !== f) el.remove();
+    });
+    anchor.classList.add("fb-anchor");
     f.classList.add("fb-float");
+    // USER FIX DIRECTIVE #1 (alignment): pin the chip's left edge under
+    // the triggering element — right-aligned buttons (Save/Apply sit at
+    // the row's right) otherwise leave the chip ~570px to their left.
+    if (o.alignEl && o.alignEl !== anchor) {
+      const ar = anchor.getBoundingClientRect();
+      const er = o.alignEl.getBoundingClientRect();
+      f.style.left = Math.max(0, Math.round(er.left - ar.left)) + "px";
+    } else {
+      f.style.left = "";
+    }
+    // USER FIX: the chip sizes to its text (max-content) but must NEVER
+    // overflow the card it lives in — clamp the left edge into the
+    // nearest card and cap the width so long messages wrap instead.
+    requestAnimationFrame(() => {
+      if (!f.isConnected) return;
+      const card = anchor.closest(".dui-section, .card, .card2, .dui-container")
+                   || document.body;
+      const cr = card.getBoundingClientRect();
+      const maxRight = cr.right - 8;
+      const measure = () => f.getBoundingClientRect();
+      let fr = measure();
+      if (fr.left + fr.width <= maxRight) return;
+      const minLeft = Math.max(cr.left + 8, 8);
+      // NaN-safe: track the offset as a NUMBER (style.left may be ""
+      // before the first alignment pass)
+      let leftPx = parseFloat(f.style.left) || 0;
+      const shift = Math.min(fr.left - minLeft, fr.left + fr.width - maxRight);
+      if (shift > 0) {
+        leftPx = Math.max(0, leftPx - shift);
+        f.style.left = Math.round(leftPx) + "px";
+      }
+      fr = measure();
+      const cap = maxRight - fr.left;
+      if (cap > 60 && fr.width > cap) f.style.maxWidth = Math.round(cap) + "px";
+    });
     // success dismisses itself (4s, industry norm); errors stay until
     // the next action or a click — they must remain actionable
     o.autoMs = o.autoMs !== undefined ? o.autoMs
@@ -52,12 +110,59 @@ function flashFb(container, text) {
 }
 /* FLOAT variants (DESIGN_AWARENESS.md §1): anchored overlays under the
    control — they never push layout. Errors stay 8s (actionable) or
-   until clicked; success self-dismisses at 4s. */
-function setFbFloat(container, level, text) {
-  return setFb(container, level, text, { float: true });
+   until clicked; success self-dismisses at 4s. ``anchorEl`` pins the
+   overlay under one specific element (the triggering button's row). */
+function setFbFloat(container, level, text, anchorEl, alignEl) {
+  return setFb(container, level, text, { float: true, anchorEl: anchorEl, alignEl: alignEl });
 }
-function flashFbFloat(container, text) {
-  return setFb(container, "ok", text, { float: true });
+function flashFbFloat(container, text, anchorEl, alignEl) {
+  return setFb(container, "ok", text, { float: true, anchorEl: anchorEl, alignEl: alignEl });
+}
+/* Resolve the FLOAT anchor for an action button: its own row when one
+   exists (.form-actions/.dui-row/.dui-toolbar), otherwise a dedicated
+   zero-size slot inserted right AFTER the button — the chip then sits
+   directly under the control, aligned, in ANY layout (user fix
+   directive #1: prompts belong under the component, never a card's
+   bottom edge). */
+function fbAnchorFor(btnEl) {
+  const row = btnEl.closest(".dui-row, .form-actions, .dui-toolbar");
+  if (row) return row;
+  let slot = btnEl.nextElementSibling;
+  if (!slot || slot.dataset.fbSlot !== "1") {
+    slot = document.createElement("span");
+    slot.dataset.fbSlot = "1";
+    slot.style.cssText = "position:relative;display:block;width:0;height:0;";
+    btnEl.after(slot);
+  }
+  // shift the slot back over the button's left edge so the chip appears
+  // LEFT-ALIGNED under the control (the slot naturally sits at the
+  // button's right edge; layout-neutral since the box is 0x0)
+  slot.style.left = -btnEl.offsetWidth + "px";
+  return slot;
+}
+/* HEADER PROMPT (user directive): add/remove and other high-priority
+   outcomes surface ON TOP OF THE HEADER for 5s — ONE opaque, tone-
+   railed banner, shared by every tab, independent of the component
+   chips (which stay anchored under their controls). */
+function showHeaderPrompt(text, level, ms) {
+  level = level || "ok";
+  const dur = ms === undefined ? 5000 : ms;
+  let el = document.getElementById("hdr-prompt");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "hdr-prompt";
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+    el.addEventListener("click", () => el.remove());
+    document.body.appendChild(el);
+  }
+  clearTimeout(el._hdrTimer);
+  el.className = "hdr-prompt hdr-prompt-" + level;
+  el.textContent = (FB_TONE_GLYPH[level] ? FB_TONE_GLYPH[level] + "  " : "") + text;
+  // restart the entrance animation when a repeat message replaces one
+  el.style.animation = "none"; void el.offsetWidth; el.style.animation = "";
+  if (dur > 0) el._hdrTimer = setTimeout(() => { if (el.isConnected) el.remove(); }, dur);
+  return el;
 }
 /* busy state for a button while its action runs (.btn.busy shows a spinner) */
 function withBusy(btnEl, promise) {
