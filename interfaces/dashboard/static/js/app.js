@@ -22,7 +22,7 @@ function buildNav() {
     const a = document.createElement("button");
     a.className = "nav-item" + (item.id===currentView?" active":"");
     a.dataset.view = item.id;
-    a.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${item.icon}"/></svg><span>${esc(item.label)}</span><span class="badge hidden" id="nav-badge-${item.id}"></span>`;
+    a.innerHTML = `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${esc(item.icon)}"/></svg><span>${esc(item.label)}</span><span class="badge hidden" id="nav-badge-${esc(item.id)}"></span>`;
     a.onclick = () => UI.go(item.id);
     nav.appendChild(a);
   }
@@ -33,7 +33,7 @@ function buildNav() {
   for (const item of bnItems) {
     const a = document.createElement("button");
     a.className = "bnav-item" + (item.id===currentView?" active":"");
-    a.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${item.icon}"/></svg><span>${esc(item.label.split(" ")[0])}</span>`;
+    a.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="${esc(item.icon)}"/></svg><span>${esc(item.label.split(" ")[0])}</span>`;
     a.onclick = () => UI.go(item.id);
     bn.appendChild(a);
   }
@@ -45,9 +45,10 @@ function buildNav() {
   if (typeof buildDashboardUINav === "function") buildDashboardUINav();
 }
 
-const LOADERS = {};
 const UI = {
   go(view) {
+    // leaving a view collapses its expanded tables (user directive)
+    if (typeof duiResetExpansions === "function") duiResetExpansions();
     currentView = view;
     // Popups do not survive navigation: close and clear the shared details
     // popup so no stale content/DOM (or its closures) outlives the page.
@@ -59,7 +60,6 @@ const UI = {
       || (NAV.find(n => n.id === view) || {}).label
       || view;
     buildNav(); $("sidebar").classList.remove("open");
-    if (LOADERS[view]) { LOADERS[view](); delete LOADERS[view]; }
     render();
   },
   tab(name) {
@@ -104,7 +104,7 @@ function render() {
   // Accounts to add the first one (Get Started used to snap straight
   // back to onboarding because this guard covered all views).
   const hasAccts = accounts().length > 0;
-  if (!hasAccts && currentView==="home") { showPanel("panel-onboard"); return; }
+  if (!hasAccts && currentView==="home") { showPanel("panel-onboard"); syncOnboardAuth(); return; }
   // Plugin dashboard-UI pages ("dui-*" views) and simple plugin panels
   // ("plugin-*" views) manage their OWN panel activation + content —
   // showPanel()'s fallback to panel-home was silently bouncing idle
@@ -132,6 +132,14 @@ function updateNavBadges() {
   const attn = getAttention();
   const badge = $("nav-badge-home");
   if (badge) { badge.textContent = attn.length; badge.classList.toggle("hidden",!attn.length); }
+}
+
+/* QA ticket 12: the onboarding welcome's step 0 (dashboard token) shows
+   ONLY while the token is missing — once connected the welcome is
+   purely about accounts/plugins/groups. */
+function syncOnboardAuth() {
+  const card = $("onboard-auth");
+  if (card) card.hidden = !!token();
 }
 
 /* Lightweight per-second updates (no DOM rebuild) — metric numbers only.
@@ -206,7 +214,16 @@ function connectWS() {
 }
 function handleWsClosed() {
   clearTimeout(wsWatchdog);
-  $("wsdot").classList.remove("on"); $("connmsg").textContent = "disconnected";
+  $("wsdot").classList.remove("on");
+  // QA ticket 1b: without a token the WS upgrade can NEVER succeed —
+  // the retry ladder just masks an auth failure as a connectivity
+  // problem. Name the real issue and stop retrying (saving a token
+  // resets wsRetries and reconnects immediately).
+  if (typeof token === "function" && !token()) {
+    $("connmsg").textContent = "not connected — dashboard token required";
+    return;
+  }
+  $("connmsg").textContent = "disconnected";
   if (wsRetries < 10) { wsRetries++; $("connmsg").textContent=`reconnecting (${wsRetries}/10)…`;
     wsRetryTimer = setTimeout(()=>{ wsRetryTimer=null; connectWS(); }, Math.min(1000*Math.pow(2,wsRetries),30000)); }
   else {
@@ -232,7 +249,14 @@ function wire() {
     const field = $("adv-token");
     const card = $("token-card");
     secretStore.setItem("dash_token", field.value.trim());
-    wsRetries = 0; connectWS(); render();
+    wsRetries = 0; connectWS();
+    // QA ticket 1c: the nav/plugin surfaces were fetched pre-auth (and
+    // failed silently) — reload them so one save recovers the whole
+    // shell without a manual F5.
+    Promise.allSettled([
+      typeof loadDashboardUINav === "function" ? loadDashboardUINav() : null,
+      typeof loadPluginUI === "function" ? loadPluginUI() : null,
+    ]).then(() => { buildNav(); render(); });
     flashFb(card, "token saved — reconnecting…");
   };
   $("hdr-gear").onclick = () => { UI.go("tools"); UI.toolsTab("adv"); };
@@ -268,7 +292,7 @@ function wire() {
     // empty selection = zero plugins (a valid desired state)
     body.plugins = [...$("aa-plugins").querySelectorAll("input:checked")].map(i=>i.value);
     const c = $("aa-cred").value; if (c) body.credential = c;
-    try { await withBusy($("aa-submit"), post("/api/accounts/add", body)); $("dlg-add-acct").close(); await refreshAccountsNow(); render(); }
+    try { await withBusy($("aa-submit"), post("/api/accounts/add", body)); $("dlg-add-acct").close(); showHeaderPrompt(`account "${name}" added`); await refreshAccountsNow(); render(); }
     catch(e) { setFb(form,"error",e.message); }
   };
 
@@ -284,23 +308,27 @@ function wire() {
     if (!name) { setFb($("cg-name").closest(".field"),"error","Group name is required."); return; }
     try {
       await withBusy($("cg-submit"), post("/api/groups/create",{name, description:$("cg-desc").value, enabled:$("cg-enabled").checked}));
-      $("dlg-create-group").close(); await afterGroupMutation();
+      $("dlg-create-group").close(); showHeaderPrompt(`group "${name}" created`); await afterGroupMutation();
     } catch(e) { setFb(form,"error",e.message); }
   };
 
   // Credential dialog
   $("cred-save").onclick = async () => {
     const name = $("cred-name").value, val = $("cred-val").value;
-    if (!name||!val) return;
-    try { await withBusy($("cred-save"), post("/api/accounts/credential",{name,credential:val})); $("dlg-cred").close(); await refreshAccountsNow(); render(); }
+    if (!name||!val) {   // QA ticket 6: a silent no-op reads as a dead button
+      setFb($("dlg-cred").querySelector(".dlg-body"),"error",
+            !name ? "Account name is required." : "Enter the Discord token.");
+      return;
+    }
+    try { await withBusy($("cred-save"), post("/api/accounts/credential",{name,credential:val})); $("dlg-cred").close(); showHeaderPrompt(`credential saved for "${name}"`); await refreshAccountsNow(); render(); }
     catch(e) { setFb($("dlg-cred").querySelector(".dlg-body"),"error",e.message); }
   };
 
   // Bulk actions — partial failures report next to the bar, never as
   // blanket success (per-action allSettled accounting).
   $("bulk-clear").onclick = () => { selectedAccounts.clear(); renderAccounts(); };
-  $("bulk-start").onclick = () => bulkLifecycle("/api/accounts/start");
-  $("bulk-stop").onclick = () => bulkLifecycle("/api/accounts/stop");
+  $("bulk-start").onclick = e => withBusy(e.currentTarget, bulkLifecycle("/api/accounts/start"));
+  $("bulk-stop").onclick = e => withBusy(e.currentTarget, bulkLifecycle("/api/accounts/stop"));
   $("bulk-group").onclick = () => {
     if (!selectedAccounts.size) return;
     const names = [...selectedAccounts];
@@ -311,7 +339,7 @@ function wire() {
           : post("/api/groups/set-account",{account:n, group})));
       const failed = rs.filter(r=>r.status==="rejected");
       if (failed.length) setFb($("bulkbar"),"error",`${rs.length-failed.length}/${rs.length} moved — ${failed.map(r=>r.reason&&r.reason.message||String(r.reason)).join("; ")}`);
-      else flashFb($("bulkbar"), `${rs.length} account${rs.length!==1?"s":""} moved`);
+      else showHeaderPrompt(`${rs.length} account${rs.length!==1?"s":""} moved to "${group||"independent"}"`);
       selectedAccounts.clear();
       updateBulkBar();
       await afterGroupMutation();
@@ -321,9 +349,9 @@ function wire() {
   // Task filters + streams
   $("task-filter-status").onchange = renderTaskTable;
   $("task-filter-account").onchange = renderTaskTable;
-  $("task-refresh").onclick = loadTasks;
+  $("task-refresh").onclick = () => withBusy($("task-refresh"), loadTasks());
   $("log-backfill").onclick = async () => {
-    try { const entries = await api("/api/logs?n=200"+($("log-acct").value?"&account="+encodeURIComponent($("log-acct").value):""))||[];
+    try { const entries = await withBusy($("log-backfill"), api("/api/logs?n=200"+($("log-acct").value?"&account="+encodeURIComponent($("log-acct").value):""))||[])||[];
       $("logbox").innerHTML="";   // replace, never stack on repeated clicks
       for (const e of entries) logLine(e); } catch(e) { showErr(e.message); }
   };
@@ -331,7 +359,7 @@ function wire() {
   $("log-acct").onchange = () => { $("logbox").innerHTML=""; };
   $("log-sev").onchange = () => { $("logbox").innerHTML=""; };
   $("audit-backfill").onclick = async () => {
-    try { const entries = await api("/api/audit?n=200"+($("audit-acct").value?"&account="+encodeURIComponent($("audit-acct").value):""))||[];
+    try { const entries = await withBusy($("audit-backfill"), api("/api/audit?n=200"+($("audit-acct").value?"&account="+encodeURIComponent($("audit-acct").value):""))||[])||[];
       $("auditbox").innerHTML="";
       for (const e of entries) auditLine(e); } catch(e) { showErr(e.message); }
   };
@@ -344,7 +372,7 @@ function wire() {
     $("rp-level").value="global"; $("rp-owner").value="";
     const dlg=$("dlg-policy"); clearFb(dlg.querySelector(".form")); dlg.showModal(); $("rp-interval").focus();
   };
-  $("rl-refresh").onclick = loadPolicies;
+  $("rl-refresh").onclick = () => withBusy($("rl-refresh"), loadPolicies());
   $("rp-submit").onclick = async () => {
     const form = $("dlg-policy").querySelector(".form");
     clearFb(form);
@@ -362,9 +390,9 @@ function wire() {
 
   // Advanced
   $("adv-estop").onclick = () => confirmAction("GLOBAL EMERGENCY STOP","This affects ALL running accounts and tasks.",
-    ()=>post("/api/estop").catch(e=>setFb($("adv-estop").closest(".card"),"error",e.message)));
+    ()=>post("/api/estop").then(()=>showHeaderPrompt("EMERGENCY STOP issued — all tasks cancelled", "error")).catch(e=>setFb($("adv-estop").closest(".card"),"error",e.message)));
   $("adv-resume").onclick = () => withBusy($("adv-resume"), post("/api/resume"))
-    .then(()=>flashFb($("adv-resume").closest(".card"),"resume requested"))
+    .then(()=>showHeaderPrompt("fleet resume requested"))
     .catch(e=>setFb($("adv-resume").closest(".card"),"error",e.message));
   $("adv-import").onclick = () => withBusy($("adv-import"), post("/api/credentials/import-env"))
     .then(()=>flashFb($("adv-import").closest(".card"),"import requested"))
@@ -382,6 +410,10 @@ function wire() {
   // the Accounts tab (must actually navigate: render() only pins the
   // onboarding panel to Home).
   $("onboard-cta").onclick = () => { UI.go("fleet"); UI.tab("accounts"); };
+  // QA ticket 12: the tokenless first-run user gets a visible step 0
+  // instead of a welcome whose first click 401s (same target as the
+  // gear: the static Tools ▸ Advanced token card).
+  $("onboard-auth-cta").onclick = () => { UI.go("tools"); UI.toolsTab("adv"); $("adv-token").focus(); };
 
   // Mobile menu
   $("menu-btn").onclick = () => $("sidebar").classList.toggle("open");
@@ -409,7 +441,7 @@ function wire() {
       const tag = (e.target.tagName||"").toLowerCase();
       if (!["input","textarea","select"].includes(tag) && !e.target.isContentEditable) { $("search").focus(); e.preventDefault(); }
     }
-    if (e.key==="Escape") { $$(".menu.open").forEach(m=>m.classList.remove("open")); $("sidebar").classList.remove("open"); }
+    if (e.key==="Escape") { $$(".menu.open").forEach(m=>m.classList.remove("open")); $("sidebar").classList.remove("open"); $("search-results").classList.remove("open"); }
   });
 
   // Connectivity re-arm: background tabs and OS sleep/network loss can
@@ -445,7 +477,7 @@ function wire() {
     for (const a of accounts()) if (a.name.toLowerCase().includes(q)) items.push({label:a.name,type:"Account",action:()=>openAcctDetails(a.name)});
     for (const g of groupsList) if (g.name.toLowerCase().includes(q)) items.push({label:g.name,type:"Group",action:()=>openGroupDetails(g.name)});
     for (const m of manifests) if (m.name.toLowerCase().includes(q)) items.push({label:m.name,type:"Plugin",action:()=>UI.go("plugins")});
-    results.innerHTML = items.slice(0,8).map((item,i)=>`<div class="result" data-i="${i}">${esc(item.label)}<span class="type">${esc(item.type)}</span></div>`).join("")||"<div class='result dim'>No results</div>";
+    results.innerHTML = items.slice(0,8).map((item,i)=>`<button type="button" class="result" data-i="${i}">${esc(item.label)}<span class="type">${esc(item.type)}</span></button>`).join("")||"<div class='result dim'>No results</div>";
     results.classList.add("open");
     results.querySelectorAll(".result[data-i]").forEach(el=>el.onclick=()=>{results.classList.remove("open");$("search").value="";items[+el.dataset.i].action();});
   };
@@ -453,8 +485,8 @@ function wire() {
 
 function bulkLifecycle(path) {
   const names = [...selectedAccounts];
-  if (!names.length) return;
-  Promise.allSettled(names.map(n=>post(path,{account:n}))).then(rs=>{
+  if (!names.length) return Promise.resolve();
+  return Promise.allSettled(names.map(n=>post(path,{account:n}))).then(rs=>{
     const failed = rs.filter(r=>r.status==="rejected");
     if (failed.length) setFb($("bulkbar"),"error",`${rs.length-failed.length}/${rs.length} succeeded — ${failed.map(r=>r.reason&&r.reason.message||String(r.reason)).join("; ")}`);
     else flashFb($("bulkbar"), `${rs.length} request${rs.length!==1?"s":""} sent`);
