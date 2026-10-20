@@ -149,15 +149,15 @@ function deleteGroupFlow(g) {
   const count = g.member_count??0;
   if (count > 0) {
     confirmAction(`Delete Group ${g.name}`,
-      `Group ${g.name} has ${count} member${count!==1?"s":""}. Deleting a group never deletes accounts — members return to independent (per-account) pacing.`,
+      `Group ${g.name} has ${count} member${count!==1?"s":""}. Deleting a group never deletes accounts - members return to independent (per-account) pacing.`,
       ()=>post("/api/groups/delete",{group:g.name,detach_members:true})
-        .then(afterGroupMutation).catch(e=>toast(e.message)),
+        .then(()=>{ showHeaderPrompt(`group "${g.name}" deleted`); return afterGroupMutation(); }).catch(e=>toast(e.message)),
       "Delete + Detach Members");
   } else {
     confirmAction(`Delete Group ${g.name}`,
       `Delete the empty group ${g.name}?`,
       ()=>post("/api/groups/delete",{group:g.name,detach_members:false})
-        .then(afterGroupMutation).catch(e=>toast(e.message)));
+        .then(()=>{ showHeaderPrompt(`group "${g.name}" deleted`); return afterGroupMutation(); }).catch(e=>toast(e.message)));
   }
 }
 
@@ -190,11 +190,16 @@ function openGroupPicker(title, currentGroup, onPick) {
   body.appendChild(list);
 }
 
+let groupDetailsSeq = 0;
 async function openGroupDetails(name) {
   UI.go("fleet"); UI.tab("groups");
+  // QA ticket 11: a slow /groups/info must not pop this modal over a
+  // view the user switched to meanwhile — the homeStatsSeq pattern
+  const seq = ++groupDetailsSeq;
   let snap;
   try { snap = await api("/api/groups/info?group="+encodeURIComponent(name)); }
-  catch(e) { toast(e.message); return; }
+  catch(e) { if (seq === groupDetailsSeq) toast(e.message); return; }
+  if (seq !== groupDetailsSeq) return;   // superseded by a newer request/navigation
   const body = openDetailsPopup(snap.name);
   const members = snap.members||[];
   const count = snap.member_count??members.length;
@@ -225,7 +230,7 @@ async function openGroupDetails(name) {
   body.querySelectorAll("[data-remove]").forEach(b=>b.onclick=()=>{
     if (b.disabled) return; b.disabled = true;
     post("/api/groups/remove-member",{group:snap.name,account:b.dataset.remove})
-      .then(()=>{ afterGroupMutation(); openGroupDetails(snap.name); })
+      .then(()=>{ showHeaderPrompt(`"${b.dataset.remove}" removed from group "${snap.name}"`); afterGroupMutation(); openGroupDetails(snap.name); })
       .catch(e=>{ setFb(body,"error",e.message); b.disabled=false; });
   });
   body.querySelector('[data-gd="edit"]').onclick = () => openGroupEdit(snap.name);
@@ -299,7 +304,8 @@ function openMemberPicker(groupName) {
     clearFb(list);
     const rs = await withBusy(add, Promise.allSettled(chosen.map(n=>post("/api/groups/add-member",{group:groupName,account:n}))));
     const failed = rs.filter(r=>r.status==="rejected");
-    if (failed.length) { setFb(list,"error",`${rs.length-failed.length}/${rs.length} added — ${failed.map(r=>r.reason&&r.reason.message||String(r.reason)).join("; ")}`); add.disabled=false; return; }
+    if (failed.length) { setFb(list,"error",`${rs.length-failed.length}/${rs.length} added — ${failed.map(r=>r.reason&&r.reason.message||String(r.reason)).join("; ")}`); return; }
+    showHeaderPrompt(`${chosen.length} account${chosen.length!==1?"s":""} added to group "${groupName}"`);
     $("dlg-details").close();
     await afterGroupMutation();
   };
