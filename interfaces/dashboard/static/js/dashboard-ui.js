@@ -34,7 +34,12 @@ let duiSeq = 0;
 let duiComps = {};
 let duiDataCache = {};
 /* bulk-selection state: view component id -> Set of selected keys */
+/* bulk selection: compId -> Set(keys); table expansion: compId -> true.
+   The expansion flag survives the WS-tick data refresh — without it,
+   loadDUIData re-renders from the ORIGINAL page_size and an expanded
+   table collapses on its own (user-reported bug). */
 const duiSelection = {};
+const duiExpanded = {};
 /* dynamic form fields: form id -> field defs from a fields provider */
 const duiFormFields = {};
 /* account-scoped pages: plugin -> the dashboard-selected account */
@@ -56,7 +61,7 @@ function openDuiModal(modalId) {
 /* ── Navigation ────────────────────────────────────────────────────────────── */
 async function loadDashboardUINav() {
   try { duiNav = await api("/api/dashboard-ui/navigation") || []; }
-  catch { duiNav = []; }
+  catch (e) { duiNav = []; showErr(e.message); }   // QA ticket 5: an empty sidebar must explain itself
   // SINGLE SOURCE OF TRUTH (review: "separate customisation from
   // structure"): the server's navigation defines the framework
   // sidebar — labels, icons, order. app.js consumes NAV/TITLES.
@@ -151,7 +156,7 @@ function renderDuiAccountPicker(pluginName, panel) {
   const bar = document.createElement("div");
   bar.className = "dui-acct-bar";
   bar.innerHTML = `<label class="dui-acct-label">Account</label>` +
-    `<select data-dui-acct-sel="${esc(pluginName)}">` +
+    `<select data-dui-acct-sel="${esc(pluginName)}" aria-label="Account for ${esc(pluginName)}">` +
     accounts().map(a => `<option value="${esc(a.name)}"${duiPageAccount[pluginName] === a.name ? " selected" : ""}>${esc(a.name)}</option>`).join("") +
     `</select>`;
   panel.prepend(bar);
@@ -361,7 +366,10 @@ function duiTableHTML(comp, data, compId) {
     return duiEmpty("table data must be a list or a {columns, rows} object");
   }
   if (!rows.length) return duiEmpty(comp.empty_text);
-  const pageSize = Math.max(0, Math.round(+comp.page_size || 0));
+  // expanded state wins over the declared page_size (WS-tick refreshes
+  // re-render with the original comp — the flag keeps "show all" stuck)
+  const pageSize = duiExpanded[compId] ? 0
+    : Math.max(0, Math.round(+comp.page_size || 0));
   const visible = pageSize && rows.length > pageSize ? rows.slice(0, pageSize) : rows;
   // Row-action key resolution: the declared key column when it exists
   // among the columns, else the "__key" pseudo-cell PAST the visible
@@ -372,12 +380,23 @@ function duiTableHTML(comp, data, compId) {
   if (keyCol === "__key" && keyIdx < 0) keyIdx = columns.length;
   const rowActions = Array.isArray(comp.row_actions) ? comp.row_actions : [];
   const selectable = comp.selectable === true;
-  const head = (selectable ? `<th class="dui-sel-th"></th>` : "")
+  // precompute per-row keys (with the synthetic fallback) — the header
+  // select-all and the body checkboxes must agree on the same keys
+  const rowKeys = visible.map((r, rowIndex) => {
+    let key = keyIdx >= 0 && r ? String(r[keyIdx] ?? "") : "";
+    if (!key) key = "#" + rowIndex;
+    return key;
+  });
+  const allSelected = selectable && visible.length > 0
+    && rowKeys.every(k => duiSelected(compId).has(k));
+  const head = (selectable
+    ? `<th class="dui-sel-th"><input type="checkbox" data-dui-selall="${esc(compId)}"` +
+      ` aria-label="Select all rows"${allSelected ? " checked" : ""}></th>` : "")
     + columns.map(c => `<th>${esc(c)}</th>`).join("")
     + (rowActions.length ? `<th></th>` : "");
-  const body = visible.map(r => {
+  const body = visible.map((r, rowIndex) => {
     const cells = columns.map((_, i) => `<td>${duiCell(r ? r[i] : "")}</td>`).join("");
-    const key = keyIdx >= 0 && r ? String(r[keyIdx] ?? "") : "";
+    const key = rowKeys[rowIndex];
     const selCell = selectable
       ? `<td class="dui-sel-td"><input type="checkbox" data-dui-sel="${esc(compId)}" data-dui-key="${esc(key)}"${duiSelected(compId).has(key) ? " checked" : ""}></td>` : "";
     let actionCell = "";
@@ -408,9 +427,11 @@ function duiTilesHTML(comp, data, compId) {
   const rowActions = Array.isArray(comp.row_actions) ? comp.row_actions : [];
   const keyCol = String(comp.key_column || "key");
   const ST = {ok: "online", warn: "warning", err: "offline", info: "info"};
-  const cards = tiles.map(t => {
+  const cards = tiles.map((t, tileIndex) => {
     if (!t || typeof t !== "object") return "";
-    const key = String(t[keyCol] ?? t.key ?? "");
+    const keyCol = String(comp.key_column || "key");
+    let key = String(t[keyCol] ?? t.key ?? "");
+    if (!key) key = "#" + tileIndex;   // unique fallback — never share a selection key
     const tone = ["ok", "warn", "err", "info"].includes(t.tone) ? t.tone : null;
     const sel = comp.selectable === true
       ? `<label class="dui-tile-check" title="Select for bulk actions">` +
@@ -547,6 +568,13 @@ function updateDuiBulkBar(compId) {
   if (cnt) cnt.textContent = `${n} selected`;
 }
 
+function duiResetExpansions() {
+  /* USER DIRECTIVE: an expanded table collapses automatically when the
+     active window moves elsewhere — expansion is transient view state,
+     so navigating away resets it (UI.go calls this). */
+  for (const key of Object.keys(duiExpanded)) delete duiExpanded[key];
+}
+
 /* Wire checkboxes + bulk buttons in freshly rendered bodies. */
 function wireDuiSelection(root, pluginName, compId) {
   root.querySelectorAll(`input[data-dui-sel="${compId}"]`).forEach(cb => {
@@ -556,8 +584,55 @@ function wireDuiSelection(root, pluginName, compId) {
       const set = duiSelected(compId);
       if (cb.checked) set.add(cb.dataset.duiKey); else set.delete(cb.dataset.duiKey);
       updateDuiBulkBar(compId);
+      syncDuiSelAll(root, compId);
     });
   });
+  // header SELECT-ALL: toggles every row of this table (user request:
+  // select all entries at once). Computed from the CACHED DATA, not the
+  // DOM — the 1s stats refresh re-renders the body mid-flight and DOM
+  // scans race it. After updating the selection the body re-renders,
+  // so checkboxes reflect the state.
+  const selAll = root.querySelector(`input[data-dui-selall="${compId}"]`);
+  if (selAll && !selAll.dataset.duiWired) {
+    selAll.dataset.duiWired = "1";
+    selAll.addEventListener("change", () => {
+      const comp = duiComps[compId] || {};
+      const data = duiDataCache[compId];
+      let rows = null;
+      if (Array.isArray(data)) rows = data;
+      else if (data && Array.isArray(data.rows)) rows = data.rows;
+      const columns = (data && Array.isArray(data.columns)) ? data.columns : [];
+      const keyCol = String(comp.key_column || "");
+      const keyIdx = keyCol ? columns.indexOf(keyCol) : -1;
+      const set = duiSelected(compId);
+      (rows || []).forEach((r, i) => {
+        let key = keyIdx >= 0 && r ? String(r[keyIdx] ?? "") : "";
+        if (!key) key = "#" + i;
+        if (selAll.checked) set.add(key); else set.delete(key);
+      });
+      updateDuiBulkBar(compId);
+      const bodyHost = root.querySelector("[data-dui-body]");
+      if (bodyHost) {
+        bodyHost.innerHTML = duiTableHTML(comp, data, compId);
+        wireDUIMore(bodyHost, compId, pluginName);
+        wireDuiSelection(bodyHost, pluginName, compId);
+        updateDuiBulkBar(compId);
+      }
+    });
+  }
+  syncDuiSelAll(root, compId);
+
+/* header select-all reflector: checked = all visible selected,
+   indeterminate = some selected. */
+function syncDuiSelAll(root, compId) {
+  const selAll = root.querySelector(`input[data-dui-selall="${compId}"]`);
+  if (!selAll) return;
+  const boxes = Array.from(
+    root.querySelectorAll(`input[data-dui-sel="${compId}"]`));
+  const checked = boxes.filter(b => b.checked).length;
+  selAll.checked = boxes.length > 0 && checked === boxes.length;
+  selAll.indeterminate = checked > 0 && checked < boxes.length;
+}
   root.querySelectorAll(`button[data-dui-bulk="${compId}"]`).forEach(btn => {
     if (btn.dataset.duiWired) return;
     btn.dataset.duiWired = "1";
@@ -569,12 +644,12 @@ function wireDuiSelection(root, pluginName, compId) {
           { action: btn.dataset.duiBaction, rows }));
         if (!res) return;
         if (res.field_errors && Object.keys(res.field_errors).length)
-          setFbFloat(host, "error", Object.values(res.field_errors).join("; "));
+          setFbFloat(host, "error", Object.values(res.field_errors).join("; "), null, btn);
         else if (res.message)
-          res.success ? flashFbFloat(host, res.message) : setFbFloat(host, "error", res.message);
+          res.success ? flashFbFloat(host, res.message, null, btn) : setFbFloat(host, "error", res.message, null, btn);
         if (res.success !== false && !(res.field_errors && Object.keys(res.field_errors).length))
           duiSelection[compId] = new Set();   // bulk ops consume the selection
-      } catch (e) { setFbFloat(host, "error", e.message); }
+      } catch (e) { setFbFloat(host, "error", e.message, null, btn); }
     };
     btn.onclick = () => {
       const rows = duiSelected(compId);
@@ -611,16 +686,25 @@ function wireDUIRowActions(root, pluginName) {
     const body = el.closest("[data-dui-body]");
     const host = (body && body.parentElement) || el.closest(".tbl-wrap")
                  || el.parentElement;
+    // USER DIRECTIVE: remove/delete-type outcomes are HIGH-PRIORITY —
+    // they surface the 5s header prompt, not a component chip.
+    const removalLike = /^(remove|delete|unload|forget|reload|estop)$/i.test(el.dataset.duiRaction || "");
+    const highPriority = (m) => removalLike || /\b(created|added|removed|deleted)\b/i.test(m || "");
     const fire = async () => {
       try {
         const res = await withBusy(el, dispatchUIAction(pluginName, compId,
           { action: el.dataset.duiRaction, row: el.dataset.duiRow }));
         if (!res) return;
         if (res.field_errors && Object.keys(res.field_errors).length)
-          setFbFloat(host, "error", Object.values(res.field_errors).join("; "));
+          setFbFloat(host, "error", Object.values(res.field_errors).join("; "), null, el);
         else if (res.message)
-          res.success ? flashFbFloat(host, res.message) : setFbFloat(host, "error", res.message);
-      } catch (e) { setFbFloat(host, "error", e.message); }
+          res.success
+            ? (highPriority(res.message) ? showHeaderPrompt(res.message)
+                           : flashFbFloat(host, res.message, null, el))
+            : setFbFloat(host, "error", res.message, null, el);
+        else if (res.success !== false && removalLike)
+          showHeaderPrompt(`"${el.dataset.duiRow}" removed`);
+      } catch (e) { setFbFloat(host, "error", e.message, null, el); }
     };
     el.onclick = () => {
       if (def.confirm) confirmAction("Confirm", def.confirm, fire);
@@ -629,12 +713,15 @@ function wireDUIRowActions(root, pluginName) {
   });
 }
 
-/* Reveal the rows a page_size hid (works off the cached provider result). */
+/* Reveal the rows a page_size hid (works off the cached provider result).
+   The expansion is REMEMBERED per component (duiExpanded) so the WS-tick
+   data refresh re-renders expanded instead of collapsing back. */
 function wireDUIMore(host, compId, pluginName) {
   const btn = host.querySelector("[data-dui-more]");
   if (!btn) return;
   btn.onclick = () => {
     const comp = duiComps[compId] || {};
+    duiExpanded[compId] = true;   // survives refreshes — no self-collapse
     const fresh = duiTableHTML({ ...comp, page_size: 0 }, duiDataCache[compId], compId);
     const box = host.querySelector(".dui-data") || host;
     box.innerHTML = fresh;
@@ -939,9 +1026,14 @@ function duiHint(comp) {
 function renderButton(comp, disabled) {
   const variant = ["primary", "secondary", "danger", "ghost"].includes(comp.variant) ? comp.variant : "secondary";
   const off = disabled || comp.disabled === true;
+  // USER GUARD: button descriptions render as native TOOLTIPS — never
+  // as visible hint text. A visible hint inside a Toolbar inflates the
+  // fixed-height bar and overlaps the content below (bug report:
+  // Rescan hint). Tooltips cannot overlap by construction.
+  const tip = comp.description ? ` title="${esc(comp.description)}"` : "";
   return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)}${off ? ' data-dui-disabled="1"' : ""}>` +
-    `<button type="button" class="btn btn-${esc(variant)}${comp.loading ? " busy" : ""}" data-dui-act="${esc(comp.id)}"${comp.open_modal ? ` data-dui-open="${esc(comp.open_modal)}"` : ""}${off || comp.loading ? " disabled" : ""}>${esc(comp.label || comp.id)}</button>` +
-    duiHint(comp) + `</div>`;
+    `<button type="button" class="btn btn-${esc(variant)}${comp.loading ? " busy" : ""}" data-dui-act="${esc(comp.id)}"${comp.open_modal ? ` data-dui-open="${esc(comp.open_modal)}"` : ""}${tip}${off || comp.loading ? " disabled" : ""}>${esc(comp.label || comp.id)}</button>` +
+    `</div>`;
 }
 
 function renderToggle(comp, disabled) {
@@ -1022,7 +1114,6 @@ async function loadDuiFormFields(pluginName, id, host) {
     return renderDashboardUIComponent(comp, pluginName, false);
   }).join("") || `<span class="dim">no settings in the schema</span>`;
   // options-backed selects inside dynamic fields
-  host.querySelectorAll("[data-dui-field] select").forEach(() => {});
 }
 
 async function loadDuiOptions(pluginName, id, wrapper) {
@@ -1081,7 +1172,7 @@ function renderSelect(comp, disabled) {
         duiLabel(comp) + `<div class="picklist">${live}</div>` + duiHint(comp) + `</div>`;
     }
     return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)} data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
-      duiLabel(comp) + `<select${off ? " disabled" : ""}>${live}</select>` +
+      duiLabel(comp) + `<select${off ? " disabled" : ""} aria-label="${esc(comp.label || comp.id)}">${live}</select>` +
       duiHint(comp) + `</div>`;
   }
   if (comp.type === "radio-group") {
@@ -1096,7 +1187,7 @@ function renderSelect(comp, disabled) {
     `<option value="${esc(o.value)}"${o.value === current ? " selected" : ""}>${esc(o.label)}</option>`).join("");
   return `<div class="dui-item" data-dui-comp="${esc(comp.id)}"${duiItemStyle(comp)} data-dui-field="${esc(comp.id)}"${off ? ' data-dui-disabled="1"' : ""}>` +
     duiLabel(comp) +
-    `<select${off ? " disabled" : ""}${comp.action === true ? ` data-dui-in="${esc(comp.id)}"` : ""}>${opts}</select>` +
+    `<select${off ? " disabled" : ""}${comp.action === true ? ` data-dui-in="${esc(comp.id)}"` : ""} aria-label="${esc(comp.label || comp.id)}">${opts}</select>` +
     duiHint(comp) + `</div>`;
 }
 
@@ -1169,15 +1260,28 @@ function wireDashboardUI(root, pluginName) {
   root.querySelectorAll("[data-dui-act]").forEach(el => {
     const id = el.dataset.duiAct;
     const host = el.closest("[data-dui-comp]") || el.parentElement;
+    // USER FIX DIRECTIVE #1: anchor under the BUTTON'S OWN ROW — the
+    // component host can be a tall section (fleet controls, Appearance
+    // and Dashboard cards), which dropped the prompt at its bottom edge
+    const anchor = typeof fbAnchorFor === "function" ? fbAnchorFor(el) : host;
+    // USER DIRECTIVE: remove/delete-type outcomes are HIGH-PRIORITY —
+    // they surface the 5s header prompt, not a component chip.
+    const removalLike = /^(remove|delete|unload|forget|reload|estop)$/i.test(id || "");
+    const highPriority = (m) => removalLike || /\b(created|added|removed|deleted)\b/i.test(m || "");
     const fire = async () => {
       try {
         const res = await withBusy(el, dispatchUIAction(pluginName, id, {}));
         if (!res) return;
         if (res.field_errors && Object.keys(res.field_errors).length)
-          setFbFloat(host, "error", Object.values(res.field_errors).join("; "));
+          setFbFloat(host, "error", Object.values(res.field_errors).join("; "), anchor, el);
         else if (res.message)
-          res.success ? flashFbFloat(host, res.message) : setFbFloat(host, "error", res.message);
-      } catch (e) { setFbFloat(host, "error", e.message); }
+          res.success
+            ? (highPriority(res.message) ? showHeaderPrompt(res.message)
+                           : flashFbFloat(host, res.message, anchor, el))
+            : setFbFloat(host, "error", res.message, anchor, el);
+        else if (res.success !== false && removalLike)
+          showHeaderPrompt("removed");
+      } catch (e) { setFbFloat(host, "error", e.message, anchor, el); }
     };
     const comp = duiComps[id] || {};
     el.onclick = () => {
@@ -1192,12 +1296,13 @@ function wireDashboardUI(root, pluginName) {
     const id = el.dataset.duiIn;
     const comp = duiComps[id] || {};
     const host = el.closest("[data-dui-comp]") || el.parentElement;
+    const anchor = typeof fbAnchorFor === "function" ? fbAnchorFor(el) : host;
     el.addEventListener("change", async () => {
       try {
         const res = await dispatchUIAction(pluginName, id, { value: duiFieldValue(comp, host) });
         if (res && res.message)
-          res.success ? flashFbFloat(host, res.message) : setFbFloat(host, "error", res.message);
-      } catch (e) { setFbFloat(host, "error", e.message); }
+          res.success ? flashFbFloat(host, res.message, anchor, el) : setFbFloat(host, "error", res.message, anchor, el);
+      } catch (e) { setFbFloat(host, "error", e.message, anchor, el); }
     });
   });
 
@@ -1226,6 +1331,9 @@ function wireDashboardUI(root, pluginName) {
     const comp = duiComps[id] || {};
     const btn = formEl.querySelector('[data-dui-submit="' + id + '"]');
     if (!btn) return;
+    // user directive #1: form feedback anchors under the SUBMIT ROW
+    // (the component the user acted on), never the whole form's bottom
+    const fbRow = btn.closest(".dui-row, .form-actions, .dui-toolbar") || btn.parentElement;
     btn.onclick = async () => {
       const payload = {};
       formEl.querySelectorAll("[data-dui-field] .fb").forEach(fb => fb.remove());
@@ -1251,16 +1359,22 @@ function wireDashboardUI(root, pluginName) {
       // server-side)
       if (comp.client_action === "save-token") {
         const tok = String(payload["token-value"] || "").trim();
-        if (!tok) { setFbFloat(formEl, "error", "Token required."); return; }
+        if (!tok) { setFbFloat(formEl, "error", "Token required.", fbRow, btn); return; }
         secretStore.setItem("dash_token", tok);
         wsRetries = 0; connectWS();
-        flashFbFloat(formEl, "token saved — reconnecting…");
+        // QA ticket 1c: reload the surfaces that failed pre-auth so the
+        // save recovers the whole shell without a manual refresh
+        Promise.allSettled([
+          typeof loadDashboardUINav === "function" ? loadDashboardUINav() : null,
+          typeof loadPluginUI === "function" ? loadPluginUI() : null,
+        ]).then(() => { buildNav(); render(); });
+        flashFbFloat(formEl, "token saved — reconnecting…", fbRow, btn);
         return;
       }
       if (comp.client_action === "save-theme") {
         applyDashTheme(String(payload["theme-accent"] || ""),
                        String(payload["theme-density"] || ""));
-        flashFbFloat(formEl, "theme applied");
+        flashFbFloat(formEl, "theme applied", fbRow, btn);
         return;
       }
       try {
@@ -1272,14 +1386,20 @@ function wireDashboardUI(root, pluginName) {
             const slot = formEl.querySelector('[data-dui-field="' + fid + '"]');
             if (slot) setFb(slot, "error", res.field_errors[fid]);
           }
-        if (res.message)
-          res.success ? flashFbFloat(formEl, res.message) : setFbFloat(formEl, "error", res.message);
+        if (res.message) {
+          const highPriority =
+            /\b(created|added|removed|deleted)\b/i.test(res.message || "");
+          res.success
+            ? (highPriority ? showHeaderPrompt(res.message)
+                            : flashFbFloat(formEl, res.message, fbRow, btn))
+            : setFbFloat(formEl, "error", res.message, fbRow, btn);
+        }
         if (comp.close_on_submit && res.success !== false
             && !(res.field_errors && Object.keys(res.field_errors).length)) {
           const dlg = formEl.closest("dialog");
           if (dlg) dlg.close();
         }
-      } catch (e) { setFbFloat(formEl, "error", e.message); }
+      } catch (e) { setFbFloat(formEl, "error", e.message, fbRow, btn); }
     };
   });
 
