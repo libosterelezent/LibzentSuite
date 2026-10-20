@@ -125,14 +125,14 @@ function wirePluginCard(card, m) {
     if (act === "reload") {
       b.disabled = true;
       post("/api/plugins/reload", {plugin: m.name})
-        .then(r => { flashFb(card, `${m.name} reloaded (${r.restored_accounts} account(s))`); loadManifests().then(renderPlugins); })
+        .then(r => { showHeaderPrompt(`${m.name} reloaded (${r.restored_accounts} account(s) re-attached)`); loadManifests().then(renderPlugins); })
         .catch(e => { setFb(card, "error", e.message); b.disabled = false; });
       return;
     }
     if (act === "unload") {
       confirmAction("Unload Plugin", `Unload ${m.name} from all accounts? Assignments are preserved — reload restores them.`,
         () => post("/api/plugins/unload", {plugin: m.name})
-          .then(r => { toast(`${m.name} unloaded from ${r.detached_accounts} account(s)`, "info"); loadManifests().then(renderPlugins); })
+          .then(r => { showHeaderPrompt(`${m.name} unloaded from ${r.detached_accounts} account(s)`); loadManifests().then(renderPlugins); })
           .catch(e => setFb(card, "error", e.message)));
       return;
     }
