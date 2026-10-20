@@ -218,11 +218,18 @@ kbd { font: 600 10px/1 var(--mono); color: var(--dim); background: var(--surface
 .lrow .fb { grid-column: 1 / -1; margin-top: 4px; }
 #bulkbar .fb, .row > .fb { flex: 1 1 100%; }
 
-/* FLOAT feedback: anchors under its control as an overlay — never pushes layout. */
+/* FLOAT feedback: anchors under its control as an overlay — never pushes layout.
+   USER FIX DIRECTIVE #1: the chip is OPAQUE (var(--surface)) — the old
+   ~9%-alpha tint let page content bleed through and made the text
+   unreadable — and carries a 3px tone rail + semi-tone border, weight 600. */
 .fb-anchor { position: relative; }
 .fb-float { position: absolute; top: calc(100% + var(--sp-1)); left: var(--sp-2);
   width: max-content; max-width: min(340px, 90vw); z-index: 40;
-  box-shadow: var(--shadow); cursor: pointer; }
+  background: var(--surface); font-weight: 600;
+  box-shadow: var(--shadow-lg); cursor: pointer; }
+.fb-float.fb-error { background: var(--surface); border: 1px solid rgba(248,113,113,.45); border-left: 3px solid var(--err); }
+.fb-float.fb-ok { background: var(--surface); border: 1px solid rgba(52,211,153,.45); border-left: 3px solid var(--ok); }
+.fb-float.fb-warn { background: var(--surface); border: 1px solid rgba(251,191,36,.5); border-left: 3px solid var(--warn); }
 
 .field .fb, .form .fb { margin-top: 0; }
 .picklist .fb { margin-top: 6px; }
@@ -231,6 +238,21 @@ kbd { font: 600 10px/1 var(--mono); color: var(--dim); background: var(--surface
 #toasts { position: fixed; right: var(--sp-4); bottom: var(--sp-4); z-index: 300;
   display: flex; flex-direction: column; gap: var(--sp-2);
   width: min(400px, calc(100vw - var(--sp-8))); pointer-events: none; }
+
+/* HEADER PROMPT — add/remove + high-priority outcomes (user directive):
+   ONE banner on top of the header, 5s, opaque, click-to-dismiss. */
+#hdr-prompt { position: fixed; top: var(--sp-2); left: 50%; transform: translateX(-50%);
+  z-index: 400; display: flex; align-items: center; gap: var(--sp-1-5);
+  background: var(--surface); color: var(--text); font-size: var(--fs-sm); font-weight: 600;
+  padding: var(--sp-2) var(--sp-4); border-radius: var(--r);
+  border: 1px solid var(--border); border-left: 3px solid var(--ok);
+  box-shadow: var(--shadow-lg); cursor: pointer; overflow-wrap: anywhere;
+  max-width: min(560px, 92vw); animation: hdrPromptIn .22s var(--ease); }
+#hdr-prompt.hdr-prompt-error { border-left-color: var(--err); color: var(--err); }
+#hdr-prompt.hdr-prompt-warn { border-left-color: var(--warn); }
+@keyframes hdrPromptIn { from { opacity: 0; transform: translate(-50%, -10px); }
+  to { opacity: 1; transform: translate(-50%, 0); } }
+@media (prefers-reduced-motion: reduce) { #hdr-prompt { animation: none; } }
 .toast { background: var(--surface); border: 1px solid var(--border);
   border-left: 3px solid var(--err); color: var(--text); padding: var(--sp-2-5) var(--sp-3);
   border-radius: var(--r-sm); font-size: var(--fs-sm); box-shadow: var(--shadow-lg);
