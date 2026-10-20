@@ -54,6 +54,12 @@
       <div class="panel" id="panel-onboard">
         <div class="onboarding">
           <h2>Welcome to SlaughterMudae</h2>
+          <div id="onboard-auth" class="card" style="margin-bottom:var(--sp-4);border-color:var(--accent)" hidden>
+            <h4>Step 0 — connect the dashboard</h4>
+            <p class="dim">Paste the dashboard token from your <code>.env</code>
+              (<code>DASHBOARD_TOKEN</code>) to unlock this dashboard.</p>
+            <button class="btn btn-primary" id="onboard-auth-cta">Set Dashboard Token</button>
+          </div>
           <p class="dim">Set up your workspace in three steps:</p>
           <div class="steps">
             <div class="step"><div class="num">1</div><div class="txt">
@@ -146,8 +152,8 @@
         </div>
         <div id="atab-tasks">
           <div class="row" style="margin-bottom:var(--sp-2)">
-            <select id="task-filter-status"><option value="">all</option><option>queued</option><option>running</option><option>completed</option><option>failed</option><option>cancelled</option><option>timed_out</option></select>
-            <select id="task-filter-account"><option value="">all accounts</option></select>
+            <select id="task-filter-status" aria-label="Filter tasks by status"><option value="">all</option><option>queued</option><option>running</option><option>completed</option><option>failed</option><option>cancelled</option><option>timed_out</option></select>
+            <select id="task-filter-account" aria-label="Filter tasks by account"><option value="">all accounts</option></select>
             <button class="btn btn-secondary btn-sm" id="task-refresh">refresh</button>
           </div>
           <div class="tbl-wrap"><table id="task-table"></table></div>
@@ -159,8 +165,8 @@
         </div>
         <div id="atab-logs" class="hidden">
           <div class="row" style="margin-bottom:var(--sp-2)">
-            <select id="log-acct"><option value="">all accounts</option></select>
-            <select id="log-sev"><option value="">all</option><option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select>
+            <select id="log-acct" aria-label="Filter logs by account"><option value="">all accounts</option></select>
+            <select id="log-sev" aria-label="Filter logs by severity"><option value="">all</option><option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select>
             <button class="btn btn-secondary btn-sm" id="log-backfill">load history</button>
             <button class="btn btn-ghost btn-sm" id="log-clear">clear</button>
           </div>
@@ -168,7 +174,7 @@
         </div>
         <div id="atab-audit" class="hidden">
           <div class="row" style="margin-bottom:var(--sp-2)">
-            <select id="audit-acct"><option value="">all accounts</option></select>
+            <select id="audit-acct" aria-label="Filter audit entries by account"><option value="">all accounts</option></select>
             <button class="btn btn-secondary btn-sm" id="audit-backfill">load history</button>
           </div>
           <div id="auditbox" class="logbox" style="max-height:500px"></div>
@@ -201,7 +207,7 @@
         </div>
         <div id="ttab-sim">
           <div class="card"><h4>Run Simulation</h4>
-            <div class="row"><select id="sim-sel"></select>
+            <div class="row"><select id="sim-sel" aria-label="Simulation scenario"></select>
             <button class="btn btn-primary" id="sim-run">run</button></div>
             <div id="sim-report" style="margin-top:var(--sp-3)"></div>
           </div>
@@ -307,7 +313,7 @@
   <div class="dlg-body">
     <div class="form">
       <div class="field"><label>Action</label>
-        <select id="rp-action"><option value="message">message</option><option value="dm">dm</option></select>
+        <select id="rp-action" aria-label="Policy action"><option value="message">message</option><option value="dm">dm</option></select>
         <span class="hint">Which action lane the policy paces</span></div>
       <div class="field"><label>Interval (seconds)</label><input id="rp-interval" type="number" min="0.05" step="0.05" placeholder="0.05">
         <span class="hint">Minimum seconds between actions of this lane</span></div>
@@ -317,7 +323,7 @@
       </div>
       <div class="form-grid">
         <div class="field"><label>Level</label>
-          <select id="rp-level"><option value="global">global</option><option value="account">account</option><option value="plugin">plugin</option></select></div>
+          <select id="rp-level" aria-label="Policy level"><option value="global">global</option><option value="account">account</option><option value="plugin">plugin</option></select></div>
         <div class="field"><label>Owner <span class="faint">(account/plugin name)</span></label><input id="rp-owner" placeholder="(global — leave empty)"></div>
       </div>
     </div>
