@@ -10,7 +10,7 @@ let pluginPanels = [];
 async function loadPluginUI() {
   try {
     pluginPanels = await api("/api/ui/panels") || [];
-  } catch { pluginPanels = []; }
+  } catch (e) { pluginPanels = []; showErr(e.message); }   // QA ticket 5: a dead surface must SAY so, not vanish
   buildPluginNav();
   // Builder-based plugin pages (Stage D) load after the simple panels —
   // an additional surface, both stay alive. Fire-and-forget: it catches
