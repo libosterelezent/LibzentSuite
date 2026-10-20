@@ -60,11 +60,10 @@ const $$ = sel => document.querySelectorAll(sel);
    through this (audit rule: no raw ${value} from API data in templates). */
 function esc(s){const d=document.createElement("span");d.textContent=String(s??"");return d.innerHTML.replace(/"/g,"&quot;").replace(/'/g,"&#39;");}
 
-/* btn()/btnG() return DOM ELEMENTS — only for append() wiring, NEVER for
+/* btn() returns a DOM ELEMENT — only for append() wiring, NEVER for
    interpolation into innerHTML template literals (they stringify to
    [object HTMLButtonElement]). Static tests enforce this. */
 function btn(l,fn,cls){const b=document.createElement("button");b.textContent=l;b.onclick=fn;if(cls)b.className=cls;return b;}
-function btnG(l,fn,cls){const b=btn(l,null,cls);b.onclick=()=>{if(b.disabled)return;b.disabled=true;Promise.resolve(fn()).finally(()=>{b.disabled=false;});};return b;}
 
 function fmtDur(s){s=Math.max(0,Math.round(+s||0));if(s<60)return s+"s";if(s<3600)return Math.floor(s/60)+"m "+(s%60)+"s";return Math.floor(s/3600)+"h "+Math.floor(s%3600/60)+"m";}
 function fmtLatency(ms){if(ms==null)return"-";const n=+ms;return Number.isFinite(n)?Math.round(n)+"ms":"-";}
