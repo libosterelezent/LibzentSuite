@@ -40,6 +40,10 @@ html[data-side="rail"] #side-toggle svg { transform: rotate(180deg); }
 .nav-item.active::before { content: ''; position: absolute; left: -10px; top: 9px; bottom: 9px; width: 3px;
   border-radius: 0 3px 3px 0; background: var(--accent); }
 .nav-item.active .icon { color: var(--accent); opacity: 1; }
+/* QA ticket 2: accent icons fail the 3:1 graphics bar on LIGHT surfaces
+   (~2.4-3.0:1 depending on the runtime accent preset) — --accent2 is the
+   darker sibling that passes (4.29:1); dark theme keeps --accent (6.16:1) */
+html[data-theme="light"] .nav-item.active .icon { color: var(--accent2); }
 .nav-item .icon { width: 18px; height: 18px; flex-shrink: 0; opacity: .75; }
 .nav-item > span:not(.badge) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .nav-item .badge { margin-left: auto; font-size: var(--fs-2xs); font-weight: 700;
@@ -110,7 +114,7 @@ html[data-theme="light"] #theme-btn .i-moon { display: none; }
 .tabbar .tab.active { color: var(--text); border-bottom-color: var(--accent); }
 .tabbar .tab .count { font-size: var(--fs-2xs); background: var(--surface3); padding: 1px var(--sp-1-5);
   border-radius: 99px; color: var(--dim); font-weight: 650; }
-.tabbar .tab.active .count { background: rgba(var(--accent-rgb), .18); color: var(--accent); }
+.tabbar .tab.active .count { background: rgba(var(--accent-rgb), .18); color: var(--text); }
 
 /* Page toolbar */
 .toolbar { display: flex; align-items: center; gap: var(--sp-2); margin-bottom: var(--sp-4); flex-wrap: wrap; }
@@ -124,6 +128,7 @@ html[data-theme="light"] #theme-btn .i-moon { display: none; }
 .viewsel .vm-btn svg { width: 15px; height: 15px; }
 .viewsel .vm-btn:hover { color: var(--text); }
 .viewsel .vm-btn.active { background: var(--surface); color: var(--accent); box-shadow: var(--shadow); }
+html[data-theme="light"] .viewsel .vm-btn.active { color: var(--accent2); } /* QA ticket 2: 3:1 graphics bar in light theme */
 
 /* Bulk bar */
 #bulkbar { display: none; position: sticky; top: calc(var(--hdr-h) + 8px); z-index: 20;
