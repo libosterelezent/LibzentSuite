@@ -435,7 +435,7 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
                                             .set_label("↻ Refresh").set_variant("ghost")
                                             .set_action(lambda ctx=None, payload=None: {"success": True, "message": "cooldowns refreshed", "refresh": ["act-cds"]})))
               .add_component(ui.Table(component_id="act-cds")
-                             .set_columns(["Account", "Plugin", "Action", "Remaining", "Total"])
+                             .set_columns(["Account", "Plugin", "Key", "Remaining", "Source"])
                              .set_key_column("__key")
                              .set_empty_text("no active cooldowns")
                              .set_data_source(_cooldowns_data(api))
@@ -476,7 +476,7 @@ def _tasks_data(api: Any):
         for k in (tasks or []):
             rows.append([str(k.get("id", "?")), k.get("account") or "—",
                          k.get("plugin") or "—", k.get("status", "?"),
-                         str(k.get("run_count", k.get("runs", "?")))])
+                         str(k.get("attempts", "?"))])
         return {"columns": ["ID", "Account", "Plugin", "Status", "Runs"],
                 "rows": rows}
     return provide
@@ -489,16 +489,16 @@ def _cooldowns_data(api: Any):
         except Exception:
             cds = []
         rows = []
-        now = time.time()
         for c in (cds or []):
-            until = c.get("until") or c.get("until_s") or c.get("expires_at")
-            remain = "?" if until is None else f"{max(0, int(float(until) - now))}s"
+            # cooldowns_list rows: account/plugin/cooldown_key/remaining_s/
+            # source/reason (api.py) — remaining_s is already computed
+            remain = f"{max(0, int(c.get('remaining_s') or 0))}s"
             account = c.get("account", "?")
             plugin = c.get("plugin") or "—"
-            rows.append([account, plugin, c.get("action", "?"), remain,
-                         str(c.get("count", c.get("total", "?"))),
+            rows.append([account, plugin, c.get("cooldown_key") or "all",
+                         remain, c.get("source") or "—",
                          f"{account}|{plugin}"])
-        return {"columns": ["Account", "Plugin", "Action", "Remaining", "Total"],
+        return {"columns": ["Account", "Plugin", "Key", "Remaining", "Source"],
                 "rows": rows}
     return provide
 
@@ -526,7 +526,7 @@ def _logs_data(api: Any):
         for e in (entries or []):
             lines.append(f"{_clock(e.get('ts', e.get('time', '')))}  "
                          f"{str(e.get('account') or 'system'):10} "
-                         f"{str(e.get('level') or 'info').upper():5} "
+                         f"{str(e.get('severity') or 'info').upper():5} "
                          f"{e.get('message', e.get('msg', ''))}")
         return {"value": "\n".join(lines) or "— no log entries —"}
     return provide
@@ -889,14 +889,14 @@ def _admin_rows_data(api: Any):
         rows = []
         for name, row in sorted((ov.get("accounts") or {}).items()):
             display = name if name in live else f"{name}  (stale)"
-            perms = row.get("permissions") or {}
-            granted = sum(1 for v in perms.values() if v)
+            allowed = row.get("allowed_user_ids") or []
             rows.append([display,
                          "yes" if row.get("is_admin") else "no",
                          str(row.get("prefix_mode", "mention"))
                          + (f" {row.get('prefix_symbol')}"
                             if row.get("prefix_symbol") else ""),
-                         f"{granted}/{len(perms)}" if perms else "fail-closed",
+                         f"{len(allowed)} allowed" if allowed
+                         else "fail-closed",
                          name])
         return {"columns": ["Account", "Admin", "Prefix", "Commands"],
                 "rows": rows}
@@ -930,10 +930,12 @@ def _build_tools(ui: DashboardUIToolset, api: Any):
             return {"success": False, "field_errors": {
                 "sim-name": "Type a scenario name from the list."}}
         report = await api.simulation_run(name)
-        last_report["log"] = ((report or {}).get("log")
-                              or "\n".join(str(x) for x in
-                                           ((report or {}).get("steps") or []))
-                              or "completed")
+        # report shape (runner.py): name/passed/duration_s/failures/
+        # log_lines/interactions/summary — 'log'/'steps' never existed
+        last_report["log"] = ("\n".join(
+            str(x) for x in ((report or {}).get("log_lines") or []))
+            or (report or {}).get("summary")
+            or "completed")
         return {"success": True, "message": f"scenario {name} finished",
                 "refresh": ["sim-report"]}
 
@@ -1249,7 +1251,9 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
             a = next((x for x in rows if x.get("name") == name), None)
             if not a:
                 return {"columns": ["Plugin"], "rows": []}
-            return {"columns": ["Plugin", "Key"],
+            # '__key' cell past the ONE visible column — a named "Key"
+            # column shifted the resolution index and broke unassign
+            return {"columns": ["Plugin"],
                     "rows": [[p, f"{name}|{p}"]
                              for p in (a.get("assigned_plugins") or [])]}
         return provide
@@ -1319,7 +1323,9 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
 
     async def group_bulk_run(row, ctx, start=True):
         try:
-            snap = await api.groups_get(row)
+            # groups_snapshot carries members/status (groups_get returns
+            # only the record: id/name/description/enabled/…)
+            snap = await api.groups_snapshot(row)
         except Exception:
             return {"success": False, "message": f"unknown group {row}"}
         members = [m.get("name") for m in (snap.get("members") or [])]
@@ -1424,7 +1430,7 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
             if not name:
                 return []
             try:
-                snap = await api.groups_get(name)
+                snap = await api.groups_snapshot(name)
             except Exception:
                 return [{"label": name, "value": "not found"}]
             out = [{"label": "State",
@@ -1441,18 +1447,22 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
 
     def _gd_members(api):
         async def provide(ctx):
+            # '__key' cell rides PAST the visible columns (the renderer
+            # resolves it at columns.length) — a named "Key" column broke
+            # key resolution (r[3] undefined → '#rowIndex' → dead actions)
+            empty = {"columns": ["Member", "Status"], "rows": []}
             name = _fleet_state.get("group_details")
             if not name:
-                return {"columns": ["Member", "Status", "Key"], "rows": []}
+                return empty
             try:
-                snap = await api.groups_get(name)
+                snap = await api.groups_snapshot(name)
             except Exception:
-                return {"columns": ["Member", "Status", "Key"], "rows": []}
+                return empty
             rows = []
             for m in (snap.get("members") or []):
                 rows.append([m.get("name", "?"), m.get("status", "?"),
                              f"{name}|{m.get('name', '?')}"])
-            return {"columns": ["Member", "Status", "Key"], "rows": rows}
+            return {"columns": ["Member", "Status"], "rows": rows}
         return provide
 
     def _gm_accounts(api):
