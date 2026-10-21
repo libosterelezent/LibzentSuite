@@ -213,11 +213,12 @@ def _build_design(ui: DashboardUIToolset, api: Any):
                          ["gamma", "cooldown", "9m"], ["delta", "online", "now"]]}
 
     async def _records(ctx=None):
-        tones = {"online": "ok", "offline": "muted", "cooldown": "warn"}
+        # 'muted' is outside the renderer's tone whitelist (ok/warn/err/info)
+        tones = {"online": "ok", "offline": "err", "cooldown": "warn"}
         return {"records": [
             {"key": name, "cells": [
                 {"primary": name, "secondary": seen},
-                {"text": status, "tone": tones.get(status, "muted")},
+                {"text": status, "tone": tones.get(status, "err")},
                 {"chips": ["probe"]}, "—"]}
             for name, status, seen in [
                 ("alpha", "online", "2m"), ("beta", "offline", "1h"),
@@ -227,11 +228,16 @@ def _build_design(ui: DashboardUIToolset, api: Any):
         return {"records": []}
 
     async def _tiles(ctx=None):
-        return [{"title": "libo", "status": "online", "meta": "12 plugins",
+        # meta must be [[label, value]] PAIRS — string meta is silently
+        # dropped by the tile renderer (framework_ui._prof_tiles pattern)
+        return [{"title": "libo", "status": "online",
+                 "meta": [["meta", "12 plugins"]],
                  "chips": ["probe", "soulcopy"], "lines": [["uptime", "3h 12m"]]},
-                {"title": "libalt30", "status": "cooldown", "meta": "8 plugins",
+                {"title": "libalt30", "status": "cooldown",
+                 "meta": [["meta", "8 plugins"]],
                  "chips": ["probe"], "lines": [["uptime", "41m"]], "tone": "warn"},
-                {"title": "libalt21", "status": "offline", "meta": "—",
+                {"title": "libalt21", "status": "offline",
+                 "meta": [["meta", "—"]],
                  "chips": [], "lines": [["uptime", "—"]], "tone": "err"}]
 
     def _poke(row, ctx):

@@ -409,42 +409,42 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
                 "refresh": ["act-cds"]}
 
     (page
-     .add_section(ui.Section(component_id="act-tasks-sec")
-        .set_width("30%")
-        .add_component(ui.Toolbar(component_id="act-tasks-bar").set_title("Tasks")
-                       .set_icon("M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11")
-                       .add_component(ui.Button(component_id="act-tasks-refresh")
-                                      .set_label("↻ Refresh").set_variant("ghost")
-                                      .set_action(lambda ctx=None, payload=None: {"success": True, "message": "tasks refreshed", "refresh": ["act-tasks"]})))
-        .add_component(ui.Table(component_id="act-tasks")
-                       .set_columns(["ID", "Account", "Plugin", "Status", "Runs"])
-                       .set_key_column("ID")
-                       .set_empty_text("no tasks scheduled")
-                       .set_page_size(50)
-                       .set_data_source(_tasks_data(api))
-                       .set_row_actions([
-                           RowAction("cancel", "cancel", cancel_row, variant="danger",
-                                     confirm="Request cancellation for this task?"),
-                       ])))
-     .add_section(ui.Section(component_id="act-cds-sec")
-        .set_width("35%")
-        .add_component(ui.Toolbar(component_id="act-cds-bar").set_title("Cooldowns")
-                       .set_icon("M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z")
-                       .add_component(ui.Button(component_id="act-cds-refresh")
-                                      .set_label("↻ Refresh").set_variant("ghost")
-                                      .set_action(lambda ctx=None, payload=None: {"success": True, "message": "cooldowns refreshed", "refresh": ["act-cds"]})))
-        .add_component(ui.Table(component_id="act-cds")
-                       .set_columns(["Account", "Plugin", "Action", "Remaining", "Total"])
-                       .set_key_column("__key")
-                       .set_empty_text("no active cooldowns")
-                       .set_data_source(_cooldowns_data(api))
-                       .set_row_actions([
-                           RowAction("clear", "clear plugin", clear_cd_row, variant="danger",
-                                     confirm="Clear EVERY cooldown this account holds "
-                                             "for this plugin?"),
-                       ])))
+     .add_section(ui.Section(component_id="act-cards-sec")
+        .add_component(ui.Grid(component_id="act-cards-grid")
+           .set_columns("auto").set_min_child("280px")
+           .add_component(ui.Card(component_id="act-tasks-card")
+              .add_component(ui.Toolbar(component_id="act-tasks-bar").set_title("Tasks")
+                             .set_icon("M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11")
+                             .add_component(ui.Button(component_id="act-tasks-refresh")
+                                            .set_label("↻ Refresh").set_variant("ghost")
+                                            .set_action(lambda ctx=None, payload=None: {"success": True, "message": "tasks refreshed", "refresh": ["act-tasks"]})))
+              .add_component(ui.Table(component_id="act-tasks")
+                             .set_columns(["ID", "Account", "Plugin", "Status", "Runs"])
+                             .set_key_column("ID")
+                             .set_empty_text("no tasks scheduled")
+                             .set_page_size(50)
+                             .set_data_source(_tasks_data(api))
+                             .set_row_actions([
+                                 RowAction("cancel", "cancel", cancel_row, variant="danger",
+                                           confirm="Request cancellation for this task?"),
+                             ])))
+           .add_component(ui.Card(component_id="act-cds-card")
+              .add_component(ui.Toolbar(component_id="act-cds-bar").set_title("Cooldowns")
+                             .set_icon("M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z")
+                             .add_component(ui.Button(component_id="act-cds-refresh")
+                                            .set_label("↻ Refresh").set_variant("ghost")
+                                            .set_action(lambda ctx=None, payload=None: {"success": True, "message": "cooldowns refreshed", "refresh": ["act-cds"]})))
+              .add_component(ui.Table(component_id="act-cds")
+                             .set_columns(["Account", "Plugin", "Key", "Remaining", "Source"])
+                             .set_key_column("__key")
+                             .set_empty_text("no active cooldowns")
+                             .set_data_source(_cooldowns_data(api))
+                             .set_row_actions([
+                                 RowAction("clear", "clear plugin", clear_cd_row, variant="danger",
+                                           confirm="Clear EVERY cooldown this account holds "
+                                                   "for this plugin?"),
+                             ])))))
      .add_section(ui.Section(component_id="act-logs-sec")
-        .set_width("35%")
         .add_component(ui.Toolbar(component_id="act-logs-bar")
                        .set_title("Recent logs")
                        .set_icon("M4 6h16M4 12h16M4 18h10")
@@ -455,7 +455,6 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
                        .set_value("— refresh to load —")
                        .set_data_source(_logs_data(api))))
      .add_section(ui.Section(component_id="act-audit-sec")
-        .set_width("35%")
         .add_component(ui.Toolbar(component_id="act-audit-bar").set_title("Audit trail")
                        .set_icon("M9 12l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z")
                        .add_component(ui.Button(component_id="act-audit-refresh")
@@ -477,7 +476,7 @@ def _tasks_data(api: Any):
         for k in (tasks or []):
             rows.append([str(k.get("id", "?")), k.get("account") or "—",
                          k.get("plugin") or "—", k.get("status", "?"),
-                         str(k.get("run_count", k.get("runs", "?")))])
+                         str(k.get("attempts", "?"))])
         return {"columns": ["ID", "Account", "Plugin", "Status", "Runs"],
                 "rows": rows}
     return provide
@@ -490,16 +489,16 @@ def _cooldowns_data(api: Any):
         except Exception:
             cds = []
         rows = []
-        now = time.time()
         for c in (cds or []):
-            until = c.get("until") or c.get("until_s") or c.get("expires_at")
-            remain = "?" if until is None else f"{max(0, int(float(until) - now))}s"
+            # cooldowns_list rows: account/plugin/cooldown_key/remaining_s/
+            # source/reason (api.py) — remaining_s is already computed
+            remain = f"{max(0, int(c.get('remaining_s') or 0))}s"
             account = c.get("account", "?")
             plugin = c.get("plugin") or "—"
-            rows.append([account, plugin, c.get("action", "?"), remain,
-                         str(c.get("count", c.get("total", "?"))),
+            rows.append([account, plugin, c.get("cooldown_key") or "all",
+                         remain, c.get("source") or "—",
                          f"{account}|{plugin}"])
-        return {"columns": ["Account", "Plugin", "Action", "Remaining", "Total"],
+        return {"columns": ["Account", "Plugin", "Key", "Remaining", "Source"],
                 "rows": rows}
     return provide
 
@@ -527,7 +526,7 @@ def _logs_data(api: Any):
         for e in (entries or []):
             lines.append(f"{_clock(e.get('ts', e.get('time', '')))}  "
                          f"{str(e.get('account') or 'system'):10} "
-                         f"{str(e.get('level') or 'info').upper():5} "
+                         f"{str(e.get('severity') or 'info').upper():5} "
                          f"{e.get('message', e.get('msg', ''))}")
         return {"value": "\n".join(lines) or "— no log entries —"}
     return provide
@@ -541,10 +540,14 @@ def _audit_data(api: Any):
             entries = []
         lines = []
         for e in (entries or []):
-            lines.append(f"{_clock(e.get('ts', e.get('time', '')))}  "
+            # audit schema: action/direction/note (NOT 'event' — that is
+            # the LOG schema; reading it here rendered '?' for every row)
+            arrow = "<-" if e.get("direction") == "in" else "->"
+            note = str(e.get("note") or "").replace("\n", " ")
+            lines.append(f"{_clock(e.get('ts', e.get('time', '')))} {arrow} "
                          f"{str(e.get('account') or 'system'):10} "
-                         f"{e.get('event', '?')}"
-                         + (f" — {e.get('detail')}" if e.get("detail") else ""))
+                         f"{e.get('action', '?')}"
+                         + (f"  {note}" if note else ""))
         return {"value": "\n".join(lines) or "— no audit entries —"}
     return provide
 
@@ -886,14 +889,14 @@ def _admin_rows_data(api: Any):
         rows = []
         for name, row in sorted((ov.get("accounts") or {}).items()):
             display = name if name in live else f"{name}  (stale)"
-            perms = row.get("permissions") or {}
-            granted = sum(1 for v in perms.values() if v)
+            allowed = row.get("allowed_user_ids") or []
             rows.append([display,
                          "yes" if row.get("is_admin") else "no",
                          str(row.get("prefix_mode", "mention"))
                          + (f" {row.get('prefix_symbol')}"
                             if row.get("prefix_symbol") else ""),
-                         f"{granted}/{len(perms)}" if perms else "fail-closed",
+                         f"{len(allowed)} allowed" if allowed
+                         else "fail-closed",
                          name])
         return {"columns": ["Account", "Admin", "Prefix", "Commands"],
                 "rows": rows}
@@ -927,10 +930,18 @@ def _build_tools(ui: DashboardUIToolset, api: Any):
             return {"success": False, "field_errors": {
                 "sim-name": "Type a scenario name from the list."}}
         report = await api.simulation_run(name)
-        last_report["log"] = ((report or {}).get("log")
-                              or "\n".join(str(x) for x in
-                                           ((report or {}).get("steps") or []))
-                              or "completed")
+        # report shape (runner.py): name/passed/duration_s/failures/
+        # log_lines/interactions/summary — the verdict must be visible:
+        # a FAILED run never renders as a bare 'completed'
+        r = report or {}
+        out = []
+        if r.get("passed") is False:
+            fails = [str(f) for f in (r.get("failures") or [])]
+            out.append(f"FAILED — {len(fails)} failure(s)")
+            out.extend(f"  ✗ {f}" for f in fails[:20])
+        out.append("\n".join(str(x) for x in (r.get("log_lines") or []))
+                    or r.get("summary") or "completed")
+        last_report["log"] = "\n".join(out)
         return {"success": True, "message": f"scenario {name} finished",
                 "refresh": ["sim-report"]}
 
@@ -1246,7 +1257,9 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
             a = next((x for x in rows if x.get("name") == name), None)
             if not a:
                 return {"columns": ["Plugin"], "rows": []}
-            return {"columns": ["Plugin", "Key"],
+            # '__key' cell past the ONE visible column — a named "Key"
+            # column shifted the resolution index and broke unassign
+            return {"columns": ["Plugin"],
                     "rows": [[p, f"{name}|{p}"]
                              for p in (a.get("assigned_plugins") or [])]}
         return provide
@@ -1316,7 +1329,9 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
 
     async def group_bulk_run(row, ctx, start=True):
         try:
-            snap = await api.groups_get(row)
+            # groups_snapshot carries members/status (groups_get returns
+            # only the record: id/name/description/enabled/…)
+            snap = await api.groups_snapshot(row)
         except Exception:
             return {"success": False, "message": f"unknown group {row}"}
         members = [m.get("name") for m in (snap.get("members") or [])]
@@ -1421,7 +1436,7 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
             if not name:
                 return []
             try:
-                snap = await api.groups_get(name)
+                snap = await api.groups_snapshot(name)
             except Exception:
                 return [{"label": name, "value": "not found"}]
             out = [{"label": "State",
@@ -1438,18 +1453,22 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
 
     def _gd_members(api):
         async def provide(ctx):
+            # '__key' cell rides PAST the visible columns (the renderer
+            # resolves it at columns.length) — a named "Key" column broke
+            # key resolution (r[3] undefined → '#rowIndex' → dead actions)
+            empty = {"columns": ["Member", "Status"], "rows": []}
             name = _fleet_state.get("group_details")
             if not name:
-                return {"columns": ["Member", "Status", "Key"], "rows": []}
+                return empty
             try:
-                snap = await api.groups_get(name)
+                snap = await api.groups_snapshot(name)
             except Exception:
-                return {"columns": ["Member", "Status", "Key"], "rows": []}
+                return empty
             rows = []
             for m in (snap.get("members") or []):
                 rows.append([m.get("name", "?"), m.get("status", "?"),
                              f"{name}|{m.get('name', '?')}"])
-            return {"columns": ["Member", "Status", "Key"], "rows": rows}
+            return {"columns": ["Member", "Status"], "rows": rows}
         return provide
 
     def _gm_accounts(api):
