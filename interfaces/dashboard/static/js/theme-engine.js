@@ -101,20 +101,8 @@ function themeSave() {
   try {
     localStorage.setItem("lz_theme", JSON.stringify(themeState));
   } catch (_) { /* non-fatal */ }
-  // Server-side persistence (best-effort — localStorage is the primary)
-  if (typeof fetch === "function") {
-    fetch("/api/settings/set", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Dashboard-Token":
-          typeof token === "function" ? (token() || "") : "",
-      },
-      body: JSON.stringify({
-        key: "__theme", value: JSON.stringify(themeState),
-      }),
-    }).catch(() => {});
-  }
+  // Server-side persistence is a TODO: needs a dedicated theme endpoint.
+  // localStorage is the primary store (per-browser, survives restarts).
 }
 
 function themeLoad() {

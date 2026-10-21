@@ -50,7 +50,8 @@ TOKEN = "static-test-token"
 #: JS modules in the exact dependency order index.html loads them.
 JS_FILES = ["state.js", "api.js", "ui.js", "accounts.js", "groups.js",
             "views.js", "plugins-ui.js", "admin-ui.js", "plugin-ui.js",
-            "dashboard-ui.js", "framework-ui.js", "app.js", "shell.js"]
+            "dashboard-ui.js", "framework-ui.js", "app.js", "shell.js",
+            "theme-engine.js"]
 #: every stylesheet index.html links.
 CSS_FILES = ["base.css", "layout.css", "components.css", "responsive.css"]
 
