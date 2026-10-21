@@ -1,13 +1,20 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   base.css — design tokens (dark + light themes), reset, scrollbar theme,
-   typography, controls (buttons, badges, chips, forms) and inline feedback.
-   No layout here.
+   base.css — THE TOKEN SOURCE + reset. Carbon: pure black/grey surfaces, one
+   accent, 3px radii, Inter + JetBrains Mono.
+
+   Layers (in order): tokens → element reset → scrollbar theme → base
+   typography → focus-visible → prefers-reduced-motion. NO component styles
+   here — visual components live in components.css, app layout in shell.css.
 
    Theming: tokens live on :root (dark, the default). html[data-theme="light"]
    re-pins the surface/text tokens; with no explicit choice the OS preference
    decides (prefers-color-scheme) unless the user picked a theme in the header.
    Every component colors itself with these tokens only — a theme can never
    touch structure.
+
+   NOTE: this file MAY contain hex values (it defines them). components.css
+   and shell.css may not — they use var(--*) exclusively, with alpha tints
+   via color-mix() so runtime theme rewrites are tracked automatically.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 :root {
@@ -81,18 +88,52 @@ html[data-theme="light"] {
   }
 }
 
+/* ═════════════════════════════ Density (token-level) ═══════════════════════
+   Compact density re-pins the spacing/type tokens themselves — every
+   component that uses the tokens (or calc(var(--sp-N) * var(--density)))
+   follows automatically. */
+html[data-density="compact"] {
+  --sp-1-5: 5px; --sp-2: 6px; --sp-2-5: 8px; --sp-3: 8px; --sp-4: 12px;
+  --sp-5: 14px; --sp-6: 16px;
+  --fs-2xl: 16px; --fs-3xl: 19px; --fs-4xl: 21px;
+  --gap: var(--sp-2); --gap-sm: 4px; --ctrl-h: 32px;
+}
+
+/* ═════════════════════════════════ Reset ═══════════════════════════════════ */
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
 body {
   background: var(--bg); color: var(--text);
-  font: 14px/1.5 var(--font); letter-spacing: -.003em;
-  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; overflow-x: hidden;
+  font-family: var(--font); font-size: var(--fs-md); line-height: 1.55;
+  letter-spacing: -.003em;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  overflow-x: hidden;
 }
 ::selection { background: rgba(var(--accent-rgb), .35); color: inherit; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
-h1, h2, h3, h4 { letter-spacing: -.01em; }
+img { display: block; max-width: 100%; }
+button { font: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+h1, h2, h3, h4 { letter-spacing: -.01em; overflow-wrap: anywhere; }
+h1 { font-size: var(--fs-3xl); font-weight: 650; }
+h2 { font-size: var(--fs-2xl); font-weight: 650; }
+h3 { font-size: var(--fs-xl); font-weight: 600; }
+h4 { font-size: var(--fs-base); font-weight: 600; }
+small { font-size: var(--fs-xs); }
+hr { border: none; border-top: 1px solid var(--border); }
+code, kbd, samp, pre { font-family: var(--mono); font-size: .92em; }
+pre { overflow-x: auto; }
+kbd { font: 600 var(--fs-2xs)/1 var(--mono); color: var(--dim);
+  background: var(--surface3); border: 1px solid var(--border2);
+  border-bottom-width: 2px; border-radius: var(--r-sm); padding: 2px 5px; }
 
+/* ═════════════════════ Focus-visible (WCAG 2.2 — the floor) ════════════════
+   Every interactive element gets a visible ring. Inputs additionally carry
+   var(--ring) on :focus (components.css); this outline is the universal
+   guarantee for buttons, links, tabs, switches and anything tabbable. */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ═════════════════════════ prefers-reduced-motion ══════════════════════════ */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important;
     animation-iteration-count: 1 !important; transition-duration: .01ms !important;
@@ -107,169 +148,11 @@ h1, h2, h3, h4 { letter-spacing: -.01em; }
 ::-webkit-scrollbar-thumb:hover { background: var(--faint); }
 ::-webkit-scrollbar-corner { background: transparent; }
 
-button { font: inherit; cursor: pointer; border: none; background: none; color: inherit; }
-input, select, textarea { font: inherit; color: var(--text); background: var(--surface2);
-  border: 1px solid var(--border); border-radius: var(--r-sm); padding: var(--sp-1) var(--sp-2-5);
-  outline: none; min-width: 0; transition: border-color var(--t-fast), box-shadow var(--t-fast), background var(--t-fast); }
-input:hover, select:hover, textarea:hover { border-color: var(--border2); }
-input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: var(--ring); }
-input:focus-visible, select:focus-visible, textarea:focus-visible { outline: none; }
-input::placeholder, textarea::placeholder { color: var(--faint); }
-.dui-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
-  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-sm); }
-input[type="password"]:not(:placeholder-shown) { letter-spacing: .3em; }   /* mask dots only — not the placeholder */
-input[type="checkbox"], input[type="radio"] { accent-color: var(--accent2); }
+/* ═══════════════════ Select chevron (token-file exception) ═════════════════
+   The chevron is an inline SVG data-URI, and data-URIs cannot read custom
+   properties — so this ONE rule lives in the token file where hexes are
+   allowed. The stroke below is a neutral grey that reads on both themes.
+   All other select styling is in components.css. */
 select { appearance: none; -webkit-appearance: none; padding-right: 28px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b95ab' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888888' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat; background-position: right 9px center; }
-textarea { resize: vertical; }
-
-.mono { font-family: var(--mono); font-size: .92em; }
-.dim { color: var(--dim); } .faint { color: var(--faint); }
-.hidden { display: none !important; }
-.trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-kbd { font: 600 10px/1 var(--mono); color: var(--dim); background: var(--surface3);
-  border: 1px solid var(--border2); border-bottom-width: 2px; border-radius: 5px; padding: 2px 5px; }
-
-/* ═════════════════════════════════ Buttons ═════════════════════════════════ */
-.btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-1-5);
-  height: var(--ctrl-h); padding: 0 var(--sp-4); border-radius: var(--r-sm);
-  font-size: var(--fs-md); font-weight: 550; white-space: nowrap; user-select: none;
-  transition: background var(--t-fast), border-color var(--t-fast), transform var(--t-fast), box-shadow var(--t-fast), color var(--t-fast); }
-.btn:active { transform: translateY(1px); }
-.btn-primary { background: linear-gradient(180deg, var(--accent), var(--accent2)); color: var(--on-accent);
-  box-shadow: 0 1px 0 rgba(255,255,255,.18) inset, 0 1px 2px rgba(0,0,0,.25); }
-.btn-primary:hover { filter: brightness(1.08); box-shadow: 0 1px 0 rgba(255,255,255,.22) inset, 0 4px 14px rgba(var(--accent-rgb), .35); }
-.btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
-.btn-secondary:hover { background: var(--surface3); border-color: var(--border2); }
-.btn-danger { background: var(--err2); color: #fff; box-shadow: 0 1px 0 rgba(255,255,255,.14) inset; }
-.btn-danger:hover { filter: brightness(1.1); box-shadow: 0 4px 14px rgba(220,38,38,.35); }
-.btn-ghost { color: var(--dim); padding: 0 var(--sp-2-5); height: 30px; }
-.btn-ghost:hover { color: var(--text); background: var(--surface2); }
-.btn-sm { height: 28px; padding: 0 var(--sp-2-5); font-size: var(--fs-sm); border-radius: 7px; }
-.btn:disabled, .btn.busy { opacity: .55; cursor: not-allowed; pointer-events: none; }
-.btn.busy { position: relative; color: transparent; }
-.btn.busy::after { content: ''; position: absolute; width: 13px; height: 13px;
-  border-radius: 50%; border: 2px solid rgba(255,255,255,.3); border-top-color: currentColor;
-  color: var(--dim); animation: spin .7s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
-.btn .icon { width: 14px; height: 14px; }
-
-/* ═════════════════════════════ Status badges ═══════════════════════════════ */
-.st { display: inline-flex; align-items: center; gap: var(--sp-1-5); font-size: var(--fs-xs);
-  font-weight: 600; padding: 2px var(--sp-2); border-radius: 99px; white-space: nowrap; }
-.st::before { content: ''; width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-.st-running, .st-online { color: var(--ok); background: rgba(52,211,153,.13); }
-.st-running::before, .st-online::before { background: var(--ok); box-shadow: 0 0 0 3px rgba(52,211,153,.18);
-  animation: pulse 2.4s ease-in-out infinite; }
-@keyframes pulse { 50% { box-shadow: 0 0 0 5px rgba(52,211,153,0); } }
-.st-info { color: var(--accent); background: rgba(var(--accent-rgb), .13); }
-.cd-card .remaining.expired, .expired { color: var(--dim); text-decoration: line-through; }
-.st-info::before { background: var(--accent); }
-.st-dim { color: var(--dim); background: rgba(139,149,171,.14); }
-.st-dim::before { background: var(--dim); }
-.st-connecting, .st-reconnecting { color: var(--accent); background: rgba(var(--accent-rgb), .13); }
-.st-connecting::before, .st-reconnecting::before { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
-.st-stopped, .st-created, .st-offline { color: var(--dim); background: rgba(139,149,171,.14); }
-.st-stopped::before, .st-created::before, .st-offline::before { background: var(--dim); }
-.st-failed, .st-error { color: var(--err); background: rgba(248,113,113,.13); }
-.st-failed::before, .st-error::before { background: var(--err); }
-.st-cooldown, .st-warning { color: var(--warn); background: rgba(251,191,36,.14); }
-.st-cooldown::before, .st-warning::before { background: var(--warn); }
-.st-missing_credential, .st-invalid_credential { color: var(--err); background: rgba(248,113,113,.15); }
-.st-missing_credential::before, .st-invalid_credential::before { background: var(--err); }
-
-.scope { display: inline-flex; align-items: center; font-size: var(--fs-2xs); font-weight: 700;
-  padding: 2px var(--sp-1-5); border-radius: 5px; text-transform: uppercase; letter-spacing: .06em;
-  background: var(--surface3); color: var(--dim); font-family: var(--mono); }
-.scope-global { color: var(--accent); background: rgba(var(--accent-rgb), .12); }
-.scope-account { color: var(--ok); background: rgba(52,211,153,.12); }
-.scope-plugin { color: var(--plugin); background: rgba(var(--plugin-rgb), .12); }
-
-/* Chips */
-.chip { display: inline-flex; align-items: center; gap: var(--sp-1); font-size: var(--fs-xs);
-  padding: 2px var(--sp-2-5); border-radius: 99px; background: var(--surface3); color: var(--dim);
-  white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-.chip.group { background: rgba(251,191,36,.12); color: var(--warn); cursor: pointer; }
-.chip.plugin { background: rgba(52,211,153,.12); color: var(--ok); }
-.chip.grant { color: var(--ok); }
-.chip.deny { color: var(--faint); text-decoration: line-through; }
-.chip.task-queued { color: var(--dim); } .chip.task-running { color: var(--accent); }
-.chip.task-completed { color: var(--ok); } .chip.task-failed { color: var(--err); }
-.chip.task-cancelled { color: var(--faint); } .chip.task-timed_out { color: var(--warn); }
-
-/* ═════════════════════════════════ Forms ═══════════════════════════════════ */
-.form { display: flex; flex-direction: column; gap: var(--sp-4); max-width: 520px; }
-.form .field { display: flex; flex-direction: column; gap: var(--sp-1-5); min-width: 0; }
-.form .field label { font-size: var(--fs-sm); color: var(--text); font-weight: 550; }
-.form .field .hint { font-size: var(--fs-xs); color: var(--faint); line-height: 1.4; }
-.form .field input, .form .field select { height: var(--ctrl-h); }
-.form-actions { display: flex; gap: var(--sp-2); justify-content: flex-end; margin-top: var(--sp-2); flex-wrap: wrap; }
-.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); }
-
-/* ═══════════════════════ Inline feedback (errors move to their action) ═════ */
-.fb { display: flex; align-items: flex-start; gap: var(--sp-1-5); font-size: var(--fs-sm); line-height: 1.4;
-  padding: var(--sp-1-5) var(--sp-2-5); border-radius: var(--r-sm); margin-top: var(--sp-2);
-  overflow-wrap: anywhere; }
-.fb-error { color: var(--err); background: rgba(248,113,113,.09); border: 1px solid rgba(248,113,113,.3); }
-.fb-ok { color: var(--ok); background: rgba(52,211,153,.09); border: 1px solid rgba(52,211,153,.3); }
-.fb-busy { color: var(--accent); background: rgba(var(--accent-rgb), .08); border: 1px solid rgba(var(--accent-rgb), .28); }
-
-/* Placement guards — see the layout notes: an inline error is appended as
-   the LAST CHILD of its scope; list-row grids and flex rows must give it a
-   full-width line instead of a squeezed cell. */
-.lrow .fb { grid-column: 1 / -1; margin-top: 4px; }
-#bulkbar .fb, .row > .fb { flex: 1 1 100%; }
-
-/* FLOAT feedback: anchors under its control as an overlay — never pushes layout.
-   USER FIX DIRECTIVE #1: the chip is OPAQUE (var(--surface)) — the old
-   ~9%-alpha tint let page content bleed through and made the text
-   unreadable — and carries a 3px tone rail + semi-tone border, weight 600. */
-.fb-anchor { position: relative; }
-.fb-float { position: absolute; top: calc(100% + var(--sp-1)); left: var(--sp-2);
-  width: max-content; max-width: min(340px, 90vw); z-index: 40;
-  background: var(--surface); font-weight: 600;
-  box-shadow: var(--shadow-lg); cursor: pointer; }
-.fb-float.fb-error { background: var(--surface); border: 1px solid rgba(248,113,113,.45); border-left: 3px solid var(--err); }
-.fb-float.fb-ok { background: var(--surface); border: 1px solid rgba(52,211,153,.45); border-left: 3px solid var(--ok); }
-.fb-float.fb-warn { background: var(--surface); border: 1px solid rgba(251,191,36,.5); border-left: 3px solid var(--warn); }
-
-.field .fb, .form .fb { margin-top: 0; }
-.picklist .fb { margin-top: 6px; }
-
-/* Toasts — the ONLY global error surface. Bottom-right, auto-dismiss. */
-#toasts { position: fixed; right: var(--sp-4); bottom: var(--sp-4); z-index: 300;
-  display: flex; flex-direction: column; gap: var(--sp-2);
-  width: min(400px, calc(100vw - var(--sp-8))); pointer-events: none; }
-
-/* HEADER PROMPT — add/remove + high-priority outcomes (user directive):
-   ONE banner on top of the header, 5s, opaque, click-to-dismiss. */
-#hdr-prompt { position: fixed; top: var(--sp-2); left: 50%; transform: translateX(-50%);
-  z-index: 400; display: flex; align-items: center; gap: var(--sp-1-5);
-  background: var(--surface); color: var(--text); font-size: var(--fs-sm); font-weight: 600;
-  padding: var(--sp-2) var(--sp-4); border-radius: var(--r);
-  border: 1px solid var(--border); border-left: 3px solid var(--ok);
-  box-shadow: var(--shadow-lg); cursor: pointer; overflow-wrap: anywhere;
-  max-width: min(560px, 92vw); animation: hdrPromptIn .22s var(--ease); }
-#hdr-prompt.hdr-prompt-error { border-left-color: var(--err); color: var(--err); }
-#hdr-prompt.hdr-prompt-warn { border-left-color: var(--warn); }
-@keyframes hdrPromptIn { from { opacity: 0; transform: translate(-50%, -10px); }
-  to { opacity: 1; transform: translate(-50%, 0); } }
-@media (prefers-reduced-motion: reduce) { #hdr-prompt { animation: none; } }
-.toast { background: var(--surface); border: 1px solid var(--border);
-  border-left: 3px solid var(--err); color: var(--text); padding: var(--sp-2-5) var(--sp-3);
-  border-radius: var(--r-sm); font-size: var(--fs-sm); box-shadow: var(--shadow-lg);
-  overflow-wrap: anywhere; animation: toastIn .22s var(--ease); pointer-events: auto; }
-@keyframes toastIn { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
-.toast-ok { border-left-color: var(--ok); }
-.toast-info { border-left-color: var(--accent); }
-
-/* ═════════════════════════════ Density (decorative) ═══════════════════════ */
-html[data-density="compact"] {
-  --sp-1-5: 5px; --sp-2: 6px; --sp-2-5: 8px; --sp-3: 8px; --sp-4: 12px;
-  --sp-5: 14px; --sp-6: 16px;
-  --fs-2xl: 16px; --fs-3xl: 19px; --fs-4xl: 21px;
-  --gap: var(--sp-2); --gap-sm: 4px; --ctrl-h: 32px;
-}
