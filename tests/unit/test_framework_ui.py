@@ -76,10 +76,13 @@ class StubAPI:
         return {}
 
     async def logs_tail(self, n=100, **kw):
-        return [{"ts": "t", "account": "a1", "level": "info", "message": "hi"}]
+        return [{"ts": "t", "account": "a1", "severity": "info",
+                 "message": "hi"}]
 
     async def audit_tail(self, n=100, **kw):
-        return [{"ts": "t", "account": "a1", "event": "e", "detail": "d"}]
+        # real audit schema: action/note (the LOG schema's 'event'/
+        # 'detail' never exist here — that bug rendered '?')
+        return [{"ts": "t", "account": "a1", "action": "e", "note": "d"}]
 
     async def ratelimit_policies(self):
         return [{"level": "global", "owner": None, "action": "message",
@@ -134,7 +137,9 @@ class StubAPI:
 
     async def simulation_run(self, name):
         self.calls.append(("simulation_run", name))
-        return {"log": "ran " + name}
+        # real runner schema: passed/log_lines/summary (not 'log')
+        return {"passed": True, "log_lines": ["ran " + name],
+                "summary": "ok"}
 
     async def emergency_stop_all(self, surface="api"):
         self.calls.append(("emergency_stop_all",))
@@ -228,8 +233,10 @@ class TestProviders(unittest.IsolatedAsyncioTestCase):
         reg, api, _ = make_registry()
         logs = await reg.get_data(FRAMEWORK_PLUGIN, "act-logs", None)
         self.assertIn("hi", logs["value"])
+        self.assertIn("INFO", logs["value"])   # severity renders, not level
         audit = await reg.get_data(FRAMEWORK_PLUGIN, "act-audit", None)
-        self.assertIn("e — d", audit["value"])
+        self.assertIn("e", audit["value"])     # the action
+        self.assertIn("d", audit["value"])     # the note
 
 
 class TestActions(unittest.IsolatedAsyncioTestCase):
@@ -493,6 +500,11 @@ class FleetStubAPI(StubAPI):
         return list(self._groups)
 
     async def groups_get(self, group):
+        return dict(self._snap) if group == "g1" else None
+
+    async def groups_snapshot(self, group):
+        # real snapshot shape: members/status/pacing_key ride here —
+        # groups_get returns only the record (api.py split)
         return dict(self._snap) if group == "g1" else None
 
     async def groups_create(self, payload, surface="api"):
