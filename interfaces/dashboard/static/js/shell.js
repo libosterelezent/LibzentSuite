@@ -24,11 +24,11 @@
     return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
   }
   applyTheme(store.getItem("dash_theme"));
+  // Theme button now opens the theme engine panel (the old light/dark
+  // toggle is superseded — the engine's presets handle both)
   const themeBtn = $("theme-btn");
   if (themeBtn) themeBtn.onclick = () => {
-    const next = currentIsLight() ? "dark" : "light";
-    store.setItem("dash_theme", next);
-    applyTheme(next);
+    if (typeof themeOpen === "function") themeOpen();
   };
 
   /* ── Sidebar rail (desktop) ─────────────────────────────────────────────── */
