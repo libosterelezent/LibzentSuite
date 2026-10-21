@@ -411,7 +411,7 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
     (page
      .add_section(ui.Section(component_id="act-cards-sec")
         .add_component(ui.Grid(component_id="act-cards-grid")
-           .set_columns("auto").set_min_child("340px")
+           .set_columns("auto").set_min_child("280px")
            .add_component(ui.Card(component_id="act-tasks-card")
               .add_component(ui.Toolbar(component_id="act-tasks-bar").set_title("Tasks")
                              .set_icon("M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11")
@@ -931,11 +931,17 @@ def _build_tools(ui: DashboardUIToolset, api: Any):
                 "sim-name": "Type a scenario name from the list."}}
         report = await api.simulation_run(name)
         # report shape (runner.py): name/passed/duration_s/failures/
-        # log_lines/interactions/summary — 'log'/'steps' never existed
-        last_report["log"] = ("\n".join(
-            str(x) for x in ((report or {}).get("log_lines") or []))
-            or (report or {}).get("summary")
-            or "completed")
+        # log_lines/interactions/summary — the verdict must be visible:
+        # a FAILED run never renders as a bare 'completed'
+        r = report or {}
+        out = []
+        if r.get("passed") is False:
+            fails = [str(f) for f in (r.get("failures") or [])]
+            out.append(f"FAILED — {len(fails)} failure(s)")
+            out.extend(f"  ✗ {f}" for f in fails[:20])
+        out.append("\n".join(str(x) for x in (r.get("log_lines") or []))
+                    or r.get("summary") or "completed")
+        last_report["log"] = "\n".join(out)
         return {"success": True, "message": f"scenario {name} finished",
                 "refresh": ["sim-report"]}
 
