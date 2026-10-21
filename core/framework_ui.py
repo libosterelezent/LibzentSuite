@@ -540,10 +540,14 @@ def _audit_data(api: Any):
             entries = []
         lines = []
         for e in (entries or []):
-            lines.append(f"{_clock(e.get('ts', e.get('time', '')))}  "
+            # audit schema: action/direction/note (NOT 'event' — that is
+            # the LOG schema; reading it here rendered '?' for every row)
+            arrow = "<-" if e.get("direction") == "in" else "->"
+            note = str(e.get("note") or "").replace("\n", " ")
+            lines.append(f"{_clock(e.get('ts', e.get('time', '')))} {arrow} "
                          f"{str(e.get('account') or 'system'):10} "
-                         f"{e.get('event', '?')}"
-                         + (f" — {e.get('detail')}" if e.get("detail") else ""))
+                         f"{e.get('action', '?')}"
+                         + (f"  {note}" if note else ""))
         return {"value": "\n".join(lines) or "— no audit entries —"}
     return provide
 
