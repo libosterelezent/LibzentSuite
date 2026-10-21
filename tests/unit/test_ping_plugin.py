@@ -1,4 +1,4 @@
-"""Say plugin tests: discovery, self-command execution, UI action."""
+"""Ping plugin tests: discovery, self-command execution, UI action."""
 from __future__ import annotations
 
 import sys
@@ -11,11 +11,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from core.errors import TargetGone  # noqa: E402
 from core.plugin_base import CommandContext  # noqa: E402
-from plugins.say.plugin import SayPlugin  # noqa: E402
+from plugins.ping.plugin import PingPlugin  # noqa: E402
 
 
 class _FakeServices:
-    """The PluginServices surface say touches (paced sends)."""
+    """The PluginServices surface ping touches (paced sends)."""
 
     def __init__(self, blocked: bool = False) -> None:
         self.blocked = blocked
@@ -38,80 +38,87 @@ class _FakeServices:
 def _ctx(services: _FakeServices) -> SimpleNamespace:
     import logging
 
-    return SimpleNamespace(account="t", plugin="say",
+    return SimpleNamespace(account="t", plugin="ping",
                            settings={}, services=services,
-                           logger=logging.getLogger("test.say"))
+                           logger=logging.getLogger("test.ping"))
 
 
 def _cmd_ctx(services: _FakeServices) -> CommandContext:
     import logging
 
     return CommandContext(
-        account="t", plugin="say", services=services,
-        logger=logging.getLogger("test.say"), channel_id=1,
+        account="t", plugin="ping", services=services,
+        logger=logging.getLogger("test.ping"), channel_id=1,
         guild_id=None, invoker_id=42, raw="", parsed={})
 
 
-class SayPluginTests(unittest.IsolatedAsyncioTestCase):
+class PingPluginTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.plugin = SayPlugin()
+        self.plugin = PingPlugin()
         self.services = _FakeServices()
         self.ctx = _ctx(self.services)
 
     async def test_command_declared_with_grammar(self) -> None:
-        spec = SayPlugin.COMMANDS[0]
-        self.assertEqual(spec.name, "say")
+        spec = PingPlugin.COMMANDS[0]
+        self.assertEqual(spec.name, "ping")
         self.assertEqual(
             [a.name for a in spec.args], ["channel_id", "text"])
         self.assertTrue(spec.args[1].greedy)
 
-    async def test_say_sends_through_services(self) -> None:
-        reply = await self.plugin._say(self.ctx, 555, "hello there")
+    async def test_ping_sends_through_services(self) -> None:
+        reply = await self.plugin._ping(self.ctx, 555, "hello there")
         self.assertEqual(self.services.sent, [(555, "hello there")])
         self.assertIn("sent to", reply)
         self.assertEqual(len(self.plugin._sent), 1)
 
     async def test_blocked_channel_aborts_clean_no_raise(self) -> None:
         self.services.blocked = True
-        reply = await self.plugin._say(self.ctx, 555, "hello")
+        reply = await self.plugin._ping(self.ctx, 555, "hello")
         self.assertIn("unusable", reply)
         self.assertEqual(self.plugin._sent, [])
 
     async def test_cmd_requires_channel_and_text(self) -> None:
         cmd = _cmd_ctx(self.services)
-        reply = await SayPlugin._cmd_say(self.plugin, cmd, [])
+        reply = await PingPlugin._cmd_ping(self.plugin, cmd, [])
         self.assertIn("usage", reply)
 
     async def test_cmd_rejects_non_numeric_channel(self) -> None:
         cmd = _cmd_ctx(self.services)
-        reply = await SayPlugin._cmd_say(self.plugin, cmd,
-                                         ["abc", "hi"])
+        reply = await PingPlugin._cmd_ping(self.plugin, cmd,
+                                           ["abc", "hi"])
         self.assertIn("number", reply)
 
     async def test_cmd_happy_path(self) -> None:
         cmd = _cmd_ctx(self.services)
-        reply = await SayPlugin._cmd_say(
+        reply = await PingPlugin._cmd_ping(
             self.plugin, cmd, ["555", "hello", "world"])
         self.assertIn("sent to", reply)
         self.assertEqual(self.services.sent,
                          [(555, "hello world")])
 
+    async def test_command_name_avoids_reserved_verbs(self) -> None:
+        """`ping` must not collide with the framework's reserved names
+        (the retired `say` collision is why this plugin was renamed)."""
+        from core.plugin_manager.commands import FRAMEWORK_COMMANDS
+        reserved = {s.name for s in FRAMEWORK_COMMANDS}
+        self.assertNotIn(PingPlugin.COMMANDS[0].name, reserved)
+
     async def test_ui_action_requires_both_fields(self) -> None:
         self.plugin._ctx = self.ctx
-        out = await self.plugin._ui_say(None, {"say-channel": 1})
+        out = await self.plugin._ui_ping(None, {"ping-channel": 1})
         self.assertFalse(out["success"])
         self.assertIn("field_errors", out)
 
     async def test_ui_action_happy_path(self) -> None:
         self.plugin._ctx = self.ctx
-        out = await self.plugin._ui_say(
-            None, {"say-channel": 555, "say-text": "from dashboard"})
+        out = await self.plugin._ui_ping(
+            None, {"ping-channel": 555, "ping-text": "from dashboard"})
         self.assertTrue(out["success"])
         self.assertEqual(self.services.sent,
                          [(555, "from dashboard")])
 
     async def test_ui_stats_count(self) -> None:
-        await self.plugin._say(self.ctx, 1, "x")
+        await self.plugin._ping(self.ctx, 1, "x")
         cards = await self.plugin.ui_stats(self.ctx)
         self.assertEqual(cards[0].value, "1")
 
