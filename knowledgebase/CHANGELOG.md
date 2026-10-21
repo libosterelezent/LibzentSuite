@@ -195,8 +195,8 @@ fallback, Enter-to-save, ?token= accepted on REST too`*
 *Commit `71b9de4` — `feat: live dashboard demo script (sim_server) +
 share-link token param + expose simulator loader`*
 
-## Rename: MudaeScripts → SlaughterMudae
-*Commit `d383b07` — `rename: MudaeScripts -> SlaughterMudae (identity,
+## Rename: MudaeScripts → LibzentSuite
+*Commit `d383b07` — `rename: MudaeScripts -> LibzentSuite (identity,
 logger namespace, CLI prog/prompt, dashboard)`*
 
 ## Auto-reconnect, dashboard SPA + WebSocket

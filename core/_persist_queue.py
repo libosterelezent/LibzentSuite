@@ -153,7 +153,7 @@ class PersistQueue:
                 # hazard impossible to miss on the console
                 try:
                     sys.stderr.write(
-                        f"[slaughtermudae] {self._label} persistence: stop"
+                        f"[libzent] {self._label} persistence: stop"
                         f"() join timed out after {timeout:g}s while the "
                         f"owner's drain is still running — do NOT close "
                         f"the database under it (queued rows may be lost)"
@@ -314,7 +314,7 @@ class PersistQueue:
         self._notified = True
         try:
             sys.stderr.write(
-                f"[slaughtermudae] {self._label} persistence failing: "
+                f"[libzent] {self._label} persistence failing: "
                 f"{type(exc).__name__}: {exc} "
                 "(further errors counted silently)\n")
         except Exception:

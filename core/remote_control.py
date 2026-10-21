@@ -40,7 +40,7 @@ from .priority import Priority
 #: subclass RuntimeError (AccountError etc.) still render bare.
 _DOMAIN_ERRORS = DOMAIN_ERRORS
 
-LOG = logging.getLogger("slaughtermudae.remote_control")
+LOG = logging.getLogger("libzent.remote_control")
 
 #: hard cap on one reply (Discord's own limit is 2000 — headroom for safety)
 MAX_REPLY_CHARS = 1900

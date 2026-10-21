@@ -1,4 +1,4 @@
-# SlaughterMudae
+# LibzentSuite
 
 A multi-account Discord automation framework designed around one principle:
 **your accounts should behave like well-paced humans, not bots.**
@@ -58,7 +58,7 @@ a local dashboard.
 ## Install
 
 ```bash
-git clone <this repo> && cd SlaughterMudae
+git clone <this repo> && cd LibzentSuite
 pip install -r requirements.txt       # aiosqlite + cryptography + discord.py-self
 cp .env.example .env                  # then edit it (see below)
 chmod 600 .env
@@ -288,7 +288,7 @@ simulations/tests never require it.
 
 ```
                     ┌─────────────────────┐
-                    │   SlaughterMudae    │
+                    │   LibzentSuite    │
                     │  (core framework)   │
 Events ────────────►│ Event routing       │
                     │ Account control     │
@@ -317,7 +317,7 @@ Events ────────────►│ Event routing       │
                          API functions
 ```
 
-**SlaughterMudae controls the flow; plugins control API usage; the
+**LibzentSuite controls the flow; plugins control API usage; the
 RateLimiter controls when those calls may execute.** The framework's
 complete client-touch inventory is audited in the `core/account_manager`
 module docstring — every entry is demand-driven by a plugin task.
@@ -395,7 +395,7 @@ account's message interval at runtime.
 ## Credentials & security
 
 Tokens: Fernet-encrypted in the DB; master key outside it
-(`state/credentials.key` 0600 or `SM_MASTER_KEY`). Boot audits permissions
+(`state/credentials.key` 0600 or `LZ_MASTER_KEY`). Boot audits permissions
 on db/key/.env, tightens WAL sidecars, and runs a key/DB decrypt canary.
 Dashboard auth is constant-time token compare + loopback-only origin
 checks; WS frames and bodies are size-capped; diagnostic artifacts are

@@ -1,4 +1,4 @@
-# SlaughterMudae — Integration Contract (READ FIRST)
+# LibzentSuite — Integration Contract (READ FIRST)
 
 This document is the **binding contract** between all modules of the rewrite.
 Every module MUST implement exactly the public API pinned here. When something
@@ -32,7 +32,7 @@ Spec source: `TODO + Ideas.md` (architecture, phases, safety rules).
 ## API BOUNDARY (binding architecture contract)
 
 ```
-Events ──► SlaughterMudae (routing/orchestration/lifecycle) ──► Plugins
+Events ──► LibzentSuite (routing/orchestration/lifecycle) ──► Plugins
                                                                     │ on demand
                                                                     ▼
                                                        RateLimiter (scopes)
@@ -520,7 +520,7 @@ Task.content with Task.message_id as target; audit notes carry counts only.
 
 ## Database (A2 implements; models+schema in spine)
 
-`database/db.py`: `Database(path="state/slaughter.db", *, audit_keep=10000,
+`database/db.py`: `Database(path="state/libzent.db", *, audit_keep=10000,
 log_keep=10000)` — one background-thread aiosqlite connection (async API;
 ops never run on the event loop), 0600 file perms, WAL, `.migrate()`
 runs pending migrations from `database/schema.py:MIGRATIONS` using a

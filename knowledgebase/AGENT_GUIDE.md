@@ -1,6 +1,6 @@
 # AGENT GUIDE — for future coding/debugging agents
 
-You are working in **SlaughterMudae**, a multi-account Discord automation
+You are working in **LibzentSuite**, a multi-account Discord automation
 framework (stdlib-only core; live mode needs the `discord.py-self` fork).
 This page tells you where things live, what to trust, and how to work
 without breaking the architecture.

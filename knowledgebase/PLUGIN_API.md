@@ -62,7 +62,7 @@ the plugin count.
 | `plugin` | `str` | plugin name |
 | `settings` | `Dict[str, Any]` | **live** resolved settings — `PluginManager.set_setting` mutates this dict in place; re-read values at use time instead of caching them across long awaits |
 | `services` | `PluginServices` | per-(account, plugin) I/O facade (§5–§11) + persistence (§14–§15) |
-| `logger` | `logging.Logger` | pre-scoped `slaughtermudae.<account>.<plugin>`; stdlib call style `ctx.logger.info("fmt %s", arg)` |
+| `logger` | `logging.Logger` | pre-scoped `libzent.<account>.<plugin>`; stdlib call style `ctx.logger.info("fmt %s", arg)` |
 
 A fresh context is built per hook invocation and per event dispatch; the *settings dict* is the
 shared live object, the context itself is cheap.

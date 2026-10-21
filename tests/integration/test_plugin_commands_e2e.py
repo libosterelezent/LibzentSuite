@@ -122,7 +122,7 @@ class CommandE2EBase(unittest.IsolatedAsyncioTestCase):
         fw = await build(
             env_file=str(root / "absent.env"),
             config_dir=str(root / "config"),  # no config -> defaults
-            db_path=str(root / "state" / "slaughter.db"),
+            db_path=str(root / "state" / "libzent.db"),
             plugin_dir=str(REAL_PLUGINS),
             quiet=True,
         )

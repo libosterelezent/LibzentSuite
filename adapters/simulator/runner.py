@@ -542,7 +542,7 @@ class SimulationRunner:
         # MAIN stack's lines — and document the cross-leak instead.
         from core.logging_service import StdlibBridge, attach_stdlib_bridge, detach_stdlib_bridge
 
-        tree_root = logging.getLogger("slaughtermudae")
+        tree_root = logging.getLogger("libzent")
         bridge_attached_here = not any(
             isinstance(h, StdlibBridge) for h in tree_root.handlers
         )

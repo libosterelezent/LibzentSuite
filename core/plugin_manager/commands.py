@@ -51,7 +51,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from ..errors import DOMAIN_ERRORS
 from ..plugin_base import ArgSpec, CommandContext, CommandSpec, usage_line
 
-LOG = logging.getLogger("slaughtermudae.selfcommands")
+LOG = logging.getLogger("libzent.selfcommands")
 
 #: services-facade plugin label used for framework-owned commands (task
 #: attribution: the audit rows read ``<account>/selfcmd``)

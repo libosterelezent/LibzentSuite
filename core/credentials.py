@@ -38,7 +38,7 @@ from typing import Dict, Mapping, Optional
 
 from .errors import CredentialsError  # ONE class (was defined twice)
 
-LOG = logging.getLogger("slaughtermudae.credentials")
+LOG = logging.getLogger("libzent.credentials")
 
 #: keys whose values must be masked in any human-facing output
 SENSITIVE_KEYS = ("token", "secret", "password")

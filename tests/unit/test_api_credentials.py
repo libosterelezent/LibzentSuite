@@ -792,7 +792,7 @@ class TestCredentialKeyFileHardening(unittest.IsolatedAsyncioTestCase):
         svc._memory.clear()
         await svc.resolve("alpha")
         self.assertEqual(self.key_path.stat().st_mode & 0o777, 0o600)
-        with self.assertNoLogs("slaughtermudae.credentials", level="WARNING"):
+        with self.assertNoLogs("libzent.credentials", level="WARNING"):
             svc._fernet = None
             svc._memory.clear()
             await svc.resolve("alpha")

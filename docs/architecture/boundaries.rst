@@ -28,7 +28,7 @@ Hard rules enforced by review and tests:
   goes through the ``PluginServices`` protocol.
 * Account tokens are stored as Fernet **ciphertext in the database** —
   plaintext never enters it, and the key lives outside the DB
-  (``state/credentials.key`` 0600 or ``SM_MASTER_KEY`` in the process
+  (``state/credentials.key`` 0600 or ``LZ_MASTER_KEY`` in the process
   environment). ``.env`` holds ids/auth switches only; legacy
   ``DISCORD_TOKEN_*`` entries are read just once by the
   ``credentials import-env`` migration into the encrypted store.

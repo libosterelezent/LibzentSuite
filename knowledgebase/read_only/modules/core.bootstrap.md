@@ -49,5 +49,5 @@ tests, `main.py --sim` and the dashboard's Simulation page.
 
 ## Functions
 
-- `async def build(*, env_file: str='.env', config_dir: str='config', db_path: str='state/slaughter.db', plugin_dir: str='plugins', client_factory: Optional[Callable[[str, str], Any]]=None, simulation_runner: Any=None, credentials: Optional[Credentials]=None, database: Any=None, quiet: bool=False, credential_key_path: Optional[Path]=None) -> Framework` — side effects: `network`
+- `async def build(*, env_file: str='.env', config_dir: str='config', db_path: str='state/libzent.db', plugin_dir: str='plugins', client_factory: Optional[Callable[[str, str], Any]]=None, simulation_runner: Any=None, credentials: Optional[Credentials]=None, database: Any=None, quiet: bool=False, credential_key_path: Optional[Path]=None) -> Framework` — side effects: `network`
   - Compose the live framework (the boot flow of ``main.py``).

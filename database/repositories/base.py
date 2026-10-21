@@ -15,7 +15,7 @@ from typing import Any, AsyncIterator, Optional, Sequence
 
 from ..connection import DatabaseError
 
-LOG = logging.getLogger("slaughtermudae.database")
+LOG = logging.getLogger("libzent.database")
 
 __all__ = ["BaseRepository", "loads_tolerant"]
 

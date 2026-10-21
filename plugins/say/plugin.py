@@ -29,7 +29,7 @@ from core.settings_manager import Setting
 if TYPE_CHECKING:
     from core.dashboard_ui.builders import DashboardUIToolset
 
-LOG = logging.getLogger("slaughtermudae.say")
+LOG = logging.getLogger("libzent.say")
 
 
 class SayPlugin(PluginBase):

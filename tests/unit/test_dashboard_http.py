@@ -640,7 +640,7 @@ class TestDashboardHTTP(unittest.IsolatedAsyncioTestCase):
     async def test_index_served_without_auth(self) -> None:
         status, body = await asyncio.to_thread(http_get, self.url("/"), None)
         self.assertEqual(status, 200)
-        self.assertIn("SlaughterMudae", body)
+        self.assertIn("LibzentSuite", body)
 
     async def test_api_requires_token(self) -> None:
         status, body = await asyncio.to_thread(http_get, self.url("/api/status"), None)

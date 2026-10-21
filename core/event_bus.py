@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, FrozenSet, List, Optional, Type
 
 from ._asyncutil import cancellation_attributable, outer_cancel_pending
 
-LOG = logging.getLogger("slaughtermudae.events")
+LOG = logging.getLogger("libzent.events")
 
 Handler = Callable[["Event"], Any]
 

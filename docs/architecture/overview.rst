@@ -7,7 +7,7 @@ control API usage; the RateLimiter controls when calls may execute.**
 .. code-block:: text
 
                      ┌─────────────────────┐
-                     │   SlaughterMudae    │
+                     │   LibzentSuite    │
    Events ──────────►│ Event routing       │
                      │ Account control     │
                      │ Task orchestration  │

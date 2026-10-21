@@ -82,7 +82,7 @@
   }).observe($("snav"), {childList: true});
 
   /* ── Title + deep links ─────────────────────────────────────────────────── */
-  const BASE_TITLE = "SlaughterMudae";
+  const BASE_TITLE = "LibzentSuite";
   function syncTitle() {
     const t = $("page-title").textContent;
     document.title = t ? `${t} · ${BASE_TITLE}` : BASE_TITLE;

@@ -5,7 +5,7 @@
 
 Opt-in, isolated CPU/RAM/event-loop benchmarking. Never imported by
 production paths (zero overhead when unused); never touches
-`state/slaughter.db` or `state/credentials.key` (temp workspaces + the
+`state/libzent.db` or `state/credentials.key` (temp workspaces + the
 bootstrap's `credential_key_path` kwarg); never talks to Discord.
 
 ## Run

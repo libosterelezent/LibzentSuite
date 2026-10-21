@@ -372,7 +372,7 @@ class TestCredentials(_TmpCase):
     async def test_key_file_created_private_and_reused(self) -> None:
         path = self.dir / "k" / "credentials.key"
         with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("SM_MASTER_KEY", None)
+            os.environ.pop("LZ_MASTER_KEY", None)
             svc = CredentialService(None, key_path=path)
             _ = svc.fernet
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode) & 0o077, 0)
@@ -384,7 +384,7 @@ class TestCredentials(_TmpCase):
         path = self.dir / "bad.key"
         path.write_text("not-a-fernet-key")
         with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("SM_MASTER_KEY", None)
+            os.environ.pop("LZ_MASTER_KEY", None)
             with self.assertRaises(CredentialsError):
                 _ = CredentialService(None, key_path=path).fernet
 
@@ -412,7 +412,7 @@ class TestBootstrapRobustness(_TmpCase):
                             client_factory=lambda n, t: None, credentials=creds,
                             database=db, quiet=True)
         self.assertFalse(db.connection.connected)
-        root = logging.getLogger("slaughtermudae")
+        root = logging.getLogger("libzent")
         from core.logging_service import StdlibBridge
         self.assertFalse([h for h in root.handlers if isinstance(h, StdlibBridge)])
 

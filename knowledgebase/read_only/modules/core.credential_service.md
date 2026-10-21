@@ -19,7 +19,7 @@ Threat model (honest, spec §44):
                                  DASHBOARD_TOKEN auth, and the bind stays
                                  127.0.0.1 by default.
 
-Key management (spec §12): ``SM_MASTER_KEY`` env (urlsafe base64 Fernet
+Key management (spec §12): ``LZ_MASTER_KEY`` env (urlsafe base64 Fernet
 key) when set; otherwise a generated key file at ``state/credentials.key``
 (chmod 0600, outside the DB, gitignored via state/). Losing the key means
 re-entering credentials — by design (no recoverable plaintext anywhere).

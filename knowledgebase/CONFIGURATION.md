@@ -1,6 +1,6 @@
 # CONFIGURATION — complete settings reference
 
-Everything SlaughterMudae can be tuned with, verified against source:
+Everything LibzentSuite can be tuned with, verified against source:
 `.env` ([core/credentials.py](../core/credentials.py)), `config/*.json`
 ([core/config.py](../core/config.py)), framework account settings
 ([core/settings_manager.py](../core/settings_manager.py)) and the SQLite
@@ -30,7 +30,7 @@ one `KEY=value` per line; `#` comments and blank lines skipped; optional
 | Key | Classification | Purpose | Validation | Mutability / restart | Security |
 |---|---|---|---|---|---|
 | `DISCORD_TOKEN_<NAME>` | **SECRET — credential (LEGACY)** | Per-account token convention: account `main` → `DISCORD_TOKEN_MAIN` (name upper-cased, `Credentials.token_for`). LEGACY storage: the **DB credential store takes precedence** — if an encrypted credential exists for the account it is used and the env value is ignored; if not, the env value is the fallback (status `env`, never auto-stored). Converting to encrypted storage is the explicit `credentials import` command (one-shot per account; never overwrites an existing `db` credential unless forced) | Absent token + no DB credential + `accounts start` → `CredentialsError` / status `missing_credential` naming the exact key to set | Values parsed once at boot → **restart the process** to change; an imported DB credential can be replaced at runtime via `accounts set-credential` (no restart) | **Secret.** `.env` should be `chmod 600`; masked by `redacted()` (first 4 chars + length, or `***` when ≤ 4 chars). DB-stored copies are Fernet-encrypted at rest ([SECURITY.md](SECURITY.md)) |
-| `SM_MASTER_KEY` | **SECRET — key material** | Master key for the encrypted credential store (urlsafe-base64 Fernet key). When set it wins over the key file; when absent a key file is used/created at `state/credentials.key` (chmod 0600, outside the DB, `state/` is gitignored) | Invalid non-Fernet value raises `CredentialsError` at first use with generation instructions | Read lazily on first credential use → restart to change. **Losing the key means re-entering every stored credential — by design** (no recoverable plaintext anywhere) | **Highest-value secret in the deployment**: possession of key + DB file = all credentials. Never commit; rotate by re-importing |
+| `LZ_MASTER_KEY` | **SECRET — key material** | Master key for the encrypted credential store (urlsafe-base64 Fernet key). When set it wins over the key file; when absent a key file is used/created at `state/credentials.key` (chmod 0600, outside the DB, `state/` is gitignored) | Invalid non-Fernet value raises `CredentialsError` at first use with generation instructions | Read lazily on first credential use → restart to change. **Losing the key means re-entering every stored credential — by design** (no recoverable plaintext anywhere) | **Highest-value secret in the deployment**: possession of key + DB file = all credentials. Never commit; rotate by re-importing |
 | `MUDAE_BOT_ID` | Public identifier (bootstrap) | Mudae bot user id — **DB-first now**: the authoritative source is the admin-panel kv row `access:mudae_bot_id` (`AccessManager.mudae_bot_id`); this env value is the FALLBACK when the DB value is unset (and `POST /api/admin/mudae-id/set` `null` clears back to it). Plugins read it via `services.credentials`, never hardcode it | `require("MUDAE_BOT_ID")` raises `CredentialsError` when missing; non-integer raises `CredentialsError` | Loaded at boot → **restart to change** (the DB value can change at runtime via the admin panel) | Public identifier (not a secret), but keep it in `.env` anyway |
 | `OWNER_USER_IDS` | Authorization (**DEPRECATED after migration**) | Comma- or semicolon-separated Discord user ids. Read **ONCE** by `AccessManager.migrate_from_credentials` (bootstrap) to seed the DB admin list (`access:admins`) when it is EMPTY — first boot on the new model only. After that the env value is IGNORED for authorization: command access lives in the per-account permission lists + the admin list (dashboard Admin tab / `adminlist` verbs). Remains the diagnostics view for legacy unwired stacks | Non-integer element raises `CredentialsError` (parsed once, cached; malformed caches as EMPTY — fail closed) | Loaded at boot → **restart to change**; irrelevant for authorization after the one-time migration | The pre-migration authorization allowlist; treat as sensitive |
 | `SELF_COMMAND_PREFIX` | Feature default | The DEFAULT self-command prefix for every account (`"@me"` = the account's own mention works as prefix). Each account's admin-panel prefix config (`prefix_mode` mention/symbol/both + `prefix_symbol`) OVERRIDES this default at client build time; with no prefix configured the account runs a plain Client with no command machinery | absent/empty = disabled | Loaded at boot → **restart to change** (per-account overrides are runtime-editable via `/api/admin/prefix/set`) | Not a secret; gates who can type commands at the account (the AccessManager gate is the actual authorization) |
@@ -222,7 +222,7 @@ Restart: none.
 
 ## 6. Database-persisted state (SQLite)
 
-Default path `state/slaughter.db` (`--db` to override; `:memory:` for
+Default path `state/libzent.db` (`--db` to override; `:memory:` for
 simulations). File created with mode `0600` before first write, WAL journal
 mode, migrations are append-only and versioned in `schema_migrations`.
 Schema: [database/schema.py](../database/schema.py).
@@ -243,7 +243,7 @@ Schema: [database/schema.py](../database/schema.py).
 | `task_history` | **Finished** tasks only (status/attempts/duration/error/summary) | Task scheduler |
 | `kv` | Generic key/value store — the admin-access rows (`access:admins`, `access:mudae_bot_id`, `access:account:<name>`), the rate floor/tombstones (`ratelimit:floor`, `ratelimit:removed`), namespaced plugin state (`pstate:<scope>:...`) | AccessManager, RateLimitManager, PluginStateService |
 | `api_cache` | Per-account resolved Discord entities (`kind` ∈ `dm|user|channel`, PK `(account, kind, key)`) — restarts never re-fetch | Account manager |
-| `credentials` | **Fernet ciphertext** of account tokens (key outside the DB: `SM_MASTER_KEY` or `state/credentials.key`) | CredentialService |
+| `credentials` | **Fernet ciphertext** of account tokens (key outside the DB: `LZ_MASTER_KEY` or `state/credentials.key`) | CredentialService |
 | `cooldowns` | Persistent cooldowns keyed `(account, plugin, cooldown_key)` with **absolute epoch expiry** — restarts restore the REMAINING time | CooldownService |
 | `schema_migrations` | Applied migration versions | Database |
 
@@ -277,7 +277,7 @@ Verified against source; see also the consolidated `DISCREPANCIES.md`:
 |---|---|---|
 | `--env` | `.env` | Credentials file path |
 | `--config` | `config` | Config directory (`global_settings.json`, `rate_limits.json`, optional `accounts/*.json`) |
-| `--db` | `state/slaughter.db` | SQLite persistence file |
+| `--db` | `state/libzent.db` | SQLite persistence file |
 | `--plugins` | `plugins` | Plugin discovery directory |
 | `--dashboard` | off | Serve the browser dashboard (+WS) |
 | `--port` | `8070` | Dashboard port |

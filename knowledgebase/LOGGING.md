@@ -22,7 +22,7 @@ database `logs` table (bounded, best-effort).
 ```
 OUTBOUND (framework-native)                          INBOUND (stdlib world)
 ┌────────────────────────────────┐                   ┌──────────────────────────────────┐
-│ manager.info(source, msg, ...) │                   │ logging.getLogger("slaughtermudae.*")
+│ manager.info(source, msg, ...) │                   │ logging.getLogger("libzent.*")
 │  (ServiceLogger / LogService   │                   │  (plugin contexts, loader,        │
 │   convenience methods)         │                   │   event_bus, dashboard, 3rd-party)│
 └───────────┬────────────────────┘                   └───────────────┬──────────────────┘
@@ -35,7 +35,7 @@ OUTBOUND (framework-native)                          INBOUND (stdlib world)
             ├── counters[severity] += 1
             │
             ├── OUTBOUND MIRROR — ONLY when NOT inside ingest_context():
-            │     logging.getLogger(f"slaughtermudae.{source}").log(
+            │     logging.getLogger(f"libzent.{source}").log(
             │         level, msg, extra={"_sm_from_service": True})
             │        └──► StdlibBridge skips records carrying the
             │             _sm_from_service marker (guard #1)
@@ -65,7 +65,7 @@ mirror→bridge feedback loop", 10-agent investigation).
 
 ```
 LogService.record(msg)
-   └─► mirror → logging.getLogger("slaughtermudae.x").log(...)   (no marker)
+   └─► mirror → logging.getLogger("libzent.x").log(...)   (no marker)
           └─► StdlibBridge.emit (attached to the same tree)
                └─► LogService.record(msg)                        (re-ingested)
                     └─► mirror → stdlib ...                      (repeat)
@@ -165,13 +165,13 @@ manager's logger: `ServiceLogger(logs, "ratelimit")`, `"scheduler"`,
 ## 4. Stdlib boundary functions
 
 ### `configure_stderr(level=logging.INFO)`
-Attaches ONE human-readable stderr handler to the `slaughtermudae` logger
+Attaches ONE human-readable stderr handler to the `libzent` logger
 tree (idempotent via the module `_STDERR_CONFIGURED` flag): format
 `"%(asctime)s %(levelname)-7s %(name)s: %(message)s"` (`%H:%M:%S`), sets the
 tree level, and sets `propagate = False` — framework records must not leak to
 the global root logger (whose `lastResort` handler would print them raw).
 
-### `attach_stdlib_bridge(service, logger_name="slaughtermudae") -> StdlibBridge`
+### `attach_stdlib_bridge(service, logger_name="libzent") -> StdlibBridge`
 Attaches (idempotently — an existing bridge on the tree is returned) the
 stdlib→structured bridge so plugin-context and third-party records under the
 tree reach the dashboard Logs page WITHOUT changing plugin call sites. Beyond
@@ -186,7 +186,7 @@ attaching it:
 
 `StdlibBridge.emit(record)` (a `logging.Handler`): skips `_sm_from_service`
 records (guard #1); derives `source` from the logger name —
-`slaughtermudae.*` → the suffix with `.` → `:` (e.g. `account:alpha`),
+`libzent.*` → the suffix with `.` → `:` (e.g. `account:alpha`),
 bare tree root → `"core"`, foreign loggers → `ext:<name>`; maps severity via
 `_SEVERITY_BY_LEVELNAME` where **CRITICAL/FATAL → ERROR** (the structured
 store has no crash level, and INFO would hide it — the loop-fix commit also
@@ -195,7 +195,7 @@ level names fall back by `record.levelno` thresholds; then calls
 `service.record(...)` **inside `ingest_context()`** (guard #2). The whole body
 is `try/except: pass` — a logging bridge must never raise.
 
-### `detach_stdlib_bridge(logger_name="slaughtermudae") -> int`
+### `detach_stdlib_bridge(logger_name="libzent") -> int`
 Removes every `StdlibBridge` from the tree (shutdown/teardown), returns how
 many. After this, raw stdlib records under the tree print only (no structured
 ingestion) — exactly the pre-attach behavior. Idempotent; safe to call from
@@ -242,7 +242,7 @@ subscriptions (`logger.subscribe(_on_log)` for the report's timed log lines,
 `audit.subscribe(_on_audit)` for interactions) attached BEFORE any traffic can
 flow. For the stdlib boundary:
 
-- **attach**: if the `slaughtermudae` tree has NO `StdlibBridge`
+- **attach**: if the `libzent` tree has NO `StdlibBridge`
   (`bridge_attached_here`), it attaches one bound to the RUN's service —
   standalone `--sim` runs previously DROPPED plugin/loader INFO lines (tree
   effective level WARNING with no bridge).

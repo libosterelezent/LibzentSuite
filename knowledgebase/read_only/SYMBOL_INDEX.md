@@ -14,7 +14,7 @@
 | [`adapters.simulator.runner`](modules/adapters.simulator.runner.md) | 1 | 4 | 9 | SimulationRunner — a COMPLETE ephemeral stack per scenario run (spec §16). |
 | [`adapters.simulator.scenarios`](modules/adapters.simulator.scenarios.md) | 2 | 19 | 19 | Scenario definitions for the offline simulation suite (spec §16). |
 | [`adapters.simulator.world`](modules/adapters.simulator.world.md) | 3 | 2 | 24 | SimWorld — a complete in-memory Discord world (ported from the audited |
-| [`core`](modules/core.md) | 0 | 0 | 0 | SlaughterMudae core framework. |
+| [`core`](modules/core.md) | 0 | 0 | 0 | LibzentSuite core framework. |
 | [`core._asyncutil`](modules/core._asyncutil.md) | 0 | 2 | 2 | Small asyncio helpers shared by the event bus and the task scheduler. |
 | [`core._persist_queue`](modules/core._persist_queue.md) | 1 | 0 | 14 | Shared queued-persistence engine for the log and audit sinks. |
 | [`core.access_manager`](modules/core.access_manager.md) | 1 | 1 | 29 | AccessManager — the DB-backed authorization/prefix/admin store. |
@@ -92,7 +92,7 @@
 | [`interfaces.dashboard`](modules/interfaces.dashboard.md) | 0 | 0 | 0 | interfaces.dashboard — HTTP+WebSocket dashboard (spec §12, agent A8). |
 | [`interfaces.dashboard.server`](modules/interfaces.dashboard.server.md) | 4 | 19 | 46 | Dashboard backend: JSON REST + WebSocket live push over ControlAPI. |
 | [`interfaces.dashboard.ws`](modules/interfaces.dashboard.ws.md) | 2 | 8 | 8 | Minimal RFC 6455 WebSocket server subset (text frames only). |
-| [`main`](modules/main.md) | 0 | 4 | 4 | SlaughterMudae entrypoint. |
+| [`main`](modules/main.md) | 0 | 4 | 4 | LibzentSuite entrypoint. |
 | [`plugins`](modules/plugins.md) | 0 | 0 | 0 | Plugins directory — each subdir is a framework plugin. |
 | [`plugins.probe`](modules/plugins.probe.md) | 0 | 0 | 0 | Probe fixture plugin: the framework's reference test subject. |
 | [`plugins.probe.plugin`](modules/plugins.probe.plugin.md) | 1 | 0 | 14 | Probe plugin: discovery/attachment/command-registry test fixture. |

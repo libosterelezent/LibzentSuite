@@ -62,7 +62,7 @@ from ..event_bus import (
 from ..priority import Priority
 from .cache import DiscordCache, resolve_dm_channel
 
-LOG = logging.getLogger("slaughtermudae.services")
+LOG = logging.getLogger("libzent.services")
 
 
 class TaskAckRegistry:

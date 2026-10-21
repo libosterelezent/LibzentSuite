@@ -1,4 +1,4 @@
-"""SlaughterMudae framework benchmark subsystem (opt-in, isolated).
+"""LibzentSuite framework benchmark subsystem (opt-in, isolated).
 
 Public surface: ``BENCH_SCENARIOS``, ``run_suite`` (async) and
 ``run_bench_cli``. Routed from ``main.py --bench`` or ``python -m

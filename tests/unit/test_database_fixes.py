@@ -86,7 +86,7 @@ class TestTelemetryRingEviction(unittest.IsolatedAsyncioTestCase):
 
     async def test_ring_keeps_appending_past_maxlen(self) -> None:
         tele = DbTelemetry()
-        tele.enabled = True  # bypass SM_DB_TELEMETRY; deterministic
+        tele.enabled = True  # bypass LZ_DB_TELEMETRY; deterministic
         total = tele._ring.maxlen + 200  # noqa: SLF001 — pin the window size
         for i in range(total):
             tele.record("read", (i + 1) * 0.001)  # ms == i + 1

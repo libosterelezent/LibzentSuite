@@ -1,4 +1,4 @@
-# SlaughterMudae — Data Flow
+# LibzentSuite — Data Flow
 
 This file traces three flows end-to-end with the exact functions they pass
 through: (a) an inbound Discord message, (b) an outbound send from a plugin,

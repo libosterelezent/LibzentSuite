@@ -11,7 +11,7 @@ wrapper over `core.api.ControlAPI` — CLI and dashboard share one facade.
 
 | Mode | Invocation | Behaviour |
 |---|---|---|
-| REPL | `python3 main.py` (no extra args) | Banner `SlaughterMudae control terminal — 'help' for commands, 'quit' to exit.`, prompt `sm> `. `api.shutdown()` and `bye.` run on **every** exit path (quit/exit, EOF, Ctrl-C at the prompt, Ctrl-C mid-command) |
+| REPL | `python3 main.py` (no extra args) | Banner `LibzentSuite control terminal — 'help' for commands, 'quit' to exit.`, prompt `sm> `. `api.shutdown()` and `bye.` run on **every** exit path (quit/exit, EOF, Ctrl-C at the prompt, Ctrl-C mid-command) |
 | One-shot | `python3 main.py <command ...>` | Runs a single command line (`run_once`); exit code 0 on success, 1 on error; `quit` prints `bye.` and returns 0. `run_once` does **not** call `api.shutdown()` — the lifecycle is owned by `main.py` |
 | Help only | `python3 main.py` with empty extra args | Prints the help text, exit 0 |
 

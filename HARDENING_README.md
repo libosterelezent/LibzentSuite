@@ -288,7 +288,7 @@ cross-cutting invariants) → ~90 findings fixed. **708 tests pass**
   every exit path, mid-assembly DB leaks closed, edit events push frozen
   DTOs, 429/consumer guard order matches live, reaction rebuild keeps id/me.
 * Docs: credentials story (DB-encrypted, not .env), dependency list,
-  705→708 counts, SM_MASTER_KEY documented, first-boot policy semantics,
+  705→708 counts, LZ_MASTER_KEY documented, first-boot policy semantics,
   dashboard resume note — see README / docs/ diffs.
 
 # Audit rounds 1–2 (post-Phase-3 sweeps)

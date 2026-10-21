@@ -11,7 +11,7 @@ Threat model (honest, spec §44):
                                  DASHBOARD_TOKEN auth, and the bind stays
                                  127.0.0.1 by default.
 
-Key management (spec §12): ``SM_MASTER_KEY`` env (urlsafe base64 Fernet
+Key management (spec §12): ``LZ_MASTER_KEY`` env (urlsafe base64 Fernet
 key) when set; otherwise a generated key file at ``state/credentials.key``
 (chmod 0600, outside the DB, gitignored via state/). Losing the key means
 re-entering credentials — by design (no recoverable plaintext anywhere).
@@ -36,9 +36,9 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from .errors import CredentialsError
 
-LOG = logging.getLogger("slaughtermudae.credentials")
+LOG = logging.getLogger("libzent.credentials")
 
-KEY_ENV = "SM_MASTER_KEY"
+KEY_ENV = "LZ_MASTER_KEY"
 DEFAULT_KEY_PATH = Path("state/credentials.key")
 
 
@@ -72,7 +72,7 @@ class CredentialService:
 
     # ------------------------------------------------------------------ key
     def _load_or_create_key(self) -> bytes:
-        """Master key: SM_MASTER_KEY env > key file (created on first run)."""
+        """Master key: LZ_MASTER_KEY env > key file (created on first run)."""
         env_key = os.environ.get(KEY_ENV, "").strip()
         if env_key:
             try:
@@ -194,7 +194,7 @@ class CredentialService:
                 return
             self.fernet.decrypt(ciphertext)  # raises InvalidToken on mismatch
         except CredentialsError as exc:
-            # master-key LOAD failure (invalid SM_MASTER_KEY / corrupt key
+            # master-key LOAD failure (invalid LZ_MASTER_KEY / corrupt key
             # file — the fernet property raises before any decrypt): key
             # misconfiguration must be VISIBLE at boot, not silent
             LOG.warning(

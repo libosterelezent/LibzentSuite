@@ -67,7 +67,7 @@ class SyncGroupManager:
         self._repo = groups_repo
         self._accounts = accounts_repo
         self._limiter = limiter
-        self._logger = (logger or logging.getLogger("slaughtermudae.sync_groups"))
+        self._logger = (logger or logging.getLogger("libzent.sync_groups"))
         #: name -> SyncGroupRecord (cache; refresh via load()/mutators)
         self._cache: Dict[str, Any] = {}
         #: serializes persist+runtime-sync per membership change so the

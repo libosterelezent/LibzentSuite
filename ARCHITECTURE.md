@@ -1,4 +1,4 @@
-# SlaughterMudae — Architecture
+# LibzentSuite — Architecture
 
 Implemented exactly per the architecture in `TODO + Ideas.md` (§"Suggested
 architecture", §14 project structure). Inter-module contracts: INTEGRATION.md.

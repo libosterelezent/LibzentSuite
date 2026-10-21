@@ -88,7 +88,7 @@ class DbTelemetryTests(unittest.IsolatedAsyncioTestCase):
                 # assertNoLogs on the ROOT logger flags ANY debug record;
                 # scope to the framework tree (aiosqlite's own debug lines
                 # are third-party and not ours to police)
-                with self.assertNoLogs(logger="slaughtermudae",
+                with self.assertNoLogs(logger="libzent",
                                        level="DEBUG"):
                     for i in range(50):
                         await db.kv.set(f"x{i}", i)

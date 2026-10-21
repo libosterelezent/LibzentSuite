@@ -164,7 +164,7 @@ class TestMigrations(AsyncDatabaseTestCase):
         await self.db.connection.execute(
             "INSERT INTO schema_migrations (version, name, applied_at) "
             "VALUES (99999, 'from the future', 0)")
-        with self.assertLogs("slaughtermudae.database", level="WARNING") as logs:
+        with self.assertLogs("libzent.database", level="WARNING") as logs:
             self.assertEqual(await self.db.migrate(), 0)
         self.assertTrue(any("NEWER" in m for m in logs.output))
 

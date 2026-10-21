@@ -6,7 +6,7 @@
 **Path:** `main.py`
 
 ```
-SlaughterMudae entrypoint.
+LibzentSuite entrypoint.
 
 Usage:
   python main.py                        interactive REPL (live accounts from config/)

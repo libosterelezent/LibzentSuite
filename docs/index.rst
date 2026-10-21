@@ -1,4 +1,4 @@
-SlaughterMudae — Documentation
+LibzentSuite — Documentation
 ==============================
 
 Multi-account Discord automation framework: plugins that request services

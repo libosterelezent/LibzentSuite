@@ -1,6 +1,6 @@
 """FINAL-PHASE (G8): chaos matrix — fleet chaos + profiling-hook safety.
 
-- FleetChaosTests (SM_CHAOS gated): 5 accounts × start_all × bursts × DB
+- FleetChaosTests (LZ_CHAOS gated): 5 accounts × start_all × bursts × DB
   writes × auth-fail injection × drop-reconnect × delete+create.
 - ProfilingChaosTests (ungated): §39 — diagnostic hooks ALWAYS restore.
 """
@@ -22,10 +22,10 @@ from database.db import Database
 from tests.unit.helpers import FakeClientFactory, make_manager
 from tests.unit.test_account_manager import _fast_reconnect_settings
 
-CHAOS = bool(os.environ.get("SM_CHAOS"))
+CHAOS = bool(os.environ.get("LZ_CHAOS"))
 
 
-@unittest.skipUnless(CHAOS, "set SM_CHAOS=1 to run the fleet chaos soak")
+@unittest.skipUnless(CHAOS, "set LZ_CHAOS=1 to run the fleet chaos soak")
 class FleetChaosTests(unittest.IsolatedAsyncioTestCase):
     """5-account full chaos (G8 design a): start_all admission path, 2k
     burst, real temp-DB writes, memory-first status polls, auth-fail

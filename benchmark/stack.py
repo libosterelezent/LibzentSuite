@@ -1,6 +1,6 @@
 """TemporaryWorkspace + BenchStack: isolated stacks for benchmark scenarios.
 
-NEVER touches state/slaughter.db or state/credentials.key: every run gets
+NEVER touches state/libzent.db or state/credentials.key: every run gets
 a tempfile workspace; the bootstrap's ``credential_key_path`` kwarg keeps
 a concurrent live process safe. Fakes/simulation only — no real Discord.
 """

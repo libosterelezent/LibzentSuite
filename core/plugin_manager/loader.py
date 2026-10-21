@@ -41,7 +41,7 @@ from typing import Dict, List, Optional, Type
 from ..errors import PluginError
 from ..plugin_base import ArgSpec, CommandSpec, PluginBase
 
-LOG = logging.getLogger("slaughtermudae.loader")
+LOG = logging.getLogger("libzent.loader")
 
 #: unique synthetic parent package names across repeated scans (tests)
 _PARENT_SEQ = itertools.count()

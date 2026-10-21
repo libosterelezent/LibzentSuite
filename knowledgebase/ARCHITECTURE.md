@@ -1,4 +1,4 @@
-# SlaughterMudae — Architecture (source-verified)
+# LibzentSuite — Architecture (source-verified)
 
 This file documents the *real* architecture as implemented in the repository:
 the component topology, the audited API boundary contract between framework
@@ -60,7 +60,7 @@ per-component detail, [DATA_FLOW.md](DATA_FLOW.md) for traffic flows,
                                 └───────────────────────────────┘
 ```
 
-The root README's summary holds in source: *SlaughterMudae controls the flow;
+The root README's summary holds in source: *LibzentSuite controls the flow;
 plugins control API usage; the RateLimiter controls when those calls may
 execute.*
 
@@ -201,7 +201,7 @@ Credentials.from_file(env_file)                  # tokens/ids, .env only
 load_config(config_dir)                          # global settings, policies, account files
 Database(db_path)                                # sqlite + migrations in the constructor
 LogService() + attach_db(database.logs)          # structured logs persist
-attach_stdlib_bridge(logs)                       # slaughtermudae.* stdlib records ingested
+attach_stdlib_bridge(logs)                       # libzent.* stdlib records ingested
 EventBus() + _wire_event_logging(bus, logs)      # lifecycle events -> structured lines
 RateLimitManager(bus, svc_logger, database.policies,
                   kv_repo=database.kv)           # floor + stored policies

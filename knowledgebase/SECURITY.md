@@ -18,7 +18,7 @@ store — never in code, never in the database as plaintext.**
 |---|---|
 | Two sanctioned stores | (1) legacy `.env` file; (2) the encrypted-at-rest `credentials` table (Fernet ciphertext). Resolution precedence: DB → `.env` fallback (never overwrites the DB) → `MISSING_CREDENTIAL` |
 | DB stores **ciphertext** | The `credentials` table keeps Fernet ciphertext only (AES-128-CBC + HMAC-SHA256 via `cryptography.fernet` — established library, nothing homemade). The legacy `accounts.token_ref` keeps only the `.env` KEY name |
-| Key outside the DB | Master key = `SM_MASTER_KEY` env (urlsafe-base64 Fernet key) when set, else generated at `state/credentials.key` (chmod 0600, git-ignored via `state/`). Losing the key means re-entering credentials — by design (no recoverable plaintext anywhere) |
+| Key outside the DB | Master key = `LZ_MASTER_KEY` env (urlsafe-base64 Fernet key) when set, else generated at `state/credentials.key` (chmod 0600, git-ignored via `state/`). Losing the key means re-entering credentials — by design (no recoverable plaintext anywhere) |
 | No network on save | Storing/rotating a credential performs zero network activity — saving is always separate from connecting (spec §16) |
 | Explicit import only | `.env` → DB conversion is the one-shot `credentials import`; it never silently overwrites an existing stored credential |
 | `redacted()` masking | Human-safe copy: any key containing `token`/`secret`/`password` renders as `<first 4 chars>…(<length> chars)`; values of **≤ 4 chars are fully hidden** (`***`) |
@@ -30,7 +30,7 @@ store — never in code, never in the database as plaintext.**
 
 | Scenario | What the attacker gets | Why |
 |---|---|---|
-| **DB file stolen/copied** (`state/slaughter.db`, backups, WAL sidecars) | Fernet **ciphertext only** — no usable tokens | The key never lives in the database; without `SM_MASTER_KEY`/`credentials.key` the rows are undecryptable blobs |
+| **DB file stolen/copied** (`state/libzent.db`, backups, WAL sidecars) | Fernet **ciphertext only** — no usable tokens | The key never lives in the database; without `LZ_MASTER_KEY`/`credentials.key` the rows are undecryptable blobs |
 | **Running process compromised** (memory read, crash dumps, ptrace, malicious plugin) | **Plaintext credentials may exist in memory** | Decryption happens at resolve time and is cached for runtime use (spec §14). Encryption-at-rest does NOT protect a running process — a malicious plugin with process memory access is out of scope by design |
 | **Dashboard compromised** | Severe by design — it manages accounts | Credential routes are management APIs: they REQUIRE `DASHBOARD_TOKEN` auth (like every other mutating route) and the bind stays `127.0.0.1` by default. Status/list routes return words (`db`/`env`/`missing`), never values. Never expose the dashboard beyond loopback without the token |
 | **Key + DB both stolen** | All stored credentials | The key is the crown jewel: `0600` key file or env var, never backed up next to the DB, never committed |
@@ -104,7 +104,7 @@ and the `REMOTE_CONTROL` env now gates that simulator behavior only
 | Artefact | Protection |
 |---|---|
 | Database file | Created with mode `0600` (best-effort) after connect, parent dirs auto-created; WAL journal mode |
-| `state/credentials.key` | Generated with mode `0600`, outside the DB, git-ignored via `state/`; holds the Fernet master key when `SM_MASTER_KEY` is unset |
+| `state/credentials.key` | Generated with mode `0600`, outside the DB, git-ignored via `state/`; holds the Fernet master key when `LZ_MASTER_KEY` is unset |
 | `.env` | Not enforced by code — git-ignored (`.gitignore`: `.env`, `.env.*`, `!​.env.example`, `accounts/`, `*.token`, `*_token.txt`) and the README instructs `chmod 600 .env` |
 | Logs/audit | Message *content* is stored in `audit_logs.content` (needed for the trail) — treat the DB as sensitive; it lives under git-ignored `state/` |
 
@@ -161,7 +161,7 @@ Related: [CONFIGURATION.md](CONFIGURATION.md) (every knob),
   nor live key material.
 * **No-auth dashboard** refuses nothing but warns; credential routes
   hard-gate (CREDENTIAL_GATED_ROUTES).
-* **`--debug` mode** (`main.py --debug`): slaughtermudae tree at DEBUG,
+* **`--debug` mode** (`main.py --debug`): libzent tree at DEBUG,
   discord library at INFO (gateway reconnect/close-code lines), DB
-  worker telemetry live (`SM_DB_TELEMETRY=1`), scheduler pressure on
+  worker telemetry live (`LZ_DB_TELEMETRY=1`), scheduler pressure on
   the Overview.

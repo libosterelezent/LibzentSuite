@@ -183,7 +183,7 @@ class SettingsManager:
         global_layer: Optional[Mapping[str, Mapping[str, Any]]] = None,
     ) -> None:
         self._bus = bus
-        self._logger = logger or logging.getLogger("slaughtermudae.settings")
+        self._logger = logger or logging.getLogger("libzent.settings")
         self._plugin_repo = plugin_repo            # database PluginRepository
         self._account_repo = account_settings_repo  # database AccountSettingsRepository
         #: plugin name -> {key: raw value}      (config file layer)

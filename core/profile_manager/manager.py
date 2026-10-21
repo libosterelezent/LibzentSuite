@@ -50,7 +50,7 @@ class ProfileManager:
         """
         self._profiles = profiles_repo
         self._accounts = accounts_repo
-        self._logger = (logger or logging.getLogger("slaughtermudae.profiles"))
+        self._logger = (logger or logging.getLogger("libzent.profiles"))
         #: name -> ProfileRecord (cache; refresh via load()/set_profile)
         self._profile_cache: Dict[str, Any] = {}
         #: account -> sorted profile names (cache; refresh via load()/assign)

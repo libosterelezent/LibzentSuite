@@ -81,8 +81,8 @@ class TombstoneChurnTests(unittest.IsolatedAsyncioTestCase):
             await h.manager.add_account(name)
             # exactly what PluginManager._context creates per activation
             for plugin in ("roll", "soulcopy"):
-                logging.getLogger(f"slaughtermudae.{name}.{plugin}")
-            logging.getLogger(f"slaughtermudae.adapter.{name}")
+                logging.getLogger(f"libzent.{name}.{plugin}")
+            logging.getLogger(f"libzent.adapter.{name}")
             await h.manager._credential_service.store(name, "tok")
             await h.manager.start(name)
             await h.collector.wait_for(AccountConnected, 1)
@@ -95,7 +95,7 @@ class TombstoneChurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(after, before + 2,
                              f"loggerDict grew {before} -> {after}")
         residue = [k for k in logging.Logger.manager.loggerDict
-                   if k.startswith("slaughtermudae.churn")]
+                   if k.startswith("libzent.churn")]
         self.assertEqual(residue, [])
 
     async def test_live_account_loggers_survive_others_pruning(self) -> None:
@@ -105,12 +105,12 @@ class TombstoneChurnTests(unittest.IsolatedAsyncioTestCase):
             await h.manager.add_account(name)
             await h.manager._credential_service.store(name, "tok")
             await h.manager.start(name)
-        logging.getLogger(f"slaughtermudae.alpha.roll").info("alive")
+        logging.getLogger(f"libzent.alpha.roll").info("alive")
         await h.manager.stop("beta")
         await h.manager.remove_account("beta")
         # alpha's logger still works and is still registered
-        logger = logging.getLogger(f"slaughtermudae.alpha.roll")
-        self.assertIn(f"slaughtermudae.alpha.roll",
+        logger = logging.getLogger(f"libzent.alpha.roll")
+        self.assertIn(f"libzent.alpha.roll",
                       logging.Logger.manager.loggerDict)
         logger.info("still alive after beta removal")
         await h.manager.stop_all()

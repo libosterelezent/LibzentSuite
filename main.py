@@ -1,4 +1,4 @@
-"""SlaughterMudae entrypoint.
+"""LibzentSuite entrypoint.
 
 Usage:
   python main.py                        interactive REPL (live accounts from config/)
@@ -56,16 +56,16 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
         # Logs page filters by severity client-side), the discord library's
         # gateway lines surface at INFO (reconnect/close-code visibility —
         # heartbeats would drown everything at DEBUG), and the DB worker
-        # telemetry runs live (also available via SM_DB_TELEMETRY=1 alone).
-        logging.getLogger("slaughtermudae").setLevel(logging.DEBUG)
+        # telemetry runs live (also available via LZ_DB_TELEMETRY=1 alone).
+        logging.getLogger("libzent").setLevel(logging.DEBUG)
         logging.getLogger("discord").setLevel(logging.INFO)
-        os.environ.setdefault("SM_DB_TELEMETRY", "1")
+        os.environ.setdefault("LZ_DB_TELEMETRY", "1")
         # the TELEMETRY singleton read the env var at IMPORT time (before
         # this point), so setting the variable alone enabled nothing
         from database.telemetry import TELEMETRY
         TELEMETRY.enabled = True
-        logging.getLogger("slaughtermudae").info(
-            "DEBUG MODE: slaughtermudae tree at DEBUG, discord at INFO, "
+        logging.getLogger("libzent").info(
+            "DEBUG MODE: libzent tree at DEBUG, discord at INFO, "
             "DB worker telemetry enabled")
     try:
         framework = await build(
@@ -219,7 +219,7 @@ def main() -> int:
     dashboard / headless). Returns a process exit code (130 on Ctrl-C).
     """
     parser = argparse.ArgumentParser(
-        prog="slaughtermudae", description="SlaughterMudae automation framework"
+        prog="libzent", description="LibzentSuite automation framework"
     )
     parser.add_argument("--sim", metavar="NAME", const="", default=None, nargs="?",
                         help="run a simulation scenario (no network); omit NAME to list")
@@ -245,12 +245,12 @@ def main() -> int:
                              "lines (reconnect/close-code visibility), DB "
                              "worker telemetry, scheduler pressure in "
                              "status")
-    parser.add_argument("--db", default="state/slaughter.db", help="sqlite persistence file")
+    parser.add_argument("--db", default="state/libzent.db", help="sqlite persistence file")
     args, extra = parser.parse_known_args()
 
     if args.sim is not None or args.sim_list:
         if (args.start_all or args.dashboard or args.headless
-                or extra or args.db != "state/slaughter.db"):
+                or extra or args.db != "state/libzent.db"):
             print("error: --sim/--sim-list cannot be combined with live-stack "
                   "flags (--start-all/--dashboard/--headless/--db or a command)",
                   file=sys.stderr)

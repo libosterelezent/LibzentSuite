@@ -345,7 +345,7 @@ class TestCredentialGateNoToken(_ServerTestCase):
     async def test_spa_served_unauthenticated(self) -> None:
         status, body = await asyncio.to_thread(http_get, self.url("/"), None)
         self.assertEqual(status, 200)
-        self.assertIn("SlaughterMudae", body)
+        self.assertIn("LibzentSuite", body)
 
     async def test_normal_routes_still_open(self) -> None:
         status, body = await asyncio.to_thread(

@@ -465,7 +465,7 @@ none).
 > `core/task_scheduler/scheduler.py`. Verified at commit `487dc53`.
 
 **DbTelemetry** — boundary DB worker timing (default OFF, zero overhead;
-benchmark or `SM_DB_TELEMETRY=1` enable it): TOTAL_DB_LATENCY,
+benchmark or `LZ_DB_TELEMETRY=1` enable it): TOTAL_DB_LATENCY,
 COMMIT_TIME, TRANSACTION_TIME histograms from the connection-layer seams
 + worker-thread CPU via `/proc/self/task/<tid>/stat`. Honest about the
 seam's limits: per-statement in-transaction timings and the queue-wait

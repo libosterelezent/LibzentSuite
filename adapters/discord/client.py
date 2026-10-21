@@ -48,7 +48,7 @@ from core.errors import (
 )
 from core.plugin_manager.commands import COMMAND_HUB
 
-LOG = logging.getLogger("slaughtermudae.adapter")
+LOG = logging.getLogger("libzent.adapter")
 
 #: how long connect() waits for READY before failing (the library's own
 #: connect loop retries forever — a black-holed gateway must not hang boot)
@@ -1745,7 +1745,7 @@ class RealClientFactory:
             self._identify_gate.expected = len(self._gate_accounts)
         # K13 (S9-C1): a per-account child logger keeps adapter lines
         # (connected/terminated/close-failed) attributable — the bridge
-        # maps slaughtermudae.adapter.<name> to source "adapter:<name>".
+        # maps libzent.adapter.<name> to source "adapter:<name>".
         logger = self._logger.getChild(name) if name else self._logger
         # per-account access configuration (admin panel; defaults when
         # no manager is wired: mention mode + legacy env owner ids)

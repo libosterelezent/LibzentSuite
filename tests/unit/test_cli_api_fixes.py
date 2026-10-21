@@ -196,7 +196,7 @@ class TestStdlibBridgeTraceback(unittest.TestCase):
             raise ValueError("kaboom")
         except ValueError:
             record = logging.LogRecord(
-                "slaughtermudae.core", logging.ERROR, "f", 1,
+                "libzent.core", logging.ERROR, "f", 1,
                 "it broke", None, sys.exc_info())
         bridge.emit(record)
         message = service.tail(1)[0]["message"]
@@ -208,7 +208,7 @@ class TestStdlibBridgeTraceback(unittest.TestCase):
         service = LogService()
         bridge = StdlibBridge(service)
         record = logging.LogRecord(
-            "slaughtermudae.core", logging.INFO, "f", 1, "fine", None, None)
+            "libzent.core", logging.INFO, "f", 1, "fine", None, None)
         bridge.emit(record)
         self.assertEqual(service.tail(1)[0]["message"], "fine")
 

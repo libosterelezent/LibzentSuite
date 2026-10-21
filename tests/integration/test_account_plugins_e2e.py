@@ -100,7 +100,7 @@ class AccountPluginsE2EBase(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="sm-plugins-e2e-")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.db_path = self.root / "state" / "slaughter.db"
+        self.db_path = self.root / "state" / "libzent.db"
 
     async def boot(self) -> Tuple[Any, List[Tuple[str, Optional[Set[str]]]]]:
         """``await build(...)`` + an attach spy on the PluginManager.

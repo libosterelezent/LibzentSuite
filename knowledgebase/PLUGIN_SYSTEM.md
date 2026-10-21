@@ -148,7 +148,7 @@ For each **enabled** runtime (`_activate_one`):
 1. Resolve settings again (`SettingsManager.resolve(plugin, schema, account=account)`); failure →
    disable + record error + return.
 2. Build a `PluginContext` (account, plugin, the live settings dict, the per-plugin services
-   facade, logger `slaughtermudae.<account>.<plugin>`).
+   facade, logger `libzent.<account>.<plugin>`).
 3. `on_load(ctx)` — once ever per attach cycle (`loaded` flag), then `on_enable(ctx)`.
 4. `runtime.active = True`; publish `PluginLoaded(account=..., plugin=...)` on the bus.
 
@@ -476,7 +476,7 @@ PluginContext (one per (account, plugin), built per hook/dispatch)
 ├── plugin: str
 ├── settings: Dict[str, Any]        # LIVE resolved view (mutated in place by set_setting)
 ├── services: PluginServices        # per-(account, plugin) facade — the ONLY I/O surface
-└── logger: logging.Logger          # slaughtermudae.<account>.<plugin>
+└── logger: logging.Logger          # libzent.<account>.<plugin>
 ```
 
 Everything plugins may depend on is specified in [PLUGIN_API.md](PLUGIN_API.md) (stability tiers:

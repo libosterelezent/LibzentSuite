@@ -35,7 +35,7 @@ Account (core.account_manager.manager.Account)
 ### 1.3 Credential storage (the `credentials` table)
 
 Per-account tokens are stored **encrypted at rest** (Fernet ciphertext;
-key outside the DB — `SM_MASTER_KEY` env or `state/credentials.key`
+key outside the DB — `LZ_MASTER_KEY` env or `state/credentials.key`
 chmod 0600) by `core.credential_service.CredentialService`. Resolution
 precedence on start (spec §17):
 

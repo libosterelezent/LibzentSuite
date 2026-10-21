@@ -48,7 +48,7 @@ from .context import ActionContext, ActionResult, CheckContext
 from .errors import (AccountContextError, ComponentDisabledError,
                    ResultValidationError, TreeValidationError, UIError)
 
-LOG = logging.getLogger("slaughtermudae.dashboard_ui.registry")
+LOG = logging.getLogger("libzent.dashboard_ui.registry")
 
 #: per-list cap on data-provider results (bounded payloads crossing the wire)
 MAX_DATA_ITEMS = 500

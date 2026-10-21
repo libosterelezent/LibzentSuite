@@ -351,8 +351,8 @@ class AdapterIsolationTests(unittest.IsolatedAsyncioTestCase):
         alpha = factory("alpha", "tok-a")
         beta = factory("beta", "tok-b")
         self.assertIs(alpha._identify_gate, beta._identify_gate)
-        self.assertEqual(alpha._logger.name, "slaughtermudae.adapter.alpha")
-        self.assertEqual(beta._logger.name, "slaughtermudae.adapter.beta")
+        self.assertEqual(alpha._logger.name, "libzent.adapter.alpha")
+        self.assertEqual(beta._logger.name, "libzent.adapter.beta")
 
     async def test_identify_gate_spaces_concurrent_identifies(self) -> None:
         gate = IdentifyGate(interval=0.08)

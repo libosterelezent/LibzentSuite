@@ -27,7 +27,7 @@ from pathlib import Path
 from .connection import DatabaseConnection, DatabaseError  # noqa: F401 re-export
 from .schema import MIGRATIONS, latest_version
 
-LOG = logging.getLogger("slaughtermudae.database")
+LOG = logging.getLogger("libzent.database")
 
 from .repositories.account_plugins import AccountPluginsRepository
 from .repositories.accounts import AccountsRepository
@@ -48,7 +48,7 @@ from .repositories.tasks import TaskHistoryRepository
 class Database:
     """Async persistence service owning ONE aiosqlite connection."""
 
-    def __init__(self, path: str | Path = "state/slaughter.db", *,
+    def __init__(self, path: str | Path = "state/libzent.db", *,
                  audit_keep: int = 10_000, log_keep: int = 10_000) -> None:
         self._path = str(path)
         self._audit_keep = int(audit_keep)

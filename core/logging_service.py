@@ -76,7 +76,7 @@ _STDERR_ATEXIT_ARMED = False
 
 def _start_stderr_pipeline() -> None:
     """Create + start the one listener thread and attach its queue handler
-    to the ``slaughtermudae`` logger (idempotent; lock-guarded)."""
+    to the ``libzent`` logger (idempotent; lock-guarded)."""
     global _STDERR_LISTENER, _STDERR_QUEUE_HANDLER, _STDERR_ATEXIT_ARMED
     with _STDERR_PIPELINE_LOCK:
         if _STDERR_QUEUE_HANDLER is not None:
@@ -147,7 +147,7 @@ def stop_stderr_pipeline() -> None:
         # cycles left the flag latched and the second arm was a no-op)
         _STDERR_CONFIGURED = False
     if qhandler is not None:
-        logging.getLogger("slaughtermudae").removeHandler(qhandler)
+        logging.getLogger("libzent").removeHandler(qhandler)
     if listener is not None:
         listener.stop()  # flushes what already queued, joins the thread
 
@@ -199,7 +199,7 @@ def configure_stderr(level: int = logging.INFO) -> None:
     global _STDERR_CONFIGURED
     if _STDERR_CONFIGURED:
         return
-    root = logging.getLogger("slaughtermudae")
+    root = logging.getLogger("libzent")
     root.setLevel(level)
     _start_stderr_pipeline()
     root.addHandler(_STDERR_QUEUE_HANDLER)
@@ -352,7 +352,7 @@ class LogService:
         # mirror somehow reaches a bridge, it is skipped (the original loop
         # echoed every line ~recursion-limit times into ring AND DB).
         if not getattr(self._ingest, "active", False):
-            logging.getLogger(f"slaughtermudae.{source}").log(
+            logging.getLogger(f"libzent.{source}").log(
                 _LEVEL_BY_SEVERITY[severity], "%s", entry.message,
                 extra={"_sm_from_service": True},
             )
@@ -457,7 +457,7 @@ class ServiceLogger:
     def __init__(self, service: "LogService", source: str) -> None:
         self._service = service
         self._source = source
-        self.name = f"slaughtermudae.{source}"
+        self.name = f"libzent.{source}"
 
     def _record(self, severity: str, msg: Any, args: tuple,
                 with_location: bool = False, **ctx: Any) -> None:
@@ -538,7 +538,7 @@ class StdlibBridge(logging.Handler):
     """Bridges stdlib logger records into the structured LogService.
 
     Plugin contexts (and any third-party code) log through ordinary stdlib
-    loggers under the ``slaughtermudae.*`` tree; this handler forwards those
+    loggers under the ``libzent.*`` tree; this handler forwards those
     records into LogService so the dashboard Logs page sees EVERYTHING from
     one place (spec §10) without changing plugin call sites.
     """
@@ -556,8 +556,8 @@ class StdlibBridge(logging.Handler):
                 # bounded only by the recursion limit)
                 return
             name = record.name or "stdlib"
-            if name.startswith("slaughtermudae"):
-                source = name[len("slaughtermudae"):].lstrip(".") or "core"
+            if name.startswith("libzent"):
+                source = name[len("libzent"):].lstrip(".") or "core"
                 source = source.replace(".", ":")
             else:
                 source = f"ext:{name}"
@@ -594,7 +594,7 @@ class StdlibBridge(logging.Handler):
 
 
 def attach_stdlib_bridge(
-    service: "LogService", logger_name: str = "slaughtermudae"
+    service: "LogService", logger_name: str = "libzent"
 ) -> StdlibBridge:
     """Attach (idempotently) the stdlib->structured bridge; returns the handler.
 
@@ -622,7 +622,7 @@ def attach_stdlib_bridge(
     return bridge
 
 
-def detach_stdlib_bridge(logger_name: str = "slaughtermudae") -> int:
+def detach_stdlib_bridge(logger_name: str = "libzent") -> int:
     """Remove every StdlibBridge from the tree (shutdown/teardown).
 
     Returns how many were removed. After this, raw stdlib records under the

@@ -24,7 +24,7 @@ from core.rate_limit_manager import RateLimitManager
 
 
 class _TmpCase(unittest.IsolatedAsyncioTestCase):
-    """Temp dir + a guaranteed-absent SM_MASTER_KEY (repo style)."""
+    """Temp dir + a guaranteed-absent LZ_MASTER_KEY (repo style)."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="sm-fixes-")
@@ -32,7 +32,7 @@ class _TmpCase(unittest.IsolatedAsyncioTestCase):
         self.dir = Path(self.tmp.name)
         self._env = mock.patch.dict(os.environ, {}, clear=False)
         self._env.start()
-        os.environ.pop("SM_MASTER_KEY", None)
+        os.environ.pop("LZ_MASTER_KEY", None)
         self.addCleanup(self._env.stop)
 
 
@@ -328,7 +328,7 @@ class StderrClaimWiringTests(unittest.IsolatedAsyncioTestCase):
         self.users = m._STDERR_USERS
         self.listener = m._STDERR_LISTENER
         self.configured = m._STDERR_CONFIGURED
-        lg = logging.getLogger("slaughtermudae")
+        lg = logging.getLogger("libzent")
         self.handlers = list(lg.handlers)
         self.propagate = lg.propagate
 
@@ -338,7 +338,7 @@ class StderrClaimWiringTests(unittest.IsolatedAsyncioTestCase):
         m._STDERR_USERS = self.users
         m._STDERR_LISTENER = self.listener
         m._STDERR_CONFIGURED = self.configured
-        lg = logging.getLogger("slaughtermudae")
+        lg = logging.getLogger("libzent")
         lg.handlers[:] = self.handlers
         lg.propagate = self.propagate
 

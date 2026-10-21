@@ -1584,7 +1584,7 @@ class PluginManager:
             plugin=plugin,
             services=services,
             logger=logging.getLogger(
-                f"slaughtermudae.{account}.{plugin}.command"),
+                f"libzent.{account}.{plugin}.command"),
             channel_id=int(channel_id or 0),
             guild_id=guild_id,
             settings_api=self._settings_api(account, plugin),
@@ -1883,7 +1883,7 @@ class PluginManager:
             plugin=runtime.name,
             settings=runtime.settings,
             services=services,
-            logger=logging.getLogger(f"slaughtermudae.{account}.{runtime.name}"),
+            logger=logging.getLogger(f"libzent.{account}.{runtime.name}"),
             explicit_settings=explicit,
         )
 

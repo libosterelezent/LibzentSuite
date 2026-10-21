@@ -4,7 +4,7 @@ Narrow interface (:class:`ParserSettingsStorage` protocol) + the
 simplest reliable implementation this framework needs today:
 :class:`JSONFileSettingsStorage` — one JSON document under the
 gitignored runtime ``state/`` directory (the same convention as
-``state/slaughter.db``; runtime state never belongs in git).
+``state/libzent.db``; runtime state never belongs in git).
 
 Durability properties:
   * atomic writes — serialize to a temp file in the same directory,

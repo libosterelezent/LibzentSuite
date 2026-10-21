@@ -95,7 +95,7 @@ does zero extra work and never warns (simulator/headless boots).
   - Stop the stderr listener thread and detach its queue handler.
 - `def configure_stderr(level: int=logging.INFO) -> None`
   - Attach one human-readable stderr handler to the logger tree (idempotent).
-- `def attach_stdlib_bridge(service: 'LogService', logger_name: str='slaughtermudae') -> StdlibBridge`
+- `def attach_stdlib_bridge(service: 'LogService', logger_name: str='libzent') -> StdlibBridge`
   - Attach (idempotently) the stdlib->structured bridge; returns the handler.
-- `def detach_stdlib_bridge(logger_name: str='slaughtermudae') -> int`
+- `def detach_stdlib_bridge(logger_name: str='libzent') -> int`
   - Remove every StdlibBridge from the tree (shutdown/teardown).

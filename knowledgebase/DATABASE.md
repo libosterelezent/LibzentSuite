@@ -146,7 +146,7 @@ that migration on next boot; harmless because every statement is
   account/profile only).
 - **Migration 3 — "secure credentials + persistent cooldowns"**:
   `credentials` (Fernet ciphertext ONLY; key lives OUTSIDE the database —
-  `state/credentials.key` 0600 or `SM_MASTER_KEY` env: a stolen DB never
+  `state/credentials.key` 0600 or `LZ_MASTER_KEY` env: a stolen DB never
   yields usable tokens) and `cooldowns` (ABSOLUTE epoch expiry so a
   restart restores the REMAINING time, never restarts the window).
 - **Migration 4 — "per-account trail indexes"**: account-keyed indexes on
@@ -200,7 +200,7 @@ that migration on next boot; harmless because every statement is
 
 Token VALUES never enter the database as plaintext. Two supported
 locations: **encrypted at rest** in `credentials` (Fernet ciphertext; key
-outside the DB — `state/credentials.key` chmod 0600 or `SM_MASTER_KEY`
+outside the DB — `state/credentials.key` chmod 0600 or `LZ_MASTER_KEY`
 env), or the **legacy `.env`** file (`accounts.token_ref` keeps the env
 KEY for back-compat). Resolution precedence: DB credential → `.env`
 fallback → `MISSING_CREDENTIAL`. See

@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..errors import AccountError, FlowBlocked, TargetGone
 
-LOG = logging.getLogger("slaughtermudae.cache")
+LOG = logging.getLogger("libzent.cache")
 
 #: stale-start audit: bound on ONE client.open_dm inside DM resolution —
 #: the per-account DM lock is held across it, so an unbounded/hung open

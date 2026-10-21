@@ -25,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="benchmark",
         description="SlaughterMudade framework benchmark (isolated, "
                     "fakes/simulation only — never real Discord, never "
-                    "state/slaughter.db)")
+                    "state/libzent.db)")
     parser.add_argument("--scenario", action="append", default=None,
                         help="scenario name (repeatable; default: all)")
     parser.add_argument("--list", action="store_true",

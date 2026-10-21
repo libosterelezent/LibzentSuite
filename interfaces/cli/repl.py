@@ -32,7 +32,7 @@ from .commands import QuitRequested, UsageError, help_text, run_command
 __all__ = ["Repl", "run_once", "render_error", "PROMPT", "BANNER"]
 
 PROMPT = "sm> "
-BANNER = "SlaughterMudae control terminal — 'help' for commands, 'quit' to exit."
+BANNER = "LibzentSuite control terminal — 'help' for commands, 'quit' to exit."
 
 #: Domain families already carry a human-readable message: rendered bare.
 #: Everything else keeps its exception type name so bugs stay identifiable

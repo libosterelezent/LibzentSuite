@@ -236,7 +236,7 @@ class TestPluginAssignmentGating(unittest.IsolatedAsyncioTestCase):
 class TestPersistenceRoundtrip(unittest.IsolatedAsyncioTestCase):
     async def test_state_survives_reboot(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sm-state-") as tmp:
-            db_path = str(Path(tmp) / "slaughter.db")
+            db_path = str(Path(tmp) / "libzent.db")
             stack = await Stack(db_path=db_path).boot()
             api = stack.framework.api
             # capability: DIRECT plugin assignment (the old "profiles" key
@@ -291,7 +291,7 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
 
     async def test_dm_resolved_once_across_restarts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sm-dm-") as tmp:
-            db_path = str(Path(tmp) / "slaughter.db")
+            db_path = str(Path(tmp) / "libzent.db")
             stack = await Stack(db_path=db_path).boot()
             api = stack.framework.api
             await api.accounts_add({"name": "alpha"})

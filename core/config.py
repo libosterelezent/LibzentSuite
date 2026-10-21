@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
 
-LOG = logging.getLogger("slaughtermudae.config")
+LOG = logging.getLogger("libzent.config")
 
 #: actions a rate policy can pace (spec §5) — used to warn about typo keys
 #: in flat-mode policy files (unknown keys would otherwise silently become

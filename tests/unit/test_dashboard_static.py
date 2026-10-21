@@ -945,7 +945,7 @@ class TestStartupEndpointsLive(unittest.IsolatedAsyncioTestCase):
     async def test_index_served(self) -> None:
         status, body = await self._get("/", as_json=False)
         self.assertEqual(status, 200)
-        self.assertIn("SlaughterMudae", body)
+        self.assertIn("LibzentSuite", body)
 
     async def test_static_assets_served_without_auth(self) -> None:
         """The split frontend's CSS/JS must be reachable BEFORE the token

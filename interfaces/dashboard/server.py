@@ -90,7 +90,7 @@ from core.event_bus import (
 
 from . import ws as wsproto
 
-LOG = logging.getLogger("slaughtermudae.dashboard")
+LOG = logging.getLogger("libzent.dashboard")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 BROADCAST_INTERVAL = 1.0
@@ -1699,7 +1699,7 @@ def _make_handler(server: "DashboardServer") -> type:
         rbufsize = 0
         # AUDIT: the default banner leaks the stdlib/Python version on every
         # response (incl. stdlib-generated error pages).
-        server_version = "STMudae"
+        server_version = "LibzentSuite"
         sys_version = ""
 
         def end_headers(self) -> None:  # noqa: N802

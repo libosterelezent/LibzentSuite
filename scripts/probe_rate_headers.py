@@ -15,13 +15,13 @@ What it reports per route:
     limit, remaining, reset_at, lock state — what the library paces by
 
 Usage:
-  SM_PROBE_TOKEN=<token> python3 scripts/probe_rate_headers.py
+  LZ_PROBE_TOKEN=<token> python3 scripts/probe_rate_headers.py
   python3 scripts/probe_rate_headers.py --token <token>
   python3 scripts/probe_rate_headers.py --token <token> --burst 5
   python3 scripts/probe_rate_headers.py --token <token> --json out.json
   python3 scripts/probe_rate_headers.py --token <token> --channel <id>
 
-The token is read from the SM_PROBE_TOKEN environment variable when set
+The token is read from the LZ_PROBE_TOKEN environment variable when set
 (preferred — keeps it out of process tables); --token is the fallback.
 The token is used ONLY for the Authorization header; it is never logged.
 All probe requests are read-only GETs (nothing sent/deleted/modified).
@@ -317,7 +317,7 @@ def main() -> int:
                     "(uses discord.py-self's own HTTP client)")
     parser.add_argument("--token", default=None,
                         help="the Discord account token (fallback when "
-                             "SM_PROBE_TOKEN is not set; the environment "
+                             "LZ_PROBE_TOKEN is not set; the environment "
                              "variable is preferred so the token never "
                              "appears in process tables)")
     parser.add_argument("--route", default="all",
@@ -333,9 +333,9 @@ def main() -> int:
     parser.add_argument("--json", default=None,
                         help="write a JSON report to this path")
     args = parser.parse_args()
-    args.token = args.token or os.environ.get("SM_PROBE_TOKEN")
+    args.token = args.token or os.environ.get("LZ_PROBE_TOKEN")
     if not args.token:
-        parser.error("a token is required: set SM_PROBE_TOKEN or pass "
+        parser.error("a token is required: set LZ_PROBE_TOKEN or pass "
                      "--token")
     return asyncio.run(run(args))
 

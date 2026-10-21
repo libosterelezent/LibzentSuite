@@ -152,7 +152,7 @@ class TestSends(unittest.IsolatedAsyncioTestCase):
         # DM path: a deleted DM channel is equally gone (and the deliberate
         # resurrection divergence is logged loudly by the world)
         dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
-        with self.assertLogs("slaughtermudae.simulator", level="WARNING"):
+        with self.assertLogs("libzent.simulator", level="WARNING"):
             world.channel_gone(dm)
         with self.assertRaises(TargetGone):
             await client.send_dm(SYNTHETIC_MUDAE_ID, "ghost-dm")
@@ -162,7 +162,7 @@ class TestSends(unittest.IsolatedAsyncioTestCase):
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
         dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
         world.server_limit_next(channel_id=dm, retry_after=0.4)
-        with self.assertLogs("slaughtermudae.simulator", level="WARNING"):
+        with self.assertLogs("libzent.simulator", level="WARNING"):
             world.channel_gone(dm)
         with self.assertRaises(TargetGone):
             await client.send_dm(SYNTHETIC_MUDAE_ID, "ghost-dm")

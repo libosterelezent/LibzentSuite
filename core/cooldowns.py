@@ -20,7 +20,7 @@ import math
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-LOG = logging.getLogger("slaughtermudae.cooldowns")
+LOG = logging.getLogger("libzent.cooldowns")
 
 
 class CooldownService:

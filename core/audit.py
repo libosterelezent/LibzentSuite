@@ -37,7 +37,7 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
 
 from ._persist_queue import PersistQueue
 
-LOG = logging.getLogger("slaughtermudae.audit")
+LOG = logging.getLogger("libzent.audit")
 
 #: FINAL-PHASE (F8 gap 3): per-entry content cap (manager paths truncate
 #: to 80 chars; the scheduler's task content was landing untruncated —

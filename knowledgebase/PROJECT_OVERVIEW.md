@@ -1,7 +1,7 @@
-# SlaughterMudae — Project Overview
+# LibzentSuite — Project Overview
 
 This file is the entry point of the knowledgebase: it explains what the
-SlaughterMudae project *is*, the surfaces you manage it through, the safety
+LibzentSuite project *is*, the surfaces you manage it through, the safety
 philosophy that shapes every design decision, the verified quickstart
 commands, and the repository layout. Deeper material lives in
 [ARCHITECTURE.md](ARCHITECTURE.md) (component topology and the API boundary
@@ -13,7 +13,7 @@ commit `35176a82` (see `knowledgebase/read_only/SYMBOL_INDEX.md`).
 
 ## What the project is
 
-SlaughterMudae is a **multi-account Discord automation framework** for the
+LibzentSuite is a **multi-account Discord automation framework** for the
 Mudae collector bot, written in Python ≥ 3.10 with a standard-library-only
 core (`requirements.txt`: zero hard dependencies). Its defining idea, stated
 in `README.md` and `INTEGRATION.md` and enforced throughout the source, is a
@@ -101,7 +101,7 @@ without authorizing it. Concretely, in source:
 `main.main()` defines exactly these flags: `--sim [NAME]`, `--sim-list`,
 `--config DIR` (default `config`), `--plugins DIR` (default `plugins`),
 `--env FILE` (default `.env`), `--start-all`, `--dashboard`, `--headless`,
-`--port N` (default `8070`), `--db FILE` (default `state/slaughter.db`);
+`--port N` (default `8070`), `--db FILE` (default `state/libzent.db`);
 unknown trailing arguments become a one-shot CLI command line. Note: the
 module docstring also advertises a reserved `--tui` flag that argparse does
 **not** define (see the discrepancy list in the session report).
@@ -132,7 +132,7 @@ reference (`database.models.AccountRecord.token_ref`).
 ## Repository layout (verified with `ls`)
 
 ```
-SlaughterMudae/
+LibzentSuite/
 ├── main.py                     entrypoint (argparse + asyncio.run + shutdown)
 ├── core/                       framework managers + shared contracts
 │   ├── api.py                  ControlAPI — the ONE facade both interfaces call

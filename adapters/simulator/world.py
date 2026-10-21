@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from core.errors import ServerRateLimit
 
-LOG = logging.getLogger("slaughtermudae.simulator")
+LOG = logging.getLogger("libzent.simulator")
 
 # --- synthetic fixture ids (NOT real Discord ids; real ones live in .env) ---
 SYNTHETIC_OWNER_ID = 1001

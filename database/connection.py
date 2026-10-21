@@ -53,7 +53,7 @@ import aiosqlite
 
 from core.errors import DatabaseError  # ONE class for the whole framework
 
-LOG = logging.getLogger("slaughtermudae.database")
+LOG = logging.getLogger("libzent.database")
 
 #: pragmas applied once per connection (see module docstring for rationale)
 PRAGMAS = (

@@ -88,7 +88,7 @@ if TYPE_CHECKING:  # duck-typed at runtime — no manager imports here
     from .settings_manager import SettingsManager
     from .task_scheduler import TaskScheduler
 
-LOG = logging.getLogger("slaughtermudae.api")
+LOG = logging.getLogger("libzent.api")
 
 #: back-compat alias for the kv key persisting the send-lane configuration
 #: (the canonical constants live in core.rate_limit_manager)

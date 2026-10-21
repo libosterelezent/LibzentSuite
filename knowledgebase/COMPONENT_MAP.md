@@ -1,4 +1,4 @@
-# SlaughterMudae — Component Map
+# LibzentSuite — Component Map
 
 This file is the per-component reference: one section per component of the
 framework, each with its purpose, the state it owns, its key public symbols

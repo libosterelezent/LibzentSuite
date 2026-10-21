@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 
 from .errors import CredentialsError
 
-LOG = logging.getLogger("slaughtermudae.access")
+LOG = logging.getLogger("libzent.access")
 
 #: kv keys (single source of truth for the row names)
 KEY_ADMINS = "access:admins"

@@ -528,7 +528,7 @@ class TestChannelGone(unittest.IsolatedAsyncioTestCase):
         resurrects DM channels; the sim deliberately does not)."""
         world = _basic_world()
         dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
-        with self.assertLogs("slaughtermudae.simulator", level="WARNING") as logs:
+        with self.assertLogs("libzent.simulator", level="WARNING") as logs:
             self.assertTrue(world.channel_gone(dm))
         self.assertTrue(
             any("deliberate sim divergence" in line for line in logs.output),
@@ -542,7 +542,7 @@ class TestChannelGone(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(dm, world.channels)
         # a guild channel deletion stays QUIET (no divergence there)
         guild = _basic_world()
-        with self.assertNoLogs("slaughtermudae.simulator"):
+        with self.assertNoLogs("libzent.simulator"):
             guild.channel_gone(SYNTHETIC_GUILD_CHANNEL)
 
 

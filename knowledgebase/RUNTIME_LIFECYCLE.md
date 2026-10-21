@@ -1,4 +1,4 @@
-# SlaughterMudae — Runtime Lifecycle
+# LibzentSuite — Runtime Lifecycle
 
 This file documents process lifecycle as implemented: the exact boot order
 of `core.bootstrap.build()` and `main.run_app` (verified line by line
@@ -11,12 +11,12 @@ state: [COMPONENT_MAP.md](COMPONENT_MAP.md); traffic flows:
 
 ## Boot order — `core.bootstrap.build()` (verified, line by line)
 
-`build(*, env_file=".env", config_dir="config", db_path="state/slaughter.db",
+`build(*, env_file=".env", config_dir="config", db_path="state/libzent.db",
 plugin_dir="plugins", client_factory=None, simulation_runner=None,
 credentials=None, database=None, quiet=False) -> Framework`:
 
 1. **`configure_stderr()`** (skipped when `quiet=True`) — one human-readable
-   stderr handler on the `slaughtermudae` logger tree, idempotent.
+   stderr handler on the `libzent` logger tree, idempotent.
 2. **`Credentials.from_file(env_file)`** — .env parsing; a missing file
    yields an EMPTY credential set (warning) — boot never dies on it.
 3. **`load_config(config_dir)`** — global settings layer, rate policies
@@ -30,7 +30,7 @@ credentials=None, database=None, quiet=False) -> Framework`:
 5. **`LogService()` + `logs.attach_db(database.logs)`** — structured logs
    now persist (best-effort; failures counted, never raised).
 6. **`attach_stdlib_bridge(logs)`** — plugin/stdlib logger records under
-   `slaughtermudae.*` are ingested into the structured service (loop-proof
+   `libzent.*` are ingested into the structured service (loop-proof
    via the `_sm_from_service` marker + `ingest_context`).
 7. **`EventBus()` + `_wire_event_logging(bus, logs)`** — lifecycle events in
    `_LOGGED_EVENTS` (Account*, Plugin*, Task terminal, RateLimitTriggered,
@@ -108,7 +108,7 @@ build(...) ──► framework = Framework
 
 Argparse surface (verified): `--sim [NAME]`, `--sim-list`, `--config`,
 `--plugins`, `--env`, `--start-all`, `--dashboard`, `--headless`, `--port`
-(default 8070), `--db` (default `state/slaughter.db`); trailing argv becomes
+(default 8070), `--db` (default `state/libzent.db`); trailing argv becomes
 a one-shot command. `--sim`/`--sim-list` short-circuit into
 `run_sim` (offline; never touches the live stack). There is **no** `--tui`
 flag despite the module docstring (discrepancy list).

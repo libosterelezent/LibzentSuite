@@ -99,7 +99,7 @@ def _forget_account_loggers(name: str) -> None:
     DB rows — migrating to structured context would orphan it), but
     stdlib never frees them, so distinct-name churn grew loggerDict
     forever (+~3 entries per account ever seen). Pruning OUR OWN
-    ``slaughtermudae.<name>*`` subtree in the removal cascade bounds
+    ``libzent.<name>*`` subtree in the removal cascade bounds
     retention to LIVE accounts — the same forget-idiom as every other
     mirror (K14/K15/F1).
 
@@ -113,10 +113,10 @@ def _forget_account_loggers(name: str) -> None:
     """
     try:
         manager = logging.Logger.manager
-        prefix = f"slaughtermudae.{name}"
+        prefix = f"libzent.{name}"
         doomed = [key for key in manager.loggerDict
                   if key == prefix or key.startswith(prefix + ".")
-                  or key == f"slaughtermudae.adapter.{name}"]
+                  or key == f"libzent.adapter.{name}"]
         for key in doomed:
             manager.loggerDict.pop(key, None)
         if doomed:
@@ -380,7 +380,7 @@ class AccountManager:
         construction).
         """
         self._bus = bus
-        self._logger = logger or logging.getLogger("slaughtermudae.accounts")
+        self._logger = logger or logging.getLogger("libzent.accounts")
         self._accounts_repo = accounts_repo
         self._plugin_manager = plugin_manager
         # RETAINED for its own bookkeeping only (profile cache cascade,

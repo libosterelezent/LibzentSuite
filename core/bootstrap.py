@@ -56,7 +56,7 @@ from .task_scheduler import TaskScheduler
 from .account_manager import AccountManager
 from .account_manager.lifecycle import LifecycleGovernor
 
-ROOT_LOGGER = logging.getLogger("slaughtermudae")
+ROOT_LOGGER = logging.getLogger("libzent")
 
 
 #: bus events worth a structured log line (MessageReceived is far too chatty)
@@ -343,7 +343,7 @@ async def build(
     *,
     env_file: str = ".env",
     config_dir: str = "config",
-    db_path: str = "state/slaughter.db",
+    db_path: str = "state/libzent.db",
     plugin_dir: str = "plugins",
     client_factory: Optional[Callable[[str, str], Any]] = None,
     simulation_runner: Any = None,
@@ -420,7 +420,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
                     simulation_runner: Any,
                     credential_key_path: Optional[Path] = None,
                     env_file: str = ".env", stderr_claimed: bool = False,
-                    db_path: str = "state/slaughter.db") -> Framework:
+                    db_path: str = "state/libzent.db") -> Framework:
     """Wire every manager over an already-connected database."""
 
     # shared services over the database (credentials encrypted at rest,
@@ -696,7 +696,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     try:
         attach_framework_ui(plugins.ui_registry, api)
     except Exception:
-        logging.getLogger("slaughtermudae.bootstrap").exception(
+        logging.getLogger("libzent.bootstrap").exception(
             "framework UI attach failed — dashboard falls back "
             "to the legacy panels")
     return Framework(

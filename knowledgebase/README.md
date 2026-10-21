@@ -1,4 +1,4 @@
-# SlaughterMudae knowledgebase
+# LibzentSuite knowledgebase
 
 Handwritten reference documentation for the framework, backed by the
 generated symbol inventory. **Source code is the source of truth** — every

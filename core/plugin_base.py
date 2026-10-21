@@ -226,7 +226,7 @@ class PluginContext:
     settings: Dict[str, Any]
     #: per-(account, plugin) services facade (sends, waits, credentials)
     services: "PluginServices"
-    #: pre-scoped logger: slaughtermudae.<account>.<plugin>
+    #: pre-scoped logger: libzent.<account>.<plugin>
     logger: logging.Logger
     #: setting keys the user set EXPLICITLY in any settings layer (None =
     #: unknown / not computed). A resolved value equal to the schema
@@ -445,7 +445,7 @@ class CommandContext:
     plugin: str
     #: per-(account, plugin) services facade (paced sends, credentials...)
     services: "PluginServices"
-    #: pre-scoped logger: slaughtermudae.<account>.<plugin>
+    #: pre-scoped logger: libzent.<account>.<plugin>
     logger: logging.Logger
     #: channel the command was invoked in
     channel_id: int = 0

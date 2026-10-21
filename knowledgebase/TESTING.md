@@ -117,8 +117,8 @@ current stance is offline-only. Live Discord behaviour (real
 
 > Verified at commit `487dc53`.
 
-* `tests/stress/` — `SM_SOAK`-gated fleet soak (3-account chaos),
-  `SM_CHAOS`-gated 5-account full chaos (auth-fail injection,
+* `tests/stress/` — `LZ_SOAK`-gated fleet soak (3-account chaos),
+  `LZ_CHAOS`-gated 5-account full chaos (auth-fail injection,
   drop-reconnect, delete+create mid-chaos), profiling-hook restoration.
 * `tests/unit/test_tombstone.py` — weakref-proven post-delete audit:
   Account/runtime/client/supervisor COLLECTED after removal, task delta
