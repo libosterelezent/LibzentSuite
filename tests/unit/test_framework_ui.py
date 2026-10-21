@@ -134,7 +134,10 @@ class StubAPI:
 
     async def simulation_run(self, name):
         self.calls.append(("simulation_run", name))
-        return {"log": "ran " + name}
+        return {"name": name, "passed": True,
+                "duration_s": 0, "failures": [],
+                "log_lines": ["ran " + name],
+                "interactions": [], "summary": "completed"}
 
     async def emergency_stop_all(self, surface="api"):
         self.calls.append(("emergency_stop_all",))
@@ -493,6 +496,9 @@ class FleetStubAPI(StubAPI):
         return list(self._groups)
 
     async def groups_get(self, group):
+        return dict(self._snap) if group == "g1" else None
+
+    async def groups_snapshot(self, group):
         return dict(self._snap) if group == "g1" else None
 
     async def groups_create(self, payload, surface="api"):
