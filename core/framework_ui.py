@@ -1056,7 +1056,7 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
     async def open_details(row, ctx):
         _fleet_state["details"] = row
         return {"open_modal": "acct-details-modal",
-                "refresh": ["ad-status", "ad-lines", "ad-plugins"]}
+                "refresh": ["ad-status", "ad-lines", "ad-plugins", "ad-pacing", "ad-presets"]}
 
     async def open_cred(row, ctx):
         _fleet_state["cred"] = row
@@ -1240,6 +1240,83 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
             out.append({"label": "Credential",
                         "value": a.get("credential") or "missing"})
             out.append({"label": "Sync group", "value": a.get("sync_group") or "independent"})
+            return out
+        return provide
+
+
+    def _details_pacing(api):
+        """Pacing metrics for the account detail view."""
+        async def provide(ctx):
+            name = _fleet_state.get("details")
+            rows = await _accts()
+            a = next((x for x in rows if x.get("name") == name), None)
+            if not a:
+                return []
+            out = [{"label": "Sync Group",
+                    "value": a.get("sync_group") or "independent"}]
+            try:
+                eff = await api.ratelimit_effective(
+                    account=name, action="message")
+                if eff:
+                    interval = eff.get("interval")
+                    if interval:
+                        out.append({"label": "Interval",
+                                    "value": f"{interval}s"})
+                    jitter = eff.get("jitter")
+                    if jitter and len(jitter) >= 2:
+                        out.append({"label": "Jitter",
+                                    "value": f"{jitter[0]}–{jitter[1]}s"})
+            except Exception:
+                pass
+            return out
+        return provide
+
+    def _details_presets(api):
+        """Per-plugin settings profiles for the account detail view."""
+        async def provide(ctx):
+            name = _fleet_state.get("details")
+            if not name:
+                return {"columns": ["Plugin", "Preset"], "rows": []}
+            rows = []
+            try:
+                states = await api.plugins_state(account=name) or []
+                for s in states:
+                    plugin = s.get("name", "?")
+                    try:
+                        profiles = await api.plugin_profiles_list(
+                            plugin=plugin) or []
+                        for pr in profiles:
+                            rows.append([
+                                plugin,
+                                pr.get("name", "?"),
+                                f"{name}|{plugin}|{pr.get('name', '?')}"
+                            ])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return {"columns": ["Plugin", "Preset"], "rows": rows}
+        return provide
+
+    def _details_stats(api):
+        """Live stat pills for the account detail hero strip."""
+        async def provide(ctx):
+            name = _fleet_state.get("details")
+            rows = await _accts()
+            a = next((x for x in rows if x.get("name") == name), None)
+            if not a:
+                return []
+            out = []
+            if a.get("latency_ms") is not None:
+                out.append({"label": "Ping",
+                            "value": f"{a['latency_ms']:.0f}ms"})
+            if a.get("uptime_s"):
+                out.append({"label": "Uptime",
+                            "value": _fmt_uptime(a["uptime_s"])})
+            out.append({"label": "Credential",
+                        "value": a.get("credential") or "missing"})
+            cds = a.get("cooldowns") or 0
+            out.append({"label": "Cooldowns", "value": str(cds)})
             return out
         return provide
 
@@ -1567,19 +1644,35 @@ def _build_fleet(ui: DashboardUIToolset, api: Any):
                                    ui.TextInput(component_id="fa-cred").set_label("Token")
                                    .set_placeholder("Discord token (optional now)"))))
      .add_modal(ui.Modal(component_id="acct-details-modal").set_title("Account")
-        .add_component(ui.Metric(component_id="ad-status").set_label("State")
-                       .set_value("—").set_data_source(_details_status(api)))
-        .add_component(ui.ListView(component_id="ad-lines")
-                       .set_data_source(_details_lines(api)))
-        .add_component(ui.Toolbar(component_id="ad-plugins-bar")
-                       .set_title("Assigned plugins"))
-        .add_component(ui.Table(component_id="ad-plugins")
-                       .set_columns(["Plugin"]).set_key_column("__key")
-                       .set_empty_text("none assigned")
-                       .set_data_source(_details_plugins_rows(api))
-                       .set_row_actions([
-                           RowAction("unassign", "✕", unassign_plugin, variant="danger",
-                                     confirm="Unassign this plugin?")])))
+         .add_component(ui.Metric(component_id="ad-status").set_label("State")
+                        .set_value("—").set_data_source(_details_status(api)))
+         .add_component(ui.ListView(component_id="ad-lines")
+                        .set_data_source(_details_stats(api)))
+         .add_component(ui.Grid(component_id="ad-detail-grid")
+             .set_columns("auto").set_min_child("280px")
+             .add_component(ui.Card(component_id="ad-abilities-card")
+                .add_component(ui.Toolbar(component_id="ad-plugins-bar")
+                               .set_title("Abilities"))
+                .add_component(ui.Table(component_id="ad-plugins")
+                               .set_columns(["Plugin"]).set_key_column("__key")
+                               .set_empty_text("none assigned")
+                               .set_data_source(_details_plugins_rows(api))
+                               .set_row_actions([
+                                   RowAction("unassign", "Unassign", unassign_plugin,
+                                             variant="danger",
+                                             confirm="Unassign this plugin?")])))
+             .add_component(ui.Card(component_id="ad-right-card")
+                .add_component(ui.Toolbar(component_id="ad-pacing-bar")
+                               .set_title("Pacing"))
+                .add_component(ui.ListView(component_id="ad-pacing")
+                               .set_data_source(_details_pacing(api)))
+                .add_component(ui.Toolbar(component_id="ad-presets-bar")
+                               .set_title("Memory"))
+                .add_component(ui.Table(component_id="ad-presets")
+                               .set_columns(["Plugin", "Preset"])
+                               .set_key_column("__key")
+                               .set_empty_text("no presets saved")
+                               .set_data_source(_details_presets(api))))))
      .add_modal(ui.Modal(component_id="acct-cred-modal").set_title("Set Credential")
         .add_component(ui.Form(component_id="acct-cred-form")
                        .set_description("Encrypted at rest; never displayed back.")
