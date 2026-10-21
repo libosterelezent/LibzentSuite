@@ -409,42 +409,42 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
                 "refresh": ["act-cds"]}
 
     (page
-     .add_section(ui.Section(component_id="act-tasks-sec")
-        .set_width("30%")
-        .add_component(ui.Toolbar(component_id="act-tasks-bar").set_title("Tasks")
-                       .set_icon("M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11")
-                       .add_component(ui.Button(component_id="act-tasks-refresh")
-                                      .set_label("↻ Refresh").set_variant("ghost")
-                                      .set_action(lambda ctx=None, payload=None: {"success": True, "message": "tasks refreshed", "refresh": ["act-tasks"]})))
-        .add_component(ui.Table(component_id="act-tasks")
-                       .set_columns(["ID", "Account", "Plugin", "Status", "Runs"])
-                       .set_key_column("ID")
-                       .set_empty_text("no tasks scheduled")
-                       .set_page_size(50)
-                       .set_data_source(_tasks_data(api))
-                       .set_row_actions([
-                           RowAction("cancel", "cancel", cancel_row, variant="danger",
-                                     confirm="Request cancellation for this task?"),
-                       ])))
-     .add_section(ui.Section(component_id="act-cds-sec")
-        .set_width("35%")
-        .add_component(ui.Toolbar(component_id="act-cds-bar").set_title("Cooldowns")
-                       .set_icon("M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z")
-                       .add_component(ui.Button(component_id="act-cds-refresh")
-                                      .set_label("↻ Refresh").set_variant("ghost")
-                                      .set_action(lambda ctx=None, payload=None: {"success": True, "message": "cooldowns refreshed", "refresh": ["act-cds"]})))
-        .add_component(ui.Table(component_id="act-cds")
-                       .set_columns(["Account", "Plugin", "Action", "Remaining", "Total"])
-                       .set_key_column("__key")
-                       .set_empty_text("no active cooldowns")
-                       .set_data_source(_cooldowns_data(api))
-                       .set_row_actions([
-                           RowAction("clear", "clear plugin", clear_cd_row, variant="danger",
-                                     confirm="Clear EVERY cooldown this account holds "
-                                             "for this plugin?"),
-                       ])))
+     .add_section(ui.Section(component_id="act-cards-sec")
+        .add_component(ui.Grid(component_id="act-cards-grid")
+           .set_columns("auto").set_min_child("340px")
+           .add_component(ui.Card(component_id="act-tasks-card")
+              .add_component(ui.Toolbar(component_id="act-tasks-bar").set_title("Tasks")
+                             .set_icon("M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11")
+                             .add_component(ui.Button(component_id="act-tasks-refresh")
+                                            .set_label("↻ Refresh").set_variant("ghost")
+                                            .set_action(lambda ctx=None, payload=None: {"success": True, "message": "tasks refreshed", "refresh": ["act-tasks"]})))
+              .add_component(ui.Table(component_id="act-tasks")
+                             .set_columns(["ID", "Account", "Plugin", "Status", "Runs"])
+                             .set_key_column("ID")
+                             .set_empty_text("no tasks scheduled")
+                             .set_page_size(50)
+                             .set_data_source(_tasks_data(api))
+                             .set_row_actions([
+                                 RowAction("cancel", "cancel", cancel_row, variant="danger",
+                                           confirm="Request cancellation for this task?"),
+                             ])))
+           .add_component(ui.Card(component_id="act-cds-card")
+              .add_component(ui.Toolbar(component_id="act-cds-bar").set_title("Cooldowns")
+                             .set_icon("M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z")
+                             .add_component(ui.Button(component_id="act-cds-refresh")
+                                            .set_label("↻ Refresh").set_variant("ghost")
+                                            .set_action(lambda ctx=None, payload=None: {"success": True, "message": "cooldowns refreshed", "refresh": ["act-cds"]})))
+              .add_component(ui.Table(component_id="act-cds")
+                             .set_columns(["Account", "Plugin", "Action", "Remaining", "Total"])
+                             .set_key_column("__key")
+                             .set_empty_text("no active cooldowns")
+                             .set_data_source(_cooldowns_data(api))
+                             .set_row_actions([
+                                 RowAction("clear", "clear plugin", clear_cd_row, variant="danger",
+                                           confirm="Clear EVERY cooldown this account holds "
+                                                   "for this plugin?"),
+                             ])))))
      .add_section(ui.Section(component_id="act-logs-sec")
-        .set_width("35%")
         .add_component(ui.Toolbar(component_id="act-logs-bar")
                        .set_title("Recent logs")
                        .set_icon("M4 6h16M4 12h16M4 18h10")
@@ -455,7 +455,6 @@ def _build_activity(ui: DashboardUIToolset, api: Any):
                        .set_value("— refresh to load —")
                        .set_data_source(_logs_data(api))))
      .add_section(ui.Section(component_id="act-audit-sec")
-        .set_width("35%")
         .add_component(ui.Toolbar(component_id="act-audit-bar").set_title("Audit trail")
                        .set_icon("M9 12l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z")
                        .add_component(ui.Button(component_id="act-audit-refresh")
