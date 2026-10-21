@@ -1,353 +1,72 @@
 <!DOCTYPE html>
-<!-- LibzentSuite dashboard v2 — operations console.
+<!-- LibzentSuite dashboard v3 — the Carbon rebuild.
      Page shell only: styling lives in styles/, behaviour in js/ (no build
      step — plain files served by interfaces/dashboard/server.py).
-
-     IA: Home · Accounts & Groups · Plugins · Profiles · Activity · Policies · Tools
-     All REST/WS integrations preserved (4 WS message types). -->
+     IA: Home · Accounts · Activity · Policies · Admin · Tools (+ plugin pages)
+     Hash-routed; chrome built by js/shell.js. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>LibzentSuite</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%230a0a0a'/%3E%3Crect x='1' y='1' width='30' height='30' rx='3' fill='none' stroke='%233a3a3a' stroke-width='1.5'/%3E%3Cpath d='M9 23V9h7a5 5 0 0 1 0 10h-4' fill='none' stroke='%23a0a0a0' stroke-width='3' stroke-linecap='square'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" id="lz-fonts">
 <link rel="stylesheet" href="styles/base.css">
-<link rel="stylesheet" href="styles/layout.css">
 <link rel="stylesheet" href="styles/components.css">
-<link rel="stylesheet" href="styles/responsive.css">
+<link rel="stylesheet" href="styles/shell.css">
 </head>
 <body>
 
-<!-- ═══════════════════════════════ Shell ════════════════════════════════════ -->
-<div id="shell">
-  <!-- Sidebar: full / rail (desktop) and drawer (mobile) -->
+<div id="app">
+  <!-- Sidebar: rail (desktop) / drawer (mobile); built by shell.js -->
   <aside id="sidebar" aria-label="Main navigation">
-    <div class="brand"><div class="logo" aria-hidden="true"></div><span class="name">LibzentSuite</span>
+    <div class="brand">
+      <div class="logo" aria-hidden="true"></div>
+      <span class="name">LibzentSuite</span>
       <button id="side-toggle" type="button" title="Collapse sidebar" aria-label="Collapse sidebar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></button>
       <button id="side-close" type="button" aria-label="Close menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
     </div>
-    <div class="side-label">Workspace</div>
     <nav id="snav"></nav>
-    <div class="foot" id="side-foot">—</div>
+    <div class="side-foot" id="side-foot"></div>
   </aside>
   <div id="side-backdrop" aria-hidden="true"></div>
 
   <!-- Main -->
   <div id="main">
-    <header id="hdr">
-      <button id="menu-btn" class="hdr-btn" type="button" aria-label="Open menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
-      <span class="crumb" id="page-crumb">LibzentSuite</span>
+    <header id="topbar">
+      <button id="menu-btn" class="topbar-btn" type="button" aria-label="Open menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
+      <span class="crumb dim" id="page-crumb">LibzentSuite</span>
       <span class="page-title" id="page-title">Home</span>
       <div class="spacer"></div>
       <div id="search-wrap">
-        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-        <input id="search" placeholder="Search accounts, groups, plugins…" autocomplete="off" aria-label="Search">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input id="search" placeholder="Search accounts, plugins…" autocomplete="off" aria-label="Search">
         <kbd class="search-kbd" aria-hidden="true">Ctrl K</kbd>
-        <div id="search-results"></div>
+        <div id="search-results" role="listbox"></div>
       </div>
-      <div id="conn" title="WebSocket"><div id="wsdot"></div><span id="connmsg">connecting…</span></div>
-      <button id="theme-btn" class="hdr-btn" type="button" title="Theme engine" aria-label="Open theme engine" onclick="if(typeof themeOpen==='function')themeOpen()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg></button>
-      <button id="hdr-gear" class="hdr-btn" type="button" title="Connection &amp; advanced settings" aria-label="Connection and advanced settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+      <div id="conn" class="conn" title="WebSocket"><div id="conn-dot" class="conn-dot"></div><span id="conn-msg" class="dim">connecting…</span></div>
+      <button id="theme-btn" class="topbar-btn" type="button" title="Theme engine" aria-label="Open theme engine"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg></button>
     </header>
 
-    <div id="content">
-      <!-- Onboarding (shown when zero accounts) -->
-      <div class="panel" id="panel-onboard">
-        <div class="onboarding">
-          <h2>Welcome to LibzentSuite</h2>
-          <div id="onboard-auth" class="card" style="margin-bottom:var(--sp-4);border-color:var(--accent)" hidden>
-            <h4>Step 0 — connect the dashboard</h4>
-            <p class="dim">Paste the dashboard token from your <code>.env</code>
-              (<code>DASHBOARD_TOKEN</code>) to unlock this dashboard.</p>
-            <button class="btn btn-primary" id="onboard-auth-cta">Set Dashboard Token</button>
-          </div>
-          <p class="dim">Set up your workspace in three steps:</p>
-          <div class="steps">
-            <div class="step"><div class="num">1</div><div class="txt">
-              <h4>Add an account</h4><p>Each account is a Discord user the framework operates.</p></div></div>
-            <div class="step"><div class="num">2</div><div class="txt">
-              <h4>Assign plugins</h4><p>Pick which plugins each account can run — capabilities are assigned per account.</p></div></div>
-            <div class="step"><div class="num">3</div><div class="txt">
-              <h4>Group for coordination</h4><p>Accounts in a sync group share pacing, taking turns naturally.</p></div></div>
-          </div>
-          <button class="btn btn-primary" id="onboard-cta">Get Started</button>
-        </div>
-      </div>
-
-      <!-- Home -->
-      <div class="panel" id="panel-home">
-        <div id="home-attn" class="attn" style="margin-bottom:var(--sp-3)"></div>
-        <div class="metrics" id="home-metrics" style="margin-bottom:var(--sp-3)"></div>
-        <div class="grid grid-2">
-          <div class="card"><h4>Sync Groups</h4><div id="home-groups"></div></div>
-          <div class="card"><h4>Recent Activity</h4><div id="home-activity" class="logbox" style="max-height:200px"></div></div>
-        </div>
-      </div>
-
-      <!-- Accounts & Groups -->
-      <div class="panel" id="panel-fleet">
-        <div class="tabbar">
-          <button class="tab active" data-tab="accounts">Accounts <span class="count" id="cnt-accts"></span></button>
-          <button class="tab" data-tab="groups">Sync Groups <span class="count" id="cnt-groups"></span></button>
-        </div>
-        <div id="bulkbar">
-          <span class="count" id="bulk-count">0 selected</span>
-          <div class="actions">
-            <button class="btn btn-secondary btn-sm" id="bulk-start">Start</button>
-            <button class="btn btn-secondary btn-sm" id="bulk-stop">Stop</button>
-            <button class="btn btn-secondary btn-sm" id="bulk-group">Move to group…</button>
-            <button class="btn btn-ghost btn-sm" id="bulk-clear">clear</button>
-          </div>
-        </div>
-        <div id="tab-accounts">
-          <div class="toolbar">
-            <button class="btn btn-primary" id="btn-add-acct">+ Add Account</button>
-            <div class="spacer"></div>
-            <div class="viewsel" id="vm-acct" role="group" aria-label="Accounts display mode">
-              <button class="vm-btn" data-mode="tiles" title="Tile view" aria-label="Tile view"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></button>
-              <button class="vm-btn" data-mode="list" title="List view" aria-label="List view"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg></button>
-            </div>
-          </div>
-          <div id="acct-view"></div>
-        </div>
-        <div id="tab-groups" class="hidden">
-          <div class="toolbar">
-            <button class="btn btn-primary" id="btn-create-group">+ Create Group</button>
-            <div class="spacer"></div>
-            <div class="viewsel" id="vm-group" role="group" aria-label="Groups display mode">
-              <button class="vm-btn" data-mode="tiles" title="Tile view" aria-label="Tile view"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></button>
-              <button class="vm-btn" data-mode="list" title="List view" aria-label="List view"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg></button>
-            </div>
-          </div>
-          <div id="group-view"></div>
-        </div>
-      </div>
-
-      <!-- Plugins (cards carry the per-plugin profile library + quick binds) -->
-      <div class="panel" id="panel-plugins">
-        <div class="grid grid-2" id="plugin-grid"></div>
-      </div>
-
-      <!-- Profiles (per-account plugin-profile bindings) -->
-      <div class="panel" id="panel-profiles">
-        <div class="toolbar">
-          <label for="pp-acct" class="dim" style="font-size:12px;font-weight:500">Account</label>
-          <select id="pp-acct" style="min-width:180px"></select>
-          <button class="btn btn-ghost btn-sm" id="pp-refresh" title="Reload the profile library and this account's bindings">refresh</button>
-        </div>
-        <div id="pp-host"></div>
-      </div>
-
-      <!-- Admin -->
-      <div class="panel" id="panel-admin">
-        <div id="admin-content"></div>
-      </div>
-
-      <!-- Activity -->
-      <div class="panel" id="panel-activity">
-        <div class="tabbar">
-          <button class="tab active" data-atab="tasks">Tasks <span class="count" id="cnt-tasks"></span></button>
-          <button class="tab" data-atab="cooldowns">Cooldowns <span class="count" id="cnt-cd"></span></button>
-          <button class="tab" data-atab="logs">Logs</button>
-          <button class="tab" data-atab="audit">Audit Trail</button>
-        </div>
-        <div id="atab-tasks">
-          <div class="row" style="margin-bottom:var(--sp-2)">
-            <select id="task-filter-status" aria-label="Filter tasks by status"><option value="">all</option><option>queued</option><option>running</option><option>completed</option><option>failed</option><option>cancelled</option><option>timed_out</option></select>
-            <select id="task-filter-account" aria-label="Filter tasks by account"><option value="">all accounts</option></select>
-            <button class="btn btn-secondary btn-sm" id="task-refresh">refresh</button>
-          </div>
-          <div class="tbl-wrap"><table id="task-table"></table></div>
-          <h4 style="margin:var(--sp-3) 0 var(--sp-2);font-size:12px;color:var(--dim);text-transform:uppercase">History</h4>
-          <div class="tbl-wrap"><table id="task-history"></table></div>
-        </div>
-        <div id="atab-cooldowns" class="hidden">
-          <div id="cd-list" class="grid" style="gap:var(--sp-2)"></div>
-        </div>
-        <div id="atab-logs" class="hidden">
-          <div class="row" style="margin-bottom:var(--sp-2)">
-            <select id="log-acct" aria-label="Filter logs by account"><option value="">all accounts</option></select>
-            <select id="log-sev" aria-label="Filter logs by severity"><option value="">all</option><option>DEBUG</option><option>INFO</option><option>WARNING</option><option>ERROR</option></select>
-            <button class="btn btn-secondary btn-sm" id="log-backfill">load history</button>
-            <button class="btn btn-ghost btn-sm" id="log-clear">clear</button>
-          </div>
-          <div id="logbox" class="logbox" style="max-height:500px"></div>
-        </div>
-        <div id="atab-audit" class="hidden">
-          <div class="row" style="margin-bottom:var(--sp-2)">
-            <select id="audit-acct" aria-label="Filter audit entries by account"><option value="">all accounts</option></select>
-            <button class="btn btn-secondary btn-sm" id="audit-backfill">load history</button>
-          </div>
-          <div id="auditbox" class="logbox" style="max-height:500px"></div>
-        </div>
-      </div>
-
-      <!-- Policies -->
-      <div class="panel" id="panel-policies">
-        <div class="grid grid-2" style="margin-bottom:var(--gap)">
-          <div class="card"><h4>Effective Pacing</h4><div id="rl-effective-view"></div></div>
-          <div class="card"><h4>429 Activity</h4><div id="rl-429"></div></div>
-        </div>
-        <div class="card"><h4>Stored Policies</h4>
-          <div class="toolbar">
-            <button class="btn btn-secondary btn-sm" id="rl-add">+ Add Policy</button>
-            <div class="spacer"></div>
-            <button class="btn btn-ghost btn-sm" id="rl-refresh">refresh</button>
-          </div>
-          <div class="tbl-wrap"><table id="rl-policy-table"></table></div>
-        </div>
-        <div class="card"><h4>Safety Floor</h4><div id="rl-floor"></div></div>
-        <div class="card"><h4>Warnings</h4><div id="rl-warnings"></div></div>
-      </div>
-
-      <!-- Tools -->
-      <div class="panel" id="panel-tools">
-        <div class="tabbar">
-          <button class="tab active" data-ttab="sim">Simulation</button>
-          <button class="tab" data-ttab="adv">Advanced</button>
-        </div>
-        <div id="ttab-sim">
-          <div class="card"><h4>Run Simulation</h4>
-            <div class="row"><select id="sim-sel" aria-label="Simulation scenario"></select>
-            <button class="btn btn-primary" id="sim-run">run</button></div>
-            <div id="sim-report" style="margin-top:var(--sp-3)"></div>
-          </div>
-        </div>
-        <div id="ttab-adv" class="hidden">
-          <div class="card" id="token-card"><h4>Dashboard Connection</h4>
-            <p class="sub" style="margin-bottom:var(--sp-2)">The access token authorizes REST and WebSocket calls. It is kept in this tab's session storage only (never localStorage) and is stripped from the URL immediately after load.</p>
-            <div class="row">
-              <input id="adv-token" type="password" placeholder="dashboard token" style="flex:1;min-width:180px">
-              <button class="btn btn-primary" id="adv-token-save">save &amp; reconnect</button>
-            </div>
-          </div>
-          <div class="card"><h4>System Actions</h4>
-            <div class="row">
-              <button class="btn btn-danger" id="adv-estop">Emergency Stop All</button>
-              <button class="btn btn-secondary" id="adv-resume">Resume</button>
-            </div>
-          </div>
-          <div class="card"><h4>Maintenance</h4>
-            <div class="row">
-              <button class="btn btn-secondary" id="adv-import">Import .env credentials</button>
-            </div>
-            <p class="sub" id="cred-gate-msg"></p>
-          </div>
-        </div>
-      </div>
-      <!-- Design gallery (built entirely by framework-ui.js) -->
-      <div class="panel" id="panel-design"></div>
-    </div>
+    <main id="view" class="view" aria-live="polite"></main>
   </div>
 </div>
 
-<!-- Bottom navigation (mobile) -->
-<nav id="bottomnav"></nav>
-
-<!-- Global error/notice toasts (scoped inline feedback lives in each card) -->
-<div id="toasts" aria-live="polite"></div>
-
-<!-- ═══════════════════════════════ Dialogs ═══════════════════════════════════
-     All popups: viewport-centered (fixed + inset:0 + margin:auto, see
-     components.css), internally scrolling, with a 32px close button in the
-     upper-right corner. data-dlg-close powers both ✕ and Cancel buttons
-     through ONE delegated listener; Escape is native <dialog> behavior. -->
-<dialog id="dlg-add-acct">
-  <div class="dlg-hdr"><span class="dlg-title">Add Account</span><button type="button" class="dlg-close" data-dlg-close aria-label="Close">✕</button></div>
-  <div class="dlg-body">
-    <div class="form">
-      <div class="field"><label>Account name</label><input id="aa-name" placeholder="alpha"><span class="hint">Lowercase letters, digits, dashes (max 32)</span></div>
-      <div class="field"><label>Sync Group <span class="faint">(optional)</span></label>
-        <input id="aa-group" placeholder="farm" list="group-list"><span class="hint">Accounts in the same group coordinate their pacing</span></div>
-      <div class="field"><label>Plugins <span class="faint">(optional — none is valid)</span></label>
-        <div id="aa-plugins"></div><span class="hint">Choose which plugins this account can run</span></div>
-      <div class="field"><label>Credential <span class="faint">(optional now)</span></label>
-        <input id="aa-cred" type="password" placeholder="Discord token"><span class="hint">Stored encrypted — never displayed back</span></div>
-    </div>
-  </div>
-  <div class="dlg-foot"><button class="btn btn-secondary" data-dlg-close>Cancel</button>
-  <button class="btn btn-primary" id="aa-submit">Create Account</button></div>
-</dialog>
-
-<dialog id="dlg-cred">
-  <div class="dlg-hdr"><span class="dlg-title">Set Credential</span><button type="button" class="dlg-close" data-dlg-close aria-label="Close">✕</button></div>
-  <div class="dlg-body">
-    <p style="margin-bottom:var(--sp-3);font-size:13px;color:var(--dim)">The token is stored encrypted server-side and never displayed back.</p>
-    <input id="cred-name" type="hidden">
-    <input id="cred-val" type="password" placeholder="Discord token" style="width:100%;height:38px">
-  </div>
-  <div class="dlg-foot"><button class="btn btn-secondary" data-dlg-close>Cancel</button>
-  <button class="btn btn-primary" id="cred-save">Save Credential</button></div>
-</dialog>
-
-<dialog id="dlg-confirm">
-  <div class="dlg-hdr"><span class="dlg-title" id="cf-title">Confirm</span><button type="button" class="dlg-close" data-dlg-close aria-label="Close">✕</button></div>
-  <div class="dlg-body"><p id="cf-msg" style="font-size:14px;line-height:1.5;overflow-wrap:anywhere"></p></div>
-  <div class="dlg-foot"><button class="btn btn-secondary" data-dlg-close>Cancel</button>
-  <button class="btn btn-danger" id="cf-yes">Confirm</button></div>
-</dialog>
-
-<dialog id="dlg-details">
-  <div class="dlg-hdr"><span class="dlg-title" id="dt-title">Details</span><button type="button" class="dlg-close" data-dlg-close aria-label="Close">✕</button></div>
-  <div class="dlg-body" id="dt-body"></div>
-</dialog>
-
-<dialog id="dlg-create-group">
-  <div class="dlg-hdr"><span class="dlg-title">Create Group</span><button type="button" class="dlg-close" data-dlg-close aria-label="Close">✕</button></div>
-  <div class="dlg-body">
-    <div class="form">
-      <div class="field"><label>Group name</label><input id="cg-name" placeholder="farm" list="group-list">
-        <span class="hint">Lowercase letters, digits, dashes (max 32). Accounts in the same group coordinate their pacing.</span></div>
-      <div class="field"><label>Description <span class="faint">(optional)</span></label><input id="cg-desc" placeholder="Farming accounts"></div>
-      <div class="field"><label>Enabled</label>
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer"><input type="checkbox" id="cg-enabled" checked> Group is active</label></div>
-    </div>
-  </div>
-  <div class="dlg-foot"><button class="btn btn-secondary" data-dlg-close>Cancel</button>
-  <button class="btn btn-primary" id="cg-submit">Create Group</button></div>
-</dialog>
-
-<datalist id="group-list"></datalist>
-
-<dialog id="dlg-policy">
-  <div class="dlg-hdr"><span class="dlg-title" id="rp-title">Add Policy</span><button type="button" class="dlg-close" data-dlg-close aria-label="Close">✕</button></div>
-  <div class="dlg-body">
-    <div class="form">
-      <div class="field"><label>Action</label>
-        <select id="rp-action" aria-label="Policy action"><option value="message">message</option><option value="dm">dm</option></select>
-        <span class="hint">Which action lane the policy paces</span></div>
-      <div class="field"><label>Interval (seconds)</label><input id="rp-interval" type="number" min="0.05" step="0.05" placeholder="0.05">
-        <span class="hint">Minimum seconds between actions of this lane</span></div>
-      <div class="form-grid">
-        <div class="field"><label>Jitter min (s)</label><input id="rp-jmin" type="number" min="0" step="0.1" placeholder="0"></div>
-        <div class="field"><label>Jitter max (s)</label><input id="rp-jmax" type="number" min="0" step="0.1" placeholder="0"></div>
-      </div>
-      <div class="form-grid">
-        <div class="field"><label>Level</label>
-          <select id="rp-level" aria-label="Policy level"><option value="global">global</option><option value="account">account</option><option value="plugin">plugin</option></select></div>
-        <div class="field"><label>Owner <span class="faint">(account/plugin name)</span></label><input id="rp-owner" placeholder="(global — leave empty)"></div>
-      </div>
-    </div>
-  </div>
-  <div class="dlg-foot"><button class="btn btn-secondary" data-dlg-close>Cancel</button>
-  <button class="btn btn-primary" id="rp-submit">Save Policy</button></div>
-</dialog>
-
-<script src="js/state.js"></script>
+<script src="js/store.js"></script>
 <script src="js/api.js"></script>
 <script src="js/ui.js"></script>
-<script src="js/accounts.js"></script>
-<script src="js/groups.js"></script>
-<script src="js/views.js"></script>
-<script src="js/plugins-ui.js"></script>
-<script src="js/admin-ui.js"></script>
-<script src="js/plugin-ui.js"></script>
-<script src="js/dashboard-ui.js"></script>
-<script src="js/framework-ui.js"></script>
-<script src="js/app.js"></script>
+<script src="js/router.js"></script>
+<script src="js/render.js"></script>
+<script src="js/views/home.js"></script>
+<script src="js/views/accounts.js"></script>
+<script src="js/views/activity.js"></script>
+<script src="js/views/policies.js"></script>
+<script src="js/views/admin.js"></script>
+<script src="js/views/tools.js"></script>
+<script src="js/views/plugins.js"></script>
 <script src="js/shell.js"></script>
-<script src="js/theme-engine.js"></script>
+<script src="js/theme.js"></script>
 </body>
 </html>
