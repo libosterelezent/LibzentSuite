@@ -116,7 +116,7 @@ const showErr = msg => toast(msg, "err");
    ui.dialog builds a <dialog> on demand (Carbon structure: dlg-hdr /
    dlg-body / dlg-foot), wires ONE delegated close listener per dialog, and
    returns {close, body, dialog}. Escape works natively. */
-function dialog({title, bodyEl, actions = [], wide = false, onClose} = {}) {
+function dialog({title, bodyEl, actions = [], wide = false, onClose, tabs = null} = {}) {
   const dlg = el("dialog", {class: wide ? "dlg wide" : "dlg"});
   const close = () => { if (dlg.open) dlg.close(); };
   const hdr = el("div", {class: "dlg-hdr"},
@@ -124,7 +124,59 @@ function dialog({title, bodyEl, actions = [], wide = false, onClose} = {}) {
     el("button", {class: "dlg-close", type: "button", "aria-label": "Close",
                   onclick: close}, "✕"));
   const body = el("div", {class: "dlg-body"});
-  if (bodyEl) body.append(bodyEl);
+
+  /* tabbed variant (Phase A-11 step 1): tabs = [{id, label, build(panel)}].
+     build() may be async — rejections render as an in-panel error. */
+  if (tabs && tabs.length) {
+    const tablist = el("div", {class: "dlg-tabs", role: "tablist"});
+    const panels = el("div", {class: "dlg-panels"});
+    const entries = tabs.map((t, i) => {
+      const btn = el("button", {
+        class: "dlg-tab" + (i === 0 ? " on" : ""), role: "tab", type: "button",
+        id: `dlg-tab-${t.id}`, "aria-controls": `dlg-panel-${t.id}`,
+        "aria-selected": i === 0 ? "true" : "false",
+        tabindex: i === 0 ? "0" : "-1",
+      }, t.label);
+      tablist.append(btn);
+      const panel = el("div", {
+        class: "dlg-panel" + (i === 0 ? "" : " hidden"), role: "tabpanel",
+        id: `dlg-panel-${t.id}`, "aria-labelledby": `dlg-tab-${t.id}`,
+        tabindex: "0",
+      });
+      panels.append(panel);
+      const select = () => {
+        entries.forEach((e, j) => {
+          e.btn.setAttribute("aria-selected", j === idx ? "true" : "false");
+          e.btn.setAttribute("tabindex", j === idx ? "0" : "-1");
+          e.btn.classList.toggle("on", j === idx);
+          e.panel.classList.toggle("hidden", j !== idx);
+        });
+        btn.focus();
+      };
+      const idx = i;
+      btn.addEventListener("click", select);
+      btn.addEventListener("keydown", e => {
+        if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+          e.preventDefault();
+          entries[(idx + (e.key === "ArrowRight" ? 1 : entries.length - 1)) % entries.length].btn.click();
+        } else if (e.key === "Home") { e.preventDefault(); entries[0].btn.click(); }
+        else if (e.key === "End") { e.preventDefault(); entries[entries.length - 1].btn.click(); }
+      });
+      return {btn, panel, tab: t};
+    });
+    for (const {panel, tab} of entries) {
+      try {
+        const built = tab.build(panel);
+        if (built && typeof built.catch === "function")
+          built.catch(e => panel.append(emptyState("Tab failed", e.message || String(e))));
+      } catch (e) {
+        panel.append(emptyState("Tab failed", e.message || String(e)));
+      }
+    }
+    body.append(tablist, panels);
+  } else if (bodyEl) {
+    body.append(bodyEl);
+  }
   const foot = actions.length
     ? el("div", {class: "dlg-foot"},
         ...actions.map(a => el("button", {
@@ -207,4 +259,51 @@ function collapseWrap(host, threshold = 8) {
   };
   host.append(more);
   return host;
+}
+
+/* ── settings-schema editor primitives (Phase A-11 step 3) ──────────────────
+   Shared by the plugin registry and the account ability dialog's Settings
+   tab: schemaField renders one field from a plugin's settings schema def
+   ({name, type: bool|int|float|text, min, max, default, description});
+   collectSchema reads them back into {name: value}, validating numerics.
+   form is any container whose .field nodes carry data-key. */
+function schemaField(def, value) {
+  const cur = value == null ? (def.default ?? "") : value;
+  if (def.type === "bool") {
+    const i = el("input", {type: "checkbox"});
+    i.checked = cur === true;
+    return el("div", {class: "field", dataset: {key: def.name}},
+      el("label", {}, `${def.name} (${def.type})`),
+      el("label", {style: "display:inline-flex;gap:var(--sp-2);align-items:center;"}, i,
+        el("span", {class: "dim"}, def.description || "")));
+  }
+  const input = def.type === "int" || def.type === "float"
+    ? el("input", {type: "number", step: def.type === "int" ? "1" : "any",
+        min: def.min != null ? String(def.min) : undefined,
+        max: def.max != null ? String(def.max) : undefined})
+    : el("input", {type: "text"});
+  input.value = String(cur ?? "");
+  return el("div", {class: "field", dataset: {key: def.name}},
+    el("label", {}, `${def.name} (${def.type})`), input,
+    def.description ? el("div", {class: "hint"}, def.description) : null);
+}
+function collectSchema(form, schema) {
+  const out = {};
+  for (const def of schema) {
+    const slot = form.querySelector(`[data-key="${CSS.escape(def.name)}"]`);
+    if (!slot) continue;
+    const input = slot.querySelector("input");
+    if (def.type === "bool") { out[def.name] = input.checked; continue; }
+    if (def.type === "int" || def.type === "float") {
+      if (input.value === "") { out[def.name] = def.default ?? null; continue; }
+      const n = Number(input.value);
+      if (!Number.isFinite(n) || (def.type === "int" && !Number.isInteger(n))) {
+        toast(`${def.name} must be ${def.type === "int" ? "an integer" : "a finite number"}.`, "err");
+        return null;
+      }
+      out[def.name] = n; continue;
+    }
+    out[def.name] = input.value;
+  }
+  return out;
 }
