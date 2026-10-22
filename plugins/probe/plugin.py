@@ -111,6 +111,7 @@ class ProbePlugin(PluginBase):
         page = (ui.Page()
                 .set_id("probe-ui")
                 .set_title("Probe UI")
+                .set_icon("M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0V8zM12 18v4")
                 .set_description("Fixture dashboard"))
 
         section = ui.Section().set_title("Controls")
