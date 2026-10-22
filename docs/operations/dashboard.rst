@@ -4,7 +4,7 @@ Dashboard
 ``python main.py --dashboard --headless`` serves the SPA + REST + WebSocket
 on ``127.0.0.1:8070`` (``DASHBOARD_TOKEN`` enables auth; static page is
 served unauthenticated). Sidebar sections mirror the spec: Overview,
-Accounts, Plugins, Profiles (retained future infrastructure — records
+Accounts, Plugins (per-account enablement, settings, the profile
 only; capabilities are direct account→plugin assignments), Rate Limits
 (incl. the sequential lane),
 Cooldowns (active persistent cooldowns, soonest first), Tasks, Logs (live

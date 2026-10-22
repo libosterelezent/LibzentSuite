@@ -263,6 +263,20 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         ALTER TABLE account_plugins ADD COLUMN profile TEXT;
         """,
     ),
+
+    (
+        8,
+        "drop legacy profile tables",
+        """
+        -- ProfileManager removal (2026-10-22): the legacy named
+        -- permission-bundle tables gated nothing and their accessor
+        -- layer is deleted. Capabilities live in account_plugins;
+        -- per-plugin settings presets live in plugin_profiles.
+        DROP TABLE IF EXISTS account_profiles;
+        DROP TABLE IF EXISTS profile_plugins;
+        DROP TABLE IF EXISTS profiles;
+        """,
+    ),
 ]
 
 

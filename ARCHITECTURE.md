@@ -15,7 +15,7 @@ architecture", §14 project structure). Inter-module contracts: INTEGRATION.md.
  Account   Profile    Sync     Plugin   Settings
  Manager   Manager    Group     Manager  Manager
  (core.    (core.     Manager   (core.   (core.
-  account_  profile_  (core.     plugin_  settings_
+  (core.              (core.    (core.
   manager)  manager)  sync_       manager) manager)
      |         |       group_      |         |
      |         |       manager)    |         |
@@ -46,7 +46,7 @@ auditing) is the framework's job.
 ## First-class Account (spec §1)
 
 `Account` splits persistent state (`database.models.AccountRecord`: id, name,
-token ref, enabled, sync group, settings, profiles) from runtime state
+token ref, enabled, sync group, settings) from runtime state
 (`AccountRuntime`: client, connection status, DiscordCache, latency, uptime,
 supervisor). The details page (spec §8) draws runtime data EXCLUSIVELY from
 the live client's cached snapshot — zero extra fetches.
@@ -75,8 +75,7 @@ a profile never changes which plugins an account runs.
 configurations per plugin. When that lands, profiles will describe
 per-plugin configuration sets; until then they are records only.
 
-Profiles and sync groups are ORTHOGONAL: changing one never touches the
-other.
+
 
 ## Sync groups
 
@@ -129,7 +128,7 @@ tokens.
   -> EventBus -> RateLimitManager(config policies) -> SyncGroupManager
   -> SettingsManager -> AuditRecorder
   -> Task Scheduler(late-bound sender) -> PluginManager
-  -> ProfileManager -> AccountManager(restores persisted accounts,
+  -> AccountManager(restores persisted accounts,
      delegates group-membership restore to SyncGroupManager)
   -> sender bound -> scheduler.start() -> SimulationRunner -> ControlAPI
   -> {REPL | one-shot CLI | Dashboard | headless}

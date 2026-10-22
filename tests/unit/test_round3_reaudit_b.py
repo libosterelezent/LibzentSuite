@@ -181,8 +181,7 @@ class TestEstopResumeViaApi(unittest.IsolatedAsyncioTestCase):
             async def get(self, name):
                 return {}
 
-        api = ControlAPI(accounts=Accts(), plugins=None, profiles=None,
-                         settings=None, cooldowns=None, scheduler=sched,
+        api = ControlAPI(accounts=Accts(), plugins=None,                          settings=None, cooldowns=None, scheduler=sched,
                          limiter=NoopLimiter(), database=None, logs=QuietLog(),
                          audit=None)
         t = sched.submit("alpha", "roll", "message", channel_id=1, content="x")
@@ -426,8 +425,7 @@ class TestDocumentedRegressions(unittest.IsolatedAsyncioTestCase):
             async def accounts(self):
                 return []
 
-        api = ControlAPI(accounts=Accts(), plugins=plugins, profiles=None,
-                         settings=settings, cooldowns=None, scheduler=None,
+        api = ControlAPI(accounts=Accts(), plugins=plugins,                          settings=settings, cooldowns=None, scheduler=None,
                          limiter=None, database=None, logs=LOG, audit=None)
         await plugins.attach_account("a1")
         await settings.set_plugin_setting("a1", "spy", "count", 9, schema)

@@ -27,9 +27,8 @@ Decisions for things INTEGRATION.md left open (documented per the contract):
     account→plugin assignments through the facade; removal is idempotent
     (``existed=false`` renders a "nothing to do" message, never an error).
     Assignments apply immediately — there are no next-start semantics.
-  * The ``profiles`` group stays (retained future infrastructure: profile
-    CRUD + bookkeeping assignments), but its help text says plainly that
-    profiles do NOT control which plugins an account runs.
+  * The legacy ``profiles`` group is removed (profiles never controlled
+    which plugins an account runs).
   * ``accounts enable <name> <on|off>`` also accepts true/false; a real bool
     is passed down (ControlAPI.parse_bool re-validates on its side anyway).
   * ``accounts credential <name> <token>`` prints a shell-history warning:
@@ -55,7 +54,7 @@ __all__ = [
     "HELP", "QuitRequested", "UsageError", "help_text", "run_command",
     "format_status", "format_accounts", "format_account_info",
     "format_account_plugins",
-    "format_plugins", "format_plugin_state", "format_profiles",
+    "format_plugins", "format_plugin_state",
     "format_groups",
     "format_group_snapshot", "format_policies",
     "format_effective", "format_tasks", "format_history", "format_logs",
@@ -105,12 +104,6 @@ HELP: Dict[str, Tuple[str, str]] = {
         "|clear <account> <plugin> <key>",
         "plugin management ('clear' resets one setting to its lower"
         " layer/default, unmasking profile + plugin defaults)",
-    ),
-    "profiles": (
-        "list|create <name> <plugin ...>|delete <name>"
-        "|assign <account> <profile>|unassign <account> <profile>",
-        "profile records — RETAINED FUTURE INFRASTRUCTURE; they do NOT"
-        " control which plugins an account runs (use 'accounts plugin-add')",
     ),
     "groups": (
         "list|show <group>|create <name> [description]"
@@ -223,8 +216,6 @@ async def run_command(api: Any, line: str) -> Optional[str]:
         return await _cooldowns_group(api, args)
     if cmd == "plugins":
         return await _plugins_group(api, args)
-    if cmd == "profiles":
-        return await _profiles_group(api, args)
     if cmd == "groups":
         return await _groups_group(api, args)
     if cmd == "ratelimit":
@@ -295,13 +286,6 @@ _PLUGINS_USAGE = {
     "set": "plugins set <account> <plugin> <key> <value>",
     "clear": "plugins clear <account> <plugin> <key>",
 }
-_PROFILES_USAGE = {
-    "list": "profiles list",
-    "create": "profiles create <name> <plugin ...>",
-    "delete": "profiles delete <name>",
-    "assign": "profiles assign <account> <profile>",
-    "unassign": "profiles unassign <account> <profile>",
-}
 _GROUPS_USAGE = {
     "list": "groups list",
     "show": "groups show <group>",
@@ -361,7 +345,7 @@ def _usage_for(ctx: str) -> str:
     group, _, sub = ctx.partition(" ")
     table = {
         "accounts": _ACCOUNTS_USAGE, "plugins": _PLUGINS_USAGE,
-        "profiles": _PROFILES_USAGE, "groups": _GROUPS_USAGE,
+        "groups": _GROUPS_USAGE,
         "ratelimit": _RATELIMIT_USAGE,
         "tasks": _TASKS_USAGE, "credentials": _CREDENTIALS_USAGE,
         "cooldowns": _COOLDOWNS_USAGE,
@@ -602,38 +586,6 @@ async def _plugins_group(api: Any, args: List[str]) -> str:
             verb="cleared",
         )
     raise UsageError(f"plugins: unknown subcommand {sub!r}")  # pragma: no cover
-
-
-async def _profiles_group(api: Any, args: List[str]) -> str:
-    """profiles list|create|delete|assign|unassign.
-
-    Retained future infrastructure: profile CRUD + assignment bookkeeping
-    persist, but they have NO capability effect — plugins are assigned
-    directly per account (``accounts plugin-add`` / ``plugin-remove``).
-    """
-    sub, rest = _sub(_PROFILES_USAGE, args, "profiles")
-    ctx = f"profiles {sub}"
-    if sub == "list":
-        _exact(rest, 0, ctx)
-        return format_profiles(await api.profiles_list())
-    if sub == "create":
-        if len(rest) < 2:
-            raise UsageError(
-                f"profiles create: needs a name and at least one plugin"
-                f" — usage: {_PROFILES_USAGE['create']}"
-            )
-        return _result(
-            await api.profiles_create(rest[0], rest[1:]), verb="created"
-        )
-    if sub == "delete":
-        return _result(await api.profiles_delete(_exact(rest, 1, ctx)), verb="deleted")
-    if sub == "assign":
-        account, profile = _exact(rest, 2, ctx)
-        return _result(await api.profiles_assign(account, profile), verb="assigned")
-    if sub == "unassign":
-        account, profile = _exact(rest, 2, ctx)
-        return _result(await api.profiles_unassign(account, profile), verb="unassigned")
-    raise UsageError(f"profiles: unknown subcommand {sub!r}")  # pragma: no cover
 
 
 async def _groups_group(api: Any, args: List[str]) -> str:
@@ -958,9 +910,6 @@ def format_account_info(details: dict) -> str:
             lines.append(f"{_col(str(plugin.get('name', '?')), 14)}{flag}")
     else:
         lines.append("(none assigned — 'accounts plugin-add <account> <plugin>')")
-    section("Profiles (informational)")
-    profiles = details.get("profiles") or []
-    lines.append(", ".join(str(p) for p in profiles) if profiles else "(none)")
     lines.append("(retained future infrastructure — not the capability mechanism)")
     section("Rate Limit")
     rate = details.get("rate_limit") or {}
@@ -1037,21 +986,6 @@ def format_plugin_state(states: List[dict]) -> str:
         lines.append(f"  {flag} {state.get('name', '?')}{suffix}")
         for key, value in sorted((state.get("settings") or {}).items()):
             lines.append(f"      {key} = {value!r}")
-    return "\n".join(lines)
-
-
-def format_profiles(profiles: List[dict]) -> str:
-    """Profiles payload (api.profiles_list) -> name, plugins, description."""
-    if not profiles:
-        return "  (no profiles defined — 'profiles create <name> <plugin ...>')"
-    lines: List[str] = []
-    for profile in profiles:
-        plugins = ", ".join(str(p) for p in profile.get("plugins") or []) or "-"
-        desc = profile.get("description") or ""
-        lines.append(
-            f"  {_col(str(profile.get('name', '?')), 18)}[{plugins}]"
-            + (f" — {desc}" if desc else "")
-        )
     return "\n".join(lines)
 
 

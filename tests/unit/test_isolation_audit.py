@@ -39,7 +39,6 @@ from core.account_manager import AccountStatus
 from core.errors import AccountError
 from core.event_bus import AccountConnected, AccountFailed, EventBus
 from core.logging_service import LogService, ServiceLogger
-from core.profile_manager.manager import ProfileManager
 from core.rate_limit_manager.engine import RateLimitManager
 from core.task_scheduler import TaskScheduler
 
@@ -277,21 +276,6 @@ class RemoveFailedAccountTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("alpha", h.plugins.deactivated)  # K6: hooks fired
         self.assertIn("alpha", h.plugins.detached)
 
-    async def test_remove_evicts_mirrors_and_engine_residue(self) -> None:
-        """K14/K15 wiring: the removal cascade reaches every mirror."""
-        h = make_manager()
-        await h.manager.add_account("alpha")
-        h.profile_manager._assignment_cache["alpha"] = ["grinder"]
-        settings = NS(forget_account=mock.MagicMock())
-        limiter = NS(prune_account=mock.MagicMock())
-        h.manager._settings = settings
-        h.manager._limiter = limiter
-        await h.manager.remove_account("alpha")
-        settings.forget_account.assert_called_once_with("alpha")
-        limiter.prune_account.assert_called_once_with("alpha")
-        self.assertNotIn("alpha", h.profile_manager._assignment_cache)
-
-
 # ----------------------------------------------------------------- K7-K8-K13
 class _FakeLibClient:
     """discord.Client stand-in exercising the adapter's connect() contract."""
@@ -400,13 +384,6 @@ class MirrorForgetTests(unittest.IsolatedAsyncioTestCase):
         sm.forget_account("alpha")
         self.assertNotIn("alpha", sm._account_plugin)
         self.assertNotIn("alpha", sm._account_framework)
-
-    async def test_profile_manager_forget_account(self) -> None:
-        pm = ProfileManager(object(), LOG, object())
-        pm._assignment_cache["alpha"] = ["grinder"]
-        pm.forget_account("alpha")
-        self.assertNotIn("alpha", pm._assignment_cache)
-
 
 # -------------------------------------------------------------------- K15
 class EnginePruneTests(unittest.IsolatedAsyncioTestCase):

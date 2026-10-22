@@ -1403,45 +1403,6 @@ class DashboardServer:
                 }
 
             # -------------------------------------------------------------- profiles
-            if (method, path) == ("GET", "/api/profiles"):
-                return 200, {"ok": True, "data": await api.profiles_list()}
-            if (method, path) == ("POST", "/api/profiles/create"):
-                plugins = require_field(body, "plugins", path)
-                if not isinstance(plugins, list) or not all(isinstance(p, str) for p in plugins):
-                    raise ValueError(
-                        f"field 'plugins' in POST {path} must be a list of plugin names"
-                    )
-                return 200, {
-                    "ok": True,
-                    "data": await api.profiles_create(
-                        require_str(body, "name", path),
-                        plugins,
-                        body.get("description", ""),
-                    ),
-                }
-            if (method, path) == ("POST", "/api/profiles/delete"):
-                return 200, {
-                    "ok": True,
-                    "data": await api.profiles_delete(require_str(body, "name", path)),
-                }
-            if (method, path) == ("POST", "/api/profiles/assign"):
-                return 200, {
-                    "ok": True,
-                    "data": await api.profiles_assign(
-                        require_str(body, "account", path),
-                        require_str(body, "profile", path),
-                    ),
-                }
-            if (method, path) == ("POST", "/api/profiles/unassign"):
-                return 200, {
-                    "ok": True,
-                    "data": await api.profiles_unassign(
-                        require_str(body, "account", path),
-                        require_str(body, "profile", path),
-                    ),
-                }
-
-            # ------------------------------------------------------------ sync groups
             if (method, path) == ("GET", "/api/groups"):
                 return 200, {"ok": True, "data": await api.groups_list()}
             if (method, path) == ("GET", "/api/groups/info"):

@@ -5,7 +5,7 @@ Boot
 ----
 ``main.py`` → :func:`core.bootstrap.build` (order pinned by tests):
 credentials → config → Database+migrations → LogService(+bridge) → bus →
-limiter → settings → audit → scheduler → plugins.discover → profiles →
+limiter → settings → audit → scheduler → plugins.discover →
 accounts (DB restore) → sender bind → ``scheduler.start()`` → remote
 control → ControlAPI → surface.
 

@@ -196,7 +196,7 @@ introduced:
    auth, input limits, frame handling, connection leaks.
 4. `interfaces/cli/` (commands 1.1k lines, REPL).
 5. `adapters/simulator/*`, `adapters/model.py`, `core/api.py`,
-   `core/remote_control.py`, plugin manager/loader/base, profile manager.
+   `core/remote_control.py`, plugin manager/loader/base.
 6. `plugins/` (roll, soulcopy — since REMOVED; the framework ships with
    no bundled plugins) and `scripts/`.
 7. Docs: update ARCHITECTURE.md / docs for `_persist_queue`, `_asyncutil`,

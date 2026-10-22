@@ -24,49 +24,12 @@ from core.account_manager import AccountManager
 from core.credentials import Credentials
 from core.errors import DatabaseError, SchedulerError
 from core.event_bus import EventBus
-from core.profile_manager import ProfileManager
-from database.models import AccountRecord, ProfileRecord
+from database.models import AccountRecord
 
 LOG = logging.getLogger("tests.helpers")
 
 
 # ------------------------------------------------------------ repositories
-class FakeProfilesRepo:
-    """Dict-backed ProfilesRepository (async methods, like the real one).
-
-    ``accounts`` (optional FakeAccountsRepo) enables the delete cascade the
-    real repository performs: deleting a profile also drops its account
-    assignments (database/repositories/profiles.py delete()).
-    """
-
-    def __init__(self, accounts: Optional["FakeAccountsRepo"] = None) -> None:
-        self.data: Dict[str, ProfileRecord] = {}
-        self._accounts = accounts
-
-    async def upsert(self, name, plugins, description="") -> None:
-        if not isinstance(name, str) or not name.strip():
-            raise DatabaseError("profile name must be a non-empty string")
-        name = name.strip()
-        self.data[name] = ProfileRecord(
-            name=name, plugins=sorted(set(plugins)), description=description
-        )
-
-    async def delete(self, name) -> bool:
-        existed = name in self.data
-        self.data.pop(name, None)
-        if existed and self._accounts is not None:
-            for record in self._accounts.records.values():
-                if name in record.profiles:
-                    record.profiles.remove(name)
-        return existed
-
-    async def get(self, name) -> Optional[ProfileRecord]:
-        return self.data.get(name)
-
-    async def list(self) -> List[ProfileRecord]:
-        return [self.data[k] for k in sorted(self.data)]
-
-
 class FakeAccountsRepo:
     """Dict-backed AccountsRepository with injectable failures (async)."""
 
@@ -120,22 +83,6 @@ class FakeAccountsRepo:
     async def delete(self, name) -> bool:
         self._maybe_fail("delete")
         return self.records.pop(name, None) is not None
-
-    async def assign_profile(self, name, profile) -> None:
-        record = self.records.get(name)
-        if record is None:
-            raise RuntimeError(f"unknown account {name!r}")
-        if profile not in record.profiles:
-            record.profiles.append(profile)
-
-    async def unassign_profile(self, name, profile) -> None:
-        record = self.records.get(name)
-        if record is not None and profile in record.profiles:
-            record.profiles.remove(profile)
-
-    async def profiles_of(self, name) -> List[str]:
-        record = self.records.get(name)
-        return sorted(record.profiles) if record is not None else []
 
     @staticmethod
     def _copy(record: AccountRecord) -> AccountRecord:
@@ -514,8 +461,6 @@ class ManagerHarness:
     manager: AccountManager
     bus: EventBus
     repo: FakeAccountsRepo
-    profiles_repo: FakeProfilesRepo
-    profile_manager: ProfileManager
     plugins: FakePluginManager
     scheduler: FakeScheduler
     settings: FakeSettings
@@ -525,9 +470,6 @@ class ManagerHarness:
     account_plugins: FakeAccountPluginsRepo
     collector: EventCollector = field(default_factory=lambda: EventCollector(EventBus()))
 
-    def add_profile(self, name: str, *plugin_names: str) -> Any:
-        """Create a profile through the async profile manager (AWAIT this)."""
-        return self.profile_manager.set_profile(name, list(plugin_names))
 
 
 def make_manager(
@@ -542,8 +484,6 @@ def make_manager(
     """Build an AccountManager wired to fakes (fresh bus/repos per call)."""
     bus = EventBus()
     repo = FakeAccountsRepo()
-    profiles_repo = FakeProfilesRepo(accounts=repo)
-    profile_manager = ProfileManager(profiles_repo, LOG, repo)
     plugins = FakePluginManager()
     scheduler = FakeScheduler()
     settings = settings or FakeSettings()
@@ -591,7 +531,7 @@ def make_manager(
         credential_service._runtime_sources[name] = "db"
 
     manager = AccountManager(
-        bus, LOG, repo, plugins, profile_manager, scheduler, settings, audit,
+        bus, LOG, repo, plugins, scheduler, settings, audit,
         factory, credentials, limiter=limiter, supervisor_tick=supervisor_tick,
         credential_service=credential_service,
         account_plugins=account_plugins
@@ -605,8 +545,7 @@ def make_manager(
         AccountConnected, AccountDisconnected, AccountFailed, MessageReceived,
     )
     return ManagerHarness(
-        manager=manager, bus=bus, repo=repo, profiles_repo=profiles_repo,
-        profile_manager=profile_manager, plugins=plugins, scheduler=scheduler,
+        manager=manager, bus=bus, repo=repo, plugins=plugins, scheduler=scheduler,
         settings=settings, audit=audit, factory=factory,
         credentials=credentials, collector=collector,
         account_plugins=manager._account_plugins,
@@ -626,7 +565,7 @@ def make_task(**overrides: Any) -> SimpleNamespace:
 
 
 __all__ = [
-    "FakeProfilesRepo", "FakeAccountsRepo", "FakeAccountPluginsRepo",
+"FakeAccountsRepo", "FakeAccountPluginsRepo",
     "FakePluginManager", "FakeScheduler", "FakeSettings", "FakeAudit",
     "FakeDetailsLimiter", "FakeClient", "FakeClientFactory", "EventCollector",
     "ManagerHarness", "make_manager", "make_task", "default_snapshot",

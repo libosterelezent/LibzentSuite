@@ -7,7 +7,7 @@ Construction order (the only place that knows how the managers interconnect):
     -> SyncGroupManager(await load) -> SettingsManager(await load)
     -> AuditRecorder
     -> TaskScheduler(late-bound sender) -> PluginManager(discover + await
-    persist_metadata) -> ProfileManager(await load)
+    persist_metadata) -> managers
     -> AccountManager(await load; restores persisted accounts + delegates
        group membership restore to SyncGroupManager)
     -> CredentialService(+refresh)/CooldownService(await restore)/
@@ -17,7 +17,7 @@ Construction order (the only place that knows how the managers interconnect):
 
 ``build`` is ASYNC (``framework = await build(...)``): the database layer
 is aiosqlite, so the connection+migrations and every boot-time repository
-read (settings, policies, profiles, accounts, cooldown restore, plugin
+read (settings, policies, accounts, cooldown restore, plugin
 metadata) are awaited here before any manager serves traffic.
 
 The sender cycle (scheduler needs accounts.send_hook; accounts needs the
@@ -48,7 +48,6 @@ from .event_bus import EventBus
 from .logging_service import LogService, ServiceLogger, attach_stdlib_bridge, claim_stderr_pipeline, detach_stdlib_bridge, release_stderr_pipeline
 from .plugin_manager import PluginManager
 from .plugin_state import PluginStateService
-from .profile_manager import ProfileManager
 from .rate_limit_manager import RateLimitManager
 from .settings_manager import SettingsManager
 from .sync_group_manager import SyncGroupManager
@@ -170,7 +169,7 @@ class Framework:
     def __init__(self, api: ControlAPI, bus: EventBus, logs: LogService,
                  limiter: RateLimitManager, scheduler: TaskScheduler,
                  accounts: AccountManager, plugins: PluginManager,
-                 profiles: ProfileManager, settings: SettingsManager,
+                 settings: SettingsManager,
                  audit: AuditRecorder, database: Any,
                  credentials: Credentials, config: ProjectConfig,
                  credential_service: Any = None,
@@ -187,7 +186,6 @@ class Framework:
         self.scheduler = scheduler
         self.accounts = accounts
         self.plugins = plugins
-        self.profiles = profiles
         self.settings = settings
         self.audit = audit
         self.database = database
@@ -550,10 +548,6 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     plugins.init_boot_dashboard_uis()
     await plugins.persist_metadata()
 
-    profiles = ProfileManager(
-        database.profiles, ServiceLogger(logs, "profiles"), database.accounts
-    )
-    await profiles.load()
 
     if client_factory is None:
         from adapters.discord import RealClientFactory
@@ -565,7 +559,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
 
     accounts = AccountManager(
         bus, ServiceLogger(logs, "accounts"), database.accounts,
-        plugins, profiles, scheduler, settings, audit,
+        plugins, scheduler, settings, audit,
         client_factory, credentials, limiter=limiter,
         api_cache_repo=database.cache,
         credential_service=credential_service, cooldowns=cooldowns,
@@ -670,7 +664,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
             simulation_runner = None
 
     api = ControlAPI(
-        accounts=accounts, plugins=plugins, profiles=profiles, settings=settings,
+        accounts=accounts, plugins=plugins, settings=settings,
         access=access,
         limiter=limiter, scheduler=scheduler, logs=logs, audit=audit,
         simulation=simulation_runner, credentials=credentials, database=database,
@@ -701,7 +695,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
             "to the legacy panels")
     return Framework(
         api=api, bus=bus, logs=logs, limiter=limiter, scheduler=scheduler,
-        accounts=accounts, plugins=plugins, profiles=profiles, settings=settings,
+        accounts=accounts, plugins=plugins, settings=settings,
         audit=audit, database=database, credentials=credentials, config=config,
         credential_service=credential_service, cooldowns=cooldowns,
         plugin_state=plugin_state, sync_groups=sync_groups,

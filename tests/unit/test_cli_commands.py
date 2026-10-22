@@ -21,7 +21,6 @@ from interfaces.cli.commands import (
     format_plugins,
     format_plugin_state,
     format_policies,
-    format_profiles,
     format_simulation_report,
     format_tasks,
     format_warnings,
@@ -29,7 +28,6 @@ from interfaces.cli.commands import (
     run_command,
 )
 from interfaces.cli.repl import Repl, render_error, run_once
-
 
 class FakeApi:
     """Duck-typed ControlAPI recording every call; canned payloads."""
@@ -46,7 +44,7 @@ class FakeApi:
         return {
             "uptime_s": 12.5, "tasks": {"queued": 1, "running": 0, "completed": 3},
             "accounts": [{"name": "alpha", "status": "running", "user_id": 42,
-                          "enabled": True, "profiles": ["roller"],
+                          "enabled": True,
                           "assigned_plugins": ["roll"]}],
             "ratelimit": {"policies": [{"level": "global", "owner": None,
                                         "action": "message", "interval": 2.0,
@@ -58,7 +56,7 @@ class FakeApi:
     async def accounts_list(self):
         self._record("accounts_list")
         return [{"name": "alpha", "status": "running", "user_id": 42, "enabled": True,
-                 "profiles": ["roller"], "assigned_plugins": ["roll", "soulcopy"],
+                 "assigned_plugins": ["roll", "soulcopy"],
                  "latency_ms": 83.0, "uptime_s": 100.0}]
 
     async def accounts_add(self, payload, surface="api"):
@@ -120,7 +118,7 @@ class FakeApi:
                         "cache_source": "client cache (READY)"},
             "plugins": [{"name": "soulcopy", "enabled": True},
                         {"name": "roll", "enabled": False}],
-            "profiles": ["collector"],
+            
             "rate_limit": {"message": {"interval": 2.0, "jitter": [0.1, 0.5],
                                        "source": "inherited from global"}},
         }
@@ -166,10 +164,6 @@ class FakeApi:
         return {"account": account, "plugin": plugin, "key": key, "value": value}
 
     # ---- profiles
-    async def profiles_list(self):
-        self._record("profiles_list")
-        return [{"name": "roller", "description": "rolls", "plugins": ["roll"]}]
-
     async def profiles_create(self, name, plugins, description=""):
         self._record("profiles_create", name, plugins, description)
         return {"name": name, "plugins": plugins}
@@ -287,7 +281,6 @@ class FakeApi:
     async def shutdown(self):
         self._record("shutdown")
 
-
 def called(api: FakeApi, name: str) -> Optional[Tuple[Tuple, dict]]:
     """Args/kwargs of the MOST RECENT call with this method name."""
     result: Optional[Tuple[Tuple, dict]] = None
@@ -295,7 +288,6 @@ def called(api: FakeApi, name: str) -> Optional[Tuple[Tuple, dict]]:
         if cname == name:
             result = (args, kwargs)
     return result
-
 
 class TestBasics(unittest.IsolatedAsyncioTestCase):
     async def test_help(self) -> None:
@@ -321,7 +313,6 @@ class TestBasics(unittest.IsolatedAsyncioTestCase):
     async def test_unclosed_quotes(self) -> None:
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), 'accounts add "bob')
-
 
 class TestAccountsGroup(unittest.IsolatedAsyncioTestCase):
     async def test_list(self) -> None:
@@ -360,8 +351,7 @@ class TestAccountsGroup(unittest.IsolatedAsyncioTestCase):
         text = await run_command(api, "accounts info alpha")
         self.assertTrue(called(api, "accounts_info"))
         for needle in ("Status", "Identity", "Runtime", "client cache", "Plugins",
-                       "Profiles (informational)", "not the capability mechanism",
-                       "Rate Limit", "inherited from global"):
+                                      "Rate Limit", "inherited from global"):
             self.assertIn(needle, text)
 
     async def test_enable_on_off(self) -> None:
@@ -398,7 +388,6 @@ class TestAccountsGroup(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_subcommand(self) -> None:
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), "accounts frobnicate")
-
 
 class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
     """accounts plugins|plugin-add|plugin-remove (direct capabilities)."""
@@ -505,7 +494,6 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
         focused = await run_command(FakeApi(), "help accounts")
         self.assertIn("plugin-add", focused)
 
-
 class TestPluginsGroup(unittest.IsolatedAsyncioTestCase):
     async def test_list(self) -> None:
         api = FakeApi()
@@ -527,24 +515,6 @@ class TestPluginsGroup(unittest.IsolatedAsyncioTestCase):
         await run_command(api, "plugins set alpha soulcopy trigger go")
         self.assertEqual(called(api, "plugins_set_setting")[0],
                          ("alpha", "soulcopy", "trigger", "go"))
-
-
-class TestProfilesGroup(unittest.IsolatedAsyncioTestCase):
-    async def test_create_requires_plugins(self) -> None:
-        with self.assertRaises(UsageError):
-            await run_command(FakeApi(), "profiles create roller")
-
-    async def test_create_assign_unassign_delete(self) -> None:
-        api = FakeApi()
-        await run_command(api, "profiles create roller roll")
-        self.assertEqual(called(api, "profiles_create")[0], ("roller", ["roll"], ""))
-        await run_command(api, "profiles assign alpha roller")
-        self.assertEqual(called(api, "profiles_assign")[0], ("alpha", "roller"))
-        await run_command(api, "profiles unassign alpha roller")
-        await run_command(api, "profiles delete roller")
-        text = await run_command(api, "profiles list")
-        self.assertIn("roller", text)
-
 
 class TestRateLimitGroup(unittest.IsolatedAsyncioTestCase):
     async def test_set_global(self) -> None:
@@ -632,7 +602,6 @@ class TestRateLimitGroup(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), "ratelimit lane rate")
 
-
 class TestTasksGroup(unittest.IsolatedAsyncioTestCase):
     async def test_list(self) -> None:
         api = FakeApi()
@@ -655,7 +624,6 @@ class TestTasksGroup(unittest.IsolatedAsyncioTestCase):
         await run_command(api, "tasks cancel-matching alpha soulcopy")
         self.assertEqual(called(api, "tasks_cancel_matching")[0],
                          ("alpha", "soulcopy"))
-
 
 class TestSimulationLogsAudit(unittest.IsolatedAsyncioTestCase):
     async def test_simulation_list_and_run(self) -> None:
@@ -692,7 +660,6 @@ class TestSimulationLogsAudit(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(called(api, "system_resume"))
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), "estop sideways")
-
 
 class TestCredentialsAndCooldowns(unittest.IsolatedAsyncioTestCase):
     """accounts credential / credentials [status|import-env] / cooldowns."""
@@ -785,7 +752,6 @@ class TestCredentialsAndCooldowns(unittest.IsolatedAsyncioTestCase):
         await run_command(api, "estop")
         self.assertEqual(called(api, "emergency_stop_all")[1].get("surface"), "cli")
 
-
 class TestFormatters(unittest.TestCase):
     def test_format_accounts_empty(self) -> None:
         self.assertIn("no accounts", format_accounts([]))
@@ -814,13 +780,12 @@ class TestFormatters(unittest.TestCase):
             "runtime": {"cached_guilds": 3, "cached_channels": 12, "cached_dms": 2,
                         "cache_source": "client cache (READY)"},
             "plugins": [{"name": "soulcopy", "enabled": True}],
-            "profiles": ["collector"],
+            
             "rate_limit": {"message": {"interval": 2.0, "jitter": [0.1, 0.5],
                                        "source": "inherited from global"}},
         })
         self.assertIn("client cache", text)
         self.assertIn("inherited from global", text)
-        self.assertIn("Profiles (informational)", text)
         self.assertIn("not the capability mechanism", text)
 
     def test_format_warnings_icons(self) -> None:
@@ -836,7 +801,6 @@ class TestFormatters(unittest.TestCase):
         })
         self.assertIn("FAIL", text.upper())
         self.assertIn("chunk missing", text)
-
 
 class TestRepl(unittest.IsolatedAsyncioTestCase):
     async def test_quit_calls_shutdown_every_path(self) -> None:
@@ -935,7 +899,6 @@ class TestRepl(unittest.IsolatedAsyncioTestCase):
         self.assertIn("bye.", out.getvalue())
         self.assertTrue(called(api, "shutdown"))
 
-
 class TestHelpCommand(unittest.IsolatedAsyncioTestCase):
     """'help <cmd>' focus, alias handling, and registry drift checks."""
 
@@ -973,13 +936,12 @@ class TestHelpCommand(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             set(HELP),
             {"help", "status", "accounts", "credentials", "cooldowns",
-             "plugins", "profiles", "groups", "ratelimit", "tasks",
+             "plugins", "groups", "ratelimit", "tasks",
              "simulation", "logs", "audit", "estop", "quit"},
         )
         for name, (sig, desc) in HELP.items():
             self.assertTrue(desc, f"HELP[{name!r}] has no description")
             self.assertIsInstance(sig, str)
-
 
 class TestHostileParsing(unittest.IsolatedAsyncioTestCase):
     """Fuzz: hostile argument shapes only ever produce text, None,
@@ -1013,7 +975,6 @@ class TestHostileParsing(unittest.IsolatedAsyncioTestCase):
         "tasks list a b", "tasks cancel-matching a b c",
         "logs -5", "logs --5", "logs 5 a b", "logs 0x10", "audit -1",
         "plugins state", "plugins set a p k", "plugins enable a",
-        "profiles create", "profiles delete", "profiles assign a",
         "credentials", "credentials import-env --force",
         "credentials import-env --overwrite --overwrite",
         "cooldowns a b", "cooldowns clear a", "cooldowns clear a b c d",
@@ -1072,7 +1033,6 @@ class TestHostileParsing(unittest.IsolatedAsyncioTestCase):
         api = FakeApi()
         await run_command(api, "logs 0")
         self.assertEqual(called(api, "logs_tail")[0], (0, None, None))
-
 
 class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):
     """Round-2: the stop event vs long commands, EOF, and pending input."""
@@ -1149,7 +1109,6 @@ class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):
         self.assertIn("bye.", text)
         self.assertTrue(called(api, "shutdown"))
         self.assertFalse(repl.running)
-
 
 class TestRunOnceExitCodes(unittest.IsolatedAsyncioTestCase):
     """Every failure mode maps to the right process exit code."""
@@ -1231,7 +1190,6 @@ class TestRunOnceExitCodes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outs[0], outs[1])
         self.assertNotIn("\x1b", outs[0])
 
-
 class TestOutputVolumeAndFormatting(unittest.TestCase):
     """Huge payloads render bounded, deterministic, ANSI-free text."""
 
@@ -1274,7 +1232,6 @@ class TestOutputVolumeAndFormatting(unittest.TestCase):
                                  "jitter": [0.1, 0.5]}])
         self.assertIn("2.00s +0.10..0.50s", text)
 
-
 class TestFloorCapDisplay(unittest.IsolatedAsyncioTestCase):
     """'ratelimit floor' round-1 cap (86400) renders correctly end to end."""
 
@@ -1299,10 +1256,8 @@ class TestFloorCapDisplay(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(UsageError):  # non-finite rejected at the CLI
             await run_command(api, "ratelimit floor nan")
 
-
 if __name__ == "__main__":
     unittest.main()
-
 
 class ColumnSeparationTests(unittest.TestCase):
     def test_overlong_cell_never_runs_into_the_next_column(self):

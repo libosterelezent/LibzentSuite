@@ -25,11 +25,11 @@ from tests.unit.helpers import (
 )
 
 STATUS_KEYS = {"id", "name", "status", "user_id", "enabled", "sync_group",
-               "profiles", "assigned_plugins", "plugin_profiles",
+               "assigned_plugins", "plugin_profiles",
                "latency_ms", "uptime_s", "last_error", "credential",
                "plugins"}
 DETAILS_KEYS = {"name", "status", "identity", "runtime", "plugins",
-                "profiles", "rate_limit", "credential"}
+                "rate_limit", "credential"}
 
 _TEST_LOG = logging.getLogger("tests.account_manager")
 
@@ -722,7 +722,6 @@ class DetailsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(d["runtime"]["cached_dms"], 1)
         self.assertEqual(d["runtime"]["cache_source"], "client cache (READY)")
         self.assertEqual(d["plugins"], [{"name": "soulcopy", "enabled": True}])
-        self.assertEqual(d["profiles"], [])  # retained field, decoupled
         self.assertEqual(d["rate_limit"], {
             "message": {"interval": 5.0, "jitter": [0.0, 0.0],
                         "source": "global, account:alpha"},
@@ -754,16 +753,6 @@ class DetailsTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AccountError):
             await h.manager.details("ghost")
 
-    async def test_details_reflects_profile_assigned_after_add(self) -> None:
-        h = make_manager()
-        await h.manager.add_account("alpha")
-        await h.add_profile("basic", "soulcopy")
-        await h.profile_manager.assign("alpha", "basic")
-        d = await h.manager.details("alpha")  # record refreshed from the repo
-        self.assertEqual(d["profiles"], ["basic"])
-
-
-class AuditTests(unittest.IsolatedAsyncioTestCase):
     async def test_inbound_messages_are_audited(self) -> None:
         h = make_manager()
         await h.manager.add_account("alpha")

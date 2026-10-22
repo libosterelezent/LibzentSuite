@@ -294,7 +294,6 @@ class Account:
             "user_id": rt.user_id,
             "enabled": self.record.enabled,
             "sync_group": self.record.sync_group,
-            "profiles": list(self.record.profiles),
             "assigned_plugins": list(self.assigned_plugins),
             "plugin_profiles": dict(self.plugin_profiles),
             "latency_ms": latency,
@@ -336,7 +335,6 @@ class AccountManager:
         logger: Any,
         accounts_repo: Any,
         plugin_manager: Any,
-        profile_manager: Any,
         scheduler: Any,
         settings: SettingsManager,
         audit: Any,
@@ -383,10 +381,8 @@ class AccountManager:
         self._logger = logger or logging.getLogger("libzent.accounts")
         self._accounts_repo = accounts_repo
         self._plugin_manager = plugin_manager
-        # RETAINED for its own bookkeeping only (profile cache cascade,
-        # future plugin-specific profile system) — the capability path
+
         # never consults it anymore (direct account→plugin assignments).
-        self._profile_manager = profile_manager
         self._scheduler = scheduler
         self._settings = settings
         self._audit = audit
@@ -807,12 +803,7 @@ class AccountManager:
                 settings_mgr.forget_account(name)
             except Exception:
                 self._logger.exception("settings mirror cascade failed for %s", name)
-        profile_mgr = getattr(self, "_profile_manager", None)
-        if hasattr(profile_mgr, "forget_account"):
-            try:
-                profile_mgr.forget_account(name)
-            except Exception:
-                self._logger.exception("profile cache cascade failed for %s", name)
+
         limiter = getattr(self, "_limiter", None)
         if hasattr(limiter, "prune_account"):
             try:
@@ -2327,7 +2318,6 @@ class AccountManager:
                 "cache_source": "client cache (READY)",
             },
             "plugins": self._plugin_rows(account),
-            "profiles": list(record.profiles),
             "rate_limit": self._rate_limit_rows(name),
             "credential": account.credential_source,
         }

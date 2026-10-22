@@ -29,14 +29,13 @@ class AccountRecord:
     enabled: bool = True
     sync_group: Optional[str] = None     # accounts that act in sync (optional)
     settings: Dict[str, Any] = field(default_factory=dict)   # framework layer
-    profiles: List[str] = field(default_factory=list)        # assigned profiles
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id, "name": self.name, "token_ref": self.token_ref,
             "enabled": self.enabled, "sync_group": self.sync_group,
-            "settings": dict(self.settings), "profiles": list(self.profiles),
+            "settings": dict(self.settings),
             "created_at": round(self.created_at, 3),
         }
 
@@ -64,21 +63,6 @@ class SyncGroupRecord:
             "description": self.description, "enabled": self.enabled,
             "created_at": round(self.created_at, 3),
             "updated_at": round(self.updated_at, 3),
-        }
-
-
-@dataclass
-class ProfileRecord:
-    """A named capability bundle: the plugins it permits (spec §4)."""
-
-    name: str
-    plugins: List[str] = field(default_factory=list)
-    description: str = ""
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "name": self.name, "plugins": sorted(self.plugins),
-            "description": self.description,
         }
 
 
@@ -160,6 +144,6 @@ class RatePolicyRecord:
         }
 
 
-__all__ = ["AccountRecord", "SyncGroupRecord", "ProfileRecord",
+__all__ = ["AccountRecord", "SyncGroupRecord",
            "PluginProfileRecord", "PluginMetadata", "RatePolicyRecord",
            "POLICY_LEVELS"]
