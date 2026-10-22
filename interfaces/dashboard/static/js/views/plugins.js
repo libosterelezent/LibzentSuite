@@ -18,16 +18,40 @@
 
 routerAdd("/plugins", "Plugins", async (container) => {
   const state = {alive: true, profiles: [], profileFailed: false};
+  const mode = () => (prefGet("plugin_view", "tiles") === "list" ? "list" : "tiles");
+
+  const tileBtn = el("button", {class: "btn btn-sm", type: "button",
+    "aria-pressed": "false", title: "Tile view"}, "Tiles");
+  const listBtn = el("button", {class: "btn btn-sm", type: "button",
+    "aria-pressed": "false", title: "List view"}, "List");
+  const paintModeBtns = () => {
+    tileBtn.className = "btn btn-sm " + (mode() === "tiles" ? "btn-primary" : "btn-ghost");
+    tileBtn.setAttribute("aria-pressed", mode() === "tiles" ? "true" : "false");
+    listBtn.className = "btn btn-sm " + (mode() === "list" ? "btn-primary" : "btn-ghost");
+    listBtn.setAttribute("aria-pressed", mode() === "list" ? "true" : "false");
+  };
+  tileBtn.onclick = () => { prefSet("plugin_view", "tiles"); paintModeBtns(); render(); };
+  listBtn.onclick = () => { prefSet("plugin_view", "list"); paintModeBtns(); render(); };
+  paintModeBtns();
 
   container.append(el("div", {class: "view-hdr"},
-    el("h1", {}, "Plugins"),
-    el("p", {class: "dim"},
-      "The discovered plugin registry: per-account enablement, settings, the shared profile library and lifecycle."),
+    el("div", {},
+      el("h1", {}, "Plugins"),
+      el("p", {class: "dim"},
+        "The discovered plugin registry: per-account enablement, settings, the shared profile library and lifecycle.")),
+    el("div", {class: "actions"},
+      tileBtn, listBtn,
+      el("button", {class: "btn btn-secondary btn-sm", type: "button"}, "↻ Refresh")),
   ));
-  const refreshBtn = el("button", {class: "btn btn-secondary btn-sm", type: "button"}, "↻ Refresh");
-  container.querySelector(".view-hdr").append(refreshBtn);
-  const grid = el("div", {style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:var(--sp-3);align-items:start;"});
+  const refreshBtn = container.querySelector(".view-hdr .btn-secondary");
+  const grid = el("div", {});
   container.append(grid);
+
+  const paintGrid = () => {
+    grid.style.cssText = mode() === "list"
+      ? "display:grid;grid-template-columns:minmax(0,1fr);gap:var(--sp-3);align-items:start;"
+      : "display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:var(--sp-3);align-items:start;";
+  };
 
   const profilesOf = plugin => state.profiles.filter(p => p.plugin === plugin);
 
@@ -261,15 +285,16 @@ routerAdd("/plugins", "Plugins", async (container) => {
         el("span", {class: "k"}, p.description || ""),
         el("span", {style: "margin-left:auto;display:inline-flex;gap:4px;"}, edit, del)));
     }
-    const newProf = el("button", {class: "btn btn-secondary btn-sm", type: "button"}, "+ New profile");
-    newProf.onclick = () => openProfileEditor(manifest, null);
-    lib.append(newProf);
+    /* profile CREATION is on hold for removal (operator, Phase A #10):
+       existing profiles stay editable/deletable, new ones come later
+       through the account MEMORY flow */
     card.append(lib);
     return card;
   }
 
   function render() {
     const manifests = storeGet("manifests") || [];
+    paintGrid();
     grid.textContent = "";
     if (!manifests.length) {
       grid.append(emptyState("No plugins",
