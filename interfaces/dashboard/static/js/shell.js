@@ -7,12 +7,12 @@
    ═══════════════════════════════════════════════════════════════════════════ */
 
 const NAV_MAIN = [
-  {hash: "/home",     label: "Home",     icon: "M3 12l9-9 9 9v9a2 2 0 0 1-2 2h-4v-7h-6v7H5a2 2 0 0 1-2-2z"},
-  {hash: "/accounts", label: "Accounts", icon: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"},
-  {hash: "/activity", label: "Activity", icon: "M22 12h-4l-3 9L9 3l-3 9H2"},
-  {hash: "/policies", label: "Policies", icon: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"},
-  {hash: "/admin",    label: "Admin",    icon: "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0z"},
-  {hash: "/tools",    label: "Tools",    icon: "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"},
+  {hash: "/home",     label: "Home",     icon: "home"},
+  {hash: "/accounts", label: "Accounts", icon: "users"},
+  {hash: "/activity", label: "Activity", icon: "activity"},
+  {hash: "/policies", label: "Policies", icon: "shield"},
+  {hash: "/admin",    label: "Admin",    icon: "admin"},
+  {hash: "/tools",    label: "Tools",    icon: "tools"},
 ];
 
 function buildChrome() {
@@ -25,18 +25,24 @@ function buildChrome() {
     snav.append(el("div", {class: "snav-label"}, "Workspace"));
     for (const n of NAV_MAIN) {
       snav.append(el("a", {class: "snav-item", href: "#" + n.hash, dataset: {hash: n.hash}},
-        el("svg", {viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
-                   "stroke-width": "2", "aria-hidden": "true"}, el("path", {d: n.icon})),
-        el("span", {}, n.label)));
+        ico(n.icon), el("span", {}, n.label)));
     }
     const pluginPages = (storeGet("navigation") || []).filter(p => p.plugin !== "$framework");
     if (pluginPages.length) {
       snav.append(el("div", {class: "snav-label"}, "Plugins"));
       for (const p of pluginPages) {
+        /* plugin pages carry their own icon path from the builder — render
+           it inline (same stroke language); icon-less pages fall back to
+           the sprite plug symbol (never a bare dot) */
+        const mark = p.icon
+          ? el("svg", {class: "snav-ico", viewBox: "0 0 24 24", fill: "none",
+                       stroke: "currentColor", "stroke-width": "2", "aria-hidden": "true"},
+              el("path", {d: p.icon}))
+          : ico("plug", "snav-ico");
         snav.append(el("a", {
           class: "snav-item snav-plugin",
           href: `#/plugins/${encodeURIComponent(p.plugin)}/${encodeURIComponent(p.page_id)}`,
-        }, el("span", {}, p.title)));
+        }, mark, el("span", {}, p.title)));
       }
       snav.append(el("a", {class: "snav-item snav-dim", href: "#/plugins"},
         el("span", {}, "manage plugins…")));
@@ -54,11 +60,16 @@ function buildChrome() {
     if (route) {
       const leaf = route.pattern.split("/").filter(Boolean)[0] || "";
       const nav = NAV_MAIN.find(n => n.hash === "/" + leaf);
-      crumb.textContent = nav ? nav.label : leaf;
+      /* proper-case the leaf for non-nav routes (plugin pages etc.) */
+      const section = nav ? nav.label
+        : leaf.charAt(0).toUpperCase() + leaf.slice(1);
+      crumb.textContent = section;
       const t = params && params.name ? params.name : (route.title || "");
       title.textContent = t;
-      /* "Home Home" duplication: hide the crumb when it equals the title */
-      crumb.style.display = t === crumb.textContent ? "none" : "";
+      /* single title in the header: hide the crumb when it duplicates the
+         title (was case-sensitive: "plugins" vs "Plugins" both showed) */
+      crumb.style.display =
+        t.toLowerCase() === section.toLowerCase() ? "none" : "";
     }
   });
 
