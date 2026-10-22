@@ -350,6 +350,39 @@ class TestUiContracts(unittest.TestCase):
         self.assertIn("themeOpen", shell,
                       "shell must wire the theme button to themeOpen()")
 
+    def test_tabbed_dialog_contract(self):
+        """Phase A-11 step 1: the tabbed dialog is ARIA-wired and
+        keyboard-operable."""
+        ui_js = _js_path("js/ui.js").read_text(encoding="utf-8")
+        self.assertIn('role: "tablist"', ui_js)
+        self.assertIn("aria-selected", ui_js)
+        self.assertIn("ArrowRight", ui_js, "tab switching must be keyboard-operable")
+        self.assertIn("dlg-panel", ui_js)
+
+    def test_ability_dialog_exists(self):
+        """The combined Settings/Presets/Logs/Raw ability dialog."""
+        acc = _js_path("js/views/accounts.js").read_text(encoding="utf-8")
+        for marker in ("acctOpenAbilityDialog", '"settings"', '"presets"',
+                       '"logs"', '"raw"'):
+            self.assertIn(marker, acc)
+        self.assertIn("REDACT", acc, "raw tab must redact credential-ish keys")
+
+    def test_state_kv_strip(self):
+        acc = _js_path("js/views/accounts.js").read_text(encoding="utf-8")
+        self.assertIn("kv-row", acc, "Memory state strip must exist (mockup)")
+
+    def test_theme_layout_tab_and_import(self):
+        theme = _js_path("js/theme.js").read_text(encoding="utf-8")
+        self.assertIn(">Layout<", theme)
+        self.assertIn("lz-css-import", theme, "CSS tab must offer Import")
+        self.assertIn("detailLayout", theme,
+                      "layout prefs must apply via body dataset")
+
+    def test_schema_helpers_are_global(self):
+        ui_js = _js_path("js/ui.js").read_text(encoding="utf-8")
+        self.assertRegex(ui_js, r"function schemaField\(")
+        self.assertRegex(ui_js, r"function collectSchema\(")
+
     def test_double_submit_guards(self):
         ui_js = _js_path("js/ui.js").read_text(encoding="utf-8")
         self.assertRegex(ui_js, r"function busy\(")
