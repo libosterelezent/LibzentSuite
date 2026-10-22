@@ -163,23 +163,6 @@ class FakeApi:
         self._record("plugins_set_setting", account, plugin, key, value)
         return {"account": account, "plugin": plugin, "key": key, "value": value}
 
-    # ---- profiles
-    async def profiles_create(self, name, plugins, description=""):
-        self._record("profiles_create", name, plugins, description)
-        return {"name": name, "plugins": plugins}
-
-    async def profiles_delete(self, name):
-        self._record("profiles_delete", name)
-        return {"deleted": name, "existed": True}
-
-    async def profiles_assign(self, account, profile):
-        self._record("profiles_assign", account, profile)
-        return {"account": account, "profiles": [profile]}
-
-    async def profiles_unassign(self, account, profile):
-        self._record("profiles_unassign", account, profile)
-        return {"account": account, "profiles": []}
-
     # ---- ratelimit
     async def ratelimit_policies(self):
         self._record("ratelimit_policies")

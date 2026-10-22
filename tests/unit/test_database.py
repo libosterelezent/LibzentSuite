@@ -208,7 +208,6 @@ class TestAccounts(AsyncDatabaseTestCase):
 
     async def test_delete_cascades(self) -> None:
         await self.db.accounts.add("alpha")
-        await self.db.accounts.assign_profile("alpha", "roller")
         await self.db.plugins.set_state("alpha", "soulcopy", False)
         await self.db.plugins.set_setting("alpha", "soulcopy", "trigger", "x")
         await self.db.account_settings.set("alpha", "reconnect_enabled", False)
@@ -218,7 +217,6 @@ class TestAccounts(AsyncDatabaseTestCase):
         self.assertEqual(await self.db.plugins.settings("alpha", "soulcopy"), {})
         self.assertIsNone(await self.db.plugins.state("alpha", "soulcopy"))
         self.assertEqual(await self.db.account_settings.get("alpha"), {})
-        self.assertEqual(await self.db.accounts.profiles_of("alpha"), [])
         self.assertIsNone(await self.db.cache.get("alpha", "dm", "42"))  # api_cache cascade
         self.assertFalse(await self.db.accounts.delete("alpha"))
 

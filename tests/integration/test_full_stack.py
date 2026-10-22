@@ -217,22 +217,6 @@ class TestPluginAssignmentGating(unittest.IsolatedAsyncioTestCase):
         finally:
             await stack.stop()
 
-    async def test_profile_grant_does_not_widen_attachment(self) -> None:
-        stack = await Stack(extra_accounts=["beta"]).boot()
-        api = stack.framework.api
-        await api.accounts_add({"name": "beta"})
-        await api.accounts_start()
-        try:
-            await api.profiles_create("copier", [PROBE, "spy"])
-            await api.profiles_assign("beta", "copier")  # retained infra
-            # ... and attachment is UNCHANGED by the grant
-            self.assertEqual({p["name"] for p in await api.plugins_state("beta")},
-                             set())
-            self.assertEqual(await api.accounts_plugins_list("beta"), [])
-        finally:
-            await stack.stop()
-
-
 class TestPersistenceRoundtrip(unittest.IsolatedAsyncioTestCase):
     async def test_state_survives_reboot(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sm-state-") as tmp:
@@ -242,9 +226,6 @@ class TestPersistenceRoundtrip(unittest.IsolatedAsyncioTestCase):
             # capability: DIRECT plugin assignment (the old "profiles" key
             # no longer exists on accounts_add)
             await api.accounts_add({"name": "alpha", "plugins": [PROBE]})
-            # profile bookkeeping (retained infra) survives alongside
-            await api.profiles_create("copier", [PROBE])
-            await api.profiles_assign("alpha", "copier")
             await api.ratelimit_set("message", 4.0, 0.1, 0.9, level="account", owner="alpha")
             await api.plugins_set_enabled("alpha", PROBE, False)
             await api.plugins_set_setting("alpha", PROBE, "trigger", "go")
@@ -256,7 +237,6 @@ class TestPersistenceRoundtrip(unittest.IsolatedAsyncioTestCase):
             try:
                 accounts = await api2.accounts_list()
                 self.assertEqual([a["name"] for a in accounts], ["alpha"])
-                self.assertEqual(accounts[0]["profiles"], ["copier"])
                 self.assertEqual(accounts[0]["assigned_plugins"], [PROBE])
                 policies = await api2.ratelimit_policies()
                 override = [p for p in policies
@@ -266,8 +246,6 @@ class TestPersistenceRoundtrip(unittest.IsolatedAsyncioTestCase):
                 states = {p["name"]: p for p in await api2.plugins_state("alpha")}
                 self.assertFalse(states[PROBE]["enabled"])   # plugin state
                 self.assertEqual(states[PROBE]["settings"]["trigger"], "go")
-                profiles = await api2.profiles_list()
-                self.assertEqual(profiles[0]["name"], "copier")
             finally:
                 await stack2.stop()
 
