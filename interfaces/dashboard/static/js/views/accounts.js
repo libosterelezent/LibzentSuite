@@ -1003,10 +1003,10 @@ function acctAbilitiesSection(a, ex, rerender) {
                  : (man.description || "plugin"))),
       el("div", {class: "ab-actions"},
         toggle,
-        iconBtn("M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z",
-          "Plugin profile — " + p,
-          () => acctOpenProfileBind(a, p, ex, rerender),
-          "Plugin profile"),
+        iconBtn("gear",
+          "Plugin settings — " + p,
+          () => acctOpenAbilityDialog(a, p, ex, rerender),
+          "Settings, presets, logs, raw"),
         un)));
   }
   /* dashed assign button (combined mockup) — duplicates the header action
@@ -1016,6 +1016,194 @@ function acctAbilitiesSection(a, ex, rerender) {
   wrap.append(addAbility);
   sec.append(wrap);
   return sec;
+}
+
+/* ── ability dialog (Phase A-11 steps 2-6): Settings/Presets/Logs/Raw ──────
+   The mockup's combined modal: one wide four-tab dialog per assigned
+   plugin. Opening it NEVER touches the account's execution lifecycle. */
+function acctOpenAbilityDialog(a, pluginName, ex, rerender) {
+  const man = acctManifestMap()[pluginName] || {};
+  dialog({
+    title: `${pluginName} — ${a.name}`,
+    wide: true,
+    tabs: [
+      {id: "settings", label: "Settings",
+        build: p => acctAbilitySettingsTab(p, a, pluginName, man)},
+      {id: "presets", label: "Presets",
+        build: p => acctAbilityPresetsTab(p, a, pluginName, ex, rerender)},
+      {id: "logs", label: "Logs",
+        build: p => acctAbilityLogsTab(p, a)},
+      {id: "raw", label: "Raw",
+        build: p => acctAbilityRawTab(p, a, pluginName)},
+    ],
+  });
+}
+
+/* Settings tab: the plugin's REAL schema-driven configuration for this
+   account (verified contracts: /api/plugins/settings?account= +
+   /api/plugins/set-setting). Graceful when the plugin declares none. */
+function acctAbilitySettingsTab(panel, a, pluginName, man) {
+  const schema = man.settings || [];
+  if (!schema.length) {
+    panel.append(emptyState("No settings",
+      `${pluginName} declares no configurable settings.`));
+    return;
+  }
+  const skel = el("div", {class: "skel"}, el("div"), el("div"));
+  panel.append(skel);
+  const form = el("div", {});
+  api("/api/plugins/settings?account=" + encodeURIComponent(a.name)).then(list => {
+    skel.remove();
+    const entry = (list || []).find(x => x.name === pluginName);
+    const values = (entry && entry.settings) || {};
+    for (const def of schema) form.append(schemaField(def, values[def.name]));
+  }).catch(e => {
+    skel.remove();
+    panel.append(emptyState("Settings unavailable", e.message));
+  });
+  const save = el("button", {class: "btn btn-primary btn-sm", type: "button"}, "Save settings");
+  save.onclick = busy(save, async () => {
+    const values = collectSchema(panel, schema);
+    if (!values) return;
+    try {
+      for (const key of Object.keys(values)) {
+        if (values[key] === null && schema.find(d => d.name === key)?.default == null) continue;
+        await post("/api/plugins/set-setting",
+          {account: a.name, plugin: pluginName, key, value: values[key]});
+      }
+      toast(`settings saved for ${a.name}`, "ok");
+    } catch (e) { toast(e.message, "err"); }
+  });
+  panel.append(el("div", {class: "toolbar"}, save));
+}
+
+/* Presets tab: the profile library for this plugin + this account's
+   binding (moved here from the old binding-only dialog, Phase A-11 #2). */
+function acctAbilityPresetsTab(panel, a, pluginName, ex, rerender) {
+  const bindings = ex.bindings || a.plugin_profiles || {};
+  const active = bindings[pluginName];
+  const profiles = (ex.profiles || []).filter(r => r.plugin === pluginName);
+
+  panel.append(el("div", {class: "kv"},
+    el("span", {class: "k"}, "active preset"),
+    el("span", {class: "v"}, active || "plugin defaults")));
+
+  if (!profiles.length) {
+    panel.append(emptyState("No presets yet",
+      "Save the plugin's current settings as the first preset below."));
+  }
+  for (const r of profiles) {
+    const loadBtn = el("button", {class: "load", type: "button"}, "load");
+    loadBtn.onclick = busy(loadBtn, async () => {
+      try {
+        await post("/api/accounts/plugin-profile",
+          {account: a.name, plugin: pluginName, profile: r.name});
+        toast(`preset "${r.name}" loaded`, "ok");
+        await loadStatsNow();
+        acctDetailRefresh(a.name, ex, rerender);
+      } catch (e) { toast(e.message, "err"); }
+    });
+    const delBtn = el("button", {class: "del", type: "button"}, "delete");
+    delBtn.onclick = busy(delBtn, async () => {
+      const ok = await confirmBox({title: "Delete preset",
+        body: `Delete ${pluginName} preset "${r.name}"? Accounts bound to it fall back to plugin defaults.`,
+        yes: "Delete"});
+      if (!ok) return;
+      try {
+        await post("/api/plugins/profiles/delete", {plugin: pluginName, name: r.name});
+        acctDetailRefresh(a.name, ex, rerender);
+      } catch (e) { toast(e.message, "err"); }
+    });
+    panel.append(el("div", {class: "preset"},
+      el("span", {class: "pn"}, r.name),
+      active === r.name ? el("span", {class: "badge badge-ok"}, "active") : null,
+      el("span", {class: "pc"}, Object.keys(r.settings || {}).length + " settings"),
+      el("div", {class: "pa"}, loadBtn, delBtn)));
+  }
+  if (active) {
+    const clearBtn = el("button", {class: "btn btn-ghost btn-sm", type: "button",
+      title: "Unbind and fall back to plugin defaults"}, "clear binding (" + active + ")");
+    clearBtn.onclick = busy(clearBtn, async () => {
+      try {
+        await post("/api/accounts/plugin-profile",
+          {account: a.name, plugin: pluginName, profile: null});
+        toast("binding cleared — plugin defaults", "ok");
+        acctDetailRefresh(a.name, ex, rerender);
+      } catch (e) { toast(e.message, "err"); }
+    });
+    panel.append(clearBtn);
+  }
+
+  /* save the CURRENT account settings as a new preset (GPT step 4:
+     settings fetched + serialized before create) */
+  const nameIn = el("input", {type: "text",
+    placeholder: "preset name — lowercase, digits, dashes",
+    "aria-label": "New preset name", autocomplete: "off"});
+  const saveBtn = el("button", {class: "btn btn-secondary btn-sm", type: "button"}, "Save current as preset");
+  saveBtn.onclick = busy(saveBtn, async () => {
+    const pname = nameIn.value.trim();
+    if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(pname)) {
+      toast("Preset name: lowercase letters, digits, dashes.", "err");
+      return;
+    }
+    try {
+      const list = await api("/api/plugins/settings?account=" + encodeURIComponent(a.name));
+      const entry = (list || []).find(x => x.name === pluginName);
+      const settings = (entry && entry.settings) || {};
+      if (!Object.keys(settings).length) { toast("No settings to save.", "err"); return; }
+      await post("/api/plugins/profiles/create",
+        {plugin: pluginName, name: pname, description: `saved from ${a.name}`, settings});
+      toast(`preset "${pname}" saved`, "ok");
+      acctDetailRefresh(a.name, ex, rerender);
+    } catch (e) { toast(e.message, "err"); }
+  });
+  panel.append(el("div", {class: "toolbar"}, nameIn, saveBtn));
+}
+
+/* Logs tab: this account's real log tail (bounded), not mockup samples. */
+function acctAbilityLogsTab(panel, a) {
+  const skel = el("div", {class: "skel"}, el("div"), el("div"), el("div"));
+  panel.append(skel);
+  api("/api/logs?account=" + encodeURIComponent(a.name) + "&n=100").then(rows => {
+    skel.remove();
+    if (!rows || !rows.length) {
+      panel.append(emptyState("No log entries", "Nothing logged for this account yet."));
+      return;
+    }
+    const box = el("div", {class: "logbox"});
+    for (const r of rows.slice(-200)) {
+      box.append(el("div", {class: "log-line"},
+        el("span", {class: "ts mono"}, fmtTs(r.ts)),
+        el("span", {class: "sev " + String(r.severity || "info").toLowerCase()},
+          String(r.severity || "INFO").toUpperCase()),
+        el("span", {class: "log-msg"}, r.message ?? "")));
+    }
+    panel.append(box);
+  }).catch(e => {
+    skel.remove();
+    panel.append(emptyState("Logs unavailable", e.message));
+  });
+}
+
+/* Raw tab: the plugin's real state row, credential-redacted (GPT step 6:
+   never expose tokens; never assume key/value shapes beyond the
+   contract). Values are JSON-rendered for inspection. */
+function acctAbilityRawTab(panel, a, pluginName) {
+  const skel = el("div", {class: "skel"}, el("div"), el("div"), el("div"));
+  panel.append(skel);
+  api("/api/plugins/state?account=" + encodeURIComponent(a.name)).then(rows => {
+    skel.remove();
+    const st = (rows || []).find(x => x.name === pluginName);
+    if (!st) { panel.append(emptyState("No state", "The plugin is not loaded on this account.")); return; }
+    const REDACT = /token|credential|secret|password|authorization/i;
+    const scrub = v => JSON.parse(JSON.stringify(v, (k, val) =>
+      REDACT.test(String(k)) ? "[redacted]" : val));
+    const pre = el("pre", {class: "dui-code mono"}, JSON.stringify(scrub(st), null, 2));
+    panel.append(pre);
+  }).catch(e => {
+    skel.remove();
+    panel.append(emptyState("Raw state unavailable", e.message));
+  });
 }
 
 /* ── 3. MEMORY (plugin profiles) ─────────────────────────────────────────── */
@@ -1109,6 +1297,18 @@ function acctMemorySection(a, ex, rerender) {
       "No presets in the library yet — build settings on the Plugins page and save them as profiles.");
     wrap.append(hint);
   }
+  /* state-kv strip (mockup): per-plugin runtime state — real fields only */
+  const statesRow = el("div", {class: "kv-row", style: "margin-top:var(--sp-2)"});
+  for (const p of assigned) {
+    const st = (a.plugins || {})[p] || (ex.states || []).find(s => s.name === p) || {};
+    statesRow.append(el("div", {class: "kv"},
+      el("span", {class: "k"}, p),
+      el("span", {class: "v"},
+        st.enabled === false ? "off" : "on",
+        st.error_count ? el("span", {class: "badge badge-err"},
+          String(st.error_count) + " err") : null)));
+  }
+  if (assigned.length) wrap.append(statesRow);
   sec.append(wrap);
   return sec;
 }
@@ -1349,53 +1549,6 @@ function acctOpenAssign(a, rerender) {
 }
 
 /* plugin-profile binding dialog (the ability settings icon) */
-function acctOpenProfileBind(a, plugin, ex, rerender) {
-  const profiles = (ex.profiles || []).filter(r => r.plugin === plugin);
-  const current = (ex.bindings || a.plugin_profiles || {})[plugin] ?? null;
-  const list = el("div", {class: "picklist"});
-  if (!profiles.length) {
-    list.append(el("p", {class: "hint"},
-      "No presets exist for " + plugin +
-      " yet — build its settings on the Plugins page and save them as a profile."));
-  }
-  const mkRow = (value, label, desc, checked) => {
-    const radio = el("input", {type: "radio", name: "acct-profile-" + plugin,
-      value: value == null ? "" : value});
-    radio.checked = checked;
-    return el("label", {class: "pick-row"}, radio,
-      el("span", {class: "pl-name"}, label),
-      el("span", {class: "pl-desc"}, desc));
-  };
-  list.append(mkRow(null, "plugin defaults", "the plugin's own settings", current == null));
-  for (const r of profiles)
-    list.append(mkRow(r.name, r.name,
-      Object.keys(r.settings || {}).length + " settings" +
-        (r.description ? " — " + r.description : ""),
-      current === r.name));
-
-  const form = el("div", {},
-    el("p", {class: "dim"},
-      "Bind the preset " + plugin + " runs with on " + a.name + "."),
-    list);
-  dialog({title: plugin + " — profile", bodyEl: form, actions: [
-    {label: "Cancel", variant: "secondary", onclick: close => close()},
-    {label: "Bind", variant: "primary", onclick: (close) => {
-      const btn = form.closest("dialog").querySelector(".dlg-foot .btn-primary");
-      busy(btn, async () => {
-        const picked = list.querySelector("input:checked");
-        const profile = picked && picked.value ? picked.value : null;
-        try {
-          await post("/api/accounts/plugin-profile",
-            {account: a.name, plugin, profile});
-          toast(profile ? "preset “" + profile + "” bound" : "plugin defaults bound", "ok");
-          close();
-          await loadStatsNow();
-          acctDetailRefresh(a.name, ex, rerender);
-        } catch (e) { acctFbError(form, e.message); }
-      })();
-    }},
-  ]});
-}
 
 /* ── route registration ──────────────────────────────────────────────────── */
 routerAdd("/accounts", "Accounts", acctListMount);
