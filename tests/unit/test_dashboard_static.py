@@ -415,6 +415,21 @@ def _get(url: str, as_json: bool = True) -> tuple:
         return exc.code, (json.loads(raw) if as_json else raw)
 
 
+def _send_sync(url: str, method: str, payload: dict) -> tuple:
+    req = urllib.request.Request(
+        url, method=method,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json",
+                 "X-Dashboard-Token": TOKEN})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("utf-8")
+            return resp.status, json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8")
+        return exc.code, json.loads(raw)
+
+
 class TestStartupEndpointsLive(unittest.IsolatedAsyncioTestCase):
     """Boot a real DashboardServer with zero accounts and confirm every
     startup data source answers 200/ok — the SPA's first paint must never
@@ -478,6 +493,51 @@ class TestStartupEndpointsLive(unittest.IsolatedAsyncioTestCase):
         _, body = await self._get("/api/status")
         self.assertIsInstance(body["data"]["accounts"], list)
         self.assertEqual(body["data"]["accounts"], [])
+
+    async def test_theme_round_trip(self) -> None:
+        """GET/POST /api/theme: the durable theme mirror. Runs against a
+        tmp file — the operator's real state/theme.json must never be
+        touched by a test."""
+        import core.theme_store as ts
+        tmp = Path(self.__class__.__name__ + "-theme.json")
+        old_path = ts.PATH
+        ts.PATH = tmp
+        try:
+            if tmp.exists():
+                tmp.unlink()
+            # empty store reads as {}
+            status, body = await self._get("/api/theme")
+            self.assertEqual(status, 200)
+            self.assertTrue(body["ok"])
+            self.assertEqual(body["data"], {})
+            # a real payload persists
+            payload = {"scope": "global", "updated_at": 42,
+                       "global": {"accent": "#ec4899", "fontUi": "Inter"},
+                       "pages": {}, "pageCss": {}}
+            status, body = await self._send("POST", "/api/theme",
+                                            {"theme": payload})
+            self.assertEqual(status, 200)
+            self.assertTrue(body["ok"])
+            status, body = await self._get("/api/theme")
+            self.assertEqual(body["data"]["updated_at"], 42)
+            self.assertEqual(body["data"]["global"]["accent"], "#ec4899")
+            # malformed POSTs are client faults (400), never 500s
+            status, _ = await self._send("POST", "/api/theme", {"nope": 1})
+            self.assertEqual(status, 400)
+            status, _ = await self._send("POST", "/api/theme",
+                                         {"theme": "nope"})
+            self.assertEqual(status, 400)
+        finally:
+            ts.PATH = old_path
+            if tmp.exists():
+                tmp.unlink()
+
+    async def _send(self, method: str, path: str, payload: dict) -> tuple:
+        # MUST hop threads (same reason as _get): the server's route
+        # coroutine runs on THIS loop — a blocking urlopen on it would
+        # deadlock the request.
+        return await asyncio.to_thread(_send_sync,
+                                       f"{self.base}{path}", method, payload)
 
 
 if __name__ == "__main__":
