@@ -599,10 +599,17 @@ Decision rule: could a plugin own the surface? -> builder. Needs routing
 params / selection state / WS-diffed live data / multi-step flows? -> bespoke.
 
 
-PHASE 9 — GROUP RELAY: CENTRALIZED ACTION CONTROL  (planned)
+PHASE 9 — GROUP RELAY: CENTRALIZED ACTION CONTROL  (planned — DESIGN LOCKED)
 
 The entire point of Groups: control the actions of MULTIPLE accounts
 CENTRALLY — not merely share a pacing clock.
+
+DESIGN SPEC: docs/design/fleet-orchestration-hub.md (decisions locked
+2026-10-22: scheduling ownership + INDEPENDENT|GROUP_MANAGED mode flag,
+db-authoritative state, operator-assign + strategy slot with relay as
+strategy #1, drain-default transitions, channel-scoped tasks day one,
+dedicated Fleet Hub route). Consult sources: GPT (repo-connected) +
+Gemini plans in state/ui-rebuild-2026-10-22/.
 
 [x] Group CRUD + membership (exists — SyncGroupManager)
 [x] Grouped accounts serialize on the shared limiter clock (exists)
