@@ -126,18 +126,16 @@ effective cooldown AND its source.
 
 ## 7. Account data — LOCKED (B3, operator answers 2026-10-22)
 
-    AccountPluginData — one document per (account, plugin, channel)
-      account_id
-      plugin
-      channel_id          # the channel this data belongs to
-      data_json           # free-form, plugin-authored — ANY keys
-      updated_at, version
+    AccountPluginData — one document per scope in a FIXED lattice:
+      account -> plugin -> guild -> channel
+      (account_id, plugin, guild_id, channel_id, data_json, ...)
 
-- Scope dimension FIXED to channel (operator: data unique per channel;
-  the Mudae 4-instance example was reference only). Plugin owns the
-  payload; the framework owns the scope.
+- Scope lattice FIXED (operator: option A). Four dimensions, framework-
+  defined: per plugin-global (no guild/channel), per guild, per channel.
+  The UI renders one universal browser: pick account -> plugin -> guild
+  -> channel -> data. Plugin owns the payload; framework owns the scope.
 - STANDALONE copies (no inheritance): channel A's document never
-  inherits channel B's. Full CRUD per (account, plugin, channel).
+  inherits channel B's. Full CRUD per scope node.
 - METRICS live inside data_json whenever the data produces them.
   LOCAL view: numeric keys render as stat pills, unknown keys render
   as a key-value inspector. GLOBAL rollup is OPT-IN: plugins may
@@ -148,8 +146,9 @@ effective cooldown AND its source.
   reads it through that mapping. One store, no parallel cooldown table.
 - Storage: SEPARATE DATABASE FLOW (operator decision) — `state/plugin-data.db`,
   its own WAL SQLite file with a self-initializing document schema (no main
-  migrator involvement): `plugin_data(account, plugin, channel_id, data_json,
-  version, updated_at)` + unique key index. Rationale: the documents are
+  migrator involvement): `plugin_data(account, plugin, guild_id, channel_id,
+  data_json, version, updated_at)` + unique key index (guild_id/channel_id
+  `'0'` = plugin-global / guild-level scopes). Rationale: the documents are
   standalone copies with no relations to config truth, so there is nothing
   needing cross-DB transactions, while churn isolation, independent backup/
   retention, and failure isolation all favor the split. Access via a dedicated
