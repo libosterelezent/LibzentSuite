@@ -119,13 +119,37 @@ Most-restrictive-wins through ONE policy interface. Clearing a manual
 cooldown never clears an `observed`/`server` cooldown. Dashboard shows the
 effective cooldown AND its source.
 
-## 7. Account data (B3 bridge — to be expanded with the operator's input)
+## 7. Account data — LOCKED (B3, operator answers 2026-10-22)
 
-The channel-scoped task (D5) is the anchor: per-channel, per-plugin settings
-and cooldown data (the failed ProfileManager goal) becomes "the data a task
-reads", keyed by (account, plugin, channel-scope). Metrics then roll up
-naturally: LOCAL = per task/channel scope; GLOBAL = per account/plugin.
-Full data model = the B3 discussion, next.
+    AccountPluginData — one document per (account, plugin, channel)
+      account_id
+      plugin
+      channel_id          # the channel this data belongs to
+      data_json           # free-form, plugin-authored — ANY keys
+      updated_at, version
+
+- Scope dimension FIXED to channel (operator: data unique per channel;
+  the Mudae 4-instance example was reference only). Plugin owns the
+  payload; the framework owns the scope.
+- STANDALONE copies (no inheritance): channel A's document never
+  inherits channel B's. Full CRUD per (account, plugin, channel).
+- METRICS live inside data_json whenever the data produces them.
+  LOCAL view: numeric keys render as stat pills, unknown keys render
+  as a key-value inspector. GLOBAL rollup is OPT-IN: plugins may
+  declare metric hints (key, label, aggregate sum|last) in the task
+  definition; undeclared keys stay local. No schema guessing.
+- COOLDOWNS are ordinary data_json fields; a TaskDefinition declares
+  `cooldown_key` (which key feeds its pacing) and the policy engine
+  reads it through that mapping. One store, no parallel cooldown table.
+- Storage: `account_plugin_data` table, PK (account, plugin, channel);
+  endpoints GET/PUT/LIST under /api/accounts/data; the account detail
+  MEMORY section grows a per-plugin per-channel Data view (generic
+  JSON cards + declared-metric pills).
+- Relationship to plugin_profiles (v7, ALIVE): presets are named
+  SETTINGS bundles applied to plugin settings; AccountPluginData is
+  per-channel OPERATIONAL data. Different lifecycles, both stay.
+
+Full data model = the B3 discussion, continued with the operator.
 
 ## 8. Join / leave — the ownership transition (D1 + D3/D4)
 
