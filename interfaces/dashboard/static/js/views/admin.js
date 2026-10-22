@@ -117,7 +117,7 @@ routerAdd("/admin", "Admin", async (container) => {
         } catch (e) { toast(e.message, "err"); }
       };
       const forgetBtn = stale
-        ? el("button", {class: "btn btn-ghost btn-sm", type: "button"}, "✕ remove") : null;
+        ? el("button", {class: "btn btn-danger btn-sm", type: "button"}, "✕ forget") : null;
       if (forgetBtn) forgetBtn.onclick = async () => {
         const ok = await confirmBox({title: "Forget access row",
           body: `Remove the stale access row for "${name}"? (the account itself no longer exists)`,
