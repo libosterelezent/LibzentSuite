@@ -33,9 +33,10 @@ routerAdd("/policies", "Policies", async (container) => {
     return bodyEl;
   };
 
-  /* ── effective pacing + lane ────────────────────────────────────────── */
+  /* ── effective pacing ──────────────────────────────────────────────── */
+  /* (the fleet send lane is gone for good — sync groups + per-account
+     pacing + the safety floor own spacing; no tombstone section) */
   const effHost = section("Effective pacing");
-  const laneHost = section("Fleet send lane");
   async function loadEffective() {
     effHost.textContent = "";
     effHost.append(el("div", {class: "skel"}, el("div"), el("div"), el("div")));
@@ -65,25 +66,6 @@ routerAdd("/policies", "Policies", async (container) => {
     });
     effHost.append(grid,
       el("p", {class: "hint"}, "Merge order, highest wins: global ← group ← account ← plugin policies. Discord bucket limits still apply on top."));
-  }
-
-  async function loadLane() {
-    laneHost.textContent = "";
-    try {
-      const lane = await api("/api/ratelimit/lane");
-      if (!state.alive) return;
-      if (lane && lane.removed) {
-        laneHost.append(emptyState("Fleet send lane removed",
-          lane.reason || "Sync groups + per-account pacing replaced it."));
-      } else {
-        laneHost.append(el("div", {class: "kv"},
-          el("span", {class: "k"}, "state"),
-          el("span", {class: "v"}, lane && lane.enabled ? "enabled" : "disabled")),
-          lane && lane.prefixrate ? el("div", {class: "kv"},
-            el("span", {class: "k"}, "prefix rate"),
-            el("span", {class: "v"}, String(lane.prefixrate))) : null);
-      }
-    } catch (e) { if (state.alive) laneHost.append(emptyState("Lane unavailable", e.message)); }
   }
 
   /* ── 429 activity ───────────────────────────────────────────────────── */
@@ -235,13 +217,14 @@ routerAdd("/policies", "Policies", async (container) => {
       } catch (e) { toast(e.message, "err"); }
     };
     floorHost.append(
-      el("div", {class: "pacing-grid"},
-        el("div", {class: "pacing-item"},
+      el("div", {class: "row", style: "align-items:stretch;gap:calc(var(--sp-4) * var(--density));"},
+        el("div", {class: "pacing-item", style: "flex:0 1 300px;min-width:240px;"},
           el("div", {class: "pl"}, "minimum enforced interval"),
           el("div", {class: "pv"}, floor != null ? floor + "s" : "—"),
-          el("div", {class: "hint"}, "Configured intervals below the floor are raised to it."))),
-      el("div", {class: "toolbar"},
-        el("div", {class: "field"}, el("label", {}, "New floor (s)"), input), save));
+          el("div", {class: "hint"}, "Configured intervals below the floor are raised to it.")),
+        el("div", {class: "field", style: "align-self:center;margin:0;"},
+          el("label", {}, "New floor (s)"), input),
+        save));
   }
 
   /* ── warnings ───────────────────────────────────────────────────────── */
@@ -277,7 +260,7 @@ routerAdd("/policies", "Policies", async (container) => {
 
   refreshBtn.onclick = () => busy(refreshBtn, refreshAll);
   async function refreshAll() {
-    await Promise.allSettled([loadEffective(), loadLane(), loadPolicies(), loadStats(), loadWarnings()]);
+    await Promise.allSettled([loadEffective(), loadPolicies(), loadStats(), loadWarnings()]);
   }
   await refreshAll();
 
