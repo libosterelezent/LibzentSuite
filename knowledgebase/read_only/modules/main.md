@@ -1,7 +1,7 @@
 # Module `main`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
 **Path:** `main.py`
 
@@ -20,7 +20,7 @@ Usage:
 
 ## Functions
 
-- `async def run_sim(name: str | None, list_only: bool) -> int`
+- `async def run_sim(name: str | None, list_only: bool, plugin_dir: str='plugins') -> int`
   - Run scenario(s) through the offline SimulationRunner (no network).
 - `async def run_app(args: argparse.Namespace, argv: list[str]) -> int` — side effects: `creates_tasks`
   - Boot the live stack and attach the requested surfaces.

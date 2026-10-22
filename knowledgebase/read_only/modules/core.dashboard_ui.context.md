@@ -1,9 +1,9 @@
 # Module `core.dashboard_ui.context`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `core/dashboard_ui/context.py`
+**Path:** `core\dashboard_ui\context.py`
 
 ```
 Callback context types for the dashboard UI API (Stage C).
@@ -36,3 +36,10 @@ dashboard itself.
 | `CheckContext` | dataclass | yes | Trusted context for visibility checks — fail-closed. |
 | `ActionContext` | dataclass | yes | Context passed to action callbacks. |
 | `ActionResult` | dataclass | yes | Normalized action result — JSON-safe. |
+
+## Functions
+
+- `def clean_view_id(raw: Any) -> Optional[str]`
+  - A client-supplied view id if well-formed, else None.
+- `def current_view_id() -> Optional[str]`
+  - The current request's dashboard view id (None = unknown/legacy).

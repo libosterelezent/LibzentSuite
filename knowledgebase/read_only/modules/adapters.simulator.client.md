@@ -1,9 +1,9 @@
 # Module `adapters.simulator.client`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `adapters/simulator/client.py`
+**Path:** `adapters\simulator\client.py`
 
 ```
 SimClient — the simulated half of the adapter boundary (ported from the
@@ -60,6 +60,8 @@ Behaviour highlights (audit-proven unless noted):
   - World push -> framework callback (ignores our own messages).
 - `def reaction_event(self, kind: str, message_id: int, channel_id: int, guild_id: 'int | None', user_id: int, emoji: str, raw: Any) -> None`
   - World reaction dispatch -> on_reaction. The world pushes EVERY
+- `def can_see(self, channel_id: int) -> bool`
+  - Gateway-truth visibility: a client only ever sees channels it
 - `async def add_reaction(self, channel_id: int, message_id: int, emoji: str) -> Any`
   - React via the world (echoes a ReactionAdded to other subscribers).
 - `async def click_button(self, channel_id: int, message_id: int, custom_id: str) -> Any`

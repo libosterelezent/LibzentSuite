@@ -910,7 +910,6 @@ def format_account_info(details: dict) -> str:
             lines.append(f"{_col(str(plugin.get('name', '?')), 14)}{flag}")
     else:
         lines.append("(none assigned — 'accounts plugin-add <account> <plugin>')")
-    lines.append("(retained future infrastructure — not the capability mechanism)")
     section("Rate Limit")
     rate = details.get("rate_limit") or {}
     if rate:

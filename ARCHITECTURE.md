@@ -65,11 +65,11 @@ enabled/disabled flag (`plugins enable|disable`, `plugin_states` table)
 says whether an attached plugin actually runs. An account with no
 assignments runs zero plugins (fail-closed).
 
-**Profiles: retained future infrastructure, no capability effect.**
-`ProfileManager` and the `profiles` / `profile_plugins` / `account_profiles`
-tables still exist and their CRUD + assignment bookkeeping still works from
-both surfaces, but nothing consults them when attaching plugins — assigning
-a profile never changes which plugins an account runs.
+**Capabilities:** direct account→plugin assignment (`account_plugins`).
+Per-plugin settings presets live in `plugin_profiles` (v7); per-channel
+operational data lives in `plugin-data.db` (Phase 9 design). The legacy
+`ProfileManager` / `profiles` / `profile_plugins` / `account_profiles`
+tables were REMOVED (2026-10-22, migration 8).
 
 **Future (NOT implemented):** plugin-specific profiles / multiple saved
 configurations per plugin. When that lands, profiles will describe

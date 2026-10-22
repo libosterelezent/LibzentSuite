@@ -1,9 +1,9 @@
 # Module `core.api`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `core/api.py`
+**Path:** `core\api.py`
 
 ```
 CoreAPI — the ONE application surface both interfaces call (spec §13/§14).
@@ -39,8 +39,7 @@ Method map (grouped like the dashboard navigation, spec §12):
                     (set-setting value null = plugins_clear_setting: the
                     account-layer override is DELETED, unmasking the lower
                     layers — not pinned to the schema default)
-  profiles_*        list/create/delete/assign/unassign (RETAINED profile
-                    infrastructure — bookkeeping only, NO effect on which
+                      infrastructure — bookkeeping only, NO effect on which
                     plugins an account runs; capability assignment lives
                     in accounts_plugin_*)
   groups_*          sync groups: list/get/create/update/delete + membership
@@ -76,7 +75,7 @@ through ``_resolved()`` so this facade keeps working at every step.
 - `async def status(self) -> Dict[str, Any]`
   - Overview snapshot: accounts + rate limits + tasks + warnings.
 - `async def accounts_list(self) -> List[Dict[str, Any]]`
-  - Every account: name, discord id (when running), status, profiles,
+  - Every account: name, discord id (when running), status,
 - `async def accounts_add(self, payload: Dict[str, Any], surface: str='api') -> Dict[str, Any]`
   - Register + persist an account; optionally store its credential.
 - `async def accounts_remove(self, name: str, surface: str='api') -> Dict[str, Any]`
@@ -132,6 +131,10 @@ through ``_resolved()`` so this facade keeps working at every step.
   - Installed plugins incl. their settings schema (auto-generated UIs).
 - `async def plugins_state(self, account: str) -> List[Dict[str, Any]]`
   - Per-account plugin runtime state incl. resolved settings + errors.
+- `async def plugins_reload(self, plugin: str, surface: str='api') -> Dict[str, Any]`
+  - Hot-reload one plugin (detach → re-import → re-attach).
+- `async def plugins_unload(self, plugin: str, surface: str='api') -> Dict[str, Any]`
+  - Unload a plugin (detach everywhere, unregister UI; assignments
 - `async def plugins_set_enabled(self, account: str, plugin: str, enabled: bool) -> Dict[str, Any]`
   - Enable/disable a plugin on an account (lifecycle hooks fire).
 - `async def plugins_settings(self, account: str) -> List[Dict[str, Any]]`
@@ -140,13 +143,6 @@ through ``_resolved()`` so this facade keeps working at every step.
   - Change ONE plugin setting for ONE account (validated + persisted).
 - `async def plugins_clear_setting(self, account: str, plugin: str, key: str) -> Dict[str, Any]`
   - Reset ONE plugin setting: DELETE the account-layer override.
-- `async def profiles_list(self) -> List[Dict[str, Any]]`
-- `async def profiles_create(self, name: str, plugins: List[str], description: str='') -> Dict[str, Any]`
-- `async def profiles_delete(self, name: str) -> Dict[str, Any]`
-- `async def profiles_assign(self, account: str, profile: str) -> Dict[str, Any]`
-  - Grant a profile (bookkeeping ONLY — no capability effect).
-- `async def profiles_unassign(self, account: str, profile: str) -> Dict[str, Any]`
-  - Revoke a profile grant (bookkeeping ONLY — no capability effect;
 - `async def groups_list(self) -> List[Dict[str, Any]]`
   - Every sync group with its member count (sorted by name).
 - `async def groups_get(self, group: Any) -> Dict[str, Any]`
@@ -172,12 +168,12 @@ through ``_resolved()`` so this facade keeps working at every step.
 - `async def ui_panels(self) -> List[Dict[str, Any]]`
   - Plugin-contributed sidebar panels (framework-level).
 - `async def dashboard_ui_navigation(self) -> List[Dict[str, Any]]`
-  - Plugin pages for the sidebar: [{plugin, page_id, title, icon,
-- `async def dashboard_ui_page(self, plugin: str, page_id: str) -> Optional[Dict[str, Any]]`
+  - Plugin pages for the sidebar, VISIBILITY-CHECKED.
+- `async def dashboard_ui_page(self, plugin: str, page_id: str, account: Optional[str]=None) -> Optional[Dict[str, Any]]`
   - One page's full serialized component tree; None when the
-- `async def dashboard_ui_action(self, plugin: str, component_id: str, payload: Dict[str, Any], surface: str='api') -> Dict[str, Any]`
+- `async def dashboard_ui_action(self, plugin: str, component_id: str, payload: Dict[str, Any], surface: str='api', account: Optional[str]=None) -> Dict[str, Any]`
   - Dispatch a registered component action (visibility-checked).
-- `async def dashboard_ui_data(self, plugin: str, component_id: str) -> Any`
+- `async def dashboard_ui_data(self, plugin: str, component_id: str, account: Optional[str]=None) -> Any`
   - Fetch a data-provider result (visibility-checked, JSON-safe).
 - `async def admin_overview(self) -> Dict[str, Any]`
   - The admin panel's full view: admin ids, mudae bot id, and every
@@ -196,10 +192,12 @@ through ``_resolved()`` so this facade keeps working at every step.
 - `async def admin_mudae_id(self, surface: str='api') -> Dict[str, Any]`
   - Read the framework-level Mudae bot id.
 - `async def admin_mudae_id_set(self, user_id, surface: str='api') -> Dict[str, Any]`
+- `async def admin_forget_account(self, account: str, surface: str='api') -> Dict[str, Any]`
+  - Remove an account's access row (admin/perms/prefix) — cleanup
 - `async def ratelimit_policies(self) -> List[Dict[str, Any]]`
   - Every stored policy with its level/owner scope.
 - `async def ratelimit_set(self, action: str, interval: float, jitter_min: float=0.0, jitter_max: float=0.0, level: str='global', owner: Optional[str]=None) -> Dict[str, Any]` — side effects: `db_write`
-  - Set a policy. Enforces the safety floor: < 1.5s/action is REJECTED.
+  - Set a policy. Enforces the safety floor: an interval at or below the
 - `async def ratelimit_clear(self, level: str, owner: Optional[str], action: str) -> Dict[str, Any]`
 - `async def ratelimit_effective(self, action: str, account: Optional[str]=None, plugin: Optional[str]=None) -> Dict[str, Any]`
   - What actually paces this (account, plugin, action) right now.
@@ -208,7 +206,7 @@ through ``_resolved()`` so this facade keeps working at every step.
 - `async def ratelimit_warnings(self) -> List[Dict[str, Any]]`
   - Safety review of the current configuration.
 - `async def ratelimit_set_floor(self, seconds: float) -> Dict[str, Any]`
-  - Raise the pacing floor (can never drop below 1.5s; persisted).
+  - Raise the pacing floor (never below MIN_ACTION_INTERVAL; persisted).
 - `async def ratelimit_lane(self) -> Dict[str, Any]`
   - Sequential send lane state (REMOVED — returns stub for compat).
 - `async def ratelimit_set_lane(self, enabled: Any=None, prefixrate: Any=None) -> Dict[str, Any]`

@@ -145,29 +145,6 @@ consumes, the persistence it touches, and how it isolates failures. Read
   allows NOTHING); `deny` = listed blocked, everything else passes;
   `all`/absent/`None` = no restriction.
 
-## core.profile_manager (profile manager — RETAINED FUTURE INFRASTRUCTURE)
-
-* **Module**: `core.profile_manager.manager`.
-* **Purpose**: named profile records — a profile lists plugins, and the
-  CRUD + assignment bookkeeping persists. It has **NO capability effect**:
-  profiles do NOT decide which plugins an account runs (that is the direct
-  `account_plugins` assignment owned by the account manager). Retained as
-  the foundation for the FUTURE (not yet implemented) plugin-specific
-  profiles / multiple-configuration feature.
-* **Owns**: no duplicate cache — read-through over the repositories ("the
-  repository is the single source of truth").
-* **Key symbols**: `core.profile_manager.manager.ProfileManager`
-  (`set_profile`, `delete_profile`, `profiles`, `assign`, `unassign`,
-  `assigned`, `allowed_plugins` — retained but not consulted by the attach
-  path).
-* **Events**: none (management-plane only).
-* **Persistence**: `database.repositories.profiles` (profiles + plugin
-  lists), `database.repositories.accounts` (assignments; delete cascades).
-  Mutations persist FIRST, then report success.
-* **Failure isolation**: unknown profile names in an account's assignment
-  list are logged and skipped; validation errors are `core.errors.ProfileError` with the
-  known names listed.
-
 ## core.settings_manager (settings)
 
 * **Module**: `core.settings_manager`.

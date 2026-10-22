@@ -1,9 +1,9 @@
 # Module `core.cooldowns`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `core/cooldowns.py`
+**Path:** `core\cooldowns.py`
 
 ```
 CooldownService — generic persistent cooldowns with restart recovery.
@@ -45,6 +45,8 @@ deterministic without wall-clock sleeps.
   - Every active cooldown of one account (optionally one plugin).
 - `def active_count_for(self, account: str) -> int`
   - Memory-only active count (FINAL-PHASE F3: status-poll path).
+- `def active_counts_all(self) -> dict`
+  - One O(C) pass computing EVERY account's active count.
 - `async def resync(self) -> int` — side effects: `db_write`
   - Rebuild the memory mirror from the repository (DB wins per key).
 - `async def delete_account(self, account: str) -> int` — side effects: `db_write`

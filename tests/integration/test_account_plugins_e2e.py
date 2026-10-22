@@ -356,9 +356,6 @@ class TestRestartRestoresAssignments(AccountPluginsE2EBase):
             await fw2.shutdown()
 
 
-# ---------------------------------------------------- 7 (profile decoupling)
-class TestProfileDecoupling(AccountPluginsE2EBase):
-
 # -------------------------------------------------- 8 (sync group isolation)
 class TestSyncGroupIsolation(AccountPluginsE2EBase):
 

@@ -1,11 +1,11 @@
 # Plugin `probe`
 
 > GENERATED REFERENCE — READ ONLY (declarations extracted by controlled import; no execution of plugin logic).
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`.
 
 - **Version:** 1.1.0
 - **Description:** test fixture
-- **Source:** `plugins/probe/__init__.py`
+- **Source:** `plugins\probe\__init__.py`
 
 ## Declared settings
 

@@ -1,9 +1,9 @@
 # Module `core.rate_limit_manager.engine`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `core/rate_limit_manager/engine.py`
+**Path:** `core\rate_limit_manager\engine.py`
 
 ```
 Pacing engine: priority waiters, server cooldowns, jitter (A4).
@@ -121,7 +121,7 @@ Other documented decisions (INTEGRATION.md: pick the safest option):
 - `def removed_default(self, level: str, owner, action: str) -> bool`
   - True when the user explicitly CLEARED this key (seed must skip).
 - `def set_floor(self, seconds: float) -> float`
-  - Raise the safety floor (never lower, never below 1.5s).
+  - Raise the safety floor (never lower, never below MIN_ACTION_INTERVAL).
 - `async def prune_account(self, account: str) -> None` — side effects: `db_write`
   - Drop a removed account's engine residue + policy rows (cascade).
 - `def set_account_group(self, account: str, group: Optional[str]) -> None`

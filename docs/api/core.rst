@@ -58,12 +58,6 @@ account manager was constructed with (the injected ``Credentials``); the
 former ``core.framework_credentials.FrameworkCredentials`` wrapper was
 never constructed anywhere and has been removed.
 
-Legacy profile records (retained future infrastructure)
---------------------------------------------------------
-.. automodule:: core.profile_manager.manager
-   :members: ProfileManager
-
-Profiles no longer decide which plugins an account runs — that is the
 direct account→plugin assignment (``account_plugins`` table; see
 ``ControlAPI.accounts_plugin_assign`` / ``accounts_plugins_set``).
 Per-plugin **setting** profiles ARE implemented:

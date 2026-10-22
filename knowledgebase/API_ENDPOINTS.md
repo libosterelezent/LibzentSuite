@@ -187,11 +187,6 @@ admin-flagged accounts' own user ids.
 
 | Method | Path | Request | `data` payload | ControlAPI | Description |
 |---|---|---|---|---|---|
-| GET | `/api/profiles` | — | `[{name, plugins, description}]` | `profiles_list()` | Every profile record |
-| POST | `/api/profiles/create` | body: `name`, `plugins` (list of str), `description?` | the profile payload | `profiles_create(...)` | Define a record (bookkeeping only) |
-| POST | `/api/profiles/delete` | body: `name` | deletion payload | `profiles_delete(name)` | Delete (cascades assignments) |
-| POST | `/api/profiles/assign` | body: `account`, `profile` | assignment payload | `profiles_assign(...)` | Bookkeeping grant — nothing re-attaches |
-| POST | `/api/profiles/unassign` | body: `account`, `profile` | unassignment payload | `profiles_unassign(...)` | Bookkeeping revoke |
 
 ## 12. Sync groups — 9 routes
 
@@ -301,7 +296,6 @@ reference: [CLI.md](CLI.md).
 | `credentials` | `status` · `import-env [--overwrite]` |
 | `cooldowns` | `[account]` · `clear <account> <plugin> [key]` |
 | `plugins` | `list` · `state <account>` · `enable <account> <plugin>` · `disable <account> <plugin>` · `settings <account>` · `set <account> <plugin> <key> <value>` |
-| `profiles` | `list` · `create <name> <plugin ...>` · `delete <name>` · `assign <account> <profile>` · `unassign <account> <profile>` — retained future infrastructure (NO capability effect) |
 | `groups` | `list` · `show <group>` · `create <name> [description]` · `update <group> <field> <value>` · `delete <group> [--detach-members]` · `add-member <group> <account>` · `remove-member <group> <account>` · `set-account <account> <group>` · `clear-account <account>` |
 | `ratelimit` | `show` · `stats` · `set <action> <interval> [jitter_min jitter_max] [level owner]` · `clear <level> <owner> <action>` · `effective <action> [account] [plugin]` · `warnings` · `floor <seconds>` · `lane [on [rate]\|off\|rate <s>]` (lane = removed-feature stub) |
 | `tasks` | `list [status]` · `cancel <id>` · `history [n]` · `cancel-matching [account] [plugin]` |

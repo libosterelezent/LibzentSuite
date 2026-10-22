@@ -1,9 +1,9 @@
 # Module `core`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `core/__init__.py`
+**Path:** `core\__init__.py`
 
 ```
 LibzentSuite core framework.
@@ -11,7 +11,6 @@ LibzentSuite core framework.
 Component layout (see INTEGRATION.md and ARCHITECTURE.md):
   core.account_manager    Account (first-class), AccountManager, DiscordCache
   core.plugin_manager     plugin discovery/lifecycle/dispatch (+ core.plugin_base)
-  core.profile_manager    profile bookkeeping (retained infra — capabilities
                           are DIRECT account→plugin assignments now)
   core.settings_manager   shared settings schema + layered resolution
   core.rate_limit_manager 4-level rate policies, pacing, server limits, warnings

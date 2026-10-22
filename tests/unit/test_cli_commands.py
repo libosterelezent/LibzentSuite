@@ -769,7 +769,6 @@ class TestFormatters(unittest.TestCase):
         })
         self.assertIn("client cache", text)
         self.assertIn("inherited from global", text)
-        self.assertIn("not the capability mechanism", text)
 
     def test_format_warnings_icons(self) -> None:
         text = format_warnings([{"level": "warn", "code": "aggressive", "message": "m"}])
