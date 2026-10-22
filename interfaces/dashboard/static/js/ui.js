@@ -75,15 +75,27 @@ function dot(state) {
   return el("span", {class: "dot " + tone, "aria-hidden": "true"});
 }
 
-/* iconBtn(): 26×26 ghost icon button with an aria-label (never unlabeled). */
-function iconBtn(svgPath, label, onclick, title) {
-  const b = el("button", {
+/* ico(): sprite-based icon — names come from /assets/icons.svg
+   (home, users, activity, shield, admin, tools, bolt, db, clock, pulse,
+   plug, refresh, x, plus, gear, trash, eye, search, chevron-left, menu).
+   New UI code uses THIS instead of inline path svgs. */
+function ico(name, cls = "ico") {
+  return el("svg", {class: cls, "aria-hidden": "true"},
+    el("use", {href: "/assets/icons.svg#" + name}));
+}
+
+/* iconBtn(): 26×26 ghost icon button with an aria-label (never unlabeled).
+   Accepts an inline svg path OR a sprite name (see ico()). */
+function iconBtn(svgOrName, label, onclick, title) {
+  const inner = svgOrName.startsWith("#") || !svgOrName.includes(" ")
+    ? ico(svgOrName.replace("#", ""), "ico")
+    : el("svg", {viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
+                 "stroke-width": "2", "aria-hidden": "true"},
+        el("path", {d: svgOrName}));
+  return el("button", {
     class: "icon-btn", type: "button", "aria-label": label,
     title: title || label, onclick,
-  }, el("svg", {viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
-                "stroke-width": "2", "aria-hidden": "true"},
-        el("path", {d: svgPath})));
-  return b;
+  }, inner);
 }
 
 /* ── toasts ───────────────────────────────────────────────────────────────── */
@@ -172,4 +184,27 @@ function emptyState(msg, hint) {
   return el("div", {class: "empty"},
     el("div", {class: "empty-msg"}, msg),
     hint ? el("div", {class: "empty-hint dim"}, hint) : null);
+}
+
+/* collapseWrap(host, threshold): when a list container exceeds threshold
+   children, hide the overflow behind a "+N more / show less" toggle.
+   Returns host. Used for id chips, perms, member chips (Phase A #9). */
+function collapseWrap(host, threshold = 8) {
+  const items = Array.from(host.children);
+  if (items.length <= threshold) return host;
+  items.forEach((c, i) => { if (i >= threshold) c.classList.add("hidden"); });
+  const more = el("button", {class: "btn btn-ghost btn-sm", type: "button",
+    "aria-expanded": "false"},
+    "+" + (items.length - threshold) + " more");
+  let open = false;
+  more.onclick = () => {
+    open = !open;
+    items.forEach((c, i) => {
+      if (i >= threshold) c.classList.toggle("hidden", !open);
+    });
+    more.textContent = open ? "show less" : "+" + (items.length - threshold) + " more";
+    more.setAttribute("aria-expanded", open ? "true" : "false");
+  };
+  host.append(more);
+  return host;
 }
