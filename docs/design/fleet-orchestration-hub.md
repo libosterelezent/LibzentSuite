@@ -141,10 +141,18 @@ effective cooldown AND its source.
 - COOLDOWNS are ordinary data_json fields; a TaskDefinition declares
   `cooldown_key` (which key feeds its pacing) and the policy engine
   reads it through that mapping. One store, no parallel cooldown table.
-- Storage: `account_plugin_data` table, PK (account, plugin, channel);
-  endpoints GET/PUT/LIST under /api/accounts/data; the account detail
-  MEMORY section grows a per-plugin per-channel Data view (generic
-  JSON cards + declared-metric pills).
+- Storage: SEPARATE DATABASE FLOW (operator decision) — `state/plugin-data.db`,
+  its own WAL SQLite file with a self-initializing document schema (no main
+  migrator involvement): `plugin_data(account, plugin, channel_id, data_json,
+  version, updated_at)` + unique key index. Rationale: the documents are
+  standalone copies with no relations to config truth, so there is nothing
+  needing cross-DB transactions, while churn isolation, independent backup/
+  retention, and failure isolation all favor the split. Access via a dedicated
+  repository exposed ONLY through ctx.services (plugins never touch the DB
+  directly); optimistic writes on `version`. Retention hooks (prune/TTL per
+  plugin) are cheap future additions. Endpoints GET/PUT/LIST under
+  /api/accounts/data; the account detail MEMORY section grows a per-plugin
+  per-channel Data view (generic JSON cards + declared-metric pills).
 - Relationship to plugin_profiles (v7, ALIVE): presets are named
   SETTINGS bundles applied to plugin settings; AccountPluginData is
   per-channel OPERATIONAL data. Different lifecycles, both stay.
