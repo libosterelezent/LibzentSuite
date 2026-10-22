@@ -89,6 +89,7 @@ function acctListMount(root) {
   let q = "";
   const sel = new Set();           // bulk-selection account names
   const mode = () => (prefGet("acct_view", "tiles") === "list" ? "list" : "tiles");
+  const groupMode = () => (prefGet("group_view", "tiles") === "list" ? "list" : "tiles");
   let lastSig = "";
 
   /* static header (kept out of the re-render so the search keeps focus) */
@@ -98,15 +99,25 @@ function acctListMount(root) {
     "aria-pressed": "false", title: "Tile view"}, "Tiles");
   const listBtn = el("button", {class: "btn btn-ghost btn-sm", type: "button",
     "aria-pressed": "false", title: "List view"}, "List");
+  /* ONE header switcher for both tabs: it controls whichever tab is
+     active (Phase A #7 — the groups tab ignored the header switcher
+     because it only wrote the accounts pref). Per-tab persistence:
+     accounts and groups remember their own view. */
+  const activeMode = () => (tab === "groups" ? groupMode() : mode());
+  const setMode = m => {
+    prefSet(tab === "groups" ? "group_view" : "acct_view", m);
+    paintModeBtns();
+    render();
+  };
   const paintModeBtns = () => {
-    const m = mode();
+    const m = activeMode();
     tileBtn.className = "btn btn-sm " + (m === "tiles" ? "btn-primary" : "btn-ghost");
     tileBtn.setAttribute("aria-pressed", m === "tiles" ? "true" : "false");
     listBtn.className = "btn btn-sm " + (m === "list" ? "btn-primary" : "btn-ghost");
     listBtn.setAttribute("aria-pressed", m === "list" ? "true" : "false");
   };
-  tileBtn.onclick = () => { prefSet("acct_view", "tiles"); paintModeBtns(); render(); };
-  listBtn.onclick = () => { prefSet("acct_view", "list"); paintModeBtns(); render(); };
+  tileBtn.onclick = () => setMode("tiles");
+  listBtn.onclick = () => setMode("list");
   paintModeBtns();
 
   const hdr = el("div", {class: "view-hdr"},
@@ -159,8 +170,9 @@ function acctListMount(root) {
 
   function render() {
     paintTabs();
+    paintModeBtns();
     body.textContent = "";
-    if (tab === "groups") body.append(acctGroupsPane(() => render()));
+    if (tab === "groups") body.append(acctGroupsPane(() => render(), groupMode));
     else body.append(acctFleetPane({q, sel, mode: mode(),
       onSelChange: render, onMutate: render}));
     lastSig = fleetSig();
@@ -376,7 +388,7 @@ function acctListTable(accts, sel, onSelChange) {
 }
 
 /* ── the sync-groups tab ──────────────────────────────────────────────────── */
-function acctGroupsPane(onMutate) {
+function acctGroupsPane(onMutate, groupMode) {
   const groups = storeGet("groups") || [];
   const accts = storeGet("accounts") || [];
   const pane = el("div", {},
@@ -398,6 +410,11 @@ function acctGroupsPane(onMutate) {
     return pane;
   }
 
+  /* list mode comes from the HEADER switcher (group_view pref) */
+  if (groupMode() === "list") {
+    pane.append(acctGroupsTable(groups, accts, onMutate));
+    return pane;
+  }
   const grid = el("div", {class: "grid grid-2"});
   for (const g of groups) {
     const members = accts.filter(a => a.sync_group === g.name);
@@ -458,6 +475,72 @@ function acctGroupsPane(onMutate) {
   }
   pane.append(grid);
   return pane;
+}
+
+/* groups as a table (list mode) — same actions as the tiles */
+function acctGroupsTable(groups, accts, onMutate) {
+  const head = el("tr", {},
+    el("th", {scope: "col"}, "Group"),
+    el("th", {scope: "col"}, "Status"),
+    el("th", {scope: "col"}, "Members"),
+    el("th", {scope: "col"}, "Description"),
+    el("th", {scope: "col"}, ""));
+  const tb = el("tbody", {});
+  for (const g of groups) {
+    const members = accts.filter(a => a.sync_group === g.name);
+    const memberCell = el("td", {class: "row"});
+    if (!members.length) memberCell.append(el("span", {class: "faint"}, "—"));
+    for (const m of members) {
+      const rm = el("button", {type: "button",
+        title: "Remove " + m.name + " from " + g.name,
+        "aria-label": "Remove " + m.name + " from " + g.name,
+        class: "btn btn-ghost btn-sm"}, "✕");
+      rm.onclick = busy(rm, async () => {
+        const ok = await confirmBox({title: "Remove member",
+          body: "Remove " + m.name + " from " + g.name + "? It will pace independently.",
+          yes: "Remove"});
+        if (!ok) return;
+        try {
+          await post("/api/groups/remove-member", {group: g.name, account: m.name});
+          toast(m.name + " removed", "ok");
+          await Promise.allSettled([loadGroups(), loadStatsNow()]);
+          onMutate();
+        } catch (e) { toast(e.message, "err"); }
+      });
+      memberCell.append(el("span", {class: "chip"},
+        el("a", {href: "#/accounts/" + encodeURIComponent(m.name)}, m.name), rm));
+    }
+    collapseWrap(memberCell, 4);
+
+    const addBtn = el("button", {class: "btn btn-ghost btn-sm", type: "button"}, "Add member…");
+    addBtn.onclick = () => acctOpenGroupAddMember(g, accts, onMutate);
+    const editBtn = el("button", {class: "btn btn-sm btn-secondary", type: "button"}, "Edit");
+    editBtn.onclick = () => acctOpenGroupEdit(g, onMutate);
+    const delBtn = el("button", {class: "btn btn-sm btn-danger", type: "button"}, "Delete");
+    delBtn.onclick = busy(delBtn, async () => {
+      const ok = await confirmBox({title: "Delete group",
+        body: "Delete " + g.name + "? Its " + members.length +
+          " member(s) move back to independent pacing.",
+        yes: "Delete"});
+      if (!ok) return;
+      try {
+        await post("/api/groups/delete", {group: g.name, detach_members: true});
+        toast("group deleted", "ok");
+        await Promise.allSettled([loadGroups(), loadStatsNow()]);
+        onMutate();
+      } catch (e) { toast(e.message, "err"); }
+    });
+
+    tb.append(el("tr", {},
+      el("td", {}, el("b", {}, g.name)),
+      el("td", {}, el("span", {class: "badge " + (g.enabled === false ? "badge-warn" : "badge-ok")},
+        g.enabled === false ? "paused" : "active")),
+      memberCell,
+      el("td", {class: "dim"}, g.description || "—"),
+      el("td", {class: "row"}, addBtn, editBtn, delBtn)));
+  }
+  return el("div", {class: "tbl-wrap"},
+    el("table", {class: "tbl"}, el("thead", {}, head), tb));
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
