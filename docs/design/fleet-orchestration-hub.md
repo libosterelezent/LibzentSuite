@@ -50,6 +50,11 @@ Task states: `QUEUED → ASSIGNED → RUNNING → COMPLETED | SUSPENDED | FAILED
 CANCELLED`. SUSPENDED returns to QUEUED when prerequisites clear; FAILED
 resumes only if the retry policy explicitly allows.
 
+TRANSPORT RULE (live-found, Phase C): Discord snowflakes (account, channel,
+guild, message ids) are STRINGS end to end — through forms, JSON payloads,
+storage, and logs. JS Numbers silently round 19-digit ids (…544 became …500
+on a live send); the server parses digit-strings exactly (require_int).
+
 ## 3. Signals — three families over the existing EventBus
 
 - **Observations** (authorize nothing): parser classified a limit marker;
