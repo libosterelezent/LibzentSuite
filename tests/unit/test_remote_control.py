@@ -44,12 +44,12 @@ class FakeApi:
         self.calls.append(("status",))
         return {"uptime_s": 12.0, "tasks": {"queued": 0, "completed": 3},
                 "accounts": [{"name": "alpha", "status": "running",
-                              "latency_ms": 83.0, "profiles": []}],
+                              "latency_ms": 83.0}],
                 "warnings": []}
 
     async def accounts_list(self):
         self.calls.append(("accounts_list",))
-        return [{"name": "alpha", "status": "running", "profiles": ["copier"]}]
+        return [{"name": "alpha", "status": "running"}]
 
     async def accounts_info(self, name):
         self.calls.append(("accounts_info", name))
@@ -197,9 +197,9 @@ class PortedCommandTests(unittest.IsolatedAsyncioTestCase):
 
     # ----------------------------------------------------------- accounts
     async def test_accounts_list_default_and_explicit(self) -> None:
-        self.assertIn("· alpha: running profiles=['copier']",
+        self.assertIn("· alpha: running",
                       await self._run("accounts", []))
-        self.assertIn("· alpha: running profiles=['copier']",
+        self.assertIn("· alpha: running",
                       await self._run("accounts", ["list"]))
 
     async def test_accounts_info(self) -> None:
@@ -367,7 +367,7 @@ class PortedCommandTests(unittest.IsolatedAsyncioTestCase):
         huge = "x" * 5000
 
         async def one_huge_row():
-            return [{"name": huge, "status": "running", "profiles": []}]
+            return [{"name": huge, "status": "running"}]
         self.api.accounts_list = one_huge_row
         reply = await self._run("accounts", ["list"])
         self.assertLessEqual(len(reply), MAX_REPLY_CHARS)

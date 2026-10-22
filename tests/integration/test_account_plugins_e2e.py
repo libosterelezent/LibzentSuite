@@ -356,41 +356,6 @@ class TestRestartRestoresAssignments(AccountPluginsE2EBase):
             await fw2.shutdown()
 
 
-# ---------------------------------------------------- 7 (profile decoupling)
-class TestProfileDecoupling(AccountPluginsE2EBase):
-
-    async def test_7_profile_grants_never_move_attachment(self) -> None:
-        fw, attach_calls = await self.boot()
-        api = fw.api
-        await api.accounts_add({"name": "alpha", "plugins": [PROBE]})
-
-        # profile CRUD works (retained infrastructure)
-        await api.profiles_create("copier", [PROBE, SPY], "both")
-        listed = await api.profiles_list()
-        self.assertEqual([p["name"] for p in listed], ["copier"])
-        self.assertEqual(listed[0]["plugins"], [PROBE, SPY])
-
-        # granting the profile to alpha is bookkeeping ONLY
-        await api.profiles_assign("alpha", "copier")
-        row = await self.account_row(api, "alpha")
-        self.assertEqual(row["profiles"], ["copier"])  # grant recorded
-        # ...and attachment is UNCHANGED by the grant
-        self.assertEqual(await self.attached(api, "alpha"), {PROBE})
-        self.assertEqual(await self.assigned(api, "alpha"), [PROBE])
-        self.assertEqual(self.last_attach(attach_calls, "alpha"), {PROBE})
-
-        # the retained ProfileManager.allowed_plugins still answers (and
-        # would grant BOTH) — the account capability path just never asks
-        self.assertEqual(fw.profiles.allowed_plugins("alpha"),
-                         {PROBE, SPY})
-
-        # unassigning the profile works and moves nothing either
-        await api.profiles_unassign("alpha", "copier")
-        row = await self.account_row(api, "alpha")
-        self.assertEqual(row["profiles"], [])
-        self.assertEqual(await self.attached(api, "alpha"), {PROBE})
-
-
 # -------------------------------------------------- 8 (sync group isolation)
 class TestSyncGroupIsolation(AccountPluginsE2EBase):
 

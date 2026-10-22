@@ -69,8 +69,8 @@ core/                    framework (managers + shared contracts)
   logging_service.py     (spine)  structured LogService
   settings_manager.py    (spine)  Setting schema + SettingsManager
   account_manager/       (A6)     Account (first-class), AccountManager, DiscordCache
-  profile_manager/       (A6)     ProfileManager — RETAINED future infrastructure
-                                   (profile records; NOT the capability model:
+  (legacy profile_manager removed 2026-10-22 — capabilities are
+                         DIRECT account→plugin assignments;
                                    accounts get plugins directly)
   plugin_base.py         (A3)     PluginBase, PluginContext, PluginServices protocol
   plugin_manager/        (A3)     discovery, per-account instances, dispatch

@@ -75,7 +75,6 @@ def build_api(**overrides: Any) -> ControlAPI:
     kwargs = dict(
         accounts=_Manager(),
         plugins=_Manager(),
-        profiles=_Manager(),
         settings=_Manager(),
         limiter=_Manager(),
         scheduler=_Manager(),

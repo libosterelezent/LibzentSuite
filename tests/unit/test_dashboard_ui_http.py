@@ -156,7 +156,7 @@ class DashboardUIRouteTests(unittest.IsolatedAsyncioTestCase):
         # the REAL ControlAPI — its dashboard_ui_* methods only touch
         # plugins.ui_registry, which the real manager exposes
         self.api = ControlAPI(
-            accounts=object(), plugins=self.manager, profiles=object(),
+            accounts=object(), plugins=self.manager,
             settings=object(), limiter=object(), scheduler=object(),
             logs=object())
         self.server = DashboardServer(self.api, token=TOKEN, port=0)
@@ -202,8 +202,8 @@ class DashboardUIRouteTests(unittest.IsolatedAsyncioTestCase):
             EventBus(), LOG, SettingsManager(EventBus()),
             plugin_dir=str(FIXTURES), ui_registry=empty)
         api = ControlAPI(accounts=object(), plugins=manager,
-                         profiles=object(), settings=object(),
-                         limiter=object(), scheduler=object(), logs=object())
+                         settings=object(), limiter=object(),
+                         scheduler=object(), logs=object())
         server = DashboardServer(api, token=TOKEN, port=0)
         server.start()
         try:
@@ -418,7 +418,7 @@ class EnforcementRouteTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.attach_account("alpha", {"probe"})
         await self.manager.activate_account("alpha", FakeServices("alpha"))
         self.api = ControlAPI(
-            accounts=object(), plugins=self.manager, profiles=object(),
+            accounts=object(), plugins=self.manager,
             settings=object(), limiter=object(), scheduler=object(),
             logs=object())
         self.server = DashboardServer(self.api, token=TOKEN, port=0)

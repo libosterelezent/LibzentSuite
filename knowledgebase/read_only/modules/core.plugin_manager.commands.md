@@ -1,9 +1,9 @@
 # Module `core.plugin_manager.commands`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `core/plugin_manager/commands.py`
+**Path:** `core\plugin_manager\commands.py`
 
 ```
 Self-command hub: the per-account command registry (Phase 3).
@@ -77,7 +77,7 @@ the last one (documented last-wins) — executor-level tests can call
   - Drop every trace of an account (detached/removed cascade).
 - `def subscribe(self, account: str, rebuild: Callable[[List[CommandSpec]], None], stats_provider: Optional[Callable[[], Dict[str, Any]]]=None) -> None`
   - A live client subscribes: register the rebuild callback, then
-- `def unsubscribe(self, account: str) -> None`
+- `def unsubscribe(self, account: str, rebuild: Optional[Callable[[List[CommandSpec]], None]]=None) -> None`
   - The client disconnected/stopped: drop its callback and stats
 - `def entries(self, account: str) -> List[RegisteredCommand]`
   - Current registry entries (fresh recompute — never stale).

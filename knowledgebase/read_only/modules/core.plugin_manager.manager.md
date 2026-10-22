@@ -1,9 +1,9 @@
 # Module `core.plugin_manager.manager`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `core/plugin_manager/manager.py`
+**Path:** `core\plugin_manager\manager.py`
 
 ```
 PluginManager: per-account plugin instances, lifecycle, dispatch (spec §2).
@@ -44,17 +44,25 @@ plugin only — the ported discipline from three audit rounds.
 - `def manifests(self) -> List[Dict[str, Any]]`
   - JSON-safe manifests (metadata + settings schema) for both UIs.
 - `def names(self) -> List[str]`
-- `async def attach_account(self, account: str, allowed: Optional[Set[str]]=None) -> None` — side effects: `db_write`
+- `async def attach_account(self, account: str, allowed: Optional[Set[str]]=None) -> None`
   - Instantiate this account's plugins (profile allowlist applies).
+- `async def reload_plugin(self, name: str) -> Dict[str, Any]`
+  - Hot-reload one plugin: validate → teardown → restore LIVE runtimes.
+- `async def unload_plugin(self, name: str) -> Dict[str, Any]`
+  - Unload one plugin: tear down on every account, unregister UI.
 - `def detach_account(self, account: str) -> None`
   - Drop the account's instances WITHOUT firing unload hooks.
 - `async def activate_account(self, account: str, services: Any) -> None`
   - Resolve settings + fire on_load/on_enable for enabled plugins.
 - `def init_boot_dashboard_uis(self) -> int`
   - Register plugin dashboard UIs at DISCOVERY time (no account).
+- `def active_instance_for(self, plugin_name: str, account=None)`
+  - VALIDATED live instance for a plugin, optionally per account.
+- `def services_for(self, account: str, plugin_name: str)`
+  - The account's services facade for one plugin (or None).
 - `def close(self) -> None`
   - Tear the manager down: bus subscriptions off, pending tasks reaped.
-- `async def deactivate_account(self, account: str) -> None` — side effects: `publishes_event`
+- `async def deactivate_account(self, account: str) -> None`
   - Fire on_disable + on_unload for the account's active plugins.
 - `def ui_registry(self) -> Any`
   - The plugin dashboard-UI registry (Stage D routes dispatch here).
@@ -62,6 +70,8 @@ plugin only — the ported discipline from three audit rounds.
   - Toggle a plugin at runtime (persisted BEFORE memory mutates).
 - `async def set_setting(self, account: str, plugin: str, key: str, value: Any) -> Any` — side effects: `db_write`
   - Validate + persist + apply one plugin setting for one account.
+- `async def refresh_settings(self, account: Optional[str]=None, plugin: Optional[str]=None) -> int`
+  - Re-resolve the LIVE settings of attached runtimes (in place).
 - `async def clear_setting(self, account: str, plugin: str, key: str) -> Any`
   - Remove one account-layer override; live view falls back to the
 - `async def ui_stats(self, account: str) -> List[Dict[str, Any]]`

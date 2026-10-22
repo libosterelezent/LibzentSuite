@@ -241,7 +241,6 @@ are swallowed and counted in `LogService.stats()["db_failures"]`).
 | Account `enabled` flag | persisted; affects only `start_all` / `--start-all` (a running account is untouched) | `AccountManager.set_enabled` |
 | Account `sync_group` | re-registers the limiter's group scope immediately (`set_account_group`) — pacing composes from the next acquire | `AccountManager._sync_group_scope` |
 | Account plugin assignment (`accounts add` plugins / `plugin-add` / `plugin-remove`) | persisted first, then the account's plugins **re-attach IMMEDIATELY** (running or not — no restart needed); an unknown plugin name rejects the call up front | `AccountManager.assign_plugin`/`unassign_plugin`/`set_account_plugins` |
-| Profile create/delete/assign/unassign | persisted immediately; **NO capability effect** (bookkeeping only — plugins are assigned directly per account; nothing re-attaches) | `ProfileManager` (retained future infrastructure) |
 | Plugin code changes / new plugin files | require a process restart (discovery runs once at boot; a fresh `discover()` rescans but nothing re-runs it in production) | `PluginLoader.discover` |
 | config/ files (`rate_limits.json`, `global_settings.json`, account files) | read at boot only; DB/kv state and live mutations win afterward | `core.config.load_config` |
 | .env (tokens, owner ids) | read at boot; account tokens are resolved at each `start`/reconnect from the boot-time `Credentials` object — a changed token needs a restart (or at least a fresh boot) | `Credentials.from_file`, `AccountManager._connect_client` |

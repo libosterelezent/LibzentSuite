@@ -9,8 +9,6 @@ Division of labour (the managers cooperate, none absorbs another):
                                before; this manager only keeps the engine's
                                account->group metadata in sync through the
                                existing ``set_account_group`` API.
-  * ProfileManager           — plugin permissions (orthogonal: changing a
-                               profile never touches a group, and vice versa).
   * AccountManager           — account lifecycle; delegates the group bits
                                of add/remove/restore here when wired.
 
@@ -80,7 +78,7 @@ class SyncGroupManager:
     async def load(self) -> None:
         """Populate the group cache from the repository (boot path).
 
-        Best-effort like ProfileManager.load: a failure logs and leaves the
+        Best-effort: a failure logs and leaves the
         cache empty — reads then fall back to read-through repo queries.
         """
         try:
@@ -145,7 +143,7 @@ class SyncGroupManager:
         """Every group as ``{"id","name","description","enabled",
         "member_count","created_at","updated_at"}``, sorted by name.
 
-        Read-through (refreshes the cache), like ProfileManager.profiles().
+        Read-through (refreshes the cache on read).
         """
         try:
             records = await self._repo.list() or []
@@ -261,7 +259,7 @@ class SyncGroupManager:
     ) -> Dict[str, Any]:
         """Remove an account from ONE group (group -> None).
 
-        Idempotent-lenient like ProfileManager.unassign: removing an
+        Idempotent-lenient: removing an
         account that is not a member of THAT group reports
         ``existed: False`` instead of failing (its actual membership, if
         any, is untouched).
@@ -471,7 +469,7 @@ class SyncGroupManager:
 
     async def _require_account(self, account: str) -> None:
         """Typo trap: the account must exist (when an accounts repo is
-        wired) — with the known names in the error, like ProfileManager."""
+        wired) — with the known names in the error."""
         if self._accounts is None:
             return
         try:

@@ -1,9 +1,9 @@
 # Module `interfaces.cli.commands`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `interfaces/cli/commands.py`
+**Path:** `interfaces\cli\commands.py`
 
 ```
 Shared CLI command engine (spec §13) — used by the REPL and one-shot mode.
@@ -35,9 +35,8 @@ Decisions for things INTEGRATION.md left open (documented per the contract):
     account→plugin assignments through the facade; removal is idempotent
     (``existed=false`` renders a "nothing to do" message, never an error).
     Assignments apply immediately — there are no next-start semantics.
-  * The ``profiles`` group stays (retained future infrastructure: profile
-    CRUD + bookkeeping assignments), but its help text says plainly that
-    profiles do NOT control which plugins an account runs.
+  * The legacy ``profiles`` group is removed (profiles never controlled
+    which plugins an account runs).
   * ``accounts enable <name> <on|off>`` also accepts true/false; a real bool
     is passed down (ControlAPI.parse_bool re-validates on its side anyway).
   * ``accounts credential <name> <token>`` prints a shell-history warning:
@@ -78,8 +77,6 @@ Decisions for things INTEGRATION.md left open (documented per the contract):
   - Plugin manifests (api.plugins_manifests) -> metadata + settings schema.
 - `def format_plugin_state(states: List[dict]) -> str`
   - Per-account plugin state (api.plugins_state / plugins_settings).
-- `def format_profiles(profiles: List[dict]) -> str`
-  - Profiles payload (api.profiles_list) -> name, plugins, description.
 - `def format_groups(groups: List[dict]) -> str`
   - Sync groups payload (api.groups_list) -> name, members, description.
 - `def format_group_snapshot(snapshot: dict) -> str`

@@ -4,7 +4,7 @@ database — persistence
 .. automodule:: database.db
    :members: Database
 .. automodule:: database.models
-   :members: AccountRecord, ProfileRecord, PluginMetadata, RatePolicyRecord
+   :members: AccountRecord, PluginMetadata, RatePolicyRecord
 .. automodule:: database.repositories.accounts
    :members: AccountsRepository
 .. automodule:: database.repositories.account_plugins

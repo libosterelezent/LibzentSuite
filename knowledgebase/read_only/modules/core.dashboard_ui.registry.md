@@ -1,9 +1,9 @@
 # Module `core.dashboard_ui.registry`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `core/dashboard_ui/registry.py`
+**Path:** `core\dashboard_ui\registry.py`
 
 ```
 DashboardUIRegistry — the central registry for plugin dashboard UIs.
@@ -58,11 +58,13 @@ routes call INTO this registry).
   - The stored JSON-safe snapshot (a copy — callers may mutate it);
 - `def list_plugins(self) -> List[str]`
   - Plugin names with an active UI (sorted for determinism).
+- `def set_instance_resolver(self, resolver) -> None`
+  - Install ``(plugin_name, account|None) -> instance|None``.
 - `async def dispatch_action(self, plugin_name: str, component_id: str, payload: dict, context: ActionContext) -> ActionResult`
   - Invoke one component's action callback (visibility-checked).
 - `async def get_data(self, plugin_name: str, component_id: str, context: CheckContext) -> Any`
   - Fetch one component's data (visibility-checked, JSON-safe).
 - `async def check_visibility(self, plugin_name: str, component_id: str, context: CheckContext) -> bool`
   - Evaluate the component's FULL ancestor chain of checks.
-- `async def visible_tree(self, plugin_name: str, node: dict, account: Optional[str]=None) -> Optional[dict]`
+- `async def visible_tree(self, plugin_name: str, node: dict, account: Optional[str]=None, services: Any=None) -> Optional[dict]`
   - A copy of a serialized ``node`` with every visibility-denied

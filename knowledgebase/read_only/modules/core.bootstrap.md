@@ -1,9 +1,9 @@
 # Module `core.bootstrap`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `core/bootstrap.py`
+**Path:** `core\bootstrap.py`
 
 ```
 Composition root: builds the ENTIRE framework from config + credentials.
@@ -15,7 +15,7 @@ Construction order (the only place that knows how the managers interconnect):
     -> SyncGroupManager(await load) -> SettingsManager(await load)
     -> AuditRecorder
     -> TaskScheduler(late-bound sender) -> PluginManager(discover + await
-    persist_metadata) -> ProfileManager(await load)
+    persist_metadata) -> managers
     -> AccountManager(await load; restores persisted accounts + delegates
        group membership restore to SyncGroupManager)
     -> CredentialService(+refresh)/CooldownService(await restore)/
@@ -25,7 +25,7 @@ Construction order (the only place that knows how the managers interconnect):
 
 ``build`` is ASYNC (``framework = await build(...)``): the database layer
 is aiosqlite, so the connection+migrations and every boot-time repository
-read (settings, policies, profiles, accounts, cooldown restore, plugin
+read (settings, policies, accounts, cooldown restore, plugin
 metadata) are awaited here before any manager serves traffic.
 
 The sender cycle (scheduler needs accounts.send_hook; accounts needs the

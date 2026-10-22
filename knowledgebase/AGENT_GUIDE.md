@@ -17,7 +17,6 @@ without breaking the architecture.
 | `core/account_manager/` | Account registry/lifecycle/supervisor (`manager.py`), plugin services per account (`services.py`), Discord cache (`cache.py`) |
 | `core/plugin_manager/` | Discovery (`loader.py`), per-account instances + dispatch (`manager.py`) |
 | `core/plugin_base.py` | The plugin contract: `PluginBase` / `PluginContext` / `PluginServices` protocol |
-| `core/profile_manager/` | Profile records — RETAINED future infrastructure (NOT the capability model; capabilities are direct account→plugin assignments in `account_plugins`) |
 | `core/settings_manager.py` | ONE settings schema (defaults ← global ← account), `ACCOUNT_SETTINGS` |
 | `core/rate_limit_manager/` | `engine.py` (pacing), `policies.py` (4-level model, floor), `lane.py` (GlobalSendLane), `warnings.py` (safety warnings) |
 | `core/task_scheduler/` | `scheduler.py` (queue/lanes/retry), `tasks.py` (Task model) |

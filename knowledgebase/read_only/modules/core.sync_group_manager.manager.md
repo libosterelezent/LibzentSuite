@@ -1,9 +1,9 @@
 # Module `core.sync_group_manager.manager`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `core/sync_group_manager/manager.py`
+**Path:** `core\sync_group_manager\manager.py`
 
 ```
 SyncGroupManager — the application-level owner of sync group membership.
@@ -17,8 +17,6 @@ Division of labour (the managers cooperate, none absorbs another):
                                before; this manager only keeps the engine's
                                account->group metadata in sync through the
                                existing ``set_account_group`` API.
-  * ProfileManager           — plugin permissions (orthogonal: changing a
-                               profile never touches a group, and vice versa).
   * AccountManager           — account lifecycle; delegates the group bits
                                of add/remove/restore here when wired.
 

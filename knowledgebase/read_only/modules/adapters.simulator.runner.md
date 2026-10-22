@@ -1,9 +1,9 @@
 # Module `adapters.simulator.runner`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `adapters/simulator/runner.py`
+**Path:** `adapters\simulator\runner.py`
 
 ```
 SimulationRunner — a COMPLETE ephemeral stack per scenario run (spec §16).
@@ -28,8 +28,8 @@ boot order, same as the production bootstrap)::
         + await restore_sequence()
     PluginManager(bus, logger, settings, db.plugins, plugin_dir)
         + discover() + await persist_metadata()
-    ProfileManager(db.profiles, logger, db.accounts) + await load()
-    AccountManager(bus, logger, db.accounts, plugins_mgr, profiles, scheduler,
+    (legacy ProfileManager removed) + await load()
+    AccountManager(bus, logger, db.accounts, plugins_mgr, scheduler,
                    settings, audit, client_factory, credentials[, limiter],
                    credential_service=..., cooldowns=..., plugin_state=...)
         + await load()

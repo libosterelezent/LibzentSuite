@@ -149,7 +149,6 @@ LibzentSuite/
 │   ├── account_manager/        Account, AccountRuntime, AccountManager, DiscordCache,
 │   │                           AccountPluginServices + TaskAckRegistry, resolve_dm_channel
 │   ├── plugin_manager/         PluginLoader (discovery) + PluginManager (lifecycle/dispatch)
-│   ├── profile_manager/        ProfileManager (retained future infrastructure —
 │   │                           NOT the capability model)
 │   ├── settings_manager.py     Setting schema + layered SettingsManager
 │   ├── rate_limit_manager/     policies.py, engine.py (RateLimitManager), lane.py, warnings.py

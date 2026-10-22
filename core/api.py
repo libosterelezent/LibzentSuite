@@ -31,8 +31,7 @@ Method map (grouped like the dashboard navigation, spec §12):
                     (set-setting value null = plugins_clear_setting: the
                     account-layer override is DELETED, unmasking the lower
                     layers — not pinned to the schema default)
-  profiles_*        list/create/delete/assign/unassign (RETAINED profile
-                    infrastructure — bookkeeping only, NO effect on which
+                      infrastructure — bookkeeping only, NO effect on which
                     plugins an account runs; capability assignment lives
                     in accounts_plugin_*)
   groups_*          sync groups: list/get/create/update/delete + membership
@@ -83,7 +82,6 @@ if TYPE_CHECKING:  # duck-typed at runtime — no manager imports here
     from .credentials import Credentials
     from .logging_service import LogService
     from .plugin_manager import PluginManager
-    from .profile_manager import ProfileManager
     from .rate_limit_manager import RateLimitManager
     from .settings_manager import SettingsManager
     from .task_scheduler import TaskScheduler
@@ -128,8 +126,7 @@ class ControlAPI:
         *,
         accounts: "AccountManager",
         plugins: "PluginManager",
-        profiles: "ProfileManager",
-        settings: "SettingsManager",
+            settings: "SettingsManager",
         limiter: "RateLimitManager",
         scheduler: "TaskScheduler",
         logs: "LogService",
@@ -146,7 +143,6 @@ class ControlAPI:
     ) -> None:
         self._accounts = accounts
         self._plugins = plugins
-        self._profiles = profiles
         self._settings = settings
         self._limiter = limiter
         self._scheduler = scheduler
@@ -257,7 +253,7 @@ class ControlAPI:
 
     # -------------------------------------------------------------- accounts
     async def accounts_list(self) -> List[Dict[str, Any]]:
-        """Every account: name, discord id (when running), status, profiles,
+        """Every account: name, discord id (when running), status,
         credential status and active-cooldown count."""
         return await self._enrich_accounts(await self._accounts.accounts())
 
@@ -1208,57 +1204,6 @@ class ControlAPI:
             "account": account, "plugin": plugin, "key": key,
             "cleared": True, "value": effective,
         }
-
-    # -------------------------------------------------------------- profiles
-    async def profiles_list(self) -> List[Dict[str, Any]]:
-        return await _resolved(self._profiles.profiles())
-
-    async def profiles_create(
-        self, name: str, plugins: List[str], description: str = ""
-    ) -> Dict[str, Any]:
-        if not isinstance(plugins, list) or not all(isinstance(p, str) for p in plugins):
-            raise ValueError("'plugins' must be a list of plugin names")
-        return await _resolved(self._profiles.set_profile(name, plugins, description))
-
-    async def profiles_delete(self, name: str) -> Dict[str, Any]:
-        return await _resolved(self._profiles.delete_profile(name))
-
-    async def profiles_assign(self, account: str, profile: str) -> Dict[str, Any]:
-        """Grant a profile (bookkeeping ONLY — no capability effect).
-
-        Profiles no longer decide which plugins an account runs: that is
-        the direct account→plugin assignment (accounts_plugin_assign /
-        accounts_plugins_set). The grant is persisted and mirrored into
-        the account record, and nothing re-attaches.
-        """
-        out = await _resolved(self._profiles.assign(account, profile))
-        self._refresh_account_profiles(account)  # FINAL-PHASE (F3)
-        return out
-
-    async def profiles_unassign(self, account: str, profile: str) -> Dict[str, Any]:
-        """Revoke a profile grant (bookkeeping ONLY — no capability effect;
-        assignment-based attachment is untouched by profile changes)."""
-        out = await _resolved(self._profiles.unassign(account, profile))
-        self._refresh_account_profiles(account)  # FINAL-PHASE (F3)
-        return out
-
-    def _refresh_account_profiles(self, account: str) -> None:
-        """Propagate a profile-assignment change into the manager's memory
-        record (FINAL-PHASE F3): ProfileManager owns its cache but never
-        touched AccountManager.record.profiles — the memory-first status
-        poll must not go stale the moment profiles change."""
-        try:
-            manager = self._accounts
-            account_obj = getattr(manager, "_accounts", {}).get(account)
-            if account_obj is None:
-                return
-            cache = getattr(manager._profile_manager, "_assignment_cache", None)
-            if isinstance(cache, dict):
-                account_obj.record.profiles = sorted(
-                    cache.get(account, []))
-        except Exception:
-            LOG.debug("profile memory refresh failed for %r", account,
-                      exc_info=True)
 
     # ------------------------------------------------------------ sync groups
     async def groups_list(self) -> List[Dict[str, Any]]:

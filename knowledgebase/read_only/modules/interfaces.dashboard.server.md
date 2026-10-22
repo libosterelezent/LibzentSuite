@@ -1,9 +1,9 @@
 # Module `interfaces.dashboard.server`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `interfaces/dashboard/server.py`
+**Path:** `interfaces\dashboard\server.py`
 
 ```
 Dashboard backend: JSON REST + WebSocket live push over ControlAPI.
@@ -97,7 +97,7 @@ pass the real bus explicitly.
 - `def unregister_threadsafe(self, client: WebSocketClient) -> None`
 - `def push_stats_to(self, client: WebSocketClient) -> Optional['concurrent.futures.Future[None]']`
   - Queue a stats snapshot for one client (async fetch, thread-safe).
-- `def call(self, method: str, path: str, body: Dict[str, Any], query: Optional[Dict[str, List[str]]]=None) -> Tuple[int, Dict[str, Any]]`
+- `def call(self, method: str, path: str, body: Dict[str, Any], query: Optional[Dict[str, List[str]]]=None, view_id: Optional[str]=None) -> Tuple[int, Dict[str, Any]]`
   - Execute an API call on the main loop; returns (http_status, payload).
 
 ### `_BoundedThreadingHTTPServer`

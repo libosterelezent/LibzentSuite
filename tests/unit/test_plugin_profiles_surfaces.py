@@ -137,7 +137,6 @@ class ProfileSurfaceTestBase(unittest.IsolatedAsyncioTestCase):
         self.api = ControlAPI(
             accounts=self.accounts_mgr,
             plugins=_StubPluginManager(["roll", "snipe"]),
-            profiles=SimpleNamespace(),
             settings=SimpleNamespace(),
             limiter=SimpleNamespace(),
             scheduler=SimpleNamespace(),
@@ -431,7 +430,7 @@ class UnwiredTests(unittest.IsolatedAsyncioTestCase):
         api = ControlAPI(
             accounts=_StubAccountsManager(),
             plugins=_StubPluginManager(["roll"]),
-            profiles=SimpleNamespace(), settings=SimpleNamespace(),
+            settings=SimpleNamespace(),
             limiter=SimpleNamespace(), scheduler=SimpleNamespace(),
             logs=SimpleNamespace(),
         )
@@ -441,7 +440,7 @@ class UnwiredTests(unittest.IsolatedAsyncioTestCase):
         api = ControlAPI(
             accounts=_StubAccountsManager(),
             plugins=_StubPluginManager(["roll"]),
-            profiles=SimpleNamespace(), settings=SimpleNamespace(),
+            settings=SimpleNamespace(),
             limiter=SimpleNamespace(), scheduler=SimpleNamespace(),
             logs=SimpleNamespace(),
         )

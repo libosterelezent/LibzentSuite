@@ -20,8 +20,8 @@ boot order, same as the production bootstrap)::
         + await restore_sequence()
     PluginManager(bus, logger, settings, db.plugins, plugin_dir)
         + discover() + await persist_metadata()
-    ProfileManager(db.profiles, logger, db.accounts) + await load()
-    AccountManager(bus, logger, db.accounts, plugins_mgr, profiles, scheduler,
+    (legacy ProfileManager removed) + await load()
+    AccountManager(bus, logger, db.accounts, plugins_mgr, scheduler,
                    settings, audit, client_factory, credentials[, limiter],
                    credential_service=..., cooldowns=..., plugin_state=...)
         + await load()
@@ -193,7 +193,6 @@ def _load_stack_modules() -> SimpleNamespace:
         from core.credential_service import CredentialService
         from core.plugin_manager import PluginManager
         from core.plugin_state import PluginStateService
-        from core.profile_manager import ProfileManager
         from core.rate_limit_manager import MIN_ACTION_INTERVAL, RateLimitManager
         from core.sync_group_manager import SyncGroupManager
         from core.task_scheduler import TaskScheduler
@@ -212,7 +211,6 @@ def _load_stack_modules() -> SimpleNamespace:
         CredentialService=CredentialService,
         PluginManager=PluginManager,
         PluginStateService=PluginStateService,
-        ProfileManager=ProfileManager,
         RateLimitManager=RateLimitManager,
         SyncGroupManager=SyncGroupManager,
         TaskScheduler=TaskScheduler,
@@ -313,7 +311,6 @@ class SimulationRunner:
         log_ratelimit = ServiceLogger(logger, "ratelimit")
         log_scheduler = ServiceLogger(logger, "scheduler")
         log_plugins = ServiceLogger(logger, "plugins")
-        log_profiles = ServiceLogger(logger, "profiles")
         log_accounts = ServiceLogger(logger, "accounts")
         log_sync_groups = ServiceLogger(logger, "sync-groups")
         settings = SettingsManager(
@@ -414,8 +411,6 @@ class SimulationRunner:
                     if module_name.startswith(_PLUGIN_MODULE_PREFIX)
                 }
 
-            profiles = mods.ProfileManager(db.profiles, log_profiles, db.accounts)
-            await profiles.load()
             await cooldowns.restore()
 
             user_ids = {ACCOUNT_NAME: SYNTHETIC_ALPHA_ID}
@@ -452,7 +447,7 @@ class SimulationRunner:
                 pass
 
             accounts = self._build_account_manager(
-                mods, bus, log_accounts, db, plugins_mgr, profiles, scheduler,
+                mods, bus, log_accounts, db, plugins_mgr, scheduler,
                 settings, audit, client_factory, credentials, limiter,
                 credential_service=credential_service, cooldowns=cooldowns,
                 plugin_state=plugin_state, sync_groups=sync_groups,
@@ -465,7 +460,7 @@ class SimulationRunner:
             from core.api import ControlAPI
 
             api = ControlAPI(
-                accounts=accounts, plugins=plugins_mgr, profiles=profiles,
+                accounts=accounts, plugins=plugins_mgr,
                 settings=settings, limiter=limiter, scheduler=scheduler,
                 logs=logger, audit=audit, credentials=credentials,
                 sync_groups=sync_groups,
@@ -764,7 +759,6 @@ class SimulationRunner:
         logger: LogService,
         db: Any,
         plugins_mgr: Any,
-        profiles: Any,
         scheduler: Any,
         settings: SettingsManager,
         audit: Any,
@@ -786,7 +780,7 @@ class SimulationRunner:
         """
         try:
             return mods.AccountManager(
-                bus, logger, db.accounts, plugins_mgr, profiles, scheduler,
+                bus, logger, db.accounts, plugins_mgr, scheduler,
                 settings, audit, client_factory, credentials, limiter=limiter,
                 api_cache_repo=db.cache,
                 credential_service=credential_service, cooldowns=cooldowns,
@@ -796,13 +790,13 @@ class SimulationRunner:
         except TypeError:
             try:
                 return mods.AccountManager(
-                    bus, logger, db.accounts, plugins_mgr, profiles, scheduler,
+                    bus, logger, db.accounts, plugins_mgr, scheduler,
                     settings, audit, client_factory, credentials, limiter=limiter,
                     api_cache_repo=db.cache,
                 )
             except TypeError:
                 return mods.AccountManager(
-                    bus, logger, db.accounts, plugins_mgr, profiles, scheduler,
+                    bus, logger, db.accounts, plugins_mgr, scheduler,
                     settings, audit, client_factory, credentials,
                 )
 

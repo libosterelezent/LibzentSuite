@@ -1,9 +1,9 @@
 # Module `adapters.simulator.scenarios`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `adapters/simulator/scenarios.py`
+**Path:** `adapters\simulator\scenarios.py`
 
 ```
 Scenario definitions for the offline simulation suite (spec §16).

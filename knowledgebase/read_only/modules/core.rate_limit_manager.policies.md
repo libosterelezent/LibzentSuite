@@ -1,9 +1,9 @@
 # Module `core.rate_limit_manager.policies`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `core/rate_limit_manager/policies.py`
+**Path:** `core\rate_limit_manager\policies.py`
 
 ```
 Rate policies: the 4-level policy model + validation (spec §5, A4).
@@ -31,7 +31,9 @@ at construction time — finite numbers (NaN previously slipped through float
 comparisons and poisoned buckets), sane caps so a stray 1e9 can not wedge the
 fleet, and precise human-readable RatePolicyError messages.
 
-The *safety floor* (MIN_ACTION_INTERVAL — no policy faster than 1.5s/action)
+The *safety floor* (MIN_ACTION_INTERVAL — the validation minimum; the
+shipped default floor comes from the config/boot wiring, and a fleet
+operator can raise it at any time via the dashboard)
 is enforced by the manager (engine.py) at set time, not here: RatePolicy
 itself only guarantees structural sanity so a malformed object can never
 exist, even programmatically.

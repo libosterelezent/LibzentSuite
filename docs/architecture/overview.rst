@@ -34,7 +34,7 @@ Composition order (``core/bootstrap.py``): credentials → config →
 Database (async `connect()` opens the connection and runs migrations) → LogService (+ DB sink +
 stdlib bridge) → EventBus → RateLimitManager (config policies, lane from
 kv) → SettingsManager → AuditRecorder → TaskScheduler (late-bound sender)
-→ PluginManager.discover → ProfileManager → AccountManager (restores
+→ PluginManager.discover → AccountManager (restores
 persisted accounts) → sender bound → scheduler start →
 ControlAPI (self-command hub bridged via ``COMMAND_HUB.api_provider``) →
 surface (REPL / one-shot CLI / dashboard / headless).

@@ -3,7 +3,7 @@
 > One `Account` per Discord user account: registry, lifecycle, cache, direct
 > plugin assignments, profiles (retained), supervisor,
 > emergency stops. Source of truth: `core/account_manager/{manager,cache,services}.py`,
-> `database/models.py`, `core/profile_manager/manager.py`, `core/settings_manager.py`,
+> `database/models.py`, `core/settings_manager.py`,
 > `core/api.py`, `core/rate_limit_manager/engine.py`.
 > Plugin-side view: [PLUGIN_SYSTEM.md](PLUGIN_SYSTEM.md) · [PLUGIN_API.md](PLUGIN_API.md) ·
 > Adapters: [ADAPTERS.md](ADAPTERS.md).
@@ -29,7 +29,6 @@ Account (core.account_manager.manager.Account)
 | `enabled` | `bool` | `False` = skipped by `start_all` |
 | `sync_group` | `Optional[str]` | accounts that act in sync (rate scope, §8) |
 | `settings` | `Dict[str, Any]` | framework account settings layer |
-| `profiles` | `List[str]` | assigned profiles — RETAINED future-infra bookkeeping only; profiles do NOT grant plugins (capabilities live in the `account_plugins` table, mirrored as `Account.assigned_plugins`) |
 | `created_at` | `float` | wall clock |
 
 ### 1.3 Credential storage (the `credentials` table)
@@ -255,19 +254,6 @@ send.
 * **Assignment ≠ enabled**: the assignment decides which plugins ATTACH to
   the account; the per-account enabled flag (`plugin_states`, CLI
   `plugins enable|disable`) decides whether an attached plugin runs.
-
-### 4.2 Legacy profile records: retained future infrastructure (NO capability effect)
-
-`core.profile_manager.manager.ProfileManager` over
-`database.repositories.profiles` still exists and works:
-
-* A profile is a named plugin allowlist; plugin lists are stripped/deduped/sorted on write
-  (`set_profile`; names match `^[a-z][a-z0-9_-]{0,31}$`; an empty list is rejected).
-* `assign`/`unassign` (both sides validated) persist immediately and mirror
-  into `AccountRecord.profiles` — **bookkeeping only**. Nothing re-attaches
-  plugins; `ProfileManager.allowed_plugins` is retained but NOT consulted
-  by the attach path.
-* Deleting a profile cascades its assignments; `delete_profile` is idempotent.
 
 ### 4.3 Plugin setting profiles (implemented — the OTHER profile system)
 

@@ -355,7 +355,7 @@ async def _accounts_handler(ctx: CommandContext, args: List[str]) -> str:
         if not accounts:
             return "no accounts registered"
         return "\n".join(
-            f"· {a['name']}: {a.get('status')} profiles={a.get('profiles') or '-'}"
+            f"· {a['name']}: {a.get('status')}"
             for a in accounts
         )
     sub, rest = args[0], args[1:]

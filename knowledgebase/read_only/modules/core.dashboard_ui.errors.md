@@ -1,9 +1,9 @@
 # Module `core.dashboard_ui.errors`
 
 > GENERATED REFERENCE — READ ONLY. Produced by `scripts/gen_knowledgebase.py` from static AST inspection.
-> Commit: `9c9ed1475e17ee886158b10ea539a924e304ac87`. Regenerate; do not hand-edit.
+> Commit: `eac8ca4b565e98b3d2a77cbad76de12f6df3a4f1`. Regenerate; do not hand-edit.
 
-**Path:** `core/dashboard_ui/errors.py`
+**Path:** `core\dashboard_ui\errors.py`
 
 ```
 Dashboard UI error hierarchy.
@@ -38,6 +38,10 @@ subclasses pinpoint what went wrong:
 | `TreeValidationError` | exception | yes | Structural tree problems: cycles, orphans, components with multiple |
 | `FrozenLayoutError` | exception | yes | A mutation was attempted on a component attached to a frozen layout. |
 | `ActionRegistrationError` | exception | yes | A non-callable was registered where an action callable is required. |
+| `ComponentDisabledError` | exception | yes | A disabled component (or a descendant of one) was invoked — |
+| `AccountContextError` | exception | yes | An account-scoped operation lacked a validated account/runtime |
+| `ResultValidationError` | exception | yes | A callback/provider result failed cross-the-wire validation |
+| `FormValidationError` | exception | yes | Reserved for form-schema failures surfaced as structured |
 
 ### `DuplicateComponentIdError`
 

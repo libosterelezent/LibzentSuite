@@ -326,8 +326,8 @@ class TestRenderedVisibilityPruning(unittest.IsolatedAsyncioTestCase):
         api = ControlAPI(accounts=object(),
                          plugins=type("P", (), {
                              "ui_registry": registry})(),
-                         profiles=object(), settings=object(),
-                         limiter=object(), scheduler=object(), logs=object())
+                         settings=object(), limiter=object(),
+                         scheduler=object(), logs=object())
         return await api.dashboard_ui_page("prune", "pg")
 
     async def test_no_checks_keep_the_whole_tree(self):
