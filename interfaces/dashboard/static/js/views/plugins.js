@@ -55,47 +55,8 @@ routerAdd("/plugins", "Plugins", async (container) => {
 
   const profilesOf = plugin => state.profiles.filter(p => p.plugin === plugin);
 
-  /* ── settings + profile editors share this schema field builder ─────── */
-  function schemaField(def, value) {
-    const cur = value == null ? (def.default ?? "") : value;
-    if (def.type === "bool") {
-      const i = el("input", {type: "checkbox"});
-      i.checked = cur === true;
-      return el("div", {class: "field", dataset: {key: def.name}},
-        el("label", {}, `${def.name} (${def.type})`),
-        el("label", {style: "display:inline-flex;gap:var(--sp-2);align-items:center;"}, i,
-          el("span", {class: "dim"}, def.description || "")));
-    }
-    const input = def.type === "int" || def.type === "float"
-      ? el("input", {type: "number", step: def.type === "int" ? "1" : "any",
-          min: def.min != null ? String(def.min) : undefined,
-          max: def.max != null ? String(def.max) : undefined})
-      : el("input", {type: "text"});
-    input.value = String(cur ?? "");
-    return el("div", {class: "field", dataset: {key: def.name}},
-      el("label", {}, `${def.name} (${def.type})`), input,
-      def.description ? el("div", {class: "hint"}, def.description) : null);
-  }
-  function collectSchema(form, schema) {
-    const out = {};
-    for (const def of schema) {
-      const slot = form.querySelector(`[data-key="${CSS.escape(def.name)}"]`);
-      if (!slot) continue;
-      const input = slot.querySelector("input");
-      if (def.type === "bool") { out[def.name] = input.checked; continue; }
-      if (def.type === "int" || def.type === "float") {
-        if (input.value === "") { out[def.name] = def.default ?? null; continue; }
-        const n = Number(input.value);
-        if (!Number.isFinite(n) || (def.type === "int" && !Number.isInteger(n))) {
-          toast(`${def.name} must be ${def.type === "int" ? "an integer" : "a finite number"}.`, "err");
-          return null;
-        }
-        out[def.name] = n; continue;
-      }
-      out[def.name] = input.value;
-    }
-    return out;
-  }
+  /* ── settings + profile editors use the GLOBAL schemaField/collectSchema
+     (ui.js, Phase A-11 step 3 — shared with the account ability dialog) ── */
 
   /* ── per-card: settings editor dialog ───────────────────────────────── */
   function openSettingsEditor(manifest, accounts) {
