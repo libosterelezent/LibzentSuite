@@ -343,8 +343,8 @@ select { padding-right: 28px; }
 /* ═══════════════════════ Empty states / skeletons / spinner ════════════════ */
 .empty { display: flex; flex-direction: column; align-items: center; text-align: center;
   gap: var(--sp-1-5); padding: calc(var(--sp-8) * var(--density)) var(--sp-4);
-  border: 1px dashed var(--border2); border-radius: var(--r);
-  background: var(--surface); }
+  border: 1px solid var(--border); border-radius: var(--r);
+  background: color-mix(in srgb, var(--surface2) 45%, transparent); }
 .empty-msg { font-size: var(--fs-md); font-weight: 550; color: var(--dim); }
 .empty-hint { font-size: var(--fs-xs); color: var(--faint); max-width: 48ch; }
 
