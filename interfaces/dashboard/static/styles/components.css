@@ -311,7 +311,22 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
 input:focus-visible, select:focus-visible, textarea:focus-visible { outline: none; }
 input::placeholder, textarea::placeholder { color: var(--faint); }
 input[type="password"]:not(:placeholder-shown) { letter-spacing: .3em; }  /* mask dots only */
-input[type="checkbox"], input[type="radio"] { accent-color: var(--accent2); }
+/* checkboxes: visible, sized, accent-themed in BOTH states (UA default
+   renders a bright white box in dark mode that ignores the theme) */
+input[type="checkbox"] { appearance: none; width: 15px; height: 15px;
+  border: 1px solid var(--border2); border-radius: var(--r-sm);
+  background: var(--surface2); cursor: pointer; flex-shrink: 0;
+  position: relative; display: inline-block; margin: 0;
+  transition: background var(--t-fast), border-color var(--t-fast); }
+input[type="checkbox"]:hover { border-color: var(--accent); }
+input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent);
+  outline-offset: 2px; }
+input[type="checkbox"]:checked { background: var(--accent);
+  border-color: var(--accent); }
+input[type="checkbox"]:checked::after { content: ''; position: absolute;
+  inset: 0; background: var(--on-accent);
+  clip-path: polygon(18% 50%, 40% 70%, 84% 22%, 94% 32%, 42% 86%, 8% 60%); }
+input[type="radio"] { accent-color: var(--accent); }
 textarea { resize: vertical; }
 /* re-assert after the padding shorthand above — base.css reserves 28px for
    the chevron data-URI, and shorthand would clobber the longhand */
@@ -477,10 +492,6 @@ dialog.dlg.wide { width: min(880px, 94vw); }
 .acct-tile .actions { justify-content: space-between; margin-top: var(--sp-1); }
 .acct-tile .actions .sel { display: inline-flex; align-items: center;
   gap: var(--sp-1-5); font-size: var(--fs-xs); color: var(--dim); }
-
-/* checkboxes: visible, sized, themed (accent-color alone is invisible-dark) */
-input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent);
-  cursor: pointer; flex-shrink: 0; }
 
 /* pick list (Add-Account plugin picker): inline checkbox + name + desc */
 .picklist { display: flex; flex-direction: column; gap: 2px;

@@ -29,7 +29,9 @@
   --accent: #a0a0a0; --accent2: #808080; --accent-rgb: 160, 160, 160;
   --ok: #5fbf8a; --ok2: #3a8f63; --warn: #c9a227; --warn2: #a08020;
   --err: #d95050; --err2: #b03030;
-  --plugin: #b080d0; --plugin-rgb: 176, 128, 208;
+  /* plugin identity — DERIVED from the accent (tracks any chosen hue with
+     a faint cool shift; a hardcoded violet ignored the theme engine) */
+  --plugin: color-mix(in srgb, var(--accent) 85%, #b080d0);
   --surface2-rgb: 24, 24, 24;
   --on-accent: #0a0a0a;
 
