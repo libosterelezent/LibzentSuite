@@ -140,25 +140,28 @@ class PingPlugin(PluginBase):
         page = (
             ui.Page(component_id="ping")
             .set_title("Ping")
+            .set_icon("M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0V8zM12 18v4")
             .set_description("Send a provided message to a chosen "
                              "channel (paced + audited).")
             .add_section(
                 ui.Section(component_id="ping-sec")
                 .add_component(
                     ui.Form(component_id="ping-form")
-                    .add_component(ui.NumberInput(component_id="ping-channel")
-                                   .set_label("Channel ID")
-                                   .set_placeholder("123456789"))
-                    .add_component(ui.Textarea(component_id="ping-text")
-                                   .set_label("Message")
-                                   .set_placeholder("text to send"))
-                    .add_component(
-                        ui.Button(component_id="ping-send")
-                        .set_label("Send")
-                        .set_variant("primary")
-                        .set_action(self._ui_ping))))
-        )
-        self.attach_dashboard_ui(page)
+                    .set_description("The message rides the SAME paced "
+                                     "pipeline as all plugin traffic.")
+                    .set_submit_action(self._ui_ping)
+                    .set_submit_label("Send")
+                    .set_close_on_submit(False)
+                    .add_fields(
+                        ui.TextInput(component_id="ping-channel")
+                        .set_label("Channel ID")
+                        .set_placeholder("123456789"),
+                        ui.Textarea(component_id="ping-text")
+                        .set_label("Message")
+                        .set_placeholder("text to send")))))
+        layout = ui.Layout()
+        layout.add_page(page)
+        self.attach_dashboard_ui(layout)
 
     async def _ui_ping(self, ctx: Any,
                        payload: Dict[str, Any]) -> Dict[str, Any]:
