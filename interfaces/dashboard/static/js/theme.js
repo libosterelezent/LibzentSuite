@@ -224,6 +224,12 @@ function themeApply() {
   // 4. Density
   root.style.setProperty("--density", String(g.density));
 
+  // 4b. Layout preferences (Layout tab) — attribute-driven: the views and
+  // CSS follow via body[data-*] selectors, no direct view coupling.
+  const L = g.layout || {};
+  document.body.dataset.detailLayout = L.detail || "two";
+  document.body.dataset.hero = L.hero || "on";
+
   // 5. Page overrides
   const pageOverrides = themeState.pages[themeState.scope];
   if (pageOverrides && themeState.scope !== "global") {
@@ -293,6 +299,7 @@ function themeBuildPanel() {
       <div class="lz-tp-tab" role="tab" tabindex="0" data-tab="0" style="padding:10px 12px;font-size:12px;font-weight:550;color:var(--accent);border-bottom:2px solid var(--accent);cursor:pointer">Appearance</div>
       <div class="lz-tp-tab" role="tab" tabindex="0" data-tab="1" style="padding:10px 12px;font-size:12px;font-weight:550;color:var(--dim);border-bottom:2px solid transparent;cursor:pointer">Fonts</div>
       <div class="lz-tp-tab" role="tab" tabindex="0" data-tab="2" style="padding:10px 12px;font-size:12px;font-weight:550;color:var(--dim);border-bottom:2px solid transparent;cursor:pointer">CSS</div>
+      <div class="lz-tp-tab" role="tab" tabindex="0" data-tab="3" style="padding:10px 12px;font-size:12px;font-weight:550;color:var(--dim);border-bottom:2px solid transparent;cursor:pointer">Layout</div>
     </div>
     <div style="flex:1;overflow-y:auto;padding:16px 20px" id="lz-tp-body"></div>
   `;
@@ -505,6 +512,53 @@ function themeRenderTab(tabIndex) {
       a.href = URL.createObjectURL(blob);
       a.download = "libzent-theme.css";
       a.click();
+    });
+    /* Import (Phase A-11 step 12): load a .css file into the active sheet */
+    const importFile = el("input", {type: "file", accept: ".css,text/css",
+      id: "lz-css-import-file", style: "display:none"});
+    const importBtn = el("button", {class: "btn btn-ghost btn-sm", type: "button",
+      id: "lz-css-import",
+      title: "Import a .css file into the active sheet"}, "Import");
+    importBtn.addEventListener("click", () => importFile.click());
+    importFile.addEventListener("change", () => {
+      const f = importFile.files[0];
+      if (!f) return;
+      f.text().then(txt => {
+        body.querySelector("#lz-css").value = txt;
+        writeSheet(txt);
+        toast("css imported", "ok");
+      });
+    });
+    body.querySelector("#lz-css-export").after(importBtn, importFile);
+  } else if (tabIndex === 3) {
+    /* Layout tab (Phase A-11 steps 10-12): preferences the build can
+       actually honor — attribute-driven, applied via themeApply. */
+    const L = g.layout || (g.layout = {});
+    const seg = (attr, val, label, cur) =>
+      `<button class="lz-layout" data-attr="${attr}" data-v="${val}" style="flex:1;padding:6px 12px;background:none;border:none;color:${cur === val ? "var(--accent)" : "var(--dim)"};font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">${label}</button>`;
+    body.innerHTML = `
+      <div style="font-size:11px;font-weight:600;color:var(--dim);margin:0 0 6px;letter-spacing:.03em">Account detail layout</div>
+      <div style="display:flex;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden;margin-bottom:14px">
+        ${seg("detail", "two", "Two-column", L.detail || "two")}
+        ${seg("detail", "one", "Single column", L.detail || "two")}
+      </div>
+      <div style="font-size:11px;font-weight:600;color:var(--dim);margin:0 0 6px;letter-spacing:.03em">Hero strip</div>
+      <div style="display:flex;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden;margin-bottom:14px">
+        ${seg("hero", "on", "Visible", L.hero || "on")}
+        ${seg("hero", "off", "Hidden", L.hero || "on")}
+      </div>
+      <div style="font-size:10px;color:var(--faint);line-height:1.5">
+        Layout preferences persist with the theme (state/theme.json +
+        localStorage) and apply immediately across every route.
+      </div>
+    `;
+    body.querySelectorAll(".lz-layout").forEach(el => {
+      el.addEventListener("click", () => {
+        g.layout[el.dataset.attr] = el.dataset.v;
+        themeApply();
+        themeSave();
+        themeRenderTab(3);
+      });
     });
   }
 }
