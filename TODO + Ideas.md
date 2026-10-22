@@ -583,6 +583,70 @@ PHASE 8 — SAFETY / VALIDATION  ✅ DONE
 [x] Graceful shutdown
 
 
+PHASE 6b — DASHBOARD UI v3 REBUILD  ✅ DONE
+
+[x] Hash-routed SPA (Carbon design system, tokens + canonical classes)
+[x] Bespoke account-as-object view (hero / abilities / memory / pacing / live stats)
+[x] Generic builder-tree renderer for plugin pages (render.js)
+[x] Theme engine (presets, accent, radius, density, fonts, custom CSS)
+[x] Contract tests pinning endpoints, classes, tokens (test_dashboard_static.py)
+
+Architecture decision (locked): plugins build UI through the SAFE BUILDER
+(core/dashboard_ui -> render.js); the framework's own flagship views stay
+BESPOKE (js/views/*). Modular split — the design system (tokens + canonical
+classes) is the single shared contract; static tests are the drift police.
+Decision rule: could a plugin own the surface? -> builder. Needs routing
+params / selection state / WS-diffed live data / multi-step flows? -> bespoke.
+
+
+PHASE 9 — GROUP RELAY: CENTRALIZED ACTION CONTROL  (planned)
+
+The entire point of Groups: control the actions of MULTIPLE accounts
+CENTRALLY — not merely share a pacing clock.
+
+[x] Group CRUD + membership (exists — SyncGroupManager)
+[x] Grouped accounts serialize on the shared limiter clock (exists)
+
+[ ] RELAY / TURN-TAKING (the real flow):
+      A rolls -> Mudae limit message lands on A
+      -> A marked SPENT for the window
+      -> B becomes ACTIVE and starts rolling
+      -> (all members spent) -> group cooldown -> reset -> A active again
+[ ] RotationController: thin coordinator ABOVE SyncGroupManager — subscribes
+    to parser events, owns queue state (ACTIVE / WAITING / SPENT / COOLING),
+    gates which account may act. Modularity rule: the limiter stays pure
+    pacing (safety floor); the relay decides WHO may go, the limiter still
+    decides HOW FAST. One being wrong must never violate the other.
+[ ] Handoff sensor: MudaeParser rule family for per-locale limit markers
+    (roulette / roll variants)
+[ ] Reset semantics: event-based (Mudae's own reset message) preferred,
+    window-based fallback
+[ ] PACING BETWEEN GROUPED ACCOUNTS: shared-clock middle pacing is NOT
+    necessarily desirable under relay — but it stays EDITABLE, never removed
+    (per-group pacing mode: shared-clock | relay | off; floor always applies)
+[ ] Stats frame carries per-group rotation state (whose turn, spent-since,
+    resets-in) so the dashboard shows the flow live
+[ ] Group detail view in the dashboard: member queue with live turn state,
+    handoff history
+[ ] Account hero shows group turn state (e.g. "grp farm-a · waiting, turn: B")
+[ ] Room for more group strategies later — the coordinator is a strategy
+    slot, relay is only the first strategy
+
+
+PHASE 10 — PLUGIN METRICS & FLOWS  (planned)
+
+[ ] Plugins supply metrics INTO the dashboard: ui_stats StatCards already
+    surface per-account in the account detail LIVE STATS section — keep
+    growing what plugins report (roll counts, claims, hits, streaks)
+[ ] Plugin-authored FLOWS: the operator will build real behaviors inside
+    plugins (rolling, claiming, reactions) that emit events + telemetry
+    through the event bus — the dashboard reads, plugins speak
+[ ] Plugin flows must ride the SAME paced pipeline (ctx.services), never
+    raw clients — the plugin contract holds as flows grow
+[ ] Metrics feed the group relay: per-account plugin counters make the
+    rotation numerically visible (A: 8 rolls this window, B: 0)
+
+
 ORIGINAL TODO ITEMS TO PRESERVE
 
 - Add Plugin settings page.
