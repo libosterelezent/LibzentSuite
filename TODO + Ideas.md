@@ -135,33 +135,21 @@ Example:
 The CLI and GUI both consume the same schema.
 
 
-4. PROFILES / CAPABILITIES
+4. PROFILES / CAPABILITIES  — SUPERSEDED (2026-10-22)
 
-The original "Role" concept should preferably be represented as an internal framework profile/capability rather than a Discord server role.
+The original "Role"/Profile concept (Roller/Sniper/Collector bundles) was
+built as ProfileManager and FAILED — it gated nothing and its bookkeeping
+outlived its purpose (full removal plan: consult-B1-profilemanager.md).
 
-Example:
+What replaced it:
+- Capabilities are DIRECT account -> plugin assignments (account_plugins)
+- Named settings presets live as per-plugin profiles (plugin_profiles,
+  ALIVE — bound per account from the account MEMORY view)
+- Per-channel operational data is the AccountPluginData store
+  (plugin-data.db — see docs/design/fleet-orchestration-hub.md §7)
 
-    Profile: Roller
-        Plugins:
-            Roll
-
-    Profile: Sniper
-        Plugins:
-            Snipe
-
-    Profile: Collector
-        Plugins:
-            Roll
-            Snipe
-            Collector
-
-Then:
-
-    Account A -> Roller
-    Account B -> Sniper
-    Account C -> Sniper
-
-This makes the system easier to expand.
+Do not reintroduce permission bundles. Accounts, plugins, and scopes are
+the axes; profiles were the wrong abstraction.
 
 
 5. RATE LIMIT MANAGER
@@ -240,17 +228,12 @@ Concept:
 
 Use a proper database instead of storing everything in one large JSON file.
 
-Possible SQLite tables:
+    libzent.db (SQLite, versioned migrations):
+    accounts, account_settings, plugins, plugin_settings,
+    plugin_profiles, rate_limit_policies, audit_logs, tasks
 
-    accounts
-    account_settings
-    plugins
-    plugin_settings
-    profiles
-    profile_plugins
-    account_profiles
-    rate_limit_policies
-    audit_logs
+    plugin-data.db (SQLite, self-initializing — PHASE 9/B3):
+    plugin_data(account, plugin, guild_id, channel_id, data_json, ...)
 
 Secrets should not be treated as automatically secure simply because they are stored in SQLite. Use an OS credential/keyring mechanism where appropriate.
 
@@ -282,10 +265,6 @@ Example:
     ----------------
     Roll       Enabled
     Snipe      Disabled
-
-    Profile
-    ----------------
-    Collector
 
     Rate Limit
     ----------------
@@ -440,9 +419,6 @@ Suggested commands:
     app plugins disable <plugin>
     app plugins settings <plugin>
 
-    app profiles list
-    app profiles assign <account> <profile>
-
     app ratelimit global
     app ratelimit account <account>
 
@@ -462,9 +438,9 @@ RECOMMENDED PROJECT STRUCTURE
     +-- core/
     |    +-- account_manager
     |    +-- plugin_manager
-    |    +-- profile_manager
     |    +-- settings_manager
     |    +-- rate_limit_manager
+    |    +-- sync_group_manager
     |    +-- task_scheduler
     |    +-- event_bus
     |    +-- logging
@@ -654,23 +630,29 @@ PHASE 10 — PLUGIN METRICS & FLOWS  (planned)
     rotation numerically visible (A: 8 rolls this window, B: 0)
 
 
-ORIGINAL TODO ITEMS TO PRESERVE
+ACTIVE QUEUE  (2026-10-22, ordered)
 
-- Add Plugin settings page.
-- Add Account add/remove handling.
-- Add account list showing account names and IDs.
-- Add account details button.
-- Show runtime information from cached client memory where available.
-- Add database for persistence and protection of sensitive configuration.
-- Add internal role/profile-style assignment system.
-- Add global and per-account rate-limit settings.
-- Allow selecting an account from the account list when configuring account-specific rate limits.
-- Add advanced delay configuration using float ranges.
-- Add live simulation testing.
-- Add detailed logging for simulation and runtime interactions.
-- Warn users when configured pacing/settings may be unsafe.
-- Require a configurable minimum pacing value, with the current proposed minimum being 1.5 seconds plus optional jitter.
+[ ] PHASE A-11 refactor queue — GPT repo-connected plan
+    (state/ui-rebuild-2026-10-22/consult-A11-gpt-plan.md):
+    tabbed ability dialog (Settings/Presets/Logs/Raw), state-kv strip,
+    theme Layout tab + CSS import, contract-test extensions.
+    IN PROGRESS: dialog tabs + schemaField extraction landed.
+[ ] ProfileManager COMPLETE REMOVAL — plan ready
+    (state/ui-rebuild-2026-10-22/consult-B1-profilemanager.md):
+    9 ordered steps, migration 8 drops profiles/profile_plugins/
+    account_profiles, CLI group + /api/profiles* routes removed,
+    test strategy included.
+[ ] PHASE C LIVE DEBUG — in progress
+    accounts alpha/bravo registered via UI; bravo RUNNING (live
+    Discord); alpha blocked on a fresh credential (old token invalid).
+    Remaining: admin-command flow B -> A, ordered full walkthrough.
+[ ] PHASE 9 ROLLOUT — design locked (docs/design/
+    fleet-orchestration-hub.md), implementation phases A-G pending.
+[ ] PHASE 10 ROLLOUT — after PHASE 9 signals exist.
 
+
+ORIGINAL TODO ITEMS TO PRESERVE — all shipped (2026-10-22); the section is
+retired. History lives in git.
 
 CORE DESIGN GOAL
 
