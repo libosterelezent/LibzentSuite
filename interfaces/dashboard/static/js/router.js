@@ -54,6 +54,8 @@ const Router = (() => {
               unmount: typeof returned === "function" ? returned : null,
               viewObj};
     document.title = (m.route.title ? m.route.title + " — " : "") + "LibzentSuite";
+    /* page-scoped custom CSS follows the route (theme.js bridge) */
+    if (typeof themeSetScope === "function") themeSetScope(m.route.pattern);
     for (const fn of routeSubs) {
       try { fn(m.route, m.params); } catch (e) { console.error(e); }
     }
