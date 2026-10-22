@@ -82,6 +82,7 @@ const THEME_ACCENTS = [
 /* ── State ───────────────────────────────────────────────────────────────── */
 const themeState = {
   scope: "global",
+  updated_at: 0,
   global: {
     preset: "carbon",
     accent: "#a0a0a0",
@@ -98,11 +99,53 @@ const themeState = {
 
 /* ── Persistence ─────────────────────────────────────────────────────────── */
 function themeSave() {
+  themeState.updated_at = Date.now();
   try {
     localStorage.setItem("lz_theme", JSON.stringify(themeState));
   } catch (_) { /* non-fatal */ }
-  // Server-side persistence is a TODO: needs a dedicated theme endpoint.
-  // localStorage is the primary store (per-browser, survives restarts).
+  // Durable mirror: state/theme.json via /api/theme — fonts + custom CSS
+  // survive a browser change. localStorage stays the instant cache.
+  themeRemotePush();
+}
+
+let _pushTimer = null, _pushBusy = false, _pushWarned = false;
+function themeRemotePush() {
+  if (_pushTimer) clearTimeout(_pushTimer);
+  _pushTimer = setTimeout(async () => {
+    _pushTimer = null;
+    if (_pushBusy) return;
+    _pushBusy = true;
+    try {
+      await api("/api/theme", {method: "POST",
+                               body: JSON.stringify({theme: themeState})});
+    } catch (e) {
+      if (!_pushWarned) { _pushWarned = true;
+        toast("theme server persistence unavailable — staying per-browser ("
+              + e.message + ")", "err"); }
+    } finally { _pushBusy = false; }
+  }, 1200);
+}
+
+let _pulled = false;
+async function themeRemotePull() {
+  if (_pulled) return;
+  _pulled = true;
+  let remote;
+  try { remote = await api("/api/theme"); } catch { return; }
+  if (!remote || typeof remote !== "object") return;
+  const remoteTs = +remote.updated_at || 0;
+  const localTs = +themeState.updated_at || 0;
+  if (remoteTs > localTs) {
+    // a different browser saved newer state here: adopt it
+    Object.assign(themeState.global, remote.global || {});
+    themeState.pages = remote.pages || {};
+    themeState.pageCss = remote.pageCss || {};
+    themeState.updated_at = remoteTs;
+    try { localStorage.setItem("lz_theme", JSON.stringify(themeState)); } catch (_) {}
+    themeApply();
+  } else if (remoteTs < localTs) {
+    themeRemotePush();          // local is newer: seed the server copy
+  }
 }
 
 function themeLoad() {
@@ -113,8 +156,17 @@ function themeLoad() {
       Object.assign(themeState.global, parsed.global || {});
       themeState.pages = parsed.pages || {};
       themeState.pageCss = parsed.pageCss || {};
+      themeState.updated_at = +parsed.updated_at || 0;
     }
   } catch (_) { /* corrupted — start fresh */ }
+  // The pull needs the token: it is adopted from ?token= during boot
+  // (shell.js, on DOMContentLoaded) — this script parses before that,
+  // so an immediate pull would go out unauthenticated (401).
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", themeRemotePull);
+  } else {
+    themeRemotePull();
+  }
 }
 
 /* ── Font loading ────────────────────────────────────────────────────────── */
@@ -184,6 +236,17 @@ function themeApply() {
   themeLoadFonts(g.fontUi, g.fontMono);
 
   // 7. Custom CSS (global + page-scoped)
+  themeApplyCss();
+  /* NOTE: no themeSave() here — apply is not a mutation. Saving happens at
+     USER actions only (accent/preset/radius/density/font/CSS handlers);
+     otherwise every boot would stamp the default state as freshest and
+     push it over the server copy. */
+}
+
+/* The <style> tag carrying user CSS: global sheet plus the CURRENT
+   route's page-scoped sheet. Split from themeApply so a route change
+   can re-scope CSS without re-running tokens/fonts. */
+function themeApplyCss() {
   let cssTag = document.getElementById("lz-custom-css");
   if (!cssTag) {
     cssTag = document.createElement("style");
@@ -193,9 +256,18 @@ function themeApply() {
   const pageCss = themeState.scope !== "global"
     ? (themeState.pageCss[themeState.scope] || "")
     : "";
-  cssTag.textContent = g.css + "\n" + pageCss;
+  cssTag.textContent = themeState.global.css + "\n" + pageCss;
+}
 
-  themeSave();
+/* Route → scope bridge (called by shell.js on every route change): the
+   page-scoped custom CSS sheet follows the route pattern. */
+function themeSetScope(scope) {
+  if (!scope || themeState.scope === scope) return;
+  themeState.scope = scope;
+  themeApplyCss();
+  const body = document.getElementById("lz-tp-body");
+  if (document.getElementById("lz-theme-panel") && body
+      && body.querySelector("#lz-css")) themeRenderTab(2);
 }
 
 /* ── The panel ──────────────────────────────────────────────────────────── */
@@ -218,14 +290,24 @@ function themeBuildPanel() {
       </div>
     </div>
     <div style="display:flex;border-bottom:1px solid var(--border);padding:0 12px">
-      <div class="lz-tp-tab" data-tab="0" style="padding:10px 12px;font-size:12px;font-weight:550;color:var(--accent);border-bottom:2px solid var(--accent);cursor:pointer">Appearance</div>
-      <div class="lz-tp-tab" data-tab="1" style="padding:10px 12px;font-size:12px;font-weight:550;color:var(--dim);border-bottom:2px solid transparent;cursor:pointer">Fonts</div>
-      <div class="lz-tp-tab" data-tab="2" style="padding:10px 12px;font-size:12px;font-weight:550;color:var(--dim);border-bottom:2px solid transparent;cursor:pointer">CSS</div>
+      <div class="lz-tp-tab" role="tab" tabindex="0" data-tab="0" style="padding:10px 12px;font-size:12px;font-weight:550;color:var(--accent);border-bottom:2px solid var(--accent);cursor:pointer">Appearance</div>
+      <div class="lz-tp-tab" role="tab" tabindex="0" data-tab="1" style="padding:10px 12px;font-size:12px;font-weight:550;color:var(--dim);border-bottom:2px solid transparent;cursor:pointer">Fonts</div>
+      <div class="lz-tp-tab" role="tab" tabindex="0" data-tab="2" style="padding:10px 12px;font-size:12px;font-weight:550;color:var(--dim);border-bottom:2px solid transparent;cursor:pointer">CSS</div>
     </div>
     <div style="flex:1;overflow-y:auto;padding:16px 20px" id="lz-tp-body"></div>
   `;
 
   document.body.appendChild(panel);
+
+  /* tab switching — the tabs are plain divs; without this wiring the
+     Fonts/CSS tabs were unreachable (a v2 bug carried through the port) */
+  panel.querySelectorAll(".lz-tp-tab").forEach(t => {
+    const open = () => themeRenderTab(+t.dataset.tab);
+    t.addEventListener("click", open);
+    t.addEventListener("keydown", e => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+    });
+  });
   return panel;
 }
 
@@ -286,6 +368,7 @@ function themeRenderTab(tabIndex) {
       el.addEventListener("click", () => {
         g.preset = el.dataset.id;
         themeApply();
+        themeSave();
         themeRenderTab(0);
       });
       el.addEventListener("mouseenter", () => {
@@ -302,6 +385,7 @@ function themeRenderTab(tabIndex) {
         g.accent = el.dataset.hex;
         g.accentRgb = el.dataset.rgb;
         themeApply();
+        themeSave();
         themeRenderTab(0);
       });
     });
@@ -310,11 +394,13 @@ function themeRenderTab(tabIndex) {
       g.radius = parseInt(radius.value);
       document.getElementById("lz-radius-val").textContent = g.radius + "px";
       themeApply();
+      themeSave();
     });
     body.querySelectorAll(".lz-density").forEach(el => {
       el.addEventListener("click", () => {
         g.density = parseFloat(el.dataset.v);
         themeApply();
+        themeSave();
         themeRenderTab(0);
       });
     });
@@ -351,22 +437,37 @@ function themeRenderTab(tabIndex) {
         if (type === "ui") g.fontUi = name;
         else g.fontMono = name;
         themeApply();
+        themeSave();
         themeRenderTab(1);
       });
     });
 
   } else if (tabIndex === 2) {
+    const scope = themeState.scope;
+    const isGlobal = scope === "global";
+    /* escape a closing textarea tag inside user CSS (it would break the
+       markup; everything else is fine raw inside <textarea>) */
+    const sheet = (isGlobal ? g.css : (themeState.pageCss[scope] || ""))
+      .replace(/<\//g, "<\\/");
     body.innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span style="font-size:11px;font-weight:600;color:var(--dim)">Scope</span>
+        <select id="lz-scope" style="flex:1;font-size:11px">
+          <option value="global">Global — every page</option>
+          ${isGlobal ? "" : `<option value="${esc(scope)}" selected>This page (${esc(scope)})</option>`}
+        </select>
+      </div>
       <div style="font-size:11px;font-weight:600;color:var(--dim);margin:0 0 6px;letter-spacing:.03em">Custom CSS</div>
       <div style="font-size:10px;color:var(--faint);margin-bottom:8px;line-height:1.5">
         Write CSS targeting any element. All design tokens available as
         <code style="font-family:var(--mono)">var(--accent)</code>,
         <code style="font-family:var(--mono)">var(--surface)</code>, etc.
+        Page scope follows the route you opened the panel from.
         Changes apply live and persist.
       </div>
       <textarea id="lz-css" spellcheck="false"
         style="width:100%;min-height:180px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r-sm);color:var(--text);font-family:var(--mono);font-size:11px;line-height:1.6;padding:12px;resize:vertical;outline:none;tab-size:2;white-space:pre;overflow:auto"
-        placeholder="/* .hero { border-left-color: var(--warn); } */&#10;/* .pill { border-radius: 0; } */">${g.css}</textarea>
+        placeholder="/* .hero { border-left-color: var(--warn); } */&#10;/* .pill { border-radius: 0; } */">${sheet}</textarea>
       <div style="display:flex;gap:6px;margin-top:8px;align-items:center">
         <button id="lz-css-apply" style="padding:8px 14px;border-radius:var(--r-sm);font-size:11px;font-weight:600;cursor:pointer;border:1px solid var(--accent);background:rgba(var(--accent-rgb),.1);color:var(--accent);font-family:var(--font)">Apply</button>
         <button id="lz-css-clear" style="padding:8px 14px;border-radius:var(--r-sm);font-size:11px;font-weight:600;cursor:pointer;border:1px solid var(--border2);background:var(--surface2);color:var(--text);font-family:var(--font)">Clear</button>
@@ -374,22 +475,32 @@ function themeRenderTab(tabIndex) {
         <button id="lz-css-export" style="padding:8px 14px;border-radius:var(--r-sm);font-size:11px;font-weight:600;cursor:pointer;border:1px solid var(--border2);background:var(--surface2);color:var(--text);font-family:var(--font)">Export</button>
       </div>
       <div style="font-size:10px;color:var(--faint);margin-top:8px;line-height:1.5">
-        Stored in <code style="font-family:var(--mono)">state/theme.json</code>.
-        Survives restarts. Right-click any element to inspect its class name.
+        Stored in <code style="font-family:var(--mono)">state/theme.json</code> (server)
+        and localStorage. Survives restarts and browsers.
       </div>
     `;
 
-    body.querySelector("#lz-css-apply").addEventListener("click", () => {
-      g.css = body.querySelector("#lz-css").value;
+    const readSheet = () => body.querySelector("#lz-css").value;
+    const writeSheet = v => {
+      if (isGlobal) g.css = v;
+      else themeState.pageCss[scope] = v;
       themeApply();
+      themeSave();
+    };
+    body.querySelector("#lz-scope").addEventListener("change", e => {
+      themeState.scope = e.target.value;
+      themeApplyCss();
+      themeRenderTab(2);
+    });
+    body.querySelector("#lz-css-apply").addEventListener("click", () => {
+      writeSheet(readSheet());
     });
     body.querySelector("#lz-css-clear").addEventListener("click", () => {
-      g.css = "";
       body.querySelector("#lz-css").value = "";
-      themeApply();
+      writeSheet("");
     });
     body.querySelector("#lz-css-export").addEventListener("click", () => {
-      const blob = new Blob([g.css], { type: "text/css" });
+      const blob = new Blob([readSheet()], { type: "text/css" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
       a.download = "libzent-theme.css";
