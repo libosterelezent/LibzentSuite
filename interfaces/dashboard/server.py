@@ -252,7 +252,14 @@ def require_finite(value: float, key: str, route: str) -> float:
 
 
 def require_int(body: Dict[str, Any], key: str, route: str) -> int:
-    """Required integer field (bools excluded; integral floats tolerated)."""
+    """Required integer field (bools excluded; integral floats tolerated).
+
+    Digit STRINGS are accepted and parsed exactly: Discord snowflakes
+    exceed JavaScript Number.MAX_SAFE_INTEGER, so browser clients that
+    send ids as strings (the only lossless way) must not be rejected —
+    while a JSON number that already lost precision is indistinguishable
+    from a legit int and passes through as-is.
+    """
     value = require_field(body, key, route)
     if isinstance(value, bool):
         raise ValueError(f"field '{key}' in POST {route} must be an integer, got {value!r}")
@@ -260,6 +267,8 @@ def require_int(body: Dict[str, Any], key: str, route: str) -> int:
         return value
     if isinstance(value, float) and value.is_integer():
         return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
     raise ValueError(f"field '{key}' in POST {route} must be an integer, got {value!r}")
 
 
@@ -282,6 +291,10 @@ def require_json_list(body: Dict[str, Any], key: str, route: str) -> List[Any]:
             out.append(item)
         elif isinstance(item, float) and item.is_integer():
             out.append(int(item))
+        elif isinstance(item, str) and item.strip().isdigit():
+            # exact parse: snowflakes exceed JS Number.MAX_SAFE_INTEGER, so
+            # browser clients send ids as strings to avoid precision loss
+            out.append(int(item.strip()))
         else:
             raise ValueError(
                 f"field '{key}' in POST {route} must contain integers, got {item!r}")

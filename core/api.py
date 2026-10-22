@@ -1580,12 +1580,17 @@ class ControlAPI:
     # ------------------------------------------------------ admin access
     async def admin_overview(self) -> Dict[str, Any]:
         """The admin panel's full view: admin ids, mudae bot id, and every
-        account's access row."""
+        account's access row.
+
+        Ids serialize as STRINGS: Discord snowflakes exceed JavaScript
+        Number.MAX_SAFE_INTEGER, so JSON numbers get rounded by the
+        browser's JSON.parse before any code runs."""
         access = self._require_access()
         rows = await access.all_account_rows()
         return {
-            "admins": await access.admin_ids(),
-            "mudae_bot_id": await access.mudae_bot_id(),
+            "admins": [str(i) for i in await access.admin_ids()],
+            "mudae_bot_id": str(await access.mudae_bot_id())
+            if await access.mudae_bot_id() is not None else None,
             "accounts": rows,
         }
 
@@ -1626,11 +1631,13 @@ class ControlAPI:
         """Read the per-account command-permission list.
 
         ``surface`` is reserved (mgmt audit vocabulary): reads are not
-        audited — only the perms_set/add/remove mutations are.
+        audited - only the perms_set/add/remove mutations are.
+        Ids serialize as strings (snowflake-safe transport).
         """
         access = self._require_access()
         return {"account": account,
-                "allowed_user_ids": await access.allowed_user_ids(account)}
+                "allowed_user_ids": [str(i) for i in
+                                     await access.allowed_user_ids(account)]}
 
     async def admin_perms_set(self, account: str, ids: List[int],
                               surface: str = "api") -> Dict[str, Any]:

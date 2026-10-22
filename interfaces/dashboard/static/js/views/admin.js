@@ -31,8 +31,12 @@ routerAdd("/admin", "Admin", async (container) => {
   };
 
   const numericOrToast = v => {
-    if (!/^\d+$/.test(v)) { toast("Enter a numeric Discord user id.", "err"); return null; }
-    return parseInt(v, 10);
+    /* STRING in, STRING out: Discord snowflakes exceed JS Number precision
+       (155669093634917518 became ...517600 through parseInt). The server
+       parses digit-strings exactly (require_int). */
+    v = (v || "").trim();
+    if (!/^\d{5,21}$/.test(v)) { toast("Enter a numeric Discord user id.", "err"); return null; }
+    return v;
   };
 
   /* ── framework admins ───────────────────────────────────────────────── */
