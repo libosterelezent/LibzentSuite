@@ -56,14 +56,19 @@ routerAdd("/admin", "Admin", async (container) => {
       chips.append(el("span", {class: "hint"},
         "no admins — nobody can command any account (fail-closed)"));
     } else for (const id of admins) {
-      const rm = el("button", {class: "btn btn-ghost btn-sm", type: "button",
+      const rm = el("button", {class: "btn btn-danger btn-sm", type: "button",
         "aria-label": "Remove admin " + id, title: "Remove admin"}, "✕");
       rm.onclick = async () => {
+        const ok = await confirmBox({title: "Remove framework admin",
+          body: "Remove " + id + " from the framework admins? It loses the power to command any account.",
+          yes: "Remove"});
+        if (!ok) return;
         try { await busyRun(rm, () => post("/api/admin/ids/remove", {user_id: id})); await load(); }
         catch (e) { toast(e.message, "err"); }
       };
       chips.append(el("span", {class: "chip mono"}, String(id), rm));
     }
+    collapseWrap(chips, 8);
     adminsHost.append(chips, el("div", {class: "toolbar"}, input, add),
       el("p", {class: "hint"}, "The old OWNER_USER_IDS env was migrated once and is ignored since."));
   }
@@ -139,9 +144,13 @@ routerAdd("/admin", "Admin", async (container) => {
       const perms = row.allowed_user_ids || [];
       if (!perms.length) permsRow.append(el("span", {class: "hint"}, "no ids — framework admins only (fail-closed)"));
       for (const id of perms) {
-        const rm = el("button", {class: "btn btn-ghost btn-sm", type: "button",
+        const rm = el("button", {class: "btn btn-danger btn-sm", type: "button",
           "aria-label": "Revoke " + id, title: "Revoke"}, "✕");
         rm.onclick = async () => {
+          const ok = await confirmBox({title: "Revoke command perm",
+            body: "Revoke " + id + "'s command access on " + name + "? (framework admins keep access)",
+            yes: "Revoke"});
+          if (!ok) return;
           try {
             await busyRun(rm, () => post("/api/admin/perms/remove", {account: name, user_id: id}));
             await load();
@@ -149,6 +158,7 @@ routerAdd("/admin", "Admin", async (container) => {
         };
         permsRow.append(el("span", {class: "chip mono"}, String(id), rm));
       }
+      collapseWrap(permsRow, 8);
       const permInput = el("input", {type: "text", placeholder: "discord user id", style: "width:180px;"});
       const permAdd = el("button", {class: "btn btn-secondary btn-sm", type: "button"}, "+ Allow");
       permAdd.onclick = async () => {
