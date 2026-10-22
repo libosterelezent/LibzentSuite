@@ -76,6 +76,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from core.api import ControlAPI
+from core import theme_store
 from core.dashboard_ui.context import _VIEW_ID, clean_view_id
 from core.dashboard_ui.errors import UIError
 from core.errors import AccountError, DatabaseError
@@ -1055,6 +1056,24 @@ class DashboardServer:
                     q_str(query, "account", path))}
             if (method, path) == ("GET", "/api/ui/panels"):
                 return 200, {"ok": True, "data": await api.ui_panels()}
+
+            # ───────────────────────────────── theme engine persistence ───
+            # Durable copy of the theme-engine state (presets, accent,
+            # fonts, custom CSS): localStorage is the instant per-browser
+            # cache, state/theme.json survives browser changes. Server-
+            # owned (a presentation concern, not ControlAPI/CLI surface).
+            if (method, path) == ("GET", "/api/theme"):
+                return 200, {"ok": True, "data": theme_store.load()}
+            if (method, path) == ("POST", "/api/theme"):
+                state = body.get("theme")
+                if not isinstance(state, dict):
+                    return 400, {"ok": False,
+                                 "error": "field 'theme' (object) is required"}
+                try:
+                    theme_store.save(state)
+                except ValueError as exc:
+                    return 400, {"ok": False, "error": str(exc)}
+                return 200, {"ok": True, "data": {"saved": True}}
 
             # ------------------------------------------- dashboard UI (Stage D)
             # Builder-based plugin pages: navigation for the sidebar, one
