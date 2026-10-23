@@ -672,9 +672,22 @@ ACTIVE QUEUE  (2026-10-23, ordered)
        apply/clear), migration v9 + FleetRepository, write-ahead
        history + event seam, generation bumping; 33 service tests on
        real in-memory SQLite (79 fleet tests total).
-    C-G pending. NOTE: tests/unit/test_task_scheduler has ~7
-    pre-existing timing flakes on HEAD (completed 1!=2 family) —
-    triage before Phase C leans on that suite.
+    C. DONE (2026-10-23, 84ddbc7): FleetPolicy (§4 check order,
+       cooldown retry_at, generation fence, D1 boundary) + the
+       scheduler dispatch_guard (pre-dispatch park + post-grant
+       revalidation, fail-open on guard error); bootstrap wires the
+       service+guard live. Acceptance proven end-to-end: paused group
+       parks work with zero sender calls/grants; resume dispatches
+       paced; independents unaffected. Scheduler suite de-flaked
+       first (d32ee99). NOTE: the live dashboard process predates the
+       fleet wiring — restart picks it up.
+    D-G pending.
+    D. NEXT — parser observations (parser output alone cannot bypass
+       state/policy) + FleetTaskHandler on PluginBase (§5 opt-in
+       capability), observation dedup, member connectivity derived
+       into eligibility.
+    E. ownership transitions drain/restore. F. Fleet Hub SPA view.
+    G. reconciler + recovery regression.
 [ ] PHASE 10 ROLLOUT — after PHASE 9 signals exist.
 
 
