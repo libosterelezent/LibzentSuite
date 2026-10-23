@@ -531,18 +531,35 @@ body[data-hero="off"] .hero { display: none; }
 .pick-row .pl-name { font-weight: 600; font-size: var(--fs-sm); color: var(--text); }
 .pick-row .pl-desc { font-size: var(--fs-xs); color: var(--dim); }
 
-/* channel tree (profile editor scope picker): guild groups with nested
-   channel checkboxes; the guild head toggles/clears its children */
-.ctree { display: flex; flex-direction: column; gap: var(--sp-2);
+/* channel tree dropdown (profile editor scope picker): a closed control
+   summarizing the pick; opening reveals collapsible guild groups */
+.ctree-dd { min-width: 0; }
+.ctree-dd-head { display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-2); min-height: var(--ctrl-h); padding: 0 var(--sp-3);
   border: 1px solid var(--border); border-radius: var(--r-sm);
-  padding: var(--sp-1); background: var(--surface2);
-  max-height: 320px; overflow-y: auto; }
-.ctree-group { display: flex; flex-direction: column; gap: 1px; }
-.ctree-guild { display: flex; align-items: center; gap: var(--sp-2);
-  font-weight: 600; font-size: var(--fs-sm); color: var(--text);
+  background: var(--surface2); cursor: pointer; user-select: none;
+  font-size: var(--fs-sm); color: var(--dim); list-style: none; }
+.ctree-dd-head::-webkit-details-marker { display: none; }
+.ctree-dd-head svg { flex: none; transition: transform var(--t-fast); }
+.ctree-dd[open] .ctree-dd-head svg { transform: rotate(180deg); }
+.ctree-dd[open] .ctree-dd-head { color: var(--text); border-color: var(--accent);
+  border-radius: var(--r-sm) var(--r-sm) 0 0; }
+.ctree { display: flex; flex-direction: column; gap: 2px;
+  border: 1px solid var(--border); border-top: none;
+  border-radius: 0 0 var(--r-sm) var(--r-sm); background: var(--surface2);
+  max-height: 320px; overflow-y: auto; padding: var(--sp-1); }
+.ctree-group { border-bottom: 1px solid var(--border); padding-bottom: 2px; }
+.ctree-group:last-child { border-bottom: none; padding-bottom: 0; }
+.ctree-guild-row { display: flex; align-items: center; gap: var(--sp-2);
   padding: var(--sp-1) var(--sp-1-5); border-radius: var(--r-sm);
   cursor: pointer; transition: background var(--t-fast); }
-.ctree-guild:hover { background: var(--surface3); }
+.ctree-guild-row:hover { background: var(--surface3); }
+.ctree-guild { display: flex; align-items: center; gap: var(--sp-2);
+  flex: 1; min-width: 0; font-weight: 600; font-size: var(--fs-sm);
+  color: var(--text); }
+.ctree-guild-name { overflow-wrap: anywhere; }
+.ctree-count { flex: none; font-size: var(--fs-xs); color: var(--dim);
+  font-family: var(--mono); }
 .ctree-chans { margin-left: var(--sp-4); display: flex;
   flex-direction: column; gap: 1px; }
 .ctree-row { display: flex; align-items: center; gap: var(--sp-2);
@@ -550,6 +567,26 @@ body[data-hero="off"] .hero { display: none; }
   padding: 2px var(--sp-1-5); border-radius: var(--r-sm);
   cursor: pointer; transition: background var(--t-fast), color var(--t-fast); }
 .ctree-row:hover { background: var(--surface3); color: var(--text); }
+
+/* builder tile-view: responsive card grid (profile bindings etc.) */
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: calc(var(--sp-3) * var(--density)); }
+.tile { display: flex; flex-direction: column; gap: var(--sp-2);
+  border: 1px solid var(--border); border-left: 3px solid var(--border);
+  border-radius: var(--r-sm); padding: var(--sp-3);
+  background: var(--surface2); min-width: 0; }
+.tile.tile-ok { border-left-color: var(--ok); }
+.tile.tile-warn { border-left-color: var(--warn); }
+.tile.tile-err { border-left-color: var(--err); }
+.tile.tile-accent { border-left-color: var(--accent); }
+.tile-head { display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-2); }
+.tile-title { font-weight: 600; font-size: var(--fs-md); color: var(--text);
+  overflow-wrap: anywhere; }
+.tile .kv { font-size: var(--fs-sm); }
+.tile .chips { flex-wrap: wrap; gap: var(--sp-1); }
+.tile-acts { display: flex; gap: var(--sp-1); justify-content: flex-end;
+  margin-top: auto; }
 
 /* hero meta as stat pills (combined mockup) */
 .hero-meta { gap: var(--sp-2); }

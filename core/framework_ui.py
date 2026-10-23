@@ -1881,7 +1881,7 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
                                            surface="dashboard")
         return {"success": True,
                 "message": f"{plugin}: {choice or 'default'} bound to {account}",
-                "refresh": ["prof-tiles"]}
+                "refresh": ["prof-tiles", "prof-lib"]}
 
     def _editor_fields(api):
         async def provide(ctx):
@@ -2019,13 +2019,13 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
                     pass   # plugin may not be assigned — creation still succeeded
         return {"success": True,
                 "message": f"profile {name} saved for {plugin}",
-                "refresh": ["prof-tiles"]}
+                "refresh": ["prof-tiles", "prof-lib"]}
 
     async def delete_profile(row, ctx):
         plugin, _, name = row.partition("|")
         await api.plugin_profile_delete(plugin, name)
         return {"success": True, "message": f"profile {name} deleted",
-                "refresh": ["prof-tiles", "bp-profile"]}
+                "refresh": ["prof-tiles", "prof-lib", "bp-profile"]}
 
     def _library_records(api):
         async def provide(ctx):

@@ -227,7 +227,8 @@ function bComp(comp) {
     case "radio-group":
     case "multi-select": return bInput(comp);
     case "list-view":
-    case "table": {
+    case "table":
+    case "tile-view": {
       const n = el("div", Object.assign({}, bStyle(comp),
         {style: bFlexStyle(comp) + "display:flex;flex-direction:column;gap:var(--sp-2);min-width:0;"}));
       if (comp.title) n.append(el("div", {class: "dim"}, comp.title));
@@ -385,27 +386,50 @@ function bInput(comp) {
   return el("span");
 }
 
-/* channel-tree: guild groups of channel checkboxes (profile scope
-   picker). The guild head toggles/clears its children and reads
-   indeterminate on partial picks; value = the checked channel ids. */
+/* channel-tree: multi-select DROPDOWN grouped by guild (profile scope
+   picker). Closed, it summarizes the pick; opening reveals collapsible
+   guild groups of channel checkboxes. A guild row's label selects
+   (head checks/clears children, indeterminate on partial); the rest of
+   the row expands/collapses. value = the checked channel ids. */
 function bChannelTree(comp) {
   const pre = new Set((Array.isArray(comp.value) ? comp.value : []).map(String));
+  const sumText = el("span", {class: "ctree-sum"});
+  const dd = el("details", {class: "ctree-dd"},
+    el("summary", {class: "ctree-dd-head"}, sumText,
+      bIcon("M6 9l6 6 6-6")));
   const tree = el("div", {class: "ctree"});
+  dd.append(tree);
+
+  const boxes = [];   /* every channel checkbox, across guilds */
+  const syncSummary = () => {
+    const n = boxes.filter(b => b.checked).length;
+    sumText.textContent = n
+      ? `${n} channel${n === 1 ? "" : "s"} selected`
+      : "all channels (no selection)";
+  };
+
   for (const g of (Array.isArray(comp.groups) ? comp.groups : [])) {
     const chans = (Array.isArray(g.channels) ? g.channels : [])
       .filter(c => c && c.id);
     if (!chans.length) continue;
-    const boxes = [];
+    const gboxes = [];
     const head = el("input", {type: "checkbox", class: "ctree-head",
-      "aria-label": String(g.name || g.id)});
+      "aria-label": "select all in " + String(g.name || g.id)});
+    const label = el("label", {class: "ctree-guild"}, head,
+      el("span", {class: "ctree-guild-name"}, g.name || g.id));
+    const count = el("span", {class: "ctree-count"});
+    const row = el("div", {class: "ctree-guild-row"}, label, count);
     const list = el("div", {class: "ctree-chans"});
     const sync = () => {
-      const n = boxes.filter(b => b.checked).length;
-      head.checked = n === boxes.length;
-      head.indeterminate = n > 0 && n < boxes.length;
+      const n = gboxes.filter(b => b.checked).length;
+      head.checked = n === gboxes.length;
+      head.indeterminate = n > 0 && n < gboxes.length;
+      count.textContent = n ? `${n}/${gboxes.length}` : "";
+      syncSummary();
     };
     head.addEventListener("change", () => {
-      for (const b of boxes) b.checked = head.checked;
+      for (const b of gboxes) b.checked = head.checked;
+      sync();
     });
     for (const c of chans) {
       const box = el("input", {type: "checkbox", class: "ctree-chan"});
@@ -413,15 +437,20 @@ function bChannelTree(comp) {
       box.checked = pre.has(String(c.id));
       box.addEventListener("change", sync);
       boxes.push(box);
+      gboxes.push(box);
       list.append(el("label", {class: "ctree-row"},
         box, el("span", {}, "#" + (c.name || c.id))));
     }
     sync();
-    tree.append(el("div", {class: "ctree-group"},
-      el("label", {class: "ctree-guild"}, head,
-        el("span", {}, g.name || g.id)), list));
+    list.hidden = !gboxes.some(b => b.checked);   // open where the pick is
+    row.addEventListener("click", e => {
+      if (e.target.closest("label")) return;      // label = selection only
+      list.hidden = !list.hidden;
+    });
+    tree.append(el("div", {class: "ctree-group"}, row, list));
   }
-  return tree;
+  syncSummary();
+  return dd;
 }
 
 /* option list fill: static comp.options now, or an options provider when
@@ -685,6 +714,7 @@ async function builderLoadData(plugin, compId, host, quiet) {
   const comp = bComps[compId] || {};
   host.textContent = "";
   if (comp.type === "table") host.append(bTable(plugin, comp, data, host));
+  else if (comp.type === "tile-view") host.append(bTileView(plugin, comp, data, host));
   else host.append(bList(plugin, comp, data, host));
 }
 
@@ -720,8 +750,18 @@ function bRowActionBtns(plugin, comp, key) {
    hides rows behind a "show all" toggle; row keys resolve via key_column
    (or the "__key" pseudo-cell past the visible columns). */
 function bTable(plugin, comp, data, host) {
-  let columns = [], rows = [];
-  if (data && !Array.isArray(data) && typeof data === "object") {
+  let columns = [], rows = [], rowKeys = null;
+  if (data && !Array.isArray(data) && Array.isArray(data.records)) {
+    /* record providers: [{key, cells: [str | {primary, secondary}, …]}] —
+       row keys come from the records, not a visible column */
+    columns = (Array.isArray(comp.columns) && comp.columns.length)
+      ? comp.columns.map(String) : [];
+    rowKeys = data.records.map(r => String((r && r.key) ?? ""));
+    rows = data.records.map(r => Array.isArray(r && r.cells) ? r.cells.map(c =>
+      (c && typeof c === "object")
+        ? String(c.primary ?? "") + (c.secondary ? " — " + c.secondary : "")
+        : c) : []);
+  } else if (data && !Array.isArray(data) && typeof data === "object") {
     columns = Array.isArray(data.columns) ? data.columns.map(String) : [];
     rows = Array.isArray(data.rows) ? data.rows : [];
   } else if (Array.isArray(data) && data.length &&
@@ -753,7 +793,8 @@ function bTable(plugin, comp, data, host) {
     ...(Array.isArray(comp.row_actions) && comp.row_actions.length ? [el("th")] : [])));
   const tbody = el("tbody");
   visible.forEach((r, rowIndex) => {
-    let key = keyIdx >= 0 && r ? String(r[keyIdx] ?? "") : "";
+    let key = rowKeys ? (rowKeys[rowIndex] || "")
+      : (keyIdx >= 0 && r ? String(r[keyIdx] ?? "") : "");
     if (!key) key = "#" + rowIndex;
     const tr = el("tr", null,
       ...columns.map((_, i) => el("td", {}, bCell(r ? r[i] : ""))),
@@ -782,7 +823,8 @@ function bTable(plugin, comp, data, host) {
 function bList(plugin, comp, data, host) {
   if (data == null || (Array.isArray(data) && !data.length))
     return emptyState(comp.empty_text || "nothing to show yet");
-  if (Array.isArray(comp.columns))
+  if (Array.isArray(comp.columns) ||
+      (data && !Array.isArray(data) && Array.isArray(data.records)))
     return bTable(plugin, comp, data, host);
   let items = null;
   if (Array.isArray(data)) items = data;
@@ -796,6 +838,47 @@ function bList(plugin, comp, data, host) {
     } else box.append(el("div", {class: "kv"}, el("span", {class: "v"}, bCell(item))));
   }
   return box;
+}
+
+/* tile-view: {tiles: [{key, title, tone?, status?, meta?/lines?, chips?}]}
+   → responsive card grid; per-tile actions reuse the table row-action
+   dispatcher ({action, row}). Chips may be strings or {text, kind}. */
+function bTileView(plugin, comp, data, host) {
+  const tiles = (data && !Array.isArray(data) && Array.isArray(data.tiles))
+    ? data.tiles : (Array.isArray(data) ? data : null);
+  if (!tiles || !tiles.length)
+    return emptyState(comp.empty_text || "nothing to show yet");
+  const grid = el("div", {class: "tiles"});
+  for (const t of tiles) {
+    if (!t || typeof t !== "object") continue;
+    const tone = String(t.tone || "");
+    const card = el("div", {class: "tile" + (tone ? " tile-" + tone : "")});
+    const head = el("div", {class: "tile-head"});
+    head.append(el("span", {class: "tile-title"}, String(t.title ?? t.key ?? "")));
+    if (t.status) {
+      const variant = tone === "ok" || tone === "warn" || tone === "err" ? tone : "dim";
+      head.append(el("span", {class: "badge badge-" + variant}, String(t.status)));
+    }
+    card.append(head);
+    const lines = Array.isArray(t.lines) ? t.lines : Array.isArray(t.meta) ? t.meta : [];
+    for (const line of lines) {
+      if (Array.isArray(line))
+        card.append(el("div", {class: "kv"}, el("span", {class: "k"}, bCell(line[0])),
+          el("span", {class: "v"}, bCell(line[1]))));
+      else if (line != null)
+        card.append(el("div", {class: "kv"}, el("span", {class: "v"}, bCell(line))));
+    }
+    const chips = (Array.isArray(t.chips) ? t.chips : [])
+      .map(c => (c && typeof c === "object") ? c : {text: c});
+    if (chips.length)
+      card.append(el("div", {class: "chips"}, ...chips.map(c =>
+        el("span", {class: "chip " + (c.kind || "dim")}, bCell(c.text ?? c)))));
+    if (Array.isArray(comp.row_actions) && comp.row_actions.length && t.key != null)
+      card.append(el("div", {class: "tile-acts"},
+        bRowActionBtns(plugin, comp, String(t.key))));
+    grid.append(card);
+  }
+  return grid;
 }
 
 /* live leaves (metrics / texts with a data provider): update IN PLACE —
@@ -833,6 +916,8 @@ async function builderAction(plugin, componentId, payload) {
       for (const id of result.refresh) {
         const host = bRoot && bRoot.querySelector(`[data-bld-body="${CSS.escape(String(id))}"]`);
         if (host) { builderLoadData(plugin, id, host, true); continue; }
+        const fields = bRoot && bRoot.querySelector(`[data-bld-fields="${CSS.escape(String(id))}"]`);
+        if (fields) { bLoadFields(plugin, id, fields); continue; }
         const live = bRoot && bRoot.querySelector(`[data-bld-live="${CSS.escape(String(id))}"]`);
         if (live) bLoadLive(plugin, id, live);
       }
