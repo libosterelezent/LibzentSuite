@@ -777,9 +777,16 @@ function acctDetailMount(root, params) {
     channels: null,      // /api/accounts/channels
     info: null,          // /api/accounts/info fallback (store miss)
     stats: null,         // /api/ui/stats — plugin-contributed StatCards
+    errors: {},          // slice key -> message: FAILED loads, distinct from
+                         // loaded-empty; values keep their last-good data
   };
   let infoTried = false;
   let lastSig = "";
+  let alive = true;      // stale-response guard: renders stop at unmount
+  /* pending | found | missing — a direct-URL entry with an empty store
+     must show LOADING, not a false "Account not found" while /info and
+     the first WS frame are still in flight */
+  let existence = "pending";
 
   const hdr = el("div", {class: "view-hdr"},
     el("div", {},
@@ -815,13 +822,33 @@ function acctDetailMount(root, params) {
     };
   };
 
-  function scheduleRender() { render(); }
+  function scheduleRender() { if (alive) render(); }
+
+  /* volatile fields paint IN PLACE: the WS pushes fresh accounts every
+     second, and uptime/ping must never rebuild the page (focused
+     controls, open dialogs and half-typed inputs would die with it) */
+  function paintLive(row) {
+    if (!row) return;
+    const set = (key, text) => {
+      const node = heroWrap.querySelector('[data-live="' + key + '"]');
+      if (node && node.textContent !== text) node.textContent = text;
+    };
+    set("uptime", acctUptime(row.uptime_s));
+    set("latency", acctLatency(row.latency_ms));
+    set("cooldowns", String(row.cooldowns));
+  }
 
   function render() {
+    if (!alive) return;
     const row = getRow() || infoAsRow(ex.info);
     heroWrap.textContent = "";
     body.textContent = "";
     if (!row) {
+      if (existence === "pending") {
+        heroWrap.append(el("div", {class: "card"},
+          el("div", {class: "skel"}, el("div"), el("div"), el("div"))));
+        return;
+      }
       heroWrap.append(el("div", {class: "card"},
         el("div", {class: "empty"},
           el("svg", {class: "icon", viewBox: "0 0 24 24", fill: "none",
@@ -834,6 +861,11 @@ function acctDetailMount(root, params) {
           el("a", {class: "btn btn-primary", href: "#/accounts"}, "Back to Accounts"))));
       return;
     }
+    const failed = Object.keys(ex.errors || {});
+    if (failed.length)
+      heroWrap.append(el("div", {class: "hint", role: "status"},
+        "⚠ " + failed.length + " data source" + (failed.length === 1 ? "" : "s") +
+        " unavailable (" + failed.join(", ") + ") — showing last known values"));
     heroWrap.append(acctHero(row));
     /* combined layout (mockup: account-detail combined-theme-engine):
        row 1 = Abilities | Memory · row 2 = Pacing | Live stats · ops full */
@@ -845,6 +877,7 @@ function acctDetailMount(root, params) {
         acctPacingSection(row, ex),
         acctLiveStatsSection(row, ex)),
       acctOperationsSection(row, ex.channels, scheduleRender));
+    paintLive(row);
     lastSig = acctDetailSig(row);
   }
 
@@ -856,17 +889,19 @@ function acctDetailMount(root, params) {
     const nowHave = !!getRow();
     const fresh = nowHave && !hadRow;
     hadRow = nowHave;
-    if (fresh) acctDetailRefresh(acctName, ex, scheduleRender);
+    if (fresh) { existence = "found"; acctDetailRefresh(acctName, ex, scheduleRender); }
     const row = getRow() || infoAsRow(ex.info);
     if (!row) { render(); return; }        // vanished → not-found screen
-    if (acctDetailSig(row) === lastSig) return;
+    if (acctDetailSig(row) === lastSig) { paintLive(row); return; }  // volatile-only
     render();
   });
 
   /* boot: store may be empty (direct URL entry) — pull REST truth */
   render();
-  if (!getRow() && !storeGet("stats")) loadStatsNow().then(render).catch(() => {});
+  if (!getRow() && !storeGet("stats"))
+    loadStatsNow().then(scheduleRender).catch(() => {});
   if (getRow()) {
+    existence = "found";
     acctDetailRefresh(acctName, ex, scheduleRender);
   } else if (!infoTried) {
     /* unknown so far: confirm existence via /info first — the extras
@@ -874,35 +909,56 @@ function acctDetailMount(root, params) {
     infoTried = true;
     api("/api/accounts/info?account=" + encodeURIComponent(acctName))
       .then(info => {
+        if (!alive) return;                // stale response after unmount
         ex.info = info;
+        existence = "found";
         render();
         acctDetailRefresh(acctName, ex, scheduleRender);
       })
-      .catch(() => { ex.info = null; render(); });   // stays not-found
+      .catch(() => {
+        if (!alive) return;
+        ex.info = null;
+        existence = "missing";             // CONFIRMED absent, not still-loading
+        render();
+      });
   }
-  return unsub;
+  return () => { alive = false; unsub(); };
 }
 
+/* structural signature: volatile per-second fields (uptime, latency)
+   are deliberately EXCLUDED — they paint in place via paintLive(); a
+ * sig change here means the page structure legitimately changes */
 function acctDetailSig(row) {
   return JSON.stringify([row.name, row.status, row.enabled, row.user_id,
-    row.sync_group, row.latency_ms, row.uptime_s, row.credential,
+    row.sync_group, row.credential,
     row.cooldowns, row.assigned_plugins, row.plugins, row.plugin_profiles]);
 }
 
-/* refresh every REST-only slice the detail page shows. A failed slice
-   degrades to an empty value (renders "—"), never blocks the others. */
+/* refresh every REST-only slice the detail page shows. ONE batched
+   render when all slices settle (the baseline rebuilt the page once
+   per slice); a failed slice keeps its LAST GOOD value and records
+   ex.errors[key] — never erasing another slice's successful data. */
 function acctDetailRefresh(acctName, ex, scheduleRender) {
   const enc = encodeURIComponent(acctName);
-  const grab = (key, path) =>
-    api(path).then(data => { ex[key] = data; scheduleRender(); })
-             .catch(() => { ex[key] = key.startsWith("eff") ? {} : []; });
-  grab("states", "/api/plugins/state?account=" + enc);
-  grab("bindings", "/api/accounts/plugin-profiles?account=" + enc);
-  grab("profiles", "/api/plugins/profiles");
-  grab("effMsg", "/api/ratelimit/effective?action=message&account=" + enc);
-  grab("effDm", "/api/ratelimit/effective?action=dm&account=" + enc);
-  grab("channels", "/api/accounts/channels?account=" + enc);
-  grab("stats", "/api/ui/stats?account=" + enc);
+  const slices = [
+    ["states", "/api/plugins/state?account=" + enc],
+    ["bindings", "/api/accounts/plugin-profiles?account=" + enc],
+    ["profiles", "/api/plugins/profiles"],
+    ["effMsg", "/api/ratelimit/effective?action=message&account=" + enc],
+    ["effDm", "/api/ratelimit/effective?action=dm&account=" + enc],
+    ["channels", "/api/accounts/channels?account=" + enc],
+    ["stats", "/api/ui/stats?account=" + enc],
+  ];
+  Promise.allSettled(slices.map(([key, path]) =>
+    api(path).then(data => {
+      delete ex.errors[key];
+      ex[key] = data;
+    }).catch(e => {
+      ex.errors[key] = e.message || "unavailable";
+      /* keep the prior value: null on first load (renders "—"),
+         last-good on a refresh — a failed refresh never lies */
+    })
+  )).then(() => scheduleRender());
   loadStatsNow().catch(() => {});
 }
 
@@ -912,10 +968,13 @@ function acctHero(a) {
   const hero = el("div", {class: "hero " + s.tone,
     title: a.last_error ? String(a.last_error) : null});
   const cred = acctCred(a.credential);
-  /* bordered stat pills (combined mockup: UPTIME / PING / CRED / GRP) */
-  const pill = (label, value, tone) => el("span",
+  /* bordered stat pills (combined mockup: UPTIME / PING / CRED / GRP);
+     `live` marks VOLATILE pills — paintLive() updates their text in
+     place on every WS push instead of rebuilding the page */
+  const pill = (label, value, tone, live) => el("span",
     {class: "ms-pill" + (tone ? " " + tone : "")},
-    el("span", {class: "k"}, label), el("b", {class: "v"}, value));
+    el("span", {class: "k"}, label),
+    el("b", {class: "v", dataset: live ? {live} : {}}, value));
   hero.append(
     el("span", {class: "hero-state"}, dot(
       s.tone === "ok" ? "on" : s.tone === "err" ? "err" : "off"),
@@ -923,14 +982,14 @@ function acctHero(a) {
     el("span", {class: "hero-name"}, a.name),
     a.user_id ? el("span", {class: "dim mono"}, "user " + a.user_id) : "",
     el("div", {class: "hero-meta"},
-      pill("uptime", acctUptime(a.uptime_s)),
+      pill("uptime", acctUptime(a.uptime_s), null, "uptime"),
       pill("ping", acctLatency(a.latency_ms),
-        a.latency_ms != null && a.latency_ms < 200 ? "ok" : ""),
+        a.latency_ms != null && a.latency_ms < 200 ? "ok" : "", "latency"),
       pill("cred", cred.label,
         cred.tone === "ok" ? "ok" : cred.tone === "err" ? "err" : ""),
       pill("grp", a.sync_group || "independent"),
       a.cooldowns != null ? pill("429s", String(a.cooldowns),
-        a.cooldowns > 0 ? "warn" : "") : null,
+        a.cooldowns > 0 ? "warn" : "", "cooldowns") : null,
       a.enabled === false ? pill("enabled", "no", "err") : null));
   return hero;
 }
