@@ -246,6 +246,7 @@ class TaskScheduler:
         retry_backoff: float = 0.5,
         max_backoff: float = 30.0,
         history_repo: Any = None,
+        dispatch_guard: Optional[Callable[[Task], Awaitable[Any]]] = None,
     ) -> None:
         for label, value in (
             ("default_timeout", default_timeout),
@@ -266,6 +267,12 @@ class TaskScheduler:
         self._retry_backoff = float(retry_backoff)
         self._max_backoff = float(max_backoff)
         self._history_repo = history_repo
+        # PHASE 9 (spec §4) fleet gate: optional duck-typed async
+        # ``(task) -> decision`` with ``.allowed`` + optional
+        # ``.retry_at``. Consulted BEFORE dispatch and revalidated after
+        # the limiter grant; a disallowed task PARKS (still queued) —
+        # the guard never fails work and never owns pacing.
+        self._guard = dispatch_guard
 
         self._seq = itertools.count(1)
         self._tasks: Dict[int, Task] = {}  # live (queued/running) by id
@@ -377,6 +384,50 @@ class TaskScheduler:
         self._stop_latch = None  # a fresh arm retires any completed latch
         self._sweeping = False
         self._started = True
+
+    def set_dispatch_guard(self, guard: Optional[Callable[[Task], Awaitable[Any]]]) -> None:
+        """Attach/replace/clear the fleet dispatch gate (PHASE 9 §4).
+
+        Late-binding on purpose: bootstrap wires the policy engine after
+        the account manager exists. The guard is duck-typed and never
+        imported from core.fleet — the scheduler stays generic.
+        """
+        self._guard = guard
+
+    async def _guard_decision(self, task: Task) -> Optional[Any]:
+        """One guard evaluation; None means 'no opinion' (absent guard,
+        or the guard itself errored — logged loudly, treated as allowed:
+        a broken policy engine must not wedge every dispatch, and the
+        limiter still gates the clock afterwards either way)."""
+        if self._guard is None:
+            return None
+        try:
+            return await self._guard(task)
+        except Exception:
+            self._log("warning", "fleet",
+                      f"dispatch guard error for task={task.id}"
+                      f" account={task.account} (fail-open)")
+            return None
+
+    async def _await_guard(self, task: Task) -> None:
+        """Fleet gate: park the task — still QUEUED — until the guard
+        allows dispatch. ``retry_at`` (epoch) bounds each park slice;
+        cancels, stops and sweeps preempt the park, and the caller's
+        checkpoint finishes the task."""
+        if self._guard is None:
+            return
+        while True:
+            decision = await self._guard_decision(task)
+            if decision is None or getattr(decision, "allowed", True):
+                return
+            retry_at = getattr(decision, "retry_at", None)
+            delay = 0.25
+            if isinstance(retry_at, (int, float)):
+                delay = max(0.05, min(float(retry_at) - time.time(), 5.0))
+            await asyncio.sleep(delay)
+            if (task.cancelled or self._sweeping
+                    or task.status not in (STATUS_QUEUED, STATUS_RUNNING)):
+                return
 
     async def stop(self, *, drain: bool = True, timeout: float = 10.0) -> None:
         """Stop the scheduler (idempotent).
@@ -1141,6 +1192,14 @@ class TaskScheduler:
                     await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                     return
 
+                # fleet gate (PHASE 9 §4): park — still queued — until the
+                # guard allows; never consumes an attempt, never sends
+                await self._await_guard(task)
+                if (task.cancelled or self._sweeping
+                        or task.status not in (STATUS_QUEUED, STATUS_RUNNING)):
+                    await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
+                    return
+
                 await self._gate.enter(int(task.priority), task.id)
                 # checkpoint 0.5: cancelled while parked on the GATE — never
                 # reach the limiter (no grant consumed, no clock stamps)
@@ -1182,6 +1241,15 @@ class TaskScheduler:
                         or task.status not in (STATUS_QUEUED, STATUS_RUNNING)):
                     await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                     return
+
+                # FINAL policy revalidation (PHASE 9 §4): approved at
+                # enqueue can still be rejected at dispatch (group paused
+                # mid-queue). Disallowed -> release this attempt's turn and
+                # re-park at the loop head (no attempt consumed, no sender
+                # call; the grant slot is spent — pacing was never bypassed)
+                decision = await self._guard_decision(task)
+                if decision is not None and not getattr(decision, "allowed", True):
+                    continue
 
                 if task.status == STATUS_QUEUED:  # first attempt: queued -> running
                     task.status = STATUS_RUNNING

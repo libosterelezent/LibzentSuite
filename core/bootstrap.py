@@ -176,6 +176,7 @@ class Framework:
                  cooldowns: Any = None,
                  plugin_state: Any = None,
                  sync_groups: Any = None,
+                 fleet: Any = None,
                  cooldown_resync_stop: Optional[Callable[[], Any]] = None,
                  claims_stderr: bool = False,
                  ) -> None:
@@ -196,6 +197,8 @@ class Framework:
         self.cooldowns = cooldowns
         self.plugin_state = plugin_state
         self.sync_groups = sync_groups
+        #: PHASE 9 fleet orchestration (service + policy gate)
+        self.fleet = fleet
         #: stops the periodic cooldown-resync task (set by _assemble)
         self._cooldown_resync_stop = cooldown_resync_stop
         # this framework holds one CLAIM on the process-global stderr
@@ -655,6 +658,32 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
 
     scheduler.start()
 
+    # PHASE 9 (rollout C, spec §4): the fleet gate — one policy check
+    # before the scheduler dispatches, revalidated after the limiter
+    # grant. A paused group cannot start new work; policy changes never
+    # bypass pacing (the limiter still gates every dispatch AFTER the
+    # guard). Membership itself stays with SyncGroupManager — the fleet
+    # service layers mode/eligibility/assignments on top through seams.
+    from core.fleet import FleetPolicy, FleetService
+
+    async def _fleet_group_exists(name: str) -> bool:
+        return await sync_groups.get_group_by_name(name) is not None
+
+    async def _fleet_join(account: str, group: str) -> None:
+        await sync_groups.sync_membership(account, group)
+
+    async def _fleet_leave(account: str) -> None:
+        await sync_groups.sync_membership(account, None)
+
+    fleet = FleetService(
+        database.fleet,
+        group_exists=_fleet_group_exists,
+        membership_join=_fleet_join,
+        membership_leave=_fleet_leave,
+    )
+    await fleet.load()
+    scheduler.set_dispatch_guard(FleetPolicy(fleet).scheduler_guard())
+
     if simulation_runner is None:
         try:
             from adapters.simulator import SimulationRunner
@@ -697,6 +726,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         api=api, bus=bus, logs=logs, limiter=limiter, scheduler=scheduler,
         accounts=accounts, plugins=plugins, settings=settings,
         audit=audit, database=database, credentials=credentials, config=config,
+        fleet=fleet,
         credential_service=credential_service, cooldowns=cooldowns,
         plugin_state=plugin_state, sync_groups=sync_groups,
         cooldown_resync_stop=_stop_cooldown_resync_task,

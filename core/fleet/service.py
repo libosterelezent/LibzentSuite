@@ -555,6 +555,11 @@ class FleetService:
 
     # ------------------------------------------------------------- reads
 
+    def now(self) -> float:
+        """The service's clock (injected seam) — policy evaluation and
+        tests share ONE time authority."""
+        return self._now()
+
     def group_state(self, group_name: str) -> Optional[FleetGroupState]:
         return self._groups.get(group_name)
 
