@@ -1049,32 +1049,58 @@ function acctAbilitySettingsTab(panel, a, pluginName, man) {
       `${pluginName} declares no configurable settings.`));
     return;
   }
-  const skel = el("div", {class: "skel"}, el("div"), el("div"));
-  panel.append(skel);
-  const form = el("div", {});
-  api("/api/plugins/settings?account=" + encodeURIComponent(a.name)).then(list => {
-    skel.remove();
-    const entry = (list || []).find(x => x.name === pluginName);
-    const values = (entry && entry.settings) || {};
-    for (const def of schema) form.append(schemaField(def, values[def.name]));
-  }).catch(e => {
-    skel.remove();
-    panel.append(emptyState("Settings unavailable", e.message));
-  });
   const save = el("button", {class: "btn btn-primary btn-sm", type: "button"}, "Save settings");
+  save.disabled = true;   /* no saving while the form loads */
+  const bar = el("div", {class: "toolbar"}, save);
+  const skel = el("div", {class: "skel"}, el("div"), el("div"));
+  /* the form HOST is attached to the panel: schema fields must be
+     VISIBLE here, and collectSchema must read from this same element
+     (the baseline built fields into a detached div and collected from
+     the panel — invisible controls, fabricated "saved" success) */
+  const formHost = el("div", {class: "form"});
+  panel.append(skel, formHost, bar);
+
+  const load = () =>
+    api("/api/plugins/settings?account=" + encodeURIComponent(a.name))
+      .then(list => {
+        skel.remove();
+        const entry = (list || []).find(x => x.name === pluginName);
+        const values = (entry && entry.settings) || {};
+        formHost.textContent = "";
+        for (const def of schema)
+          formHost.append(schemaField(def, values[def.name]));
+        save.disabled = false;
+      })
+      .catch(e => {
+        skel.remove();
+        formHost.textContent = "";
+        formHost.append(emptyState("Settings unavailable", e.message));
+        save.disabled = true;   /* failed load ≠ saveable */
+      });
+
   save.onclick = busy(save, async () => {
-    const values = collectSchema(panel, schema);
+    const values = collectSchema(formHost, schema);
     if (!values) return;
+    let written = 0;
     try {
       for (const key of Object.keys(values)) {
         if (values[key] === null && schema.find(d => d.name === key)?.default == null) continue;
         await post("/api/plugins/set-setting",
           {account: a.name, plugin: pluginName, key, value: values[key]});
+        written++;
       }
-      toast(`settings saved for ${a.name}`, "ok");
-    } catch (e) { toast(e.message, "err"); }
+      toast(`settings saved for ${a.name} (${written} value${written === 1 ? "" : "s"})`, "ok");
+    } catch (e) {
+      /* partial failure is honest: what wrote, what didn't, and the
+         form reloads from the server so the visible values match the
+         persisted truth */
+      toast(written
+        ? `saved ${written}, then failed: ${e.message}`
+        : e.message, "err");
+    }
+    await load();
   });
-  panel.append(el("div", {class: "toolbar"}, save));
+  load();
 }
 
 /* Presets tab: the profile library for this plugin + this account's

@@ -218,15 +218,20 @@ function spinner() {
    spinner, re-enables in finally. Returns the wrapped handler. */
 function busy(btnEl, fn) {
   return async (...args) => {
-    if (btnEl.disabled) return;
+    if (btnEl.disabled) return;   /* double-submit guard */
     btnEl.disabled = true;
-    btnEl.dataset.label = btnEl.textContent;
-    btnEl.textContent = "";
-    btnEl.append(spinner(), " " + btnEl.dataset.label);
+    btnEl.setAttribute("aria-busy", "true");
+    /* snapshot the COMPLETE content: icon buttons carry SVG children
+       that a textContent round-trip destroys (the old save/restore
+       kept only the text and permanently ate the icon) */
+    const restore = Array.from(btnEl.childNodes);
+    const label = btnEl.textContent;
+    btnEl.replaceChildren(spinner(), label ? " " + label.trim() : "");
     try { return await fn(...args); }
     finally {
+      btnEl.replaceChildren(...restore);
+      btnEl.removeAttribute("aria-busy");
       btnEl.disabled = false;
-      btnEl.textContent = btnEl.dataset.label;
     }
   };
 }
