@@ -1034,7 +1034,10 @@ class Form(UIContainer):
         """DYNAMIC fields: a callable returning ``{"fields": [def, …]}``
         where each def is ``{id, type, label, value?, placeholder?,
         description?, required?, options?, min?, max?, step?}`` and type
-        is one of text/number/textarea/select/checkbox. Fetched lazily —
+        is one of text/number/textarea/select/checkbox/channel-tree (a
+        channel-tree def carries ``groups`` — ``[{id, name, channels:
+        [{id, name}]}]`` — plus ``value``: the checked channel ids).
+        Fetched lazily —
         the form adapts to live schema (the profile editor pattern:
         fields come from the plugin's setting schema, values from the
         profile being edited). May not be combined with static fields.

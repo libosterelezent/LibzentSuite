@@ -3,25 +3,26 @@
 A plugin profile's ``settings_json`` may carry the RESERVED top-level
 key ``"channels"`` restricting where the account's plugin may act::
 
-    {"channels": {"mode": "all" | "allow" | "deny",
-                  "rules": [{"guild_id": "123",
-                             "channel_ids": ["456", "787"]}]}}
+    {"channels": ["456", "787"]}
 
-Semantics:
+Semantics (POSITIVE SET — no modes):
 
-* ``"all"`` (or the key being absent/None) — no restriction;
-* ``"allow"`` — channel ALLOWlist grouped by guild: a channel is
-  allowed only when its guild has a rule listing it. An empty (or
-  guild-less) allow-list therefore allows NOTHING — never everything;
-* ``"deny"`` — the mirror image: listed channels are blocked, every
-  other channel (including unlisted guilds) is allowed.
+* the key being absent/None/empty — no restriction (every channel);
+* a channel is allowed ONLY when its id is in the set.
 
 Guild/channel ids are STRINGS in the stored structure (JSON keys and
 Discord snowflakes exceed JS integer safety); :func:`channel_allowed`
 tolerantly accepts ``int`` arguments too.
 
+HISTORY: the original structure was a mode-rule envelope
+(``{"mode": "all"|"allow"|"deny", "rules": [...]}``). Removed with the
+legacy ProfileManager cleanup (2026-10-23): three ways to say the same
+thing was the wrong UX, and the picker is a positive selection. Stored
+scopes in the old shape read as UNRESTRICTED (fail-open transition) —
+re-edit and re-save to convert.
+
 This module is PURE (no I/O, no framework imports) so every later
-phase — the services layer's send gate, the dashboard UI preview, the
+phase — the services layer's send gate, the dashboard UI picker, the
 command interface — validates and evaluates EXACTLY this structure.
 The validation lives here and nowhere else.
 """
@@ -34,9 +35,6 @@ __all__ = ["validate", "channel_allowed", "CHANNELS_KEY"]
 #: the reserved top-level settings key carrying the scope
 CHANNELS_KEY = "channels"
 
-#: accepted scope modes
-MODES = ("all", "allow", "deny")
-
 
 def _err(field: str, problem: str) -> ValueError:
     """One clear error NAMING the problem field (never a bare 'invalid')."""
@@ -46,73 +44,40 @@ def _err(field: str, problem: str) -> ValueError:
 def validate(scope: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Parse + validate a channel scope; returns a normalized COPY.
 
-    ``scope`` is the VALUE of the reserved ``"channels"`` key — the
-    ``{"mode": ..., "rules": [...]}`` object (a caller holding a whole
-    settings dict extracts it first). ``None`` (or an all-mode scope
-    with no rules) validates trivially and means "no restriction".
+    ``scope`` is the VALUE of the reserved ``"channels"`` key:
+    ``{"channels": [id, ...]}`` (or None = unrestricted).
 
-    Returns a normalized copy: ``mode`` defaulted to ``"all"``, ids kept
-    as the strings they must already be. The input is never mutated.
+    Returns a normalized copy: ids kept as the strings they must
+    already be. The input is never mutated.
 
     Raises:
-        ValueError: naming the problem field — non-dict scope, unknown
-            mode, bad rules type, a rule that is not an object, missing
-            or non-string guild_id, missing/non-list channel_ids, or a
-            non-string channel id / unknown rule key (typo trap).
+        ValueError: naming the problem field — non-dict scope, a
+            ``channels`` value that is not a list of non-empty
+            strings, or an unknown key (typo trap).
     """
     if scope is None:
         return None
     if not isinstance(scope, dict):
         raise _err(CHANNELS_KEY, f"must be an object, got {type(scope).__name__}")
 
-    unknown_keys = sorted(set(scope) - {"mode", "rules"})
+    unknown_keys = sorted(set(scope) - {"channels"})
     if unknown_keys:
         raise _err(CHANNELS_KEY,
-                   f"unknown key(s) {unknown_keys} (supports: ['mode', 'rules'])")
+                   f"unknown key(s) {unknown_keys} (supports: ['channels'])")
 
-    mode = scope.get("mode", "all")
-    if mode is None:
-        mode = "all"
-    if not isinstance(mode, str) or mode not in MODES:
-        raise _err("mode", f"must be one of {list(MODES)}, got {mode!r}")
+    ids_raw = scope.get("channels", [])
+    if not isinstance(ids_raw, list):
+        raise _err("channels", f"must be a list of channel ids, got {type(ids_raw).__name__}")
 
-    rules_raw = scope.get("rules", [])
-    if rules_raw is None:
-        rules_raw = []
-    if not isinstance(rules_raw, list):
-        raise _err("rules", f"must be a list of rules, got {type(rules_raw).__name__}")
-
-    rules: List[Dict[str, List[str]]] = []
-    for index, rule in enumerate(rules_raw):
-        field = f"rules[{index}]"
-        if not isinstance(rule, dict):
-            raise _err(field, f"must be an object, got {type(rule).__name__}")
-        unknown = sorted(set(rule) - {"guild_id", "channel_ids"})
-        if unknown:
+    cleaned: List[str] = []
+    for index, channel_id in enumerate(ids_raw):
+        field = f"channels[{index}]"
+        if not isinstance(channel_id, str) or not channel_id.strip():
             raise _err(field,
-                       f"unknown key(s) {unknown} (supports: "
-                       "['guild_id', 'channel_ids'])")
-        guild_id = rule.get("guild_id")
-        if not isinstance(guild_id, str) or not guild_id.strip():
-            raise _err(f"{field}.guild_id",
-                       f"must be a non-empty string, got {guild_id!r}")
-        channel_ids = rule.get("channel_ids", [])
-        if channel_ids is None:
-            channel_ids = []
-        if not isinstance(channel_ids, list):
-            raise _err(f"{field}.channel_ids",
-                       f"must be a list of channel-id strings, got "
-                       f"{type(channel_ids).__name__}")
-        cleaned_ids: List[str] = []
-        for channel_id in channel_ids:
-            if not isinstance(channel_id, str) or not channel_id.strip():
-                raise _err(f"{field}.channel_ids",
-                           f"channel ids must be non-empty strings, got "
-                           f"{channel_id!r}")
-            cleaned_ids.append(channel_id)
-        rules.append({"guild_id": guild_id, "channel_ids": cleaned_ids})
+                       f"must be a non-empty string, got {channel_id!r}")
+        cleaned.append(channel_id.strip())
 
-    return {"mode": mode, "rules": rules}
+    return {"channels": cleaned}
 
 
 def channel_allowed(
@@ -123,37 +88,17 @@ def channel_allowed(
     """Whether (guild_id, channel_id) passes the scope (None = all allowed).
 
     ``guild_id``/``channel_id`` accept ``str`` OR ``int`` (normalized by
-    :class:`str` — never compared cross-type). An UNVALIDATED scope is
-    evaluated leniently, never crashing: a malformed rule is skipped,
-    and an unreadable mode falls back to "allow" (fail-open applies ONLY
-    to shape problems here — callers validate at write time, so this
-    path exists for defensive reads of stored data).
+    :class:`str` — never compared cross-type). An UNVALIDATED or
+    legacy-shaped scope is evaluated leniently, never crashing; only a
+    clean positive set restricts (fail-open applies ONLY to shape
+    problems here — callers validate at write time).
     """
     if not scope:
         return True
     if not isinstance(scope, dict):
         return True
-    mode = scope.get("mode") or "all"
-    if mode == "all":
+    listed = scope.get("channels")
+    if not isinstance(listed, list):
         return True
-    if mode not in ("allow", "deny"):
-        return True
-
-    guild = str(guild_id)
     channel = str(channel_id)
-    listed = False
-    for rule in scope.get("rules") or []:
-        if not isinstance(rule, dict):
-            continue
-        rule_guild = rule.get("guild_id")
-        if rule_guild is None or str(rule_guild) != guild:
-            continue
-        for rule_channel in rule.get("channel_ids") or []:
-            if str(rule_channel) == channel:
-                listed = True
-                break
-        if listed:
-            break
-    # allow: ONLY listed channels pass (empty list = nothing allowed);
-    # deny: listed channels are blocked, everything else passes.
-    return listed if mode == "allow" else not listed
+    return any(str(c) == channel for c in listed)

@@ -35,8 +35,7 @@ SCHEMA = (
     Setting("userstack", "bool", True, "send $us 20"),
 )
 
-SCOPE = {"mode": "allow",
-         "rules": [{"guild_id": "111", "channel_ids": ["aaa", "bbb"]}]}
+SCOPE = {"channels": ["aaa", "bbb"]}
 
 
 class _StubAudit:
@@ -205,16 +204,19 @@ class ProfileCrudTests(ProfileSurfaceTestBase):
 
     async def test_create_channels_scope_stored_normalized(self) -> None:
         created = await self.api.plugin_profile_create(
-            "roll", "grind", settings={"channels": {"mode": "allow"}})
+            "roll", "grind",
+            settings={"channels": {"channels": [" aaa ", "bbb"]}})
         self.assertEqual(created["settings"]["channels"],
-                         {"mode": "allow", "rules": []})
+                         {"channels": ["aaa", "bbb"]})
 
     async def test_create_bad_channels_scope_rejected(self) -> None:
+        # the mode/rules envelope is gone: 'mode' is just an unknown
+        # key now, caught by the typo trap
         with self.assertRaises(ValueError) as ctx:
             await self.api.plugin_profile_create(
                 "roll", "grind",
                 settings={"channels": {"mode": "whitelist"}})
-        self.assertIn("mode", str(ctx.exception))
+        self.assertIn("unknown key", str(ctx.exception))
 
     async def test_create_duplicate_rejected(self) -> None:
         await self.api.plugin_profile_create("roll", "grind")

@@ -27,7 +27,7 @@
 
 /* input leaves — the types a form collects (and dynamic field providers return) */
 const B_INPUTS = new Set(["checkbox", "toggle", "text-input", "number-input",
-  "textarea", "select", "radio-group", "multi-select"]);
+  "textarea", "select", "radio-group", "multi-select", "channel-tree"]);
 
 /* per-rendered-page state: id→comp index, fetch race guard, last provider
    results (for "show all"), expanded tables, dynamic form field defs and
@@ -371,6 +371,8 @@ function bInput(comp) {
     i.value = String(cur);
     return bFieldShell(comp, wire(i));
   }
+  if (comp.type === "channel-tree")
+    return bFieldShell(comp, bChannelTree(comp));
   if (comp.type === "select" || comp.type === "radio-group" || comp.type === "multi-select") {
     const host = comp.type === "select"
       ? el("select", {"aria-label": comp.label || comp.id})
@@ -381,6 +383,45 @@ function bInput(comp) {
     return shell;
   }
   return el("span");
+}
+
+/* channel-tree: guild groups of channel checkboxes (profile scope
+   picker). The guild head toggles/clears its children and reads
+   indeterminate on partial picks; value = the checked channel ids. */
+function bChannelTree(comp) {
+  const pre = new Set((Array.isArray(comp.value) ? comp.value : []).map(String));
+  const tree = el("div", {class: "ctree"});
+  for (const g of (Array.isArray(comp.groups) ? comp.groups : [])) {
+    const chans = (Array.isArray(g.channels) ? g.channels : [])
+      .filter(c => c && c.id);
+    if (!chans.length) continue;
+    const boxes = [];
+    const head = el("input", {type: "checkbox", class: "ctree-head",
+      "aria-label": String(g.name || g.id)});
+    const list = el("div", {class: "ctree-chans"});
+    const sync = () => {
+      const n = boxes.filter(b => b.checked).length;
+      head.checked = n === boxes.length;
+      head.indeterminate = n > 0 && n < boxes.length;
+    };
+    head.addEventListener("change", () => {
+      for (const b of boxes) b.checked = head.checked;
+    });
+    for (const c of chans) {
+      const box = el("input", {type: "checkbox", class: "ctree-chan"});
+      box.value = String(c.id);
+      box.checked = pre.has(String(c.id));
+      box.addEventListener("change", sync);
+      boxes.push(box);
+      list.append(el("label", {class: "ctree-row"},
+        box, el("span", {}, "#" + (c.name || c.id))));
+    }
+    sync();
+    tree.append(el("div", {class: "ctree-group"},
+      el("label", {class: "ctree-guild"}, head,
+        el("span", {}, g.name || g.id)), list));
+  }
+  return tree;
 }
 
 /* option list fill: static comp.options now, or an options provider when
@@ -485,6 +526,8 @@ function bFieldValue(id) {
   const comp = bComps[id] || {};
   if (comp.type === "multi-select")
     return [...field.querySelectorAll('input[type="checkbox"]:checked')].map(i => i.value);
+  if (comp.type === "channel-tree")
+    return [...field.querySelectorAll(".ctree-chan:checked")].map(i => i.value);
   if (comp.type === "radio-group") {
     const r = field.querySelector('input[type="radio"]:checked');
     return r ? r.value : null;
@@ -534,7 +577,8 @@ async function bLoadFields(plugin, id, host) {
   bFormFields[id] = defs;
   host.textContent = "";
   const TYPE_MAP = {text: "text-input", number: "number-input", textarea: "textarea",
-    select: "select", checkbox: "checkbox", multiselect: "multi-select", radio: "radio-group"};
+    select: "select", checkbox: "checkbox", multiselect: "multi-select", radio: "radio-group",
+    "channel-tree": "channel-tree"};
   for (const d of defs) {
     if (!d || !d.id) continue;
     const c = {
@@ -542,6 +586,7 @@ async function bLoadFields(plugin, id, host) {
       label: d.label != null ? String(d.label) : String(d.id),
       value: d.value, placeholder: d.placeholder, description: d.description,
       required: d.required === true, options: Array.isArray(d.options) ? d.options : [],
+      groups: Array.isArray(d.groups) ? d.groups : [],
       min_value: d.min, max_value: d.max, step: d.step,
     };
     bComps[c.id] = c;   /* value collection + validation read the comp by id */

@@ -1892,9 +1892,9 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
             schema = await _schema_for(api, plugin)
             current = dict(ed.get("settings") or {})
             fields = []
-            # ── channel selector: per-guild multiselects from the live
-            #    account cache (the component-built successor of the old
-            #    scope boxes); pre-checked from the profile's rules
+            # ── channel selector: ONE channel-tree field fed from the
+            #    live account cache; pre-checked from the stored scope
+            #    (positive set, or legacy mode/rules transition read)
             account = _profiles_state.get("account")
             if account:
                 try:
@@ -1902,23 +1902,35 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
                 except Exception:
                     guilds = []
                 scope = (current.get("channels") or {})
-                rules = {str(r.get("guild_id")): [str(c) for c in (r.get("channel_ids") or [])]
-                         for r in (scope.get("rules") or [])}
+                pre = []
+                if isinstance(scope, dict):
+                    if isinstance(scope.get("channels"), list):
+                        pre = [str(c) for c in scope["channels"]]
+                    else:
+                        for r in (scope.get("rules") or []):
+                            pre.extend(str(c) for c in (r.get("channel_ids") or []))
+                groups = []
                 for g in guilds:
                     gid = str(g.get("guild_id", ""))
                     chans = g.get("channels") or []
                     if not gid or not chans:
                         continue
-                    fields.append({
-                        "id": f"ch:{gid}",
-                        "type": "multiselect",
-                        "label": g.get("guild_name") or gid,
-                        "description": "checked = in the rule list",
-                        "options": [{"value": str(c.get("id", "")),
-                                     "label": f"#{c.get('name', '?')}"}
-                                    for c in chans],
-                        "value": rules.get(gid, []),
+                    groups.append({
+                        "id": gid,
+                        "name": str(g.get("guild_name") or gid),
+                        "channels": [{"id": str(c.get("id", "")),
+                                      "name": str(c.get("name") or c.get("id", ""))}
+                                     for c in chans],
                     })
+                fields.append({
+                    "id": "channels-scope",
+                    "type": "channel-tree",
+                    "label": "Channels",
+                    "description": "pick the channels this profile's plugin "
+                                   "operates in - empty selection = all",
+                    "groups": groups,
+                    "value": pre,
+                })
             for s in schema or ():
                 name = getattr(s, "name", None)
                 stype = getattr(s, "type", "str")
@@ -1983,21 +1995,12 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
                     f"must be a valid {getattr(s, 'type', 'str')}")
         if field_errors:
             return {"success": False, "field_errors": field_errors}
-        # channel scope: mode select + per-guild selections → the
-        # reserved settings structure (validated by plugin_scopes)
-        mode = str(payload.get("pe-scope-mode") or "all")
-        if mode not in ("all", "allow", "deny"):
-            mode = "all"
-        if mode != "all":
-            rules = []
-            for key, value in payload.items():
-                if not key.startswith("ch:") or not isinstance(value, list):
-                    continue
-                gid = key[3:]
-                if value:
-                    rules.append({"guild_id": gid,
-                                  "channel_ids": [str(c) for c in value]})
-            settings["channels"] = {"mode": mode, "rules": rules}
+        # channel scope: the positive channel set picked in the tree
+        # (validated by plugin_scopes; settings is rebuilt fresh each
+        # submit, so an empty selection simply stores no scope = all)
+        picked = payload.get("channels-scope")
+        if isinstance(picked, list) and picked:
+            settings["channels"] = {"channels": [str(c) for c in picked]}
         description = str(payload.get("pe-desc") or "")
         if ed.get("name"):
             await api.plugin_profile_update(
@@ -2036,10 +2039,9 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
                 name = p.get("name", "?")
                 settings = p.get("settings") or {}
                 scope = settings.get("channels") or {}
-                mode = scope.get("mode", "all") if isinstance(scope, dict) else "all"
-                n_rules = len(scope.get("rules") or []) if isinstance(scope, dict) else 0
-                scope_txt = ("all channels" if mode == "all" or not scope
-                             else f"{mode}: {n_rules} guild rule(s)")
+                n = len(scope.get("channels") or []) if isinstance(scope, dict) else 0
+                scope_txt = ("all channels" if not n
+                             else f"{n} channel(s) selected")
                 records.append({
                     "key": f"{plugin}|{name}",
                     "cells": [
@@ -2119,16 +2121,7 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
                                    .set_label("Profile name").set_max_length(64)
                                    .set_required(True),
                                    ui.TextInput(component_id="pe-desc")
-                                   .set_label("Description").set_max_length(200),
-                                   ui.Select(component_id="pe-scope-mode")
-                                   .set_label("Channel scope")
-                                   .set_options(["all", "allow", "deny"])
-                                   .set_description(
-                                       "all: no restriction · allow: only "
-                                       "checked channels · deny: checked "
-                                       "channels are blocked. Guild channel "
-                                       "lists appear when the account is "
-                                       "online (live cache)."))))
+                                   .set_label("Description").set_max_length(200))))
      .add_modal(ui.Modal(component_id="effective-modal").set_title("Effective settings")
         .add_component(ui.ListView(component_id="eff-lines")
                        .set_empty_text("no settings")

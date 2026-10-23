@@ -540,7 +540,9 @@ class FleetStubAPI(StubAPI):
 
     async def plugin_profile_create(self, plugin, name, description="",
                                     settings=None, surface="api"):
-        self.fleet_calls.append(("p-create", plugin, name)); return {}
+        self.fleet_calls.append(("p-create", plugin, name))
+        self.create_settings = settings
+        return {}
 
     async def plugin_profile_update(self, plugin, name, *, name_new=None,
                                     description=None, settings=None,
@@ -738,18 +740,33 @@ class TestProfilesPage(unittest.IsolatedAsyncioTestCase):
         framework_ui._profiles_state["account"] = "a1"
         framework_ui._profiles_state["editor"] = {
             "plugin": "probe", "name": None,
+            "settings": {"channels": {"channels": ["111"]}}}
+        data = await reg.get_data(FRAMEWORK_PLUGIN, "editor-form", None)
+        by_id = {f["id"]: f for f in data["fields"]}
+        tree = by_id["channels-scope"]
+        self.assertEqual(tree["type"], "channel-tree")
+        self.assertEqual(tree["value"], ["111"])   # pre-checked
+        self.assertEqual(len(tree["groups"]), 1)
+        guild = tree["groups"][0]
+        self.assertEqual(guild["id"], "999")
+        self.assertEqual(guild["name"], "Test Guild")
+        self.assertEqual([c["id"] for c in guild["channels"]], ["111", "222"])
+
+    async def test_editor_fields_read_legacy_scope_shape(self):
+        # stored mode/rules scopes pre-select their channels in the tree
+        # (the re-edit-and-re-save conversion path)
+        from core import framework_ui
+        reg, api = make_fleet_registry()
+        framework_ui._profiles_state["account"] = "a1"
+        framework_ui._profiles_state["editor"] = {
+            "plugin": "probe", "name": None,
             "settings": {"channels": {"mode": "allow",
                                       "rules": [{"guild_id": "999",
                                                  "channel_ids": ["111"]}]}}}
         data = await reg.get_data(FRAMEWORK_PLUGIN, "editor-form", None)
-        by_id = {f["id"]: f for f in data["fields"]}
-        self.assertIn("ch:999", by_id)
-        guild_field = by_id["ch:999"]
-        self.assertEqual(guild_field["type"], "multiselect")
-        self.assertEqual(guild_field["label"], "Test Guild")
-        self.assertEqual([o["value"] for o in guild_field["options"]],
-                         ["111", "222"])
-        self.assertEqual(guild_field["value"], ["111"])   # pre-checked
+        tree = {f["id"]: f for f in data["fields"]}["channels-scope"]
+        self.assertEqual(tree["type"], "channel-tree")
+        self.assertEqual(tree["value"], ["111"])
 
     async def test_editor_submit_packs_channel_scope(self):
         from core import framework_ui
@@ -759,11 +776,12 @@ class TestProfilesPage(unittest.IsolatedAsyncioTestCase):
         ctx = ActionContext(plugin=FRAMEWORK_PLUGIN, component_id="editor-form")
         result = await reg.dispatch_action(
             FRAMEWORK_PLUGIN, "editor-form",
-            {"pe-name": "scoped", "pe-scope-mode": "allow",
-             "ch:999": ["111", "222"]}, ctx)
+            {"pe-name": "scoped", "channels-scope": ["111", "222"]}, ctx)
         self.assertTrue(result.success, result.message)
         create_calls = [c for c in api.fleet_calls if c[0] == "p-create"]
         self.assertTrue(create_calls)
+        self.assertEqual(api.create_settings.get("channels"),
+                         {"channels": ["111", "222"]})
 
 
 
