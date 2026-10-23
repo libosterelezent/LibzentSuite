@@ -1207,17 +1207,26 @@ function acctAbilityRawTab(panel, a, pluginName) {
 }
 
 /* ── 3. MEMORY (plugin profiles) ─────────────────────────────────────────── */
+
+/* positive channel-set summary: "N channels" | "all channels" */
+function scopeSummary(settings) {
+  const scope = settings && settings.channels;
+  const n = (scope && Array.isArray(scope.channels)) ? scope.channels.length : 0;
+  return n ? `${n} channel${n === 1 ? "" : "s"}` : "all channels";
+}
+
 function acctMemorySection(a, ex, rerender) {
   const sec = el("div", {class: "section"});
+  const galleryBtn = el("button", {class: "sec-act", type: "button"}, "Profile gallery");
+  galleryBtn.onclick = () => acctProfileGallery(a, ex, rerender);
   sec.append(el("div", {class: "sec-hdr"},
     el("svg", {viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
                "stroke-width": "2", "aria-hidden": "true"},
       el("path", {d: "M21 12c0 1.66-4 3-9 3s-9-1.34-9-3M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5M21 12V5c0-1.66-4-3-9-3S3 3.34 3 5"})),
-    "Memory"));
+    "Memory", galleryBtn));
   const wrap = el("div", {class: "sec-body"});
   const assigned = a.assigned_plugins || [];
   const bindings = ex.bindings || a.plugin_profiles || {};
-  const profiles = ex.profiles;
 
   if (!assigned.length) {
     wrap.append(el("p", {class: "hint"},
@@ -1225,78 +1234,26 @@ function acctMemorySection(a, ex, rerender) {
     sec.append(wrap);
     return sec;
   }
-  if (profiles === null) {           // still loading
+  if (ex.profiles === null) {           // still loading
     wrap.append(el("p", {class: "hint"}, "loading profile library…"));
     sec.append(wrap);
     return sec;
   }
 
-  let any = false;
+  /* concise: one kv row of bindings — detail + management live in the gallery */
+  const row = el("div", {class: "kv-row"});
   for (const p of assigned) {
-    const rows = profiles.filter(r => r.plugin === p);
-    const group = el("div", {class: "preset-group"},
-      el("div", {class: "pg-name"}, p));
-    if (!rows.length && (profiles || []).some(r => r.plugin !== p)) {
-      group.append(el("p", {class: "hint"},
-        "no presets — create them on the Plugins page"));
-    }
-    for (const r of rows) {
-      const active = bindings[p] === r.name;
-      const loadBtn = el("button", {class: "load", type: "button"}, "load");
-      loadBtn.onclick = busy(loadBtn, async () => {
-        try {
-          await post("/api/accounts/plugin-profile",
-            {account: a.name, plugin: p, profile: r.name});
-          toast("preset “" + r.name + "” loaded", "ok");
-          await loadStatsNow();
-          acctDetailRefresh(a.name, ex, rerender);
-        } catch (e) { toast(e.message, "err"); }
-      });
-      const delBtn = el("button", {class: "del", type: "button"}, "delete");
-      delBtn.onclick = busy(delBtn, async () => {
-        const ok = await confirmBox({title: "Delete preset",
-          body: "Delete " + p + " preset “" + r.name +
-            "” for every account? This cannot be undone.",
-          yes: "Delete"});
-        if (!ok) return;
-        try {
-          await post("/api/plugins/profiles/delete", {plugin: p, name: r.name});
-          toast("preset deleted", "ok");
-          acctDetailRefresh(a.name, ex, rerender);
-        } catch (e) { toast(e.message, "err"); }
-      });
-      group.append(el("div", {class: "preset"},
-        el("span", {class: "pn"}, r.name),
-        active ? el("span", {class: "badge badge-ok"}, "active") : null,
-        el("span", {class: "pc"},
-          Object.keys(r.settings || {}).length + " settings"),
-        el("div", {class: "pa"},
-          loadBtn, delBtn)));
-      any = true;
-    }
-    wrap.append(group);
-    /* allow clearing the binding back to plugin defaults */
     const bound = bindings[p];
-    if (bound) {
-      const clearBtn = el("button", {class: "btn btn-ghost btn-sm", type: "button"},
-        "clear binding (" + bound + ")");
-      clearBtn.onclick = busy(clearBtn, async () => {
-        try {
-          await post("/api/accounts/plugin-profile",
-            {account: a.name, plugin: p, profile: null});
-          toast("binding cleared — plugin defaults", "ok");
-          await loadStatsNow();
-          acctDetailRefresh(a.name, ex, rerender);
-        } catch (e) { toast(e.message, "err"); }
-      });
-      wrap.append(clearBtn);
-    }
+    const prof = bound
+      ? (ex.profiles || []).find(r => r.plugin === p && r.name === bound)
+      : null;
+    row.append(el("div", {class: "kv"},
+      el("span", {class: "k"}, p),
+      el("span", {class: "v"},
+        bound ? bound + " · " + scopeSummary(prof && prof.settings) : "default")));
   }
-  if (!any && assigned.length) {
-    const hint = el("p", {class: "hint"},
-      "No presets in the library yet — build settings on the Plugins page and save them as profiles.");
-    wrap.append(hint);
-  }
+  wrap.append(row);
+
   /* state-kv strip (mockup): per-plugin runtime state — real fields only */
   const statesRow = el("div", {class: "kv-row", style: "margin-top:var(--sp-2)"});
   for (const p of assigned) {
@@ -1308,9 +1265,177 @@ function acctMemorySection(a, ex, rerender) {
         st.error_count ? el("span", {class: "badge badge-err"},
           String(st.error_count) + " err") : null)));
   }
-  if (assigned.length) wrap.append(statesRow);
+  wrap.append(statesRow);
   sec.append(wrap);
   return sec;
+}
+
+/* the gallery: every profile, grouped by plugin; bind/unbind this account,
+   edit (schema + channel scope), delete — one dialog, no page sprawl */
+async function acctProfileGallery(a, ex, rerender) {
+  const dlg = dialog({title: `Profile gallery — ${a.name}`, wide: true,
+    bodyEl: el("div", {class: "skel"}, el("div"), el("div"), el("div"))});
+  let chanGroups = [];
+  try {
+    chanGroups = await api("/api/accounts/channels?account=" +
+      encodeURIComponent(a.name)) || [];
+  } catch { chanGroups = []; }   /* offline account: scope editing degrades */
+
+  const refresh = async () => {
+    try {
+      ex.profiles = await api("/api/plugins/profiles") || [];
+      ex.bindings = await api("/api/accounts/plugin-profiles?account=" +
+        encodeURIComponent(a.name)) || {};
+    } catch (e) { toast(e.message, "err"); return; }
+    await acctDetailRefresh(a.name, ex, rerender);
+    dlg.body.textContent = "";
+    dlg.body.append(galleryBody(a, ex, chanGroups, rerender, refresh));
+  };
+  await refresh();
+}
+
+function galleryBody(a, ex, chanGroups, rerender, refresh) {
+  const wrap = el("div", null);
+  const assigned = a.assigned_plugins || [];
+  const bindings = ex.bindings || a.plugin_profiles || {};
+  const byPlugin = {};
+  for (const r of (ex.profiles || []))
+    (byPlugin[r.plugin] = byPlugin[r.plugin] || []).push(r);
+  const order = [
+    ...assigned.filter(p => byPlugin[p]),
+    ...Object.keys(byPlugin).filter(p => !assigned.includes(p)).sort()];
+
+  if (!order.length)
+    return wrap.append(el("div", {class: "empty"},
+      el("div", {class: "empty-msg"},
+        "No profiles in the library yet — build one from a plugin's settings.")));
+
+  for (const p of order) {
+    const isAssigned = assigned.includes(p);
+    const group = el("div", {class: "preset-group"},
+      el("div", {class: "pg-name"}, p,
+        isAssigned ? null : el("span", {class: "faint"}, " · not assigned")));
+    for (const r of byPlugin[p]) {
+      const active = bindings[p] === r.name;
+      const bindBtn = el("button", {class: "load", type: "button",
+        title: isAssigned ? "Bind this profile to " + a.name
+                          : "Assign " + p + " to the account first"});
+      bindBtn.textContent = active ? "rebind" : "bind";
+      if (!isAssigned) bindBtn.disabled = true;
+      bindBtn.onclick = busy(bindBtn, async () => {
+        try {
+          await post("/api/accounts/plugin-profile",
+            {account: a.name, plugin: p, profile: r.name});
+          toast(`“${r.name}” bound to ${a.name}`, "ok");
+          await loadStatsNow();
+          await refresh();
+        } catch (e) { toast(e.message, "err"); }
+      });
+      const editBtn = el("button", {class: "load", type: "button"}, "edit");
+      editBtn.onclick = () =>
+        acctProfileEditor(a, p, r, chanGroups, refresh);
+      const delBtn = el("button", {class: "del", type: "button"}, "delete");
+      delBtn.onclick = busy(delBtn, async () => {
+        const ok = await confirmBox({title: "Delete profile",
+          body: `Delete ${p} profile “${r.name}” for EVERY account? This cannot be undone.`,
+          yes: "Delete"});
+        if (!ok) return;
+        try {
+          await post("/api/plugins/profiles/delete", {plugin: p, name: r.name});
+          toast("profile deleted", "ok");
+          await refresh();
+        } catch (e) { toast(e.message, "err"); }
+      });
+      group.append(el("div", {class: "preset" + (active ? " on" : "")},
+        el("span", {class: "pn"}, r.name),
+        active ? el("span", {class: "badge badge-ok"}, "active") : null,
+        el("span", {class: "pc"}, scopeSummary(r.settings)),
+        el("div", {class: "pa"}, bindBtn, editBtn, delBtn)));
+    }
+    if (isAssigned && bindings[p]) {
+      const clearBtn = el("button", {class: "btn btn-ghost btn-sm", type: "button"},
+        "clear binding (" + bindings[p] + ")");
+      clearBtn.onclick = busy(clearBtn, async () => {
+        try {
+          await post("/api/accounts/plugin-profile",
+            {account: a.name, plugin: p, profile: null});
+          toast("binding cleared — plugin defaults", "ok");
+          await loadStatsNow();
+          await refresh();
+        } catch (e) { toast(e.message, "err"); }
+      });
+      group.append(clearBtn);
+    }
+    wrap.append(group);
+  }
+  return wrap;
+}
+
+/* profile editor (bespoke port): schema fields via the global schemaField,
+   channel scope via the builder's channel-tree picker; offline account
+   keeps the stored scope untouched instead of silently clearing it */
+function acctProfileEditor(a, plugin, prof, chanGroups, onSaved) {
+  const manifests = storeGet("manifests") || [];
+  const manifest = manifests.find(m => m.name === plugin);
+  const schema = (manifest && manifest.settings) || [];
+  const settings = (prof && prof.settings) || {};
+  const storedScope = (settings.channels && Array.isArray(settings.channels.channels))
+    ? settings.channels.channels.map(String) : [];
+
+  const nameInput = el("input", {type: "text", maxlength: "64",
+    value: prof ? prof.name : "", placeholder: "e.g. farm-fast"});
+  const descInput = el("input", {type: "text", maxlength: "200",
+    value: prof ? (prof.description || "") : "", placeholder: "what this bundle is for"});
+
+  const pickerGroups = (chanGroups || [])
+    .map(g => ({
+      id: String(g.guild_id || ""),
+      name: String(g.guild_name || g.guild_id || ""),
+      channels: (g.channels || [])
+        .map(c => ({id: String(c.id || ""), name: String(c.name || c.id || "")}))
+        .filter(c => c.id)}))
+    .filter(g => g.id && g.channels.length);
+  const scopeField = el("div", {class: "field"},
+    el("label", {}, "Channels"),
+    pickerGroups.length
+      ? bChannelTree({groups: pickerGroups, value: storedScope})
+      : el("div", {class: "hint"},
+          storedScope.length
+            ? `scoped to ${storedScope.length} channel${storedScope.length === 1 ? "" : "s"} — start ${a.name} to re-pick`
+            : `all channels — start ${a.name} to pick specific channels`));
+
+  const form = el("div", {class: "form"},
+    el("div", {class: "field"}, el("label", {}, "Profile name"), nameInput),
+    el("div", {class: "field"}, el("label", {}, "Description"), descInput),
+    schema.length
+      ? el("div", null, ...schema.map(def => schemaField(def, settings[def.name])))
+      : el("p", {class: "hint"},
+          "This plugin declares no settings — the profile carries name, description and channel scope."),
+    scopeField);
+
+  dialog({title: `Edit profile — ${plugin}`, wide: true, bodyEl: form, actions: [
+    {label: "Cancel", variant: "secondary", onclick: close => close()},
+    {label: "Save profile", variant: "primary", onclick: (close) => {
+      const name = nameInput.value.trim();
+      if (!name) { toast("Profile name is required.", "err"); return; }
+      const values = collectSchema(form, schema);
+      if (!values) return;
+      const picked = [...form.querySelectorAll(".ctree-chan:checked")].map(i => i.value);
+      if (pickerGroups.length) {
+        if (picked.length) values.channels = {channels: picked};
+        /* empty pick = unrestricted: the key stays absent */
+      } else if (storedScope.length) {
+        values.channels = settings.channels;   /* offline: preserve as-is */
+      }
+      const body = {plugin, name: prof.name, description: descInput.value,
+                    settings: values};
+      if (name !== prof.name) body.name_new = name;
+      post("/api/plugins/profiles/update", body)
+        .then(() => { close(); toast(`profile ${name} saved`, "ok"); onSaved && onSaved(); })
+        .catch(e => toast(e.message, "err"));
+    }},
+  ]});
+  nameInput.focus();
 }
 
 /* ── 4. PACING ───────────────────────────────────────────────────────────── */
