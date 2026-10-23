@@ -649,6 +649,7 @@ class TaskScheduler:
         name: Optional[str] = None,
         timeout: Optional[float] = None,
         retries: int = 0,
+        fleet_assignment: Optional[str] = None,
     ) -> Task:
         """Validate, queue and publish one task; returns the live Task.
 
@@ -691,6 +692,12 @@ class TaskScheduler:
             raise SchedulerError(f"retries must be an int >= 0, got {retries!r}")
         if retries < 0:
             raise SchedulerError(f"retries must be >= 0, got {retries!r}")
+        if fleet_assignment is not None and (
+                not isinstance(fleet_assignment, str)
+                or not fleet_assignment.strip()):
+            raise SchedulerError(
+                f"fleet_assignment must be a non-empty string or None, "
+                f"got {fleet_assignment!r}")
 
         task = Task(
             id=next(self._seq),
@@ -705,6 +712,8 @@ class TaskScheduler:
             priority=int(prio),
             timeout_s=timeout_s,
             max_retries=retries,
+            fleet_assignment=(fleet_assignment.strip()
+                              if isinstance(fleet_assignment, str) else None),
         )
         try:
             self._ensure_lane(task.account)  # validates a running loop FIRST:

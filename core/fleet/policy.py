@@ -127,27 +127,34 @@ class FleetPolicy:
                        f" — {worst.reason}",
                 retry_at=worst.expires_at)
 
-        # 5. task assigned + valid (only when an assignment is in hand)
-        if assignment_id is not None:
-            rec = self._fleet.assignment(assignment_id)
-            if rec is None:
-                return PolicyDecision(
-                    allowed=False,
-                    reason=f"unknown fleet assignment {assignment_id!r}")
-            if rec.account != account:
-                return PolicyDecision(
-                    allowed=False,
-                    reason=f"assignment {assignment_id!r} is held by "
-                           f"{rec.account!r}, not {account!r}")
-            if rec.status != AssignmentStatus.ASSIGNED:
-                return PolicyDecision(
-                    allowed=False,
-                    reason=f"assignment {assignment_id!r} is {rec.status}")
-            if rec.generation != state.generation:
-                return PolicyDecision(
-                    allowed=False,
-                    reason=f"assignment generation {rec.generation} != live"
-                           f" {state.generation} — stale dispatch fenced")
+        # 5. task assigned + valid (§4 task_valid) — and D1's ownership
+        #    fence: on a group-managed account, ONLY fleet-linked
+        #    dispatches run. An unlinked (independent-flow) submit is
+        #    SUSPENDED for members — it flows again the moment the
+        #    account leaves (leave restores Independent cleanly, §8).
+        if assignment_id is None:
+            return PolicyDecision(
+                allowed=False,
+                reason="independent flow suspended (group-managed)")
+        rec = self._fleet.assignment(assignment_id)
+        if rec is None:
+            return PolicyDecision(
+                allowed=False,
+                reason=f"unknown fleet assignment {assignment_id!r}")
+        if rec.account != account:
+            return PolicyDecision(
+                allowed=False,
+                reason=f"assignment {assignment_id!r} is held by "
+                       f"{rec.account!r}, not {account!r}")
+        if rec.status != AssignmentStatus.ASSIGNED:
+            return PolicyDecision(
+                allowed=False,
+                reason=f"assignment {assignment_id!r} is {rec.status}")
+        if rec.generation != state.generation:
+            return PolicyDecision(
+                allowed=False,
+                reason=f"assignment generation {rec.generation} != live"
+                       f" {state.generation} — stale dispatch fenced")
 
         # 6. prerequisites: suspend/resume own this at the service level
         #    (SUSPENDED never reaches dispatch); nothing further here.
@@ -159,7 +166,12 @@ class FleetPolicy:
         """The bridge the TaskScheduler parks on (spec §4's pre-dispatch
         + post-grant revalidation). Duck-typed: the scheduler reads
         ``.allowed`` / ``.retry_at`` and imports nothing from core.fleet.
+        Carries the task's fleet linkage (§5/E): linked dispatches get
+        the full assignment validation; unlinked submits on members are
+        the SUSPENDED independent flow (D1).
         """
         async def guard(task: Any) -> PolicyDecision:
-            return await self.evaluate(str(getattr(task, "account", "")))
+            return await self.evaluate(
+                str(getattr(task, "account", "")),
+                assignment_id=getattr(task, "fleet_assignment", None))
         return guard

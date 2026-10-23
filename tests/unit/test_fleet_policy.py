@@ -56,10 +56,20 @@ class PolicyCheckOrderTests(_Base):
         self.assertTrue(decision.allowed)
         self.assertIn("not fleet-managed", decision.reason)
 
-    async def test_eligible_member_allowed(self):
-        decision = await FleetPolicy(self.svc).evaluate("bravo")
+    async def test_eligible_member_with_assignment_allowed(self):
+        rec = await self.svc.submit_task("farm", ROLL)
+        await self.svc.assign_task(rec.id, "bravo")
+        decision = await FleetPolicy(self.svc).evaluate(
+            "bravo", assignment_id=rec.id)
         self.assertTrue(decision.allowed)
         self.assertIsNone(decision.retry_at)
+
+    async def test_member_unlinked_flow_suspended(self):
+        """D1: group-managed members run only fleet-linked dispatches —
+        an independent-flow submit is suspended (parks)."""
+        decision = await FleetPolicy(self.svc).evaluate("bravo")
+        self.assertFalse(decision.allowed)
+        self.assertIn("independent flow suspended", decision.reason)
 
     async def test_paused_group_blocks(self):
         await self.svc.pause_group("farm")
@@ -124,7 +134,10 @@ class PolicyCooldownTests(_Base):
         cd = await self.svc.apply_cooldown(CooldownScopeType.ACCOUNT,
                                            "bravo", "hold", 60.0)
         await self.svc.clear_cooldown(cd.id)
-        decision = await FleetPolicy(self.svc).evaluate("bravo")
+        rec = await self.svc.submit_task("farm", ROLL)
+        await self.svc.assign_task(rec.id, "bravo")
+        decision = await FleetPolicy(self.svc).evaluate(
+            "bravo", assignment_id=rec.id)
         self.assertTrue(decision.allowed)
 
 
@@ -312,13 +325,16 @@ class PausedGroupAcceptanceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_paused_group_cannot_start_new_work_until_resumed(self):
         await self.svc.pause_group("farm")
-        task = self.scheduler.submit("bravo", "p", "message")
-        await asyncio.sleep(0.3)
-        self.assertEqual(task.status, "queued")
-        self.assertEqual(self.sender.calls, [])
-        self.assertEqual(self.grants, [])       # no pacing slot consumed
+        rec = await self.svc.submit_task("farm", ROLL)
+        with self.assertRaises(ValueError):
+            # paused group: no assignment, and the linked dispatch below
+            # would park on the same verdict
+            await self.svc.assign_task(rec.id, "bravo")
 
         await self.svc.resume_group("farm")
+        await self.svc.assign_task(rec.id, "bravo")   # fresh generation
+        task = self.scheduler.submit("bravo", "p", "message",
+                                     fleet_assignment=rec.id)
         deadline = asyncio.get_running_loop().time() + 3.0
         while asyncio.get_running_loop().time() < deadline:
             if task.status == "completed":

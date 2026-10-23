@@ -125,6 +125,11 @@ class Task:
     #: cancel while queued/parked on the grant AND a failure before the
     #: send (limiter error) never sent, so both must stay unaudited.
     sender_ran: bool = False
+    #: PHASE 9 (§5/E): the fleet assignment this task dispatches for —
+    # a STRING assignment id, or None for the independent flow. The
+    #: fleet gate reads it: on a group-managed account only linked
+    #: dispatches run (D1 suspends the independent flow).
+    fleet_assignment: Optional[str] = None
     #: Tri-state wire classification for the audit gate. None = unknown
     #: (default: the sender started but its outcome does not prove
     #: whether a request reached the wire — budget-expiry timeout, cancel
@@ -166,6 +171,7 @@ class Task:
             "grant_wait_ms": round(self.grant_wait_ms, 3),
             "grant_jitter_ms": round(self.grant_jitter_ms, 3),
             "cancelled": bool(self.cancelled),
+            "fleet_assignment": self.fleet_assignment,
             "duration_s": (
                 round(self.finished_at - self.started_at, 3)
                 if (self.started_at is not None and self.finished_at is not None)
