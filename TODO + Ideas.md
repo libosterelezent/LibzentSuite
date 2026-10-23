@@ -660,7 +660,15 @@ ACTIVE QUEUE  (2026-10-23, ordered)
     Blocked: alpha still needs a fresh credential. Remaining:
     admin-command flow B -> A, ordered full walkthrough.
 [ ] PHASE 9 ROLLOUT — design locked (docs/design/
-    fleet-orchestration-hub.md), implementation phases A-G pending.
+    fleet-orchestration-hub.md). Progress:
+    A. DONE (2026-10-23, d640cec): core/fleet/ models + transition
+       tables (46 pure tests) — member eligibility, assignment states
+       with leave/retry guards, scoped cooldown records (most-
+       restrictive-wins), task definitions (channel scope, field
+       classes, metric hints), generation fence, event envelope.
+    B-G pending. NOTE: tests/unit/test_task_scheduler has ~7
+    pre-existing timing flakes on HEAD (completed 1!=2 family) —
+    triage before Phase C leans on that suite.
 [ ] PHASE 10 ROLLOUT — after PHASE 9 signals exist.
 
 
