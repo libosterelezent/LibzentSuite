@@ -666,7 +666,13 @@ ACTIVE QUEUE  (2026-10-23, ordered)
        with leave/retry guards, scoped cooldown records (most-
        restrictive-wins), task definitions (channel scope, field
        classes, metric hints), generation fence, event envelope.
-    B-G pending. NOTE: tests/unit/test_task_scheduler has ~7
+    B. DONE (2026-10-23, f1e99d8): FleetService — the ONE writer of
+       the fleet projection (join/leave, pauses, full assignment
+       lifecycle, handoff with destination-first validation, cooldown
+       apply/clear), migration v9 + FleetRepository, write-ahead
+       history + event seam, generation bumping; 33 service tests on
+       real in-memory SQLite (79 fleet tests total).
+    C-G pending. NOTE: tests/unit/test_task_scheduler has ~7
     pre-existing timing flakes on HEAD (completed 1!=2 family) —
     triage before Phase C leans on that suite.
 [ ] PHASE 10 ROLLOUT — after PHASE 9 signals exist.
