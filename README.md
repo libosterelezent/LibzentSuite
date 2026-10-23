@@ -111,20 +111,25 @@ python3 main.py accounts list          # one-shot command mode
 
 | Page | What you do there |
 |---|---|
-| **Home** | live fleet status + plugin-contributed metric cards |
-| **Accounts & Groups** | add/remove, start/stop, store tokens, direct plugin assignment, sync groups |
-| **Plugins** | per-account enable/disable, settings, the **profile library** (create/edit/delete setting bundles with channel scopes) |
-| **Profiles** | per-account profile bindings + the effective merged-settings view |
-| **Activity** | live log stream + every Discord interaction (audit) |
+| **Home** | live fleet status at a glance (running, cooldowns, tasks, sync groups) + the recent activity feed |
+| **Accounts** | add/remove, start/stop, store tokens, direct plugin assignment, sync groups; each account detail page carries Abilities / Memory (plugin presets + bindings, the Profile gallery) / Pacing / Live stats (plugin `ui_stats` cards) / Operations |
+| **Fleet** | the Fleet Hub (`#/groups`): group-managed orchestration — members, eligibility, task assignments, scoped cooldowns, transition history; mutations ride the FleetService path and converge live over the WebSocket |
+| **Plugins** | per-account enable/disable, settings, the **profile library** (named setting bundles with channel scopes — edit/delete; creation happens from an account's MEMORY flow) |
+| **Activity** | the task queue/history, pacing cooldowns, live log stream + every Discord interaction (audit) |
 | **Policies** | pacing policies, effective rates, safety warnings, the 429 throttle card |
 | **Admin** | framework admin ids, per-account command permissions + prefixes (mention/symbol/both), Mudae bot id |
-| **Tools** | task queue/history, offline simulations, emergency stop, shutdown |
+| **Tools** | offline simulations, emergency stop, shutdown, credential import |
+
+Plugin profiles are named SETTINGS presets (bundles applied to a plugin's
+settings, with an optional channel scope) — not the removed permission-bundle
+model. Sync groups (Accounts tab) pace accounts together; the Fleet Hub is the
+separate orchestration layer on top.
 
 Nearly everything works from both (`python3 main.py …` or the dashboard —
 same API underneath, so pick whichever you like). Dashboard-only today:
 admin-panel management, plugin-profile editing, per-account channel
-lists, the effective-settings view and bulk plugin-set; the CLI covers
-accounts/credentials/plugins/profiles-bindings/ratelimit/cooldowns/
+lists and bulk plugin-set; the CLI covers
+accounts/credentials/plugins/profile-bindings/ratelimit/cooldowns/
 tasks/simulation/logs/audit/estop/status/groups.
 
 Debugging a live issue? Add `--debug`: DEBUG-level logs, Discord gateway
@@ -152,8 +157,10 @@ stay empty and everything still boots (the loader simply discovers zero
 plugins). Plugins are self-describing packages: a `PluginBase` subclass
 with metadata, a `Setting` manifest, lifecycle hooks, optional declared
 self-commands (`COMMANDS` with the `ArgSpec` argument grammar) and
-optional dashboard UI extension (`ui_stats` stat cards, `ui_panels`
-sidebar panels — structured data only, XSS-safe by construction).
+optional dashboard UI extension (`ui_stats` stat cards — rendered on the
+account detail page; `ui_panels` structured panels are a declared surface
+the current SPA does not yet render — and builder pages declared through
+the safe dashboard UI toolset).
 **The plugin development guide is
 [`knowledgebase/PLUGIN_SYSTEM.md`](knowledgebase/PLUGIN_SYSTEM.md)**
 (§7a self-commands, §7b UI extension; the formal API reference is
@@ -272,11 +279,11 @@ config/                global settings, rate policies, account files
 main.py                entrypoint
 ```
 
-The dashboard serves a sidebar SPA (Home, Accounts & Groups, Plugins,
-Profiles, Activity, Policies, Admin, Tools — plus any plugin-contributed
-panels) on `http://127.0.0.1:8070` with live WebSocket push; set
-`DASHBOARD_TOKEN` in `.env` to require auth. The complete REST/WS/CLI/
-self-command reference is `knowledgebase/API_ENDPOINTS.md`.
+The dashboard serves a sidebar SPA (Home, Accounts, Activity, Fleet,
+Policies, Admin, Tools — plus a Plugins section with builder pages
+contributed by plugins) on `http://127.0.0.1:8070` with live WebSocket
+push; set `DASHBOARD_TOKEN` in `.env` to require auth. The complete
+REST/WS/CLI/self-command reference is `knowledgebase/API_ENDPOINTS.md`.
 
 Dependencies: Python ≥ 3.10 + `aiosqlite` + `cryptography` (see
 `requirements.txt`). Live mode additionally needs the user-account client
@@ -409,9 +416,10 @@ compare; DB worker telemetry.
 
 ## Management surfaces
 
-- CLI: `accounts|credentials|plugins|profiles|ratelimit|cooldowns|tasks|simulation|logs|audit|estop|status|groups|help|quit`
+- CLI: `accounts|credentials|plugins|ratelimit|cooldowns|tasks|simulation|logs|audit|estop|status|groups|help|quit`
 - Dashboard REST: 1:1 with ControlAPI; WebSocket pushes stats/log/audit/task
-  events live (complete reference: `knowledgebase/API_ENDPOINTS.md`)
+  events live, plus `fleet` transition frames for the Fleet Hub (complete
+  reference: `knowledgebase/API_ENDPOINTS.md`)
 - Self-commands: framework verbs (`pg`, `say`, `help`, `prefixrate`,
   `adminlist`, `adminperms`, `adminprefix`) + every plugin-declared
   `COMMANDS` verb — gated per account by the admin-panel access lists
@@ -420,8 +428,8 @@ compare; DB worker telemetry.
 
 All of them hit the same ControlAPI; CLI↔dashboard parity holds for the
 verb groups listed above, but admin-panel management, plugin-profile
-editing, per-account channel lists, the effective-settings view and bulk
-plugin-set remain dashboard-only.
+editing, per-account channel lists and bulk plugin-set remain
+dashboard-only.
 
 ## Documentation
 

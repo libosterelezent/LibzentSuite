@@ -575,7 +575,8 @@ Decision rule: could a plugin own the surface? -> builder. Needs routing
 params / selection state / WS-diffed live data / multi-step flows? -> bespoke.
 
 
-PHASE 9 — GROUP RELAY: CENTRALIZED ACTION CONTROL  (planned — DESIGN LOCKED)
+PHASE 9 — GROUP RELAY: CENTRALIZED ACTION CONTROL  (SHIPPED 2026-10-23 — see
+ACTIVE QUEUE "PHASE 9 COMPLETE"; this section is the original design notes)
 
 The entire point of Groups: control the actions of MULTIPLE accounts
 CENTRALLY — not merely share a pacing clock.
