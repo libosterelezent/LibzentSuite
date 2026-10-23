@@ -145,11 +145,6 @@ author's guide: [DASHBOARD_UI_API.md](DASHBOARD_UI_API.md).
 
 | Method | Path | Payload | → ControlAPI |
 |---|---|---|---|
-| GET | `/api/profiles` | — | `profiles_list()` |
-| POST | `/api/profiles/create` | body: `name`, `plugins` (list of str), `description?` | `profiles_create(...)` |
-| POST | `/api/profiles/delete` | body: `name` | `profiles_delete(name)` |
-| POST | `/api/profiles/assign` | body: `account`, `profile` | `profiles_assign(...)` |
-| POST | `/api/profiles/unassign` | body: `account`, `profile` | `profiles_unassign(...)` |
 
 ### Rate limits
 

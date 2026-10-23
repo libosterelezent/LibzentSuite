@@ -306,28 +306,11 @@ fixture under tests/fixtures/sim_plugins/):
   `cooldown_*` and userstack availability via `state_*`. Stop word:
   setting `stop_trigger`, default `"rollstop"`.
 
-### core/profile_manager (A6)
-```python
-class ProfileManager:
-    def __init__(self, profiles_repo, logger, accounts_repo=None): ...
-    def set_profile(self, name, plugins, description="") -> dict   # persists
-    def delete_profile(self, name) -> dict
-    def profiles(self) -> list[dict]        # [{"name","description","plugins":[...]}]
-    def assign(self, account, profile) -> dict    # validates profile AND account exist
-    def unassign(self, account, profile) -> dict
-    def assigned(self, account) -> list[str]
-    def allowed_plugins(self, account) -> set | None   # retained; NOT consulted by attach
-```
-Port semantics from `git show HEAD:core/roles.py` (name regex, non-empty
-plugin list, unknown-role warning behavior).
+### core/profile_manager (A6) — REMOVED (2026-10-22)
 
-STATUS: retained future infrastructure. Profile CRUD and assignment
-bookkeeping persist, but profiles NO LONGER control which plugins an
-account runs — that is the direct account→plugin assignment
-(`account_plugins` table; `AccountManager.assign_plugin` /
-`unassign_plugin` / `set_account_plugins` via `ControlAPI.
-accounts_plugin_*`). Future (NOT implemented): plugin-specific profiles /
-multiple saved configurations.
+The legacy profile manager was deleted. Capabilities are direct
+account→plugin assignments; per-plugin settings presets live in
+`plugin_profiles` (v7, see §core/plugin_manager). Per-channel operational data lives in `plugin-data.db`.
 
 ### core/account_manager (A6)
 ```python
@@ -338,7 +321,7 @@ class AccountStatus(str, Enum): created connecting running reconnecting stopped
     runtime: AccountRuntime        # client, status, cache, started_at, stats, last_error
     plugins: dict                  # plugin name -> runtime info
 class AccountManager:
-    def __init__(self, bus, logger, accounts_repo, plugin_manager, profile_manager,
+    def __init__(self, bus, logger, accounts_repo, plugin_manager,
                  scheduler, settings: SettingsManager, audit, client_factory,
                  credentials, *, limiter=None, supervisor_tick=0.2,
                  api_cache_repo=None, credential_service=None, cooldowns=None,
@@ -426,7 +409,7 @@ latency_ms/user_id/on_message/on_disconnect), `ClientFactory` protocol
   `runner.py`: `SimulationRunner(plugin_dir, credentials=None)` builds a
   COMPLETE
   in-memory stack (Database(":memory:"), bus, LogService, RateLimitManager,
-  TaskScheduler, SettingsManager, ProfileManager, PluginManager,
+  TaskScheduler, SettingsManager, PluginManager,
   AccountManager with SimClient factory, AuditRecorder) per run — wiring per
   the pinned constructors; `run(name) -> report dict {name, passed,
   duration_s, failures: [str], log_lines: ["00:02.017 INFO scheduler Task 3

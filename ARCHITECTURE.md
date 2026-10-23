@@ -68,7 +68,8 @@ assignments runs zero plugins (fail-closed).
 **Capabilities:** direct account→plugin assignment (`account_plugins`).
 Per-plugin settings presets live in `plugin_profiles` (v7); per-channel
 operational data lives in `plugin-data.db` (Phase 9 design). The legacy
-`ProfileManager` / `profiles` / `profile_plugins` / `account_profiles`
+`ProfileManager` and its `profiles` / `profile_plugins` /
+`account_profiles` tables (deleted in migration 8)
 tables were REMOVED (2026-10-22, migration 8).
 
 **Future (NOT implemented):** plugin-specific profiles / multiple saved

@@ -246,7 +246,6 @@ core/                  framework managers + shared contracts
                        lifecycle governor + waiter registry
   plugin_manager/      discovery, per-account instances, event dispatch
   plugin_base.py       the plugin contract (PluginBase/Context/Services)
-  profile_manager/     retained future infrastructure: profile records
                        (NOT the capability model — accounts get plugins
                        directly via account_plugins assignments)
   settings_manager.py  ONE settings schema consumed by CLI + GUI alike
@@ -354,18 +353,6 @@ Groups are registered automatically from each account's `sync_group`
 (pure metadata — no API involved). Retries carry no scheduler delay —
 the limiter's cooldown + interval own every wait.
 
-## Lifecycle hardening
-
-Every account runtime carries a **generation counter** bumped on each
-ownership change (start/stop/remove/estop). Async lifecycle paths capture
-it before an await and validate after — a stale start can never resurrect
-a stopped account, an old stop can never clobber a newer start, a stale
-supervisor stands down by identity. The **lifecycle governor** rate-limits
-start/stop thrashing (per-account cooldowns + global buckets; estop and
-shutdown bypass entirely). `start_all` runs as a bounded 4-lane scheduler
-with admission pacing and single-flight join. IDENTIFYs are paced by a
-process-wide gate with depth-projected fast-fail.
-
 ## Rich event model
 
 `adapters/model.py` converts every inbound Discord event ONCE into a frozen
@@ -446,16 +433,6 @@ plugin-set remain dashboard-only.
 - `docs/` — Sphinx site: `pip install --user sphinx myst-parser` then
   `python3 -m sphinx -W -b html docs docs/_build/html`
 - `INTEGRATION.md` — inter-module contracts
-- `HARDENING_README.md` — the hardening history (phases 1–2 + round-2)
 - `scripts/bench_db.py`, `scripts/bench_hot.py` — perf harnesses
 - `benchmark/README.md` — the benchmark subsystem
 
-## Anti-flag hardening summary
-
-One REST call per entity ever (DM/user cache in SQLite, migration 002);
-no double-resolution on DM sends; stale-cache healing on TargetGone;
-optional typing indicator (default off); chat commands gated by the
-admin-panel access lists (fail-closed); N-account IDENTIFY pacing with per-IP
-budget; per-account 429 cooldowns with fleet-wide global-limit handling;
-reconnect backoff with jitter and flap-escalation; event-loop-friendly
-everything (queued persistence, bounded dispatch slices).

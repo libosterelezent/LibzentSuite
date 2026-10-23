@@ -23,7 +23,7 @@ from benchmark.scenarios import BENCH_SCENARIOS
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="benchmark",
-        description="SlaughterMudade framework benchmark (isolated, "
+        description="LibzentSuite framework benchmark (isolated, "
                     "fakes/simulation only — never real Discord, never "
                     "state/libzent.db)")
     parser.add_argument("--scenario", action="append", default=None,

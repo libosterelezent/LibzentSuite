@@ -35,14 +35,13 @@ from typing import Any, Dict, List
 from core.dashboard_ui import DashboardUIToolset, RowAction, BulkAction
 from core.dashboard_ui.context import current_view_id
 from core.dashboard_ui.registry import DashboardUIRegistry
-from core.framework_ui_design import _build_design
 
 #: reserved registry plugin name for the framework's own pages
 FRAMEWORK_PLUGIN = "$framework"
 
 #: main-tab views the SPA renders through the framework pages
 FRAMEWORK_VIEWS = ("home", "fleet", "plugins", "profiles", "activity",
-                   "policies", "admin", "tools", "design")
+                   "policies", "admin", "tools")
 
 class _ViewState:
     """Dict-like modal context, scoped to the requesting dashboard VIEW.
@@ -104,7 +103,7 @@ def attach_framework_ui(registry: DashboardUIRegistry, api: Any) -> int:
     layout = ui.Layout(component_id="framework-root")
     for build in (_build_home, _build_fleet, _build_plugins,
                   _build_profiles, _build_activity, _build_policies,
-                  _build_admin, _build_tools, _build_design):
+                  _build_admin, _build_tools):
         layout.add_page(build(ui, api))
     registry.attach(FRAMEWORK_PLUGIN, layout)
     return len(layout.pages())

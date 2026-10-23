@@ -199,7 +199,7 @@ SettingsManager(bus, logger, plugin_repo, account_settings_repo, global_layer=DE
 RateLimitManager(bus, logger, db.policies) · AuditRecorder(db.audit)
 TaskScheduler(bus, logger, limiter, sender)        <- LATE-BOUND SENDER
 PluginManager(bus, logger, settings, db.plugins, plugin_dir) + discover()
-ProfileManager(db.profiles, logger, db.accounts)
+(legacy ProfileManager wiring removed)
 AccountManager(bus, logger, db.accounts, plugins, profiles, scheduler, settings, audit,
                client_factory(SimClient over the world), credentials[, limiter, api_cache_repo])
 ```

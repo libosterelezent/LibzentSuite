@@ -16,7 +16,7 @@ Account
 are migration-only), wires every
 client callback (message + rich events) before connect, connects, ingests
 the READY snapshot (zero API calls), activates the account's assigned
-plugins (direct ``account_plugins`` rows — profiles are not consulted),
+plugins (direct ``account_plugins`` rows),
 spawns the reconnect supervisor (exponential backoff from account
 settings).
 
