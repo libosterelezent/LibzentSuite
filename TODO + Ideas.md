@@ -643,20 +643,22 @@ settings presets), and plugin-data.db (per-channel operational data).
 See section 4 above and docs/design/fleet-orchestration-hub.md.
 
 
-ACTIVE QUEUE  (2026-10-22, ordered)
+ACTIVE QUEUE  (2026-10-23, ordered)
 
-[ ] PHASE A-11 refactor queue — GPT repo-connected plan
-    (state/ui-rebuild-2026-10-22/consult-A11-gpt-plan.md):
-    tabbed ability dialog (Settings/Presets/Logs/Raw), state-kv strip,
-    theme Layout tab + CSS import, contract-test extensions.
-    IN PROGRESS: dialog tabs + schemaField extraction landed.
-[x] Legacy permission-bundle manager REMOVAL — DONE on
-    feat/remove-profile-manager (PR #16 open, pending merge; plan:
-    state/ui-rebuild-2026-10-22/consult-B1-profilemanager.md).
-[ ] PHASE C LIVE DEBUG — in progress
-    accounts alpha/bravo registered via UI; bravo RUNNING (live
-    Discord); alpha blocked on a fresh credential (old token invalid).
-    Remaining: admin-command flow B -> A, ordered full walkthrough.
+[x] PHASE A-11 refactor queue — DONE (2026-10-23). Tabbed ability
+    dialog, state-kv strip, theme Layout tab, contract tests, AND the
+    channel-scope editor: positive channel-set (plugin_scopes) with a
+    dropdown channel-tree picker in the profiles editor. Live-verified
+    on bravo: 6 real guilds render, selection stores the positive set,
+    library/tiles reflect it. Also fixed in the pass: builder
+    tile-view renderer, records-shape tables, dynamic-field refresh in
+    modals (commits 7db9752, 2542822).
+[x] Legacy permission-bundle manager REMOVAL — DONE (PR #16 merged
+    into feat/ui-rebuild).
+[ ] PHASE C LIVE DEBUG — resumed 2026-10-23: bravo re-credentialed
+    (new token) and RUNNING; profiles editor round-trip verified live.
+    Blocked: alpha still needs a fresh credential. Remaining:
+    admin-command flow B -> A, ordered full walkthrough.
 [ ] PHASE 9 ROLLOUT — design locked (docs/design/
     fleet-orchestration-hub.md), implementation phases A-G pending.
 [ ] PHASE 10 ROLLOUT — after PHASE 9 signals exist.
