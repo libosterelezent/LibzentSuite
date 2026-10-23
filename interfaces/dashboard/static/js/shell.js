@@ -10,6 +10,7 @@ const NAV_MAIN = [
   {hash: "/home",     label: "Home",     icon: "home"},
   {hash: "/accounts", label: "Accounts", icon: "users"},
   {hash: "/activity", label: "Activity", icon: "activity"},
+  {hash: "/groups",   label: "Fleet",    icon: "bolt"},
   {hash: "/policies", label: "Policies", icon: "shield"},
   {hash: "/admin",    label: "Admin",    icon: "admin"},
   {hash: "/tools",    label: "Tools",    icon: "tools"},

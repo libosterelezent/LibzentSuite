@@ -1410,6 +1410,27 @@ class DashboardServer:
                     "ok": True,
                     "data": await api.groups_snapshot(q_str(query, "group", path)),
                 }
+
+            # ------------------------------------------------------------- fleet (PHASE 9)
+            if (method, path) == ("GET", "/api/fleet/groups"):
+                return 200, {"ok": True, "data": await api.fleet_groups()}
+            if (method, path) == ("GET", "/api/fleet/group"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.fleet_group(
+                        q_str(query, "group", path)),
+                }
+            if (method, path) == ("POST", "/api/fleet/op"):
+                op = require_str(body, "op", path)
+                params = body.get("params")
+                if params is None:
+                    params = {k: v for k, v in body.items() if k != "op"}
+                if not isinstance(params, dict):
+                    return 400, {"ok": False,
+                                 "error": "field 'params' must be an object"}
+                return 200, {"ok": True,
+                             "data": await api.fleet_op(op, **params)}
+
             if (method, path) == ("POST", "/api/groups/create"):
                 payload = {"name": require_str(body, "name", path)}
                 if "description" in body and body["description"] is not None:

@@ -137,6 +137,7 @@ class ControlAPI:
         credentials_svc: Optional["CredentialService"] = None,
         cooldowns: Optional["CooldownService"] = None,
         sync_groups: Any = None,
+        fleet: Any = None,              # core.fleet.FleetService (PHASE 9)
         access: Any = None,              # core.access_manager.AccessManager
         started_at: float = 0.0,
         reconcile_interval_s: float = 30.0,
@@ -154,6 +155,7 @@ class ControlAPI:
         self._credentials_svc = credentials_svc
         self._cooldowns = cooldowns
         self._sync_groups = sync_groups
+        self._fleet = fleet
         self._access = access
         # NOTE: started_at is accepted (core/bootstrap passes it) but the
         # value is never read — uptime derives from _booted_at below; kept
@@ -1373,6 +1375,139 @@ class ControlAPI:
         if self._sync_groups is None:
             raise RuntimeError(
                 "sync group manager is not configured on this api")
+
+    # ---------------------------------------------------------------- fleet
+    def _require_fleet(self) -> None:
+        """Honest failure on stacks built without the fleet service."""
+        if self._fleet is None:
+            raise RuntimeError(
+                "fleet service is not configured on this api")
+
+    async def fleet_groups(self) -> List[Dict[str, Any]]:
+        """Fleet Hub list: one overview bundle per group (union of sync
+        groups and live fleet state — a group with state but no sync row
+        or vice versa still shows). Pure reads over the projection."""
+        self._require_fleet()
+        fleet = self._fleet
+        names: List[str] = []
+        if self._sync_groups is not None:
+            try:
+                names = [str(g.get("name"))
+                         for g in await self._sync_groups.list_groups()
+                         if g.get("name")]
+            except Exception:
+                names = []
+        for state in [fleet.group_state(n) for n in list(fleet._groups)]:
+            if state is not None and state.group_name not in names:
+                names.append(state.group_name)
+        bundles = []
+        for name in sorted(set(names)):
+            state = fleet.group_state(name)
+            members = fleet.members(name)
+            assignments = fleet.assignments(group_name=name)
+            counts: Dict[str, int] = {}
+            for rec in assignments:
+                counts[rec.status] = counts.get(rec.status, 0) + 1
+            cooldowns = await fleet.cooldowns(
+                scope_type="group", scope_id=name, active_only=True)
+            transitions = await fleet.transitions(group_name=name, limit=1)
+            bundles.append({
+                "group": name,
+                "exists": state is not None,
+                "paused": bool(state.paused) if state else False,
+                "generation": state.generation if state else None,
+                "member_count": len(members),
+                "members": [m.to_dict() for m in members],
+                "assignment_counts": counts,
+                "active_cooldowns": len(cooldowns),
+                "last_transition": (transitions[0].to_dict()
+                                    if transitions else None),
+            })
+        return bundles
+
+    async def fleet_group(self, group: str) -> Dict[str, Any]:
+        """One group's FULL hub bundle: members, assignments, active
+        cooldowns (with source), transition history (newest first)."""
+        self._require_fleet()
+        fleet = self._fleet
+        state = fleet.group_state(group)
+        if state is None:
+            raise ValueError(f"unknown fleet group {group!r}")
+        assignments = fleet.assignments(group_name=group)
+        return {
+            "group": group,
+            "paused": bool(state.paused),
+            "generation": state.generation,
+            "members": [m.to_dict() for m in fleet.members(group)],
+            "assignments": [r.to_dict() for r in assignments],
+            "cooldowns": [c.to_dict() for c in await fleet.cooldowns(
+                active_only=True)],
+            "transitions": [t.to_dict() for t in
+                            await fleet.transitions(group_name=group,
+                                                    limit=50)],
+        }
+
+    async def fleet_op(self, op: str, **params: Any) -> Dict[str, Any]:
+        """The hub's ONE mutation dispatch: every operation flows
+        through FleetService (rollout B's single-service rule); the op
+        table is explicit, params validated by the service itself."""
+        self._require_fleet()
+        fleet = self._fleet
+        op = str(op or "")
+        if op == "join":
+            event = await fleet.join_group(str(params.get("account")),
+                                           str(params.get("group")))
+        elif op == "leave":
+            event = await fleet.leave_group(str(params.get("account")))
+        elif op == "group_pause":
+            event = await fleet.pause_group(str(params.get("group")))
+        elif op == "group_resume":
+            event = await fleet.resume_group(str(params.get("group")))
+        elif op == "member_pause":
+            event = await fleet.pause_member(str(params.get("account")))
+        elif op == "member_resume":
+            event = await fleet.resume_member(str(params.get("account")))
+        elif op == "assign":
+            rec = await fleet.assign_task(str(params.get("assignment")),
+                                          str(params.get("account")))
+            return rec.to_dict()
+        elif op == "withdraw":
+            rec = await fleet.withdraw_task(str(params.get("assignment")))
+            return rec.to_dict()
+        elif op == "suspend":
+            rec = await fleet.suspend_task(str(params.get("assignment")),
+                                           str(params.get("reason") or
+                                               "operator suspend"))
+            return rec.to_dict()
+        elif op == "resume_task":
+            rec = await fleet.resume_task(str(params.get("assignment")))
+            return rec.to_dict()
+        elif op == "cancel":
+            rec = await fleet.cancel_task(str(params.get("assignment")),
+                                          str(params.get("reason") or
+                                              "operator cancel"))
+            return rec.to_dict()
+        elif op == "handoff":
+            rec = await fleet.handoff(str(params.get("assignment")),
+                                      str(params.get("account")),
+                                      str(params.get("reason") or
+                                          "operator handoff"))
+            return rec.to_dict()
+        elif op == "cooldown":
+            rec = await fleet.apply_cooldown(
+                str(params.get("scope_type")),
+                str(params.get("scope_id")),
+                str(params.get("reason") or "operator cooldown"),
+                params.get("duration_s"),
+            )
+            return rec.to_dict()
+        elif op == "cooldown_clear":
+            rec = await fleet.clear_cooldown(int(params.get("id")))
+            return rec.to_dict()
+        else:
+            raise ValueError(f"unknown fleet op {op!r}")
+        return event.__dict__ if hasattr(event, "__dict__") else {
+            "kind": str(event)}
 
     def _refresh_account_group(self, account: str, group: Optional[str]) -> None:
         """Propagate a membership change into the account manager's memory

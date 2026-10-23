@@ -724,6 +724,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         simulation=simulation_runner, credentials=credentials, database=database,
         credentials_svc=credential_service, cooldowns=cooldowns,
         sync_groups=sync_groups,
+        fleet=fleet,
         started_at=_time.time(),
     )
 
