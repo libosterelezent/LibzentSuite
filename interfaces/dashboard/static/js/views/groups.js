@@ -15,33 +15,34 @@
 
 routerAdd("/groups", "Fleet", async (container) => {
   const state = {alive: true};
-
-  container.append(el("div", {class: "view-hdr"},
+  /* child hosts ONLY: a late load() must never clear the ROUTER's
+     container (a newer view may own it — see router's mount fence);
+     every write goes through hdr/notice/host which the router's own
+     clear detaches harmlessly */
+  const hdr = el("div", {class: "view-hdr"},
     el("h1", {}, "Fleet"),
     el("p", {class: "dim"},
-      "Group-managed orchestration: members, work, cooldowns — and the why.")));
-
-  const host = el("div", {class: "grid grid-2"});
-  container.append(el("div", {class: "skel"}, el("div"), el("div"), el("div")));
+      "Group-managed orchestration: members, work, cooldowns — and the why."));
+  const notice = el("div", null);
+  const host = el("div", {class: "grid grid-2"},
+    el("div", {class: "skel"}, el("div"), el("div"), el("div")));
+  container.append(hdr, notice, host);
+  let loadSeq = 0;   // a stale in-flight snapshot never overwrites a newer one
 
   async function load() {
+    const seq = ++loadSeq;
     let groups;
     try {
       groups = await api("/api/fleet/groups");
     } catch (e) {
-      container.textContent = "";
-      container.append(el("div", {class: "view-hdr"},
-        el("h1", {}, "Fleet"),
-        el("p", {class: "dim"}, "Group-managed orchestration.")));
-      container.append(emptyState("Fleet unavailable", e.message));
+      if (!state.alive || seq !== loadSeq) return;
+      notice.textContent = "";
+      notice.append(emptyState("Fleet unavailable", e.message));
+      host.textContent = "";
       return;
     }
-    container.textContent = "";
-    container.append(el("div", {class: "view-hdr"},
-      el("h1", {}, "Fleet"),
-      el("p", {class: "dim"},
-        "Group-managed orchestration: members, work, cooldowns — and the why.")),
-      host);
+    if (!state.alive || seq !== loadSeq) return;
+    notice.textContent = "";
     host.textContent = "";
     if (!groups.length) {
       host.append(el("div", {class: "card"},
@@ -81,10 +82,14 @@ routerAdd("/groups", "Fleet", async (container) => {
 routerAdd("/groups/:name", "Fleet hub", async (container, params) => {
   const name = decodeURIComponent(params.name || "");
   const state = {alive: true, filter: "all"};
-
+  /* fatal-error host (load failures render HERE, never by clearing the
+     router's container — a newer view may own it) */
+  const fatal = el("div", null);
   container.append(el("div", {class: "view-hdr"},
     el("h1", {}, `Fleet — ${name}`),
-    el("p", {class: "dim"}, "Members, work, cooldowns, history — one group under management.")));
+    el("p", {class: "dim"}, "Members, work, cooldowns, history — one group under management.")),
+    fatal);
+  let loadSeq = 0;   // stale in-flight snapshots never overwrite newer ones
 
   const section = (title, hint, actions) => {
     const hdr = el("div", {class: "sec-hdr"}, el("span", {}, title));
@@ -312,16 +317,23 @@ routerAdd("/groups/:name", "Fleet hub", async (container, params) => {
   }
 
   async function load() {
+    const seq = ++loadSeq;
     try {
       data = await api("/api/fleet/group?group=" + encodeURIComponent(name));
     } catch (e) {
-      container.textContent = "";
-      container.append(el("div", {class: "view-hdr"},
-        el("h1", {}, `Fleet — ${name}`)),
-        emptyState("Group unavailable", e.message),
+      if (!state.alive || seq !== loadSeq) return;
+      data = null;
+      for (const sec of container.querySelectorAll(".section"))
+        sec.classList.add("hidden");
+      fatal.textContent = "";
+      fatal.append(emptyState("Group unavailable", e.message),
         el("a", {class: "btn btn-ghost btn-sm", href: "#/groups"}, "← fleet list"));
       return;
     }
+    if (!state.alive || seq !== loadSeq) return;
+    fatal.textContent = "";
+    for (const sec of container.querySelectorAll(".section"))
+      sec.classList.remove("hidden");
     renderOverview();
     renderMembers();
     renderQueue();

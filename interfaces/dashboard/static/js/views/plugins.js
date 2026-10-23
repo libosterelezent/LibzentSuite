@@ -293,22 +293,28 @@ async function pluginPageMount(container, params) {
   let pageId = params.pageId || "";
   const state = {alive: true};
   let unsubNav = null;
+  /* child host ONLY: after the navigation wait / page fetch, writes go
+     here — never by clearing the router's container (a newer route may
+     own it by then; the router's mount fence detaches this host) */
+  const holder = el("div", null,
+    el("div", {class: "skel"}, el("div"), el("div"), el("div")));
+  container.append(holder);
 
   /* default page: the plugin's first navigation entry. On a cold load the
      router mounts BEFORE boot's navigation fetch lands — wait for it (the
      skeleton covers the gap) instead of declaring the plugin pageless. */
   if (!pageId && !(storeGet("navigation") || []).length) {
-    container.append(el("div", {class: "skel"}, el("div"), el("div"), el("div")));
     await new Promise(resolve => {
       unsubNav = storeSubscribe(key => { if (key === "navigation") resolve(); });
       setTimeout(resolve, 8000);   // never hang the route forever
     });
   }
+  if (!state.alive) { if (unsubNav) unsubNav(); return () => {}; }
   if (!pageId) {
     const entry = (storeGet("navigation") || []).find(n => n.plugin === plugin);
     if (!entry) {
-      container.textContent = "";
-      container.append(emptyState("No dashboard pages",
+      holder.textContent = "";
+      holder.append(emptyState("No dashboard pages",
         `Plugin "${plugin}" registers no dashboard pages.`));
       if (unsubNav) unsubNav();
       return () => {};
@@ -316,14 +322,14 @@ async function pluginPageMount(container, params) {
     pageId = entry.page_id;
   }
 
-  container.textContent = "";
-  container.append(el("div", {class: "view-hdr"},
+  holder.textContent = "";
+  holder.append(el("div", {class: "view-hdr"},
     el("h1", {}, plugin),
     el("p", {class: "dim"}, `builder page · ${pageId}`),
   ));
   const host = el("div", null,
     el("div", {class: "skel"}, el("div"), el("div"), el("div"), el("div")));
-  container.append(host);
+  holder.append(host);
 
   try {
     const tree = await api("/api/dashboard-ui/page?plugin=" + encodeURIComponent(plugin) +

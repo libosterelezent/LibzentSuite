@@ -79,7 +79,7 @@ routerAdd("/activity", "Activity", async (container) => {
       (!state.taskAccount || t.account === state.taskAccount));
     bulkCancel.disabled = !active;
   };
-  storeSubscribe(key => { if (key === "tasks") paintBulkCancel(); });
+  state.unsubs.push(storeSubscribe(key => { if (key === "tasks") paintBulkCancel(); }));
   bulkCancel.onclick = async () => {
     if (bulkCancel.disabled) return;
     const ok = await confirmBox({title: "Cancel matching tasks",
