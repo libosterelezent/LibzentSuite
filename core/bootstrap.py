@@ -709,6 +709,22 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     bus.subscribe(AccountConnected, _on_account_event)
     bus.subscribe(AccountDisconnected, _on_account_event)
 
+    # rollout G (§9): the reconciler — boot pass + 30s loop; repairs
+    # crash leftovers and drift through the service's transition checks
+    from core.fleet import FleetReconciler
+
+    async def _fleet_account_exists(name: str) -> bool:
+        return await database.accounts.get(name) is not None
+
+    fleet_reconciler = FleetReconciler(
+        fleet,
+        account_exists=_fleet_account_exists,
+        group_exists=_fleet_group_exists,
+    )
+    await fleet_reconciler.reconcile()
+    fleet_reconciler.start()
+    cleanups.append(("fleet reconciler", fleet_reconciler.stop))
+
     if simulation_runner is None:
         try:
             from adapters.simulator import SimulationRunner

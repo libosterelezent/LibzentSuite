@@ -209,24 +209,7 @@ class FleetService:
         async with self._lock:
             member = self._require_member(account)
             group_name = member.group_name
-            # release live work: assigned returns to the queue for
-            # another member; running suspends (the in-flight drain
-            # wait is the scheduler's — rollout C/E wires it)
-            for rec in await self._repo.assignments(account=account):
-                if rec.status == AssignmentStatus.ASSIGNED:
-                    validate_assignment_transition(
-                        rec.status, AssignmentStatus.QUEUED)
-                    await self._repo.update_assignment(
-                        rec.id, status=AssignmentStatus.QUEUED, account=None)
-                elif rec.status == AssignmentStatus.RUNNING:
-                    validate_assignment_transition(
-                        rec.status, AssignmentStatus.SUSPENDED)
-                    await self._repo.update_assignment(
-                        rec.id, status=AssignmentStatus.SUSPENDED,
-                        stopped_at=self._now(),
-                        error="member leaving")
-                elif rec.status == AssignmentStatus.SUSPENDED:
-                    await self._repo.update_assignment(rec.id, account=None)
+            await self._release_live_work(account)
             validate_member_transition(member.eligibility,
                                        MemberEligibility.RETIRED, leaving=True)
             await self._repo.delete_member(account)
@@ -237,6 +220,52 @@ class FleetService:
             return await self._record("MemberLeft", group_name,
                                       f"{account} left (independent restored)",
                                       account=account)
+
+    async def _release_live_work(self, account: str) -> None:
+        """Return the account's live work to the group queue: assigned
+        goes back to the queue for another member; running suspends
+        (the in-flight drain wait is the scheduler's — rollout C/E).
+        Caller holds the command lock."""
+        for rec in await self._repo.assignments(account=account):
+            if rec.status == AssignmentStatus.ASSIGNED:
+                validate_assignment_transition(
+                    rec.status, AssignmentStatus.QUEUED)
+                await self._repo.update_assignment(
+                    rec.id, status=AssignmentStatus.QUEUED, account=None)
+            elif rec.status == AssignmentStatus.RUNNING:
+                validate_assignment_transition(
+                    rec.status, AssignmentStatus.SUSPENDED)
+                await self._repo.update_assignment(
+                    rec.id, status=AssignmentStatus.SUSPENDED,
+                    stopped_at=self._now(),
+                    error="member leaving")
+            elif rec.status == AssignmentStatus.SUSPENDED:
+                await self._repo.update_assignment(rec.id, account=None)
+
+    async def retire_member(self, account: str, reason: str) -> None:
+        """State-level leave for the RECONCILER (§9): same moves as
+        leave_group but WITHOUT the membership seams — the recovery
+        path repairs drift, it does not re-drive collaborators."""
+        async with self._lock:
+            member = self._require_member(account)
+            group_name = member.group_name
+            await self._release_live_work(account)
+            validate_member_transition(member.eligibility,
+                                       MemberEligibility.RETIRED, leaving=True)
+            await self._repo.delete_member(account)
+            await self._repo.bump_generation(group_name)
+            await self._reload()
+            await self._record("MemberRetired", group_name,
+                               f"recovery retired {account}: {reason}",
+                               account=account)
+
+    async def bump_group_generation(self, group_name: str) -> int:
+        """Bump the group's generation (the stale-dispatch fence). The
+        reconciler uses this to fence zombie-process dispatches."""
+        async with self._lock:
+            state = await self._repo.bump_generation(group_name)
+            self._groups[group_name] = state
+            return state.generation
 
     # ---------------------------------------------------------- group pause
 

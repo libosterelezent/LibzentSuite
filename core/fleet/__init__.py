@@ -41,6 +41,7 @@ from .observations import (
     OBS_SERVER_COOLDOWN,
 )
 from .capability import FleetTaskHandler, definitions_of, handler_of
+from .reconciler import FleetReconciler
 from .transitions import (
     ASSIGNMENT_TRANSITIONS,
     MEMBER_TRANSITIONS,
@@ -87,6 +88,8 @@ __all__ = [
     "FleetTaskHandler",
     "handler_of",
     "definitions_of",
+    # reconciler (§9)
+    "FleetReconciler",
     # transitions
     "MEMBER_TRANSITIONS",
     "ASSIGNMENT_TRANSITIONS",
