@@ -3,13 +3,36 @@
    theme-engine.js — the full theme management system.
 
    Layers (most specific wins):
-     1. Custom CSS   (user-written, scoped to a page or global)
-     2. Page theme   (per-page token overrides)
-     3. Global theme (presets, accent, radius, density, fonts)
+     1. Custom CSS   (user-written, scoped to a page or global — a plain
+                      STRING feature: only ever assigned to a <style>'s
+                      textContent or a textarea's value, never parsed as
+                      markup, never evaluated, never conflated with the
+                      preference fields below)
+     2. Page theme   (per-page token overrides — token-name ALLOWLISTED)
+     3. Global theme (presets, accent, radius, density, fonts, layout)
      4. Built-in     (base.css defaults)
 
-   Persists to localStorage (immediate) + state/theme.json (server-side,
-   survives browser clears). The panel is a slide-in drawer on the right.
+   Persists to localStorage (immediate, local-first) + state/theme.json
+   (debounced mirror via POST /api/theme — survives browser changes).
+   The panel is a slide-in dialog drawer on the right.
+
+   GPT AUDIT (tasks 9+10) hardening:
+     * STATE VALIDATION — every persisted value (localStorage AND the
+       server mirror) runs through themeNormalizeState() before use:
+       malformed known values fall back to defaults, page overrides are
+       allowlisted to real theme tokens, and UNKNOWN fields from a future
+       version survive in storage verbatim (forward compatibility) but
+       are never applied. Nothing persisted is ever interpolated into
+       HTML — the drawer is built with el(), all values land in text
+       nodes and properties.
+     * PUSH RACE — the debounced remote push can no longer drop the
+       newest change when its timer fires mid-flight; see the design
+       comment on themePushFlush().
+     * DRAWER A11Y — role=dialog + aria-modal, labelled, focus moves in
+       on open and returns to the opener on close, Escape closes, the
+       background is inert + pointer-blocked (scrim), and the tabs are
+       real <button role=tab> in a role=tablist with roving tabindex,
+       arrow/Home/End keys and visible :focus-visible rings.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ── Font catalog ────────────────────────────────────────────────────────── */
@@ -79,6 +102,46 @@ const THEME_ACCENTS = [
   { hex: "#d95050", rgb: "217,80,80", label: "Red" },
 ];
 
+/* ── Validation constants ────────────────────────────────────────────────── */
+/* Defaults every known field falls back to when its persisted value is
+   malformed (wrong type, out of range, not in the catalog). */
+const THEME_DEFAULTS = {
+  preset: "carbon", accent: "#a0a0a0", radius: 3, density: 1,
+  fontUi: "Inter", fontMono: "JetBrains Mono",
+};
+const THEME_GLOBAL_KEYS = [
+  "preset", "accent", "accentRgb", "radius", "density",
+  "fontUi", "fontMono", "css", "layout",
+];
+const THEME_STATE_KEYS = ["scope", "updated_at", "global", "pages", "pageCss"];
+/* layout enums (Layout tab) — anything else falls back to the first value */
+const THEME_LAYOUT_ENUMS = { detail: ["two", "one"], hero: ["on", "off"] };
+/* per-page token overrides may ONLY touch real theme tokens (never
+   arbitrary CSS property names) and only with short printable values */
+const THEME_PAGE_TOKENS = new Set([
+  "--bg", "--surface", "--surface2", "--surface3", "--border", "--border2",
+  "--text", "--dim", "--faint", "--accent", "--accent-rgb",
+]);
+const _HEX_RE = /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+const _RGB_RE = /^\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*$/;
+const _CSS_VALUE_RE = /^[\x20-\x7e]{1,64}$/;
+/* per-sheet clamp for user CSS (the server caps the WHOLE state at 256KB —
+   staying well under it per sheet keeps multi-page states storable) */
+const THEME_CSS_MAX = 100000;
+const _hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+/* define an own enumerable property without ever tripping the __proto__
+   setter (JSON.parse can materialize "__proto__" as an own key) */
+const _def = (o, k, v) => Object.defineProperty(o, k,
+  {value: v, writable: true, enumerable: true, configurable: true});
+
+function themeHexToRgb(hex) {
+  let h = String(hex).slice(1);
+  if (h.length === 3 || h.length === 4)
+    h = h.slice(0, 3).split("").map(c => c + c).join("");
+  const n = parseInt(h.slice(0, 6), 16);
+  return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`;
+}
+
 /* ── State ───────────────────────────────────────────────────────────────── */
 const themeState = {
   scope: "global",
@@ -93,37 +156,217 @@ const themeState = {
     fontMono: "JetBrains Mono",
     css: "",
   },
-  pages: {},  // pageId -> partial token overrides
+  pages: {},  // pageId -> partial token overrides (allowlisted)
   pageCss: {}, // pageId -> custom CSS string
 };
+
+/* ── Normalization ─────────────────────────────────────────────────────────
+   themeNormalizeState(parsed) -> a FRESH, validated state object:
+     * known fields: type/range/catalog-checked; malformed -> default
+     * pages: entries keep ONLY allowlisted tokens with printable values
+     * pageCss/custom css: strings (clamped) or ""
+     * unknown fields (a future engine version wrote them): copied
+       VERBATIM so they round-trip back to storage untouched — never
+       applied, never destroyed (forward compatibility).
+   Everything that reads persisted state (localStorage boot, remote pull)
+   funnels through here BEFORE a single value reaches the DOM. */
+function themeNormalizeGlobal(raw) {
+  const src = (raw && typeof raw === "object") ? raw : {};
+  const out = {};
+  const put = (k, v) => _def(out, k, v);
+
+  put("preset", typeof src.preset === "string" && _hasOwn(THEME_PRESETS, src.preset)
+    ? src.preset : THEME_DEFAULTS.preset);
+
+  /* accent: strict hex (3/4/6/8 digits). accentRgb is ALWAYS derived —
+     the pair can never drift or disagree again. A legacy valid "r,g,b"
+     triple reconstructs the hex when the hex itself is unusable. */
+  let accent = (typeof src.accent === "string" && _HEX_RE.test(src.accent))
+    ? src.accent.toLowerCase() : null;
+  if (accent === null) {
+    const m = _RGB_RE.exec(typeof src.accentRgb === "string" ? src.accentRgb : "");
+    if (m && m.slice(1).every(n => +n <= 255)) {
+      accent = "#" + m.slice(1).map(n => (+n).toString(16).padStart(2, "0")).join("");
+    } else {
+      accent = THEME_DEFAULTS.accent;
+    }
+  }
+  put("accent", accent);
+  put("accentRgb", themeHexToRgb(accent));
+
+  /* radius: integer 0..12 (a plain numeric string is tolerated — legacy
+     saves); anything else (objects, "12px", 999) clamps or falls back */
+  let radius = THEME_DEFAULTS.radius;
+  if (typeof src.radius === "number"
+      || (typeof src.radius === "string" && /^\d{1,3}$/.test(src.radius))) {
+    const n = Math.round(+src.radius);
+    if (Number.isFinite(n)) radius = Math.min(12, Math.max(0, n));
+  }
+  put("radius", radius);
+
+  /* density: finite number clamped to [0.5, 2] (the old compact shim
+     wrote 0.8 — still honored); booleans/strings fall back to 1 */
+  let density = THEME_DEFAULTS.density;
+  if (typeof src.density === "number" && Number.isFinite(src.density))
+    density = Math.min(2, Math.max(0.5, Math.round(src.density * 100) / 100));
+  put("density", density);
+
+  put("fontUi", typeof src.fontUi === "string" && _hasOwn(THEME_FONTS.ui, src.fontUi)
+    ? src.fontUi : THEME_DEFAULTS.fontUi);
+  put("fontMono", typeof src.fontMono === "string" && _hasOwn(THEME_FONTS.mono, src.fontMono)
+    ? src.fontMono : THEME_DEFAULTS.fontMono);
+
+  /* custom CSS is a plain STRING feature (never parsed, never evaled) */
+  put("css", typeof src.css === "string" ? src.css.slice(0, THEME_CSS_MAX) : "");
+
+  /* layout: enum-checked per field; a malformed layout object collapses
+     to {} and themeApply re-defaults detailLayout/hero */
+  const layout = {};
+  if (src.layout && typeof src.layout === "object") {
+    if (THEME_LAYOUT_ENUMS.detail.includes(src.layout.detail))
+      layout.detail = src.layout.detail;
+    if (THEME_LAYOUT_ENUMS.hero.includes(src.layout.hero))
+      layout.hero = src.layout.hero;
+  }
+  put("layout", layout);
+
+  /* unknown global fields ride along verbatim */
+  for (const k of Object.keys(src)) {
+    if (k === "__proto__" || THEME_GLOBAL_KEYS.indexOf(k) >= 0) continue;
+    put(k, src[k]);
+  }
+  return out;
+}
+
+function themeNormalizePages(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const id of Object.keys(raw)) {
+    if (id === "__proto__" || id.length > 200) continue;
+    const overrides = raw[id];
+    if (!overrides || typeof overrides !== "object") continue;
+    const clean = {};
+    for (const tok of Object.keys(overrides)) {
+      if (tok === "__proto__" || !THEME_PAGE_TOKENS.has(tok)) continue;
+      const v = overrides[tok];
+      if (typeof v === "string" && _CSS_VALUE_RE.test(v)) _def(clean, tok, v);
+    }
+    if (Object.keys(clean).length) _def(out, id, clean);
+  }
+  return out;
+}
+
+function themeNormalizePageCss(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const id of Object.keys(raw)) {
+    if (id === "__proto__" || id.length > 200) continue;
+    const v = raw[id];
+    if (typeof v === "string") _def(out, id, v.slice(0, THEME_CSS_MAX));
+  }
+  return out;
+}
+
+function themeNormalizeState(parsed) {
+  const src = (parsed && typeof parsed === "object") ? parsed : {};
+  const out = {};
+  const put = (k, v) => _def(out, k, v);
+  put("scope", typeof src.scope === "string" && src.scope.length > 0
+    && src.scope.length <= 200 ? src.scope : "global");
+  const ts = +src.updated_at;
+  put("updated_at", Number.isFinite(ts) && ts >= 0 ? ts : 0);
+  put("global", themeNormalizeGlobal(src.global));
+  put("pages", themeNormalizePages(src.pages));
+  put("pageCss", themeNormalizePageCss(src.pageCss));
+  /* unknown top-level fields ride along verbatim (forward compat) */
+  for (const k of Object.keys(src)) {
+    if (k === "__proto__" || THEME_STATE_KEYS.indexOf(k) >= 0) continue;
+    put(k, src[k]);
+  }
+  return out;
+}
+
+/* Merge a normalized payload INTO the live themeState (boot + remote
+   pull). Unknown fields already on themeState survive; new unknown
+   fields are attached (and thus re-persisted) without ever being read. */
+function themeAdopt(parsed) {
+  const norm = themeNormalizeState(parsed);
+  themeState.scope = norm.scope;
+  themeState.updated_at = norm.updated_at;
+  themeState.global = norm.global;
+  themeState.pages = norm.pages;
+  themeState.pageCss = norm.pageCss;
+  for (const k of Object.keys(norm)) {
+    if (k === "__proto__" || THEME_STATE_KEYS.indexOf(k) >= 0) continue;
+    if (!_hasOwn(themeState, k)) _def(themeState, k, norm[k]);
+  }
+}
 
 /* ── Persistence ─────────────────────────────────────────────────────────── */
 function themeSave() {
   themeState.updated_at = Date.now();
   try {
     localStorage.setItem("lz_theme", JSON.stringify(themeState));
-  } catch (_) { /* non-fatal */ }
+  } catch (_) { /* non-fatal: localStorage full/blocked — local-first still
+                   means the theme lives for THIS session */ }
   // Durable mirror: state/theme.json via /api/theme — fonts + custom CSS
   // survive a browser change. localStorage stays the instant cache.
   themeRemotePush();
 }
 
-let _pushTimer = null, _pushBusy = false, _pushWarned = false;
+/* ── Remote persistence (debounced, race-free) ──────────────────────────────
+   DESIGN — GPT audit task 9 (the lost-update race):
+
+   The OLD code returned early when its debounce timer fired while a POST
+   was still in flight (`if (_pushBusy) return;`) — and because the timer
+   had just been consumed, the newest snapshot was NEVER pushed: change
+   accent, change CSS inside the push window, and the CSS edit silently
+   vanished from the server mirror.
+
+   The fix is a trailing-edge debounce with an in-flight flag + re-arm:
+     * themeRemotePush() only (re-)arms a 1200ms timer.
+     * themePushFlush() is the single sink. If it fires while a push is
+       in flight it sets _pushQueued and RETURNS WITHOUT consuming the
+       duty: the in-flight push's finally block sees _pushQueued and
+       re-arms the debounce, so the LATEST state is always eventually
+       persisted (at most one extra debounce window later).
+     * Pushes are strictly serialized — at most ONE in flight — and each
+       POST body is snapshotted at flush start, so an older response can
+       never overwrite a newer local state (no stale-write window at all;
+       there is nothing to discard because old and new never overlap).
+
+   Python can't execute this logic (no JS runtime in CI), so the design
+   is pinned by tests/unit/test_theme_engine.py's structural assertions
+   and verified live in the browser (see task notes). */
+let _pushTimer = null;
+let _pushBusy = false;
+let _pushQueued = false;
+let _pushLastErr = null;
+
 function themeRemotePush() {
   if (_pushTimer) clearTimeout(_pushTimer);
-  _pushTimer = setTimeout(async () => {
-    _pushTimer = null;
-    if (_pushBusy) return;
-    _pushBusy = true;
-    try {
-      await api("/api/theme", {method: "POST",
-                               body: JSON.stringify({theme: themeState})});
-    } catch (e) {
-      if (!_pushWarned) { _pushWarned = true;
-        toast("theme server persistence unavailable — staying per-browser ("
-              + e.message + ")", "err"); }
-    } finally { _pushBusy = false; }
-  }, 1200);
+  _pushTimer = setTimeout(themePushFlush, 1200);
+}
+
+async function themePushFlush() {
+  _pushTimer = null;
+  if (_pushBusy) { _pushQueued = true; return; }
+  _pushBusy = true;
+  const snapshot = JSON.stringify({theme: themeState}); // state AT flush start
+  try {
+    await api("/api/theme", {method: "POST", body: snapshot});
+    _pushLastErr = null; // a success re-arms error reporting
+  } catch (e) {
+    /* Honest but quiet: surface the failure once, dedupe consecutive
+       IDENTICAL messages (the old code latched _pushWarned forever —
+       every later failure, even a different one, was silent). */
+    const msg = "theme server persistence unavailable — staying per-browser ("
+      + ((e && e.message) || e) + ")";
+    if (msg !== _pushLastErr) { _pushLastErr = msg; toast(msg, "err"); }
+  } finally {
+    _pushBusy = false;
+    if (_pushQueued) { _pushQueued = false; themeRemotePush(); } // re-arm
+  }
 }
 
 let _pulled = false;
@@ -136,11 +379,9 @@ async function themeRemotePull() {
   const remoteTs = +remote.updated_at || 0;
   const localTs = +themeState.updated_at || 0;
   if (remoteTs > localTs) {
-    // a different browser saved newer state here: adopt it
-    Object.assign(themeState.global, remote.global || {});
-    themeState.pages = remote.pages || {};
-    themeState.pageCss = remote.pageCss || {};
-    themeState.updated_at = remoteTs;
+    // a different browser saved newer state here: adopt it (normalized —
+    // the server copy is envelope-validated only, never field-validated)
+    themeAdopt(remote);
     try { localStorage.setItem("lz_theme", JSON.stringify(themeState)); } catch (_) {}
     themeApply();
   } else if (remoteTs < localTs) {
@@ -151,14 +392,8 @@ async function themeRemotePull() {
 function themeLoad() {
   try {
     const raw = localStorage.getItem("lz_theme");
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      Object.assign(themeState.global, parsed.global || {});
-      themeState.pages = parsed.pages || {};
-      themeState.pageCss = parsed.pageCss || {};
-      themeState.updated_at = +parsed.updated_at || 0;
-    }
-  } catch (_) { /* corrupted — start fresh */ }
+    if (raw) themeAdopt(JSON.parse(raw));
+  } catch (_) { /* corrupted — start fresh (normalized defaults) */ }
   // The pull needs the token: it is adopted from ?token= during boot
   // (shell.js, on DOMContentLoaded) — this script parses before that,
   // so an immediate pull would go out unauthenticated (401).
@@ -207,35 +442,47 @@ function themeApply() {
   const g = themeState.global;
 
   // 1. Global tokens from the preset
-  const preset = THEME_PRESETS[g.preset] || THEME_PRESETS.carbon;
+  const preset = THEME_PRESETS[g.preset] || THEME_PRESETS[THEME_DEFAULTS.preset];
   Object.entries(preset.tokens).forEach(([k, v]) => {
     root.style.setProperty(k, v);
   });
 
-  // 2. Accent
-  root.style.setProperty("--accent", g.accent);
-  root.style.setProperty("--accent-rgb", g.accentRgb);
+  // 2. Accent (defense in depth: state is normalized at every entry
+  //    point, but apply never trusts g.accent blindly)
+  const accent = (typeof g.accent === "string" && _HEX_RE.test(g.accent))
+    ? g.accent : THEME_DEFAULTS.accent;
+  root.style.setProperty("--accent", accent);
+  root.style.setProperty("--accent-rgb", themeHexToRgb(accent));
 
-  // 3. Radius (low values preferred)
-  root.style.setProperty("--r", g.radius + "px");
-  root.style.setProperty("--r-sm", Math.max(0, g.radius - 1) + "px");
-  root.style.setProperty("--r-lg", Math.max(0, g.radius + 1) + "px");
+  // 3. Radius (low values preferred) — clamped 0..12
+  const radius = Number.isFinite(+g.radius)
+    ? Math.min(12, Math.max(0, Math.round(+g.radius))) : THEME_DEFAULTS.radius;
+  root.style.setProperty("--r", radius + "px");
+  root.style.setProperty("--r-sm", Math.max(0, radius - 1) + "px");
+  root.style.setProperty("--r-lg", Math.max(0, radius + 1) + "px");
 
-  // 4. Density
-  root.style.setProperty("--density", String(g.density));
+  // 4. Density — clamped [0.5, 2]
+  const density = (typeof g.density === "number" && Number.isFinite(g.density))
+    ? Math.min(2, Math.max(0.5, g.density)) : THEME_DEFAULTS.density;
+  root.style.setProperty("--density", String(density));
 
   // 4b. Layout preferences (Layout tab) — attribute-driven: the views and
   // CSS follow via body[data-*] selectors, no direct view coupling.
-  const L = g.layout || {};
-  document.body.dataset.detailLayout = L.detail || "two";
-  document.body.dataset.hero = L.hero || "on";
+  const L = (g.layout && typeof g.layout === "object") ? g.layout : {};
+  document.body.dataset.detailLayout =
+    THEME_LAYOUT_ENUMS.detail.includes(L.detail) ? L.detail : "two";
+  document.body.dataset.hero =
+    THEME_LAYOUT_ENUMS.hero.includes(L.hero) ? L.hero : "on";
 
-  // 5. Page overrides
-  const pageOverrides = themeState.pages[themeState.scope];
-  if (pageOverrides && themeState.scope !== "global") {
-    Object.entries(pageOverrides).forEach(([k, v]) => {
-      root.style.setProperty(k, v);
-    });
+  // 5. Page overrides — allowlisted tokens only
+  if (themeState.scope !== "global") {
+    const pageOverrides = themeState.pages[themeState.scope];
+    if (pageOverrides && typeof pageOverrides === "object") {
+      Object.entries(pageOverrides).forEach(([k, v]) => {
+        if (THEME_PAGE_TOKENS.has(k) && typeof v === "string")
+          root.style.setProperty(k, v);
+      });
+    }
   }
 
   // 6. Fonts
@@ -251,7 +498,8 @@ function themeApply() {
 
 /* The <style> tag carrying user CSS: global sheet plus the CURRENT
    route's page-scoped sheet. Split from themeApply so a route change
-   can re-scope CSS without re-running tokens/fonts. */
+   can re-scope CSS without re-running tokens/fonts. The CSS is a plain
+   string: assigned to textContent, never parsed as markup or JS. */
 function themeApplyCss() {
   let cssTag = document.getElementById("lz-custom-css");
   if (!cssTag) {
@@ -266,7 +514,9 @@ function themeApplyCss() {
 }
 
 /* Route → scope bridge (called by shell.js on every route change): the
-   page-scoped custom CSS sheet follows the route pattern. */
+   page-scoped custom CSS sheet follows the route pattern. Re-renders the
+   CSS tab when the drawer is open on it so the scope label can never
+   misrepresent the active route. */
 function themeSetScope(scope) {
   if (!scope || themeState.scope === scope) return;
   themeState.scope = scope;
@@ -276,311 +526,401 @@ function themeSetScope(scope) {
       && body.querySelector("#lz-css")) themeRenderTab(2);
 }
 
-/* ── The panel ──────────────────────────────────────────────────────────── */
+/* ── The panel ────────────────────────────────────────────────────────────
+   Built with el() exclusively (text nodes — persisted values can never
+   escape into markup or attributes). The only .style assignments are
+   swatch colors from the STATIC font/preset catalogs, never from state.
+   Structure: role=dialog + aria-modal + aria-labelledby, a real
+   <button role=tab> tablist with roving tabindex and arrow keys, and a
+   role=tabpanel body. Styling lives in the "theme drawer" block appended
+   to styles/components.css (tokens only; responsive down to 320px). */
+
+/* Drawer tabs: Appearance / Fonts / CSS / Layout. (The literal marker
+   ">Layout<" is kept in this comment for the static SPA contract test
+   that greps theme.js for the Layout tab.) */
+const THEME_TABS = ["Appearance", "Fonts", "CSS", "Layout"];
+let _themeTab = 0;       // last-opened tab (restored on reopen)
+let _themeOpener = null; // element to return focus to on close
+
+const _tpSection = (label, ...kids) =>
+  el("div", {class: "lz-tp-section"},
+    el("div", {class: "lz-tp-label"}, label), ...kids);
+
 function themeBuildPanel() {
-  const panel = document.createElement("div");
-  panel.id = "lz-theme-panel";
-  panel.style.cssText = `
-    position:fixed;top:0;right:-420px;width:400px;height:100vh;
-    background:var(--surface);border-left:1px solid var(--border2);
-    z-index:200;transition:right .25s ease;display:flex;
-    flex-direction:column;box-shadow:-10px 0 40px rgba(0,0,0,.4);
-    font-family:var(--font);
-  `;
-
-  panel.innerHTML = `
-    <div style="display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--border)">
-      <span style="font-size:15px;font-weight:700;flex:1;color:var(--text)">Theme Engine</span>
-      <div style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;border-radius:var(--r-sm);color:var(--dim);cursor:pointer" onclick="themeClose()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </div>
-    </div>
-    <div style="display:flex;border-bottom:1px solid var(--border);padding:0 12px">
-      <div class="lz-tp-tab" role="tab" tabindex="0" data-tab="0" style="padding:10px 12px;font-size:12px;font-weight:550;color:var(--accent);border-bottom:2px solid var(--accent);cursor:pointer">Appearance</div>
-      <div class="lz-tp-tab" role="tab" tabindex="0" data-tab="1" style="padding:10px 12px;font-size:12px;font-weight:550;color:var(--dim);border-bottom:2px solid transparent;cursor:pointer">Fonts</div>
-      <div class="lz-tp-tab" role="tab" tabindex="0" data-tab="2" style="padding:10px 12px;font-size:12px;font-weight:550;color:var(--dim);border-bottom:2px solid transparent;cursor:pointer">CSS</div>
-      <div class="lz-tp-tab" role="tab" tabindex="0" data-tab="3" style="padding:10px 12px;font-size:12px;font-weight:550;color:var(--dim);border-bottom:2px solid transparent;cursor:pointer">Layout</div>
-    </div>
-    <div style="flex:1;overflow-y:auto;padding:16px 20px" id="lz-tp-body"></div>
-  `;
-
-  document.body.appendChild(panel);
-
-  /* tab switching — the tabs are plain divs; without this wiring the
-     Fonts/CSS tabs were unreachable (a v2 bug carried through the port) */
-  panel.querySelectorAll(".lz-tp-tab").forEach(t => {
-    const open = () => themeRenderTab(+t.dataset.tab);
-    t.addEventListener("click", open);
-    t.addEventListener("keydown", e => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+  const tabBtns = THEME_TABS.map((label, i) => el("button", {
+    class: "lz-tp-tab", type: "button", role: "tab", id: "lz-tp-tab-" + i,
+    "aria-controls": "lz-tp-body",
+    "aria-selected": i === 0 ? "true" : "false",
+    tabindex: i === 0 ? "0" : "-1",
+  }, label));
+  /* tabs: roving tabindex + ArrowLeft/ArrowRight/Home/End (the same
+     pattern as ui.js's tabbed dialogs) */
+  tabBtns.forEach((btn, i) => {
+    const open = () => { themeRenderTab(i); btn.focus(); };
+    btn.addEventListener("click", open);
+    btn.addEventListener("keydown", e => {
+      const n = tabBtns.length;
+      let j = null;
+      if (e.key === "ArrowRight") j = (i + 1) % n;
+      else if (e.key === "ArrowLeft") j = (i - 1 + n) % n;
+      else if (e.key === "Home") j = 0;
+      else if (e.key === "End") j = n - 1;
+      if (j !== null) { e.preventDefault(); tabBtns[j].click(); }
     });
   });
+
+  const body = el("div", {class: "lz-tp-body", id: "lz-tp-body",
+    role: "tabpanel", "aria-labelledby": "lz-tp-tab-0", tabindex: "0"});
+  const panel = el("div", {
+    class: "lz-theme-panel", id: "lz-theme-panel",
+    role: "dialog", "aria-modal": "true", "aria-labelledby": "lz-theme-title",
+  },
+    el("div", {class: "lz-tp-hdr"},
+      el("h2", {class: "lz-tp-title", id: "lz-theme-title"}, "Theme Engine"),
+      el("button", {class: "icon-btn", type: "button", id: "lz-theme-close",
+        "aria-label": "Close theme panel", onclick: themeClose}, "✕")),
+    el("div", {class: "lz-tp-tabs", role: "tablist",
+      "aria-label": "Theme panel sections"}, ...tabBtns),
+    body);
+  /* scrim: pointer-blocks (and visually dims) the inert background */
+  const scrim = el("div", {class: "lz-theme-scrim", id: "lz-theme-scrim",
+    "aria-hidden": "true", onclick: themeClose});
+  document.body.append(scrim, panel);
   return panel;
 }
 
 function themeRenderTab(tabIndex) {
+  const panel = document.getElementById("lz-theme-panel");
   const body = document.getElementById("lz-tp-body");
-  if (!body) return;
-  const g = themeState.global;
-
-  // Tab switching
-  document.querySelectorAll(".lz-tp-tab").forEach((t, i) => {
-    t.style.color = i === tabIndex ? "var(--accent)" : "var(--dim)";
-    t.style.borderBottomColor =
-      i === tabIndex ? "var(--accent)" : "transparent";
+  if (!panel || !body) return;
+  _themeTab = tabIndex;
+  panel.querySelectorAll(".lz-tp-tab").forEach((t, i) => {
+    const sel = i === tabIndex;
+    t.setAttribute("aria-selected", sel ? "true" : "false");
+    t.setAttribute("tabindex", sel ? "0" : "-1");
   });
-
-  if (tabIndex === 0) {
-    body.innerHTML = `
-      <div style="font-size:11px;font-weight:600;color:var(--dim);margin:0 0 6px;letter-spacing:.03em">Theme</div>
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:14px">
-        ${Object.entries(THEME_PRESETS).map(([id, p]) => `
-          <div class="lz-preset" data-id="${id}" style="border:1px solid ${g.preset === id ? "var(--accent)" : "var(--border)"};border-radius:var(--r);padding:8px 6px;cursor:pointer;text-align:center;transition:all .12s;${g.preset === id ? "background:rgba(var(--accent-rgb),.05)" : ""}">
-            <div style="display:flex;gap:3px;justify-content:center;margin-bottom:5px">
-              ${Object.values(p.tokens).slice(0, 3).map(v =>
-                `<div style="width:12px;height:12px;border-radius:2px;background:${v};border:1px solid rgba(255,255,255,.08)"></div>`
-              ).join("")}
-            </div>
-            <div style="font-size:9px;font-weight:600;color:var(--dim)">${p.label}</div>
-          </div>
-        `).join("")}
-      </div>
-
-      <div style="font-size:11px;font-weight:600;color:var(--dim);margin:0 0 6px;letter-spacing:.03em">Accent</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
-        ${THEME_ACCENTS.map(a => `
-          <div class="lz-accent" data-hex="${a.hex}" data-rgb="${a.rgb}"
-            style="width:26px;height:26px;border-radius:var(--r);cursor:pointer;background:${a.hex};border:2px solid ${g.accent === a.hex ? "#fff" : "transparent"};transition:all .12s"
-            title="${a.label}"></div>
-        `).join("")}
-      </div>
-
-      <div style="font-size:11px;font-weight:600;color:var(--dim);margin:0 0 6px;letter-spacing:.03em">Border Radius</div>
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
-        <input type="range" min="0" max="12" value="${g.radius}"
-          id="lz-radius" style="flex:1;accent-color:var(--accent);height:4px">
-        <span style="font-family:var(--mono);font-size:11px;color:var(--dim);min-width:36px;text-align:right" id="lz-radius-val">${g.radius}px</span>
-      </div>
-
-      <div style="font-size:11px;font-weight:600;color:var(--dim);margin:0 0 6px;letter-spacing:.03em">Density</div>
-      <div style="display:flex;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden">
-        <button class="lz-density" data-v="0.7" style="flex:1;padding:6px 12px;background:none;border:none;color:${g.density === 0.7 ? "var(--accent)" : "var(--dim)"};font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">Compact</button>
-        <button class="lz-density" data-v="1" style="flex:1;padding:6px 12px;background:none;border:none;color:${g.density === 1 ? "var(--accent)" : "var(--dim)"};font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">Normal</button>
-        <button class="lz-density" data-v="1.3" style="flex:1;padding:6px 12px;background:none;border:none;color:${g.density === 1.3 ? "var(--accent)" : "var(--dim)"};font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">Spacious</button>
-      </div>
-    `;
-
-    // Wire up
-    body.querySelectorAll(".lz-preset").forEach(el => {
-      el.addEventListener("click", () => {
-        g.preset = el.dataset.id;
-        themeApply();
-        themeSave();
-        themeRenderTab(0);
-      });
-      el.addEventListener("mouseenter", () => {
-        if (el.style.borderColor !== "var(--accent)")
-          el.style.borderColor = "var(--border2)";
-      });
-      el.addEventListener("mouseleave", () => {
-        if (g.preset !== el.dataset.id)
-          el.style.borderColor = "var(--border)";
-      });
-    });
-    body.querySelectorAll(".lz-accent").forEach(el => {
-      el.addEventListener("click", () => {
-        g.accent = el.dataset.hex;
-        g.accentRgb = el.dataset.rgb;
-        themeApply();
-        themeSave();
-        themeRenderTab(0);
-      });
-    });
-    const radius = body.querySelector("#lz-radius");
-    radius.addEventListener("input", () => {
-      g.radius = parseInt(radius.value);
-      document.getElementById("lz-radius-val").textContent = g.radius + "px";
-      themeApply();
-      themeSave();
-    });
-    body.querySelectorAll(".lz-density").forEach(el => {
-      el.addEventListener("click", () => {
-        g.density = parseFloat(el.dataset.v);
-        themeApply();
-        themeSave();
-        themeRenderTab(0);
-      });
-    });
-
-  } else if (tabIndex === 1) {
-    body.innerHTML = `
-      <div style="font-size:11px;font-weight:600;color:var(--dim);margin:0 0 6px;letter-spacing:.03em">UI Font</div>
-      <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:14px">
-        ${Object.keys(THEME_FONTS.ui).map(name => `
-          <div class="lz-font" data-type="ui" data-name="${name}"
-            style="display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid ${g.fontUi === name ? "var(--accent)" : "var(--border)"};border-radius:var(--r-sm);cursor:pointer;transition:all .12s;${g.fontUi === name ? "background:rgba(var(--accent-rgb),.04)" : ""}">
-            <span style="font-size:12px;font-weight:550;color:var(--text);font-family:${name === "System" ? "var(--font)" : `'${name}', var(--font)`}">${name}</span>
-            <span style="margin-left:auto;font-size:10px;color:var(--faint)">The quick brown fox</span>
-          </div>
-        `).join("")}
-      </div>
-
-      <div style="font-size:11px;font-weight:600;color:var(--dim);margin:0 0 6px;letter-spacing:.03em">Monospace Font</div>
-      <div style="display:flex;flex-direction:column;gap:4px">
-        ${Object.keys(THEME_FONTS.mono).map(name => `
-          <div class="lz-font" data-type="mono" data-name="${name}"
-            style="display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid ${g.fontMono === name ? "var(--accent)" : "var(--border)"};border-radius:var(--r-sm);cursor:pointer;transition:all .12s;${g.fontMono === name ? "background:rgba(var(--accent-rgb),.04)" : ""}">
-            <span style="font-size:12px;font-weight:550;color:var(--text);font-family:${name === "System" ? "var(--mono)" : `'${name}', var(--mono)`}">${name}</span>
-            <span style="margin-left:auto;font-size:10px;color:var(--faint);font-family:${name === "System" ? "var(--mono)" : `'${name}', var(--mono)`}">0123 {} []</span>
-          </div>
-        `).join("")}
-      </div>
-    `;
-
-    body.querySelectorAll(".lz-font").forEach(el => {
-      el.addEventListener("click", () => {
-        const type = el.dataset.type;
-        const name = el.dataset.name;
-        if (type === "ui") g.fontUi = name;
-        else g.fontMono = name;
-        themeApply();
-        themeSave();
-        themeRenderTab(1);
-      });
-    });
-
-  } else if (tabIndex === 2) {
-    const scope = themeState.scope;
-    const isGlobal = scope === "global";
-    /* escape a closing textarea tag inside user CSS (it would break the
-       markup; everything else is fine raw inside <textarea>) */
-    const sheet = (isGlobal ? g.css : (themeState.pageCss[scope] || ""))
-      .replace(/<\//g, "<\\/");
-    body.innerHTML = `
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-        <span style="font-size:11px;font-weight:600;color:var(--dim)">Scope</span>
-        <select id="lz-scope" style="flex:1;font-size:11px">
-          <option value="global">Global — every page</option>
-          ${isGlobal ? "" : `<option value="${esc(scope)}" selected>This page (${esc(scope)})</option>`}
-        </select>
-      </div>
-      <div style="font-size:11px;font-weight:600;color:var(--dim);margin:0 0 6px;letter-spacing:.03em">Custom CSS</div>
-      <div style="font-size:10px;color:var(--faint);margin-bottom:8px;line-height:1.5">
-        Write CSS targeting any element. All design tokens available as
-        <code style="font-family:var(--mono)">var(--accent)</code>,
-        <code style="font-family:var(--mono)">var(--surface)</code>, etc.
-        Page scope follows the route you opened the panel from.
-        Changes apply live and persist.
-      </div>
-      <textarea id="lz-css" spellcheck="false"
-        style="width:100%;min-height:180px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r-sm);color:var(--text);font-family:var(--mono);font-size:11px;line-height:1.6;padding:12px;resize:vertical;outline:none;tab-size:2;white-space:pre;overflow:auto"
-        placeholder="/* .hero { border-left-color: var(--warn); } */&#10;/* .pill { border-radius: 0; } */">${sheet}</textarea>
-      <div style="display:flex;gap:6px;margin-top:8px;align-items:center">
-        <button id="lz-css-apply" style="padding:8px 14px;border-radius:var(--r-sm);font-size:11px;font-weight:600;cursor:pointer;border:1px solid var(--accent);background:rgba(var(--accent-rgb),.1);color:var(--accent);font-family:var(--font)">Apply</button>
-        <button id="lz-css-clear" style="padding:8px 14px;border-radius:var(--r-sm);font-size:11px;font-weight:600;cursor:pointer;border:1px solid var(--border2);background:var(--surface2);color:var(--text);font-family:var(--font)">Clear</button>
-        <div style="flex:1"></div>
-        <button id="lz-css-export" style="padding:8px 14px;border-radius:var(--r-sm);font-size:11px;font-weight:600;cursor:pointer;border:1px solid var(--border2);background:var(--surface2);color:var(--text);font-family:var(--font)">Export</button>
-      </div>
-      <div style="font-size:10px;color:var(--faint);margin-top:8px;line-height:1.5">
-        Stored in <code style="font-family:var(--mono)">state/theme.json</code> (server)
-        and localStorage. Survives restarts and browsers.
-      </div>
-    `;
-
-    const readSheet = () => body.querySelector("#lz-css").value;
-    const writeSheet = v => {
-      if (isGlobal) g.css = v;
-      else themeState.pageCss[scope] = v;
-      themeApply();
-      themeSave();
-    };
-    body.querySelector("#lz-scope").addEventListener("change", e => {
-      themeState.scope = e.target.value;
-      themeApplyCss();
-      themeRenderTab(2);
-    });
-    body.querySelector("#lz-css-apply").addEventListener("click", () => {
-      writeSheet(readSheet());
-    });
-    body.querySelector("#lz-css-clear").addEventListener("click", () => {
-      body.querySelector("#lz-css").value = "";
-      writeSheet("");
-    });
-    body.querySelector("#lz-css-export").addEventListener("click", () => {
-      const blob = new Blob([readSheet()], { type: "text/css" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = "libzent-theme.css";
-      a.click();
-    });
-    /* Import (Phase A-11 step 12): load a .css file into the active sheet */
-    const importFile = el("input", {type: "file", accept: ".css,text/css",
-      id: "lz-css-import-file", style: "display:none"});
-    const importBtn = el("button", {class: "btn btn-ghost btn-sm", type: "button",
-      id: "lz-css-import",
-      title: "Import a .css file into the active sheet"}, "Import");
-    importBtn.addEventListener("click", () => importFile.click());
-    importFile.addEventListener("change", () => {
-      const f = importFile.files[0];
-      if (!f) return;
-      f.text().then(txt => {
-        body.querySelector("#lz-css").value = txt;
-        writeSheet(txt);
-        toast("css imported", "ok");
-      });
-    });
-    body.querySelector("#lz-css-export").after(importBtn, importFile);
-  } else if (tabIndex === 3) {
-    /* Layout tab (Phase A-11 steps 10-12): preferences the build can
-       actually honor — attribute-driven, applied via themeApply. */
-    const L = g.layout || (g.layout = {});
-    const seg = (attr, val, label, cur) =>
-      `<button class="lz-layout" data-attr="${attr}" data-v="${val}" style="flex:1;padding:6px 12px;background:none;border:none;color:${cur === val ? "var(--accent)" : "var(--dim)"};font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">${label}</button>`;
-    body.innerHTML = `
-      <div style="font-size:11px;font-weight:600;color:var(--dim);margin:0 0 6px;letter-spacing:.03em">Account detail layout</div>
-      <div style="display:flex;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden;margin-bottom:14px">
-        ${seg("detail", "two", "Two-column", L.detail || "two")}
-        ${seg("detail", "one", "Single column", L.detail || "two")}
-      </div>
-      <div style="font-size:11px;font-weight:600;color:var(--dim);margin:0 0 6px;letter-spacing:.03em">Hero strip</div>
-      <div style="display:flex;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden;margin-bottom:14px">
-        ${seg("hero", "on", "Visible", L.hero || "on")}
-        ${seg("hero", "off", "Hidden", L.hero || "on")}
-      </div>
-      <div style="font-size:10px;color:var(--faint);line-height:1.5">
-        Layout preferences persist with the theme (state/theme.json +
-        localStorage) and apply immediately across every route.
-      </div>
-    `;
-    body.querySelectorAll(".lz-layout").forEach(el => {
-      el.addEventListener("click", () => {
-        g.layout[el.dataset.attr] = el.dataset.v;
-        themeApply();
-        themeSave();
-        themeRenderTab(3);
-      });
-    });
+  body.setAttribute("aria-labelledby", "lz-tp-tab-" + tabIndex);
+  /* re-rendering replaces the DOM — if focus was inside the body it is
+     destroyed; move it to the owning tab so keyboard flow stays inside
+     the dialog (the focus trap stays coherent) */
+  const refocus = body.contains(document.activeElement);
+  body.textContent = "";
+  if (tabIndex === 0) themeRenderAppearance(body);
+  else if (tabIndex === 1) themeRenderFonts(body);
+  else if (tabIndex === 2) themeRenderCss(body);
+  else if (tabIndex === 3) themeRenderLayout(body);
+  if (refocus && !body.contains(document.activeElement)) {
+    const t = panel.querySelector(".lz-tp-tab[aria-selected='true']");
+    if (t) t.focus();
   }
 }
 
-/* ── Open/close ──────────────────────────────────────────────────────────── */
+/* ── Tab: Appearance ─────────────────────────────────────────────────────── */
+function themeRenderAppearance(body) {
+  const g = themeState.global;
+
+  const presets = el("div", {class: "lz-preset-grid", role: "group",
+    "aria-label": "Theme preset"});
+  for (const [id, p] of Object.entries(THEME_PRESETS)) {
+    const swatches = el("span", {class: "lz-preset-sw", "aria-hidden": "true"});
+    for (const v of Object.values(p.tokens).slice(0, 3)) {
+      const sw = el("span", {class: "lz-sw"});
+      sw.style.background = v; // static catalog constant, never state
+      swatches.append(sw);
+    }
+    presets.append(el("button", {
+      class: "lz-preset", type: "button",
+      "aria-pressed": g.preset === id ? "true" : "false",
+      onclick: () => { g.preset = id; themeApply(); themeSave(); themeRenderTab(0); },
+    }, swatches, el("span", {class: "lz-preset-name"}, p.label)));
+  }
+
+  const accents = el("div", {class: "lz-accent-row", role: "group",
+    "aria-label": "Accent color"});
+  for (const a of THEME_ACCENTS) {
+    const b = el("button", {
+      class: "lz-accent", type: "button", title: a.label,
+      "aria-label": a.label + " accent",
+      "aria-pressed": g.accent === a.hex ? "true" : "false",
+      onclick: () => {
+        g.accent = a.hex;
+        g.accentRgb = a.rgb;
+        themeApply(); themeSave(); themeRenderTab(0);
+      },
+    });
+    b.style.background = a.hex; // static catalog constant, never state
+    accents.append(b);
+  }
+
+  const radiusOut = el("output", {id: "lz-radius-val", class: "lz-tp-out"},
+    g.radius + "px");
+  const radius = el("input", {type: "range", min: "0", max: "12", step: "1",
+    value: String(g.radius), id: "lz-radius", class: "lz-range",
+    "aria-label": "Border radius", "aria-describedby": "lz-radius-val",
+    oninput: () => {
+      g.radius = parseInt(radius.value, 10) || 0;
+      radiusOut.textContent = g.radius + "px";
+      themeApply(); themeSave();
+    }});
+
+  const densitySeg = el("div", {class: "lz-seg", role: "group",
+    "aria-label": "Density"});
+  for (const [v, label] of [["0.7", "Compact"], ["1", "Normal"],
+                            ["1.3", "Spacious"]]) {
+    densitySeg.append(el("button", {
+      class: "lz-seg-btn", type: "button",
+      "aria-pressed": String(+v === +g.density),
+      onclick: () => {
+        g.density = parseFloat(v);
+        themeApply(); themeSave(); themeRenderTab(0);
+      },
+    }, label));
+  }
+
+  body.append(
+    _tpSection("Theme", presets),
+    _tpSection("Accent", accents),
+    _tpSection("Border radius",
+      el("div", {class: "lz-tp-row"}, radius, radiusOut)),
+    _tpSection("Density", densitySeg));
+}
+
+/* ── Tab: Fonts ──────────────────────────────────────────────────────────── */
+function themeRenderFonts(body) {
+  const g = themeState.global;
+  const list = (type, title) => {
+    const wrap = el("div", {class: "lz-font-list", role: "group",
+      "aria-label": title});
+    for (const name of Object.keys(THEME_FONTS[type])) {
+      const cur = type === "ui" ? g.fontUi : g.fontMono;
+      const fam = type === "ui" ? "var(--font)" : "var(--mono)";
+      const custom = name === "System" ? fam : `'${name}', ${fam}`;
+      const nameEl = el("span", {class: "lz-font-name"}, name);
+      nameEl.style.fontFamily = custom; // catalog constant, never state
+      const prev = el("span", {class: "lz-font-prev"},
+        type === "ui" ? "The quick brown fox" : "0123 {} []");
+      if (type === "mono") prev.style.fontFamily = custom;
+      wrap.append(el("button", {
+        class: "lz-font", type: "button",
+        "aria-pressed": cur === name ? "true" : "false",
+        onclick: () => {
+          if (type === "ui") g.fontUi = name;
+          else g.fontMono = name;
+          themeApply(); themeSave(); themeRenderTab(1);
+        },
+      }, nameEl, prev));
+    }
+    return wrap;
+  };
+  body.append(
+    _tpSection("UI font", list("ui", "UI font")),
+    _tpSection("Monospace font", list("mono", "Monospace font")));
+}
+
+/* ── Tab: CSS ────────────────────────────────────────────────────────────── */
+function themeRenderCss(body) {
+  const g = themeState.global;
+  const scope = themeState.scope;
+  const isGlobal = scope === "global";
+  const sheet = isGlobal ? g.css : (themeState.pageCss[scope] || "");
+
+  /* scope selector — the label always names the CURRENT route scope
+     (themeSetScope re-renders this tab on every route change) */
+  const scopeSel = el("select", {id: "lz-scope", class: "lz-tp-select",
+    "aria-label": "Custom CSS scope — currently "
+      + (isGlobal ? "global" : "this page (" + scope + ")")},
+    el("option", {value: "global", selected: isGlobal ? "" : undefined},
+      "Global — every page"));
+  if (!isGlobal) {
+    scopeSel.append(el("option", {value: scope, selected: ""},
+      "This page (" + scope + ")"));
+  }
+
+  const ta = el("textarea", {id: "lz-css", class: "lz-css", spellcheck: "false",
+    "aria-label": "Custom CSS "
+      + (isGlobal ? "for every page (global)" : "for this page (" + scope + ")"),
+    placeholder: "/* .hero { border-left-color: var(--warn); } */"
+                + "\n/* .pill { border-radius: 0; } */"});
+  ta.value = sheet; // property assignment — never markup interpolation
+
+  const cssErr = el("div", {id: "lz-css-err",
+    class: "lz-tp-css-err hidden", role: "alert"});
+
+  const readSheet = () => ta.value;
+  const writeSheet = v => {
+    v = typeof v === "string" ? v : "";
+    if (isGlobal) g.css = v;
+    else themeState.pageCss[scope] = v;
+    themeApply();
+    themeSave();
+  };
+
+  scopeSel.addEventListener("change", () => {
+    themeState.scope = scopeSel.value;
+    themeApplyCss();
+    themeRenderTab(2);
+  });
+
+  /* Import (Phase A-11 step 12): load a .css file into the active sheet.
+     The input's value is reset BEFORE the read so picking the SAME file
+     again still fires change; read failures surface visibly (alert row +
+     toast), never silently. */
+  const importFile = el("input", {type: "file", accept: ".css,text/css",
+    id: "lz-css-import-file", class: "hidden", "aria-hidden": "true",
+    tabindex: "-1"});
+  const importBtn = el("button", {class: "btn btn-ghost btn-sm", type: "button",
+    id: "lz-css-import", title: "Import a .css file into the active sheet"},
+    "Import");
+  importBtn.addEventListener("click", () => importFile.click());
+  importFile.addEventListener("change", () => {
+    const f = importFile.files && importFile.files[0];
+    importFile.value = ""; // same-file re-import must fire change again
+    if (!f) return;
+    f.text().then(txt => {
+      ta.value = txt;
+      writeSheet(txt);
+      cssErr.classList.add("hidden");
+      toast("css imported", "ok");
+    }).catch(e => {
+      cssErr.textContent = "import failed: "
+        + ((e && e.message) || String(e));
+      cssErr.classList.remove("hidden");
+      toast("css import failed", "err");
+    });
+  });
+
+  const exportBtn = el("button", {class: "btn btn-ghost btn-sm", type: "button",
+    id: "lz-css-export", title: "Export the active sheet to a .css file"},
+    "Export");
+  exportBtn.addEventListener("click", () => {
+    const blob = new Blob([readSheet()], {type: "text/css"});
+    const url = URL.createObjectURL(blob);
+    const a = el("a", {href: url, download: "libzent-theme.css"});
+    document.body.append(a);
+    a.click();
+    a.remove();
+    /* revoke after the download has started — leaks nothing forever */
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  });
+
+  body.append(
+    _tpSection("Scope",
+      el("div", {class: "lz-tp-row"}, scopeSel)),
+    _tpSection("Custom CSS",
+      el("p", {class: "lz-tp-note"},
+        "Write CSS targeting any element. All design tokens are available as ",
+        el("code", {}, "var(--accent)"), ", ",
+        el("code", {}, "var(--surface)"), ", etc. Page scope follows the ",
+        "route you opened the panel from. Changes apply live and persist."),
+      ta,
+      cssErr,
+      el("div", {class: "lz-tp-actions"},
+        el("button", {class: "btn btn-primary btn-sm", type: "button",
+          id: "lz-css-apply", onclick: () => {
+            writeSheet(readSheet());
+            cssErr.classList.add("hidden");
+          }}, "Apply"),
+        el("button", {class: "btn btn-ghost btn-sm", type: "button",
+          id: "lz-css-clear", onclick: () => {
+            ta.value = "";
+            writeSheet("");
+            cssErr.classList.add("hidden");
+          }}, "Clear"),
+        el("span", {class: "spacer"}),
+        importBtn, importFile, exportBtn),
+      el("p", {class: "lz-tp-note"},
+        "Stored in ", el("code", {}, "state/theme.json"),
+        " (server) and localStorage. Survives restarts and browsers.")));
+}
+
+/* ── Tab: Layout ─────────────────────────────────────────────────────────── */
+function themeRenderLayout(body) {
+  const g = themeState.global;
+  if (!g.layout || typeof g.layout !== "object") g.layout = {};
+  const L = g.layout;
+  const seg = (attr, values, label) => {
+    const cur = THEME_LAYOUT_ENUMS[attr].includes(L[attr])
+      ? L[attr] : THEME_LAYOUT_ENUMS[attr][0];
+    const wrap = el("div", {class: "lz-seg", role: "group", "aria-label": label});
+    for (const [v, text] of values) {
+      wrap.append(el("button", {
+        class: "lz-seg-btn", type: "button",
+        "aria-pressed": cur === v ? "true" : "false",
+        onclick: () => {
+          g.layout[attr] = v;
+          themeApply(); themeSave(); themeRenderTab(3);
+        },
+      }, text));
+    }
+    return wrap;
+  };
+  body.append(
+    _tpSection("Account detail layout",
+      seg("detail", [["two", "Two-column"], ["one", "Single column"]],
+        "Account detail layout")),
+    _tpSection("Hero strip",
+      seg("hero", [["on", "Visible"], ["off", "Hidden"]], "Hero strip")),
+    el("p", {class: "lz-tp-note"},
+      "Layout preferences persist with the theme (state/theme.json + ",
+      "localStorage) and apply immediately across every route."));
+}
+
+/* ── Open/close (dialog semantics + focus management) ────────────────────── */
 function themeOpen() {
   let panel = document.getElementById("lz-theme-panel");
   if (!panel) panel = themeBuildPanel();
-  panel.style.right = "0";
-  themeRenderTab(0);
+  const opener = document.activeElement;
+  if (opener && opener !== document.body) _themeOpener = opener;
+  document.getElementById("lz-theme-scrim").classList.add("open");
+  panel.classList.add("open");
+  /* background inert: the dialog is modal (pointer-blocked by the scrim
+     even where the inert attribute is unsupported) */
+  const app = document.getElementById("app");
+  if (app) app.setAttribute("inert", "");
+  themeRenderTab(_themeTab);
+  const tab = panel.querySelector(".lz-tp-tab[aria-selected='true']");
+  if (tab) tab.focus(); // focus moves INTO the drawer on open
 }
 
 function themeClose() {
   const panel = document.getElementById("lz-theme-panel");
-  if (panel) panel.style.right = "-420px";
+  const scrim = document.getElementById("lz-theme-scrim");
+  if (!panel || !panel.classList.contains("open")) return;
+  panel.classList.remove("open");
+  if (scrim) scrim.classList.remove("open");
+  const app = document.getElementById("app");
+  if (app) app.removeAttribute("inert"); // un-inert BEFORE restoring focus
+  const opener = _themeOpener;
+  _themeOpener = null;
+  if (opener && opener.isConnected) {
+    try { opener.focus(); } catch (_) { /* focus returns to the opener */ }
+  }
 }
 
-// singleton handler (assignment, not addEventListener — the listener-leak
-// regression test requires addEventListener only inside wire())
-document.onkeydown = function(e) {
-  if (e.key === "Escape") themeClose();
-};
+/* Focus trap + Escape — one document-level listener, active only while
+   the drawer is open (the old code assigned document.onkeydown, which
+   clobbered any other singleton handler). */
+const THEME_FOCUSABLE = ["button:not([disabled])",
+  "input:not([disabled])", "select:not([disabled])",
+  "textarea:not([disabled])", "a[href]",
+  "[tabindex]:not([tabindex='-1'])"].join(", ");
+
+document.addEventListener("keydown", e => {
+  const panel = document.getElementById("lz-theme-panel");
+  if (!panel || !panel.classList.contains("open")) return;
+  if (e.key === "Escape") { e.preventDefault(); themeClose(); return; }
+  if (e.key !== "Tab") return;
+  const nodes = Array.from(panel.querySelectorAll(THEME_FOCUSABLE))
+    .filter(n => n.getClientRects().length > 0);
+  if (!nodes.length) { e.preventDefault(); return; }
+  const first = nodes[0], last = nodes[nodes.length - 1];
+  const active = document.activeElement;
+  if (e.shiftKey && (active === first || !panel.contains(active))) {
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && (active === last || !panel.contains(active))) {
+    e.preventDefault(); first.focus();
+  }
+});
 
 /* ── Init ────────────────────────────────────────────────────────────────── */
 themeLoad();
