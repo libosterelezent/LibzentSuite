@@ -144,6 +144,22 @@ function dialog({title, bodyEl, actions = [], wide = false, onClose, tabs = null
         tabindex: "0",
       });
       panels.append(panel);
+      /* LAZY build: a tab's panel builds ON FIRST SELECTION — opening
+         the dialog only pays for the tab the operator looks at (the
+         baseline eagerly fetched every tab's data), and repeated
+         selection is a no-op */
+      const buildOnce = () => {
+        if (entry.built) return;
+        entry.built = true;
+        try {
+          const built = t.build(panel);
+          if (built && typeof built.catch === "function")
+            built.catch(e => panel.append(
+              emptyState("Tab failed", e.message || String(e))));
+        } catch (e) {
+          panel.append(emptyState("Tab failed", e.message || String(e)));
+        }
+      };
       const select = () => {
         entries.forEach((e, j) => {
           e.btn.setAttribute("aria-selected", j === idx ? "true" : "false");
@@ -151,9 +167,11 @@ function dialog({title, bodyEl, actions = [], wide = false, onClose, tabs = null
           e.btn.classList.toggle("on", j === idx);
           e.panel.classList.toggle("hidden", j !== idx);
         });
+        buildOnce();
         btn.focus();
       };
       const idx = i;
+      const entry = {btn, panel, tab: t, built: false, buildOnce};
       btn.addEventListener("click", select);
       btn.addEventListener("keydown", e => {
         if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
@@ -162,17 +180,9 @@ function dialog({title, bodyEl, actions = [], wide = false, onClose, tabs = null
         } else if (e.key === "Home") { e.preventDefault(); entries[0].btn.click(); }
         else if (e.key === "End") { e.preventDefault(); entries[entries.length - 1].btn.click(); }
       });
-      return {btn, panel, tab: t};
+      return entry;
     });
-    for (const {panel, tab} of entries) {
-      try {
-        const built = tab.build(panel);
-        if (built && typeof built.catch === "function")
-          built.catch(e => panel.append(emptyState("Tab failed", e.message || String(e))));
-      } catch (e) {
-        panel.append(emptyState("Tab failed", e.message || String(e)));
-      }
-    }
+    entries[0].buildOnce();   // the initially-selected tab builds on open
     body.append(tablist, panels);
   } else if (bodyEl) {
     body.append(bodyEl);

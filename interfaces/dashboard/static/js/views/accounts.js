@@ -1015,23 +1015,29 @@ function acctAbilitiesSection(a, ex, rerender) {
   }
   for (const p of assigned) {
     /* LIVE row first (WS-refreshed every second); the REST state snapshot
-       is only a fallback for rows that lack per-plugin info */
+       is only a fallback for rows that lack per-plugin info. TRI-STATE:
+       the runtime row only exists for LOADED plugins — missing data is
+       UNKNOWN, never "enabled" (the old `!== false` turned a not-loaded
+       plugin into a green dot) */
     const state = (a.plugins || {})[p] ||
       (ex.states || []).find(s => s.name === p) || {};
-    const enabled = state.enabled !== false;
+    const stOn = state.enabled === true;
+    const stOff = state.enabled === false;
+    const stUnknown = !stOn && !stOff;
     const hasErr = !!(state.last_error || state.error_count);
     const man = manifests[p] || {};
 
     const toggle = el("button", {
-      class: "toggle" + (enabled ? " on" : ""), type: "button",
-      role: "switch", "aria-checked": enabled ? "true" : "false",
-      "aria-label": (enabled ? "Disable " : "Enable ") + p + " on " + a.name,
-      title: (enabled ? "Disable" : "Enable") + " " + p});
+      class: "toggle" + (stOn ? " on" : ""), type: "button",
+      role: "switch", "aria-checked": stOn ? "true" : stOff ? "false" : "mixed",
+      "aria-label": (stOn ? "Disable " : "Enable ") + p + " on " + a.name,
+      title: stUnknown ? "State unknown (plugin not loaded) — click to enable"
+        : (stOn ? "Disable" : "Enable") + " " + p});
     toggle.onclick = acctLockToggle(toggle, async () => {
       try {
         await post("/api/plugins/set-enabled",
-          {account: a.name, plugin: p, enabled: !enabled});
-        toast(p + (enabled ? " disabled" : " enabled"), "ok");
+          {account: a.name, plugin: p, enabled: !stOn});
+        toast(p + (stOn ? " disabled" : " enabled"), "ok");
         await loadStatsNow();
       } catch (e) { toast(e.message, "err"); }
     });
@@ -1053,13 +1059,14 @@ function acctAbilitiesSection(a, ex, rerender) {
     });
 
     wrap.append(el("div", {class: "ability"},
-      el("span", {class: "dot " + (hasErr ? "err" : enabled ? "on" : "off"),
-                  "aria-hidden": "true"}),
+      el("span", {class: "dot " + (hasErr ? "err" : stOn ? "on" : "off"),
+                  "aria-hidden": "true",
+                  title: stUnknown ? "state unknown (not loaded)" : undefined}),
       el("div", {class: "ab-info"},
         el("div", {class: "ab-n"}, p),
         el("div", {class: "ab-d"},
           hasErr ? String(state.last_error || "errors: " + state.error_count)
-                 : (man.description || "plugin"))),
+                 : (man.description || (stUnknown ? "not loaded — state unknown" : "plugin")))),
       el("div", {class: "ab-actions"},
         toggle,
         iconBtn("gear",
@@ -1163,8 +1170,34 @@ function acctAbilitySettingsTab(panel, a, pluginName, man) {
 }
 
 /* Presets tab: the profile library for this plugin + this account's
-   binding (moved here from the old binding-only dialog, Phase A-11 #2). */
+   binding. FRESH data: the panel fetches bindings+profiles when the
+   tab first opens (tabs build lazily now) and re-fetches after every
+   mutation — the open dialog always agrees with the server. */
 function acctAbilityPresetsTab(panel, a, pluginName, ex, rerender) {
+  const enc = encodeURIComponent(a.name);
+  const skel = el("div", {class: "skel"}, el("div"), el("div"));
+  panel.append(skel);
+  const refresh = async () => {
+    try {
+      const [bindings, profiles] = await Promise.all([
+        api("/api/accounts/plugin-profiles?account=" + enc),
+        api("/api/plugins/profiles"),
+      ]);
+      ex.bindings = bindings || {};
+      ex.profiles = profiles || [];
+    } catch (e) {
+      skel.remove();
+      panel.textContent = "";
+      panel.append(emptyState("Presets unavailable", e.message));
+      return;
+    }
+    if (typeof rerender === "function") rerender();  // MEMORY section agrees
+    renderPresets(panel, a, pluginName, ex, refresh);
+  };
+  refresh();
+}
+
+function renderPresets(panel, a, pluginName, ex, refresh) {
   const bindings = ex.bindings || a.plugin_profiles || {};
   const active = bindings[pluginName];
   const profiles = (ex.profiles || []).filter(r => r.plugin === pluginName);
@@ -1185,7 +1218,7 @@ function acctAbilityPresetsTab(panel, a, pluginName, ex, rerender) {
           {account: a.name, plugin: pluginName, profile: r.name});
         toast(`preset "${r.name}" loaded`, "ok");
         await loadStatsNow();
-        acctDetailRefresh(a.name, ex, rerender);
+        await refresh();
       } catch (e) { toast(e.message, "err"); }
     });
     const delBtn = el("button", {class: "del", type: "button"}, "delete");
@@ -1196,7 +1229,8 @@ function acctAbilityPresetsTab(panel, a, pluginName, ex, rerender) {
       if (!ok) return;
       try {
         await post("/api/plugins/profiles/delete", {plugin: pluginName, name: r.name});
-        acctDetailRefresh(a.name, ex, rerender);
+        toast("preset deleted", "ok");
+        await refresh();
       } catch (e) { toast(e.message, "err"); }
     });
     panel.append(el("div", {class: "preset"},
@@ -1213,7 +1247,8 @@ function acctAbilityPresetsTab(panel, a, pluginName, ex, rerender) {
         await post("/api/accounts/plugin-profile",
           {account: a.name, plugin: pluginName, profile: null});
         toast("binding cleared — plugin defaults", "ok");
-        acctDetailRefresh(a.name, ex, rerender);
+        await loadStatsNow();
+        await refresh();
       } catch (e) { toast(e.message, "err"); }
     });
     panel.append(clearBtn);
@@ -1239,7 +1274,7 @@ function acctAbilityPresetsTab(panel, a, pluginName, ex, rerender) {
       await post("/api/plugins/profiles/create",
         {plugin: pluginName, name: pname, description: `saved from ${a.name}`, settings});
       toast(`preset "${pname}" saved`, "ok");
-      acctDetailRefresh(a.name, ex, rerender);
+      await refresh();
     } catch (e) { toast(e.message, "err"); }
   });
   panel.append(el("div", {class: "toolbar"}, nameIn, saveBtn));
@@ -1270,9 +1305,12 @@ function acctAbilityLogsTab(panel, a) {
   });
 }
 
-/* Raw tab: the plugin's real state row, credential-redacted (GPT step 6:
-   never expose tokens; never assume key/value shapes beyond the
-   contract). Values are JSON-rendered for inspection. */
+/* Raw tab: the plugin's real state row, credential-redacted. Layered:
+       1. KEY-NAME match (nested — the JSON replacer recurses) covering
+          case variants and common credential-like names,
+       2. VALUE-SHAPE match (Discord-token / JWT / bearer shapes) so an
+          oddly-named credential still redacts,
+       3. an output cap so a huge state blob cannot wedge the panel. */
 function acctAbilityRawTab(panel, a, pluginName) {
   const skel = el("div", {class: "skel"}, el("div"), el("div"), el("div"));
   panel.append(skel);
@@ -1280,10 +1318,21 @@ function acctAbilityRawTab(panel, a, pluginName) {
     skel.remove();
     const st = (rows || []).find(x => x.name === pluginName);
     if (!st) { panel.append(emptyState("No state", "The plugin is not loaded on this account.")); return; }
-    const REDACT = /token|credential|secret|password|authorization/i;
-    const scrub = v => JSON.parse(JSON.stringify(v, (k, val) =>
-      REDACT.test(String(k)) ? "[redacted]" : val));
-    const pre = el("pre", {class: "dui-code mono"}, JSON.stringify(scrub(st), null, 2));
+    const REDACT_KEYS =
+      /(token|credential|secret|password|authorization|auth|bearer|session|cookie|api[_-]?key|private[_-]?key)/i;
+    const REDACT_VALUES =
+      /^(eyJ[A-Za-z0-9_-]{8,}\.|mfa\.[A-Za-z0-9_-]{10,}|[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{20,})/;
+    const scrub = v => JSON.parse(JSON.stringify(v, (k, val) => {
+      if (typeof k === "string" && REDACT_KEYS.test(k)) return "[redacted]";
+      if (typeof val === "string" && REDACT_VALUES.test(val.trim()))
+        return "[redacted]";
+      return val;
+    }));
+    let text = JSON.stringify(scrub(st), null, 2);
+    const CAP = 64 * 1024;
+    if (text.length > CAP)
+      text = text.slice(0, CAP) + "\n\u2026 [truncated at " + CAP + " bytes]";
+    const pre = el("pre", {class: "dui-code mono"}, text);
     panel.append(pre);
   }).catch(e => {
     skel.remove();
@@ -1339,14 +1388,23 @@ function acctMemorySection(a, ex, rerender) {
   }
   wrap.append(row);
 
-  /* state-kv strip (mockup): per-plugin runtime state — real fields only */
-  const statesRow = el("div", {class: "kv-row", style: "margin-top:var(--sp-2)"});
+  /* runtime-state strip: per-plugin RUNTIME enablement — this is NOT
+     persisted plugin memory (no arbitrary key/value store exists yet);
+     UNKNOWN (not loaded) renders as "—", never a fabricated "on" */
+  const statesRow = el("div", {class: "kv-row", style: "margin-top:var(--sp-2)"},
+    el("div", {class: "kv"},
+      el("span", {class: "k dim", style: "text-transform:uppercase;"}),
+      el("span", {class: "v dim"}, "runtime state")));
   for (const p of assigned) {
     const st = (a.plugins || {})[p] || (ex.states || []).find(s => s.name === p) || {};
     statesRow.append(el("div", {class: "kv"},
       el("span", {class: "k"}, p),
-      el("span", {class: "v"},
-        st.enabled === false ? "off" : "on",
+      el("span", {class: "v",
+        title: st.enabled === true ? "enabled (runtime)"
+          : st.enabled === false ? "disabled (runtime)"
+          : "state unknown — plugin not loaded"},
+        st.enabled === true ? "on"
+          : st.enabled === false ? "off" : "—",
         st.error_count ? el("span", {class: "badge badge-err"},
           String(st.error_count) + " err") : null)));
   }
