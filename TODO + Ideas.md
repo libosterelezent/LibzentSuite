@@ -689,12 +689,29 @@ ACTIVE QUEUE  (2026-10-23, ordered)
        member, never forced onto the restricted account), and the
        FleetTaskHandler plugin capability (§5, default OFF, ping
        untouched; core still imports nothing from parsers/).
-    E. NEXT — ownership transitions: no account receives conflicting
-       work from both paths; leave restores Independent cleanly (drain
-       wiring, group-managed dispatch blocking vs independent flow).
-    F. Fleet Hub SPA view (#/groups per D6). G. reconciler + recovery
-       regression (30s sweep, WS-reconnect, lease reclaim).
-[ ] PHASE 10 ROLLOUT — after PHASE 9 signals exist.
+     E. DONE (2026-10-23, d98c696): ownership transitions — Task
+        fleet_assignment linkage; D1's fence (group-managed members run
+        ONLY linked dispatches; the independent flow parks, never
+        fails); leave restores Independent (parked work FLOWS on
+        leave); in-flight sends drain through a leave; stale-generation
+        linked dispatches fenced end-to-end.
+     F. DONE (2026-10-23, 0dc74ec): the Fleet Hub — REST surface
+        (GET /api/fleet/groups|group, POST /api/fleet/op with an
+        explicit op table) + views/groups.js (#/groups list + the
+        #/groups/:name hub: overview/members/queue/cooldowns/history,
+        confirmed destructive ops) + the Fleet sidebar tab;
+        live-verified on jj (bravo+alpha joined).
+     G. DONE (2026-10-23, 61f3a32): FleetReconciler — boot + 30s
+        idempotent passes (running-at-reboot requeue + generation bump
+        = zombie fencing, stale-generation withdrawal, orphan release,
+        ghost-member retirement; ghost groups SURFACED), concurrent
+        admin ops converge, end-to-end zombie never reaches the sender.
+     PHASE 9 COMPLETE: A-G shipped 2026-10-23; 223 tests green across
+     the fleet + scheduler + dashboard suites.
+[ ] PHASE 10 ROLLOUT — after PHASE 9 signals exist. PHASE 9's live
+    signals now exist (hub + orchestrator running); the next session
+    can open the PHASE 10 plan (plugin metrics via ui_stats StatCards,
+    AccountPluginData store in state/plugin-data.db per B3).
 
 
 ORIGINAL TODO ITEMS TO PRESERVE — all shipped (2026-10-22); the section is
