@@ -681,13 +681,19 @@ ACTIVE QUEUE  (2026-10-23, ordered)
        paced; independents unaffected. Scheduler suite de-flaked
        first (d32ee99). NOTE: the live dashboard process predates the
        fleet wiring — restart picks it up.
-    D-G pending.
-    D. NEXT — parser observations (parser output alone cannot bypass
-       state/policy) + FleetTaskHandler on PluginBase (§5 opt-in
-       capability), observation dedup, member connectivity derived
-       into eligibility.
-    E. ownership transitions drain/restore. F. Fleet Hub SPA view.
-    G. reconciler + recovery regression.
+    D. DONE (2026-10-23, f485670): FleetObservations intake (dedup
+       (account, message_id, type); observations authorize NOTHING —
+       only restrictions through the service: observed/server cooldowns,
+       connectivity -> eligibility with operator-pause outranking it),
+       relay (D3: suspend -> requeue (binding dropped) -> next eligible
+       member, never forced onto the restricted account), and the
+       FleetTaskHandler plugin capability (§5, default OFF, ping
+       untouched; core still imports nothing from parsers/).
+    E. NEXT — ownership transitions: no account receives conflicting
+       work from both paths; leave restores Independent cleanly (drain
+       wiring, group-managed dispatch blocking vs independent flow).
+    F. Fleet Hub SPA view (#/groups per D6). G. reconciler + recovery
+       regression (30s sweep, WS-reconnect, lease reclaim).
 [ ] PHASE 10 ROLLOUT — after PHASE 9 signals exist.
 
 
