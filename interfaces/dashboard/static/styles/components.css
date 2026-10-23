@@ -560,13 +560,10 @@ body[data-hero="off"] .hero { display: none; }
   cursor: pointer; transition: background var(--t-fast), color var(--t-fast); }
 .ctree-row:hover { background: var(--surface3); color: var(--text); }
 
-/* builder tile-view: responsive card grid (profile bindings etc.) */
-.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: calc(var(--sp-3) * var(--density)); }
+/* builder tile-view: flagship tile language — .card in .grid.grid-2;
+   tone rides the card's 3px left border (the hero state-color convention) */
 .tile { display: flex; flex-direction: column; gap: var(--sp-2);
-  border: 1px solid var(--border); border-left: 3px solid var(--border);
-  border-radius: var(--r-sm); padding: var(--sp-3);
-  background: var(--surface2); min-width: 0; }
+  border-left: 3px solid var(--border); }
 .tile.tile-ok { border-left-color: var(--ok); }
 .tile.tile-warn { border-left-color: var(--warn); }
 .tile.tile-err { border-left-color: var(--err); }

@@ -487,7 +487,7 @@ async function bFillOptions(plugin, comp, host) {
 /* ═══════════════════════════ forms ══════════════════════════════════════ */
 
 function bForm(comp) {
-  const form = el("form", {class: "card", dataset: {bldForm: comp.id}});
+  const form = el("form", {class: "form", dataset: {bldForm: comp.id}});
   form.addEventListener("submit", e => e.preventDefault());
   if (comp.title) form.append(el("h4", {}, comp.title));
   if (comp.description) form.append(el("p", {class: "dim"}, comp.description));
@@ -498,7 +498,7 @@ function bForm(comp) {
   for (const c of (comp.children || [])) form.append(bComp(c));
   const submit = el("button", {class: "btn btn-primary", type: "submit"},
     comp.submit_label || "Submit");
-  form.append(el("div", {style: "display:flex;gap:var(--sp-2);"}, submit));
+  form.append(el("div", {class: "form-actions"}, submit));
   submit.onclick = () => bSubmitForm(comp, form, submit);
   return form;
 }
@@ -615,7 +615,7 @@ async function bLoadFields(plugin, id, host) {
 /* ═══════════════════════════ modals + tabs ══════════════════════════════ */
 
 function bModal(comp) {
-  const dlg = el("dialog", {dataset: {bldModal: comp.id || ""}});
+  const dlg = el("dialog", {class: "dlg", dataset: {bldModal: comp.id || ""}});
   const close = () => { if (dlg.open) dlg.close(); };
   const hdr = el("div", {class: "dlg-hdr"},
     el("span", {class: "dlg-title"}, comp.title || ""),
@@ -837,11 +837,11 @@ function bTileView(plugin, comp, data, host) {
     ? data.tiles : (Array.isArray(data) ? data : null);
   if (!tiles || !tiles.length)
     return emptyState(comp.empty_text || "nothing to show yet");
-  const grid = el("div", {class: "tiles"});
+  const grid = el("div", {class: "grid grid-2"});
   for (const t of tiles) {
     if (!t || typeof t !== "object") continue;
     const tone = String(t.tone || "");
-    const card = el("div", {class: "tile" + (tone ? " tile-" + tone : "")});
+    const card = el("div", {class: "card tile" + (tone ? " tile-" + tone : "")});
     const head = el("div", {class: "tile-head"});
     head.append(el("span", {class: "tile-title"}, String(t.title ?? t.key ?? "")));
     if (t.status) {
