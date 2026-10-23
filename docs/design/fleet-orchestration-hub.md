@@ -103,6 +103,28 @@ pause state, game-message interpretation, next-account selection, history.
         id, group_id, task_id, account_id, status, priority,
         created_at, started_at, stopped_at, resume_policy, version, generation
 
+EDITABLE-WHILE-RUNNING (locked 2026-10-23, operator decision C —
+safe-application semantics; rationale: the hub's purpose is live fleet
+control, and stop/edit/start churn defeats it):
+
+  Field classes      Examples (roll task)        Application
+  hot                userstack, ignore_keys,     next dispatch picks it up
+                     max_rolls, thresholds       (always safe)
+  boundary           channel map, command        generation bump -> in-flight
+                     prefix                      action completes -> revalidate
+                                                 (exists, is text, visible) ->
+                                                 next action dispatches on it;
+                                                 parser listeners rebind
+  structural         changes to the plugin's     pause -> edit -> resume
+                     internal flow shape         (rare)
+
+Rules: a boundary edit on a RUNNING task shows a pending badge until the
+next dispatch adopts it; an invalid boundary value (channel not visible)
+flips the task to BLOCKED with the reason in the hub and retains the old
+definition. Generation checks make split-dispatch (old/new channel racing)
+impossible — the failure mode that justified the old lock-while-active rule
+in the reference implementation.
+
 Rules: task identity + audit history survive handoff; a task assigned under
 group generation N is rejected at dispatch if the live generation differs;
 handoff = explicit transfer op (validate destination → revoke source → create
@@ -191,6 +213,25 @@ actor-tagged: automated vs operator vs parser), overrides (pause/resume group,
 pause/resume member, timed cooldown, assign, withdraw, suspend, handoff —
 destructive ops confirmed, multi-account ops preview affected members).
 Live via the existing WS/store; mutations through FleetService on the server.
+
+## 10b. THE GAME-AGNOSTIC CORE (locked principle)
+
+The framework started because of one game bot and uses it to harden task
+flow robustness — but the CORE must never center on any game or bot:
+
+- core/ speaks generic vocabulary ONLY: task, channel map, observation,
+  cooldown record, strategy, assignment. No game terms, no command strings.
+- Game knowledge lives in PARSER PACKS (parsers/<game>/ — rules, locales,
+  string bindings) and PLUGIN FLOWS (plugins/<name>/) — never in core.
+- core/ imports nothing from parsers/; packs register into the parser
+  engine at boot. Dropping one pack or adding another never touches core.
+- The product shape is a WEBAPP + SCRIPT hybrid: a live dashboard
+  (webapp) driving long-running automation flows (the script side) —
+  the dashboard orchestrates; the flow engine executes.
+
+Product framing: a generic multi-account Discord flow-orchestration
+framework whose first pack is Mudae. Every core decision must stay true
+if the second pack is for a different game — or no game at all.
 
 ## 11. Rollout (acceptance criteria per phase)
 
