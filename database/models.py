@@ -144,6 +144,117 @@ class RatePolicyRecord:
         }
 
 
+@dataclass
+class FleetGroupState:
+    """Fleet projection for one group (PHASE 9): pause flag + the
+    generation counter that fences stale dispatches (spec §5)."""
+
+    group_name: str
+    paused: bool = False
+    generation: int = 1
+    updated_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"group_name": self.group_name, "paused": self.paused,
+                "generation": self.generation,
+                "updated_at": round(self.updated_at, 3)}
+
+
+@dataclass
+class FleetMemberRecord:
+    """One account's fleet state: execution mode (D1) + eligibility (§2)."""
+
+    account: str
+    group_name: str
+    mode: str                    # ExecutionMode value
+    eligibility: str             # MemberEligibility value
+    since: float = field(default_factory=time.time)
+    version: int = 1
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"account": self.account, "group_name": self.group_name,
+                "mode": self.mode, "eligibility": self.eligibility,
+                "since": round(self.since, 3), "version": self.version}
+
+
+@dataclass
+class FleetAssignmentRecord:
+    """The fleet work unit (§5) — an assignment drives scheduler tasks."""
+
+    id: str
+    group_name: str
+    task_id: str
+    status: str                   # AssignmentStatus value
+    account: Optional[str] = None
+    priority: int = 0
+    created_at: float = field(default_factory=time.time)
+    started_at: Optional[float] = None
+    stopped_at: Optional[float] = None
+    resume_policy: str = ""
+    version: int = 1
+    generation: int = 1
+    error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"id": self.id, "group_name": self.group_name,
+                "task_id": self.task_id, "status": self.status,
+                "account": self.account, "priority": int(self.priority),
+                "created_at": round(self.created_at, 3),
+                "started_at": self.started_at,
+                "stopped_at": self.stopped_at,
+                "resume_policy": self.resume_policy,
+                "version": self.version, "generation": self.generation,
+                "error": self.error}
+
+
+@dataclass
+class FleetCooldownRecord:
+    """One scoped fleet cooldown row (§6); id is the row identity."""
+
+    id: int
+    scope_type: str
+    scope_id: str
+    reason: str
+    started_at: float
+    expires_at: float
+    source: str = "manual"
+    cleared_at: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"id": self.id, "scope_type": self.scope_type,
+                "scope_id": self.scope_id, "reason": self.reason,
+                "started_at": round(self.started_at, 3),
+                "expires_at": round(self.expires_at, 3),
+                "source": self.source, "cleared_at": self.cleared_at}
+
+
+@dataclass
+class FleetTransitionRecord:
+    """One append-only history row (D2's modest transition table)."""
+
+    id: int
+    kind: str
+    group_name: str
+    generation: int
+    reason: str
+    correlation_id: str
+    occurred_at: float
+    task_id: Optional[str] = None
+    assignment_id: Optional[str] = None
+    account: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"id": self.id, "kind": self.kind,
+                "group_name": self.group_name,
+                "generation": self.generation, "reason": self.reason,
+                "correlation_id": self.correlation_id,
+                "occurred_at": round(self.occurred_at, 3),
+                "task_id": self.task_id, "assignment_id": self.assignment_id,
+                "account": self.account}
+
+
 __all__ = ["AccountRecord", "SyncGroupRecord",
            "PluginProfileRecord", "PluginMetadata", "RatePolicyRecord",
-           "POLICY_LEVELS"]
+           "POLICY_LEVELS",
+           "FleetGroupState", "FleetMemberRecord", "FleetAssignmentRecord",
+           "FleetCooldownRecord", "FleetTransitionRecord"]

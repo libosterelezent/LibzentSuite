@@ -277,6 +277,82 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         DROP TABLE IF EXISTS profiles;
         """,
     ),
+
+    (
+        9,
+        "fleet orchestration state",
+        """
+        -- PHASE 9 (spec §1/§2, D2 database-authoritative): the fleet's
+        -- OWN projection. Membership itself stays with sync_groups +
+        -- accounts.sync_group (SyncGroupManager's UNCHANGED job); these
+        -- tables hold what the orchestrator adds on top: execution mode
+        -- + eligibility per member, task assignments (the fleet work
+        -- unit — NOT the scheduler's per-action tasks), scoped fleet
+        -- cooldowns, and the modest transition history D2 requires.
+        -- Keyed by group NAME (the unique pointer) and account NAME,
+        -- matching the name-keyed convention of the other per-account
+        -- tables; Discord snowflakes that appear in scopes are STRINGS.
+        CREATE TABLE IF NOT EXISTS fleet_groups (
+            group_name  TEXT PRIMARY KEY,
+            paused      INTEGER NOT NULL DEFAULT 0,
+            generation  INTEGER NOT NULL DEFAULT 1,
+            updated_at  REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS fleet_members (
+            account     TEXT PRIMARY KEY,
+            group_name  TEXT NOT NULL,
+            mode        TEXT NOT NULL,
+            eligibility TEXT NOT NULL,
+            since       REAL NOT NULL,
+            version     INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_fleet_members_group
+            ON fleet_members(group_name);
+        CREATE TABLE IF NOT EXISTS fleet_assignments (
+            id            TEXT PRIMARY KEY,
+            group_name    TEXT NOT NULL,
+            task_id       TEXT NOT NULL,
+            account       TEXT,
+            status        TEXT NOT NULL,
+            priority      INTEGER NOT NULL DEFAULT 0,
+            created_at    REAL NOT NULL,
+            started_at    REAL,
+            stopped_at    REAL,
+            resume_policy TEXT NOT NULL DEFAULT '',
+            version       INTEGER NOT NULL DEFAULT 1,
+            generation    INTEGER NOT NULL DEFAULT 1,
+            error         TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_fleet_assignments_group_status
+            ON fleet_assignments(group_name, status);
+        CREATE TABLE IF NOT EXISTS fleet_cooldowns (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_type  TEXT NOT NULL,
+            scope_id    TEXT NOT NULL,
+            reason      TEXT NOT NULL,
+            started_at  REAL NOT NULL,
+            expires_at  REAL NOT NULL,
+            source      TEXT NOT NULL DEFAULT 'manual',
+            cleared_at  REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_fleet_cooldowns_scope
+            ON fleet_cooldowns(scope_type, scope_id);
+        CREATE TABLE IF NOT EXISTS fleet_transitions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind            TEXT NOT NULL,
+            group_name      TEXT NOT NULL,
+            generation      INTEGER NOT NULL,
+            reason          TEXT NOT NULL,
+            correlation_id  TEXT NOT NULL,
+            occurred_at     REAL NOT NULL,
+            task_id         TEXT,
+            assignment_id   TEXT,
+            account         TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_fleet_transitions_group
+            ON fleet_transitions(group_name, id);
+        """,
+    ),
 ]
 
 

@@ -30,6 +30,7 @@ from .models import (
     observation_dedup_key,
     validate_channel_scope,
 )
+from .service import FleetService
 from .transitions import (
     ASSIGNMENT_TRANSITIONS,
     MEMBER_TRANSITIONS,
@@ -61,6 +62,8 @@ __all__ = [
     "POLICY_CHECK_ORDER",
     "validate_channel_scope",
     "InvalidDefinition",
+    # service
+    "FleetService",
     # transitions
     "MEMBER_TRANSITIONS",
     "ASSIGNMENT_TRANSITIONS",

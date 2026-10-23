@@ -220,6 +220,9 @@ class CooldownRecord:
     started_at: float
     expires_at: float
     source: str = CooldownSource.MANUAL   # CooldownSource value
+    #: row identity when this record came from persistence (None for
+    #: in-memory/validated-only instances)
+    id: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.scope_type not in CooldownScopeType.ALL:

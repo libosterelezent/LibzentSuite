@@ -36,6 +36,7 @@ from .repositories.cooldowns import CooldownRepository
 from .repositories.credentials import CredentialsRepository
 from .repositories.kv import KvRepository
 from .repositories.logs import AuditRepository, LogRepository
+from .repositories.fleet import FleetRepository
 from .repositories.plugins import PluginRepository
 from .repositories.plugin_profiles import PluginProfilesRepository
 from .repositories.rate_policies import RatePolicyRepository
@@ -69,6 +70,7 @@ class Database:
         self.cache = CacheRepository(self)
         self.credentials = CredentialsRepository(self)
         self.cooldowns = CooldownRepository(self)
+        self.fleet = FleetRepository(self)
 
     @property
     def path(self) -> str:
