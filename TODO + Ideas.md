@@ -630,6 +630,19 @@ PHASE 10 — PLUGIN METRICS & FLOWS  (planned)
     rotation numerically visible (A: 8 rolls this window, B: 0)
 
 
+DEPRECATED CORE PARTS — REMOVED 2026-10-22
+
+ProfileManager (core/profile_manager/) — the named permission-bundle
+system. It gated nothing (capabilities are direct account->plugin
+assignments) and was removed completely: package, ControlAPI
+profiles_* facade, /api/profiles* routes, CLI profiles group,
+AccountsRepository assignment methods, ProfileRecord, and migration 8
+dropping the profiles / profile_plugins / account_profiles tables.
+Superseded by: account_plugins (capabilities), plugin_profiles (v7
+settings presets), and plugin-data.db (per-channel operational data).
+See section 4 above and docs/design/fleet-orchestration-hub.md.
+
+
 ACTIVE QUEUE  (2026-10-22, ordered)
 
 [ ] PHASE A-11 refactor queue — GPT repo-connected plan
@@ -637,11 +650,9 @@ ACTIVE QUEUE  (2026-10-22, ordered)
     tabbed ability dialog (Settings/Presets/Logs/Raw), state-kv strip,
     theme Layout tab + CSS import, contract-test extensions.
     IN PROGRESS: dialog tabs + schemaField extraction landed.
-[ ] ProfileManager COMPLETE REMOVAL — plan ready
-    (state/ui-rebuild-2026-10-22/consult-B1-profilemanager.md):
-    9 ordered steps, migration 8 drops profiles/profile_plugins/
-    account_profiles, CLI group + /api/profiles* routes removed,
-    test strategy included.
+[x] Legacy permission-bundle manager REMOVAL — DONE on
+    feat/remove-profile-manager (PR #16 open, pending merge; plan:
+    state/ui-rebuild-2026-10-22/consult-B1-profilemanager.md).
 [ ] PHASE C LIVE DEBUG — in progress
     accounts alpha/bravo registered via UI; bravo RUNNING (live
     Discord); alpha blocked on a fresh credential (old token invalid).
@@ -667,8 +678,7 @@ The most important architectural goal is:
 Both interfaces should manipulate the exact same underlying:
 - Accounts
 - Plugins
-- Profiles
-- Settings
+- Settings profiles
 - Tasks
 - Rate-limit policies
 - Logs
