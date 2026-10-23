@@ -664,7 +664,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     # bypass pacing (the limiter still gates every dispatch AFTER the
     # guard). Membership itself stays with SyncGroupManager — the fleet
     # service layers mode/eligibility/assignments on top through seams.
-    from core.event_bus import AccountConnected, AccountDisconnected
+    from core.event_bus import AccountConnected, AccountDisconnected, FleetStateChanged
     from core.fleet import (
         FleetObservations,
         FleetPolicy,
@@ -688,6 +688,13 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         group_exists=_fleet_group_exists,
         membership_join=_fleet_join,
         membership_leave=_fleet_leave,
+        # PHASE 9 §3: persisted first (service), then published — the
+        # dashboard forwards these to WS clients as "fleet" frames so
+        # the Fleet Hub converges without polling
+        publisher=lambda ev: bus.publish_nowait(FleetStateChanged(
+            account=ev.account_id or "",
+            kind=ev.kind, group=ev.group_id, reason=ev.reason,
+            generation=ev.generation)),
     )
     await fleet.load()
     scheduler.set_dispatch_guard(FleetPolicy(fleet).scheduler_guard())

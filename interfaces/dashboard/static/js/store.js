@@ -63,6 +63,8 @@ const _state = {
   logs: [],             // ring buffer, newest last
   audit: [],            // ring buffer, newest last
   tasksTouch: 0,        // bump key: a WS task frame arrived
+  fleet: null,          // latest WS fleet transition frame (PHASE 9 §3;
+                        // views refetch their fleet snapshot on change)
 };
 const _subs = [];
 const storeGet = key => _state[key];

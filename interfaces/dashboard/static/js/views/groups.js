@@ -76,7 +76,13 @@ routerAdd("/groups", "Fleet", async (container) => {
   }
 
   await load();
-  return () => { state.alive = false; };
+  /* live convergence (PHASE 9 §3): any fleet transition (this client,
+     another dashboard, a service op) lands as a WS "fleet" frame and
+     re-runs load() — guarded by alive + the stale-snapshot seq */
+  const unsubFleet = storeSubscribe((key, value) => {
+    if (key === "fleet" && state.alive) load();
+  });
+  return () => { state.alive = false; unsubFleet(); };
 });
 
 routerAdd("/groups/:name", "Fleet hub", async (container, params) => {
@@ -342,5 +348,13 @@ routerAdd("/groups/:name", "Fleet hub", async (container, params) => {
   }
 
   await load();
-  return () => { state.alive = false; };
+  /* live convergence: transitions for THIS group re-run load(); the
+     loadSeq guard keeps a stale in-flight snapshot from overwriting a
+     newer one, and alive stops everything at unmount */
+  const unsubFleet = storeSubscribe((key, value) => {
+    if (key === "fleet" && state.alive &&
+        (!value || !value.group || value.group === name))
+      load();
+  });
+  return () => { state.alive = false; unsubFleet(); };
 });

@@ -89,6 +89,10 @@ const WS = (() => {
       if (msg.type === "stats") {
         storeSet("stats", msg);
         storeSet("accounts", msg.accounts || []);
+      } else if (msg.type === "fleet") {
+        /* PHASE 9 §3: a fleet transition landed (persisted first
+           server-side) — views refetch their fleet snapshot */
+        storeSet("fleet", msg);
       }
       emit(msg.type, msg);
     };

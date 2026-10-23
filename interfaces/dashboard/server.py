@@ -83,6 +83,7 @@ from core.errors import AccountError, DatabaseError
 from core.event_bus import (
     Event,
     EventBus,
+    FleetStateChanged,
     TaskCancelled,
     TaskCompleted,
     TaskFailed,
@@ -156,6 +157,11 @@ def _is_loopback_host(host: str) -> bool:
 
 #: task event types forwarded to WS clients (JSON-safe payloads)
 TASK_EVENT_TYPES = (TaskStarted, TaskCompleted, TaskFailed, TaskCancelled)
+
+#: fleet transition events forwarded to WS clients (PHASE 9 §3: the
+#: Fleet Hub converges on them; delivery is an optimization over the
+#: persisted fleet_transitions table)
+FLEET_EVENT_TYPES = (FleetStateChanged,)
 
 #: routes that carry credential MATERIAL (a token value, or the power to
 #: import/copy one). Beyond the normal token auth they REQUIRE a configured
@@ -628,6 +634,7 @@ class DashboardServer:
         self._broadcaster = self._loop.create_task(self._broadcast_loop())
         self._attach_audit_recorder()
         self._attach_task_events()
+        self._attach_fleet_events()
         LOG.info(
             "dashboard listening on %s (auth=%s)",
             self.url,
@@ -761,6 +768,21 @@ class DashboardServer:
 
         for event_type in TASK_EVENT_TYPES:
             self._task_unsubs.append(bus.subscribe(event_type, _on_task_event))
+
+    def _attach_fleet_events(self) -> None:
+        """Subscribe fleet transition events (same forwarding shape as
+        task events: bus -> {"type": "fleet"} WS frame)."""
+        bus = self._bus
+        if bus is None:
+            return
+
+        def _on_fleet_event(event: Event) -> None:
+            self._broadcast_payload(
+                {"type": "fleet", "event": event.name, **event_as_dict(event)}
+            )
+
+        for event_type in FLEET_EVENT_TYPES:
+            self._task_unsubs.append(bus.subscribe(event_type, _on_fleet_event))
 
     def _broadcast_payload(self, payload: Dict[str, Any]) -> None:
         """Hop to the main loop, then queue one JSON payload on every client.
