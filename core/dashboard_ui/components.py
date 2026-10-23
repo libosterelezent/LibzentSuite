@@ -1033,7 +1033,8 @@ class Form(UIContainer):
     def set_fields_provider(self, provider) -> "Form":
         """DYNAMIC fields: a callable returning ``{"fields": [def, …]}``
         where each def is ``{id, type, label, value?, placeholder?,
-        description?, required?, options?, min?, max?, step?}`` and type
+        description?, required?, options?, min?, max?, step?,
+        max_length?, groups?}`` and type
         is one of text/number/textarea/select/checkbox/channel-tree (a
         channel-tree def carries ``groups`` — ``[{id, name, channels:
         [{id, name}]}]`` — plus ``value``: the checked channel ids).

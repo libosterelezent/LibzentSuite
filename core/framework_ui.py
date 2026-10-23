@@ -1830,14 +1830,17 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
     async def edit_profile(row, ctx):
         plugin, _, name = row.partition("|")
         settings: Dict[str, Any] = {}
+        description = ""
         if name:
             try:
                 profiles = await api.plugin_profiles_list(plugin) or []
                 prof = next((x for x in profiles if x.get("name") == name), None)
                 settings = dict((prof or {}).get("settings") or {})
+                description = str((prof or {}).get("description") or "")
             except Exception:
                 settings = {}
         _profiles_state["editor"] = {"plugin": plugin, "name": name,
+                                     "description": description,
                                      "settings": settings}
         return {"open_modal": "editor-modal", "refresh": ["editor-form"]}
 
@@ -1892,6 +1895,16 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
             schema = await _schema_for(api, plugin)
             current = dict(ed.get("settings") or {})
             fields = []
+            # identity fields ride the PROVIDER — static fields never
+            # refresh, so an edit could not show the profile being edited
+            fields.append({"id": "pe-name", "type": "text",
+                           "label": "Profile name", "required": True,
+                           "value": str(ed.get("name") or ""),
+                           "max_length": 64})
+            fields.append({"id": "pe-desc", "type": "text",
+                           "label": "Description",
+                           "value": str(ed.get("description") or ""),
+                           "max_length": 200})
             # ── channel selector: ONE channel-tree field fed from the
             #    live account cache; pre-checked from the stored scope
             #    (positive set, or legacy mode/rules transition read)
@@ -2004,7 +2017,8 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
         description = str(payload.get("pe-desc") or "")
         if ed.get("name"):
             await api.plugin_profile_update(
-                plugin, ed["name"], description=description or None,
+                plugin, ed["name"], name_new=name,
+                description=description or None,
                 settings=settings or None, surface="dashboard")
         else:
             await api.plugin_profile_create(plugin, name, description,
@@ -2116,12 +2130,7 @@ def _build_profiles(ui: DashboardUIToolset, api: Any):
                                         "server-side.")
                        .set_close_on_submit(True)
                        .set_fields_provider(_editor_fields(api))
-                       .set_submit_action(submit_editor).set_submit_label("Save Profile")
-                       .add_fields(ui.TextInput(component_id="pe-name")
-                                   .set_label("Profile name").set_max_length(64)
-                                   .set_required(True),
-                                   ui.TextInput(component_id="pe-desc")
-                                   .set_label("Description").set_max_length(200))))
+                       .set_submit_action(submit_editor).set_submit_label("Save Profile")))
      .add_modal(ui.Modal(component_id="effective-modal").set_title("Effective settings")
         .add_component(ui.ListView(component_id="eff-lines")
                        .set_empty_text("no settings")

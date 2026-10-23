@@ -386,28 +386,14 @@ function bInput(comp) {
   return el("span");
 }
 
-/* channel-tree: multi-select DROPDOWN grouped by guild (profile scope
-   picker). Closed, it summarizes the pick; opening reveals collapsible
-   guild groups of channel checkboxes. A guild row's label selects
-   (head checks/clears children, indeterminate on partial); the rest of
-   the row expands/collapses. value = the checked channel ids. */
+/* channel-tree: multi-select picker grouped by guild (profile scope
+   picker). Each guild is a collapsible dropdown — the guild's label
+   selects (head checks/clears children, indeterminate on partial),
+   the rest of the row expands/collapses its channels. Collapsed picks
+   still collect. value = the checked channel ids. */
 function bChannelTree(comp) {
   const pre = new Set((Array.isArray(comp.value) ? comp.value : []).map(String));
-  const sumText = el("span", {class: "ctree-sum"});
-  const dd = el("details", {class: "ctree-dd"},
-    el("summary", {class: "ctree-dd-head"}, sumText,
-      bIcon("M6 9l6 6 6-6")));
   const tree = el("div", {class: "ctree"});
-  dd.append(tree);
-
-  const boxes = [];   /* every channel checkbox, across guilds */
-  const syncSummary = () => {
-    const n = boxes.filter(b => b.checked).length;
-    sumText.textContent = n
-      ? `${n} channel${n === 1 ? "" : "s"} selected`
-      : "all channels (no selection)";
-  };
-
   for (const g of (Array.isArray(comp.groups) ? comp.groups : [])) {
     const chans = (Array.isArray(g.channels) ? g.channels : [])
       .filter(c => c && c.id);
@@ -418,14 +404,16 @@ function bChannelTree(comp) {
     const label = el("label", {class: "ctree-guild"}, head,
       el("span", {class: "ctree-guild-name"}, g.name || g.id));
     const count = el("span", {class: "ctree-count"});
-    const row = el("div", {class: "ctree-guild-row"}, label, count);
+    const caret = bIcon("M6 9l6 6 6-6");
+    caret.classList.add("ctree-caret");
+    const row = el("div", {class: "ctree-guild-row"}, label, count, caret);
     const list = el("div", {class: "ctree-chans"});
+    const group = el("div", {class: "ctree-group"}, row, list);
     const sync = () => {
       const n = gboxes.filter(b => b.checked).length;
       head.checked = n === gboxes.length;
       head.indeterminate = n > 0 && n < gboxes.length;
       count.textContent = n ? `${n}/${gboxes.length}` : "";
-      syncSummary();
     };
     head.addEventListener("change", () => {
       for (const b of gboxes) b.checked = head.checked;
@@ -436,21 +424,21 @@ function bChannelTree(comp) {
       box.value = String(c.id);
       box.checked = pre.has(String(c.id));
       box.addEventListener("change", sync);
-      boxes.push(box);
       gboxes.push(box);
       list.append(el("label", {class: "ctree-row"},
         box, el("span", {}, "#" + (c.name || c.id))));
     }
     sync();
     list.hidden = !gboxes.some(b => b.checked);   // open where the pick is
+    if (!list.hidden) group.classList.add("open");
     row.addEventListener("click", e => {
       if (e.target.closest("label")) return;      // label = selection only
       list.hidden = !list.hidden;
+      group.classList.toggle("open", !list.hidden);
     });
-    tree.append(el("div", {class: "ctree-group"}, row, list));
+    tree.append(group);
   }
-  syncSummary();
-  return dd;
+  return tree;
 }
 
 /* option list fill: static comp.options now, or an options provider when
@@ -616,6 +604,7 @@ async function bLoadFields(plugin, id, host) {
       value: d.value, placeholder: d.placeholder, description: d.description,
       required: d.required === true, options: Array.isArray(d.options) ? d.options : [],
       groups: Array.isArray(d.groups) ? d.groups : [],
+      max_length: d.max_length,
       min_value: d.min, max_value: d.max, step: d.step,
     };
     bComps[c.id] = c;   /* value collection + validation read the comp by id */

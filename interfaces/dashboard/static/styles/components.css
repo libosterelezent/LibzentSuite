@@ -531,23 +531,12 @@ body[data-hero="off"] .hero { display: none; }
 .pick-row .pl-name { font-weight: 600; font-size: var(--fs-sm); color: var(--text); }
 .pick-row .pl-desc { font-size: var(--fs-xs); color: var(--dim); }
 
-/* channel tree dropdown (profile editor scope picker): a closed control
-   summarizing the pick; opening reveals collapsible guild groups */
-.ctree-dd { min-width: 0; }
-.ctree-dd-head { display: flex; align-items: center; justify-content: space-between;
-  gap: var(--sp-2); min-height: var(--ctrl-h); padding: 0 var(--sp-3);
-  border: 1px solid var(--border); border-radius: var(--r-sm);
-  background: var(--surface2); cursor: pointer; user-select: none;
-  font-size: var(--fs-sm); color: var(--dim); list-style: none; }
-.ctree-dd-head::-webkit-details-marker { display: none; }
-.ctree-dd-head svg { flex: none; transition: transform var(--t-fast); }
-.ctree-dd[open] .ctree-dd-head svg { transform: rotate(180deg); }
-.ctree-dd[open] .ctree-dd-head { color: var(--text); border-color: var(--accent);
-  border-radius: var(--r-sm) var(--r-sm) 0 0; }
+/* channel tree (profile editor scope picker): each guild group is a
+   collapsible dropdown — the guild label selects, the row expands */
 .ctree { display: flex; flex-direction: column; gap: 2px;
-  border: 1px solid var(--border); border-top: none;
-  border-radius: 0 0 var(--r-sm) var(--r-sm); background: var(--surface2);
-  max-height: 320px; overflow-y: auto; padding: var(--sp-1); }
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: var(--sp-1); background: var(--surface2);
+  max-height: 320px; overflow-y: auto; }
 .ctree-group { border-bottom: 1px solid var(--border); padding-bottom: 2px; }
 .ctree-group:last-child { border-bottom: none; padding-bottom: 0; }
 .ctree-guild-row { display: flex; align-items: center; gap: var(--sp-2);
@@ -560,6 +549,9 @@ body[data-hero="off"] .hero { display: none; }
 .ctree-guild-name { overflow-wrap: anywhere; }
 .ctree-count { flex: none; font-size: var(--fs-xs); color: var(--dim);
   font-family: var(--mono); }
+.ctree-caret { flex: none; color: var(--dim);
+  transition: transform var(--t-fast); }
+.ctree-group.open .ctree-caret { transform: rotate(180deg); }
 .ctree-chans { margin-left: var(--sp-4); display: flex;
   flex-direction: column; gap: 1px; }
 .ctree-row { display: flex; align-items: center; gap: var(--sp-2);
