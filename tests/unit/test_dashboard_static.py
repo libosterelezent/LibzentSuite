@@ -573,5 +573,135 @@ class TestStartupEndpointsLive(unittest.IsolatedAsyncioTestCase):
                                        f"{self.base}{path}", method, payload)
 
 
+class TestUiRegressionContracts(unittest.TestCase):
+    """Contracts pinned by the 2026-10-23 audit-and-repair pass. Static
+    source pins are the regression guard; the behavioral proof for each
+    fix was verified live against the running dashboard (see the commit
+    messages for the exact reproducers)."""
+
+    def test_settings_tab_builds_and_collects_the_attached_form(self):
+        """The baseline built schema fields into a DETACHED div and
+        collected from the panel — invisible controls, fabricated
+        'settings saved' success."""
+        src = _js()
+        self.assertIn("collectSchema(formHost, schema)", src)
+        self.assertIn("panel.append(skel, formHost, bar)", src)
+        self.assertIn("save.disabled = true;", src)  # no save while loading
+        self.assertIn("then failed:", src)            # honest partial failure
+        self.assertNotIn("collectSchema(panel, schema)", src)
+
+    def test_busy_preserves_icon_children(self):
+        """busy() used a textContent round-trip that permanently deleted
+        SVG children from icon-only buttons."""
+        src = _js()
+        self.assertIn("Array.from(btnEl.childNodes)", src)
+        self.assertIn("btnEl.replaceChildren(...restore)", src)
+        self.assertIn('btnEl.setAttribute("aria-busy", "true")', src)
+        self.assertNotIn("btnEl.dataset.label", src)
+
+    def test_account_detail_updates_volatile_fields_in_place(self):
+        """uptime/latency in the render signature rebuilt the whole page
+        on every 1s WS push, destroying focus and inputs."""
+        src = _js()
+        self.assertIn('function paintLive(row)', src)
+        self.assertIn('dataset: live ? {live} : {}', src)
+        # the structural signature must NOT carry the per-second fields
+        sig = src[src.find("function acctDetailSig"):src.find("function acctDetailRefresh")]
+        self.assertNotIn("latency_ms", sig)
+        self.assertNotIn("uptime_s", sig)
+        # extras land in ONE batched render, failures recorded distinctly
+        self.assertIn("Promise.allSettled(slices.map", src)
+        self.assertIn("ex.errors[key]", src)
+
+    def test_detail_distinguishes_loading_from_missing(self):
+        """Direct-URL entry briefly showed a false 'Account not found'
+        while /info and the first WS frame were in flight."""
+        src = _js()
+        self.assertIn('let existence = "pending"', src)
+        self.assertIn('existence = "missing"', src)
+
+    def test_dialog_tabs_build_lazily(self):
+        """Opening the four-tab ability dialog eagerly fetched every
+        tab's data; tabs now build on first selection."""
+        src = _js()
+        self.assertIn("const buildOnce = () =>", src)
+        self.assertIn("entries[0].buildOnce()", src)
+
+    def test_presets_tab_refetches_fresh_data(self):
+        """The presets tab rendered stale page-level snapshots and never
+        refreshed inside the open dialog."""
+        src = _js()
+        self.assertIn("function renderPresets(panel, a, pluginName, ex, refresh)", src)
+        tab_src = src[src.find("function acctAbilityPresetsTab"):
+                      src.find("function renderPresets")]
+        self.assertIn('api("/api/accounts/plugin-profiles?account=" + enc)', tab_src)
+        self.assertIn('api("/api/plugins/profiles")', tab_src)
+        self.assertGreaterEqual(src.count("await refresh();"), 4)
+
+    def test_plugin_state_is_tri_state(self):
+        """A missing runtime row (plugin not loaded) rendered as a
+        fabricated 'on'."""
+        src = _js()
+        self.assertIn("const stUnknown = !stOn && !stOff;", src)
+        self.assertIn('"aria-checked": stOn ? "true" : stOff ? "false" : "mixed"', src)
+        self.assertIn('state unknown — plugin not loaded', src)
+        self.assertNotIn('state.enabled !== false', src)
+
+    def test_raw_tab_redaction_is_layered_and_capped(self):
+        src = _js()
+        self.assertIn("REDACT_KEYS", src)
+        self.assertIn("REDACT_VALUES", src)       # value-shape second layer
+        self.assertIn("api[_-]?key|private[_-]?key", src)
+        self.assertIn("truncated at", src)          # output cap
+
+    def test_router_mount_race_is_fenced(self):
+        """Two rapid hashchanges could let the OLDER view's late fetch
+        clobber the newer route, hijack active and leak subscriptions."""
+        router = (STATIC_DIR / "js" / "router.js").read_text(encoding="utf-8")
+        self.assertIn("let mountSeq = 0", router)
+        self.assertIn("if (seq !== mountSeq) return;", router)
+        self.assertIn("typeof returned === \"function\"", router)
+
+    def test_fleet_views_never_clear_the_router_container(self):
+        """groups.js wrote the live container after awaits (the race's
+        clobber vector); views now own child hosts + stale-seq guards."""
+        groups = (STATIC_DIR / "js" / "views" / "groups.js").read_text(encoding="utf-8")
+        self.assertNotIn("container.textContent", groups)
+        self.assertIn("let loadSeq = 0", groups)
+        self.assertIn("const fatal = el(\"div\", null);", groups)
+        # live convergence via the fleet store key, unsubscribed at unmount
+        self.assertIn('if (key === "fleet" && state.alive', groups)
+        self.assertIn("unsubFleet()", groups)
+
+    def test_builder_page_writes_into_a_child_host(self):
+        plugins = (STATIC_DIR / "js" / "views" / "plugins.js").read_text(encoding="utf-8")
+        mount = plugins[plugins.find("async function pluginPageMount"):
+                        plugins.find('routerAdd("/plugins/:plugin"')]
+        self.assertNotIn("container.textContent", mount)
+        self.assertIn("const holder = el(\"div\", null,", mount)
+
+    def test_activity_bulk_cancel_subscription_is_tracked(self):
+        """The tasks subscription leaked on every Activity visit."""
+        activity = (STATIC_DIR / "js" / "views" / "activity.js").read_text(encoding="utf-8")
+        self.assertIn("state.unsubs.push(storeSubscribe(key => { if (key === \"tasks\") paintBulkCancel(); }));", activity)
+
+    def test_fleet_ws_seam_end_to_end(self):
+        """PHASE 9 §3: service (persisted-first) -> bus -> WS frame ->
+        store key -> Fleet Hub convergence."""
+        event_bus = (ROOT / "core" / "event_bus.py").read_text(encoding="utf-8")
+        self.assertIn("class FleetStateChanged(Event):", event_bus)
+        bootstrap = (ROOT / "core" / "bootstrap.py").read_text(encoding="utf-8")
+        self.assertIn("publisher=lambda ev: bus.publish_nowait(FleetStateChanged(", bootstrap)
+        self.assertIn("FLEET_EVENT_TYPES", SERVER_PATH.read_text(encoding="utf-8"))
+        store = (STATIC_DIR / "js" / "store.js").read_text(encoding="utf-8")
+        self.assertRegex(store, r"fleet:\s*null")
+        api_js = (STATIC_DIR / "js" / "api.js").read_text(encoding="utf-8")
+        self.assertIn('msg.type === "fleet"', api_js)
+
+    def test_index_header_names_the_real_tabs(self):
+        html = _spa()
+        self.assertIn("Fleet", html[:800])
+
+
 if __name__ == "__main__":
     unittest.main()
