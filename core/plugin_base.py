@@ -128,6 +128,13 @@ class PluginBase(abc.ABC):
     #: discovery and the plugin manager binds each handler to the
     #: per-(account, plugin) instance. See :class:`CommandSpec`.
     COMMANDS: ClassVar[Tuple["CommandSpec", ...]] = ()
+    #: PHASE 9 (§5) opt-in FLEET capability, DEFAULT OFF: an instance of
+    #: ``core.fleet.FleetTaskHandler`` (see core/fleet/capability.py).
+    #: Plugins without it — ping and every simple plugin — are never
+    #: mounted into fleet management. The framework owns the lifecycle;
+    #: the handler only supplies the flow (prepare/execute/suspend/
+    #: recover) and its task declarations.
+    fleet_handler: ClassVar[Optional[Any]] = None
 
     # ---------------------------------------------------------- UI extension
     async def ui_stats(self, ctx: "PluginContext") -> Sequence["StatCard"]:

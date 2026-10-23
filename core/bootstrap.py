@@ -664,7 +664,15 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     # bypass pacing (the limiter still gates every dispatch AFTER the
     # guard). Membership itself stays with SyncGroupManager — the fleet
     # service layers mode/eligibility/assignments on top through seams.
-    from core.fleet import FleetPolicy, FleetService
+    from core.event_bus import AccountConnected, AccountDisconnected
+    from core.fleet import (
+        FleetObservations,
+        FleetPolicy,
+        FleetService,
+        OBS_ACCOUNT_CONNECTED,
+        OBS_ACCOUNT_DISCONNECTED,
+        Observation,
+    )
 
     async def _fleet_group_exists(name: str) -> bool:
         return await sync_groups.get_group_by_name(name) is not None
@@ -683,6 +691,23 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     )
     await fleet.load()
     scheduler.set_dispatch_guard(FleetPolicy(fleet).scheduler_guard())
+
+    # rollout D: the observation intake — bus connectivity events flow
+    # in as generic observations (account-scoped, deduped); parser-side
+    # observations arrive through plugin handlers calling the intake
+    fleet_observations = FleetObservations(fleet)
+
+    async def _on_account_event(event) -> None:
+        kind = (OBS_ACCOUNT_CONNECTED if isinstance(event, AccountConnected)
+                else OBS_ACCOUNT_DISCONNECTED)
+        await fleet_observations.observe(Observation(
+            source_account=str(event.account or ""),
+            observation_type=kind,
+            message_id=f"{kind}@{event.ts}",
+            observed_at=float(event.ts),
+            reason=str(getattr(event, "reason", "") or kind)))
+    bus.subscribe(AccountConnected, _on_account_event)
+    bus.subscribe(AccountDisconnected, _on_account_event)
 
     if simulation_runner is None:
         try:

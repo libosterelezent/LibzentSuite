@@ -32,6 +32,15 @@ from .models import (
 )
 from .policy import FleetPolicy
 from .service import FleetService
+from .observations import (
+    FleetObservations,
+    Observation,
+    OBS_ACCOUNT_CONNECTED,
+    OBS_ACCOUNT_DISCONNECTED,
+    OBS_LIMIT_MARKER,
+    OBS_SERVER_COOLDOWN,
+)
+from .capability import FleetTaskHandler, definitions_of, handler_of
 from .transitions import (
     ASSIGNMENT_TRANSITIONS,
     MEMBER_TRANSITIONS,
@@ -67,6 +76,17 @@ __all__ = [
     "FleetService",
     # policy
     "FleetPolicy",
+    # observations (rollout D)
+    "FleetObservations",
+    "Observation",
+    "OBS_LIMIT_MARKER",
+    "OBS_SERVER_COOLDOWN",
+    "OBS_ACCOUNT_DISCONNECTED",
+    "OBS_ACCOUNT_CONNECTED",
+    # capability (§5)
+    "FleetTaskHandler",
+    "handler_of",
+    "definitions_of",
     # transitions
     "MEMBER_TRANSITIONS",
     "ASSIGNMENT_TRANSITIONS",

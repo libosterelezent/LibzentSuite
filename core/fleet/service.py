@@ -288,6 +288,23 @@ class FleetService:
                                       f"operator resumed {account}",
                                       account=account)
 
+    async def mark_eligibility(self, account: str, target: str) -> FleetEvent:
+        """Derived-state moves (§2 connectivity, observation flow): set
+        the member's eligibility THROUGH the Phase A tables — an
+        invalid move (e.g. PAUSED -> WAITING while an operator pause
+        stands) raises InvalidTransition and changes nothing."""
+        async with self._lock:
+            member = self._require_member(account)
+            validate_member_transition(member.eligibility, target)
+            member.eligibility = target
+            await self._repo.upsert_member(member)
+            self._members[account] = member
+            kind = "MemberWaiting" if target == MemberEligibility.WAITING \
+                else "MemberEligibilityChanged"
+            return await self._record(kind, member.group_name,
+                                      f"{account} -> {target}",
+                                      account=account)
+
     # ---------------------------------------------------------- assignments
 
     async def submit_task(self, group_name: str,
@@ -379,6 +396,11 @@ class FleetService:
             fields = {"status": new_status}
             if new_status == AssignmentStatus.RUNNING:
                 fields["started_at"] = self._now()
+            if new_status == AssignmentStatus.QUEUED:
+                # queued work belongs to the GROUP, not an account: the
+                # binding drops (relay requeue, fail-retry, resume all
+                # return to the queue for the next assignment decision)
+                fields["account"] = None
             if new_status in (AssignmentStatus.COMPLETED,
                               AssignmentStatus.FAILED,
                               AssignmentStatus.CANCELLED,
