@@ -251,3 +251,24 @@ are swallowed and counted in `LogService.stats()["db_failures"]`).
 Headless/daemon note: `--headless` waits on a bare `asyncio.Event()`; Ctrl-C
 (`KeyboardInterrupt`, rc 130 from `main`) or task cancellation falls into
 the same `finally` → `framework.shutdown()` path.
+
+### Addendum (2026-10-25): current shutdown step list — fleet reconciler + plugin-data store
+
+The snippet above is an older snapshot; the live `Framework.shutdown`
+(`core/bootstrap.py`) is a fault-tolerant step list that now runs, in
+order: scheduler drain → cooldown-resync stop → **fleet reconciler stop**
+(Phase 9; stopped before the bus drains so its tail fleet events still
+reach subscribers) → bus drain → accounts stop_all → second bus drain →
+log persistence drain → audit persistence drain → stdlib bridge detach →
+plugin manager close → **plugin-data store close** (Phase 10) → database
+close → stderr-pipeline release (the last claim holder stops it).
+
+Why the plugin-data close is pinned: the store is a SECOND aiosqlite
+connection (`state/plugin-data.db`), and aiosqlite 0.22 worker threads
+are NON-daemon — a connection left open outlives the test summary and
+hangs `threading._shutdown` at interpreter exit (CI run 110 sat ~20
+minutes after printing `Ran 2350 tests`). Until 2026-10-25 the store's
+close was registered only on the build-failure rollback path
+(`cleanups`), so every successful boot→shutdown cycle leaked one thread.
+Regression test:
+`tests/unit/test_bootstrap_fixes.py::PluginDataTeardownTests`.

@@ -179,6 +179,7 @@ class Framework:
                  fleet: Any = None,
                  plugin_data: Any = None,
                  cooldown_resync_stop: Optional[Callable[[], Any]] = None,
+                 fleet_reconciler_stop: Optional[Callable[[], Any]] = None,
                  claims_stderr: bool = False,
                  ) -> None:
         self.api = api
@@ -204,6 +205,8 @@ class Framework:
         self.plugin_data = plugin_data
         #: stops the periodic cooldown-resync task (set by _assemble)
         self._cooldown_resync_stop = cooldown_resync_stop
+        #: stops the periodic fleet-reconciler task (set by _assemble)
+        self._fleet_reconciler_stop = fleet_reconciler_stop
         # this framework holds one CLAIM on the process-global stderr
         # pipeline — shutdown releases it (the last release stops)
         self._claims_stderr = claims_stderr
@@ -231,6 +234,9 @@ class Framework:
         steps = [
             ("scheduler", lambda: self.scheduler.stop(drain=True)),
             ("cooldown resync", self._stop_cooldown_resync),
+            # stop the reconciler's periodic pass BEFORE the drains so its
+            # tail fleet events still reach subscribers mid-teardown
+            ("fleet reconciler", self._stop_fleet_reconciler),
             ("bus drain", self.bus.drain),
             ("accounts", self.accounts.stop_all),
             # SECOND drain: stop_all emits AccountDisconnected (and plugin
@@ -244,6 +250,9 @@ class Framework:
             ("audit persistence", self.audit.stop_persistence),
             ("stdlib bridge", self._detach_bridge),
             ("plugin manager", self._close_plugins),
+            # the store is a SECOND aiosqlite connection: leaving it open
+            # leaks a non-daemon worker thread that hangs interpreter exit
+            ("plugin-data store", self._close_plugin_data),
             ("database", self.database.close),
         ]
         if self._claims_stderr:
@@ -295,6 +304,25 @@ class Framework:
         except Exception as exc:
             ROOT_LOGGER.warning("cooldown resync shutdown failed: %s: %s",
                                 type(exc).__name__, exc)
+
+    async def _stop_fleet_reconciler(self) -> None:
+        stop = self._fleet_reconciler_stop
+        if stop is None:
+            return
+        self._fleet_reconciler_stop = None  # idempotent
+        try:
+            outcome = stop()
+            if inspect.iscoroutine(outcome):
+                await outcome
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            ROOT_LOGGER.warning("fleet reconciler shutdown failed: %s: %s",
+                                type(exc).__name__, exc)
+
+    async def _close_plugin_data(self) -> None:
+        if self.plugin_data is not None:
+            await self.plugin_data.close()
 
     @staticmethod
     async def _detach_bridge() -> None:
@@ -794,5 +822,6 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         credential_service=credential_service, cooldowns=cooldowns,
         plugin_state=plugin_state, sync_groups=sync_groups,
         cooldown_resync_stop=_stop_cooldown_resync_task,
+        fleet_reconciler_stop=fleet_reconciler.stop,
         claims_stderr=stderr_claimed,
     )

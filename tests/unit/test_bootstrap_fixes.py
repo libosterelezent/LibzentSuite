@@ -392,3 +392,40 @@ class StderrClaimWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(m._STDERR_USERS, 0,
                          "the failed build released its claim")
         self.assertFalse(m.stderr_pipeline_active())
+
+
+class PluginDataTeardownTests(unittest.IsolatedAsyncioTestCase):
+    """PHASE 10 teardown: the plugin-data store is a SECOND aiosqlite
+    connection beside the main database. A shutdown that leaves it open
+    leaks a non-daemon worker thread, which hangs interpreter exit after
+    the test summary (the CI run-110 hang)."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="sm-pd-shutdown-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    async def _build(self):
+        from core import bootstrap
+        return await bootstrap.build(
+            env_file=str(self.root / "absent.env"),
+            config_dir=str(self.root / "config"),
+            db_path=str(self.root / "state" / "libzent.db"),
+            plugin_dir="tests/fixtures/plugins",
+            quiet=True)
+
+    async def test_shutdown_closes_the_plugin_data_store(self) -> None:
+        fw = await self._build()
+        store = fw.plugin_data
+        self.assertIsNotNone(store)
+        # the store is live through the shared facade before teardown
+        await fw.api.accounts_add({"name": "alpha", "plugins": ["probe"]})
+        await fw.api.accounts_data_put("alpha", "probe", "0", "0", {"v": 1})
+        docs = await fw.api.accounts_data_list("alpha")
+        self.assertEqual(len(docs), 1)
+        await fw.shutdown()
+        self.assertIsNone(
+            store._conn,
+            "shutdown must close the plugin-data store — an open "
+            "aiosqlite connection keeps a non-daemon worker thread "
+            "alive and hangs interpreter exit")
