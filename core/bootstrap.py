@@ -177,6 +177,7 @@ class Framework:
                  plugin_state: Any = None,
                  sync_groups: Any = None,
                  fleet: Any = None,
+                 plugin_data: Any = None,
                  cooldown_resync_stop: Optional[Callable[[], Any]] = None,
                  claims_stderr: bool = False,
                  ) -> None:
@@ -199,6 +200,8 @@ class Framework:
         self.sync_groups = sync_groups
         #: PHASE 9 fleet orchestration (service + policy gate)
         self.fleet = fleet
+        #: PHASE 10 AccountPluginData store (B3)
+        self.plugin_data = plugin_data
         #: stops the periodic cooldown-resync task (set by _assemble)
         self._cooldown_resync_stop = cooldown_resync_stop
         # this framework holds one CLAIM on the process-global stderr
@@ -379,7 +382,6 @@ async def build(
         config = load_config(config_dir)
 
         from database.db import Database
-
         database = database if database is not None else Database(db_path)
         await database.connect()  # open + pragmas + migrations, FIRST
         return await _assemble(
@@ -447,6 +449,16 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     )
     cooldowns = CooldownService(database.cooldowns)
     plugin_state = PluginStateService(database.kv)
+    # PHASE 10 (B3, LOCKED): AccountPluginData — its OWN WAL SQLite file
+    # beside the main database, self-initializing schema (separate
+    # database flow by design); exposed to plugins ONLY through the
+    # per-(account, plugin) services facade, never directly
+    from database.plugin_data import PluginDataStore
+
+    plugin_data_store = PluginDataStore(
+        Path(db_path).expanduser().absolute().parent / "plugin-data.db")
+    await plugin_data_store.connect()
+    cleanups.append(("plugin-data store", plugin_data_store.close))
 
     logs = LogService()
     logs.attach_db(database.logs)
@@ -567,6 +579,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         api_cache_repo=database.cache,
         credential_service=credential_service, cooldowns=cooldowns,
         plugin_state=plugin_state,
+        plugin_data=plugin_data_store,   # PHASE 10: data_* plugin API
         lifecycle=LifecycleGovernor(),  # PHASE-4 (S4): anti-thrash defaults
         sync_groups=sync_groups,
         account_plugins=database.account_plugins,  # capability source
@@ -748,6 +761,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         credentials_svc=credential_service, cooldowns=cooldowns,
         sync_groups=sync_groups,
         fleet=fleet,
+        plugin_data=plugin_data_store,
         started_at=_time.time(),
     )
 
@@ -776,6 +790,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         accounts=accounts, plugins=plugins, settings=settings,
         audit=audit, database=database, credentials=credentials, config=config,
         fleet=fleet,
+        plugin_data=plugin_data_store,
         credential_service=credential_service, cooldowns=cooldowns,
         plugin_state=plugin_state, sync_groups=sync_groups,
         cooldown_resync_stop=_stop_cooldown_resync_task,

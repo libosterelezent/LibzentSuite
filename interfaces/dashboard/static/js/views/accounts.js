@@ -777,6 +777,7 @@ function acctDetailMount(root, params) {
     channels: null,      // /api/accounts/channels
     info: null,          // /api/accounts/info fallback (store miss)
     stats: null,         // /api/ui/stats — plugin-contributed StatCards
+    dataNodes: null,     // PHASE 10: AccountPluginData scope nodes
     errors: {},          // slice key -> message: FAILED loads, distinct from
                          // loaded-empty; values keep their last-good data
   };
@@ -948,6 +949,7 @@ function acctDetailRefresh(acctName, ex, scheduleRender) {
     ["effDm", "/api/ratelimit/effective?action=dm&account=" + enc],
     ["channels", "/api/accounts/channels?account=" + enc],
     ["stats", "/api/ui/stats?account=" + enc],
+    ["dataNodes", "/api/accounts/data?account=" + enc],
   ];
   Promise.allSettled(slices.map(([key, path]) =>
     api(path).then(data => {
@@ -1388,9 +1390,8 @@ function acctMemorySection(a, ex, rerender) {
   }
   wrap.append(row);
 
-  /* runtime-state strip: per-plugin RUNTIME enablement — this is NOT
-     persisted plugin memory (no arbitrary key/value store exists yet);
-     UNKNOWN (not loaded) renders as "—", never a fabricated "on" */
+  /* runtime-state strip: per-plugin RUNTIME enablement — distinct from
+     the AccountPluginData documents below (runtime flag vs stored data) */
   const statesRow = el("div", {class: "kv-row", style: "margin-top:var(--sp-2)"},
     el("div", {class: "kv"},
       el("span", {class: "k dim", style: "text-transform:uppercase;"}),
@@ -1409,8 +1410,120 @@ function acctMemorySection(a, ex, rerender) {
           String(st.error_count) + " err") : null)));
   }
   wrap.append(statesRow);
+  wrap.append(acctPluginDataBrowser(a, ex, rerender));
   sec.append(wrap);
   return sec;
+}
+
+/* PHASE 10 (B3): the AccountPluginData browser — the MEMORY section's
+   per-plugin per-channel Data view. One fetch lists every scope node;
+   the LOCAL render puts NUMERIC keys in stat pills and everything else
+   in a kv inspector (fleet rollup is opt-in via task-definition metric
+   hints, not schema guessing). Selections survive rerenders. */
+const _dataPick = {};   // account -> {plugin, key} (module-scoped on purpose)
+
+function acctPluginDataBrowser(a, ex, rerender) {
+  const host = el("div", {style: "margin-top:var(--sp-3);"});
+  host.append(el("div", {class: "k dim",
+    style: "font-size:var(--fs-xs);text-transform:uppercase;"},
+    "plugin data (per channel)"));
+  const nodes = Array.isArray(ex.dataNodes) ? ex.dataNodes : null;
+  if (nodes === null) {
+    host.append(el("p", {class: "hint"}, "loading plugin data…"));
+    return host;
+  }
+  const assigned = a.assigned_plugins || [];
+  const pluginsWithData = [...new Set(nodes.map(n => n.plugin))];
+  const pickPlugins = [...new Set([...pluginsWithData,
+    ...assigned.filter(p => pluginsWithData.includes(p))])].sort();
+  if (!pickPlugins.length) {
+    host.append(el("p", {class: "hint"},
+      "No plugin documents yet — plugin flows write per-channel data through their services API."));
+    return host;
+  }
+  const pick = _dataPick[a.name] || {};
+  if (!pickPlugins.includes(pick.plugin)) pick.plugin = pickPlugins[0];
+
+  const scopeLabel = (guildId, channelId, channels) => {
+    if (guildId === "0" && channelId === "0") return "plugin-global";
+    const guild = (channels || []).find(g => String(g.guild_id) === guildId);
+    const gname = (guild && guild.guild_name) || guildId;
+    if (channelId === "0") return `guild-level · ${gname}`;
+    const ch = guild && (guild.channels || []).find(
+      c => String(c.id) === channelId);
+    return `#${(ch && ch.name) || channelId} · ${gname}`;
+  };
+
+  const pluginNodes = nodes.filter(n => n.plugin === pick.plugin);
+  const keys = pluginNodes.map(
+    n => `${n.guild_id}/${n.channel_id}`);
+  if (!keys.includes(pick.key)) pick.key = keys[0];
+  _dataPick[a.name] = {plugin: pick.plugin, key: pick.key};
+
+  const pluginSel = el("select", {"aria-label": "Data plugin"},
+    ...pickPlugins.map(p => el("option", {value: p,
+      selected: p === pick.plugin ? "" : undefined}, p)));
+  pluginSel.onchange = () => {
+    _dataPick[a.name] = {plugin: pluginSel.value, key: null};
+    rerender();
+  };
+  const scopeSel = el("select", {"aria-label": "Data scope"},
+    ...pluginNodes.map(n => {
+      const key = `${n.guild_id}/${n.channel_id}`;
+      return el("option", {value: key,
+        selected: key === pick.key ? "" : undefined},
+        scopeLabel(n.guild_id, n.channel_id, ex.channels));
+    }));
+  scopeSel.onchange = () => {
+    _dataPick[a.name].key = scopeSel.value;
+    rerender();
+  };
+  host.append(el("div", {class: "toolbar",
+    style: "flex-wrap:wrap;gap:var(--sp-2);"}, pluginSel,
+    pluginNodes.length ? scopeSel : null));
+
+  const node = pluginNodes.find(
+    n => `${n.guild_id}/${n.channel_id}` === pick.key);
+  if (!node) {
+    host.append(el("p", {class: "hint"},
+      "No documents for this plugin yet."));
+    return host;
+  }
+  host.append(acctPluginDataCard(node));
+  return host;
+}
+
+/* one document card: numeric keys -> stat pills, the rest -> kv rows */
+function acctPluginDataCard(node) {
+  const card = el("div", {class: "card", style: "margin-top:var(--sp-2);"});
+  card.append(el("div", {class: "dim",
+    style: "font-size:var(--fs-xs);display:flex;gap:var(--sp-3);"},
+    el("span", {}, "v" + String(node.version ?? 1)),
+    node.updated_at ? el("span", {}, fmtAge(node.updated_at)) : null));
+  const entries = Object.entries(node.data || {});
+  if (!entries.length) {
+    card.append(el("p", {class: "hint"}, "empty document"));
+    return card;
+  }
+  const numeric = entries.filter(
+    ([, v]) => typeof v === "number" && Number.isFinite(v));
+  if (numeric.length) {
+    const pills = el("div", {class: "kv-row", style: "margin-top:var(--sp-2);"});
+    for (const [k, v] of numeric)
+      pills.append(el("span", {class: "ms-pill"},
+        el("span", {class: "k"}, k),
+        el("b", {class: "v mono"}, String(Math.round(v * 1000) / 1000))));
+    card.append(pills);
+  }
+  const rest = entries.filter(
+    ([k, v]) => !(typeof v === "number" && Number.isFinite(v)));
+  for (const [k, v] of rest)
+    card.append(el("div", {class: "kv"},
+      el("span", {class: "k"}, k),
+      el("span", {class: "v",
+        style: "overflow-wrap:anywhere;"},
+        typeof v === "string" ? v : JSON.stringify(v))));
+  return card;
 }
 
 /* the gallery: every profile, grouped by plugin; bind/unbind this account,

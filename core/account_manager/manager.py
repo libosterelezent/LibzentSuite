@@ -347,6 +347,7 @@ class AccountManager:
         credential_service: Any = None,
         cooldowns: Any = None,
         plugin_state: Any = None,
+        plugin_data: Any = None,
         lifecycle: Any = None,
         sync_groups: Any = None,
         account_plugins: Any = None,
@@ -394,6 +395,9 @@ class AccountManager:
         self._credential_service = credential_service
         self._cooldowns = cooldowns
         self._plugin_state = plugin_state
+        #: PHASE 10 (B3): the shared PluginDataStore; enables the
+        #: pair+scope-scoped ``data_*`` plugin API
+        self._plugin_data = plugin_data
         # typing-indicator RNG (anti-flag: humans trigger typing; disabled
         # by default via the typing_probability account setting = 0.0)
         import random as _random
@@ -2427,6 +2431,7 @@ class AccountManager:
             api_cache_repo=self._api_cache,
             cooldowns=self._cooldowns,
             plugin_state=self._plugin_state,
+            plugin_data=self._plugin_data,
         )
         self._services[key] = services
         return services

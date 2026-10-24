@@ -304,6 +304,7 @@ class AccountPluginServices:
         api_cache_repo: Any = None,
         cooldowns: Any = None,
         plugin_state: Any = None,
+        plugin_data: Any = None,
     ) -> None:
         self._account = account
         self._plugin = plugin
@@ -324,6 +325,9 @@ class AccountPluginServices:
         self._cooldowns = cooldowns
         #: shared plugin-state service (None = state API unavailable here)
         self._plugin_state = plugin_state
+        #: PHASE 10 (B3): shared PluginDataStore (None = data API
+        #: unavailable here); exposes the pair+scope-scoped data_* API
+        self._plugin_data = plugin_data
         #: bounded wait for a task completion ack (seconds; configurable)
         self.task_ack_timeout: float = 30.0
 
@@ -540,6 +544,55 @@ class AccountPluginServices:
         return await self._require_plugin_state().delete_pair(
             self._account, self._plugin, key
         )
+
+    # -------------------------------------------- plugin data (PHASE 10/B3)
+    def _require_plugin_data(self) -> Any:
+        """The shared PluginDataStore, or an honest error when unwired."""
+        if self._plugin_data is None:
+            raise PluginError(
+                f"plugin-data API is not wired for "
+                f"{self._account}/{self._plugin} (AccountPluginData requires "
+                "the framework's PluginDataStore)"
+            )
+        return self._plugin_data
+
+    async def data_get(self, guild_id: str = "0",
+                       channel_id: str = "0") -> Optional[Dict[str, Any]]:
+        """Read ONE AccountPluginData document from the FIXED scope
+        lattice (account -> plugin -> guild -> channel; "0" = the
+        plugin-global/guild-level sentinel). Returns the document dict
+        ({"data", "version", "updated_at"}) or None — STANDALONE COPIES
+        never fall through to a parent scope."""
+        return await self._require_plugin_data().get(
+            self._account, self._plugin,
+            guild_id=guild_id, channel_id=channel_id)
+
+    async def data_put(self, guild_id: str, channel_id: str, data: Any, *,
+                       expected_version: Optional[int] = None
+                       ) -> Dict[str, Any]:
+        """Write one document in this (account, plugin) scope. The
+        optimistic guard: pass the version you READ (VersionConflict on
+        a racing writer — refetch and re-apply); omit for the simple
+        last-writer-wins path."""
+        return await self._require_plugin_data().put(
+            self._account, self._plugin, guild_id, channel_id, data,
+            expected_version=expected_version)
+
+    async def data_list(self, *, guild_id: Optional[str] = None,
+                        channel_id: Optional[str] = None
+                        ) -> List[Dict[str, Any]]:
+        """Every document this (account, plugin) pair stored (optionally
+        filtered by scope dimensions) — the UI's universal browser."""
+        return await self._require_plugin_data().list(
+            self._account, self._plugin,
+            guild_id=guild_id, channel_id=channel_id)
+
+    async def data_delete(self, guild_id: str = "0",
+                          channel_id: str = "0") -> bool:
+        """Remove one document (True when it existed)."""
+        return await self._require_plugin_data().delete(
+            self._account, self._plugin,
+            guild_id=guild_id, channel_id=channel_id)
 
     # -------------------------------------------------------------- inbound
     async def wait_for_message(

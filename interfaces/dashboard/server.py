@@ -1453,6 +1453,51 @@ class DashboardServer:
                 return 200, {"ok": True,
                              "data": await api.fleet_op(op, **params)}
 
+            # ------------------------------------------------------- plugin data (PHASE 10, B3)
+            if (method, path) == ("GET", "/api/accounts/data"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_data_list(
+                        q_str(query, "account", path),
+                        plugin=q_opt(query, "plugin"),
+                        guild_id=q_opt(query, "guild_id"),
+                        channel_id=q_opt(query, "channel_id")),
+                }
+            if (method, path) == ("GET", "/api/accounts/data/doc"):
+                doc = await api.accounts_data_get(
+                    q_str(query, "account", path),
+                    q_str(query, "plugin", path),
+                    guild_id=q_opt(query, "guild_id") or "0",
+                    channel_id=q_opt(query, "channel_id") or "0",
+                )
+                return 200, {"ok": True, "data": doc}
+            if (method, path) == ("POST", "/api/accounts/data/put"):
+                expected = body.get("expected_version")
+                if expected is not None and (
+                        isinstance(expected, bool)
+                        or not isinstance(expected, int)):
+                    return 400, {"ok": False,
+                                 "error": "field 'expected_version' must be an int"}
+                doc = await api.accounts_data_put(
+                    require_str(body, "account", path),
+                    require_str(body, "plugin", path),
+                    require_str(body, "guild_id", path),
+                    require_str(body, "channel_id", path),
+                    body.get("data"),
+                    expected_version=expected,
+                )
+                return 200, {"ok": True, "data": doc}
+            if (method, path) == ("POST", "/api/accounts/data/delete"):
+                deleted = await api.accounts_data_delete(
+                    require_str(body, "account", path),
+                    require_str(body, "plugin", path),
+                    guild_id=(body.get("guild_id")
+                              if body.get("guild_id") is not None else "0"),
+                    channel_id=(body.get("channel_id")
+                                if body.get("channel_id") is not None else "0"),
+                )
+                return 200, {"ok": True, "data": {"deleted": deleted}}
+
             if (method, path) == ("POST", "/api/groups/create"):
                 payload = {"name": require_str(body, "name", path)}
                 if "description" in body and body["description"] is not None:

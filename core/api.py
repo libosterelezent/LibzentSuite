@@ -138,6 +138,7 @@ class ControlAPI:
         cooldowns: Optional["CooldownService"] = None,
         sync_groups: Any = None,
         fleet: Any = None,              # core.fleet.FleetService (PHASE 9)
+        plugin_data: Any = None,        # database.plugin_data.PluginDataStore (PHASE 10)
         access: Any = None,              # core.access_manager.AccessManager
         started_at: float = 0.0,
         reconcile_interval_s: float = 30.0,
@@ -156,6 +157,7 @@ class ControlAPI:
         self._cooldowns = cooldowns
         self._sync_groups = sync_groups
         self._fleet = fleet
+        self._plugin_data = plugin_data
         self._access = access
         # NOTE: started_at is accepted (core/bootstrap passes it) but the
         # value is never read — uptime derives from _booted_at below; kept
@@ -850,6 +852,80 @@ class ControlAPI:
         except Exception:
             LOG.exception("channel snapshot failed for %r", account)
             return []
+
+    # -------------------------------------------------- plugin data (PHASE 10, B3)
+    def _require_plugin_data(self) -> Any:
+        """The shared PluginDataStore, or an honest error."""
+        if self._plugin_data is None:
+            raise RuntimeError(
+                "plugin-data store is not configured on this api")
+        return self._plugin_data
+
+    @staticmethod
+    def _data_scope(guild_id: Any, channel_id: Any) -> List[str]:
+        for name, value in (("guild_id", guild_id), ("channel_id", channel_id)):
+            if not isinstance(value, str) or not (value == "0" or value.isdigit()):
+                raise ValueError(
+                    f"field '{name}' must be a digit string or '0' "
+                    f"(snowflakes are STRINGS end to end), got {value!r}")
+        return [str(guild_id), str(channel_id)]
+
+    async def accounts_data_list(self, account: str, *,
+                                 plugin: Optional[str] = None,
+                                 guild_id: Optional[str] = None,
+                                 channel_id: Optional[str] = None
+                                 ) -> List[Dict[str, Any]]:
+        """AccountPluginData scope nodes for one account (optionally
+        narrowed by plugin/guild/channel) — the UI's universal browser.
+        READ path: absent documents are simply absent (standalone
+        copies, no inheritance)."""
+        self._validate_account_known(account)
+        for name, value in (("guild_id", guild_id), ("channel_id", channel_id)):
+            if value is not None:
+                self._data_scope(value, "0")   # validates the one dim
+        return await self._require_plugin_data().list(
+            account, plugin, guild_id=guild_id, channel_id=channel_id)
+
+    async def accounts_data_get(self, account: str, plugin: str, *,
+                                guild_id: str = "0",
+                                channel_id: str = "0"
+                                ) -> Optional[Dict[str, Any]]:
+        """One document (None when the scope node is empty)."""
+        self._validate_account_known(account)
+        if not isinstance(plugin, str) or not plugin.strip():
+            raise ValueError("field 'plugin' must be a non-empty string")
+        gid, cid = self._data_scope(guild_id, channel_id)
+        return await self._require_plugin_data().get(
+            account, plugin.strip(), guild_id=gid, channel_id=cid)
+
+    async def accounts_data_put(self, account: str, plugin: str,
+                                guild_id: str, channel_id: str, data: Any, *,
+                                expected_version: Optional[int] = None
+                                ) -> Dict[str, Any]:
+        """Write one document. ``expected_version`` carries the
+        optimistic-write guard (a racing writer raises VersionConflict —
+        a 400 naming the current version)."""
+        self._validate_account_known(account)
+        if not isinstance(plugin, str) or not plugin.strip():
+            raise ValueError("field 'plugin' must be a non-empty string")
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"field 'data' must be a JSON object, got {type(data).__name__}")
+        gid, cid = self._data_scope(guild_id, channel_id)
+        return await self._require_plugin_data().put(
+            account, plugin.strip(), gid, cid, data,
+            expected_version=expected_version)
+
+    async def accounts_data_delete(self, account: str, plugin: str, *,
+                                   guild_id: str = "0",
+                                   channel_id: str = "0") -> bool:
+        """Remove one scope node's document (True when it existed)."""
+        self._validate_account_known(account)
+        if not isinstance(plugin, str) or not plugin.strip():
+            raise ValueError("field 'plugin' must be a non-empty string")
+        gid, cid = self._data_scope(guild_id, channel_id)
+        return await self._require_plugin_data().delete(
+            account, plugin.strip(), guild_id=gid, channel_id=cid)
 
     async def _assigned_plugins(self, account: str) -> List[str]:
         """Sorted assigned plugins, memory-first via the account manager
