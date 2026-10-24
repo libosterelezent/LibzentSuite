@@ -112,8 +112,8 @@ python3 main.py accounts list          # one-shot command mode
 | Page | What you do there |
 |---|---|
 | **Home** | live fleet status at a glance (running, cooldowns, tasks, sync groups) + the recent activity feed |
-| **Accounts** | add/remove, start/stop, store tokens, direct plugin assignment, sync groups; each account detail page carries Abilities / Memory (plugin presets + bindings, the Profile gallery) / Pacing / Live stats (plugin `ui_stats` cards) / Operations |
-| **Fleet** | the Fleet Hub (`#/groups`): group-managed orchestration — members, eligibility, task assignments, scoped cooldowns, transition history; mutations ride the FleetService path and converge live over the WebSocket |
+| **Accounts** | add/remove, start/stop, store tokens, direct plugin assignment; each account detail page carries Abilities / Memory (plugin presets + bindings, the Profile gallery, per-channel plugin data) / Pacing / Live stats (plugin `ui_stats` cards) / Operations. Group membership lives on the Fleet page |
+| **Fleet** | the ONE groups surface (`#/groups`): create/edit/delete groups, pacing membership (the shared clock) AND fleet management (eligibility, task assignments, scoped cooldowns, transition history) side by side; mutations ride the FleetService path and converge live over the WebSocket |
 | **Plugins** | per-account enable/disable, settings, the **profile library** (named setting bundles with channel scopes — edit/delete; creation happens from an account's MEMORY flow) |
 | **Activity** | the task queue/history, pacing cooldowns, live log stream + every Discord interaction (audit) |
 | **Policies** | pacing policies, effective rates, safety warnings, the 429 throttle card |

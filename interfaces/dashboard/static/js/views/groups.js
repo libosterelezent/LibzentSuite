@@ -19,10 +19,21 @@ routerAdd("/groups", "Fleet", async (container) => {
      container (a newer view may own it — see router's mount fence);
      every write goes through hdr/notice/host which the router's own
      clear detaches harmlessly */
+  const newBtn = el("button", {class: "btn btn-primary btn-sm", type: "button"},
+    el("svg", {viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
+               "stroke-width": "2", "aria-hidden": "true"},
+      el("path", {d: "M12 5v14M5 12h14"})),
+    "New Group");
+  newBtn.onclick = () => acctOpenGroupCreate(async () => {
+    await Promise.allSettled([loadGroups(), loadStatsNow()]);
+    await load();
+  });
   const hdr = el("div", {class: "view-hdr"},
-    el("h1", {}, "Fleet"),
-    el("p", {class: "dim"},
-      "Group-managed orchestration: members, work, cooldowns — and the why."));
+    el("div", {},
+      el("h1", {}, "Fleet"),
+      el("p", {class: "dim"},
+        "Groups: membership + shared pacing + orchestration — one surface.")),
+    el("div", {class: "actions"}, newBtn));
   const notice = el("div", null);
   const host = el("div", {class: "grid grid-2"},
     el("div", {class: "skel"}, el("div"), el("div"), el("div")));
@@ -47,8 +58,18 @@ routerAdd("/groups", "Fleet", async (container) => {
     if (!groups.length) {
       host.append(el("div", {class: "card"},
         emptyState("No groups yet",
-          "Create a sync group (Accounts page), then join it to fleet management from a group below.")));
+          "A group paces its member accounts on one shared clock and — once joined to fleet management — orchestrates their work. Create the first one.")));
       return;
+    }
+    /* enrich with SYNC truth (the store's groups/accounts are the
+       pacing-membership layer; the fleet bundle is the orchestration
+       layer — the card shows BOTH honestly) */
+    const syncGroups = storeGet("groups") || [];
+    const accts = storeGet("accounts") || [];
+    for (const g of groups) {
+      const sync = syncGroups.find(x => x.name === g.group);
+      g._sync = sync || null;
+      g._syncMembers = accts.filter(a => a.sync_group === g.group).map(a => a.name);
     }
     for (const g of groups) host.append(groupCard(g));
   }
@@ -60,14 +81,17 @@ routerAdd("/groups", "Fleet", async (container) => {
       .map(s => `${counts[s]} ${s}`)
       .join(" · ") || "no live work";
     const last = g.last_transition;
+    const syncCount = (g._syncMembers || []).length;
     const card = el("div", {
       class: "card acct-tile", style: "cursor:pointer;",
       onclick: () => navigate(`/groups/${encodeURIComponent(g.group)}`)},
       el("div", {class: "acct-name"}, g.group,
-        g.paused ? el("span", {class: "badge badge-warn", style: "margin-left:var(--sp-2);"}, "paused") : null),
+        g.paused ? el("span", {class: "badge badge-warn", style: "margin-left:var(--sp-2);"}, "fleet paused") : null,
+        g._sync && g._sync.enabled === false
+          ? el("span", {class: "badge badge-dim", style: "margin-left:var(--sp-2);"}, "pacing off") : null),
       el("div", {class: "meta"},
-        el("b", {}, String(g.member_count)), " members · gen ",
-        el("b", {}, String(g.generation ?? "—")),
+        el("b", {}, String(syncCount)), " pacing member" + (syncCount === 1 ? "" : "s"),
+        g.member_count ? [" · ", el("b", {}, String(g.member_count)), " fleet-managed"] : [],
         (g.active_cooldowns ? [" · ", el("b", {class: "warn"}, String(g.active_cooldowns)), " cooldowns"] : null)),
       el("div", {class: "meta dim"}, work),
       last ? el("div", {class: "meta dim", title: last.reason || ""},
@@ -76,11 +100,12 @@ routerAdd("/groups", "Fleet", async (container) => {
   }
 
   await load();
-  /* live convergence (PHASE 9 §3): any fleet transition (this client,
-     another dashboard, a service op) lands as a WS "fleet" frame and
-     re-runs load() — guarded by alive + the stale-snapshot seq */
-  const unsubFleet = storeSubscribe((key, value) => {
-    if (key === "fleet" && state.alive) load();
+  /* live convergence: fleet transitions (WS "fleet" frames) AND sync
+     membership changes (the CRUD dialogs storeSet groups/accounts)
+     re-run load() — guarded by alive + the stale-snapshot seq */
+  const unsubFleet = storeSubscribe((key) => {
+    if (!state.alive) return;
+    if (key === "fleet" || key === "groups") load();
   });
   return () => { state.alive = false; unsubFleet(); };
 });
@@ -129,8 +154,44 @@ routerAdd("/groups/:name", "Fleet hub", async (container, params) => {
       ? null
       : `Pause group ${name}? Members stop receiving new work; in-flight sends drain.`);
 
+  /* the unified Members section: SYNC membership (pacing) + FLEET state
+     (orchestration) per account — the one place both layers are managed.
+     Group settings (edit/delete) live in this section's header. */
+  const addBtn = el("button", {class: "btn btn-ghost btn-sm", type: "button"}, "Add member…");
+  const editBtn = el("button", {class: "btn btn-sm btn-secondary", type: "button"}, "Edit group");
+  const delBtn = el("button", {class: "btn btn-sm btn-danger", type: "button"}, "Delete group");
+  addBtn.onclick = () => acctOpenGroupAddMember(
+    {name}, storeGet("accounts") || [], async () => {
+      await Promise.allSettled([loadGroups(), loadStatsNow()]);
+      await load();
+    });
+  editBtn.onclick = () => {
+    const g = (storeGet("groups") || []).find(x => x.name === name);
+    if (g) acctOpenGroupEdit(g, async () => {
+      await Promise.allSettled([loadGroups(), loadStatsNow()]);
+      navigate("/groups");   // renamed: the hub keyed by the old name dies
+      await Promise.allSettled([loadGroups()]);
+    });
+  };
+  delBtn.onclick = busy(delBtn, async () => {
+    const syncMembers = (storeGet("accounts") || [])
+      .filter(a => a.sync_group === name).length;
+    const ok = await confirmBox({title: "Delete group",
+      body: `Delete ${name}? Its ${syncMembers} pacing member(s) move back to ` +
+        `independent pacing and fleet-managed members are released.`,
+      yes: "Delete"});
+    if (!ok) return;
+    try {
+      await post("/api/groups/delete", {group: name, detach_members: true});
+      toast("group deleted", "ok");
+      await Promise.allSettled([loadGroups(), loadStatsNow()]);
+      navigate("/groups");
+    } catch (e) { toast(e.message, "err"); }
+  });
+
   const overview = section("Overview", "what this group is doing and why", pauseBtn);
-  const membersHost = section("Members", "eligibility + controls");
+  const membersHost = section("Members", "pacing membership + fleet eligibility",
+    el("div", {style: "display:flex;gap:4px;"}, addBtn, editBtn, delBtn));
   const queueHost = section("Task queue", "assignments and their why", (() => {
     const sel = el("select", {"aria-label": "Filter", style: "margin-left:auto;"},
       ...["all", "queued", "assigned", "running", "suspended", "failed",
@@ -148,11 +209,14 @@ routerAdd("/groups/:name", "Fleet hub", async (container, params) => {
     if (!data) return;
     const counts = {};
     for (const a of data.assignments) counts[a.status] = (counts[a.status] || 0) + 1;
+    const syncCount = (storeGet("accounts") || [])
+      .filter(a => a.sync_group === name).length;
     const row = el("div", {class: "kv-row"});
     for (const [k, v] of Object.entries({
       "state": data.paused ? "paused" : "running",
       "generation": String(data.generation),
-      "members": String(data.members.length),
+      "pacing members": String(syncCount),
+      "fleet-managed": String(data.members.length),
       "queued": String(counts.queued || 0),
       "assigned": String(counts.assigned || 0),
       "running": String(counts.running || 0),
@@ -167,34 +231,91 @@ routerAdd("/groups/:name", "Fleet hub", async (container, params) => {
 
   function renderMembers() {
     membersHost.textContent = "";
-    if (!data || !data.members.length) {
+    if (!data) return;
+    /* union of BOTH layers' members: sync pacing membership (the store,
+       live) and fleet-managed members (the bundle). Rows show pacing
+       membership + fleet state side by side; actions act on the layer
+       they belong to. */
+    const accts = storeGet("accounts") || [];
+    const syncMembers = accts.filter(a => a.sync_group === name).map(a => a.name);
+    const fleetByAccount = {};
+    for (const m of data.members) fleetByAccount[m.account] = m;
+    const rows = [...new Set([...syncMembers, ...Object.keys(fleetByAccount)])]
+      .sort();
+
+    if (!rows.length) {
       membersHost.append(emptyState("No members",
-        "Join an account from the accounts view or via fleet ops."));
+        "Add a pacing member to share the group's clock; join it to fleet management when the hub should drive its work."));
       return;
     }
     const tbl = el("table", {class: "tbl"});
     tbl.append(el("thead", {}, el("tr", null,
-      ...["Account", "Mode", "Eligibility", "Actions"].map(h => el("th", {}, h)))));
+      ...["Account", "Pacing", "Fleet", "Actions"].map(h => el("th", {}, h)))));
     const tbody = el("tbody");
-    for (const m of data.members) {
-      const paused = m.eligibility === "paused";
-      const btn = el("button", {class: "btn btn-ghost btn-sm", type: "button"},
-        paused ? "resume" : "pause");
-      btn.onclick = () => op(btn, paused ? "member_resume" : "member_pause",
-        {account: m.account},
-        paused ? null : `Pause member ${m.account}? It stops receiving work.`);
-      const leave = el("button", {class: "btn btn-danger btn-sm", type: "button"}, "leave");
-      leave.onclick = () => op(leave, "leave", {account: m.account},
-        `Remove ${m.account} from fleet management? Its work is released and its independent flow is restored.`);
-      const badge = el("span", {class: "badge " + (
-        m.eligibility === "eligible" ? "badge-ok"
-        : m.eligibility === "paused" ? "badge-warn" : "badge-dim")},
-        m.eligibility);
-      tbody.append(el("tr", null,
-        el("td", {}, m.account),
-        el("td", {}, m.mode === "group_managed" ? "managed" : m.mode),
-        el("td", {}, badge),
-        el("td", {style: "display:flex;gap:4px;"}, btn, leave)));
+    for (const account of rows) {
+      const inSync = syncMembers.includes(account);
+      const fm = fleetByAccount[account] || null;
+      const tds = [];
+      tds.push(el("td", {},
+        el("a", {href: "#/accounts/" + encodeURIComponent(account)}, account)));
+      tds.push(el("td", {}, inSync
+        ? el("span", {class: "badge badge-ok"}, "grouped")
+        : el("span", {class: "badge badge-dim", title: "paces independently"},
+          "independent")));
+      tds.push(el("td", {}, fm
+        ? el("span", {class: "badge " + (
+            fm.eligibility === "eligible" ? "badge-ok"
+            : fm.eligibility === "paused" ? "badge-warn" : "badge-dim")},
+          fm.eligibility)
+        : el("span", {class: "dim", title: "its independent flow runs; the hub does not drive it"},
+          "not managed")));
+      const acts = el("div", {style: "display:flex;gap:4px;flex-wrap:wrap;"});
+      if (inSync) {
+        const rm = el("button", {class: "btn btn-ghost btn-sm", type: "button"}, "remove");
+        rm.onclick = busy(rm, async () => {
+          const ok = await confirmBox({title: "Remove member",
+            body: `Remove ${account} from ${name}? It will pace independently.`,
+            yes: "Remove"});
+          if (!ok) return;
+          try {
+            await post("/api/groups/remove-member", {group: name, account});
+            toast(account + " removed", "ok");
+            await Promise.allSettled([loadGroups(), loadStatsNow()]);
+            await load();
+          } catch (e) { toast(e.message, "err"); }
+        });
+        acts.append(rm);
+      } else {
+        const add = el("button", {class: "btn btn-ghost btn-sm", type: "button"}, "add pacing");
+        add.onclick = busy(add, async () => {
+          try {
+            await post("/api/groups/add-member", {group: name, account});
+            toast(account + " added", "ok");
+            await Promise.allSettled([loadGroups(), loadStatsNow()]);
+            await load();
+          } catch (e) { toast(e.message, "err"); }
+        });
+        acts.append(add);
+      }
+      if (fm) {
+        const paused = fm.eligibility === "paused";
+        const pb = el("button", {class: "btn btn-ghost btn-sm", type: "button"},
+          paused ? "resume" : "pause");
+        pb.onclick = () => op(pb, paused ? "member_resume" : "member_pause",
+          {account},
+          paused ? null : `Pause member ${account}? It stops receiving work.`);
+        const lv = el("button", {class: "btn btn-danger btn-sm", type: "button"}, "leave");
+        lv.onclick = () => op(lv, "leave", {account},
+          `Remove ${account} from fleet management? Its work is released and its independent flow is restored.`);
+        acts.append(pb, lv);
+      } else {
+        const join = el("button", {class: "btn btn-sm btn-secondary", type: "button"}, "join fleet");
+        join.onclick = () => op(join, "join", {account, group: name},
+          `Bring ${account} under fleet management? Its independent flow is suspended while managed.`);
+        acts.append(join);
+      }
+      tds.push(el("td", {}, acts));
+      tbody.append(el("tr", null, ...tds));
     }
     tbl.append(tbody);
     membersHost.append(el("div", {class: "tbl-wrap"}, tbl));
@@ -348,13 +469,133 @@ routerAdd("/groups/:name", "Fleet hub", async (container, params) => {
   }
 
   await load();
-  /* live convergence: transitions for THIS group re-run load(); the
-     loadSeq guard keeps a stale in-flight snapshot from overwriting a
-     newer one, and alive stops everything at unmount */
+  /* live convergence: fleet transitions for THIS group re-run load();
+     sync membership edits (groups/accounts store keys from the CRUD
+     dialogs) refresh the unified member table too; the loadSeq guard
+     keeps a stale in-flight snapshot from overwriting a newer one, and
+     alive stops everything at unmount */
   const unsubFleet = storeSubscribe((key, value) => {
-    if (key === "fleet" && state.alive &&
-        (!value || !value.group || value.group === name))
+    if (!state.alive) return;
+    if (key === "fleet"
+        && (!value || !value.group || value.group === name))
       load();
+    else if (key === "groups" || key === "accounts") {
+      renderMembers();   // pacing membership changed; hub bundle untouched
+      renderOverview();  // the pacing-member count follows the store
+    }
   });
   return () => { state.alive = false; unsubFleet(); };
 });
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Group CRUD dialogs (moved from the retired Accounts 'Sync Groups' tab:
+   ONE groups surface — this page owns membership + pacing + orchestration)
+   ═══════════════════════════════════════════════════════════════════════════ */
+function acctOpenGroupCreate(onDone) {
+  const nameIn = el("input", {type: "text", placeholder: "e.g. farm-a",
+    "aria-label": "Group name"});
+  const descIn = el("input", {type: "text", placeholder: "what unites these accounts?",
+    "aria-label": "Group description"});
+  const enCb = el("input", {type: "checkbox"});
+  enCb.checked = true;
+  const form = el("div", {},
+    el("div", {class: "field"}, el("label", {}, "Name"), nameIn),
+    el("div", {class: "field"}, el("label", {}, "Description"), descIn),
+    el("label", {class: "pick-row"}, enCb,
+      el("span", {class: "pl-name"}, "active"),
+      el("span", {class: "pl-desc"}, "a paused group does not pace")));
+  dialog({title: "New Sync Group", bodyEl: form, actions: [
+    {label: "Cancel", variant: "secondary", onclick: close => close()},
+    {label: "Create", variant: "primary", onclick: (close) => {
+      const btn = form.closest("dialog").querySelector(".dlg-foot .btn-primary");
+      busy(btn, async () => {
+        const name = nameIn.value.trim();
+        if (!name) return acctFbError(form, "group name is required");
+        try {
+          await post("/api/groups/create",
+            {name, description: descIn.value.trim(), enabled: !!enCb.checked});
+          toast("group created", "ok");
+          close();
+          await loadGroups();
+          onDone();
+        } catch (e) { acctFbError(form, e.message); }
+      })();
+    }},
+  ]});
+  nameIn.focus();
+}
+
+function acctOpenGroupEdit(g, onDone) {
+  const nameIn = el("input", {type: "text", value: g.name || "",
+    "aria-label": "Group name"});
+  const descIn = el("input", {type: "text", value: g.description || "",
+    "aria-label": "Group description"});
+  const enCb = el("input", {type: "checkbox"});
+  enCb.checked = g.enabled !== false;
+  const form = el("div", {},
+    el("div", {class: "field"}, el("label", {}, "Name"), nameIn,
+      el("div", {class: "hint"}, "renaming moves every member's pacing scope with it")),
+    el("div", {class: "field"}, el("label", {}, "Description"), descIn),
+    el("label", {class: "pick-row"}, enCb,
+      el("span", {class: "pl-name"}, "active"),
+      el("span", {class: "pl-desc"}, "a paused group does not pace")));
+  dialog({title: "Edit Group — " + g.name, bodyEl: form, actions: [
+    {label: "Cancel", variant: "secondary", onclick: close => close()},
+    {label: "Save", variant: "primary", onclick: (close) => {
+      const btn = form.closest("dialog").querySelector(".dlg-foot .btn-primary");
+      busy(btn, async () => {
+        const payload = {group: g.name};
+        if (nameIn.value.trim() && nameIn.value.trim() !== g.name)
+          payload.name = nameIn.value.trim();
+        if (descIn.value !== (g.description || "")) payload.description = descIn.value;
+        if (enCb.checked !== (g.enabled !== false)) payload.enabled = enCb.checked;
+        if (Object.keys(payload).length < 2)
+          return acctFbError(form, "nothing to change");
+        try {
+          await post("/api/groups/update", payload);
+          toast("group updated", "ok");
+          close();
+          await Promise.allSettled([loadGroups(), loadStatsNow()]);
+          onDone();
+        } catch (e) { acctFbError(form, e.message); }
+      })();
+    }},
+  ]});
+}
+
+function acctOpenGroupAddMember(g, accts, onDone) {
+  const cands = accts.filter(a => a.sync_group !== g.name);
+  const list = el("div", {class: "picklist"});
+  if (!cands.length) list.append(el("p", {class: "hint"},
+    "Every account is already in " + g.name + "."));
+  for (const a of cands) {
+    list.append(el("label", {class: "pick-row"},
+      el("input", {type: "checkbox", value: a.name}),
+      el("span", {class: "pl-name"}, a.name),
+      el("span", {class: "pl-desc"},
+        a.sync_group ? "currently in " + a.sync_group : "independent")));
+  }
+  const form = el("div", {},
+    el("p", {class: "dim"}, "Add members to " + g.name + " — moving them off their current pacing."),
+    list);
+  dialog({title: "Add Members — " + g.name, bodyEl: form, actions: [
+    {label: "Cancel", variant: "secondary", onclick: close => close()},
+    {label: "Add", variant: "primary", onclick: (close) => {
+      const btn = form.closest("dialog").querySelector(".dlg-foot .btn-primary");
+      busy(btn, async () => {
+        const chosen = [...list.querySelectorAll("input:checked")].map(i => i.value);
+        if (!chosen.length) return acctFbError(form, "select at least one account");
+        let failed = 0;
+        for (const n of chosen) {
+          try { await post("/api/groups/add-member", {group: g.name, account: n}); }
+          catch (e) { failed++; toast(n + ": " + e.message, "err"); }
+        }
+        toast("members added" + (failed ? " — " + failed + " failed" : ""),
+          failed ? "err" : "ok");
+        close();
+        await Promise.allSettled([loadGroups(), loadStatsNow()]);
+        onDone();
+      })();
+    }},
+  ]});
+}

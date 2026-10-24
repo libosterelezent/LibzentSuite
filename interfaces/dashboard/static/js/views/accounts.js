@@ -85,11 +85,9 @@ function acctFbError(host, msg) {
    ══════════════════════════════════════════════════════════════════════════ */
 
 function acctListMount(root) {
-  let tab = "accounts";            // accounts | groups
   let q = "";
   const sel = new Set();           // bulk-selection account names
   const mode = () => (prefGet("acct_view", "tiles") === "list" ? "list" : "tiles");
-  const groupMode = () => (prefGet("group_view", "tiles") === "list" ? "list" : "tiles");
   let lastSig = "";
 
   /* static header (kept out of the re-render so the search keeps focus) */
@@ -99,18 +97,13 @@ function acctListMount(root) {
     "aria-pressed": "false", title: "Tile view"}, "Tiles");
   const listBtn = el("button", {class: "btn btn-ghost btn-sm", type: "button",
     "aria-pressed": "false", title: "List view"}, "List");
-  /* ONE header switcher for both tabs: it controls whichever tab is
-     active (Phase A #7 — the groups tab ignored the header switcher
-     because it only wrote the accounts pref). Per-tab persistence:
-     accounts and groups remember their own view. */
-  const activeMode = () => (tab === "groups" ? groupMode() : mode());
   const setMode = m => {
-    prefSet(tab === "groups" ? "group_view" : "acct_view", m);
+    prefSet("acct_view", m);
     paintModeBtns();
     render();
   };
   const paintModeBtns = () => {
-    const m = activeMode();
+    const m = mode();
     tileBtn.className = "btn btn-sm " + (m === "tiles" ? "btn-primary" : "btn-ghost");
     tileBtn.setAttribute("aria-pressed", m === "tiles" ? "true" : "false");
     listBtn.className = "btn btn-sm " + (m === "list" ? "btn-primary" : "btn-ghost");
@@ -123,7 +116,9 @@ function acctListMount(root) {
   const hdr = el("div", {class: "view-hdr"},
     el("div", {},
       el("h2", {}, "Accounts"),
-      el("p", {class: "dim"}, "The fleet — every registered Discord account, live.")),
+      el("p", {class: "dim"}, "The fleet — every registered Discord account, live.",
+        " Group membership and pacing live on the ",
+        el("a", {href: "#/groups"}, "Fleet page"), ".")),
     el("div", {class: "actions"},
       search,
       tileBtn, listBtn,
@@ -135,24 +130,8 @@ function acctListMount(root) {
         "Add Account")));
   search.addEventListener("input", () => { q = search.value.trim().toLowerCase(); render(); });
 
-  const tabs = el("div", {class: "tabbar", role: "tablist"});
   const body = el("div", {});
-  root.append(hdr, tabs, body);
-
-  function paintTabs() {
-    const accts = storeGet("accounts") || [];
-    const groups = storeGet("groups") || [];
-    tabs.textContent = "";
-    for (const [id, label, count] of [
-      ["accounts", "Accounts", accts.length],
-      ["groups", "Sync Groups", groups.length]]) {
-      tabs.append(el("button", {
-        class: "tab" + (tab === id ? " on" : ""), type: "button",
-        role: "tab", "aria-selected": tab === id ? "true" : "false",
-        onclick: () => { tab = id; paintTabs(); render(); }},
-        label + " ", el("span", {class: "dim"}, "(" + count + ")")));
-    }
-  }
+  root.append(hdr, body);
 
   /* cheap change signature — WS stats land every second; identical fleets
      must not rebuild the DOM under the pointer */
@@ -164,16 +143,14 @@ function acctListMount(root) {
         JSON.stringify(a.plugins || {})]),
       storeGet("groups") || [],
       Object.keys(acctManifestMap()).join(","),
-      tab, q, mode(), [...sel].join(","),
+      q, mode(), [...sel].join(","),
     ]);
   }
 
   function render() {
-    paintTabs();
     paintModeBtns();
     body.textContent = "";
-    if (tab === "groups") body.append(acctGroupsPane(() => render(), groupMode));
-    else body.append(acctFleetPane({q, sel, mode: mode(),
+    body.append(acctFleetPane({q, sel, mode: mode(),
       onSelChange: render, onMutate: render}));
     lastSig = fleetSig();
   }
@@ -387,161 +364,6 @@ function acctListTable(accts, sel, onSelChange) {
     el("table", {class: "tbl"}, el("thead", {}, head), tbody));
 }
 
-/* ── the sync-groups tab ──────────────────────────────────────────────────── */
-function acctGroupsPane(onMutate, groupMode) {
-  const groups = storeGet("groups") || [];
-  const accts = storeGet("accounts") || [];
-  const pane = el("div", {},
-    el("div", {class: "toolbar"},
-      el("span", {class: "dim"}, "Sync groups pace their members on a shared clock."),
-      el("button", {class: "btn btn-primary btn-sm", type: "button",
-        onclick: () => acctOpenGroupCreate(onMutate)}, "New Group")));
-
-  if (!groups.length) {
-    pane.append(el("div", {class: "card"},
-      el("div", {class: "empty"},
-        el("svg", {class: "icon", viewBox: "0 0 24 24", fill: "none",
-                   stroke: "currentColor", "stroke-width": "1.5", "aria-hidden": "true"},
-          el("path", {d: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"})),
-        el("h3", {}, "No sync groups"),
-        el("p", {}, "A sync group paces its member accounts on one shared clock, so Mudae sees a natural conversation instead of a burst. Create one, then move accounts into it."),
-        el("button", {class: "btn btn-primary", type: "button",
-          onclick: () => acctOpenGroupCreate(onMutate)}, "New Group"))));
-    return pane;
-  }
-
-  /* list mode comes from the HEADER switcher (group_view pref) */
-  if (groupMode() === "list") {
-    pane.append(acctGroupsTable(groups, accts, onMutate));
-    return pane;
-  }
-  const grid = el("div", {class: "grid grid-2"});
-  for (const g of groups) {
-    const members = accts.filter(a => a.sync_group === g.name);
-    const card = el("div", {class: "card"});
-    card.append(el("div", {class: "row"},
-      el("b", {}, g.name),
-      el("span", {class: "badge " + (g.enabled === false ? "badge-warn" : "badge-ok")},
-        g.enabled === false ? "paused" : "active"),
-      el("span", {class: "dim"}, members.length + " member" + (members.length === 1 ? "" : "s"))));
-    if (g.description) card.append(el("p", {class: "dim"}, g.description));
-
-    /* member chips: link to the account, ✕ removes it from the group */
-    const chips = el("div", {class: "row"});
-    for (const m of members) {
-      const rm = el("button", {type: "button",
-        title: "Remove " + m.name + " from " + g.name,
-        "aria-label": "Remove " + m.name + " from " + g.name,
-        class: "btn btn-ghost btn-sm"}, "✕");
-      rm.onclick = busy(rm, async () => {
-        const ok = await confirmBox({title: "Remove member",
-          body: "Remove " + m.name + " from " + g.name + "? It will pace independently.",
-          yes: "Remove"});
-        if (!ok) return;
-        try {
-          await post("/api/groups/remove-member", {group: g.name, account: m.name});
-          toast(m.name + " removed", "ok");
-          await Promise.allSettled([loadGroups(), loadStatsNow()]);
-          onMutate();
-        } catch (e) { toast(e.message, "err"); }
-      });
-      chips.append(el("span", {class: "chip"},
-        el("a", {href: "#/accounts/" + encodeURIComponent(m.name)}, m.name),
-        " ", rm));
-    }
-    if (!members.length) chips.append(el("span", {class: "faint"}, "no members yet"));
-    card.append(chips);
-
-    const addBtn = el("button", {class: "btn btn-ghost btn-sm", type: "button"}, "Add member…");
-    addBtn.onclick = () => acctOpenGroupAddMember(g, accts, onMutate);
-    const editBtn = el("button", {class: "btn btn-sm btn-secondary", type: "button"}, "Edit");
-    editBtn.onclick = () => acctOpenGroupEdit(g, onMutate);
-    const delBtn = el("button", {class: "btn btn-sm btn-danger", type: "button"}, "Delete");
-    delBtn.onclick = busy(delBtn, async () => {
-      const ok = await confirmBox({title: "Delete group",
-        body: "Delete " + g.name + "? Its " + members.length +
-          " member(s) move back to independent pacing.",
-        yes: "Delete"});
-      if (!ok) return;
-      try {
-        await post("/api/groups/delete", {group: g.name, detach_members: true});
-        toast("group deleted", "ok");
-        await Promise.allSettled([loadGroups(), loadStatsNow()]);
-        onMutate();
-      } catch (e) { toast(e.message, "err"); }
-    });
-    card.append(el("div", {class: "row"}, addBtn, editBtn, delBtn));
-    grid.append(card);
-  }
-  pane.append(grid);
-  return pane;
-}
-
-/* groups as a table (list mode) — same actions as the tiles */
-function acctGroupsTable(groups, accts, onMutate) {
-  const head = el("tr", {},
-    el("th", {scope: "col"}, "Group"),
-    el("th", {scope: "col"}, "Status"),
-    el("th", {scope: "col"}, "Members"),
-    el("th", {scope: "col"}, "Description"),
-    el("th", {scope: "col"}, ""));
-  const tb = el("tbody", {});
-  for (const g of groups) {
-    const members = accts.filter(a => a.sync_group === g.name);
-    const memberCell = el("td", {class: "row"});
-    if (!members.length) memberCell.append(el("span", {class: "faint"}, "—"));
-    for (const m of members) {
-      const rm = el("button", {type: "button",
-        title: "Remove " + m.name + " from " + g.name,
-        "aria-label": "Remove " + m.name + " from " + g.name,
-        class: "btn btn-ghost btn-sm"}, "✕");
-      rm.onclick = busy(rm, async () => {
-        const ok = await confirmBox({title: "Remove member",
-          body: "Remove " + m.name + " from " + g.name + "? It will pace independently.",
-          yes: "Remove"});
-        if (!ok) return;
-        try {
-          await post("/api/groups/remove-member", {group: g.name, account: m.name});
-          toast(m.name + " removed", "ok");
-          await Promise.allSettled([loadGroups(), loadStatsNow()]);
-          onMutate();
-        } catch (e) { toast(e.message, "err"); }
-      });
-      memberCell.append(el("span", {class: "chip"},
-        el("a", {href: "#/accounts/" + encodeURIComponent(m.name)}, m.name), rm));
-    }
-    collapseWrap(memberCell, 4);
-
-    const addBtn = el("button", {class: "btn btn-ghost btn-sm", type: "button"}, "Add member…");
-    addBtn.onclick = () => acctOpenGroupAddMember(g, accts, onMutate);
-    const editBtn = el("button", {class: "btn btn-sm btn-secondary", type: "button"}, "Edit");
-    editBtn.onclick = () => acctOpenGroupEdit(g, onMutate);
-    const delBtn = el("button", {class: "btn btn-sm btn-danger", type: "button"}, "Delete");
-    delBtn.onclick = busy(delBtn, async () => {
-      const ok = await confirmBox({title: "Delete group",
-        body: "Delete " + g.name + "? Its " + members.length +
-          " member(s) move back to independent pacing.",
-        yes: "Delete"});
-      if (!ok) return;
-      try {
-        await post("/api/groups/delete", {group: g.name, detach_members: true});
-        toast("group deleted", "ok");
-        await Promise.allSettled([loadGroups(), loadStatsNow()]);
-        onMutate();
-      } catch (e) { toast(e.message, "err"); }
-    });
-
-    tb.append(el("tr", {},
-      el("td", {}, el("b", {}, g.name)),
-      el("td", {}, el("span", {class: "badge " + (g.enabled === false ? "badge-warn" : "badge-ok")},
-        g.enabled === false ? "paused" : "active")),
-      memberCell,
-      el("td", {class: "dim"}, g.description || "—"),
-      el("td", {class: "row"}, addBtn, editBtn, delBtn)));
-  }
-  return el("div", {class: "tbl-wrap"},
-    el("table", {class: "tbl"}, el("thead", {}, head), tb));
-}
 
 /* ══════════════════════════════════════════════════════════════════════════
    Dialogs: add account / bulk move / groups
@@ -613,7 +435,7 @@ function acctOpenBulkMove(names, onDone) {
   const groups = storeGet("groups") || [];
   const list = el("div", {class: "picklist"});
   if (!groups.length) list.append(el("p", {class: "hint"},
-    "No sync groups exist yet — create one on the Sync Groups tab first."));
+    "No sync groups exist yet — create one on the Fleet page first."));
   const mkRow = (value, label, desc, checked) => {
     const radio = el("input", {type: "radio", name: "acct-bulk-group", value: value});
     radio.checked = checked;
@@ -653,114 +475,6 @@ function acctOpenBulkMove(names, onDone) {
   ]});
 }
 
-function acctOpenGroupCreate(onDone) {
-  const nameIn = el("input", {type: "text", placeholder: "e.g. farm-a",
-    "aria-label": "Group name"});
-  const descIn = el("input", {type: "text", placeholder: "what unites these accounts?",
-    "aria-label": "Group description"});
-  const enCb = el("input", {type: "checkbox"});
-  enCb.checked = true;
-  const form = el("div", {},
-    el("div", {class: "field"}, el("label", {}, "Name"), nameIn),
-    el("div", {class: "field"}, el("label", {}, "Description"), descIn),
-    el("label", {class: "pick-row"}, enCb,
-      el("span", {class: "pl-name"}, "active"),
-      el("span", {class: "pl-desc"}, "a paused group does not pace")));
-  dialog({title: "New Sync Group", bodyEl: form, actions: [
-    {label: "Cancel", variant: "secondary", onclick: close => close()},
-    {label: "Create", variant: "primary", onclick: (close) => {
-      const btn = form.closest("dialog").querySelector(".dlg-foot .btn-primary");
-      busy(btn, async () => {
-        const name = nameIn.value.trim();
-        if (!name) return acctFbError(form, "group name is required");
-        try {
-          await post("/api/groups/create",
-            {name, description: descIn.value.trim(), enabled: !!enCb.checked});
-          toast("group created", "ok");
-          close();
-          await loadGroups();
-          onDone();
-        } catch (e) { acctFbError(form, e.message); }
-      })();
-    }},
-  ]});
-  nameIn.focus();
-}
-
-function acctOpenGroupEdit(g, onDone) {
-  const nameIn = el("input", {type: "text", value: g.name || "",
-    "aria-label": "Group name"});
-  const descIn = el("input", {type: "text", value: g.description || "",
-    "aria-label": "Group description"});
-  const enCb = el("input", {type: "checkbox"});
-  enCb.checked = g.enabled !== false;
-  const form = el("div", {},
-    el("div", {class: "field"}, el("label", {}, "Name"), nameIn,
-      el("div", {class: "hint"}, "renaming moves every member's pacing scope with it")),
-    el("div", {class: "field"}, el("label", {}, "Description"), descIn),
-    el("label", {class: "pick-row"}, enCb,
-      el("span", {class: "pl-name"}, "active"),
-      el("span", {class: "pl-desc"}, "a paused group does not pace")));
-  dialog({title: "Edit Group — " + g.name, bodyEl: form, actions: [
-    {label: "Cancel", variant: "secondary", onclick: close => close()},
-    {label: "Save", variant: "primary", onclick: (close) => {
-      const btn = form.closest("dialog").querySelector(".dlg-foot .btn-primary");
-      busy(btn, async () => {
-        const payload = {group: g.name};
-        if (nameIn.value.trim() && nameIn.value.trim() !== g.name)
-          payload.name = nameIn.value.trim();
-        if (descIn.value !== (g.description || "")) payload.description = descIn.value;
-        if (enCb.checked !== (g.enabled !== false)) payload.enabled = enCb.checked;
-        if (Object.keys(payload).length < 2)
-          return acctFbError(form, "nothing to change");
-        try {
-          await post("/api/groups/update", payload);
-          toast("group updated", "ok");
-          close();
-          await Promise.allSettled([loadGroups(), loadStatsNow()]);
-          onDone();
-        } catch (e) { acctFbError(form, e.message); }
-      })();
-    }},
-  ]});
-}
-
-function acctOpenGroupAddMember(g, accts, onDone) {
-  const cands = accts.filter(a => a.sync_group !== g.name);
-  const list = el("div", {class: "picklist"});
-  if (!cands.length) list.append(el("p", {class: "hint"},
-    "Every account is already in " + g.name + "."));
-  for (const a of cands) {
-    list.append(el("label", {class: "pick-row"},
-      el("input", {type: "checkbox", value: a.name}),
-      el("span", {class: "pl-name"}, a.name),
-      el("span", {class: "pl-desc"},
-        a.sync_group ? "currently in " + a.sync_group : "independent")));
-  }
-  const form = el("div", {},
-    el("p", {class: "dim"}, "Add members to " + g.name + " — moving them off their current pacing."),
-    list);
-  dialog({title: "Add Members — " + g.name, bodyEl: form, actions: [
-    {label: "Cancel", variant: "secondary", onclick: close => close()},
-    {label: "Add", variant: "primary", onclick: (close) => {
-      const btn = form.closest("dialog").querySelector(".dlg-foot .btn-primary");
-      busy(btn, async () => {
-        const chosen = [...list.querySelectorAll("input:checked")].map(i => i.value);
-        if (!chosen.length) return acctFbError(form, "select at least one account");
-        let failed = 0;
-        for (const n of chosen) {
-          try { await post("/api/groups/add-member", {group: g.name, account: n}); }
-          catch (e) { failed++; toast(n + ": " + e.message, "err"); }
-        }
-        toast("members added" + (failed ? " — " + failed + " failed" : ""),
-          failed ? "err" : "ok");
-        close();
-        await Promise.allSettled([loadGroups(), loadStatsNow()]);
-        onDone();
-      })();
-    }},
-  ]});
-}
 
 /* ══════════════════════════════════════════════════════════════════════════
    Route #/accounts/:name — the account detail page (Variant A)

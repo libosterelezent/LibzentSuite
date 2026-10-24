@@ -267,6 +267,18 @@ class FleetService:
             self._groups[group_name] = state
             return state.generation
 
+    async def provision_group(self, group_name: str) -> "FleetGroupState":
+        """Get-or-create the fleet state row for a KNOWN sync group (the
+        hub auto-provisions so a freshly-created group — not yet joined
+        to management — renders with empty orchestration instead of a
+        400). Callers verify the sync group exists FIRST."""
+        async with self._lock:
+            if group_name in self._groups:
+                return self._groups[group_name]
+            state = await self._repo.ensure_group(group_name)
+            self._groups[group_name] = state
+            return state
+
     # ---------------------------------------------------------- group pause
 
     async def pause_group(self, group_name: str) -> FleetEvent:

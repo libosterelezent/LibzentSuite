@@ -1508,7 +1508,14 @@ class ControlAPI:
         fleet = self._fleet
         state = fleet.group_state(group)
         if state is None:
-            raise ValueError(f"unknown fleet group {group!r}")
+            # a SYNC group with no fleet state yet (freshly created, or
+            # never joined to management): provision the projection row
+            # so the hub works for it — orchestration simply shows empty.
+            # Genuinely-unknown names still 400 (no sync row, no fleet).
+            if self._sync_groups is None or \
+                    await self._sync_groups.get_group_by_name(group) is None:
+                raise ValueError(f"unknown fleet group {group!r}")
+            state = await fleet.provision_group(group)
         assignments = fleet.assignments(group_name=group)
         return {
             "group": group,

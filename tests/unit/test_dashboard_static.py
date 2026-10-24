@@ -669,8 +669,11 @@ class TestUiRegressionContracts(unittest.TestCase):
         self.assertNotIn("container.textContent", groups)
         self.assertIn("let loadSeq = 0", groups)
         self.assertIn("const fatal = el(\"div\", null);", groups)
-        # live convergence via the fleet store key, unsubscribed at unmount
-        self.assertIn('if (key === "fleet" && state.alive', groups)
+        # live convergence via the fleet/groups store keys, unsubscribed
+        # at unmount (alive guard first, then the key dispatch)
+        self.assertIn("if (!state.alive) return;", groups)
+        self.assertIn('key === "fleet"', groups)
+        self.assertIn('key === "groups"', groups)
         self.assertIn("unsubFleet()", groups)
 
     def test_builder_page_writes_into_a_child_host(self):
