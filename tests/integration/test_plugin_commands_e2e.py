@@ -176,9 +176,10 @@ class ExecutorOverRealDatabaseTests(CommandE2EBase):
             description="only the grind channel",
             settings={
                 "trigger": "spin",
-                "channels": {"mode": "allow", "rules": [
-                    {"guild_id": str(GUILD),
-                     "channel_ids": [str(CHANNEL_OK)]}]},
+                # canonical channel scope (core/plugin_scopes.py): a
+                # POSITIVE channel set — the profile is restricted to
+                # CHANNEL_OK
+                "channels": {"channels": [str(CHANNEL_OK)]},
             })
         await self.api.accounts_plugin_profile("alpha", PROBE, "grind-only")
         # the account is never STARTED: activate with fake services so the
@@ -207,6 +208,9 @@ class ExecutorOverRealDatabaseTests(CommandE2EBase):
         api = self.fw.plugins._settings_api("alpha", PROBE)
         effective = await api.effective()
         self.assertEqual(effective.get("trigger"), "spin")
+        # the scope rides along VALIDATED, in the canonical shape
+        self.assertEqual(effective.get("channels"),
+                         {"channels": [str(CHANNEL_OK)]})
         self.assertEqual(await api.binding(), "grind-only")
 
     async def test_help_and_framework_verbs_over_the_real_stack(self):

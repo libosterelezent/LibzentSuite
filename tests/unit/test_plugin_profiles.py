@@ -52,13 +52,13 @@ class CreateGetTests(PluginProfilesTestBase):
     async def test_create_stores_settings_and_description(self) -> None:
         record = await self.repo.create(
             "roll", "grind", "fast rolls",
-            {"trigger": "go", "channels": {"mode": "allow", "rules": []}},
+            {"trigger": "go", "channels": {"channels": ["123"]}},
         )
         fetched = await self.repo.get("roll", "grind")
         self.assertEqual(fetched.description, "fast rolls")
         # settings ride through verbatim (validation is the API's job)
         self.assertEqual(fetched.settings["trigger"], "go")
-        self.assertEqual(fetched.settings["channels"]["mode"], "allow")
+        self.assertEqual(fetched.settings["channels"], {"channels": ["123"]})
 
     async def test_get_unknown_is_none(self) -> None:
         self.assertIsNone(await self.repo.get("roll", "ghost"))
