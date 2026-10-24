@@ -10,7 +10,7 @@ core.fleet's job through its validators).
 from __future__ import annotations
 
 import time
-from typing import Any, List, Optional, Sequence
+from typing import Any, List, Optional
 
 from database.models import (
     FleetAssignmentRecord,
