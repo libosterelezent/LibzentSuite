@@ -71,7 +71,7 @@ without breaking the architecture.
 Boot order lives in `core/bootstrap.build()` (docstring): Credentials →
 Config → Database → LogService(+db sink) → EventBus → RateLimitManager →
 SettingsManager → AuditRecorder → TaskScheduler (late-bound sender) →
-PluginManager → ProfileManager → AccountManager (restores persisted
+PluginManager → → AccountManager (restores persisted
 accounts) → sender bound → `scheduler.start()` → SimulationRunner →
 ControlAPI (+ `COMMAND_HUB.api_provider` bridging the self-command
 verbs). Shutdown reverses with logging-order care

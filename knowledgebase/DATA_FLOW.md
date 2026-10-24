@@ -247,7 +247,7 @@ flow-abort contract survives.
                               │
         ┌──────────┬──────────┼───────────┬─────────────┬────────────┐
         ▼          ▼          ▼           ▼             ▼            ▼
-  AccountManager PluginManager ProfileManager RateLimitManager TaskScheduler …
+  AccountManager PluginManager RateLimitManager TaskScheduler …
   (mutations persist FIRST, then mutate memory)   SettingsManager
                               │
                               ▼

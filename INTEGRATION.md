@@ -310,7 +310,7 @@ fixture under tests/fixtures/sim_plugins/):
 
 The legacy profile manager was deleted. Capabilities are direct
 account→plugin assignments; per-plugin settings presets live in
-`plugin_profiles` (v7, see §core/plugin_manager). Per-channel operational data lives in `plugin-data.db`.
+`plugin_profiles` (v7, see §core/plugin_manager). Per-channel operational data is PLANNED for `state/plugin-data.db` (B3/Phase 10 — not implemented yet).
 
 ### core/account_manager (A6)
 ```python
@@ -429,9 +429,6 @@ latency_ms/user_id/on_message/on_disconnect), `ClientFactory` protocol
   `cooldowns [account]|clear <account> <plugin> [key]`,
   `plugins list|state <account>|enable <acct> <plugin>|disable <acct> <plugin>|
   settings <account>|set <account> <plugin> <key> <value>`,
-  `profiles list|create <name> <plugin...>|delete <name>|assign <acct> <profile>|
-  unassign <acct> <profile>` (retained infrastructure — profile commands
-  are bookkeeping only, no capability effect),
   `ratelimit show|stats|set <action> <interval> [jitter_min jitter_max] [level owner]|
   clear <level> <owner> <action>|effective <action> [account] [plugin]|warnings|
   floor <seconds>|lane [on [rate]|off|rate <s>]`,
@@ -454,8 +451,11 @@ latency_ms/user_id/on_message/on_disconnect), `ClientFactory` protocol
   CoreAPI (`/api/status`, `/api/accounts`, `/api/accounts/add|remove|info|
   enable|credential|start|stop|emergency-stop`, `/api/credentials/status|
   import-env`, `/api/cooldowns`, `/api/cooldowns/clear`, `/api/plugins`,
-  `/api/plugins/state|set-enabled|settings|set-setting`, `/api/profiles`,
-  `/api/profiles/create|delete|assign|unassign`, `/api/ratelimit/policies|
+  `/api/plugins/state|set-enabled|settings|set-setting`, the plugin
+  profile surface `/api/plugins/profiles` + `/create|update|delete` and
+  the account bindings `/api/accounts/plugin-profiles|plugin-profile`
+  (the LEGACY `/api/profiles*` routes were REMOVED with ProfileManager
+  and 404 — pinned by tests), `/api/ratelimit/policies|
   set|clear|effective|stats|warnings|floor|lane`, `/api/tasks`,
   `/api/tasks/cancel|cancel-matching|history`, `/api/simulation/list|run`,
   `/api/logs`, `/api/audit`, `/api/estop`, `/api/resume`,
@@ -468,13 +468,18 @@ latency_ms/user_id/on_message/on_disconnect), `ClientFactory` protocol
 - `interfaces/dashboard/static/index.html`: SPA with a **sidebar navigation**
   exactly per spec §12: Overview, Accounts (list + details modal per §8),
   Plugins (installed + auto-generated settings editors from the schema),
-  Profiles (list + assignments), Rate Limits (global + per-account editors +
+  Rate Limits (global + per-account editors +
   visualization of stats/warnings), Cooldowns (active persistent cooldowns),
   Tasks (running/queued/history + cancel),
   Logs (live structured tail), Simulation (scenario list, run button,
   results incl. timed log lines), Advanced (DB info, floor, emergency stop).
+  (BUILT AS — the shipped v3 SPA diverged: Home / Accounts / Activity /
+  Fleet / Policies / Admin / Tools + a builder Plugins section; profile
+  management lives in the Plugins registry and the account MEMORY section,
+  not a Profiles page. See README.md for the current page table.)
   Live WS push: `{"type":"stats",...}` every second, `{"type":"log", entry}`,
-  `{"type":"audit", entry}`, `{"type":"task", entry}` on task events
+  `{"type":"audit", entry}`, `{"type":"task", entry}` on task events,
+  `{"type":"fleet", ...}` on fleet transitions (PHASE 9 §3)
   (subscribe the bus). Port the proven SPA skeleton (esc helpers, error
   accrual, token box, ws retry cap) from
   `git show HEAD:dashboard/static/index.html`.
@@ -508,7 +513,10 @@ log_keep=10000)` — one background-thread aiosqlite connection (async API;
 ops never run on the event loop), 0600 file perms, WAL, `.migrate()`
 runs pending migrations from `database/schema.py:MIGRATIONS` using a
 `schema_migrations` table, `.close()`, and repository properties:
-`.accounts .account_settings .profiles .plugins .policies .audit .logs .tasks .kv`.
+`.accounts .account_settings .account_plugins .sync_groups .plugins
+.plugin_profiles .policies .audit .logs .tasks .kv .cache .credentials
+.cooldowns .fleet` (the legacy `.profiles` repository was REMOVED with
+ProfileManager; migration v8 dropped its tables).
 
 Repository methods (exact — other modules call these):
 ```python
@@ -516,13 +524,15 @@ AccountsRepository:
     add(name, *, token_ref=None, enabled=True, sync_group=None) -> AccountRecord
     get(name) -> AccountRecord | None ; list() -> list[AccountRecord]
     set_enabled(name, enabled) ; set_settings(name, settings: dict)
-    delete(name) -> bool        # cascades settings/plugin_settings/states/profiles
-    assign_profile(name, profile) ; unassign_profile(name, profile)
-    profiles_of(name) -> list[str]
+    delete(name) -> bool        # cascades settings/plugin_settings/states/
+                                # account_plugins/api_cache/credentials/
+                                # cooldowns (all in one transaction)
 AccountSettingsRepository: get(name) -> dict ; set(name, key, value) ; delete(name, key)
     list_accounts() -> list[str]
-ProfilesRepository: upsert(name, plugins, description="") ; delete(name) -> bool
-    get(name) -> ProfileRecord | None ; list() -> list[ProfileRecord]
+PluginProfilesRepository: create(plugin, name, description, settings) ;
+    get(plugin, name) ; list(plugin=None) ;
+    update(plugin, name, *, name_new=None, description=None, settings=None) ;
+    delete(plugin, name) -> bool
 SyncGroupsRepository: create(name, description="", *, enabled=True) -> SyncGroupRecord
     get(group_id) -> SyncGroupRecord | None ; get_by_name(name) ; list()
     update(group_id, *, name=None, description=None, enabled=None)

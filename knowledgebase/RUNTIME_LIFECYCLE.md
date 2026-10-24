@@ -59,8 +59,11 @@ credentials=None, database=None, quiet=False) -> Framework`:
     plugin_repo=database.plugins, plugin_dir=plugin_dir)` +
     `plugins.discover()`** — scans now; metadata upserted to the repo (the
     Plugins page works before any account attaches).
-14. **`ProfileManager(database.profiles, ServiceLogger(logs,"profiles"),
-    database.accounts)`** — read-through over the repositories.
+ 14. **REMOVED (2026-10-22): `ProfileManager`** — the legacy profile
+     manager is deleted; nothing is constructed here. Capabilities are
+     direct account-to-plugin assignments (`database.account_plugins`);
+     per-plugin settings presets live in `plugin_profiles`
+     (see the plugin manager section).
 15. **`client_factory`** — the injected one, or `RealClientFactory(
     credentials)` (lazy import of `adapters.discord`; tests/sims never do).
 16. **`AccountManager(bus, ServiceLogger(logs,"accounts"),

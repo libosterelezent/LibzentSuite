@@ -25,7 +25,6 @@ per-component detail, [DATA_FLOW.md](DATA_FLOW.md) for traffic flows,
                         ┌──────────────────────────────────────────────┐
                         │                 FRAMEWORK                    │
                         │  AccountManager ── PluginManager            │
-                        │       │   \──────── ProfileManager           │
                         │       │        SettingsManager (all layers)  │
         inbound ───────►│  AccountManager._wire_client callbacks       │
         (gateway events)│       │                                      │
@@ -220,7 +219,8 @@ await access.migrate_from_credentials()          # ONE-TIME OWNER_USER_IDS -> ad
 await access.warm_prefix_cache()                 # per-account prefix configs (factory cache)
 COMMAND_HUB.access = access                      # adminlist/adminperms/adminprefix verbs
 PluginManager(...) + discover()                  # binds itself to COMMAND_HUB (last-wins)
-ProfileManager(database.profiles, logger, database.accounts)
+# (ProfileManager REMOVED 2026-10-22: capabilities are direct
+#  account→plugin assignments; settings presets live in plugin_profiles)
 client_factory ||= RealClientFactory(credentials, # lazy import, injectable;
                     command_prefix=env default,  # per-account admin-panel prefixes
                     access_manager=access)       # override this default

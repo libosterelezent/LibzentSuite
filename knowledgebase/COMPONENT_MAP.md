@@ -538,7 +538,7 @@ frozen `DiscordMessage` + entity projections, pure converters
   pinned constructor wiring as production (`Database(":memory:")`,
   `EventBus`, `LogService` without a DB sink, `SettingsManager`,
   `RateLimitManager`, `AuditRecorder`, `TaskScheduler` with the SAME
-  late-bound sender seam, `PluginManager` + discover, `ProfileManager`,
+  late-bound sender seam, `PluginManager` + discover, (legacy ProfileManager removed),
   `AccountManager` over a `SimClient` factory) plus a real `ControlAPI`
   and `RemoteControl` (the retired bridge — exercised by the
   `control_mention` scenario) so scenarios exercise Discord-side
