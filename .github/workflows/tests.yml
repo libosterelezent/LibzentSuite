@@ -18,11 +18,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyflakes
+      - name: Install pinned pip
+        run: python -m pip install --upgrade "pip==26.2.2"
+      - name: Install locked runtime and CI dependencies
+        run: python -m pip install -r requirements-dev.lock.txt
+      - name: Check dependency consistency
+        run: python -m pip check
       - name: Pyflakes (production tree)
         run: |
           python -m pyflakes main.py core adapters interfaces database benchmark scripts \
