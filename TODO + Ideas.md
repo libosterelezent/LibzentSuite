@@ -709,10 +709,17 @@ ACTIVE QUEUE  (2026-10-23, ordered)
         admin ops converge, end-to-end zombie never reaches the sender.
      PHASE 9 COMPLETE: A-G shipped 2026-10-23; 223 tests green across
      the fleet + scheduler + dashboard suites.
-[ ] PHASE 10 ROLLOUT — after PHASE 9 signals exist. PHASE 9's live
-    signals now exist (hub + orchestrator running); the next session
-    can open the PHASE 10 plan (plugin metrics via ui_stats StatCards,
-    AccountPluginData store in state/plugin-data.db per B3).
+[x] PHASE 10 ROLLOUT — DONE (2026-10-24, f98ef96): the B3
+    AccountPluginData store, end to end: state/plugin-data.db (own WAL
+    SQLite, self-initializing schema, separate database flow), scope
+    lattice account->plugin->guild->channel ('0' sentinels), STANDALONE
+    copies, optimistic version writes (conflict-refusing, incl.
+    put-over-deleted), digit-string snowflakes; ctx.services.data_*
+    facade (pair-scoped structurally); REST GET /api/accounts/data
+    (+doc) + POST put/delete; the MEMORY section's per-plugin
+    per-channel Data view (numeric keys as stat pills, rest as kv — the
+    LOCAL view; rollup stays opt-in via metric hints). 16 tests +
+    live-verified.
 
 
 ORIGINAL TODO ITEMS TO PRESERVE — all shipped (2026-10-22); the section is
