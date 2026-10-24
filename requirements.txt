@@ -1,7 +1,15 @@
 # LibzentSuite — Python dependencies
 #
-# Install:      pip install -r requirements.txt
-# Run tests:    python3 -m unittest discover -s tests -t .
+# Runtime install: pip install -r requirements.lock.txt
+# CI/dev install:  pip install -r requirements-dev.lock.txt
+# Run tests:       python3 -m unittest discover -s tests -t .
+#
+# After intentionally changing direct dependencies, regenerate the lock with:
+#   uv pip compile --universal --no-annotate --no-header \
+#     --output-file requirements.lock.txt requirements.txt
+# Then refresh the development lock from the locked runtime set:
+#   uv pip compile --universal --no-annotate --no-header \
+#     --output-file requirements-dev.lock.txt requirements.lock.txt pyflakes==4.0.3
 #
 # The framework runs multi-account Discord automation with conservative
 # pacing (learned per-action defaults ~2.5-3.0s as the effective safety
