@@ -660,7 +660,7 @@ ACTIVE QUEUE  (2026-10-23, ordered)
     (new token) and RUNNING; profiles editor round-trip verified live.
     Blocked: alpha still needs a fresh credential. Remaining:
     admin-command flow B -> A, ordered full walkthrough.
-[ ] PHASE 9 ROLLOUT — design locked (docs/design/
+[x] PHASE 9 ROLLOUT — COMPLETE (A-G shipped 2026-10-23; design: docs/design/
     fleet-orchestration-hub.md). Progress:
     A. DONE (2026-10-23, d640cec): core/fleet/ models + transition
        tables (46 pure tests) — member eligibility, assignment states
