@@ -59,10 +59,14 @@ a local dashboard.
 
 ```bash
 git clone <this repo> && cd LibzentSuite
-pip install -r requirements.txt       # aiosqlite + cryptography + discord.py-self
+pip install -r requirements.lock.txt  # pinned runtime dependency versions
 cp .env.example .env                  # then edit it (see below)
 chmod 600 .env
 ```
+
+For reproducible installs, use the pinned runtime lock. When developing or
+running CI checks, install `requirements-dev.lock.txt`, which also includes
+the pinned linting tool. See `requirements.txt` for lock refresh commands.
 
 `.env` needs:
 
@@ -285,10 +289,11 @@ contributed by plugins) on `http://127.0.0.1:8070` with live WebSocket
 push; set `DASHBOARD_TOKEN` in `.env` to require auth. The complete
 REST/WS/CLI/self-command reference is `knowledgebase/API_ENDPOINTS.md`.
 
-Dependencies: Python ≥ 3.10 + `aiosqlite` + `cryptography` (see
-`requirements.txt`). Live mode additionally needs the user-account client
-fork `discord.py-self` (`pip install discord.py-self`), imported lazily —
-simulations/tests never require it.
+Dependencies: Python ≥ 3.10; direct runtime constraints are in
+`requirements.txt`, with the pinned runtime install set in
+`requirements.lock.txt`. Live mode additionally needs the user-account client
+fork `discord.py-self` (included in the runtime lock), imported lazily —
+simulations/tests never require a live network connection.
 
 ## Architecture: who calls what
 
