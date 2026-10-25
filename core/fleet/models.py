@@ -13,33 +13,34 @@ Vocabulary boundaries (the architecture rule, spec §1):
 Snowflake transport rule (live-found, Phase C): Discord ids are STRINGS
 end to end — forms, JSON, storage, logs. JS Numbers round 19-digit ids.
 """
+
 from __future__ import annotations
 
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, Optional, Tuple
+from typing import Any
 
 __all__ = [
-    "MemberEligibility",
-    "ExecutionMode",
+    "POLICY_CHECK_ORDER",
     "AssignmentStatus",
-    "TransitionMode",
     "AssignmentStrategy",
-    "FieldClass",
+    "CooldownRecord",
     "CooldownScopeType",
     "CooldownSource",
-    "CooldownRecord",
-    "effective_cooldown",
-    "MetricHint",
-    "TaskDefinition",
-    "TaskAssignment",
-    "PolicyDecision",
+    "ExecutionMode",
+    "FieldClass",
     "FleetEvent",
-    "observation_dedup_key",
-    "POLICY_CHECK_ORDER",
-    "validate_channel_scope",
     "InvalidDefinition",
+    "MemberEligibility",
+    "MetricHint",
+    "PolicyDecision",
+    "TaskAssignment",
+    "TaskDefinition",
+    "TransitionMode",
+    "effective_cooldown",
+    "observation_dedup_key",
+    "validate_channel_scope",
 ]
 
 
@@ -52,6 +53,7 @@ class InvalidDefinition(ValueError):
 
 
 # --------------------------------------------------------------- enums
+
 
 class MemberEligibility:
     """Per-member fleet eligibility states (spec §2).
@@ -69,8 +71,8 @@ class MemberEligibility:
     COOLING = "cooling"
     RETIRED = "retired"
 
-    ALL: FrozenSet[str] = frozenset({ELIGIBLE, WAITING, PAUSED, COOLING, RETIRED})
-    LIVE: FrozenSet[str] = frozenset({ELIGIBLE, WAITING, PAUSED, COOLING})
+    ALL: frozenset[str] = frozenset({ELIGIBLE, WAITING, PAUSED, COOLING, RETIRED})
+    LIVE: frozenset[str] = frozenset({ELIGIBLE, WAITING, PAUSED, COOLING})
 
 
 class ExecutionMode:
@@ -85,7 +87,7 @@ class ExecutionMode:
     INDEPENDENT = "independent"
     GROUP_MANAGED = "group_managed"
 
-    ALL: FrozenSet[str] = frozenset({INDEPENDENT, GROUP_MANAGED})
+    ALL: frozenset[str] = frozenset({INDEPENDENT, GROUP_MANAGED})
 
 
 class AssignmentStatus:
@@ -107,9 +109,10 @@ class AssignmentStatus:
     FAILED = "failed"
     CANCELLED = "cancelled"
 
-    ALL: FrozenSet[str] = frozenset({
-        QUEUED, ASSIGNED, RUNNING, COMPLETED, SUSPENDED, FAILED, CANCELLED})
-    ALWAYS_TERMINAL: FrozenSet[str] = frozenset({COMPLETED, CANCELLED})
+    ALL: frozenset[str] = frozenset(
+        {QUEUED, ASSIGNED, RUNNING, COMPLETED, SUSPENDED, FAILED, CANCELLED}
+    )
+    ALWAYS_TERMINAL: frozenset[str] = frozenset({COMPLETED, CANCELLED})
 
 
 class TransitionMode:
@@ -123,7 +126,7 @@ class TransitionMode:
 
     DRAIN = "drain"
 
-    ALL: FrozenSet[str] = frozenset({DRAIN})
+    ALL: frozenset[str] = frozenset({DRAIN})
 
 
 class AssignmentStrategy:
@@ -138,7 +141,7 @@ class AssignmentStrategy:
     MANUAL = "manual"
     RELAY = "relay"
 
-    ALL: FrozenSet[str] = frozenset({MANUAL, RELAY})
+    ALL: frozenset[str] = frozenset({MANUAL, RELAY})
 
 
 class FieldClass:
@@ -154,7 +157,7 @@ class FieldClass:
     BOUNDARY = "boundary"
     STRUCTURAL = "structural"
 
-    ALL: FrozenSet[str] = frozenset({HOT, BOUNDARY, STRUCTURAL})
+    ALL: frozenset[str] = frozenset({HOT, BOUNDARY, STRUCTURAL})
 
 
 class CooldownScopeType:
@@ -164,7 +167,7 @@ class CooldownScopeType:
     ACCOUNT = "account"
     TASK = "task"
 
-    ALL: FrozenSet[str] = frozenset({GROUP, ACCOUNT, TASK})
+    ALL: frozenset[str] = frozenset({GROUP, ACCOUNT, TASK})
 
 
 class CooldownSource:
@@ -177,12 +180,12 @@ class CooldownSource:
     OBSERVED = "observed"
     SERVER = "server"
 
-    ALL: FrozenSet[str] = frozenset({MANUAL, OBSERVED, SERVER})
+    ALL: frozenset[str] = frozenset({MANUAL, OBSERVED, SERVER})
 
 
 #: Policy check order (spec §4) — the policy engine's contract, stated
 #: here so the interface is visible before the engine exists (Phase C).
-POLICY_CHECK_ORDER: Tuple[str, ...] = (
+POLICY_CHECK_ORDER: tuple[str, ...] = (
     "framework_safety",
     "group_enabled",
     "account_eligible",
@@ -194,10 +197,10 @@ POLICY_CHECK_ORDER: Tuple[str, ...] = (
 
 # ------------------------------------------------------------- cooldowns
 
+
 def _require_str(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise InvalidDefinition(
-            f"{field_name} must be a non-empty string, got {value!r}")
+        raise InvalidDefinition(f"{field_name} must be a non-empty string, got {value!r}")
     return value
 
 
@@ -214,33 +217,34 @@ class CooldownRecord:
     cooldown service).
     """
 
-    scope_type: str                    # CooldownScopeType value
-    scope_id: str                      # group id / account name / task id
+    scope_type: str  # CooldownScopeType value
+    scope_id: str  # group id / account name / task id
     reason: str
     started_at: float
     expires_at: float
-    source: str = CooldownSource.MANUAL   # CooldownSource value
+    source: str = CooldownSource.MANUAL  # CooldownSource value
     #: row identity when this record came from persistence (None for
     #: in-memory/validated-only instances)
-    id: Optional[int] = None
+    id: int | None = None
 
     def __post_init__(self) -> None:
         if self.scope_type not in CooldownScopeType.ALL:
             raise InvalidDefinition(
                 f"cooldown scope_type must be one of "
-                f"{sorted(CooldownScopeType.ALL)}, got {self.scope_type!r}")
+                f"{sorted(CooldownScopeType.ALL)}, got {self.scope_type!r}"
+            )
         if self.source not in CooldownSource.ALL:
             raise InvalidDefinition(
-                f"cooldown source must be one of "
-                f"{sorted(CooldownSource.ALL)}, got {self.source!r}")
+                f"cooldown source must be one of {sorted(CooldownSource.ALL)}, got {self.source!r}"
+            )
         _require_str(self.scope_id, "cooldown scope_id")
         _require_str(self.reason, "cooldown reason")
         if self.expires_at < self.started_at:
             raise InvalidDefinition(
-                f"cooldown expires_at ({self.expires_at}) precedes "
-                f"started_at ({self.started_at})")
+                f"cooldown expires_at ({self.expires_at}) precedes started_at ({self.started_at})"
+            )
 
-    def is_active(self, now: Optional[float] = None) -> bool:
+    def is_active(self, now: float | None = None) -> bool:
         """True while the cooldown's window still applies."""
         return (now if now is not None else time.time()) < self.expires_at
 
@@ -250,7 +254,7 @@ class CooldownRecord:
         return self.source == CooldownSource.MANUAL
 
 
-def effective_cooldown(records, now: Optional[float] = None):
+def effective_cooldown(records, now: float | None = None):
     """Most-restrictive-wins across cooldown records (spec §6).
 
     Returns the ACTIVE record with the LATEST expiry (the one that
@@ -266,7 +270,8 @@ def effective_cooldown(records, now: Optional[float] = None):
 
 # ------------------------------------------------------ task definitions
 
-def validate_channel_scope(channel_ids) -> Tuple[str, ...]:
+
+def validate_channel_scope(channel_ids) -> tuple[str, ...]:
     """Validate a task's channel scope (D5): non-empty positive set of
     channel-id STRINGS, no duplicates. Returns the normalized tuple.
 
@@ -275,8 +280,8 @@ def validate_channel_scope(channel_ids) -> Tuple[str, ...]:
     """
     if isinstance(channel_ids, str) or not isinstance(channel_ids, (list, tuple)):
         raise InvalidDefinition(
-            "channel_scope must be a list of channel-id strings, got "
-            f"{type(channel_ids).__name__}")
+            f"channel_scope must be a list of channel-id strings, got {type(channel_ids).__name__}"
+        )
     if not channel_ids:
         raise InvalidDefinition("channel_scope must name at least one channel")
     seen = set()
@@ -284,10 +289,10 @@ def validate_channel_scope(channel_ids) -> Tuple[str, ...]:
         if not isinstance(cid, str) or not cid.strip():
             raise InvalidDefinition(
                 f"channel id must be a non-empty string, got {cid!r} "
-                "(snowflakes are STRINGS end to end)")
+                "(snowflakes are STRINGS end to end)"
+            )
         if not cid.isdigit():
-            raise InvalidDefinition(
-                f"channel id must be a digit string, got {cid!r}")
+            raise InvalidDefinition(f"channel id must be a digit string, got {cid!r}")
         if cid in seen:
             raise InvalidDefinition(f"duplicate channel id {cid!r}")
         seen.add(cid)
@@ -304,15 +309,15 @@ class MetricHint:
 
     key: str
     label: str
-    aggregate: str = "last"        # "sum" | "last"
+    aggregate: str = "last"  # "sum" | "last"
 
     def __post_init__(self) -> None:
         _require_str(self.key, "metric hint key")
         _require_str(self.label, "metric hint label")
         if self.aggregate not in ("sum", "last"):
             raise InvalidDefinition(
-                f"metric hint aggregate must be 'sum' or 'last', "
-                f"got {self.aggregate!r}")
+                f"metric hint aggregate must be 'sum' or 'last', got {self.aggregate!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -335,38 +340,34 @@ class TaskDefinition:
 
     id: str
     plugin: str
-    channel_scope: Tuple[str, ...]
+    channel_scope: tuple[str, ...]
     data_key: str = ""
     cooldown_key: str = ""
     resume_policy: str = ""
     max_attempts: int = 1
-    metric_hints: Tuple[MetricHint, ...] = ()
-    field_classes: Dict[str, str] = field(default_factory=dict)
+    metric_hints: tuple[MetricHint, ...] = ()
+    field_classes: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _require_str(self.id, "task definition id")
         _require_str(self.plugin, "task definition plugin")
         # channel_scope normalized through the validator (str/strip rules)
-        object.__setattr__(self, "channel_scope",
-                           validate_channel_scope(self.channel_scope))
+        object.__setattr__(self, "channel_scope", validate_channel_scope(self.channel_scope))
         if self.max_attempts < 1:
-            raise InvalidDefinition(
-                f"max_attempts must be >= 1, got {self.max_attempts}")
+            raise InvalidDefinition(f"max_attempts must be >= 1, got {self.max_attempts}")
         for name in ("data_key", "cooldown_key", "resume_policy"):
             value = getattr(self, name)
             if value != "" and (not isinstance(value, str) or not value.strip()):
-                raise InvalidDefinition(
-                    f"{name} must be a non-empty string or '', got {value!r}")
+                raise InvalidDefinition(f"{name} must be a non-empty string or '', got {value!r}")
         for hint in self.metric_hints:
             if not isinstance(hint, MetricHint):
-                raise InvalidDefinition(
-                    f"metric_hints entries must be MetricHint, got {hint!r}")
+                raise InvalidDefinition(f"metric_hints entries must be MetricHint, got {hint!r}")
         for knob, cls in self.field_classes.items():
             _require_str(knob, "field_classes knob name")
             if cls not in FieldClass.ALL:
                 raise InvalidDefinition(
-                    f"field class for {knob!r} must be one of "
-                    f"{sorted(FieldClass.ALL)}, got {cls!r}")
+                    f"field class for {knob!r} must be one of {sorted(FieldClass.ALL)}, got {cls!r}"
+                )
 
     def field_class_of(self, knob: str) -> str:
         """The knob's edit class — HOT when undeclared (always safe)."""
@@ -389,8 +390,8 @@ class TaskAssignment:
     status: str = AssignmentStatus.QUEUED
     priority: int = 0
     created_at: float = field(default_factory=time.time)
-    started_at: Optional[float] = None
-    stopped_at: Optional[float] = None
+    started_at: float | None = None
+    stopped_at: float | None = None
     resume_policy: str = ""
     version: int = 1
     generation: int = 1
@@ -401,11 +402,13 @@ class TaskAssignment:
         if self.status not in AssignmentStatus.ALL:
             raise InvalidDefinition(
                 f"assignment status must be one of "
-                f"{sorted(AssignmentStatus.ALL)}, got {self.status!r}")
+                f"{sorted(AssignmentStatus.ALL)}, got {self.status!r}"
+            )
         if self.version < 1 or self.generation < 1:
             raise InvalidDefinition(
                 f"version/generation must be >= 1, got "
-                f"version={self.version} generation={self.generation}")
+                f"version={self.version} generation={self.generation}"
+            )
 
     def matches_generation(self, group_generation: int) -> bool:
         """The stale-dispatch fence (spec §5): an assignment made under
@@ -423,19 +426,20 @@ class PolicyDecision:
 
     allowed: bool
     reason: str
-    retry_at: Optional[float] = None
+    retry_at: float | None = None
 
     def __post_init__(self) -> None:
         if self.allowed and self.retry_at is not None:
-            raise InvalidDefinition(
-                "an allowed decision carries no retry_at")
+            raise InvalidDefinition("an allowed decision carries no retry_at")
         _require_str(self.reason, "policy decision reason")
 
 
 # ---------------------------------------------------------------- events
 
-def observation_dedup_key(source_account: str, message_id: str,
-                          observation_type: str) -> Tuple[str, str, str]:
+
+def observation_dedup_key(
+    source_account: str, message_id: str, observation_type: str
+) -> tuple[str, str, str]:
     """Dedup key for observations (spec §3): the SAME parsed marker
     delivered twice must register once. All parts STRINGS."""
     return (str(source_account), str(message_id), str(observation_type))
@@ -449,20 +453,19 @@ class FleetEvent:
     ``task``/``assignment``/``account`` ride along when relevant.
     """
 
-    kind: str                         # e.g. "TaskAssigned", "CooldownStarted"
+    kind: str  # e.g. "TaskAssigned", "CooldownStarted"
     group_id: str
     generation: int
     reason: str
     correlation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     occurred_at: float = field(default_factory=time.time)
-    task_id: Optional[str] = None
-    assignment_id: Optional[str] = None
-    account_id: Optional[str] = None
+    task_id: str | None = None
+    assignment_id: str | None = None
+    account_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_str(self.kind, "event kind")
         _require_str(self.group_id, "event group_id")
         _require_str(self.reason, "event reason")
         if self.generation < 1:
-            raise InvalidDefinition(
-                f"event generation must be >= 1, got {self.generation}")
+            raise InvalidDefinition(f"event generation must be >= 1, got {self.generation}")

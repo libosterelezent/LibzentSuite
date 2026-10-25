@@ -4,6 +4,7 @@ One source of truth for all three: PluginStateService key-scoping
 correctness DEPENDS on every name class forbidding ':' and '/' — keep
 that separator invariant here, in one place, if these ever change.
 """
+
 from __future__ import annotations
 
 import re
@@ -19,5 +20,4 @@ GROUP_NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 PLUGIN_NAME_RE = re.compile(r"[a-z0-9_-]+")
 
 
-__all__ = ["ACCOUNT_NAME_RE", "GROUP_NAME_RE",
-           "PLUGIN_NAME_RE"]
+__all__ = ["ACCOUNT_NAME_RE", "GROUP_NAME_RE", "PLUGIN_NAME_RE"]

@@ -8,6 +8,7 @@ Grouping rules:
   * Config/validation  — ValueError subclasses with precise, human messages;
     both interfaces render them as plain 'error: ...' lines / 400 responses.
 """
+
 from __future__ import annotations
 
 
@@ -134,12 +135,26 @@ DOMAIN_ERRORS = (
 
 
 __all__ = [
-    "FlowBlocked", "CacheInvalid", "TargetGone", "AccessDenied", "FetchRequired",
-    "ServerRateLimit", "AccountError", "PluginError", "ProfileError",
-    "SyncGroupError", "SettingsValidationError", "RatePolicyError",
-    "UnsafePolicyError", "SchedulerError", "DatabaseError", "CredentialsError",
-    "SimulationError", "DOMAIN_ERRORS",
+    "DOMAIN_ERRORS",
+    "AccessDenied",
+    "AccountError",
+    "CacheInvalid",
+    "CredentialsError",
+    "DatabaseError",
+    "FetchRequired",
+    "FlowBlocked",
+    "PluginError",
+    "ProfileError",
+    "RatePolicyError",
+    "SchedulerError",
+    "ServerRateLimit",
+    "SettingsValidationError",
+    "SimulationError",
+    "SyncGroupError",
+    "TargetGone",
+    "UnsafePolicyError",
 ]
+
 
 def flow_block_reason(exc: BaseException) -> str:
     """One-line human reason for a flow abort.

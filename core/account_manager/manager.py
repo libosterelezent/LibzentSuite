@@ -61,18 +61,19 @@ called with a SERVICES FACTORY (``factory(plugin_name) -> AccountPluginServices`
 not a bare services object — per-plugin task submission needs the plugin
 name. This matches the A6 hand-off contract and should be reconciled with A3.
 """
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
-from ..credentials import Credentials
 from ..errors import AccountError, CredentialsError, SchedulerError
 from ..event_bus import (
     AccountConnected,
@@ -81,14 +82,20 @@ from ..event_bus import (
     EventBus,
     MessageReceived,
 )
-from ..settings_manager import SettingsManager
-from adapters.base import DiscordMessage
-from database.models import AccountRecord
-from .cache import DiscordCache, invalidate_dm_channel, resolve_dm_channel
-from .services import AccountPluginServices, MessageWaiterRegistry, TaskAckRegistry
 
 #: account names share the profile namespace style (may start with a digit)
 from ..names import ACCOUNT_NAME_RE as NAME_RE
+from .cache import DiscordCache, invalidate_dm_channel, resolve_dm_channel
+from .services import AccountPluginServices, MessageWaiterRegistry, TaskAckRegistry
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from adapters.base import DiscordMessage
+    from database.models import AccountRecord
+
+    from ..credentials import Credentials
+    from ..settings_manager import SettingsManager
 
 
 def _forget_account_loggers(name: str) -> None:
@@ -114,9 +121,11 @@ def _forget_account_loggers(name: str) -> None:
     try:
         manager = logging.Logger.manager
         prefix = f"libzent.{name}"
-        doomed = [key for key in manager.loggerDict
-                  if key == prefix or key.startswith(prefix + ".")
-                  or key == f"libzent.adapter.{name}"]
+        doomed = [
+            key
+            for key in manager.loggerDict
+            if key == prefix or key.startswith(prefix + ".") or key == f"libzent.adapter.{name}"
+        ]
         for key in doomed:
             manager.loggerDict.pop(key, None)
         if doomed:
@@ -125,6 +134,7 @@ def _forget_account_loggers(name: str) -> None:
                 clear()
     except Exception:  # logging internals drift: never break removal
         pass
+
 
 #: fallback reconnect policy when the settings manager is unavailable/blank
 _DEFAULT_RECONNECT = {"initial": 1.0, "max": 60.0, "multiplier": 2.0}
@@ -162,11 +172,10 @@ def _looks_like_auth_error(exc: BaseException) -> bool:
     client libraries emit for rejected tokens.
     """
     seen = 0
-    walker: Optional[BaseException] = exc
+    walker: BaseException | None = exc
     while walker is not None and seen < 5:  # bounded cause chain walk
         text = str(walker).lower()
-        if (any(marker in text for marker in _AUTH_ERROR_MARKERS)
-                or _AUTH_401_RE.search(text)):
+        if any(marker in text for marker in _AUTH_ERROR_MARKERS) or _AUTH_401_RE.search(text):
             return True
         walker = walker.__cause__ or walker.__context__
         seen += 1
@@ -201,8 +210,8 @@ class _StaleGeneration(Exception):
 
     def __init__(self, name: str, generation: int) -> None:
         super().__init__(
-            f"lifecycle generation changed for account {name!r} "
-            f"(captured {generation})")
+            f"lifecycle generation changed for account {name!r} (captured {generation})"
+        )
         self.account = name
         self.generation = generation
 
@@ -218,11 +227,11 @@ class AccountRuntime:
 
     status: AccountStatus = AccountStatus.CREATED
     client: Any = None
-    cache: Optional[DiscordCache] = None
-    started_at: Optional[float] = None
-    last_error: Optional[str] = None
-    user_id: Optional[int] = None
-    supervisor: Optional["asyncio.Task[None]"] = None
+    cache: DiscordCache | None = None
+    started_at: float | None = None
+    last_error: str | None = None
+    user_id: int | None = None
+    supervisor: asyncio.Task[None] | None = None
     stop_requested: bool = False
     lost: asyncio.Event = field(default_factory=asyncio.Event)
     stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -232,7 +241,7 @@ class AccountRuntime:
     # reconnect SUCCEEDS — so the attempt counter resets to 1 every cycle
     # and the loop would hammer IDENTIFYs forever at minimum backoff.
     session_started: float = 0.0
-    flaps: List[float] = field(default_factory=list)
+    flaps: list[float] = field(default_factory=list)
     # PHASE-4 (S1/S2 hardening): monotonic lifecycle generation. Bumped at
     # every ownership change (start entry, stop inside the lock, remove,
     # estop). Every async lifecycle path captures it BEFORE an await and
@@ -265,13 +274,13 @@ class Account:
 
     record: AccountRecord
     runtime: AccountRuntime = field(default_factory=AccountRuntime)
-    plugins: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    credential_source: Optional[str] = None
-    assigned_plugins: List[str] = field(default_factory=list)
+    plugins: dict[str, dict[str, Any]] = field(default_factory=dict)
+    credential_source: str | None = None
+    assigned_plugins: list[str] = field(default_factory=list)
     #: in-memory mirror of the ``account_plugins.profile`` column:
     #: plugin -> bound profile name (None = plugin defaults). Loaded in
     #: bulk at boot, rewritten at every assignment/binding mutation.
-    plugin_profiles: Dict[str, Optional[str]] = field(default_factory=dict)
+    plugin_profiles: dict[str, str | None] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Every account owns exactly one DiscordCache for its whole life."""
@@ -279,7 +288,7 @@ class Account:
             self.runtime.cache = DiscordCache(self.record.name)
 
     # -------------------------------------------------------------- status
-    def status_dict(self) -> Dict[str, Any]:
+    def status_dict(self) -> dict[str, Any]:
         """JSON-safe snapshot (accounts list; see details() for the full page)."""
         rt = self.runtime
         client = rt.client
@@ -300,12 +309,10 @@ class Account:
             "uptime_s": uptime,
             "last_error": rt.last_error,
             "credential": self.credential_source,
-            "plugins": {
-                name: dict(info) for name, info in sorted(self.plugins.items())
-            },
+            "plugins": {name: dict(info) for name, info in sorted(self.plugins.items())},
         }
 
-    def channels_snapshot(self) -> List[Dict[str, Any]]:
+    def channels_snapshot(self) -> list[dict[str, Any]]:
         """Text-channel snapshot from the LIVE client ([] when offline).
 
         Read-only over what the client already holds in memory (the
@@ -401,13 +408,14 @@ class AccountManager:
         # typing-indicator RNG (anti-flag: humans trigger typing; disabled
         # by default via the typing_probability account setting = 0.0)
         import random as _random
+
         self._typing_rng = _random.Random()
         # sleep seam: tests substitute an instant recorder so backoff
         # timing assertions are deterministic (no wall-clock polling —
         # the old shape was the suite's known ~1-in-8 flake)
         self._sleep = asyncio.sleep
 
-        self._accounts: Dict[str, Account] = {}
+        self._accounts: dict[str, Account] = {}
         #: accounts WE attached to the plugin manager (and have not yet
         #: detached) — lets _refresh_plugins tell "plugin manager does not
         #: have the account" (keep the last known view) apart from "attached
@@ -421,12 +429,12 @@ class AccountManager:
         # fan-out is per-account (M/A), not fleet-wide (M×E).
         self._waiter_registry = MessageWaiterRegistry(bus)
         #: (account, plugin) -> services; rebuilt on each activation
-        self._services: Dict[tuple, AccountPluginServices] = {}
+        self._services: dict[tuple, AccountPluginServices] = {}
         #: strong refs for fire-and-forget tasks (documented create_task hazard)
         self._background: set = set()
         # FINAL-PHASE (F4): single-flight bulk start (a second start_all
         # joins the running sweep) + the sweep's concurrency width
-        self._start_all_flight: Optional["asyncio.Future"] = None
+        self._start_all_flight: asyncio.Future | None = None
         # PHASE-4 (S2 #5): cancelled-but-still-unwinding supervisors —
         # strong refs so they can never be GC'd mid-teardown
         self._dying_supervisors: set = set()
@@ -445,7 +453,7 @@ class AccountManager:
         bus.subscribe(MessageReceived, self._audit_inbound)
 
     # ------------------------------------------------------- rate-scope sync
-    def _sync_group_scope(self, name: str, group: Optional[str]) -> None:
+    def _sync_group_scope(self, name: str, group: str | None) -> None:
         """Feed the account's group membership to the limiter (per-account/
         group rate scope). Pure metadata plumbing — NO Discord API is
         involved; tolerant of limiters without group support (tests).
@@ -462,7 +470,7 @@ class AccountManager:
             self._logger.exception("group scope registration failed for %s", name)
 
     async def _sync_group_apply(
-        self, name: str, group: Optional[str], *, forget: bool = False
+        self, name: str, group: str | None, *, forget: bool = False
     ) -> None:
         """One membership -> runtime sync, through the owning manager.
 
@@ -481,8 +489,7 @@ class AccountManager:
                 if inspect.iscoroutine(outcome):
                     await outcome
             except Exception:
-                self._logger.exception(
-                    "sync-group sync failed for account %s", name)
+                self._logger.exception("sync-group sync failed for account %s", name)
             return
         if forget:
             self._sync_group_scope(name, None)
@@ -544,12 +551,12 @@ class AccountManager:
         self,
         name: str,
         *,
-        token_ref: Optional[str] = None,
+        token_ref: str | None = None,
         enabled: bool = True,
-        sync_group: Optional[str] = None,
-        plugins: Optional[List[str]] = None,
+        sync_group: str | None = None,
+        plugins: list[str] | None = None,
         profiles: Any = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Register + persist an account; returns its status dict.
 
         Persists to the repository FIRST (a failed write leaves memory
@@ -584,11 +591,10 @@ class AccountManager:
                 "not control capabilities anymore — pass plugins=[...] "
                 "(direct account→plugin assignments) instead"
             )
-        if plugins is not None:
-            if not isinstance(plugins, (list, tuple)) or not all(
-                isinstance(p, str) for p in plugins
-            ):
-                raise AccountError("'plugins' must be a list of plugin names")
+        if plugins is not None and (
+            not isinstance(plugins, (list, tuple)) or not all(isinstance(p, str) for p in plugins)
+        ):
+            raise AccountError("'plugins' must be a list of plugin names")
         record = await self._accounts_repo.add(
             name, token_ref=token_ref, enabled=bool(enabled), sync_group=sync_group
         )
@@ -601,8 +607,7 @@ class AccountManager:
         persisted = True
         if self._account_plugins is not None:
             try:
-                await self._account_plugins.set_plugins(
-                    name, list(dict.fromkeys(plugins or [])))
+                await self._account_plugins.set_plugins(name, list(dict.fromkeys(plugins or [])))
             except Exception:
                 persisted = False
                 self._logger.exception(
@@ -611,8 +616,7 @@ class AccountManager:
                 )
         # fail-closed: memory must never claim assignments the database
         # lost (they would run this session, then vanish on restart)
-        account.assigned_plugins = (
-            sorted({p for p in (plugins or [])}) if persisted else [])
+        account.assigned_plugins = sorted(set(plugins or [])) if persisted else []
         fresh = await self._repo_get(name)
         if fresh is not None:
             account.record = fresh
@@ -620,12 +624,14 @@ class AccountManager:
         await self._sync_group_apply(name, sync_group)
         self._logger.info(
             "account %s added (enabled=%s sync_group=%s plugins=%s)",
-            name, enabled, sync_group, account.assigned_plugins or "-",
+            name,
+            enabled,
+            sync_group,
+            account.assigned_plugins or "-",
         )
         return account.status_dict()
 
-    def _removal_aborted(self, name: str,
-                         account: Account) -> Optional[Dict[str, Any]]:
+    def _removal_aborted(self, name: str, account: Account) -> dict[str, Any] | None:
         """Identity guard for the removal cascade (stale-start audit).
 
         The cascade has many await windows; a same-named account re-added
@@ -638,11 +644,13 @@ class AccountManager:
         if current is not None and current is not account:
             self._logger.error(
                 "removal of %s aborted: account re-created mid-cascade — "
-                "preserving the new account's state", name)
+                "preserving the new account's state",
+                name,
+            )
             return {"removed": False, "name": name, "recreated": True}
         return None
 
-    async def remove_account(self, name: str) -> Dict[str, Any]:
+    async def remove_account(self, name: str) -> dict[str, Any]:
         """Remove a STOPPED account: detach plugins, cancel supervisor, delete.
 
         Cascades every account-scoped persistent state: the stored
@@ -666,7 +674,9 @@ class AccountManager:
             raise AccountError(f"unknown account {name!r}") from None
         rt = account.runtime
         if rt.status in (
-            AccountStatus.RUNNING, AccountStatus.RECONNECTING, AccountStatus.CONNECTING,
+            AccountStatus.RUNNING,
+            AccountStatus.RECONNECTING,
+            AccountStatus.CONNECTING,
         ):
             # put it back: refusal must not mutate the registry — and must
             # NOT bump the generation either (PHASE-4 fix: the bump used to
@@ -675,8 +685,7 @@ class AccountManager:
             # the account stuck CONNECTING — a live client with no owner)
             self._accounts[name] = account
             raise AccountError(
-                f"stop account {name!r} before removing it "
-                f"(status: {rt.status.value})"
+                f"stop account {name!r} before removing it (status: {rt.status.value})"
             )
         rt.generation += 1  # PHASE-4: this removal invalidates all older ops
         rt.stop_requested = True
@@ -702,8 +711,7 @@ class AccountManager:
             if inspect.iscoroutine(outcome):  # tolerant: sync pinned, async OK
                 await outcome
         except Exception:
-            self._logger.exception(
-                "plugin deactivation on remove failed for %s", name)
+            self._logger.exception("plugin deactivation on remove failed for %s", name)
         # Stale-start audit: re-verify identity before every name-keyed
         # destructive step below — the awaits above (and each one that
         # follows) are windows in which a same-named account may have been
@@ -724,8 +732,7 @@ class AccountManager:
                     if inspect.iscoroutine(resolved):  # tolerant of sync fakes
                         await resolved
                 except Exception:
-                    self._logger.exception(
-                        "lane cleanup failed for %s", name)
+                    self._logger.exception("lane cleanup failed for %s", name)
         aborted = self._removal_aborted(name, account)
         if aborted is not None:
             return aborted
@@ -741,10 +748,8 @@ class AccountManager:
                 self._logger.warning("stale client close failed for %s", name)
                 cancel = getattr(stale_client, "_cancel_run_task", None)
                 if cancel is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         await cancel()
-                    except Exception:
-                        pass
         # (deactivate already ran BEFORE the lane cleanup above — round-3
         # reorder; the pre-round-3 duplicate deactivate block that lived
         # here was a merge artifact from the isolation audit)
@@ -795,8 +800,7 @@ class AccountManager:
             try:  # capability rows must not survive into a re-created
                 await self._account_plugins.set_plugins(name, [])  # same-named
             except Exception:  # account (it would inherit the grants)
-                self._logger.exception(
-                    "plugin-assignment cascade failed for %s", name)
+                self._logger.exception("plugin-assignment cascade failed for %s", name)
         # K14/K15: in-memory mirrors and engine residue must not outlive the
         # account either, or a re-created same-named account silently
         # inherits its settings, profile grants, pacing stamps and 429
@@ -820,22 +824,20 @@ class AccountManager:
             try:
                 self._lifecycle.forget(name)
             except Exception:
-                self._logger.exception(
-                    "lifecycle pacer cascade failed for %s", name)
+                self._logger.exception("lifecycle pacer cascade failed for %s", name)
         if self._waiter_registry is not None:  # FINAL-PHASE (F1): waiters
             try:
                 self._waiter_registry.forget_account(name)
             except Exception:
-                self._logger.exception(
-                    "waiter registry cascade failed for %s", name)
+                self._logger.exception("waiter registry cascade failed for %s", name)
         _forget_account_loggers(name)  # FINAL-PHASE (G3/R4): loggerDict
         # PHASE-4 (S1-F3): final identity check before the irreversible DB
         # row delete — the cascade has had many await windows above.
         current = self._accounts.get(name)
         if current is not None and current is not account:
             self._logger.error(
-                "removal of %s aborted before DB delete: account re-created "
-                "mid-cascade", name)
+                "removal of %s aborted before DB delete: account re-created mid-cascade", name
+            )
             return {"removed": False, "name": name, "recreated": True}
         existed = bool(await self._accounts_repo.delete(name))
         self._logger.info("account %s removed (existed=%s)", name, existed)
@@ -845,12 +847,11 @@ class AccountManager:
         """The Account object (AccountError when unknown / unhashable name)."""
         return self._get(name)
 
-    def names(self) -> List[str]:
+    def names(self) -> list[str]:
         """Sorted account names."""
         return sorted(self._accounts)
 
-    async def accounts(self, *, refresh_records: bool = False
-                       ) -> List[Dict[str, Any]]:
+    async def accounts(self, *, refresh_records: bool = False) -> list[dict[str, Any]]:
         """Status dicts of every account, sorted by name.
 
         FINAL-PHASE (F3): memory-first by default — the runtime record,
@@ -861,7 +862,7 @@ class AccountManager:
         bounding externally-edited state (a second process, manual
         sqlite) instead of polling for it.
         """
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         for name in sorted(self._accounts):
             account = self._accounts[name]
             if refresh_records:
@@ -882,10 +883,9 @@ class AccountManager:
             try:
                 await self._refresh_record(account)
             except Exception:
-                self._logger.exception(
-                    "record reconciliation failed for %s", account.record.name)
+                self._logger.exception("record reconciliation failed for %s", account.record.name)
 
-    async def set_enabled(self, name: str, enabled: bool) -> Dict[str, Any]:
+    async def set_enabled(self, name: str, enabled: bool) -> dict[str, Any]:
         """Flip the persisted enabled flag (False = skipped by start_all)."""
         account = self._get(name)
         await self._accounts_repo.set_enabled(name, bool(enabled))  # persist first
@@ -893,7 +893,7 @@ class AccountManager:
         return account.status_dict()
 
     # ---------------------------------------------------- plugin assignments
-    async def assigned_plugins(self, name: str) -> List[str]:
+    async def assigned_plugins(self, name: str) -> list[str]:
         """Sorted plugin names assigned to the account (capability read).
 
         Memory-first: answers from the in-memory mirror every mutation
@@ -938,11 +938,13 @@ class AccountManager:
         await self._attach_plugins(name)
         self._logger.info(
             "plugin %r unassigned from account %r (was assigned: %s)",
-            plugin, name, existed,
+            plugin,
+            name,
+            existed,
         )
         return existed
 
-    async def set_account_plugins(self, name: str, plugins: List[str]) -> List[str]:
+    async def set_account_plugins(self, name: str, plugins: list[str]) -> list[str]:
         """REPLACE the account's whole assignment set (re-attaches NOW).
 
         Returns the stored sorted list (canonical form on disk). The
@@ -966,9 +968,10 @@ class AccountManager:
         if self._account_plugins is None:
             raise RuntimeError(
                 "account plugin assignments are not configured on this "
-                "account manager (db.account_plugins was not wired)")
+                "account manager (db.account_plugins was not wired)"
+            )
 
-    async def _plugins_of(self, name: str) -> List[str]:
+    async def _plugins_of(self, name: str) -> list[str]:
         """Sorted assignments of one account from the repository.
 
         FAIL-CLOSED: a repository failure reads as "no assignments"
@@ -977,9 +980,13 @@ class AccountManager:
         if self._account_plugins is None:
             return []
         try:
-            return sorted({p for p in
-                           (await self._account_plugins.plugins_of(name) or [])
-                           if isinstance(p, str)})
+            return sorted(
+                {
+                    p
+                    for p in (await self._account_plugins.plugins_of(name) or [])
+                    if isinstance(p, str)
+                }
+            )
         except Exception:
             self._logger.exception(
                 "could not read plugin assignments for %r (fail-closed: none)",
@@ -987,7 +994,7 @@ class AccountManager:
             )
             return []
 
-    async def _refresh_assignment(self, name: str) -> List[str]:
+    async def _refresh_assignment(self, name: str) -> list[str]:
         """Repository → in-memory mirror for one account's assignments.
 
         Runs after EVERY assignment mutation so ``Account.assigned_plugins``
@@ -1005,7 +1012,7 @@ class AccountManager:
         await self._refresh_bindings(name)
         return stored
 
-    async def _load_assignments(self) -> Dict[str, List[str]]:
+    async def _load_assignments(self) -> dict[str, list[str]]:
         """ONE bulk boot read of every account's assignments.
 
         Accounts with zero plugins are omitted by the repository — callers
@@ -1025,7 +1032,7 @@ class AccountManager:
             )
             return {}
 
-    async def _load_bindings(self) -> Dict[str, Dict[str, Optional[str]]]:
+    async def _load_bindings(self) -> dict[str, dict[str, str | None]]:
         """ONE bulk boot read of every account's profile bindings.
 
         Same conventions as :meth:`_load_assignments` (omitted-empty,
@@ -1043,7 +1050,8 @@ class AccountManager:
         except Exception:
             self._logger.exception(
                 "could not load account plugin profile bindings "
-                "(accounts boot with plugin defaults until rebound)")
+                "(accounts boot with plugin defaults until rebound)"
+            )
             return {}
 
     async def _refresh_bindings(self, name: str) -> None:
@@ -1055,14 +1063,12 @@ class AccountManager:
         if not callable(reader):
             return
         try:
-            account.plugin_profiles = dict(
-                await self._account_plugins.bindings(name) or {})
+            account.plugin_profiles = dict(await self._account_plugins.bindings(name) or {})
         except Exception:
-            self._logger.exception(
-                "could not refresh plugin profile bindings for %r", name)
+            self._logger.exception("could not refresh plugin profile bindings for %r", name)
 
     # --------------------------------------------------------- profile views
-    async def plugin_profiles(self, name: str) -> Dict[str, Optional[str]]:
+    async def plugin_profiles(self, name: str) -> dict[str, str | None]:
         """``{plugin: profile name or None}`` for every assigned plugin.
 
         Memory-first (the in-memory mirror the boot load and every
@@ -1075,7 +1081,7 @@ class AccountManager:
             for plugin in sorted(set(account.assigned_plugins or []))
         }
 
-    def channels_snapshot(self, name: str) -> List[Dict[str, Any]]:
+    def channels_snapshot(self, name: str) -> list[dict[str, Any]]:
         """Text-channel snapshot of the account's LIVE client.
 
         [] for offline/unstarted accounts — never raises (see
@@ -1085,7 +1091,7 @@ class AccountManager:
         return self._get(name).channels_snapshot()
 
     # ------------------------------------------------------------- lifecycle
-    async def start(self, name: str) -> Dict[str, Any]:
+    async def start(self, name: str) -> dict[str, Any]:
         """Connect one account, activate its plugins, spawn the supervisor.
 
         Raises:
@@ -1097,7 +1103,9 @@ class AccountManager:
         account = self._get(name)
         rt = account.runtime
         if rt.status in (
-            AccountStatus.RUNNING, AccountStatus.CONNECTING, AccountStatus.RECONNECTING,
+            AccountStatus.RUNNING,
+            AccountStatus.CONNECTING,
+            AccountStatus.RECONNECTING,
         ):
             raise AccountError(f"account {name!r} is already {rt.status.value}")
         self._lifecycle_gate("start", name, rt.status)
@@ -1138,8 +1146,7 @@ class AccountManager:
             # raising, so there is nothing left to release either way.
             if rt.stop_requested:
                 self._discard_half_built_client(name, rt)
-            self._logger.info(
-                "start of %s superseded by newer lifecycle operation", name)
+            self._logger.info("start of %s superseded by newer lifecycle operation", name)
             return account.status_dict()
         except Exception as exc:
             if rt.stop_requested:
@@ -1156,17 +1163,14 @@ class AccountManager:
                 # clobber its status/client/plugins with this (older)
                 # start's failure. rt.client either already went through
                 # the newer owner's teardown or belongs to it.
-                self._logger.info(
-                    "start of %s superseded by newer lifecycle operation", name)
+                self._logger.info("start of %s superseded by newer lifecycle operation", name)
                 raise AccountError(
-                    f"account {name!r} start superseded by a newer "
-                    "lifecycle operation") from exc
+                    f"account {name!r} start superseded by a newer lifecycle operation"
+                ) from exc
             self._start_failed(name, rt, exc)
             if isinstance(exc, (AccountError, CredentialsError)):
                 raise
-            raise AccountError(
-                f"account {name!r} failed to connect: {exc}"
-            ) from exc
+            raise AccountError(f"account {name!r} failed to connect: {exc}") from exc
         if rt.stop_requested:
             # K2 (S1-C1/S10-C1): the racing stop() may have completed BEFORE
             # rt.client was assigned (e.g. while we awaited token resolution),
@@ -1179,8 +1183,7 @@ class AccountManager:
                 try:
                     await client.disconnect()
                 except Exception:
-                    self._logger.exception(
-                        "abort-disconnect failed for %s", name)
+                    self._logger.exception("abort-disconnect failed for %s", name)
             rt.status = AccountStatus.STOPPED
             self._logger.info("account %s start aborted by concurrent stop", name)
             return account.status_dict()
@@ -1217,9 +1220,7 @@ class AccountManager:
             pass
         else:
             try:
-                outcome = self._plugin_manager.activate_account(
-                    name, self._services_factory(name)
-                )
+                outcome = self._plugin_manager.activate_account(name, self._services_factory(name))
                 if inspect.iscoroutine(outcome):  # pinned sync; async tolerated
                     await outcome
             except Exception:
@@ -1269,12 +1270,11 @@ class AccountManager:
             # wedge the account in RECONNECTING forever — log it and settle
             # FAILED so automation/start() can recover.
             rt.supervisor.add_done_callback(
-                lambda task, _name=name, _rt=rt:
-                    self._supervisor_done(_name, _rt, task))
+                lambda task, _name=name, _rt=rt: self._supervisor_done(_name, _rt, task)
+            )
         return account.status_dict()
 
-    def _supervisor_done(self, name: str, rt: AccountRuntime,
-                         task: "asyncio.Task[None]") -> None:
+    def _supervisor_done(self, name: str, rt: AccountRuntime, task: asyncio.Task[None]) -> None:
         """Done-callback for supervisor tasks: surface unexpected deaths."""
         if task.cancelled():
             return  # deliberate stop/removal — the normal path
@@ -1307,24 +1307,29 @@ class AccountManager:
         if decision.allowed:
             return
         self._logger.warning(
-            "account %s %s refused by lifecycle governor (%s): retry in "
-            "%.1fs", name, op, decision.reason, decision.retry_after_s)
+            "account %s %s refused by lifecycle governor (%s): retry in %.1fs",
+            name,
+            op,
+            decision.reason,
+            decision.retry_after_s,
+        )
         raise AccountError(
             f"account {name!r} {op} rate-limited ({decision.reason}): "
-            f"retry in {decision.retry_after_s:.1f}s")
+            f"retry in {decision.retry_after_s:.1f}s"
+        )
 
-    def _lifecycle_commit(self, op: str, name: str, *, ok: bool,
-                          invalid_credential: bool = False) -> None:
+    def _lifecycle_commit(
+        self, op: str, name: str, *, ok: bool, invalid_credential: bool = False
+    ) -> None:
         governor = self._lifecycle
         if governor is None:
             return
         try:
-            governor.commit(name, op, ok=ok,
-                            invalid_credential=invalid_credential)
+            governor.commit(name, op, ok=ok, invalid_credential=invalid_credential)
         except Exception:
             self._logger.exception("lifecycle commit failed for %s", name)
 
-    def lifecycle_stats(self) -> Dict[str, Any]:
+    def lifecycle_stats(self) -> dict[str, Any]:
         """Governor stats for status surfaces ({} when unlimited)."""
         return self._lifecycle.stats() if self._lifecycle is not None else {}
 
@@ -1340,7 +1345,9 @@ class AccountManager:
         """
         self._logger.info(
             "start of %s superseded by a newer start; leaving the newer "
-            "owner's client/status/plugins untouched", name)
+            "owner's client/status/plugins untouched",
+            name,
+        )
 
     def _abort_stale_start(self, name: str, rt: AccountRuntime) -> None:
         """PHASE-4 cleanup for a start() that lost ownership mid-flight.
@@ -1356,16 +1363,15 @@ class AccountManager:
             outcome = self._plugin_manager.deactivate_account(name)
             if asyncio.iscoroutine(outcome):
                 task = asyncio.get_running_loop().create_task(
-                    outcome, name=f"stale-start-deactivate-{name}")
+                    outcome, name=f"stale-start-deactivate-{name}"
+                )
                 self._background.add(task)
                 task.add_done_callback(self._reap_background)
         except Exception:
-            self._logger.exception(
-                "stale-start plugin cleanup failed for %s", name)
+            self._logger.exception("stale-start plugin cleanup failed for %s", name)
         self._drop_services(name)
         self._discard_half_built_client(name, rt)
-        self._logger.info(
-            "account %s start aborted by concurrent lifecycle change", name)
+        self._logger.info("account %s start aborted by concurrent lifecycle change", name)
 
     def _discard_half_built_client(self, name: str, rt: AccountRuntime) -> None:
         """Drop a client a concurrent stop() never saw (start-race cleanup).
@@ -1389,7 +1395,7 @@ class AccountManager:
         except Exception:
             self._logger.warning("half-built client cleanup failed for %s", name)
 
-    def _reap_background(self, task: "asyncio.Task[Any]") -> None:
+    def _reap_background(self, task: asyncio.Task[Any]) -> None:
         """Drop one finished fire-and-forget task; surface its failure.
 
         Without the exception read here, a background task that dies (e.g.
@@ -1401,11 +1407,9 @@ class AccountManager:
             return
         exc = task.exception()
         if exc is not None:
-            self._logger.error(
-                "background task %s failed: %s", task.get_name(), exc)
+            self._logger.error("background task %s failed: %s", task.get_name(), exc)
 
-    async def stop(self, name: str, *,
-                   _bypass_lifecycle: bool = False) -> Dict[str, Any]:
+    async def stop(self, name: str, *, _bypass_lifecycle: bool = False) -> dict[str, Any]:
         """Stop one account (idempotent; plugins deactivated first).
 
         Order (pinned): stop_requested=True, deactivate plugins (hooks run
@@ -1421,16 +1425,21 @@ class AccountManager:
         account = self._get(name)
         rt = account.runtime
         async with rt.stop_lock:
-            if (rt.status == AccountStatus.STOPPED
-                    and rt.client is None and rt.supervisor is None):
+            if rt.status == AccountStatus.STOPPED and rt.client is None and rt.supervisor is None:
                 return account.status_dict()  # idempotent: nothing re-fires
             # STOPPED with a lingering client/supervisor (a start-race
             # survivor) falls THROUGH to the full teardown below
             if not _bypass_lifecycle:
                 self._lifecycle_gate("stop", name, rt.status)
-            was_live = rt.status in (
-                AccountStatus.RUNNING, AccountStatus.RECONNECTING, AccountStatus.CONNECTING,
-            ) or rt.client is not None
+            was_live = (
+                rt.status
+                in (
+                    AccountStatus.RUNNING,
+                    AccountStatus.RECONNECTING,
+                    AccountStatus.CONNECTING,
+                )
+                or rt.client is not None
+            )
             rt.stop_requested = True
             rt.generation += 1  # PHASE-4: this stop invalidates older ops
             gen = rt.generation
@@ -1450,8 +1459,8 @@ class AccountManager:
                     await asyncio.wait_for(asyncio.shield(inner), timeout=5.0)
             except asyncio.TimeoutError:
                 self._logger.error(
-                    "plugin deactivation timed out for %s (continuing "
-                    "teardown)", name)
+                    "plugin deactivation timed out for %s (continuing teardown)", name
+                )
             except Exception:
                 self._logger.exception("plugin deactivation failed for %s", name)
             client = rt.client
@@ -1465,18 +1474,13 @@ class AccountManager:
                     disconnecting = asyncio.ensure_future(client.disconnect())
                     self._background.add(disconnecting)
                     disconnecting.add_done_callback(self._reap_background)
-                    await asyncio.wait_for(
-                        asyncio.shield(disconnecting), timeout=10.0)
+                    await asyncio.wait_for(asyncio.shield(disconnecting), timeout=10.0)
                 except asyncio.TimeoutError:
-                    self._logger.error(
-                        "client disconnect timed out for %s (force-reaping)",
-                        name)
+                    self._logger.error("client disconnect timed out for %s (force-reaping)", name)
                     force = getattr(client, "_cancel_run_task", None)
                     if callable(force):
-                        try:
+                        with contextlib.suppress(Exception):
                             await force()
-                        except Exception:
-                            pass
                 except Exception:
                     self._logger.exception("client disconnect failed for %s", name)
             supervisor = rt.supervisor
@@ -1493,19 +1497,19 @@ class AccountManager:
                         # cancellation). Keep a strong reference so it can
                         # never be GC'd mid-unwind and stays observable.
                         self._dying_supervisors.add(supervisor)
-                        supervisor.add_done_callback(
-                            self._dying_supervisors.discard)
+                        supervisor.add_done_callback(self._dying_supervisors.discard)
                         self._logger.warning(
-                            "supervisor for %s still unwinding after cancel "
-                            "(tracked: %s)", name, supervisor.get_name())
+                            "supervisor for %s still unwinding after cancel (tracked: %s)",
+                            name,
+                            supervisor.get_name(),
+                        )
                 except asyncio.CancelledError:
                     supervisor.cancel()  # caller cancelled us — don't leak the task
                     raise
                 except Exception:
                     # a CRASHED supervisor must not abort the teardown —
                     # stop() still has to reach its STOPPED terminal state
-                    self._logger.exception(
-                        "supervisor of %s crashed during reap", name)
+                    self._logger.exception("supervisor of %s crashed during reap", name)
             if rt.generation != gen:
                 # PHASE-4 (S1-F6): a NEWER start() took ownership while this
                 # stop was parked in an await. Its CONNECTING/RUNNING state
@@ -1514,8 +1518,8 @@ class AccountManager:
                 # reap, plugin deactivation) still ran for THIS generation's
                 # resources, which is exactly what we owed it.
                 self._logger.info(
-                    "stop of %s superseded by a newer start; leaving its "
-                    "state untouched", name)
+                    "stop of %s superseded by a newer start; leaving its state untouched", name
+                )
                 return account.status_dict()
             rt.status = AccountStatus.STOPPED
             rt.lost.clear()
@@ -1530,7 +1534,7 @@ class AccountManager:
             self._logger.info("account %s stopped", name)
             return account.status_dict()
 
-    async def start_all(self, *, stagger: float = 5.0) -> Dict[str, Any]:
+    async def start_all(self, *, stagger: float = 5.0) -> dict[str, Any]:
         """Start every ENABLED account through the bounded lifecycle scheduler.
 
         FINAL-PHASE (F4) semantics:
@@ -1556,10 +1560,10 @@ class AccountManager:
             return report
         flight = asyncio.get_running_loop().create_future()
         self._start_all_flight = flight
-        started: List[str] = []
-        failed: Dict[str, str] = {}
-        skipped: List[str] = []
-        overtaken: List[str] = []
+        started: list[str] = []
+        failed: dict[str, str] = {}
+        skipped: list[str] = []
+        overtaken: list[str] = []
         try:
             # deterministic snapshot with each account's generation: a
             # queued start whose generation moves (stop/estop/remove) is
@@ -1601,15 +1605,16 @@ class AccountManager:
                         started.append(name)
                     except Exception as exc:
                         failed[name] = f"{type(exc).__name__}: {exc}"
-                        self._logger.exception(
-                            "failed to start account %s", name)
+                        self._logger.exception("failed to start account %s", name)
 
             if pending:
-                await asyncio.gather(
-                    *[asyncio.create_task(_start_one(n, g))
-                      for n, g in pending])
-            report = {"started": sorted(started), "failed": failed,
-                      "skipped": skipped, "overtaken": sorted(overtaken)}
+                await asyncio.gather(*[asyncio.create_task(_start_one(n, g)) for n, g in pending])
+            report = {
+                "started": sorted(started),
+                "failed": failed,
+                "skipped": skipped,
+                "overtaken": sorted(overtaken),
+            }
             if not flight.done():
                 flight.set_result(report)
             return report
@@ -1623,15 +1628,15 @@ class AccountManager:
                 flight.cancel()
             self._start_all_flight = None
 
-    async def stop_all(self) -> Dict[str, Any]:
+    async def stop_all(self) -> dict[str, Any]:
         """Graceful shutdown of every account; logs and continues per account.
 
         Accounts stop CONCURRENTLY (bounded): a fleet-wide halt is a
         safety-critical latency — sequential per-account disconnects could
         outlive a dashboard estop's 10s route budget.
         """
-        stopped: List[str] = []
-        failed: Dict[str, str] = {}
+        stopped: list[str] = []
+        failed: dict[str, str] = {}
 
         async def _stop_one(name: str) -> None:
             try:
@@ -1654,7 +1659,7 @@ class AccountManager:
         await asyncio.gather(*(_limited(n) for n in names))
         return {"stopped": stopped, "failed": failed}
 
-    def emergency_stop(self, name: str) -> Dict[str, Any]:
+    def emergency_stop(self, name: str) -> dict[str, Any]:
         """SYNCHRONOUS account-scoped emergency stop: returns immediately.
 
         Semantics (documented per the pinned contract): cancel every queued/
@@ -1671,8 +1676,8 @@ class AccountManager:
         account = self._get(name)
         rt = account.runtime
         rt.stop_requested = True  # immediate: blocks any reconnect flip
-        rt.generation += 1        # PHASE-4: estop invalidates older ops
-        rt.lost.set()             # wake the supervisor NOW
+        rt.generation += 1  # PHASE-4: estop invalidates older ops
+        rt.lost.set()  # wake the supervisor NOW
         cancelled = 0
         try:
             cancelled = int(self._scheduler.cancel_matching(account=name) or 0)
@@ -1684,16 +1689,12 @@ class AccountManager:
             loop = asyncio.get_running_loop()
         except RuntimeError as exc:
             raise AccountError(
-                "emergency_stop(...) needs a running event loop "
-                "(call it from async context)"
+                "emergency_stop(...) needs a running event loop (call it from async context)"
             ) from exc
-        task = loop.create_task(
-            self.stop(name, _bypass_lifecycle=True), name=f"estop-{name}")
+        task = loop.create_task(self.stop(name, _bypass_lifecycle=True), name=f"estop-{name}")
         self._background.add(task)
         task.add_done_callback(self._reap_background)
-        self._logger.error(
-            "EMERGENCY STOP %s: cancelled %d tasks, disconnecting", name, cancelled
-        )
+        self._logger.error("EMERGENCY STOP %s: cancelled %d tasks, disconnecting", name, cancelled)
         return {"account": name, "cancelled_tasks": cancelled, "stop_initiated": True}
 
     # ------------------------------------------------------------ supervisor
@@ -1738,28 +1739,28 @@ class AccountManager:
                         if not rt.stop_requested:
                             rt.status = AccountStatus.FAILED
                             rt.last_error = (
-                                f"reconnect supervisor crashed: "
-                                f"{type(exc).__name__}: {exc}"
+                                f"reconnect supervisor crashed: {type(exc).__name__}: {exc}"
                             )
                             rt.lost.clear()
                         self._logger.exception(
-                            "reconnect supervisor for %s crashed; standing "
-                            "down (status %s)", name, rt.status.value)
+                            "reconnect supervisor for %s crashed; standing down (status %s)",
+                            name,
+                            rt.status.value,
+                        )
                         return
                     continue
                 # PHASE-4 (S7-C8): event-driven wait with a long backstop —
                 # the 0.2s poll was 5 timer+task wakeups/s per idle account.
                 # Every real trigger sets ``lost`` (drop, stop, estop); the
                 # 60s backstop only covers pathological lost-wake cases.
-                try:
+                with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(rt.lost.wait(), timeout=60.0)
-                except asyncio.TimeoutError:
-                    pass
         except asyncio.CancelledError:
             raise  # deliberate stop/removal — stand down, never swallow
 
-    async def _reconnect_loop(self, name: str, rt: AccountRuntime,
-                              *, gen: Optional[int] = None) -> None:
+    async def _reconnect_loop(
+        self, name: str, rt: AccountRuntime, *, gen: int | None = None
+    ) -> None:
         """Retry connecting a dropped account with exponential backoff.
 
         A FRESH client is built per attempt (factory + callback rewiring).
@@ -1787,7 +1788,8 @@ class AccountManager:
                 rt.lost.clear()
                 self._logger.info(
                     "reconnect disabled for %s; standing down (status %s)",
-                    name, rt.status.value,
+                    name,
+                    rt.status.value,
                 )
                 return
             # M2/S2-hardening: escalate SMOOTHLY per short-lived session
@@ -1806,7 +1808,9 @@ class AccountManager:
                         " 5 min — Discord is closing this account's"
                         " sessions shortly after connect (young/flagged"
                         " account?); reconnect backoff escalated",
-                        name, len(rt.flaps))
+                        name,
+                        len(rt.flaps),
+                    )
             # Round-3 (backoff-overflow zombie): clamp the exponent and
             # guard the power itself. The clamp covers the default policy
             # (2.0 ** 1025 overflows ~21h into an outage); the OverflowError
@@ -1815,8 +1819,7 @@ class AccountManager:
             # RECONNECTING forever with nobody driving it.
             try:
                 delay = min(
-                    cfg["initial"]
-                    * (cfg["multiplier"] ** min(attempt, _BACKOFF_EXPONENT_CAP)),
+                    cfg["initial"] * (cfg["multiplier"] ** min(attempt, _BACKOFF_EXPONENT_CAP)),
                     cfg["max"],
                 )
             except OverflowError:
@@ -1858,8 +1861,7 @@ class AccountManager:
                 # revoked token forever burned a login() per backoff and
                 # left the account in permanent RECONNECTING
                 probe = rt.client
-                if (getattr(probe, "fatal_close", False)
-                        or _looks_like_auth_error(exc)):
+                if getattr(probe, "fatal_close", False) or _looks_like_auth_error(exc):
                     rt.status = AccountStatus.INVALID_CREDENTIAL
                     # stand down: with ``lost`` still set the supervisor
                     # re-entered this loop at once and retried the revoked
@@ -1871,20 +1873,15 @@ class AccountManager:
                         # raises — the failed client (and its run task) must
                         # not linger on an account nobody supervises
                         self._discard_half_built_client(name, rt)
-                    self._lifecycle_commit(
-                        "reconnect", name, ok=False, invalid_credential=True)
-                    self._logger.error(
-                        "reconnect for %s abandoned: credential rejected",
-                        name)
+                    self._lifecycle_commit("reconnect", name, ok=False, invalid_credential=True)
+                    self._logger.error("reconnect for %s abandoned: credential rejected", name)
                     return
                 attempt += 1
                 if not rt.stop_requested:
                     # FIX (S1 #3): never regress STOPPED back to RECONNECTING
                     rt.status = AccountStatus.RECONNECTING
                 rt.last_error = f"{type(exc).__name__}: {exc}"
-                self._logger.warning(
-                    "reconnect attempt failed for %s: %s", name, rt.last_error
-                )
+                self._logger.warning("reconnect attempt failed for %s: %s", name, rt.last_error)
                 continue
             if rt.stop_requested:
                 # K3 (S1-C2): a stop() completed WHILE we were inside
@@ -1897,8 +1894,7 @@ class AccountManager:
                     try:
                         await client.disconnect()
                     except Exception:
-                        self._logger.exception(
-                            "reconnect-abort disconnect failed for %s", name)
+                        self._logger.exception("reconnect-abort disconnect failed for %s", name)
                 return
             if rt.generation != gen:
                 # Stale-start audit: the generation bump came from a NEWER
@@ -1906,8 +1902,7 @@ class AccountManager:
                 # rt.status belong to the newer owner — leave them
                 # untouched; our own fresh client was already released by
                 # _connect_client's stale path before it returned.
-                self._logger.info(
-                    "reconnect of %s superseded by a newer start", name)
+                self._logger.info("reconnect of %s superseded by a newer start", name)
                 return
             rt.status = AccountStatus.RUNNING
             rt.started_at = time.monotonic()  # uptime = current connection
@@ -1946,9 +1941,7 @@ class AccountManager:
             try:
                 await old.disconnect()
             except Exception as exc:
-                self._logger.warning(
-                    "stale client teardown for %s raised %s", name, exc
-                )
+                self._logger.warning("stale client teardown for %s raised %s", name, exc)
         if rt.generation != gen:
             # ownership changed during the old-client teardown: disconnect
             # the freshly built one too — never install it
@@ -1971,10 +1964,8 @@ class AccountManager:
             # callers' discard paths see None and never double-disconnect.
             if rt.client is client:
                 rt.client = None
-            try:
+            with contextlib.suppress(Exception):
                 await client.disconnect()
-            except Exception:
-                pass
             raise _StaleGeneration(name, gen)
         if getattr(client, "connected", None) is False:  # protocol extra, tolerant
             raise AccountError(f"client for account {name!r} did not connect")
@@ -1991,6 +1982,7 @@ class AccountManager:
             return  # removed mid-connect: never resurrect its access row
         try:
             from ..plugin_manager.commands import COMMAND_HUB
+
             access = COMMAND_HUB.access
             if access is not None:
                 await access.set_account_user_id(name, user_id)
@@ -2015,25 +2007,29 @@ class AccountManager:
             if rt.client is not client:
                 return
             if rt.cache is not None and (message.dm or message.guild_id is not None):
-                try:  # inbound traffic TEACHES the cache: channels created
-                    rt.cache.learn_channel(  # after READY must not fail
-                        int(message.channel_id),  # validate_channel forever
+                # cache learning is best-effort by contract; inbound traffic
+                # TEACHES the cache: channels created after READY must not
+                # fail validate_channel forever
+                with contextlib.suppress(Exception):
+                    rt.cache.learn_channel(
+                        int(message.channel_id),
                         getattr(message, "guild_id", None),
                     )
-                except Exception:
-                    pass  # cache learning is best-effort by contract
-            self._bus.publish_nowait(MessageReceived(
-                account=name,
-                message_id=message.id,
-                channel_id=message.channel_id,
-                author_id=message.author_id,
-                content=message.content,
-                dm=message.dm,
-                message=message,
-            ))
+            self._bus.publish_nowait(
+                MessageReceived(
+                    account=name,
+                    message_id=message.id,
+                    channel_id=message.channel_id,
+                    author_id=message.author_id,
+                    content=message.content,
+                    dm=message.dm,
+                    message=message,
+                )
+            )
 
-        def _on_reaction(kind: str, message_id: int, channel_id: int,
-                         guild_id, user_id: int, emoji, raw) -> None:
+        def _on_reaction(
+            kind: str, message_id: int, channel_id: int, guild_id, user_id: int, emoji, raw
+        ) -> None:
             """Client callback -> ReactionAdded/Removed-shaped bus events.
 
             The stable ids + printable emoji cross WITHOUT any message fetch
@@ -2046,35 +2042,49 @@ class AccountManager:
             if kind != "add":  # removal events: reserved for future plugins
                 return
             text = emoji if isinstance(emoji, str) else getattr(emoji, "name", str(emoji))
-            self._bus.publish_nowait(ReactionAdded(
-                account=name, message_id=int(message_id),
-                channel_id=int(channel_id), guild_id=guild_id,
-                user_id=int(user_id), emoji=text,
-                dm=rt.cache.channels.get(channel_id).dm
-                if rt.cache.channels.get(channel_id) is not None else False,
-                raw=raw,
-            ))
+            self._bus.publish_nowait(
+                ReactionAdded(
+                    account=name,
+                    message_id=int(message_id),
+                    channel_id=int(channel_id),
+                    guild_id=guild_id,
+                    user_id=int(user_id),
+                    emoji=text,
+                    dm=rt.cache.channels.get(channel_id).dm
+                    if rt.cache.channels.get(channel_id) is not None
+                    else False,
+                    raw=raw,
+                )
+            )
 
         def _on_message_edit(message: DiscordMessage) -> None:
             from ..event_bus import MessageEdited
 
             if rt.client is not client:
                 return
-            self._bus.publish_nowait(MessageEdited(
-                account=name, message_id=message.id,
-                channel_id=message.channel_id, guild_id=message.guild_id,
-                message=message,
-            ))
+            self._bus.publish_nowait(
+                MessageEdited(
+                    account=name,
+                    message_id=message.id,
+                    channel_id=message.channel_id,
+                    guild_id=message.guild_id,
+                    message=message,
+                )
+            )
 
         def _on_message_delete(message_id: int, channel_id: int, guild_id, raw) -> None:
             from ..event_bus import MessageDeleted
 
             if rt.client is not client:
                 return
-            self._bus.publish_nowait(MessageDeleted(
-                account=name, message_id=int(message_id),
-                channel_id=int(channel_id), guild_id=guild_id,
-            ))
+            self._bus.publish_nowait(
+                MessageDeleted(
+                    account=name,
+                    message_id=int(message_id),
+                    channel_id=int(channel_id),
+                    guild_id=guild_id,
+                )
+            )
 
         def _on_disconnect(reason: str = "") -> None:
             """Client callback on UNEXPECTED loss; deliberate stops ignore it."""
@@ -2110,9 +2120,7 @@ class AccountManager:
                     rt.status = AccountStatus.RECONNECTING
                     rt.lost.set()
                 rt.last_error = reason or "connection lost"
-                self._logger.warning(
-                    "account %s connection lost (%s)", name, rt.last_error
-                )
+                self._logger.warning("account %s connection lost (%s)", name, rt.last_error)
 
         client.on_message = _on_message
         client.on_disconnect = _on_disconnect
@@ -2155,13 +2163,16 @@ class AccountManager:
             rt.status = AccountStatus.FAILED
         rt.last_error = str(exc) or f"{type(exc).__name__}: {exc!r}"
         self._lifecycle_commit(
-            "start", name, ok=False,
-            invalid_credential=rt.status == AccountStatus.INVALID_CREDENTIAL)
+            "start",
+            name,
+            ok=False,
+            invalid_credential=rt.status == AccountStatus.INVALID_CREDENTIAL,
+        )
         self._logger.error("account %s failed to start: %s", name, rt.last_error)
         self._bus.publish_nowait(AccountFailed(account=name, error=rt.last_error))
 
     # --------------------------------------------------------------- sending
-    async def _maybe_typing(self, name: str, rt: "AccountRuntime", channel_id: int) -> None:
+    async def _maybe_typing(self, name: str, rt: AccountRuntime, channel_id: int) -> None:
         """Probabilistic typing indicator before a guild send (anti-flag).
 
         Real clients fire typing while composing; an account that NEVER does
@@ -2179,10 +2190,9 @@ class AccountManager:
             return
         if self._typing_rng.random() >= probability:
             return
-        try:
+        # cosmetic best-effort only
+        with contextlib.suppress(Exception):
             await rt.client.send_typing(channel_id)
-        except Exception:
-            pass  # cosmetic best-effort only
 
     async def send_hook(self, task: Any) -> DiscordMessage:
         """Scheduler sender: one task -> one validated, audited Discord send.
@@ -2201,9 +2211,7 @@ class AccountManager:
             raise AccountError(f"task targets unknown account {name!r}")
         rt = account.runtime
         if rt.status != AccountStatus.RUNNING or rt.client is None:
-            raise ConnectionError(
-                f"account {name!r} is not running (status: {rt.status.value})"
-            )
+            raise ConnectionError(f"account {name!r} is not running (status: {rt.status.value})")
         action = getattr(task, "action", None)
         client = rt.client
         if action == "dm":
@@ -2219,8 +2227,7 @@ class AccountManager:
                 message = await client.send_message(channel_id, task.content)
             except Exception as exc:
                 if type(exc).__name__ == "TargetGone":
-                    await invalidate_dm_channel(rt.cache, self._api_cache,
-                                                int(task.user_id), name)
+                    await invalidate_dm_channel(rt.cache, self._api_cache, int(task.user_id), name)
                 raise
         elif action == "message":
             rt.cache.validate_channel(int(task.channel_id))  # TargetGone propagates
@@ -2263,8 +2270,7 @@ class AccountManager:
             return None
         else:
             raise SchedulerError(
-                f"unsupported action {action!r} "
-                "(supported: 'message', 'dm', 'reaction', 'button')"
+                f"unsupported action {action!r} (supported: 'message', 'dm', 'reaction', 'button')"
             )
         # NOTE: outbound AUDIT is written by the scheduler at task-terminal
         # (exactly-once, with attempts context) — recording here too would
@@ -2272,7 +2278,7 @@ class AccountManager:
         return message
 
     # -------------------------------------------------------------- details
-    async def details(self, name: str) -> Dict[str, Any]:
+    async def details(self, name: str) -> dict[str, Any]:
         """Account details page (spec §8) — EXACT shape:
 
         ``{"name", "status": {"connected","state","latency_ms","uptime_s"},
@@ -2312,8 +2318,7 @@ class AccountManager:
             },
             "identity": {
                 "name": rt.cache.user_name or record.name,
-                "discord_id": rt.cache.user_id if rt.cache.user_id is not None
-                else rt.user_id,
+                "discord_id": rt.cache.user_id if rt.cache.user_id is not None else rt.user_id,
             },
             "runtime": {
                 "cached_guilds": len(rt.cache.guilds),
@@ -2326,13 +2331,13 @@ class AccountManager:
             "credential": account.credential_source,
         }
 
-    def _rate_limit_rows(self, name: str) -> Dict[str, Dict[str, Any]]:
+    def _rate_limit_rows(self, name: str) -> dict[str, dict[str, Any]]:
         """Effective rate policy per action (empty dict without a limiter)."""
         if self._limiter is None:
             return {}
         try:
             policies = self._limiter.policies() or []
-            rows: Dict[str, Dict[str, Any]] = {}
+            rows: dict[str, dict[str, Any]] = {}
             for policy in policies:
                 action = policy.get("action")
                 if not action or action in rows:
@@ -2344,7 +2349,8 @@ class AccountManager:
                 else:
                     source = ", ".join(
                         f"{s.get('level')}:{s.get('owner')}"
-                        if s.get("owner") else str(s.get("level"))
+                        if s.get("owner")
+                        else str(s.get("level"))
                         for s in sources
                     )
                 rows[action] = {
@@ -2357,7 +2363,7 @@ class AccountManager:
             self._logger.exception("could not build rate_limit details for %s", name)
             return {}
 
-    def _plugin_rows(self, account: Account) -> List[Dict[str, Any]]:
+    def _plugin_rows(self, account: Account) -> list[dict[str, Any]]:
         """[{"name","enabled"}] — from plugin_manager.states when it has the
         account, else the Account's last known plugin view."""
         name = account.record.name
@@ -2385,8 +2391,7 @@ class AccountManager:
 
         return factory
 
-    def services_for(self, account_name: str,
-                     plugin_name: str) -> AccountPluginServices:
+    def services_for(self, account_name: str, plugin_name: str) -> AccountPluginServices:
         """One AccountPluginServices per (account, plugin); cached per start.
 
         The settings dict is seeded from ``plugin_manager.states`` when
@@ -2399,10 +2404,8 @@ class AccountManager:
         if key in self._services:
             return self._services[key]
         account = self._accounts.get(account_name)
-        cache = account.runtime.cache if account is not None else DiscordCache(
-            account_name
-        )
-        settings_dict: Dict[str, Any] = {}
+        cache = account.runtime.cache if account is not None else DiscordCache(account_name)
+        settings_dict: dict[str, Any] = {}
         try:
             # LIVE view first (set_setting mutates this dict in place, so
             # services.settings and ctx.settings can never diverge); the
@@ -2468,9 +2471,7 @@ class AccountManager:
         """
         activated = False
         try:
-            outcome = self._plugin_manager.attach_account(
-                name, self._allowed_plugins(name)
-            )
+            outcome = self._plugin_manager.attach_account(name, self._allowed_plugins(name))
             if inspect.iscoroutine(outcome):
                 await outcome
         except Exception:
@@ -2483,27 +2484,30 @@ class AccountManager:
         # re-activation every mid-run assign/unassign/set silently
         # stopped ALL of the account's plugins until the next start.
         rt = self._accounts.get(name)
-        if (rt is not None
-                and rt.runtime.status == AccountStatus.RUNNING
-                and not rt.runtime.stop_requested):
+        if (
+            rt is not None
+            and rt.runtime.status == AccountStatus.RUNNING
+            and not rt.runtime.stop_requested
+        ):
             try:
                 self._drop_services(name)
-                outcome = self._plugin_manager.activate_account(
-                    name, self._services_factory(name))
+                outcome = self._plugin_manager.activate_account(name, self._services_factory(name))
                 if inspect.iscoroutine(outcome):
                     await outcome
                 activated = True
             except Exception:
                 self._logger.exception(
                     "plugin re-activation after attach failed for %s "
-                    "(plugins stay inactive until the next start)", name)
+                    "(plugins stay inactive until the next start)",
+                    name,
+                )
             if rt.runtime.stop_requested:
                 # a stop() completed DURING the activation await (review
                 # finding #3): its teardown ran before these hooks fired —
                 # deactivate again so no active plugin outlives the stop
                 self._logger.warning(
-                    "stop landed during attach-activation of %s; "
-                    "deactivating its plugins", name)
+                    "stop landed during attach-activation of %s; deactivating its plugins", name
+                )
                 try:
                     outcome = self._plugin_manager.deactivate_account(name)
                     if inspect.iscoroutine(outcome):
@@ -2512,7 +2516,9 @@ class AccountManager:
                 except Exception:
                     self._logger.exception(
                         "post-stop deactivation failed for %s (plugins "
-                        "may linger active until the next stop)", name)
+                        "may linger active until the next stop)",
+                        name,
+                    )
         return activated
 
     def _allowed_plugins(self, name: str) -> set:
@@ -2550,7 +2556,7 @@ class AccountManager:
             if name in self._plugin_attached:
                 account.plugins = {}  # attached with zero plugins: the truth
             return  # plugin manager does not have the account (yet) — keep old
-        plugins: Dict[str, Dict[str, Any]] = {}
+        plugins: dict[str, dict[str, Any]] = {}
         for state in states:
             if not isinstance(state, dict) or not state.get("name"):
                 continue
@@ -2592,7 +2598,7 @@ class AccountManager:
                 channel_id=event.channel_id,
                 content=preview,
                 note=f"author={event.author_id}{' dm' if event.dm else ''}"
-                     + self._rich_note(event),
+                + self._rich_note(event),
             )
         except Exception:
             self._logger.exception("inbound audit recording failed")
@@ -2634,12 +2640,10 @@ class AccountManager:
         except TypeError as exc:  # unhashable payloads via the dashboard
             raise AccountError(f"account name must be a string, got {name!r}") from exc
         if account is None:
-            raise AccountError(
-                f"unknown account {name!r} (registered: {sorted(self._accounts)})"
-            )
+            raise AccountError(f"unknown account {name!r} (registered: {sorted(self._accounts)})")
         return account
 
-    async def _repo_get(self, name: str) -> Optional[AccountRecord]:
+    async def _repo_get(self, name: str) -> AccountRecord | None:
         """Fresh record from the repository (None on failure/unknown)."""
         try:
             return await self._accounts_repo.get(name)
@@ -2661,9 +2665,7 @@ class AccountManager:
             account.credential_source = None
             return
         try:
-            account.credential_source = self._credential_service.status(
-                account.record.name
-            ) or None
+            account.credential_source = self._credential_service.status(account.record.name) or None
         except Exception:
             account.credential_source = None
 
@@ -2690,7 +2692,7 @@ class AccountManager:
             "is not configured on this framework instance"
         )
 
-    def _reconnect_settings(self, name: str) -> Dict[str, float]:
+    def _reconnect_settings(self, name: str) -> dict[str, float]:
         """Account reconnect policy via SettingsManager (duck-typed, defaults
         on any failure so a settings problem never blocks reconnection)."""
         try:
@@ -2700,15 +2702,16 @@ class AccountManager:
         try:
             return {
                 "enabled": bool(raw.get("reconnect_enabled", True)),
-                "initial": max(0.0, float(raw.get("reconnect_initial_delay",
-                                                   _DEFAULT_RECONNECT["initial"]))),
-                "max": max(0.1, float(raw.get("reconnect_max_delay",
-                                               _DEFAULT_RECONNECT["max"]))),
-                "multiplier": max(1.0, float(raw.get("reconnect_multiplier",
-                                                     _DEFAULT_RECONNECT["multiplier"]))),
+                "initial": max(
+                    0.0, float(raw.get("reconnect_initial_delay", _DEFAULT_RECONNECT["initial"]))
+                ),
+                "max": max(0.1, float(raw.get("reconnect_max_delay", _DEFAULT_RECONNECT["max"]))),
+                "multiplier": max(
+                    1.0, float(raw.get("reconnect_multiplier", _DEFAULT_RECONNECT["multiplier"]))
+                ),
             }
         except (TypeError, ValueError):
             return {"enabled": True, **_DEFAULT_RECONNECT}
 
 
-__all__ = ["Account", "AccountManager", "AccountRuntime", "AccountStatus", "NAME_RE"]
+__all__ = ["NAME_RE", "Account", "AccountManager", "AccountRuntime", "AccountStatus"]

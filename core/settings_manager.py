@@ -10,15 +10,17 @@ Design:
   * The SAME schema auto-generates the dashboard settings editors and the CLI
     'set' validation — no per-surface implementations (parity by construction).
 """
+
 from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any
 
-from .event_bus import EventBus, SettingChanged
 from .errors import SettingsValidationError
+from .event_bus import EventBus, SettingChanged
 
 SETTING_TYPES = ("str", "int", "float", "bool")
 
@@ -36,9 +38,9 @@ class Setting:
     type: str = "str"
     default: Any = None
     description: str = ""
-    min_value: Optional[float] = None
-    max_value: Optional[float] = None
-    max_length: Optional[int] = None  # str settings only; None -> STR_MAX_LENGTH
+    min_value: float | None = None
+    max_value: float | None = None
+    max_length: int | None = None  # str settings only; None -> STR_MAX_LENGTH
 
     def __post_init__(self) -> None:
         if not self.name or not self.name.replace("_", "").isalnum():
@@ -48,7 +50,8 @@ class Setting:
                 self.name, f"unknown type {self.type!r} (use {SETTING_TYPES})"
             )
         if (self.min_value is not None or self.max_value is not None) and self.type not in (
-            "int", "float"
+            "int",
+            "float",
         ):
             raise SettingsValidationError(
                 self.name, "min/max bounds are only supported for numeric settings"
@@ -98,13 +101,11 @@ class Setting:
                 self.name, f"expected {self.type}, got {value!r}"
             ) from exc
         if self.type == "str":
-            limit = self.max_length if self.max_length is not None \
-                else STR_MAX_LENGTH
+            limit = self.max_length if self.max_length is not None else STR_MAX_LENGTH
             if len(coerced) > limit:
                 raise SettingsValidationError(
                     self.name,
-                    f"string is {len(coerced)} chars, longer than the "
-                    f"max {limit}",
+                    f"string is {len(coerced)} chars, longer than the max {limit}",
                 )
         if self.type in ("int", "float"):
             try:
@@ -114,15 +115,14 @@ class Setting:
                 # surface a validation error, not a crash
                 nonfinite = True
             if nonfinite:
-                raise SettingsValidationError(
-                    self.name, f"{value!r} is not a finite number")
+                raise SettingsValidationError(self.name, f"{value!r} is not a finite number")
         if self.min_value is not None and coerced < self.min_value:
             raise SettingsValidationError(self.name, f"{coerced} < min {self.min_value}")
         if self.max_value is not None and coerced > self.max_value:
             raise SettingsValidationError(self.name, f"{coerced} > max {self.max_value}")
         return coerced
 
-    def as_manifest(self) -> Dict[str, Any]:
+    def as_manifest(self) -> dict[str, Any]:
         """JSON-safe manifest entry for auto-generated settings UIs."""
         return {
             "name": self.name,
@@ -140,20 +140,43 @@ class Setting:
 #: (surfaces can adopt those facades — see the round-3 report).
 ACCOUNT_SETTINGS: tuple = (
     Setting("reconnect_enabled", "bool", True, "Reconnect automatically after drops."),
-    Setting("reconnect_initial_delay", "float", 1.0,
-            "First reconnect wait (seconds).", min_value=0.1, max_value=60.0),
-    Setting("reconnect_max_delay", "float", 60.0,
-            "Reconnect wait cap (seconds).", min_value=0.5, max_value=600.0),
-    Setting("reconnect_multiplier", "float", 2.0,
-            "Backoff growth factor.", min_value=1.0, max_value=10.0),
-    Setting("typing_probability", "float", 0.0,
-            "Chance a guild send first fires a typing indicator (anti-flag: "
-            "humans type; 0 disables — zero extra API calls). ~0.85 looks human.",
-            min_value=0.0, max_value=1.0),
+    Setting(
+        "reconnect_initial_delay",
+        "float",
+        1.0,
+        "First reconnect wait (seconds).",
+        min_value=0.1,
+        max_value=60.0,
+    ),
+    Setting(
+        "reconnect_max_delay",
+        "float",
+        60.0,
+        "Reconnect wait cap (seconds).",
+        min_value=0.5,
+        max_value=600.0,
+    ),
+    Setting(
+        "reconnect_multiplier",
+        "float",
+        2.0,
+        "Backoff growth factor.",
+        min_value=1.0,
+        max_value=10.0,
+    ),
+    Setting(
+        "typing_probability",
+        "float",
+        0.0,
+        "Chance a guild send first fires a typing indicator (anti-flag: "
+        "humans type; 0 disables — zero extra API calls). ~0.85 looks human.",
+        min_value=0.0,
+        max_value=1.0,
+    ),
 )
 
 
-_ACCOUNT_DEFS_CACHE: Optional[tuple] = None
+_ACCOUNT_DEFS_CACHE: tuple | None = None
 
 
 def _account_defs() -> tuple:
@@ -165,8 +188,7 @@ def _account_defs() -> tuple:
     global _ACCOUNT_DEFS_CACHE
     if _ACCOUNT_DEFS_CACHE is None:
         defs = {s.name: s for s in ACCOUNT_SETTINGS}
-        _ACCOUNT_DEFS_CACHE = (
-            defs, {name: s.validate(s.default) for name, s in defs.items()})
+        _ACCOUNT_DEFS_CACHE = (defs, {name: s.validate(s.default) for name, s in defs.items()})
     return _ACCOUNT_DEFS_CACHE
 
 
@@ -180,24 +202,25 @@ class SettingsManager:
         *,
         plugin_repo: Any = None,
         account_settings_repo: Any = None,
-        global_layer: Optional[Mapping[str, Mapping[str, Any]]] = None,
+        global_layer: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         self._bus = bus
         self._logger = logger or logging.getLogger("libzent.settings")
-        self._plugin_repo = plugin_repo            # database PluginRepository
+        self._plugin_repo = plugin_repo  # database PluginRepository
         self._account_repo = account_settings_repo  # database AccountSettingsRepository
         #: plugin name -> {key: raw value}      (config file layer)
-        self._global: Dict[str, Dict[str, Any]] = {
-            plugin: dict(layer) for plugin, layer in (global_layer or {}).items()
+        self._global: dict[str, dict[str, Any]] = {
+            plugin: dict(layer)
+            for plugin, layer in (global_layer or {}).items()
             if isinstance(layer, Mapping)
         }
         for plugin, layer in (global_layer or {}).items():
             if not isinstance(layer, Mapping):
                 self._logger.warning("ignoring malformed global settings for %r", plugin)
         #: account -> plugin -> {key: raw value}  (DB layer, loaded at boot)
-        self._account_plugin: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._account_plugin: dict[str, dict[str, dict[str, Any]]] = {}
         #: account -> {key: raw value}            (framework account settings)
-        self._account_framework: Dict[str, Dict[str, Any]] = {}
+        self._account_framework: dict[str, dict[str, Any]] = {}
         self._loaded = plugin_repo is None and account_settings_repo is None
 
     # ------------------------------------------------------------ loading
@@ -215,9 +238,7 @@ class SettingsManager:
         """
         if self._plugin_repo is not None:
             try:
-                self._account_plugin = (
-                    await self._plugin_repo.all_account_settings() or {}
-                )
+                self._account_plugin = await self._plugin_repo.all_account_settings() or {}
             except Exception:
                 self._logger.exception("could not load plugin settings layer")
                 self._account_plugin = {}
@@ -233,13 +254,13 @@ class SettingsManager:
                 names = []
             for name in names:
                 try:
-                    self._account_framework[name] = dict(
-                        await self._account_repo.get(name) or {}
-                    )
+                    self._account_framework[name] = dict(await self._account_repo.get(name) or {})
                 except Exception:
                     self._logger.exception(
                         "could not load account settings for %r "
-                        "(defaults will resolve for this account)", name)
+                        "(defaults will resolve for this account)",
+                        name,
+                    )
                     self._account_framework[name] = {}
         self._loaded = True
 
@@ -259,10 +280,10 @@ class SettingsManager:
         self,
         plugin_name: str,
         schema: Sequence[Setting],
-        account: Optional[str] = None,
+        account: str | None = None,
         *,
-        profile: Optional[Mapping[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        profile: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Effective, validated settings for one plugin instance.
 
         Merge order: validated defaults <- global layer <- bound-profile
@@ -274,14 +295,16 @@ class SettingsManager:
         :meth:`load` first at boot).
         """
         defs = {s.name: s for s in schema}
-        values: Dict[str, Any] = {s.name: s.validate(s.default) for s in schema}
+        values: dict[str, Any] = {s.name: s.validate(s.default) for s in schema}
         layers = [("global layer", self._global.get(plugin_name, {}))]
         if profile is not None:
             layers.append(("profile layer", profile))
         if account is not None:
             layers.append(
-                (f"account '{account}' layer",
-                 self._account_plugin.get(account, {}).get(plugin_name, {}))
+                (
+                    f"account '{account}' layer",
+                    self._account_plugin.get(account, {}).get(plugin_name, {}),
+                )
             )
         for layer_name, layer in layers:
             for key, raw in layer.items():
@@ -318,17 +341,25 @@ class SettingsManager:
         if self._plugin_repo is not None:
             await self._plugin_repo.set_setting(account, plugin, key, validated)
         self._account_plugin.setdefault(account, {}).setdefault(plugin, {})[key] = validated
-        self._bus.publish_nowait(SettingChanged(
-            account=account, scope=f"account:{account}/plugin:{plugin}/key:{key}",
-            key=key, old_value=old, new_value=validated,
-        ))
+        self._bus.publish_nowait(
+            SettingChanged(
+                account=account,
+                scope=f"account:{account}/plugin:{plugin}/key:{key}",
+                key=key,
+                old_value=old,
+                new_value=validated,
+            )
+        )
         return validated
 
     async def clear_plugin_setting(
-        self, account: str, plugin: str, key: str,
+        self,
+        account: str,
+        plugin: str,
+        key: str,
         schema: Sequence[Setting] = (),
         *,
-        profile: Optional[Mapping[str, Any]] = None,
+        profile: Mapping[str, Any] | None = None,
     ) -> Any:
         """DELETE one account-layer plugin setting override (dashboard 'reset').
 
@@ -362,7 +393,10 @@ class SettingsManager:
             self._logger.warning(
                 "plugin repository cannot delete settings "
                 "(no delete_setting); cleared %r/%s.%s from memory only",
-                account, plugin, key)
+                account,
+                plugin,
+                key,
+            )
         plugins = self._account_plugin.get(account)
         if plugins is not None:
             plugins.get(plugin, {}).pop(key, None)
@@ -370,16 +404,21 @@ class SettingsManager:
                 plugins.pop(plugin, None)
             if not plugins:
                 self._account_plugin.pop(account, None)
-        effective = self.resolve(plugin, schema, account=account,
-                                 profile=profile)[key] if defs \
-            else None
-        self._bus.publish_nowait(SettingChanged(
-            account=account, scope=f"account:{account}/plugin:{plugin}/key:{key}",
-            key=key, old_value=old, new_value=effective,
-        ))
+        effective = (
+            self.resolve(plugin, schema, account=account, profile=profile)[key] if defs else None
+        )
+        self._bus.publish_nowait(
+            SettingChanged(
+                account=account,
+                scope=f"account:{account}/plugin:{plugin}/key:{key}",
+                key=key,
+                old_value=old,
+                new_value=effective,
+            )
+        )
         return effective
 
-    def account_settings(self, account: str) -> Dict[str, Any]:
+    def account_settings(self, account: str) -> dict[str, Any]:
         """Resolved framework account settings (reconnect policy...).
 
         Pure memory after :meth:`load` (sync by design — called from sync
@@ -390,16 +429,12 @@ class SettingsManager:
         values = dict(defaults)
         for key, raw in stored.items():
             if key not in defs:
-                self._logger.warning(
-                    "ignoring unknown account setting %s.%s=%r", account, key, raw
-                )
+                self._logger.warning("ignoring unknown account setting %s.%s=%r", account, key, raw)
                 continue
             try:
                 values[key] = defs[key].validate(raw)
             except SettingsValidationError:
-                self._logger.warning(
-                    "ignoring invalid account setting %s.%s=%r", account, key, raw
-                )
+                self._logger.warning("ignoring invalid account setting %s.%s=%r", account, key, raw)
         return values
 
     async def set_account_setting(self, account: str, key: str, value: Any) -> Any:
@@ -415,14 +450,19 @@ class SettingsManager:
         if self._account_repo is not None:
             await self._account_repo.set(account, key, validated)
         self._account_framework.setdefault(account, {})[key] = validated
-        self._bus.publish_nowait(SettingChanged(
-            account=account, scope=f"account:{account}/key:{key}",
-            key=key, old_value=old, new_value=validated,
-        ))
+        self._bus.publish_nowait(
+            SettingChanged(
+                account=account,
+                scope=f"account:{account}/key:{key}",
+                key=key,
+                old_value=old,
+                new_value=validated,
+            )
+        )
         return validated
 
     # -------------------------------------------------------------- views
-    def layers_view(self) -> Dict[str, Any]:
+    def layers_view(self) -> dict[str, Any]:
         """Both layers as JSON-safe dicts (dashboard Advanced page).
 
         Pure memory after :meth:`load`.
@@ -436,5 +476,11 @@ class SettingsManager:
         }
 
 
-__all__ = ["Setting", "SettingsManager", "ACCOUNT_SETTINGS", "SETTING_TYPES",
-           "STR_MAX_LENGTH", "SettingsValidationError"]
+__all__ = [
+    "ACCOUNT_SETTINGS",
+    "SETTING_TYPES",
+    "STR_MAX_LENGTH",
+    "Setting",
+    "SettingsManager",
+    "SettingsValidationError",
+]

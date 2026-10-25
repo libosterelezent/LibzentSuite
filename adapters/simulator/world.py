@@ -21,17 +21,18 @@ The world owns:
   * ``channel_gone``: remove a channel so later sends raise TargetGone and
     cached snapshots stop listing it.
 """
+
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import re
 import time
-import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from core.errors import ServerRateLimit
 
@@ -49,7 +50,7 @@ SYNTHETIC_MUDAE_ID = 999_999
 _CUSTOM_EMOJI_RE = re.compile(r"^<a?:(.+):(\d+)>$")
 
 
-def _parse_emoji(text: str) -> Tuple[str, Optional[int]]:
+def _parse_emoji(text: str) -> tuple[str, int | None]:
     """Emoji string -> (bare name, custom emoji id or None)."""
     match = _CUSTOM_EMOJI_RE.match(text or "")
     if match:
@@ -57,7 +58,7 @@ def _parse_emoji(text: str) -> Tuple[str, Optional[int]]:
     return text, None
 
 
-def to_discord_message(world: "SimWorld", message: "WorldMessage"):
+def to_discord_message(world: SimWorld, message: WorldMessage):
     """WorldMessage -> rich frozen DTO (the sim's convert_message).
 
     ONE builder for every crossing — live deliveries (SimClient.receive)
@@ -87,8 +88,7 @@ def to_discord_message(world: "SimWorld", message: "WorldMessage"):
             id=message.author_id,
             name=message.author_name,
             display_name=message.author_name,
-            bot=(world.responder_id is not None
-                 and message.author_id == world.responder_id),
+            bot=(world.responder_id is not None and message.author_id == world.responder_id),
         ),
         channel=DiscordChannel(
             id=message.channel_id,
@@ -104,8 +104,10 @@ def to_discord_message(world: "SimWorld", message: "WorldMessage"):
             DiscordMessageReference(
                 message_id=message.reference_message_id,
                 channel_id=message.channel_id,
-                guild_id=message.guild_id)
-            if message.reference_message_id else None
+                guild_id=message.guild_id,
+            )
+            if message.reference_message_id
+            else None
         ),
         created_at=datetime.fromtimestamp(message.ts, tz=timezone.utc),
     )
@@ -129,20 +131,20 @@ class WorldMessage:
     dm: bool
     ts: float = field(default_factory=time.time)
     author_name: str = ""
-    guild_id: "int | None" = None
+    guild_id: int | None = None
     embeds: tuple = ()
     components: tuple = ()
     attachments: tuple = ()
     reactions: tuple = ()
-    reference_message_id: "int | None" = None
+    reference_message_id: int | None = None
 
 
 @dataclass
 class _PendingLimit:
     """A queued one-shot 429 (see SimWorld.server_limit_next)."""
 
-    channel_id: Optional[int]      # None matches any channel
-    user_id: Optional[int]         # None matches any sending client
+    channel_id: int | None  # None matches any channel
+    user_id: int | None  # None matches any sending client
     retry_after: float
     global_: bool
 
@@ -153,8 +155,8 @@ class SimWorld:
     def __init__(
         self,
         *,
-        responder_id: Optional[int] = None,
-        responses: Optional[Dict[str, List[str]]] = None,
+        responder_id: int | None = None,
+        responses: dict[str, list[str]] | None = None,
         reply_delay: float = 0.01,
     ) -> None:
         """Create an empty world.
@@ -164,27 +166,27 @@ class SimWorld:
             responses: exact command string -> list of DM pages it answers with.
             reply_delay: seconds to wait before the first page and between pages.
         """
-        self.users: Dict[int, str] = {}
-        self.channels: Dict[int, str] = {}
-        self.dm_channels: Dict[int, bool] = {}
-        self.history: Dict[int, List[WorldMessage]] = {}
+        self.users: dict[int, str] = {}
+        self.channels: dict[int, str] = {}
+        self.dm_channels: dict[int, bool] = {}
+        self.history: dict[int, list[WorldMessage]] = {}
         #: append-only record of every DELIVERED message (survives deletion)
-        self.journal: List[WorldMessage] = []
+        self.journal: list[WorldMessage] = []
         #: observability for consumed one-shot server limits (ts + details)
-        self.blocked_sends: List[dict] = []
+        self.blocked_sends: list[dict] = []
         #: channel_id -> deletion timestamp (evidence for abort checks)
-        self.gone_channels: Dict[int, float] = {}
-        self._dm_pairs: Dict[Tuple[int, int], int] = {}
-        self._reverse_dm: Dict[int, Tuple[int, int]] = {}
+        self.gone_channels: dict[int, float] = {}
+        self._dm_pairs: dict[tuple[int, int], int] = {}
+        self._reverse_dm: dict[int, tuple[int, int]] = {}
         self._dm_seq = 0
         self._next_id = 1
-        self.subscribers: List[Any] = []
+        self.subscribers: list[Any] = []
         self.responder_id = responder_id
-        self.responses: Dict[str, List[str]] = dict(responses or {})
+        self.responses: dict[str, list[str]] = dict(responses or {})
         self.reply_delay = reply_delay
         self._responder_tasks: set = set()  # strong refs (create_task hazard)
         #: queued one-shot server limits (world-owned, per-client intake)
-        self._pending_limits: List[_PendingLimit] = []
+        self._pending_limits: list[_PendingLimit] = []
 
     # -------------------------------------------------------------- topology
     def add_user(self, user_id: int, name: str) -> None:
@@ -248,18 +250,18 @@ class SimWorld:
             self.add_channel(channel_id, f"dm-{pair[0]}-{pair[1]}", dm=True)
         return self._dm_pairs[pair]
 
-    def peek_dm_channel(self, user_a: int, user_b: int) -> Optional[int]:
+    def peek_dm_channel(self, user_a: int, user_b: int) -> int | None:
         """Non-creating DM channel lookup: the pair's channel id, or None
         when the pair never opened one. For post-mortem checks that must
         not mutate the world (dm_channel_for CREATES the channel)."""
         pair = (min(user_a, user_b), max(user_a, user_b))
         return self._dm_pairs.get(pair)
 
-    def add_response(self, command: str, pages: List[str]) -> None:
+    def add_response(self, command: str, pages: list[str]) -> None:
         """Register a scripted response: exact command string -> DM pages."""
         self.responses[command] = list(pages)
 
-    def dm_pairs_of(self, channel_id: int) -> List[Tuple[int, int]]:
+    def dm_pairs_of(self, channel_id: int) -> list[tuple[int, int]]:
         """The (one) user pair behind a DM channel id (per-account filtering)."""
         pair = self._reverse_dm.get(channel_id)
         return [pair] if pair else []
@@ -267,10 +269,10 @@ class SimWorld:
     # --------------------------------------------------------- server limits
     def server_limit_next(
         self,
-        channel_id: Optional[int] = None,
+        channel_id: int | None = None,
         retry_after: float = 1.0,
         global_: bool = False,
-        user_id: Optional[int] = None,
+        user_id: int | None = None,
     ) -> None:
         """Queue a one-shot server 429 for the NEXT matching send.
 
@@ -293,9 +295,7 @@ class SimWorld:
             )
         )
 
-    def take_server_limit(
-        self, user_id: int, channel_id: Optional[int]
-    ) -> Optional[ServerRateLimit]:
+    def take_server_limit(self, user_id: int, channel_id: int | None) -> ServerRateLimit | None:
         """Consume the first matching pending one-shot limit, if any.
 
         Matching rules: a queued entry with ``channel_id=None`` matches any
@@ -324,10 +324,19 @@ class SimWorld:
 
     # ---------------------------------------------------------------- traffic
     def deliver(
-        self, channel_id: int, author_id: int, content: str, dm: Optional[bool] = None,
-        *, author_name: str = "", guild_id: "int | None" = None,
-        embeds: tuple = (), components: tuple = (), attachments: tuple = (),
-        reactions: tuple = (), reference_message_id: "int | None" = None,
+        self,
+        channel_id: int,
+        author_id: int,
+        content: str,
+        dm: bool | None = None,
+        *,
+        author_name: str = "",
+        guild_id: int | None = None,
+        embeds: tuple = (),
+        components: tuple = (),
+        attachments: tuple = (),
+        reactions: tuple = (),
+        reference_message_id: int | None = None,
     ) -> WorldMessage:
         """Append a message to the channel and push it to every subscriber.
 
@@ -340,10 +349,18 @@ class SimWorld:
         if dm is None:
             dm = self.dm_channels.get(channel_id, False)
         message = WorldMessage(
-            self._next_id, channel_id, author_id, content, dm,
-            author_name=author_name, guild_id=guild_id, embeds=embeds,
-            components=components, attachments=attachments,
-            reactions=reactions, reference_message_id=reference_message_id,
+            self._next_id,
+            channel_id,
+            author_id,
+            content,
+            dm,
+            author_name=author_name,
+            guild_id=guild_id,
+            embeds=embeds,
+            components=components,
+            attachments=attachments,
+            reactions=reactions,
+            reference_message_id=reference_message_id,
         )
         self._next_id += 1
         self.history[channel_id].append(message)
@@ -352,13 +369,11 @@ class SimWorld:
             try:
                 client.receive(message)
             except Exception:
-                LOG.exception(
-                    "world subscriber %r failed on message %s", client, message.id)
+                LOG.exception("world subscriber %r failed on message %s", client, message.id)
         self._maybe_auto_respond(message)
         return message
 
-    def react(self, user_id: int, message_id: int, emoji: str,
-              kind: str = "add") -> None:
+    def react(self, user_id: int, message_id: int, emoji: str, kind: str = "add") -> None:
         """Push a reaction event for a known message to every subscriber
         (mirrors the gateway, which dispatches reaction events to every
         connected session INCLUDING the reactor; SimClient.reaction_event
@@ -382,32 +397,36 @@ class SimWorld:
                                 # already sit in a plugin's DiscordMessage
                                 # (replace keeps id/me, unlike a fresh build)
                                 replacement = dataclasses.replace(
-                                    existing, count=existing.count + 1)
+                                    existing, count=existing.count + 1
+                                )
                                 message.reactions = (
-                                    message.reactions[:index]
-                                    + (replacement,)
-                                    + message.reactions[index + 1:])
+                                    *message.reactions[:index],
+                                    replacement,
+                                    *message.reactions[index + 1 :],
+                                )
                                 break
                         else:
-                            message.reactions = message.reactions + (
-                                DiscordReaction(
-                                    emoji=emoji, name=name, id=emoji_id,
-                                    count=1),)
+                            message.reactions = (
+                                *message.reactions,
+                                DiscordReaction(emoji=emoji, name=name, id=emoji_id, count=1),
+                            )
                     elif kind == "remove":
                         for index, existing in enumerate(message.reactions):
                             if existing.emoji != emoji:
                                 continue
                             if existing.count <= 1:
                                 message.reactions = (
-                                    message.reactions[:index]
-                                    + message.reactions[index + 1:])
+                                    message.reactions[:index] + message.reactions[index + 1 :]
+                                )
                             else:
                                 replacement = dataclasses.replace(
-                                    existing, count=existing.count - 1)
+                                    existing, count=existing.count - 1
+                                )
                                 message.reactions = (
-                                    message.reactions[:index]
-                                    + (replacement,)
-                                    + message.reactions[index + 1:])
+                                    *message.reactions[:index],
+                                    replacement,
+                                    *message.reactions[index + 1 :],
+                                )
                             break
                     # RAW PARITY (live pushes ``(reaction, user)`` handles,
                     # never None): synthetic library-shaped stand-ins built
@@ -418,31 +437,37 @@ class SimWorld:
                     for reaction in message.reactions:
                         if reaction.emoji == emoji:
                             count = reaction.count
-                    user_ns = SimpleNamespace(
-                        id=user_id, name=self.users.get(user_id, ""))
+                    user_ns = SimpleNamespace(id=user_id, name=self.users.get(user_id, ""))
                     for client in list(self.subscribers):
                         _sees = getattr(client, "can_see", None)
                         if _sees is not None and not _sees(channel_id):
-                            continue   # foreign DM pair — invisible live
+                            continue  # foreign DM pair — invisible live
                         handler = getattr(client, "reaction_event", None)
                         if handler is None:
                             handler = getattr(client, "on_reaction", None)
                         if handler is None:
                             continue
                         reaction_ns = SimpleNamespace(
-                            emoji=emoji, count=count,
+                            emoji=emoji,
+                            count=count,
                             me=(getattr(client, "user_id", None) == user_id),
-                            message_id=message_id, channel_id=channel_id)
+                            message_id=message_id,
+                            channel_id=channel_id,
+                        )
                         try:
                             handler(
-                                kind, message_id, channel_id,
+                                kind,
+                                message_id,
+                                channel_id,
                                 message.guild_id,
-                                user_id, emoji, (reaction_ns, user_ns),
+                                user_id,
+                                emoji,
+                                (reaction_ns, user_ns),
                             )
                         except Exception:
                             LOG.exception(
-                                "world subscriber %r failed on reaction %s",
-                                client, message_id)
+                                "world subscriber %r failed on reaction %s", client, message_id
+                            )
                     return
         raise KeyError(f"unknown message {message_id}")
 
@@ -459,20 +484,21 @@ class SimWorld:
                         # DM edits are visible ONLY to pair members (an
                         # unrelated account's gateway never sees the channel)
                         _sees = getattr(client, "can_see", None)
-                        if (client.user_id != message.author_id
-                                and client.on_message_edit is not None
-                                and (_sees is None
-                                     or _sees(message.channel_id))):
+                        if (
+                            client.user_id != message.author_id
+                            and client.on_message_edit is not None
+                            and (_sees is None or _sees(message.channel_id))
+                        ):
                             try:
                                 client.on_message_edit(dto)
                             except Exception:
                                 LOG.exception(
-                                    "world subscriber %r failed on edit %s",
-                                    client, message_id)
+                                    "world subscriber %r failed on edit %s", client, message_id
+                                )
                     return message
         raise KeyError(f"unknown message {message_id}")
 
-    def _to_dto(self, message: "WorldMessage"):
+    def _to_dto(self, message: WorldMessage):
         """WorldMessage -> rich frozen adapters.base DTO (edit-event parity).
 
         EDIT PARITY (audit round 3): live edit events carry the FULL
@@ -491,16 +517,19 @@ class SimWorld:
                     messages.pop(index)
                     for client in list(self.subscribers):
                         _sees = getattr(client, "can_see", None)
-                        if (client.user_id != message.author_id
-                                and client.on_message_delete is not None
-                                and (_sees is None or _sees(channel_id))):
+                        if (
+                            client.user_id != message.author_id
+                            and client.on_message_delete is not None
+                            and (_sees is None or _sees(channel_id))
+                        ):
                             try:
                                 client.on_message_delete(
-                                    message_id, channel_id, message.guild_id, message)
+                                    message_id, channel_id, message.guild_id, message
+                                )
                             except Exception:
                                 LOG.exception(
-                                    "world subscriber %r failed on delete %s",
-                                    client, message_id)
+                                    "world subscriber %r failed on delete %s", client, message_id
+                                )
                     return message
         raise KeyError(f"unknown message {message_id}")
 
@@ -522,13 +551,11 @@ class SimWorld:
             # delivered from a sync test context: nothing can await the reply
             return
         author, responder = message.author_id, self.responder_id
-        task = loop.create_task(
-            self._scripted_reply(author, responder, self.responses[text])
-        )
+        task = loop.create_task(self._scripted_reply(author, responder, self.responses[text]))
         self._responder_tasks.add(task)
         task.add_done_callback(self._responder_tasks.discard)
 
-    async def _scripted_reply(self, author: int, responder: int, pages: List[str]) -> None:
+    async def _scripted_reply(self, author: int, responder: int, pages: list[str]) -> None:
         """Deliver the scripted pages via DM to the requesting user."""
         await asyncio.sleep(self.reply_delay)
         channel_id = self.dm_channel_for(author, responder)
@@ -544,11 +571,11 @@ class SimWorld:
             task.cancel()
 
     # ---------------------------------------------------------------- queries
-    def messages_of(self, channel_id: int) -> List[str]:
+    def messages_of(self, channel_id: int) -> list[str]:
         """Contents of one channel's history (empty once the channel is gone)."""
         return [m.content for m in self.history.get(channel_id, [])]
 
-    def find_delivery(self, *, author_id: int, content: str) -> Optional[WorldMessage]:
+    def find_delivery(self, *, author_id: int, content: str) -> WorldMessage | None:
         """First delivered message with exactly this author and content."""
         for message in self.journal:
             if message.author_id == author_id and message.content == content:
@@ -583,12 +610,12 @@ class SimWorld:
 
 
 __all__ = [
-    "SimWorld",
-    "WorldMessage",
-    "to_discord_message",
-    "SYNTHETIC_OWNER_ID",
     "SYNTHETIC_ALPHA_ID",
     "SYNTHETIC_BETA_ID",
     "SYNTHETIC_GUILD_CHANNEL",
     "SYNTHETIC_MUDAE_ID",
+    "SYNTHETIC_OWNER_ID",
+    "SimWorld",
+    "WorldMessage",
+    "to_discord_message",
 ]

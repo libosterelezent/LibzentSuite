@@ -34,29 +34,31 @@ warnings`` command and the dashboard banner.
 Output shape is pinned by INTEGRATION.md: ``{"level", "code", "message"}``
 with level one of ``"danger" | "warn" | "info"``, sorted danger > warn > info.
 """
+
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING
 
-from .policies import RatePolicy
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from .policies import RatePolicy
 
 #: jitter ranges narrower than this spread look robotic
 NARROW_JITTER_SPREAD = 0.3
 
 #: output ordering: most severe first
-_LEVEL_RANK: Dict[str, int] = {"danger": 0, "warn": 1, "info": 2}
+_LEVEL_RANK: dict[str, int] = {"danger": 0, "warn": 1, "info": 2}
 
 
-def describe_scope(level: str, owner: Optional[str]) -> str:
+def describe_scope(level: str, owner: str | None) -> str:
     """Human description of a policy scope, e.g. ``"global"`` or ``"alpha/probe"``."""
     if level == "global" or not owner:
         return "global"
     return owner if level == "account_plugin" else f"{level} {owner}"
 
 
-def evaluate_policy(
-    policy: RatePolicy, level: str, owner: Optional[str], floor: float
-) -> List[dict]:
+def evaluate_policy(policy: RatePolicy, level: str, owner: str | None, floor: float) -> list[dict]:
     """Advisory verdicts for ONE stored policy (never blocks anything).
 
     Returns zero or more ``{"level", "code", "message"}`` dicts. Only a
@@ -65,39 +67,45 @@ def evaluate_policy(
     floor raised after the policy was stored. Everything at or above the
     floor is a legitimate Discord-driven pacing configuration.
     """
-    out: List[dict] = []
+    out: list[dict] = []
     where = describe_scope(level, owner)
     if policy.interval < floor:
-        out.append({
-            "level": "danger",
-            "code": "below_floor",
-            "message": (
-                f"policy {policy.action!r} at {where} paces every "
-                f"{policy.interval:.2f}s — BELOW the {floor:.2f}s safety "
-                f"floor (hand-edited, or the floor was raised after it was "
-                f"set); raise the policy"
-            ),
-        })
+        out.append(
+            {
+                "level": "danger",
+                "code": "below_floor",
+                "message": (
+                    f"policy {policy.action!r} at {where} paces every "
+                    f"{policy.interval:.2f}s — BELOW the {floor:.2f}s safety "
+                    f"floor (hand-edited, or the floor was raised after it was "
+                    f"set); raise the policy"
+                ),
+            }
+        )
     if policy.jitter_max <= 0:
-        out.append({
-            "level": "info",
-            "code": "no_jitter",
-            "message": (
-                f"policy {policy.action!r} at {where} has no jitter — add a "
-                f"range (e.g. 0.20..0.80s) to avoid metronome-perfect timing"
-            ),
-        })
+        out.append(
+            {
+                "level": "info",
+                "code": "no_jitter",
+                "message": (
+                    f"policy {policy.action!r} at {where} has no jitter — add a "
+                    f"range (e.g. 0.20..0.80s) to avoid metronome-perfect timing"
+                ),
+            }
+        )
     elif policy.jitter_max - policy.jitter_min < NARROW_JITTER_SPREAD:
-        out.append({
-            "level": "info",
-            "code": "narrow_jitter",
-            "message": (
-                f"policy {policy.action!r} at {where} jitter range "
-                f"{policy.jitter_min:.2f}..{policy.jitter_max:.2f}s is narrow "
-                f"(< {NARROW_JITTER_SPREAD:.1f}s spread) — widen it for less "
-                f"robotic spacing"
-            ),
-        })
+        out.append(
+            {
+                "level": "info",
+                "code": "narrow_jitter",
+                "message": (
+                    f"policy {policy.action!r} at {where} jitter range "
+                    f"{policy.jitter_min:.2f}..{policy.jitter_max:.2f}s is narrow "
+                    f"(< {NARROW_JITTER_SPREAD:.1f}s spread) — widen it for less "
+                    f"robotic spacing"
+                ),
+            }
+        )
     return out
 
 
@@ -119,7 +127,7 @@ def floor_warning(floor: float) -> dict:
     }
 
 
-def sort_warnings(items: Iterable[dict]) -> List[dict]:
+def sort_warnings(items: Iterable[dict]) -> list[dict]:
     """Order danger first, then warn, then info (stable + deterministic)."""
     return sorted(
         items,
@@ -132,8 +140,8 @@ def sort_warnings(items: Iterable[dict]) -> List[dict]:
 
 
 def evaluate_policies(
-    policies: Iterable[Tuple[RatePolicy, str, Optional[str]]], floor: float
-) -> List[dict]:
+    policies: Iterable[tuple[RatePolicy, str, str | None]], floor: float
+) -> list[dict]:
     """Review every stored policy; sorted danger > warn > info.
 
     Args:
@@ -145,7 +153,7 @@ def evaluate_policies(
     A clean configuration yields an EMPTY list — no permanent/residual
     entries are prepended.
     """
-    items: List[dict] = []
+    items: list[dict] = []
     for policy, level, owner in policies:
         items.extend(evaluate_policy(policy, level, owner, floor))
     return sort_warnings(items)
@@ -154,8 +162,8 @@ def evaluate_policies(
 __all__ = [
     "NARROW_JITTER_SPREAD",
     "describe_scope",
-    "evaluate_policy",
     "evaluate_policies",
+    "evaluate_policy",
     "floor_warning",
     "sort_warnings",
 ]

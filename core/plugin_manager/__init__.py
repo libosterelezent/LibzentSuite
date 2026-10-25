@@ -6,8 +6,7 @@ contract in ``core.plugin_base`` (PluginBase/PluginContext/PluginServices/
 CommandSpec/CommandContext) and the per-account self-command registry in
 ``core.plugin_manager.commands`` (SelfCommandHub + framework pg/say/help).
 """
-from .loader import PluginLoader, PluginRecord
-from .manager import PluginManager, PluginRuntime
+
 from .commands import (
     COMMAND_HUB,
     FRAMEWORK_COMMANDS,
@@ -16,9 +15,18 @@ from .commands import (
     SelfCommandHub,
     render_help,
 )
+from .loader import PluginLoader, PluginRecord
+from .manager import PluginManager, PluginRuntime
 
 __all__ = [
-    "PluginManager", "PluginRuntime", "PluginLoader", "PluginRecord",
-    "SelfCommandHub", "COMMAND_HUB", "RegisteredCommand",
-    "FRAMEWORK_COMMANDS", "FRAMEWORK_PLUGIN", "render_help",
+    "COMMAND_HUB",
+    "FRAMEWORK_COMMANDS",
+    "FRAMEWORK_PLUGIN",
+    "PluginLoader",
+    "PluginManager",
+    "PluginRecord",
+    "PluginRuntime",
+    "RegisteredCommand",
+    "SelfCommandHub",
+    "render_help",
 ]

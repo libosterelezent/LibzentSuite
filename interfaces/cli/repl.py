@@ -17,19 +17,21 @@ Decisions for things INTEGRATION.md left open:
   * ``run_once`` does NOT call ``api.shutdown()`` — the one-shot lifecycle is
     owned by ``main.py``; ``quit`` there just prints ``bye.`` and returns 0.
 """
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shlex
 import sys
 import threading
-from typing import Any, Optional, TextIO
+from typing import Any, TextIO
 
 from core.errors import DOMAIN_ERRORS, SchedulerError, UnsafePolicyError
 
 from .commands import QuitRequested, UsageError, help_text, run_command
 
-__all__ = ["Repl", "run_once", "render_error", "PROMPT", "BANNER"]
+__all__ = ["BANNER", "PROMPT", "Repl", "render_error", "run_once"]
 
 PROMPT = "sm> "
 BANNER = "LibzentSuite control terminal — 'help' for commands, 'quit' to exit."
@@ -62,9 +64,9 @@ class Repl:
     def __init__(
         self,
         api: Any,
-        stdin: Optional[TextIO] = None,
-        stdout: Optional[TextIO] = None,
-        stop_event: Optional[asyncio.Event] = None,
+        stdin: TextIO | None = None,
+        stdout: TextIO | None = None,
+        stop_event: asyncio.Event | None = None,
     ) -> None:
         """Wire the facade plus the (injectable) standard streams.
 
@@ -95,11 +97,10 @@ class Repl:
         self.running = True
         self._write(BANNER)
         loop = asyncio.get_running_loop()
-        lines: "asyncio.Queue[str]" = asyncio.Queue()
+        lines: asyncio.Queue[str] = asyncio.Queue()
         reader_done = loop.create_future()
         stop_wait = (
-            asyncio.ensure_future(self._stop_event.wait())
-            if self._stop_event is not None else None
+            asyncio.ensure_future(self._stop_event.wait()) if self._stop_event is not None else None
         )
 
         def _reader() -> None:
@@ -116,18 +117,14 @@ class Repl:
                     if not line:
                         return
             finally:
-                try:
+                with contextlib.suppress(RuntimeError):
                     loop.call_soon_threadsafe(_finish_reader)
-                except RuntimeError:
-                    pass
 
         def _finish_reader() -> None:
             if not reader_done.done():
                 reader_done.set_result(None)
 
-        threading.Thread(
-            target=_reader, name="repl-reader", daemon=True
-        ).start()
+        threading.Thread(target=_reader, name="repl-reader", daemon=True).start()
         try:
             while self.running:
                 if stop_wait is not None and stop_wait.done():
@@ -137,9 +134,7 @@ class Repl:
                 watched = {get, reader_done}
                 if stop_wait is not None:
                     watched.add(stop_wait)
-                done, _ = await asyncio.wait(
-                    watched, return_when=asyncio.FIRST_COMPLETED
-                )
+                done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
                 if stop_wait is not None and stop_wait in done:
                     get.cancel()  # host signalled exit (SIGINT/SIGTERM)
                     break
@@ -156,10 +151,9 @@ class Repl:
         finally:
             if stop_wait is not None and not stop_wait.done():
                 stop_wait.cancel()
-            try:
+            # never let a shutdown failure eat the goodbye
+            with contextlib.suppress(Exception):
                 await self.api.shutdown()
-            except Exception:
-                pass  # never let a shutdown failure eat the goodbye
             self._write("bye.")
             self.running = False
 
@@ -184,7 +178,7 @@ class Repl:
         print(text, end=end, file=self._out, flush=True)
 
 
-async def run_once(api: Any, argv: list, stdout: Optional[TextIO] = None) -> int:
+async def run_once(api: Any, argv: list, stdout: TextIO | None = None) -> int:
     """One-shot mode: run a single command line built from ``argv``.
 
     ``argv == []`` prints the help text and returns 0. Returns 0 on success

@@ -5,6 +5,7 @@ the interactive/input mixins every concrete builder derives from.
 Package-internal: import the public classes from core.dashboard_ui (or
 core.dashboard_ui.builders), not from here.
 """
+
 from __future__ import annotations
 
 import re
@@ -28,8 +29,7 @@ _MAX_ID_LENGTH = 64
 
 
 # ---------------------------------------------------------- argument checking
-_CSS_SIZE_RE = __import__("re").compile(
-    r"^[0-9]*\.?[0-9]+(px|%|em|rem|vh|vw|ch|ex|fr| vmin|vmax)$")
+_CSS_SIZE_RE = __import__("re").compile(r"^[0-9]*\.?[0-9]+(px|%|em|rem|vh|vw|ch|ex|fr| vmin|vmax)$")
 
 
 def _validate_css_size(value, prop: str) -> str:
@@ -46,7 +46,8 @@ def _validate_css_size(value, prop: str) -> str:
             return v
     raise UIError(
         f"{prop} must be a positive number (px) or a CSS size string "
-        f"like '100%', '300px', '50vh' — got {value!r}")
+        f"like '100%', '300px', '50vh' — got {value!r}"
+    )
 
 
 def _require_str(value, what: str) -> str:
@@ -72,6 +73,7 @@ def _require_number(value, what: str):
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise UIError(f"{what} must be an int or float, got {type(value).__name__}")
     import math
+
     if not math.isfinite(value):
         raise UIError(f"{what} must be finite, got {value!r}")
     return value
@@ -113,25 +115,24 @@ class UIComponent:
     return self for chaining, and refuse to run once frozen.
     """
 
-    _type_name = "component"   # serialization name, overridden per class
-    _INTERACTIVE = False       # True on components that carry actions
+    _type_name = "component"  # serialization name, overridden per class
+    _INTERACTIVE = False  # True on components that carry actions
 
-    def __init__(self, *, component_id: str = "", title: str | None = None,
-                 **kwargs) -> None:
+    def __init__(self, *, component_id: str = "", title: str | None = None, **kwargs) -> None:
         if component_id:
             self._validate_id(component_id)
         self._id = component_id or self._generate_id()
-        self._title: str | None = (
-            _require_str(title, "title") if title is not None else None)
+        self._title: str | None = _require_str(title, "title") if title is not None else None
         if kwargs:
             raise UIError(
                 f"unknown constructor argument(s) {sorted(kwargs)} — "
-                f"the builder API uses fluent setters")
-        self._check = None          # visibility check callable
-        self._parent = None         # set by the owning parent on add
-        self._frozen = False        # set by the registry on attachment
+                f"the builder API uses fluent setters"
+            )
+        self._check = None  # visibility check callable
+        self._parent = None  # set by the owning parent on add
+        self._frozen = False  # set by the registry on attachment
         self._disabled = False
-        self._width: str | None = None    # CSS size ("300px", "100%", "50vh")
+        self._width: str | None = None  # CSS size ("300px", "100%", "50vh")
         self._height: str | None = None
         # side-by-side layout hints (applied when rendered inside a
         # Row/Column/Container): how much free space this child takes,
@@ -142,7 +143,7 @@ class UIComponent:
 
     # --- fluent setters (return self) ---
 
-    def set_id(self, component_id: str) -> "UIComponent":
+    def set_id(self, component_id: str) -> UIComponent:
         """Change the id. Validated first; releases the old id with the
         parent and checks the new one against the current tree."""
         self._check_frozen("change the id")
@@ -160,23 +161,23 @@ class UIComponent:
             parent._child_ids.add(new_id)
         return self
 
-    def set_title(self, title: str) -> "UIComponent":
+    def set_title(self, title: str) -> UIComponent:
         self._check_frozen("set the title")
         self._title = _require_str(title, "title")
         return self
 
-    def set_check(self, check) -> "UIComponent":
+    def set_check(self, check) -> UIComponent:
         """Set the visibility check callable (evaluated server-side)."""
         self._check_frozen("set the check")
         self._check = _require_callable(check, "check")
         return self
 
-    def set_disabled(self, disabled: bool) -> "UIComponent":
+    def set_disabled(self, disabled: bool) -> UIComponent:
         self._check_frozen("set disabled")
         self._disabled = _require_bool(disabled, "disabled")
         return self
 
-    def set_width(self, width) -> "UIComponent":
+    def set_width(self, width) -> UIComponent:
         """Set the component width (CSS size string or px number).
 
         Accepts: "300px", "100%", "50vw", "12rem", or a positive
@@ -186,13 +187,13 @@ class UIComponent:
         self._width = _validate_css_size(width, "width")
         return self
 
-    def set_height(self, height) -> "UIComponent":
+    def set_height(self, height) -> UIComponent:
         """Set the component height (CSS size string or px number)."""
         self._check_frozen("set height")
         self._height = _validate_css_size(height, "height")
         return self
 
-    def set_grow(self, grow) -> "UIComponent":
+    def set_grow(self, grow) -> UIComponent:
         """Side-by-side share: how eagerly this child takes free space.
 
         A flex-grow weight (0–100 int). 0 keeps the child at its natural/
@@ -207,7 +208,7 @@ class UIComponent:
         self._grow = value
         return self
 
-    def set_shrink(self, shrink) -> "UIComponent":
+    def set_shrink(self, shrink) -> UIComponent:
         """Squeeze allowance (flex-shrink weight, 0–100; 0 = never)."""
         self._check_frozen("set shrink")
         value = _require_int(shrink, "shrink")
@@ -216,7 +217,7 @@ class UIComponent:
         self._shrink = value
         return self
 
-    def set_align_self(self, align) -> "UIComponent":
+    def set_align_self(self, align) -> UIComponent:
         """Override the PARENT's cross-axis alignment for this child only.
 
         One of "auto" (inherit), "start", "center", "end", "stretch",
@@ -225,8 +226,8 @@ class UIComponent:
         """
         self._check_frozen("set align_self")
         self._align_self = _require_choice(
-            align, ("auto", "start", "center", "end", "stretch", "baseline"),
-            "align_self")
+            align, ("auto", "start", "center", "end", "stretch", "baseline"), "align_self"
+        )
         return self
 
     # --- getters ---
@@ -249,13 +250,16 @@ class UIComponent:
     def _validate_id(component_id) -> None:
         if not isinstance(component_id, str):
             raise InvalidComponentIdError(
-                f"component id must be a str, got {type(component_id).__name__}")
+                f"component id must be a str, got {type(component_id).__name__}"
+            )
         if not 1 <= len(component_id) <= _MAX_ID_LENGTH:
             raise InvalidComponentIdError(
-                f"component id must be 1-{_MAX_ID_LENGTH} chars, got {len(component_id)}")
+                f"component id must be 1-{_MAX_ID_LENGTH} chars, got {len(component_id)}"
+            )
         if not _ID_RE.match(component_id):
             raise InvalidComponentIdError(
-                f"component id may only contain [a-zA-Z0-9_-], got {component_id!r}")
+                f"component id may only contain [a-zA-Z0-9_-], got {component_id!r}"
+            )
 
     def _set_parent(self, parent) -> None:
         self._parent = parent
@@ -273,7 +277,8 @@ class UIComponent:
         if self._frozen:
             raise FrozenLayoutError(
                 f"cannot {action}: component '{self._id}' "
-                f"({_type_name_of(self)}) is attached to a frozen layout")
+                f"({_type_name_of(self)}) is attached to a frozen layout"
+            )
 
     def _path(self) -> str:
         """Slash-joined ids from the tree root down to this component."""
@@ -325,8 +330,7 @@ class UIComponent:
 
     def __repr__(self) -> str:
         parent_id = self._parent.get_id() if self._parent is not None else None
-        return (f"<{_type_name_of(self)} id={self._id!r} "
-                f"parent={parent_id!r} frozen={self._frozen}>")
+        return f"<{_type_name_of(self)} id={self._id!r} parent={parent_id!r} frozen={self._frozen}>"
 
 
 # -------------------------------------------------------------- container
@@ -351,6 +355,7 @@ class UIContainer(UIComponent):
     def _check_child(self, child, _replacing=None) -> None:
         """Validate a child before adding — raises on: wrong type,
         already-owned, duplicate ID, self-reference, cycle."""
+
         def _describe(component) -> str:
             if isinstance(component, UIComponent):
                 return f"{_type_name_of(component)} '{component.get_id()}'"
@@ -360,14 +365,17 @@ class UIContainer(UIComponent):
             allowed = ", ".join(t.__name__ for t in self._allowed_child_types) or "nothing"
             raise InvalidChildError(
                 f"{_describe(child)} cannot be a child of "
-                f"{_type_name_of(self)} '{self._id}' (allowed: {allowed})")
+                f"{_type_name_of(self)} '{self._id}' (allowed: {allowed})"
+            )
         if child._parent is not None:
             raise InvalidChildError(
                 f"component '{child.get_id()}' already has a parent "
-                f"({_type_name_of(child._parent)} '{child._parent.get_id()}')")
+                f"({_type_name_of(child._parent)} '{child._parent.get_id()}')"
+            )
         if child is self:
             raise TreeValidationError(
-                f"cannot add a component to itself ({_type_name_of(self)} '{self._id}')")
+                f"cannot add a component to itself ({_type_name_of(self)} '{self._id}')"
+            )
         child_id = child.get_id()
         excluded = _replacing.get_id() if _replacing is not None else None
         if child_id != excluded and child_id in self._child_ids:
@@ -380,7 +388,8 @@ class UIContainer(UIComponent):
             if node is child:
                 raise TreeValidationError(
                     f"cycle detected: {_type_name_of(child)} '{child.get_id()}' "
-                    f"is an ancestor of {_type_name_of(self)} '{self._id}'")
+                    f"is an ancestor of {_type_name_of(self)} '{self._id}'"
+                )
             node = node.get_parent()
 
     def _check_id_available(self, component_id: str, excluding=None) -> None:
@@ -425,11 +434,13 @@ class UIContainer(UIComponent):
                 if expected_types is not None and not isinstance(child, expected_types):
                     raise InvalidChildError(
                         f"component '{component_id}' is a {_type_name_of(child)}, "
-                        f"not a {kind} of {_type_name_of(self)} '{self._id}'")
+                        f"not a {kind} of {_type_name_of(self)} '{self._id}'"
+                    )
                 self._remove_child(child)
                 return self
         raise InvalidChildError(
-            f"no {kind} with id '{component_id}' on {_type_name_of(self)} '{self._id}'")
+            f"no {kind} with id '{component_id}' on {_type_name_of(self)} '{self._id}'"
+        )
 
     # --- generic child access (typed add/remove live on subclasses) ---
 
@@ -437,19 +448,20 @@ class UIContainer(UIComponent):
         child = next((c for c in self._children if c.get_id() == component_id), None)
         if child is None:
             raise InvalidChildError(
-                f"no child with id '{component_id}' on {_type_name_of(self)} '{self._id}'")
+                f"no child with id '{component_id}' on {_type_name_of(self)} '{self._id}'"
+            )
         return child
 
     def children(self) -> list:
         return list(self._children)
 
-    def clear_children(self) -> "UIContainer":
+    def clear_children(self) -> UIContainer:
         self._check_frozen("clear children")
         for child in list(self._children):
             self._remove_child(child)
         return self
 
-    def replace_child(self, component_id: str, comp) -> "UIContainer":
+    def replace_child(self, component_id: str, comp) -> UIContainer:
         """Atomically swap the child with `component_id` for `comp`."""
         self._check_frozen(f"replace child '{component_id}'")
         old = self.get_child(component_id)
@@ -489,16 +501,15 @@ class _ComponentParent(UIContainer):
         self._gap: str | None = None
         self._icon: str | None = None
 
-    def set_gap(self, gap) -> "_ComponentParent":
+    def set_gap(self, gap) -> _ComponentParent:
         """Spacing between children (CSS size string or px number)."""
         self._check_frozen("set the gap")
         self._gap = _validate_css_size(gap, "gap")
         return self
 
-    _ICON_RE = __import__("re").compile(
-        r"^[MmZzLlHhVvCcSsQqTtAaEe0-9 ,.\-+]{1,512}$")
+    _ICON_RE = __import__("re").compile(r"^[MmZzLlHhVvCcSsQqTtAaEe0-9 ,.\-+]{1,512}$")
 
-    def set_icon(self, icon) -> "_ComponentParent":
+    def set_icon(self, icon) -> _ComponentParent:
         """Decorative SVG path drawn beside the title (24×24 viewBox
         path data — narrow path-data charset, ≤512 chars; anything else
         is rejected so plugin data can never become arbitrary markup)."""
@@ -507,11 +518,12 @@ class _ComponentParent(UIContainer):
         if not self._ICON_RE.match(icon):
             raise UIError(
                 "icon must be SVG path data (letters MZLHVCSQTA, digits, "
-                "spaces, commas, dots, + and -)")
+                "spaces, commas, dots, + and -)"
+            )
         self._icon = icon
         return self
 
-    def set_align(self, align) -> "_ComponentParent":
+    def set_align(self, align) -> _ComponentParent:
         """Cross-axis alignment of the children ("start"|"center"|"end"|
         "stretch"|"baseline") — vertical in a Row, horizontal in a
         Column/vertical Container."""
@@ -519,7 +531,7 @@ class _ComponentParent(UIContainer):
         self._align = _require_choice(align, self._CROSS_AXIS, "align")
         return self
 
-    def set_justify(self, justify) -> "_ComponentParent":
+    def set_justify(self, justify) -> _ComponentParent:
         """Main-axis distribution of the children ("start"|"center"|"end"|
         "between"|"around"|"evenly") — horizontal in a Row, vertical in a
         Column/vertical Container."""
@@ -539,17 +551,17 @@ class _ComponentParent(UIContainer):
             props["icon"] = self._icon
         return props
 
-    def add_component(self, comp) -> "_ComponentParent":
+    def add_component(self, comp) -> _ComponentParent:
         self._check_frozen("add a component")
         self._check_child(comp)
         self._add_child(comp)
         return self
 
-    def add_components(self, *comps) -> "_ComponentParent":
+    def add_components(self, *comps) -> _ComponentParent:
         self._add_many(comps)
         return self
 
-    def remove_component(self, component_id: str) -> "_ComponentParent":
+    def remove_component(self, component_id: str) -> _ComponentParent:
         return self._remove_child_by_id(component_id, kind="component")
 
 
@@ -563,8 +575,7 @@ class _Interactive(UIComponent):
         super().__init__(component_id=component_id, **kwargs)
         self._action = None
 
-    def set_action(self, action,
-                   require_account: bool = False) -> "_Interactive":
+    def set_action(self, action, require_account: bool = False) -> _Interactive:
         """Register the action callable.
 
         ``require_account=True`` marks the action ACCOUNT-SCOPED: the
@@ -574,8 +585,7 @@ class _Interactive(UIComponent):
         """
         self._check_frozen("set the action")
         self._action = _require_callable(action, "action", ActionRegistrationError)
-        self._action_require_account = _require_bool(require_account,
-                                                      "require_account")
+        self._action_require_account = _require_bool(require_account, "require_account")
         return self
 
     def _props(self) -> dict:
@@ -591,7 +601,8 @@ class _Interactive(UIComponent):
         if self._action is not None and not callable(self._action):
             errors.append(
                 f"interactive component '{self._id}' ({_type_name_of(self)}) "
-                f"has a non-callable action")
+                f"has a non-callable action"
+            )
         return errors
 
 
@@ -607,27 +618,27 @@ class _InputField(_Interactive):
         self._required = False
         self._value = None
 
-    def set_label(self, label: str) -> "_InputField":
+    def set_label(self, label: str) -> _InputField:
         self._check_frozen("set the label")
         self._label = _require_str(label, "label")
         return self
 
-    def set_description(self, description: str) -> "_InputField":
+    def set_description(self, description: str) -> _InputField:
         self._check_frozen("set the description")
         self._description = _require_str(description, "description")
         return self
 
-    def set_placeholder(self, placeholder: str) -> "_InputField":
+    def set_placeholder(self, placeholder: str) -> _InputField:
         self._check_frozen("set the placeholder")
         self._placeholder = _require_str(placeholder, "placeholder")
         return self
 
-    def set_required(self, required: bool) -> "_InputField":
+    def set_required(self, required: bool) -> _InputField:
         self._check_frozen("set required")
         self._required = _require_bool(required, "required")
         return self
 
-    def set_value(self, value: str) -> "_InputField":
+    def set_value(self, value: str) -> _InputField:
         self._check_frozen("set the value")
         self._value = _require_str(value, "value")
         return self

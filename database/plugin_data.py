@@ -28,18 +28,23 @@ by passing ``expected_version=None``.
 Pure persistence: no policy, no fleet knowledge, game-agnostic
 vocabulary only (§10b).
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import os
 import time
+from contextlib import suppress
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from core.errors import PluginError
 
-__all__ = ["PluginDataStore", "VersionConflict", "PLUGIN_GLOBAL"]
+if TYPE_CHECKING:
+    import builtins
+
+__all__ = ["PLUGIN_GLOBAL", "PluginDataStore", "VersionConflict"]
 
 LOG = logging.getLogger("libzent.plugin_data")
 
@@ -94,10 +99,9 @@ class PluginDataStore:
         await self._conn.executescript(_SCHEMA)
         await self._conn.commit()
         if self._path != ":memory:":
-            try:  # same tightening discipline as the main database
+            # same tightening discipline as the main database
+            with suppress(OSError):
                 os.chmod(self._path, 0o600)
-            except OSError:
-                pass
         LOG.info("plugin-data store ready (%s)", self._path)
 
     async def close(self) -> None:
@@ -122,13 +126,16 @@ class PluginDataStore:
             if not isinstance(value, str) or not (value == PLUGIN_GLOBAL or value.isdigit()):
                 raise PluginError(
                     f"plugin-data {name} must be a digit string or '0' "
-                    f"(snowflakes are STRINGS end to end), got {value!r}")
+                    f"(snowflakes are STRINGS end to end), got {value!r}"
+                )
 
     @staticmethod
-    def _row_to_doc(row: Any) -> Dict[str, Any]:
+    def _row_to_doc(row: Any) -> dict[str, Any]:
         return {
-            "account": row[0], "plugin": row[1],
-            "guild_id": row[2], "channel_id": row[3],
+            "account": row[0],
+            "plugin": row[1],
+            "guild_id": row[2],
+            "channel_id": row[3],
             "data": json.loads(row[4]) if row[4] else {},
             "version": int(row[5]),
             "updated_at": float(row[6]),
@@ -136,9 +143,14 @@ class PluginDataStore:
 
     # -------------------------------------------------------------- reads
 
-    async def get(self, account: str, plugin: str, *,
-                  guild_id: str = PLUGIN_GLOBAL,
-                  channel_id: str = PLUGIN_GLOBAL) -> Optional[Dict[str, Any]]:
+    async def get(
+        self,
+        account: str,
+        plugin: str,
+        *,
+        guild_id: str = PLUGIN_GLOBAL,
+        channel_id: str = PLUGIN_GLOBAL,
+    ) -> dict[str, Any] | None:
         """One document (None when absent — standalone copies never
         fall through to a parent scope)."""
         self._validate_scope(guild_id, channel_id)
@@ -147,18 +159,26 @@ class PluginDataStore:
             "SELECT account, plugin, guild_id, channel_id, data_json,"
             " version, updated_at FROM plugin_data"
             " WHERE account=? AND plugin=? AND guild_id=? AND channel_id=?",
-            (account, plugin, guild_id, channel_id))
+            (account, plugin, guild_id, channel_id),
+        )
         row = await cur.fetchone()
         return self._row_to_doc(row) if row else None
 
-    async def list(self, account: str, plugin: Optional[str] = None, *,
-                   guild_id: Optional[str] = None,
-                   channel_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def list(
+        self,
+        account: str,
+        plugin: str | None = None,
+        *,
+        guild_id: str | None = None,
+        channel_id: str | None = None,
+    ) -> builtins.list[dict[str, Any]]:
         """Scope nodes matching the given filters (each row = one doc)."""
         conn = self._require_conn()
-        sql = ("SELECT account, plugin, guild_id, channel_id, data_json,"
-               " version, updated_at FROM plugin_data WHERE 1=1")
-        params: List[Any] = [account]
+        sql = (
+            "SELECT account, plugin, guild_id, channel_id, data_json,"
+            " version, updated_at FROM plugin_data WHERE 1=1"
+        )
+        params: list[Any] = [account]
         sql += " AND account=?"
         if plugin is not None:
             sql += " AND plugin=?"
@@ -176,17 +196,24 @@ class PluginDataStore:
 
     # ------------------------------------------------------------- writes
 
-    async def put(self, account: str, plugin: str, guild_id: str,
-                  channel_id: str, data: Any, *,
-                  expected_version: Optional[int] = None) -> Dict[str, Any]:
+    async def put(
+        self,
+        account: str,
+        plugin: str,
+        guild_id: str,
+        channel_id: str,
+        data: Any,
+        *,
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
         """Write ONE document. ``expected_version`` enables the
         optimistic guard (VersionConflict on a racing writer); None
         means last-writer-wins (the dashboard's simple path)."""
         self._validate_scope(guild_id, channel_id)
         if not isinstance(data, dict):
             raise PluginError(
-                f"plugin-data document must be a JSON object, got "
-                f"{type(data).__name__}")
+                f"plugin-data document must be a JSON object, got {type(data).__name__}"
+            )
         try:
             payload = json.dumps(data, ensure_ascii=False)
         except (TypeError, ValueError) as exc:
@@ -194,8 +221,7 @@ class PluginDataStore:
         conn = self._require_conn()
         now = time.time()
 
-        existing = await self.get(account, plugin,
-                                  guild_id=guild_id, channel_id=channel_id)
+        existing = await self.get(account, plugin, guild_id=guild_id, channel_id=channel_id)
         if existing is None:
             if expected_version not in (None, 0):
                 # the writer READ a document that is now gone (deleted by
@@ -204,42 +230,62 @@ class PluginDataStore:
                 raise VersionConflict(
                     f"plugin-data document ({plugin} {guild_id}/{channel_id}) "
                     f"was deleted by another writer "
-                    f"(expected version {expected_version})")
+                    f"(expected version {expected_version})"
+                )
             await conn.execute(
                 "INSERT INTO plugin_data (account, plugin, guild_id,"
                 " channel_id, data_json, version, updated_at)"
                 " VALUES (?, ?, ?, ?, ?, 1, ?)",
-                (account, plugin, guild_id, channel_id, payload, now))
+                (account, plugin, guild_id, channel_id, payload, now),
+            )
             await conn.commit()
-            return {"account": account, "plugin": plugin,
-                    "guild_id": guild_id, "channel_id": channel_id,
-                    "data": data, "version": 1, "updated_at": now}
+            return {
+                "account": account,
+                "plugin": plugin,
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "data": data,
+                "version": 1,
+                "updated_at": now,
+            }
 
         if expected_version is not None and existing["version"] != expected_version:
             raise VersionConflict(
                 f"plugin-data document ({plugin} {guild_id}/{channel_id}) "
                 f"moved to version {existing['version']} "
-                f"(expected {expected_version}) — refetch and re-apply")
+                f"(expected {expected_version}) — refetch and re-apply"
+            )
         await conn.execute(
             "UPDATE plugin_data SET data_json=?, version=version+1,"
             " updated_at=? WHERE account=? AND plugin=? AND guild_id=?"
             " AND channel_id=?",
-            (payload, now, account, plugin, guild_id, channel_id))
+            (payload, now, account, plugin, guild_id, channel_id),
+        )
         await conn.commit()
-        return {"account": account, "plugin": plugin,
-                "guild_id": guild_id, "channel_id": channel_id,
-                "data": data, "version": existing["version"] + 1,
-                "updated_at": now}
+        return {
+            "account": account,
+            "plugin": plugin,
+            "guild_id": guild_id,
+            "channel_id": channel_id,
+            "data": data,
+            "version": existing["version"] + 1,
+            "updated_at": now,
+        }
 
-    async def delete(self, account: str, plugin: str, *,
-                     guild_id: str = PLUGIN_GLOBAL,
-                     channel_id: str = PLUGIN_GLOBAL) -> bool:
+    async def delete(
+        self,
+        account: str,
+        plugin: str,
+        *,
+        guild_id: str = PLUGIN_GLOBAL,
+        channel_id: str = PLUGIN_GLOBAL,
+    ) -> bool:
         """Remove one document (True when it existed)."""
         self._validate_scope(guild_id, channel_id)
         conn = self._require_conn()
         cur = await conn.execute(
-            "DELETE FROM plugin_data WHERE account=? AND plugin=?"
-            " AND guild_id=? AND channel_id=?",
-            (account, plugin, guild_id, channel_id))
+            "DELETE FROM plugin_data WHERE account=? AND plugin=? AND guild_id=? AND channel_id=?",
+            (account, plugin, guild_id, channel_id),
+        )
         await conn.commit()
         return cur.rowcount > 0

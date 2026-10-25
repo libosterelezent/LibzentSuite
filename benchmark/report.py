@@ -1,17 +1,18 @@
 """BenchReport: human table + JSON output + baseline compare."""
+
 from __future__ import annotations
 
 import json
 import os
 import statistics
-from typing import Any, Dict, List
+from typing import Any
 
 SCHEMA = "sm-bench/1"
 
 #: documented noise tolerances (compare verdicts); a metric "regressed"
 #: only when it exceeds the larger of the relative and absolute bands.
 TOLERANCES = {
-    "wall_s": (0.10, 0.2),     # (relative, absolute)
+    "wall_s": (0.10, 0.2),  # (relative, absolute)
     "cpu_pct": (0.05, 1.0),
     "rss_base_kb": (0.01, 512.0),
     "rss_peak_kb": (0.01, 512.0),
@@ -24,8 +25,8 @@ TOLERANCES = {
 }
 
 
-def _flat_metrics(report: Dict[str, Any]) -> Dict[str, float]:
-    out: Dict[str, float] = {}
+def _flat_metrics(report: dict[str, Any]) -> dict[str, float]:
+    out: dict[str, float] = {}
     proc = report.get("process", {})
     lag = report.get("loop_lag_ms", {})
     tasks = report.get("tasks", {})
@@ -58,20 +59,20 @@ def _flat_metrics(report: Dict[str, Any]) -> Dict[str, float]:
     return out
 
 
-def aggregate_repeats(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def aggregate_repeats(results: list[dict[str, Any]]) -> dict[str, Any]:
     """G5: median/min/max per flat metric across N repeat runs."""
     flats = [_flat_metrics(r) for r in results]
-    keys: List[str] = []
+    keys: list[str] = []
     for flat in flats:
         for k in flat:
             if k not in keys:
                 keys.append(k)
-    metrics: Dict[str, Any] = {}
+    metrics: dict[str, Any] = {}
     for key in keys:
         samples = [f[key] for f in flats if key in f]
         if not samples:
             continue
-        entry: Dict[str, Any] = {
+        entry: dict[str, Any] = {
             "median": round(statistics.median(samples), 4),
             "min": round(min(samples), 4),
             "max": round(max(samples), 4),
@@ -79,12 +80,13 @@ def aggregate_repeats(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         }
         if len(samples) >= 5:
             ordered = sorted(samples)
-            entry["p95"] = round(ordered[min(len(ordered) - 1,
-                                             int(len(ordered) * 0.95))], 4)
+            entry["p95"] = round(ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))], 4)
         metrics[key] = entry
-    return {"n": len(results), "metrics": metrics,
-            "leak_verdicts": [r.get("leak", {}).get("verdict")
-                              for r in results]}
+    return {
+        "n": len(results),
+        "metrics": metrics,
+        "leak_verdicts": [r.get("leak", {}).get("verdict") for r in results],
+    }
 
 
 def _verdict(metric: str, before: float, after: float) -> str:
@@ -97,8 +99,7 @@ def _verdict(metric: str, before: float, after: float) -> str:
     # and the bare custom.dropped / custom.errors spellings)
     lower_is_better = metric.startswith(
         ("rss_", "cpu_", "lag_", "wall_", "tasks_", "threads_")
-    ) or metric.rsplit(".", 1)[-1].endswith(
-        ("failures", "dropped", "errors"))
+    ) or metric.rsplit(".", 1)[-1].endswith(("failures", "dropped", "errors"))
     if abs(delta) <= band:
         return "unchanged"
     if delta > 0:
@@ -106,7 +107,7 @@ def _verdict(metric: str, before: float, after: float) -> str:
     return "improved" if lower_is_better else "regressed"
 
 
-def compare(before: Dict[str, Any], after: Dict[str, Any]) -> str:
+def compare(before: dict[str, Any], after: dict[str, Any]) -> str:
     """Human before/after/Δ table across scenarios + metrics."""
     lines = ["BASELINE COMPARE", "=" * 78]
     overall_regressed = False
@@ -114,16 +115,16 @@ def compare(before: Dict[str, Any], after: Dict[str, Any]) -> str:
     if not after_scenarios:
         raise ValueError(
             "compare: the new report has zero scenarios — nothing to "
-            "compare (truncated or misconfigured run?)")
-    seen: List[str] = []
+            "compare (truncated or misconfigured run?)"
+        )
+    seen: list[str] = []
     for scen in after_scenarios:
         name = scen.get("name", "?")
         seen.append(name)
         if scen.get("profiled"):
             lines.append(f"{name}: profiled run — excluded from compare")
             continue
-        prev = next((s for s in before.get("scenarios", [])
-                     if s.get("name") == name), None)
+        prev = next((s for s in before.get("scenarios", []) if s.get("name") == name), None)
         if prev is None:
             lines.append(f"{name}: (no baseline)")
             continue
@@ -137,63 +138,77 @@ def compare(before: Dict[str, Any], after: Dict[str, Any]) -> str:
             verdict = _verdict(metric, b, a)
             if verdict == "regressed":
                 overall_regressed = True
-            lines.append(f"  {metric:<28} {b:>12.3f} -> {a:>12.3f}"
-                         f"  [{verdict}]")
+            lines.append(f"  {metric:<28} {b:>12.3f} -> {a:>12.3f}  [{verdict}]")
     for prev in before.get("scenarios", []):
         name = prev.get("name", "?")
         if name in seen or prev.get("profiled"):
             continue
         overall_regressed = True
-        lines.append(f"{name}: MISSING — in the baseline but absent from "
-                     "the new report")
+        lines.append(f"{name}: MISSING — in the baseline but absent from the new report")
     lines.append("=" * 78)
-    lines.append("OVERALL: REGRESSED — rerun with --repeat 3 (medians)"
-                 if overall_regressed else "OVERALL: ok (within tolerances)")
+    lines.append(
+        "OVERALL: REGRESSED — rerun with --repeat 3 (medians)"
+        if overall_regressed
+        else "OVERALL: ok (within tolerances)"
+    )
     return "\n".join(lines)
 
 
-def render_table(report: Dict[str, Any]) -> str:
+def render_table(report: dict[str, Any]) -> str:
     """One human block per scenario."""
     lines = ["FRAMEWORK BENCHMARK", "=" * 78]
     for scen in report.get("scenarios", []):
-        lines.append(f"Scenario: {scen.get('name')}  "
-                     f"(mode={scen.get('mode', '-')}, "
-                     f"cycles={scen.get('cycles')}, "
-                     f"passed={scen.get('passed')})")
+        lines.append(
+            f"Scenario: {scen.get('name')}  "
+            f"(mode={scen.get('mode', '-')}, "
+            f"cycles={scen.get('cycles')}, "
+            f"passed={scen.get('passed')})"
+        )
         proc = scen.get("process", {})
-        lines.append(f"  RSS: base={proc.get('rss_base_kb', '?')}kB "
-                     f"peak={proc.get('rss_peak_kb', '?')}kB "
-                     f"end={proc.get('rss_end_kb', '?')}kB")
-        lines.append(f"  CPU: {proc.get('cpu_pct', '?')}% "
-                     f"(u={proc.get('cpu_user_s')}s "
-                     f"s={proc.get('cpu_sys_s')}s)")
+        lines.append(
+            f"  RSS: base={proc.get('rss_base_kb', '?')}kB "
+            f"peak={proc.get('rss_peak_kb', '?')}kB "
+            f"end={proc.get('rss_end_kb', '?')}kB"
+        )
+        lines.append(
+            f"  CPU: {proc.get('cpu_pct', '?')}% "
+            f"(u={proc.get('cpu_user_s')}s "
+            f"s={proc.get('cpu_sys_s')}s)"
+        )
         lag = scen.get("loop_lag_ms", {})
-        lines.append(f"  Loop lag ms: p50={lag.get('p50_ms')} "
-                     f"p95={lag.get('p95_ms')} p99={lag.get('p99_ms')} "
-                     f"max={lag.get('max_ms')} ({lag.get('samples')} samples)")
+        lines.append(
+            f"  Loop lag ms: p50={lag.get('p50_ms')} "
+            f"p95={lag.get('p95_ms')} p99={lag.get('p99_ms')} "
+            f"max={lag.get('max_ms')} ({lag.get('samples')} samples)"
+        )
         tasks = scen.get("tasks", {})
         threads = scen.get("threads", {})
-        lines.append(f"  Tasks: {tasks}   Threads: peak={threads.get('peak')}"
-                     f" end={threads.get('end')}")
+        lines.append(
+            f"  Tasks: {tasks}   Threads: peak={threads.get('peak')} end={threads.get('end')}"
+        )
         leak = scen.get("leak", {})
         if leak:
-            lines.append(f"  Leak verdict: {leak.get('verdict')} "
-                         f"(slope={leak.get('slope_kb_per_cycle', 0):.1f}"
-                         " kB/cycle)")
+            lines.append(
+                f"  Leak verdict: {leak.get('verdict')} "
+                f"(slope={leak.get('slope_kb_per_cycle', 0):.1f}"
+                " kB/cycle)"
+            )
             series = leak.get("rss_end_per_cycle_kb", [])
             lines.append(f"  RSS series: {series}")
         for label, stage in scen.get("stages", {}).items():
-            lines.append(f"  stage {label}: n={stage.get('count')} "
-                         f"total={stage.get('total_s')}s "
-                         f"p95={stage.get('p95_s')}s "
-                         f"max={stage.get('max_s')}s")
+            lines.append(
+                f"  stage {label}: n={stage.get('count')} "
+                f"total={stage.get('total_s')}s "
+                f"p95={stage.get('p95_s')}s "
+                f"max={stage.get('max_s')}s"
+            )
         for k, v in scen.get("custom", {}).items():
             lines.append(f"  {k}: {v}")
         lines.append("-" * 78)
     return "\n".join(lines)
 
 
-def to_json(report: Dict[str, Any], path: str) -> None:
+def to_json(report: dict[str, Any], path: str) -> None:
     """Write the report JSON 0600 on POSIX (G7: diagnostics artifacts carry
     operational metadata — machine paths, argv — keep them private)."""
     fd = None
@@ -202,19 +217,20 @@ def to_json(report: Dict[str, Any], path: str) -> None:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         except OSError:
             fd = None
-    fh = os.fdopen(fd, "w", encoding="utf-8") if fd is not None \
-        else open(path, "w", encoding="utf-8")
-    with fh:
-        json.dump(report, fh, indent=1, sort_keys=True)
+    if fd is not None:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(report, fh, indent=1, sort_keys=True)
+    else:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(report, fh, indent=1, sort_keys=True)
 
 
-def load_json(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as fh:
+def load_json(path: str) -> dict[str, Any]:
+    with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
 
-def leak_verdict(rss_series: List[float], task_series: List[int]
-                 ) -> Dict[str, Any]:
+def leak_verdict(rss_series: list[float], task_series: list[int]) -> dict[str, Any]:
     """Trend-based leak verdict (S6 §3.3): no arbitrary thresholds.
 
     cycle 1 is warmup (allocator arenas, imports, sqlite page cache) and
@@ -222,17 +238,18 @@ def leak_verdict(rss_series: List[float], task_series: List[int]
     """
     n = len(rss_series)
     if n < 3:
-        return {"rss_end_per_cycle_kb": rss_series,
-                "tasks_end_per_cycle": task_series,
-                "slope_kb_per_cycle": 0.0,
-                "verdict": "insufficient-cycles"}
+        return {
+            "rss_end_per_cycle_kb": rss_series,
+            "tasks_end_per_cycle": task_series,
+            "slope_kb_per_cycle": 0.0,
+            "verdict": "insufficient-cycles",
+        }
     s = rss_series[1:]
     growth = s[-1] - s[0]
-    noise = max(256.0, 2.0 * max((s[i] - s[i + 1] for i in range(len(s) - 1)),
-                                 default=0.0))
+    noise = max(256.0, 2.0 * max((s[i] - s[i + 1] for i in range(len(s) - 1)), default=0.0))
     non_returning = all(
-        max((s[i] - later for later in s[i + 1:]), default=0.0) <= noise
-        for i in range(len(s) - 1))
+        max((s[i] - later for later in s[i + 1 :]), default=0.0) <= noise for i in range(len(s) - 1)
+    )
     slope = growth / max(len(s) - 1, 1)
     if non_returning and growth > noise and n >= 5:
         verdict = "suspected-leak"
@@ -240,7 +257,9 @@ def leak_verdict(rss_series: List[float], task_series: List[int]
         verdict = "stable"
     else:
         verdict = "inconclusive"
-    return {"rss_end_per_cycle_kb": rss_series,
-            "tasks_end_per_cycle": task_series,
-            "slope_kb_per_cycle": round(slope, 1),
-            "verdict": verdict}
+    return {
+        "rss_end_per_cycle_kb": rss_series,
+        "tasks_end_per_cycle": task_series,
+        "slope_kb_per_cycle": round(slope, 1),
+        "verdict": verdict,
+    }

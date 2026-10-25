@@ -8,8 +8,9 @@ Exports:
 The ``discord`` import happens INSIDE connect(), so importing this package is
 always safe offline (simulator, tests, CLI dry-runs).
 """
+
 from __future__ import annotations
 
 from .client import RealClientFactory, RealDiscordClient
 
-__all__ = ["RealDiscordClient", "RealClientFactory"]
+__all__ = ["RealClientFactory", "RealDiscordClient"]

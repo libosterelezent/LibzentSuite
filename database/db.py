@@ -14,42 +14,51 @@ Secrets policy (unchanged, now stronger): the database stores Fernet
 CIPHERTEXT for credentials (key outside the DB); it never stores
 plaintext tokens.
 """
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
 import sqlite3
 import time
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .connection import DatabaseConnection, DatabaseError  # noqa: F401 re-export
-from .schema import MIGRATIONS, latest_version
-
-LOG = logging.getLogger("libzent.database")
-
+from .connection import DatabaseConnection, DatabaseError
 from .repositories.account_plugins import AccountPluginsRepository
 from .repositories.accounts import AccountsRepository
 from .repositories.cache import CacheRepository
 from .repositories.cooldowns import CooldownRepository
 from .repositories.credentials import CredentialsRepository
+from .repositories.fleet import FleetRepository
 from .repositories.kv import KvRepository
 from .repositories.logs import AuditRepository, LogRepository
-from .repositories.fleet import FleetRepository
-from .repositories.plugins import PluginRepository
 from .repositories.plugin_profiles import PluginProfilesRepository
+from .repositories.plugins import PluginRepository
 from .repositories.rate_policies import RatePolicyRepository
 from .repositories.settings import AccountSettingsRepository
 from .repositories.sync_groups import SyncGroupsRepository
 from .repositories.tasks import TaskHistoryRepository
+from .schema import MIGRATIONS, latest_version
+
+LOG = logging.getLogger("libzent.database")
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class Database:
     """Async persistence service owning ONE aiosqlite connection."""
 
-    def __init__(self, path: str | Path = "state/libzent.db", *,
-                 audit_keep: int = 10_000, log_keep: int = 10_000) -> None:
+    def __init__(
+        self,
+        path: str | Path = "state/libzent.db",
+        *,
+        audit_keep: int = 10_000,
+        log_keep: int = 10_000,
+    ) -> None:
         self._path = str(path)
         self._audit_keep = int(audit_keep)
         self._log_keep = int(log_keep)
@@ -85,18 +94,14 @@ class Database:
         """
         await self.connection.connect()
         if self._path != ":memory:":
-            try:
+            with contextlib.suppress(OSError):
                 os.chmod(self._path, 0o600)
-            except OSError:
-                pass
             # FINAL-PHASE (F7): tighten the WAL/-shm sidecars too — SQLite
             # creates them with umask-default perms (typically 0644) and
             # they carry the same pages. Restart case: they exist by now.
             for suffix in ("-wal", "-shm"):
-                try:
+                with contextlib.suppress(OSError):
                     os.chmod(self._path + suffix, 0o600)
-                except OSError:
-                    pass
         try:
             async with self._migrate_lock:
                 return await self.migrate()
@@ -110,19 +115,24 @@ class Database:
         if versions != sorted(versions) or len(set(versions)) != len(versions):
             raise DatabaseError(
                 f"database.schema MIGRATIONS versions must be unique and "
-                f"strictly increasing, got {versions!r}")
+                f"strictly increasing, got {versions!r}"
+            )
         conn = self.connection
         await conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations ("
             "version INTEGER PRIMARY KEY, name TEXT NOT NULL, "
-            "applied_at REAL NOT NULL)")
-        done = {row["version"] for row in await conn.fetch_all(
-            "SELECT version FROM schema_migrations")}
+            "applied_at REAL NOT NULL)"
+        )
+        done = {
+            row["version"] for row in await conn.fetch_all("SELECT version FROM schema_migrations")
+        }
         if done and max(done) > latest_version():
             LOG.warning(
                 "database schema v%d is NEWER than this code (v%d): "
                 "running a downgrade is unsupported and may misbehave",
-                max(done), latest_version())
+                max(done),
+                latest_version(),
+            )
         applied = 0
         for version, name, sql in MIGRATIONS:
             if version in done:
@@ -153,11 +163,13 @@ class Database:
         # same file in parallel both reach here (each saw an empty
         # schema_migrations); the loser's DDL no-ops (IF NOT EXISTS) and
         # stamps nothing instead of failing the boot.
-        stamp = (f"INSERT INTO schema_migrations (version, name, applied_at) "
-                 f"SELECT {int(version)}, '{safe_name}', {time.time()!r} "
-                 f"WHERE NOT EXISTS (SELECT 1 FROM schema_migrations "
-                 f"WHERE version = {int(version)});")
-        script = (f"BEGIN IMMEDIATE;\n{sql}\n{stamp}\nCOMMIT;")
+        stamp = (
+            f"INSERT INTO schema_migrations (version, name, applied_at) "
+            f"SELECT {int(version)}, '{safe_name}', {time.time()!r} "
+            f"WHERE NOT EXISTS (SELECT 1 FROM schema_migrations "
+            f"WHERE version = {int(version)});"
+        )
+        script = f"BEGIN IMMEDIATE;\n{sql}\n{stamp}\nCOMMIT;"
         async with self.connection.serialized() as db:
             await db.rollback()  # no stray open transaction before BEGIN
             try:
@@ -166,25 +178,21 @@ class Database:
                 tolerated = (
                     isinstance(exc, sqlite3.OperationalError)
                     and "duplicate column name" in str(exc).lower()
-                    and "ALTER TABLE" in sql.upper())
-                try:
+                    and "ALTER TABLE" in sql.upper()
+                )
+                with contextlib.suppress(Exception):
                     await db.rollback()
-                except Exception:
-                    pass
                 if tolerated:
                     # the column already exists, but the failed script
                     # rolled back EVERYTHING in it — re-run the remaining
                     # (idempotent) statements without the ALTERs, or the
                     # tables created next to them would silently never
                     # exist while the version is stamped applied
-                    rest = re.sub(r"ALTER\s+TABLE\b[^;]*;", "", sql,
-                                  flags=re.IGNORECASE)
-                    await db.executescript(
-                        f"BEGIN IMMEDIATE;\n{rest}\n{stamp}\nCOMMIT;")
+                    rest = re.sub(r"ALTER\s+TABLE\b[^;]*;", "", sql, flags=re.IGNORECASE)
+                    await db.executescript(f"BEGIN IMMEDIATE;\n{rest}\n{stamp}\nCOMMIT;")
                     return
                 if isinstance(exc, Exception):
-                    raise DatabaseError(
-                        f"migration {version} ({name}) failed: {exc}") from exc
+                    raise DatabaseError(f"migration {version} ({name}) failed: {exc}") from exc
                 raise
 
     async def close(self) -> None:

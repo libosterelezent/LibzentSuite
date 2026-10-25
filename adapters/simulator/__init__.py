@@ -10,6 +10,7 @@ Exports:
 
 Everything here runs offline with SYNTHETIC ids only — no network, no tokens.
 """
+
 from __future__ import annotations
 
 from .client import SimClient
@@ -18,10 +19,10 @@ from .scenarios import SCENARIOS, Scenario, ScenarioAPI
 from .world import SimWorld
 
 __all__ = [
-    "SimWorld",
-    "SimClient",
+    "SCENARIOS",
     "Scenario",
     "ScenarioAPI",
-    "SCENARIOS",
+    "SimClient",
+    "SimWorld",
     "SimulationRunner",
 ]

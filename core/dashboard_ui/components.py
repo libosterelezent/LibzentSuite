@@ -8,11 +8,14 @@ them (Form, Section, Card, Row, Column, Tab, Page). Package-internal:
 import the public classes from core.dashboard_ui (or
 core.dashboard_ui.builders), not from here.
 """
+
 from __future__ import annotations
 
 import inspect
 
 from ._base import (
+    UIComponent,
+    UIContainer,
     _ComponentParent,
     _InputField,
     _Interactive,
@@ -23,34 +26,32 @@ from ._base import (
     _require_number,
     _require_str,
     _validate_css_size,
-    UIComponent,
-    UIContainer,
 )
 from .errors import ActionRegistrationError, UIError
 
 __all__ = [
-    "Page",
-    "Tab",
-    "Section",
-    "Card",
-    "Row",
-    "Column",
-    "Text",
     "Badge",
-    "Metric",
-    "Checkbox",
-    "Toggle",
-    "TextInput",
-    "NumberInput",
-    "Textarea",
-    "Select",
-    "RadioGroup",
-    "MultiSelect",
-    "ListView",
-    "Table",
-    "Progress",
     "Button",
+    "Card",
+    "Checkbox",
+    "Column",
     "Form",
+    "ListView",
+    "Metric",
+    "MultiSelect",
+    "NumberInput",
+    "Page",
+    "Progress",
+    "RadioGroup",
+    "Row",
+    "Section",
+    "Select",
+    "Tab",
+    "Table",
+    "Text",
+    "TextInput",
+    "Textarea",
+    "Toggle",
 ]
 
 
@@ -66,17 +67,17 @@ class Text(UIComponent):
         self._variant: str | None = None
         self._data_source = None
 
-    def set_value(self, text: str) -> "Text":
+    def set_value(self, text: str) -> Text:
         self._check_frozen("set the value")
         self._value = _require_str(text, "value")
         return self
 
-    def set_variant(self, variant: str) -> "Text":
+    def set_variant(self, variant: str) -> Text:
         self._check_frozen("set the variant")
         self._variant = _require_choice(variant, self._VARIANTS, "variant")
         return self
 
-    def set_data_source(self, data_source) -> "Text":
+    def set_data_source(self, data_source) -> Text:
         """Live text: a provider returning ``{"value": str}`` (or a str).
 
         The rendered element carries the live flag; the frontend refreshes
@@ -110,12 +111,12 @@ class Badge(UIComponent):
         self._value: str | None = None
         self._variant: str | None = None
 
-    def set_value(self, text: str) -> "Badge":
+    def set_value(self, text: str) -> Badge:
         self._check_frozen("set the value")
         self._value = _require_str(text, "value")
         return self
 
-    def set_variant(self, variant: str) -> "Badge":
+    def set_variant(self, variant: str) -> Badge:
         self._check_frozen("set the variant")
         self._variant = _require_choice(variant, self._VARIANTS, "variant")
         return self
@@ -143,27 +144,27 @@ class Metric(UIComponent):
         self._level: str | None = None
         self._data_source = None
 
-    def set_label(self, label: str) -> "Metric":
+    def set_label(self, label: str) -> Metric:
         self._check_frozen("set the label")
         self._label = _require_str(label, "label")
         return self
 
-    def set_value(self, value: str) -> "Metric":
+    def set_value(self, value: str) -> Metric:
         self._check_frozen("set the value")
         self._value = _require_str(value, "value")
         return self
 
-    def set_sub(self, sub: str) -> "Metric":
+    def set_sub(self, sub: str) -> Metric:
         self._check_frozen("set the sub label")
         self._sub = _require_str(sub, "sub")
         return self
 
-    def set_level(self, level: str) -> "Metric":
+    def set_level(self, level: str) -> Metric:
         self._check_frozen("set the level")
         self._level = _require_choice(level, self._LEVELS, "level")
         return self
 
-    def set_data_source(self, data_source) -> "Metric":
+    def set_data_source(self, data_source) -> Metric:
         """Live values: a provider returning ``{value, sub?, level?}``.
 
         The rendered snapshot keeps whatever was set via ``set_value``;
@@ -195,7 +196,7 @@ class Separator(UIComponent):
 
     _type_name = "separator"
 
-    def set_variant(self, variant: str) -> "Separator":
+    def set_variant(self, variant: str) -> Separator:
         """'solid' (default) or 'dashed'."""
         self._check_frozen("set the variant")
         self._variant = _require_choice(variant, ("solid", "dashed"), "variant")
@@ -217,7 +218,7 @@ class Description(UIComponent):
         super().__init__(component_id=component_id, **kwargs)
         self._value: str | None = None
 
-    def set_value(self, text: str) -> "Description":
+    def set_value(self, text: str) -> Description:
         self._check_frozen("set the value")
         self._value = _require_str(text, "value")
         return self
@@ -238,7 +239,7 @@ class Header(UIComponent):
         super().__init__(component_id=component_id, **kwargs)
         self._subtitle: str | None = None
 
-    def set_subtitle(self, text: str) -> "Header":
+    def set_subtitle(self, text: str) -> Header:
         self._check_frozen("set the subtitle")
         self._subtitle = _require_str(text, "subtitle")
         return self
@@ -259,7 +260,7 @@ class Footer(UIComponent):
         super().__init__(component_id=component_id, **kwargs)
         self._value: str | None = None
 
-    def set_value(self, text: str) -> "Footer":
+    def set_value(self, text: str) -> Footer:
         self._check_frozen("set the value")
         self._value = _require_str(text, "value")
         return self
@@ -276,7 +277,7 @@ class Checkbox(_InputField):
 
     _type_name = "checkbox"
 
-    def set_value(self, value: bool) -> "Checkbox":
+    def set_value(self, value: bool) -> Checkbox:
         self._check_frozen("set the value")
         self._value = _require_bool(value, "value")
         return self
@@ -297,7 +298,7 @@ class TextInput(_InputField):
         super().__init__(component_id=component_id, **kwargs)
         self._max_length: int | None = None
 
-    def set_max_length(self, max_length: int) -> "TextInput":
+    def set_max_length(self, max_length: int) -> TextInput:
         self._check_frozen("set the max length")
         self._max_length = _require_int(max_length, "max_length")
         return self
@@ -320,17 +321,17 @@ class NumberInput(TextInput):
         self._max_value = None
         self._step = None
 
-    def set_min_value(self, min_value) -> "NumberInput":
+    def set_min_value(self, min_value) -> NumberInput:
         self._check_frozen("set the min value")
         self._min_value = _require_number(min_value, "min_value")
         return self
 
-    def set_max_value(self, max_value) -> "NumberInput":
+    def set_max_value(self, max_value) -> NumberInput:
         self._check_frozen("set the max value")
         self._max_value = _require_number(max_value, "max_value")
         return self
 
-    def set_step(self, step) -> "NumberInput":
+    def set_step(self, step) -> NumberInput:
         self._check_frozen("set the step")
         self._step = _require_number(step, "step")
         return self
@@ -355,7 +356,7 @@ class Textarea(TextInput):
         super().__init__(component_id=component_id, **kwargs)
         self._rows: int | None = None
 
-    def set_rows(self, rows: int) -> "Textarea":
+    def set_rows(self, rows: int) -> Textarea:
         self._check_frozen("set the rows")
         self._rows = _require_int(rows, "rows")
         return self
@@ -377,7 +378,7 @@ class Select(_InputField):
         self._options: list | None = None
         self._data_source = None
 
-    def set_options_provider(self, provider) -> "Select":
+    def set_options_provider(self, provider) -> Select:
         """DYNAMIC options: a callable returning ``{"options": [...]}``
         (and optionally ``{"value": [...]}`` to pre-check a MultiSelect).
         Fetched lazily by the renderer — the frozen snapshot stays valid
@@ -385,12 +386,13 @@ class Select(_InputField):
         May not be combined with static set_options."""
         self._check_frozen("set the options provider")
         if getattr(self, "_options", None):
-            raise UIError("select has static options — remove them before "
-                          "setting an options provider")
+            raise UIError(
+                "select has static options — remove them before setting an options provider"
+            )
         self._data_source = _require_callable(provider, "options provider")
         return self
 
-    def set_options(self, options) -> "Select":
+    def set_options(self, options) -> Select:
         """Accepts a list of strings or {'value','label'} dicts; both are
         normalized to {'value','label'} dicts for serialization."""
         self._check_frozen("set the options")
@@ -405,7 +407,8 @@ class Select(_InputField):
             else:
                 raise UIError(
                     "options entries must be strings or dicts with "
-                    f"'value' and 'label' keys, got {item!r}")
+                    f"'value' and 'label' keys, got {item!r}"
+                )
         self._options = normalized
         return self
 
@@ -429,7 +432,7 @@ class MultiSelect(Select):
 
     _type_name = "multi-select"
 
-    def set_value(self, value) -> "MultiSelect":
+    def set_value(self, value) -> MultiSelect:
         self._check_frozen("set the value")
         if not isinstance(value, list):
             raise UIError(f"value must be a list, got {type(value).__name__}")
@@ -448,18 +451,19 @@ class RowAction:
     (None, str, dict, ActionResult).
     """
 
-    __slots__ = ("id", "label", "action", "variant", "confirm")
+    __slots__ = ("action", "confirm", "id", "label", "variant")
 
-    def __init__(self, action_id: str, label: str, action, *,
-                 variant: str = "secondary", confirm: str = "") -> None:
+    def __init__(
+        self, action_id: str, label: str, action, *, variant: str = "secondary", confirm: str = ""
+    ) -> None:
         if not isinstance(action_id, str) or not action_id:
             raise UIError(f"row action id must be a non-empty str, got {action_id!r}")
         if not isinstance(label, str) or not label:
             raise UIError(f"row action label must be a non-empty str, got {label!r}")
         if not callable(action):
             raise UIError(
-                f"row action {action_id!r} needs a callable action, got "
-                f"{type(action).__name__}")
+                f"row action {action_id!r} needs a callable action, got {type(action).__name__}"
+            )
         if variant not in ("primary", "secondary", "danger", "ghost"):
             raise UIError(f"row action variant must be a known variant, got {variant!r}")
         if not isinstance(confirm, str):
@@ -478,18 +482,19 @@ class BulkAction:
     the list of selected keys (possibly empty — decide whether to reject).
     """
 
-    __slots__ = ("id", "label", "action", "variant", "confirm")
+    __slots__ = ("action", "confirm", "id", "label", "variant")
 
-    def __init__(self, action_id: str, label: str, action, *,
-                 variant: str = "secondary", confirm: str = "") -> None:
+    def __init__(
+        self, action_id: str, label: str, action, *, variant: str = "secondary", confirm: str = ""
+    ) -> None:
         if not isinstance(action_id, str) or not action_id:
             raise UIError(f"bulk action id must be a non-empty str, got {action_id!r}")
         if not isinstance(label, str) or not label:
             raise UIError(f"bulk action label must be a non-empty str, got {label!r}")
         if not callable(action):
             raise UIError(
-                f"bulk action {action_id!r} needs a callable action, got "
-                f"{type(action).__name__}")
+                f"bulk action {action_id!r} needs a callable action, got {type(action).__name__}"
+            )
         if variant not in ("primary", "secondary", "danger", "ghost"):
             raise UIError(f"bulk action variant must be a known variant, got {variant!r}")
         self.id = action_id
@@ -509,19 +514,17 @@ class _Selectable:
         self._selectable = _require_bool(selectable, "selectable")
         return self
 
-    def set_bulk_actions(self, actions) -> "Table":
+    def set_bulk_actions(self, actions) -> Table:
         """Bulk-operation buttons shown while rows are selected (list of
         :class:`BulkAction`); handlers receive the selected key list."""
         self._check_frozen("set the bulk actions")
         if not isinstance(actions, list):
-            raise UIError(
-                f"bulk actions must be a list, got {type(actions).__name__}")
+            raise UIError(f"bulk actions must be a list, got {type(actions).__name__}")
         checked = []
         seen = set()
         for entry in actions:
             if not isinstance(entry, BulkAction):
-                raise UIError("each bulk action must be a BulkAction, got "
-                              f"{type(entry).__name__}")
+                raise UIError(f"each bulk action must be a BulkAction, got {type(entry).__name__}")
             if entry.id in seen:
                 raise UIError(f"duplicate bulk action id {entry.id!r}")
             seen.add(entry.id)
@@ -533,12 +536,11 @@ class _Selectable:
                 prev = getattr(self, "_action", None)
                 if prev is not None:
                     self._explicit_action = prev
-                    self._explicit_require_account = getattr(
-                        self, "_action_require_account", False)
+                    self._explicit_require_account = getattr(self, "_action_require_account", False)
                 self.set_action(
                     self._dispatch_view_action,
-                    require_account=bool(getattr(
-                        self, "_explicit_require_account", False)))
+                    require_account=bool(getattr(self, "_explicit_require_account", False)),
+                )
         return self
 
     def _prepare_dispatch(self, resolver, plugin_name, account):
@@ -551,14 +553,13 @@ class _Selectable:
         pass-2 #4). Returns None when there is nothing nested to rebind
         (dispatch then runs exactly as registered)."""
         explicit = getattr(self, "_explicit_action", None)
-        rebound = self._rebind_nested(explicit, resolver, plugin_name,
-                                      account)
+        rebound = self._rebind_nested(explicit, resolver, plugin_name, account)
         if rebound is None:
             return None
 
         async def dispatcher(context, payload):
-            return await self._dispatch_view_action(context, payload,
-                                                    rebound)
+            return await self._dispatch_view_action(context, payload, rebound)
+
         return dispatcher
 
     @staticmethod
@@ -570,7 +571,7 @@ class _Selectable:
             return None
         bound_on = cb.__self__
         if not hasattr(bound_on, "initialize_dashboard_ui"):
-            return None   # not a plugin-instance method
+            return None  # not a plugin-instance method
         try:
             live = resolver(plugin_name, account)
         except Exception:
@@ -584,12 +585,11 @@ class _Selectable:
         """True when the installed action is this component's internal
         row/bulk router (never treat it as an author's explicit action)."""
         action = getattr(self, "_action", None)
-        return action is not None and getattr(
-            action, "__func__", None
-        ) is getattr(type(self), "_dispatch_view_action", None)
+        return action is not None and getattr(action, "__func__", None) is getattr(
+            type(self), "_dispatch_view_action", None
+        )
 
-    async def _dispatch_view_action(self, context, payload,
-                                    _explicit="unset"):
+    async def _dispatch_view_action(self, context, payload, _explicit="unset"):
         """Route one action payload: bulk → row → preserved explicit.
 
         Routing is decided by action id BEFORE any callback runs: a
@@ -620,8 +620,7 @@ class _Selectable:
                 if hasattr(result, "__await__"):
                     result = await result
                 return result
-        if any(entry.id == action_id
-               for entry in getattr(self, "_row_actions", None) or []):
+        if any(entry.id == action_id for entry in getattr(self, "_row_actions", None) or []):
             # matched row id — its exceptions (validation rejections
             # included) propagate unchanged
             return await self._dispatch_row_action(context, payload)
@@ -665,17 +664,17 @@ class ListView(_Selectable, _Interactive):
         self._selectable = False
         self._bulk_actions: list[BulkAction] = []
 
-    def set_data_source(self, data_source) -> "ListView":
+    def set_data_source(self, data_source) -> ListView:
         self._check_frozen("set the data source")
         self._data_source = _require_callable(data_source, "data_source")
         return self
 
-    def set_empty_text(self, text: str) -> "ListView":
+    def set_empty_text(self, text: str) -> ListView:
         self._check_frozen("set the empty text")
         self._empty_text = _require_str(text, "empty_text")
         return self
 
-    def set_columns(self, columns) -> "ListView":
+    def set_columns(self, columns) -> ListView:
         """Declare RECORDS mode: column labels for structured rows."""
         self._check_frozen("set the columns")
         if not isinstance(columns, list):
@@ -687,17 +686,16 @@ class ListView(_Selectable, _Interactive):
         self._columns = list(columns)
         return self
 
-    def set_key_column(self, column: str) -> "ListView":
+    def set_key_column(self, column: str) -> ListView:
         """Which cell value identifies a record (row actions/selection)."""
         self._check_frozen("set the key column")
         self._key_column = _require_str(column, "key column")
         return self
 
-    def set_row_actions(self, actions) -> "ListView":
+    def set_row_actions(self, actions) -> ListView:
         self._check_frozen("set the row actions")
         if not isinstance(actions, list):
-            raise UIError(
-                f"row actions must be a list, got {type(actions).__name__}")
+            raise UIError(f"row actions must be a list, got {type(actions).__name__}")
         checked: list[RowAction] = []
         seen: set[str] = set()
         for entry in actions:
@@ -718,12 +716,11 @@ class ListView(_Selectable, _Interactive):
             prev = getattr(self, "_action", None)
             if prev is not None:
                 self._explicit_action = prev
-                self._explicit_require_account = getattr(
-                    self, "_action_require_account", False)
+                self._explicit_require_account = getattr(self, "_action_require_account", False)
             self.set_action(
                 self._dispatch_view_action,
-                require_account=bool(getattr(
-                    self, "_explicit_require_account", False)))
+                require_account=bool(getattr(self, "_explicit_require_account", False)),
+            )
         return self
 
     async def _dispatch_row_action(self, context, payload):
@@ -748,16 +745,14 @@ class ListView(_Selectable, _Interactive):
             props["key_column"] = self._key_column
         if self._row_actions:
             props["row_actions"] = [
-                {"id": a.id, "label": a.label,
-                 "variant": a.variant, "confirm": a.confirm}
+                {"id": a.id, "label": a.label, "variant": a.variant, "confirm": a.confirm}
                 for a in self._row_actions
             ]
         if self._selectable:
             props["selectable"] = True
         if self._bulk_actions:
             props["bulk_actions"] = [
-                {"id": a.id, "label": a.label,
-                 "variant": a.variant, "confirm": a.confirm}
+                {"id": a.id, "label": a.label, "variant": a.variant, "confirm": a.confirm}
                 for a in self._bulk_actions
             ]
         return props
@@ -786,7 +781,7 @@ class Table(_Selectable, _Interactive):
         self._selectable = False
         self._bulk_actions: list[BulkAction] = []
 
-    def set_columns(self, columns) -> "Table":
+    def set_columns(self, columns) -> Table:
         self._check_frozen("set the columns")
         if not isinstance(columns, list):
             raise UIError(f"columns must be a list, got {type(columns).__name__}")
@@ -795,40 +790,37 @@ class Table(_Selectable, _Interactive):
         self._columns = list(columns)
         return self
 
-    def set_data_source(self, data_source) -> "Table":
+    def set_data_source(self, data_source) -> Table:
         self._check_frozen("set the data source")
         self._data_source = _require_callable(data_source, "data_source")
         return self
 
-    def set_empty_text(self, text: str) -> "Table":
+    def set_empty_text(self, text: str) -> Table:
         self._check_frozen("set the empty text")
         self._empty_text = _require_str(text, "empty_text")
         return self
 
-    def set_page_size(self, page_size: int) -> "Table":
+    def set_page_size(self, page_size: int) -> Table:
         self._check_frozen("set the page size")
         self._page_size = _require_int(page_size, "page_size")
         return self
 
-    def set_key_column(self, column: str) -> "Table":
+    def set_key_column(self, column: str) -> Table:
         """Which column identifies a row for row-action dispatch."""
         self._check_frozen("set the key column")
         self._key_column = _require_str(column, "key column")
         return self
 
-    def set_row_actions(self, actions) -> "Table":
+    def set_row_actions(self, actions) -> Table:
         """Declare per-row buttons (list of :class:`RowAction`)."""
         self._check_frozen("set the row actions")
         if not isinstance(actions, list):
-            raise UIError(
-                f"row actions must be a list, got {type(actions).__name__}")
+            raise UIError(f"row actions must be a list, got {type(actions).__name__}")
         checked: list[RowAction] = []
         seen: set[str] = set()
         for entry in actions:
             if not isinstance(entry, RowAction):
-                raise UIError(
-                    "each row action must be a RowAction, got "
-                    f"{type(entry).__name__}")
+                raise UIError(f"each row action must be a RowAction, got {type(entry).__name__}")
             if entry.id in seen:
                 raise UIError(f"duplicate row action id {entry.id!r}")
             seen.add(entry.id)
@@ -844,12 +836,11 @@ class Table(_Selectable, _Interactive):
             prev = getattr(self, "_action", None)
             if prev is not None:
                 self._explicit_action = prev
-                self._explicit_require_account = getattr(
-                    self, "_action_require_account", False)
+                self._explicit_require_account = getattr(self, "_action_require_account", False)
             self.set_action(
                 self._dispatch_view_action,
-                require_account=bool(getattr(
-                    self, "_explicit_require_account", False)))
+                require_account=bool(getattr(self, "_explicit_require_account", False)),
+            )
         return self
 
     async def _dispatch_row_action(self, context, payload):
@@ -880,16 +871,14 @@ class Table(_Selectable, _Interactive):
             props["key_column"] = self._key_column
         if self._row_actions:
             props["row_actions"] = [
-                {"id": a.id, "label": a.label,
-                 "variant": a.variant, "confirm": a.confirm}
+                {"id": a.id, "label": a.label, "variant": a.variant, "confirm": a.confirm}
                 for a in self._row_actions
             ]
         if self._selectable:
             props["selectable"] = True
         if self._bulk_actions:
             props["bulk_actions"] = [
-                {"id": a.id, "label": a.label,
-                 "variant": a.variant, "confirm": a.confirm}
+                {"id": a.id, "label": a.label, "variant": a.variant, "confirm": a.confirm}
                 for a in self._bulk_actions
             ]
         return props
@@ -905,7 +894,7 @@ class Progress(UIComponent):
         self._value = None
         self._label: str | None = None
 
-    def set_value(self, value) -> "Progress":
+    def set_value(self, value) -> Progress:
         self._check_frozen("set the value")
         value = _require_number(value, "value")
         if not 0 <= value <= 100:
@@ -913,7 +902,7 @@ class Progress(UIComponent):
         self._value = value
         return self
 
-    def set_label(self, label: str) -> "Progress":
+    def set_label(self, label: str) -> Progress:
         self._check_frozen("set the label")
         self._label = _require_str(label, "label")
         return self
@@ -943,34 +932,34 @@ class Button(_Interactive):
         self._loading = False
         self._open_modal: str | None = None
 
-    def set_label(self, label: str) -> "Button":
+    def set_label(self, label: str) -> Button:
         self._check_frozen("set the label")
         self._label = _require_str(label, "label")
         return self
 
-    def set_description(self, description: str) -> "Button":
+    def set_description(self, description: str) -> Button:
         self._check_frozen("set the description")
         self._description = _require_str(description, "description")
         return self
 
-    def set_variant(self, variant: str) -> "Button":
+    def set_variant(self, variant: str) -> Button:
         self._check_frozen("set the variant")
         self._variant = _require_choice(variant, self._VARIANTS, "variant")
         return self
 
-    def set_confirm(self, confirm: str) -> "Button":
+    def set_confirm(self, confirm: str) -> Button:
         """Require the user to confirm with this message before firing."""
         self._check_frozen("set the confirmation")
         self._confirm = _require_str(confirm, "confirm")
         return self
 
-    def set_open_modal(self, modal_id) -> "Button":
+    def set_open_modal(self, modal_id) -> Button:
         """Open a Modal client-side on click (no server round trip)."""
         self._check_frozen("set the modal to open")
         self._open_modal = _require_str(modal_id, "modal id")
         return self
 
-    def set_loading(self, loading: bool) -> "Button":
+    def set_loading(self, loading: bool) -> Button:
         self._check_frozen("set loading")
         self._loading = _require_bool(loading, "loading")
         return self
@@ -1005,32 +994,29 @@ class Form(UIContainer):
         self._client_action: str | None = None
         self._field_columns: int | str | None = None
         self._close_on_submit: bool | None = None
-        self._data_source = None      # fields provider (schema-driven)
+        self._data_source = None  # fields provider (schema-driven)
 
-    def set_submit_action(self, action,
-                          require_account: bool = False) -> "Form":
+    def set_submit_action(self, action, require_account: bool = False) -> Form:
         """Register the submit callable (see set_action for the
         account-scoping marker)."""
         self._check_frozen("set the submit action")
-        self._submit_action = _require_callable(
-            action, "submit action", ActionRegistrationError)
-        self._action_require_account = _require_bool(require_account,
-                                                      "require_account")
+        self._submit_action = _require_callable(action, "submit action", ActionRegistrationError)
+        self._action_require_account = _require_bool(require_account, "require_account")
         return self
 
-    def set_submit_label(self, label: str) -> "Form":
+    def set_submit_label(self, label: str) -> Form:
         self._check_frozen("set the submit label")
         self._submit_label = _require_str(label, "submit label")
         return self
 
-    def set_close_on_submit(self, close: bool = True) -> "Form":
+    def set_close_on_submit(self, close: bool = True) -> Form:
         """Close the containing Modal after a successful submit (no
         field errors, success not False)."""
         self._check_frozen("set close_on_submit")
         self._close_on_submit = _require_bool(close, "close_on_submit")
         return self
 
-    def set_fields_provider(self, provider) -> "Form":
+    def set_fields_provider(self, provider) -> Form:
         """DYNAMIC fields: a callable returning ``{"fields": [def, …]}``
         where each def is ``{id, type, label, value?, placeholder?,
         description?, required?, options?, min?, max?, step?,
@@ -1049,7 +1035,7 @@ class Form(UIContainer):
         self._data_source = _require_callable(provider, "fields provider")
         return self
 
-    def set_columns(self, columns) -> "Form":
+    def set_columns(self, columns) -> Form:
         """Lay the FIELDS out in a grid (int 1–4, or "auto") instead of
         the default vertical stack — the difference between a compact
         form and a six-field tower."""
@@ -1059,12 +1045,11 @@ class Form(UIContainer):
             return self
         value = _require_int(columns, "columns")
         if value not in self._FORM_GRID_COLUMNS:
-            raise UIError(
-                f"form columns must be 1-4 (or 'auto'), got {value}")
+            raise UIError(f"form columns must be 1-4 (or 'auto'), got {value}")
         self._field_columns = value
         return self
 
-    def set_description(self, description: str) -> "Form":
+    def set_description(self, description: str) -> Form:
         self._check_frozen("set the description")
         self._description = _require_str(description, "description")
         return self
@@ -1074,7 +1059,7 @@ class Form(UIContainer):
     # field-grid columns: int 1-4, or "auto" (fills from ~220px)
     _FORM_GRID_COLUMNS = (1, 2, 3, 4)
 
-    def set_client_action(self, name: str) -> "Form":
+    def set_client_action(self, name: str) -> Form:
         """Handle submission CLIENT-side instead of a server action.
 
         Supported names: ``"save-token"`` — the dashboard's own session
@@ -1087,24 +1072,25 @@ class Form(UIContainer):
         self._check_frozen("set the client action")
         if name not in self._CLIENT_ACTIONS:
             raise UIError(
-                f"unknown client action {name!r} "
-                f"(one of {', '.join(self._CLIENT_ACTIONS)})")
+                f"unknown client action {name!r} (one of {', '.join(self._CLIENT_ACTIONS)})"
+            )
         self._client_action = name
         return self
 
-    def add_field(self, field) -> "Form":
+    def add_field(self, field) -> Form:
         self._check_frozen("add a field")
         self._check_child(field)
         self._add_child(field)
         return self
 
-    def add_fields(self, *fields) -> "Form":
+    def add_fields(self, *fields) -> Form:
         self._add_many(fields)
         return self
 
-    def remove_field(self, component_id: str) -> "Form":
+    def remove_field(self, component_id: str) -> Form:
         return self._remove_child_by_id(
-            component_id, expected_types=self._allowed_child_types, kind="field")
+            component_id, expected_types=self._allowed_child_types, kind="field"
+        )
 
     def fields(self) -> list:
         return list(self._children)
@@ -1152,7 +1138,7 @@ class Container(_ComponentParent):
         super().__init__(component_id=component_id, **kwargs)
         self._direction: str | None = None
 
-    def set_direction(self, direction) -> "Container":
+    def set_direction(self, direction) -> Container:
         """Which way children flow ("vertical" default | "horizontal")."""
         self._check_frozen("set the direction")
         self._direction = _require_choice(direction, self._DIRECTIONS, "direction")
@@ -1168,7 +1154,7 @@ class Container(_ComponentParent):
 class TileView(_Selectable, _Interactive):
     """A responsive grid of data-driven cards (tiles).
 
-    The provider returns ``{"tiles": [{key, title, tone?, status?, 
+    The provider returns ``{"tiles": [{key, title, tone?, status?,
     lines?: [[label, value], …], chips?: [str, …]}]}``. Per-tile actions
     (RowAction) and bulk selection work exactly like Table's — same
     key-column contract, same dispatch channels.
@@ -1185,26 +1171,25 @@ class TileView(_Selectable, _Interactive):
         self._selectable = False
         self._bulk_actions: list[BulkAction] = []
 
-    def set_data_source(self, data_source) -> "TileView":
+    def set_data_source(self, data_source) -> TileView:
         self._check_frozen("set the data source")
         self._data_source = _require_callable(data_source, "data_source")
         return self
 
-    def set_empty_text(self, text: str) -> "TileView":
+    def set_empty_text(self, text: str) -> TileView:
         self._check_frozen("set the empty text")
         self._empty_text = _require_str(text, "empty_text")
         return self
 
-    def set_key_column(self, column: str) -> "TileView":
+    def set_key_column(self, column: str) -> TileView:
         self._check_frozen("set the key column")
         self._key_column = _require_str(column, "key column")
         return self
 
-    def set_row_actions(self, actions) -> "TileView":
+    def set_row_actions(self, actions) -> TileView:
         self._check_frozen("set the row actions")
         if not isinstance(actions, list):
-            raise UIError(
-                f"row actions must be a list, got {type(actions).__name__}")
+            raise UIError(f"row actions must be a list, got {type(actions).__name__}")
         checked: list[RowAction] = []
         seen: set[str] = set()
         for entry in actions:
@@ -1225,12 +1210,11 @@ class TileView(_Selectable, _Interactive):
             prev = getattr(self, "_action", None)
             if prev is not None:
                 self._explicit_action = prev
-                self._explicit_require_account = getattr(
-                    self, "_action_require_account", False)
+                self._explicit_require_account = getattr(self, "_action_require_account", False)
             self.set_action(
                 self._dispatch_view_action,
-                require_account=bool(getattr(
-                    self, "_explicit_require_account", False)))
+                require_account=bool(getattr(self, "_explicit_require_account", False)),
+            )
         return self
 
     async def _dispatch_row_action(self, context, payload):
@@ -1253,16 +1237,14 @@ class TileView(_Selectable, _Interactive):
             props["key_column"] = self._key_column
         if self._row_actions:
             props["row_actions"] = [
-                {"id": a.id, "label": a.label,
-                 "variant": a.variant, "confirm": a.confirm}
+                {"id": a.id, "label": a.label, "variant": a.variant, "confirm": a.confirm}
                 for a in self._row_actions
             ]
         if self._selectable:
             props["selectable"] = True
         if self._bulk_actions:
             props["bulk_actions"] = [
-                {"id": a.id, "label": a.label,
-                 "variant": a.variant, "confirm": a.confirm}
+                {"id": a.id, "label": a.label, "variant": a.variant, "confirm": a.confirm}
                 for a in self._bulk_actions
             ]
         return props
@@ -1294,10 +1276,10 @@ class Grid(_ComponentParent):
 
     def __init__(self, *, component_id: str = "", **kwargs) -> None:
         super().__init__(component_id=component_id, **kwargs)
-        self._columns = None          # int 1-6 or "auto"
-        self._min_child: str | None = None   # css size (auto mode)
+        self._columns = None  # int 1-6 or "auto"
+        self._min_child: str | None = None  # css size (auto mode)
 
-    def set_columns(self, columns) -> "Grid":
+    def set_columns(self, columns) -> Grid:
         """Column count (int 1–6) or "auto" (with set_min_child)."""
         self._check_frozen("set the columns")
         if columns == "auto":
@@ -1309,7 +1291,7 @@ class Grid(_ComponentParent):
         self._columns = value
         return self
 
-    def set_min_child(self, min_child) -> "Grid":
+    def set_min_child(self, min_child) -> Grid:
         """Minimum child width in auto mode (CSS size; default 240px)."""
         self._check_frozen("set the min child")
         self._min_child = _validate_css_size(min_child, "min_child")
@@ -1341,13 +1323,13 @@ class Alert(UIComponent):
         self._value: str | None = None
         self._variant: str | None = None
 
-    def set_value(self, value) -> "Alert":
+    def set_value(self, value) -> Alert:
         """The message body."""
         self._check_frozen("set the value")
         self._value = _require_str(value, "value")
         return self
 
-    def set_variant(self, variant: str) -> "Alert":
+    def set_variant(self, variant: str) -> Alert:
         """Severity look + icon ("info"|"ok"|"warn"|"err")."""
         self._check_frozen("set the variant")
         self._variant = _require_choice(variant, self._VARIANTS, "variant")
@@ -1386,36 +1368,36 @@ class DisplayText(UIComponent):
         self._align: str | None = None
         self._monospace: bool | None = None
 
-    def set_value(self, value) -> "DisplayText":
+    def set_value(self, value) -> DisplayText:
         self._check_frozen("set the value")
         self._value = _require_str(value, "value")
         return self
 
-    def set_tone(self, tone: str) -> "DisplayText":
+    def set_tone(self, tone: str) -> DisplayText:
         """Color intent ("default"|"dim"|"ok"|"warn"|"err")."""
         self._check_frozen("set the tone")
         self._tone = _require_choice(tone, self._TONES, "tone")
         return self
 
-    def set_size(self, size: str) -> "DisplayText":
+    def set_size(self, size: str) -> DisplayText:
         """Type scale ("xs"|"sm"|"md"|"lg"|"xl")."""
         self._check_frozen("set the size")
         self._size = _require_choice(size, self._SIZES, "size")
         return self
 
-    def set_weight(self, weight: str) -> "DisplayText":
+    def set_weight(self, weight: str) -> DisplayText:
         """Font weight ("normal"|"medium"|"semibold"|"bold")."""
         self._check_frozen("set the weight")
         self._weight = _require_choice(weight, self._WEIGHTS, "weight")
         return self
 
-    def set_align(self, align: str) -> "DisplayText":
+    def set_align(self, align: str) -> DisplayText:
         """Self alignment of the text ("left"|"center"|"right")."""
         self._check_frozen("set the align")
         self._align = _require_choice(align, self._ALIGNS, "align")
         return self
 
-    def set_monospace(self, monospace: bool) -> "DisplayText":
+    def set_monospace(self, monospace: bool) -> DisplayText:
         self._check_frozen("set monospace")
         self._monospace = _require_bool(monospace, "monospace")
         return self
@@ -1438,8 +1420,7 @@ class DisplayText(UIComponent):
 
 
 # Pin the form's field types now that every field class exists.
-_FIELD_TYPES = (TextInput, NumberInput, Textarea, Select, RadioGroup,
-                MultiSelect, Checkbox, Toggle)
+_FIELD_TYPES = (TextInput, NumberInput, Textarea, Select, RadioGroup, MultiSelect, Checkbox, Toggle)
 Form._allowed_child_types = _FIELD_TYPES
 
 
@@ -1452,7 +1433,7 @@ class Section(_ComponentParent):
         super().__init__(component_id=component_id, **kwargs)
         self._description: str | None = None
 
-    def set_description(self, description: str) -> "Section":
+    def set_description(self, description: str) -> Section:
         self._check_frozen("set the description")
         self._description = _require_str(description, "description")
         return self
@@ -1478,7 +1459,7 @@ class Card(_ComponentParent):
         super().__init__(component_id=component_id, **kwargs)
         self._tone: str | None = None
 
-    def set_tone(self, tone) -> "Card":
+    def set_tone(self, tone) -> Card:
         """Decorative accent border ("info"|"ok"|"warn"|"err")."""
         self._check_frozen("set the tone")
         self._tone = _require_choice(tone, self._TONES, "tone")
@@ -1507,17 +1488,43 @@ class Column(_ComponentParent):
 # Section/Card accept every content component; Row/Column accept the same
 # set minus Row (no nested rows); Container additionally accepts other
 # Containers (explicit opt-in nesting — see its docstring).
-_CONTENT_CHILD_TYPES = (Card, Row, Column, Container, Toolbar, Grid,
-                        TileView, Alert, Text, DisplayText, Badge, Metric, Button,
-                        Checkbox, Toggle, TextInput, NumberInput, Textarea,
-                        Select, RadioGroup, MultiSelect, ListView, Table,
-                        Progress, Form, Separator, Description, Header, Footer)
+_CONTENT_CHILD_TYPES = (
+    Card,
+    Row,
+    Column,
+    Container,
+    Toolbar,
+    Grid,
+    TileView,
+    Alert,
+    Text,
+    DisplayText,
+    Badge,
+    Metric,
+    Button,
+    Checkbox,
+    Toggle,
+    TextInput,
+    NumberInput,
+    Textarea,
+    Select,
+    RadioGroup,
+    MultiSelect,
+    ListView,
+    Table,
+    Progress,
+    Form,
+    Separator,
+    Description,
+    Header,
+    Footer,
+)
 _FLOW_CHILD_TYPES = tuple(t for t in _CONTENT_CHILD_TYPES if t is not Row)
 Section._allowed_child_types = _CONTENT_CHILD_TYPES
 Card._allowed_child_types = _CONTENT_CHILD_TYPES
 Row._allowed_child_types = _FLOW_CHILD_TYPES
 Column._allowed_child_types = _FLOW_CHILD_TYPES
-Container._allowed_child_types = _FLOW_CHILD_TYPES   # incl. Containers: opt-in nesting
+Container._allowed_child_types = _FLOW_CHILD_TYPES  # incl. Containers: opt-in nesting
 Grid._allowed_child_types = _FLOW_CHILD_TYPES
 Toolbar._allowed_child_types = _FLOW_CHILD_TYPES
 
@@ -1532,24 +1539,25 @@ class Tab(UIContainer):
         super().__init__(component_id=component_id, **kwargs)
         self._icon: str | None = None
 
-    def set_icon(self, icon: str) -> "Tab":
+    def set_icon(self, icon: str) -> Tab:
         """Set the sidebar icon (SVG path data, narrow charset)."""
         self._check_frozen("set the icon")
         icon = _require_str(icon, "icon")
         if not _ComponentParent._ICON_RE.match(icon):
             raise UIError(
                 "icon must be SVG path data (letters MZLHVCSQTA, digits, "
-                "spaces, commas, dots, + and -)")
+                "spaces, commas, dots, + and -)"
+            )
         self._icon = icon
         return self
 
-    def add_section(self, section) -> "Tab":
+    def add_section(self, section) -> Tab:
         self._check_frozen("add a section")
         self._check_child(section)
         self._add_child(section)
         return self
 
-    def add_sections(self, *sections) -> "Tab":
+    def add_sections(self, *sections) -> Tab:
         self._add_many(sections)
         return self
 
@@ -1578,7 +1586,7 @@ class Modal(_ComponentParent):
         super().__init__(component_id=component_id, **kwargs)
         self._description: str | None = None
 
-    def set_description(self, description: str) -> "Modal":
+    def set_description(self, description: str) -> Modal:
         self._check_frozen("set the description")
         self._description = _require_str(description, "description")
         return self
@@ -1590,8 +1598,10 @@ class Modal(_ComponentParent):
         return props
 
 
-Modal._allowed_child_types = tuple(
-    t for t in _CONTENT_CHILD_TYPES if t is not TileView) + (TileView,)
+Modal._allowed_child_types = (
+    *tuple(t for t in _CONTENT_CHILD_TYPES if t is not TileView),
+    TileView,
+)
 
 
 class Page(UIContainer):
@@ -1608,23 +1618,24 @@ class Page(UIContainer):
         self._account_scoped: bool | None = None
         self._account_scoped: bool | None = None
 
-    def set_description(self, description: str) -> "Page":
+    def set_description(self, description: str) -> Page:
         self._check_frozen("set the description")
         self._description = _require_str(description, "description")
         return self
 
-    def set_icon(self, icon: str) -> "Page":
+    def set_icon(self, icon: str) -> Page:
         """Set the sidebar icon (SVG path data, narrow charset)."""
         self._check_frozen("set the icon")
         icon = _require_str(icon, "icon")
         if not _ComponentParent._ICON_RE.match(icon):
             raise UIError(
                 "icon must be SVG path data (letters MZLHVCSQTA, digits, "
-                "spaces, commas, dots, + and -)")
+                "spaces, commas, dots, + and -)"
+            )
         self._icon = icon
         return self
 
-    def set_account_scope(self, scoped: bool = True) -> "Page":
+    def set_account_scope(self, scoped: bool = True) -> Page:
         """Declare this page ACCOUNT-SCOPED: the dashboard shows an
         account picker in the page header and supplies the validated
         selection (with its services facade) to every action, provider
@@ -1633,45 +1644,45 @@ class Page(UIContainer):
         self._account_scoped = _require_bool(scoped, "account scope")
         return self
 
-    def set_order(self, order: int) -> "Page":
+    def set_order(self, order: int) -> Page:
         self._check_frozen("set the order")
         self._order = _require_int(order, "order")
         return self
 
-    def add_section(self, section) -> "Page":
+    def add_section(self, section) -> Page:
         self._check_frozen("add a section")
         self._check_child(section)
         self._add_child(section)
         return self
 
-    def add_sections(self, *sections) -> "Page":
+    def add_sections(self, *sections) -> Page:
         self._add_many(sections)
         return self
 
-    def add_modal(self, modal) -> "Page":
+    def add_modal(self, modal) -> Page:
         self._check_frozen("add a modal")
         self._check_child(modal)
         self._add_child(modal)
         return self
 
-    def add_modals(self, *modals) -> "Page":
+    def add_modals(self, *modals) -> Page:
         self._add_many(modals)
         return self
 
-    def add_tab(self, tab) -> "Page":
+    def add_tab(self, tab) -> Page:
         self._check_frozen("add a tab")
         self._check_child(tab)
         self._add_child(tab)
         return self
 
-    def add_tabs(self, *tabs) -> "Page":
+    def add_tabs(self, *tabs) -> Page:
         self._add_many(tabs)
         return self
 
-    def remove_section(self, component_id: str) -> "Page":
+    def remove_section(self, component_id: str) -> Page:
         return self._remove_child_by_id(component_id, expected_types=(Section,), kind="section")
 
-    def remove_tab(self, component_id: str) -> "Page":
+    def remove_tab(self, component_id: str) -> Page:
         return self._remove_child_by_id(component_id, expected_types=(Tab,), kind="tab")
 
     def sections(self) -> list:
@@ -1693,5 +1704,3 @@ class Page(UIContainer):
         if self._account_scoped is not None:
             props["account_scoped"] = self._account_scoped
         return props
-
-

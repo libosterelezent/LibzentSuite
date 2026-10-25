@@ -28,15 +28,19 @@ services as ``services.credentials`` (plugins keep reading
 ``.owner_user_ids`` / ``.mudae_bot_id``; the values now come from the
 admin-managed store, falling back to env when the DB value is unset).
 """
+
 from __future__ import annotations
 
 import logging
 import os
 import stat
 from pathlib import Path
-from typing import Dict, Mapping, Optional
+from typing import TYPE_CHECKING
 
 from .errors import CredentialsError  # ONE class (was defined twice)
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 LOG = logging.getLogger("libzent.credentials")
 
@@ -53,23 +57,23 @@ _remote_control_warned = False
 class Credentials:
     """Immutable-ish view over a parsed .env payload."""
 
-    def __init__(self, values: Mapping[str, str], path: Optional[Path] = None) -> None:
-        self._values: Dict[str, str] = {k: v for k, v in values.items() if v is not None}
+    def __init__(self, values: Mapping[str, str], path: Path | None = None) -> None:
+        self._values: dict[str, str] = {k: v for k, v in values.items() if v is not None}
         self._path = path
-        self._owner_ids: Optional[frozenset] = None  # parsed once, lazily
+        self._owner_ids: frozenset | None = None  # parsed once, lazily
 
     # ------------------------------------------------------------------ load
     @staticmethod
-    def parse_env(text: str) -> Dict[str, str]:
+    def parse_env(text: str) -> dict[str, str]:
         """Parse .env text: comments, blank lines, optional 'export ', quotes."""
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         text = text.lstrip("\ufeff")  # UTF-8 BOM (Windows editors) hides line 1's key
         for raw in text.splitlines():
             line = raw.strip()
             if not line or line.startswith("#"):
                 continue
             if line.startswith("export "):
-                line = line[len("export "):].lstrip()
+                line = line[len("export ") :].lstrip()
             if "=" not in line:
                 continue
             key, _, value = line.partition("=")
@@ -78,7 +82,7 @@ class Credentials:
             # would eat the very space that marks ' #' as a comment, so
             # 'KEY= # disabled' parsed as '# disabled' instead of ''
             cut = -1
-            if value.lstrip()[:1] not in ("\"", "'"):
+            if value.lstrip()[:1] not in ('"', "'"):
                 # unquoted value: ' # comment' ends it (a '#' with no space
                 # before it is part of the value, e.g. tokens/passwords)
                 cut = value.find(" #")
@@ -94,7 +98,7 @@ class Credentials:
         return out
 
     @classmethod
-    def from_file(cls, path: str | Path = ".env") -> "Credentials":
+    def from_file(cls, path: str | Path = ".env") -> Credentials:
         """Load credentials from a .env file; a missing file yields an empty set."""
         p = Path(path)
         if not p.is_file():
@@ -107,7 +111,8 @@ class Credentials:
             if stat.S_ISLNK(os.lstat(p).st_mode):
                 raise CredentialsError(
                     f"credentials file {p} is a symlink — refusing to "
-                    "follow it (remove the link or use a real file)")
+                    "follow it (remove the link or use a real file)"
+                )
         except OSError as exc:
             raise CredentialsError(f"cannot read credentials file {p}: {exc}") from exc
         try:
@@ -117,16 +122,16 @@ class Credentials:
         return cls(cls.parse_env(text), p)
 
     @classmethod
-    def from_values(cls, values: Mapping[str, str]) -> "Credentials":
+    def from_values(cls, values: Mapping[str, str]) -> Credentials:
         """Build credentials directly (tests/simulations with synthetic ids)."""
         return cls(values)
 
     # ----------------------------------------------------------------- access
-    def snapshot(self) -> Dict[str, str]:
+    def snapshot(self) -> dict[str, str]:
         """Copy of all parsed values (overlaying consumers never mutate us)."""
         return dict(self._values)
 
-    def get(self, key: str, default: Optional[str] = None) -> Optional[str]:
+    def get(self, key: str, default: str | None = None) -> str | None:
         """Raw string value or default."""
         return self._values.get(key, default)
 
@@ -139,7 +144,7 @@ class Credentials:
             )
         return value
 
-    def token_for(self, account_name: str) -> Optional[str]:
+    def token_for(self, account_name: str) -> str | None:
         """MIGRATION-ONLY: reads DISCORD_TOKEN_<NAME> from .env.
 
         Used exclusively by the explicit `credentials import-env`
@@ -166,8 +171,7 @@ class Credentials:
             # truncated repr: the raw value can be arbitrarily long and
             # must not be echoed wholesale into logs/errors
             shown = raw if len(raw) <= 40 else raw[:37] + "..."
-            raise CredentialsError(
-                f"MUDAE_BOT_ID is not an integer: {shown!r}") from exc
+            raise CredentialsError(f"MUDAE_BOT_ID is not an integer: {shown!r}") from exc
 
     @property
     def owner_user_ids(self) -> frozenset[int]:
@@ -200,14 +204,16 @@ class Credentials:
             except ValueError:
                 LOG.warning(
                     "OWNER_USER_IDS contains a non-integer: %r — remote "
-                    "control will reject every mention", part)
+                    "control will reject every mention",
+                    part,
+                )
                 self._owner_ids = frozenset()
                 return self._owner_ids
         self._owner_ids = frozenset(ids)
         return self._owner_ids
 
     @property
-    def dashboard_token(self) -> Optional[str]:
+    def dashboard_token(self) -> str | None:
         """Optional local auth token for the dashboard."""
         return self._values.get("DASHBOARD_TOKEN") or None
 
@@ -250,13 +256,15 @@ class Credentials:
             LOG.warning(
                 "REMOTE_CONTROL=%r is not a recognized value (expected "
                 "1/true/yes/on or 0/false/no/off) — remote control is "
-                "DISABLED (fail closed)", raw[:40])
+                "DISABLED (fail closed)",
+                raw[:40],
+            )
         return False
 
     # ---------------------------------------------------------------- display
-    def redacted(self) -> Dict[str, str]:
+    def redacted(self) -> dict[str, str]:
         """Human-safe copy: token-like values masked, never fully shown."""
-        safe: Dict[str, str] = {}
+        safe: dict[str, str] = {}
         for key, value in self._values.items():
             if not value:
                 safe[key] = ""
@@ -269,7 +277,7 @@ class Credentials:
     def __repr__(self) -> str:  # safety net for accidental log of secrets
         return f"<Credentials path={self._path!r} keys={sorted(self._values)} redacted>"
 
-    def source_path(self) -> Optional[Path]:
+    def source_path(self) -> Path | None:
         """File the values came from, if any."""
         return self._path
 

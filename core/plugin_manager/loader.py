@@ -25,6 +25,7 @@ All discovery failures raise :class:`core.errors.PluginError` with a
 human-readable message (the old loader's PluginLoadError folded into the
 shared domain error vocabulary).
 """
+
 from __future__ import annotations
 
 import importlib
@@ -36,18 +37,15 @@ import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Type
 
 from ..errors import PluginError
+from ..names import PLUGIN_NAME_RE as _NAME_RE
 from ..plugin_base import ArgSpec, CommandSpec, PluginBase
 
 LOG = logging.getLogger("libzent.loader")
 
 #: unique synthetic parent package names across repeated scans (tests)
 _PARENT_SEQ = itertools.count()
-
-#: the only legal plugin slugs: lowercase ascii, digits, underscore, dash
-from ..names import PLUGIN_NAME_RE as _NAME_RE
 
 #: the only legal self-command names: lowercase ascii, digits, underscore
 #: (Discord command names; no dash, no spaces, bounded length)
@@ -59,7 +57,7 @@ class PluginRecord:
     """A discovered plugin: metadata class + where it came from."""
 
     name: str
-    cls: Type[PluginBase]
+    cls: type[PluginBase]
     source: Path
 
 
@@ -73,14 +71,14 @@ class PluginLoader:
 
     def __init__(self, plugin_dir: str | Path) -> None:
         self._dir = Path(plugin_dir)
-        self._records: Dict[str, PluginRecord] = {}
+        self._records: dict[str, PluginRecord] = {}
         self._discovered = False
         #: synthetic parents THIS loader created (purged on rescan — see
         #: ``_purge_stale_parents``; per-loader so parallel loaders on
         #: other dirs never touch each other's modules)
-        self._parent_names: List[str] = []
+        self._parent_names: list[str] = []
 
-    def _purge_stale_parents(self, parents: Optional[List[str]] = None) -> None:
+    def _purge_stale_parents(self, parents: list[str] | None = None) -> None:
         """Drop THIS loader's previous synthetic parents from sys.modules.
 
         Every discover() builds a fresh parent (unique via ``_PARENT_SEQ``);
@@ -94,10 +92,7 @@ class PluginLoader:
             self._parent_names = []
         for parent in parents:
             for modname in [
-                m for m in sys.modules
-                if m == parent
-                or m.startswith(parent + ".")
-                or m.startswith(parent + "_")
+                m for m in sys.modules if m == parent or m.startswith((parent + ".", parent + "_"))
             ]:
                 sys.modules.pop(modname, None)
 
@@ -107,7 +102,7 @@ class PluginLoader:
         return self._dir
 
     # ------------------------------------------------------------ discovery
-    def discover(self) -> Dict[str, PluginRecord]:
+    def discover(self) -> dict[str, PluginRecord]:
         """Scan the plugin dir; returns ``name -> record`` (fresh scan).
 
         Raises PluginError when the directory is missing, a module cannot
@@ -121,8 +116,7 @@ class PluginLoader:
         try:
             entries = sorted(self._dir.iterdir())
         except OSError as exc:
-            raise PluginError(
-                f"cannot list plugin directory {self._dir}: {exc}") from exc
+            raise PluginError(f"cannot list plugin directory {self._dir}: {exc}") from exc
         # snapshot the previous generation: a FAILED re-scan restores it
         # (records AND its synthetic modules — the previous generation's
         # lazy relative imports keep working) instead of bricking every
@@ -139,7 +133,7 @@ class PluginLoader:
         parent = types.ModuleType(parent_name)
         parent.__path__ = [str(self._dir)]
         sys.modules[parent_name] = parent
-        candidates: List[tuple] = []
+        candidates: list[tuple] = []
         for entry in entries:
             if entry.name.startswith(("_", ".")):
                 continue
@@ -169,8 +163,7 @@ class PluginLoader:
                         and issubclass(attr, PluginBase)
                         and attr is not PluginBase
                         and (
-                            attr.__module__ == module.__name__
-                            or attr.__module__.startswith(prefix)
+                            attr.__module__ == module.__name__ or attr.__module__.startswith(prefix)
                         )
                     ):
                         self._register(attr, path)
@@ -195,7 +188,9 @@ class PluginLoader:
         self._discovered = True
         LOG.info(
             "discovered %d plugin(s) in %s: %s",
-            len(self._records), self._dir, sorted(self._records),
+            len(self._records),
+            self._dir,
+            sorted(self._records),
         )
         return dict(self._records)
 
@@ -216,7 +211,7 @@ class PluginLoader:
             raise PluginError(f"error importing plugin {path}: {exc}") from exc
         return module
 
-    def _register(self, cls: Type[PluginBase], path: Path) -> None:
+    def _register(self, cls: type[PluginBase], path: Path) -> None:
         """Validate one candidate class and record it under its slug.
 
         Raises PluginError for a missing/invalid name, a duplicate setting
@@ -237,13 +232,11 @@ class PluginLoader:
         self._validate_commands(cls, name, path)
         if name in self._records:
             raise PluginError(
-                f"duplicate plugin name {name!r} "
-                f"({path} vs {self._records[name].source})"
+                f"duplicate plugin name {name!r} ({path} vs {self._records[name].source})"
             )
         self._records[name] = PluginRecord(name=name, cls=cls, source=path)
 
-    def _validate_commands(self, cls: Type[PluginBase], name: str,
-                           path: Path) -> None:
+    def _validate_commands(self, cls: type[PluginBase], name: str, path: Path) -> None:
         """Validate a plugin's declared self-commands at discovery.
 
         Fail-fast (same convention as duplicate setting keys): an invalid
@@ -257,46 +250,52 @@ class PluginLoader:
         if not isinstance(commands, tuple):
             raise PluginError(
                 f"plugin {name!r}: COMMANDS must be a tuple of CommandSpec"
-                f" (got {type(commands).__name__}) in {path}")
+                f" (got {type(commands).__name__}) in {path}"
+            )
         seen: set = set()
         for spec in commands:
             if not isinstance(spec, CommandSpec):
                 raise PluginError(
                     f"plugin {name!r}: COMMANDS entries must be CommandSpec"
-                    f" (got {type(spec).__name__}) in {path}")
+                    f" (got {type(spec).__name__}) in {path}"
+                )
             if not COMMAND_NAME_RE.fullmatch(spec.name or ""):
                 raise PluginError(
                     f"plugin {name!r}: command name {spec.name!r} must be"
-                    f" lowercase [a-z0-9_] (max 32) in {path}")
+                    f" lowercase [a-z0-9_] (max 32) in {path}"
+                )
             if spec.name in seen:
                 raise PluginError(
-                    f"plugin {name!r} declares duplicate command"
-                    f" {spec.name!r} in {path}")
+                    f"plugin {name!r} declares duplicate command {spec.name!r} in {path}"
+                )
             if not callable(spec.handler):
                 raise PluginError(
-                    f"plugin {name!r}: command {spec.name!r} has no callable"
-                    f" handler in {path}")
+                    f"plugin {name!r}: command {spec.name!r} has no callable handler in {path}"
+                )
             if not (spec.help or "").strip():
                 raise PluginError(
-                    f"plugin {name!r}: command {spec.name!r} needs a help"
-                    f" line in {path}")
+                    f"plugin {name!r}: command {spec.name!r} needs a help line in {path}"
+                )
             for arg in spec.args:
                 if not isinstance(arg, ArgSpec):
                     raise PluginError(
                         f"plugin {name!r}: command {spec.name!r} args must"
-                        f" be ArgSpec (got {type(arg).__name__}) in {path}")
+                        f" be ArgSpec (got {type(arg).__name__}) in {path}"
+                    )
                 if not (arg.name or "").strip():
                     raise PluginError(
                         f"plugin {name!r}: command {spec.name!r} declares"
-                        f" an ArgSpec with an empty name in {path}")
+                        f" an ArgSpec with an empty name in {path}"
+                    )
                 if arg.greedy and arg is not spec.args[-1]:
                     raise PluginError(
                         f"plugin {name!r}: command {spec.name!r} greedy"
-                        f" ArgSpec {arg.name!r} must be LAST in {path}")
+                        f" ArgSpec {arg.name!r} must be LAST in {path}"
+                    )
             seen.add(spec.name)
 
     # ------------------------------------------------------------- accessors
-    def names(self) -> List[str]:
+    def names(self) -> list[str]:
         """Sorted plugin names (discovers lazily on first call)."""
         if not self._discovered:
             self.discover()
@@ -309,15 +308,13 @@ class PluginLoader:
         try:
             return self._records[name]
         except KeyError as exc:
-            raise PluginError(
-                f"unknown plugin {name!r} (known: {self.names()})"
-            ) from exc
+            raise PluginError(f"unknown plugin {name!r} (known: {self.names()})") from exc
 
     def create(self, name: str) -> PluginBase:
         """Fresh instance of a plugin (one per account/plugin pair)."""
         return self.record(name).cls()
 
-    def manifests(self) -> List[dict]:
+    def manifests(self) -> list[dict]:
         """JSON-safe manifests (metadata + settings schema) for CLI/UI."""
         if not self._discovered:
             self.discover()
@@ -332,4 +329,4 @@ class PluginLoader:
         ]
 
 
-__all__ = ["PluginLoader", "PluginRecord", "COMMAND_NAME_RE"]
+__all__ = ["COMMAND_NAME_RE", "PluginLoader", "PluginRecord"]

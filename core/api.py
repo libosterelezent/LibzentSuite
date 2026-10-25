@@ -55,24 +55,25 @@ Manager migration note: the managers are moving to aiosqlite-backed async
 persistence; call sites below tolerate BOTH sync and async manager results
 through ``_resolved()`` so this facade keeps working at every step.
 """
+
 from __future__ import annotations
 
 import asyncio
 import inspect
 import logging
 import time as _time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
+from . import plugin_scopes
 from .dashboard_ui.context import ActionContext, CheckContext
 from .dashboard_ui.errors import UIError
 from .errors import DatabaseError, PluginError, SyncGroupError
-from . import plugin_scopes
-from .rate_limit_manager.policies import parse_scope
 from .rate_limit_manager import (
     KV_FLOOR_KEY,
     KV_LANE_KEY,
     KV_REMOVED_KEY,
 )
+from .rate_limit_manager.policies import parse_scope
 
 if TYPE_CHECKING:  # duck-typed at runtime — no manager imports here
     from .account_manager import AccountManager
@@ -124,22 +125,22 @@ class ControlAPI:
     def __init__(
         self,
         *,
-        accounts: "AccountManager",
-        plugins: "PluginManager",
-            settings: "SettingsManager",
-        limiter: "RateLimitManager",
-        scheduler: "TaskScheduler",
-        logs: "LogService",
-        audit: Optional["AuditRecorder"] = None,
-        simulation: Any = None,          # adapters.simulator.runner.SimulationRunner
-        credentials: Optional["Credentials"] = None,
+        accounts: AccountManager,
+        plugins: PluginManager,
+        settings: SettingsManager,
+        limiter: RateLimitManager,
+        scheduler: TaskScheduler,
+        logs: LogService,
+        audit: AuditRecorder | None = None,
+        simulation: Any = None,  # adapters.simulator.runner.SimulationRunner
+        credentials: Credentials | None = None,
         database: Any = None,
-        credentials_svc: Optional["CredentialService"] = None,
-        cooldowns: Optional["CooldownService"] = None,
+        credentials_svc: CredentialService | None = None,
+        cooldowns: CooldownService | None = None,
         sync_groups: Any = None,
-        fleet: Any = None,              # core.fleet.FleetService (PHASE 9)
-        plugin_data: Any = None,        # database.plugin_data.PluginDataStore (PHASE 10)
-        access: Any = None,              # core.access_manager.AccessManager
+        fleet: Any = None,  # core.fleet.FleetService (PHASE 9)
+        plugin_data: Any = None,  # database.plugin_data.PluginDataStore (PHASE 10)
+        access: Any = None,  # core.access_manager.AccessManager
         started_at: float = 0.0,
         reconcile_interval_s: float = 30.0,
     ) -> None:
@@ -174,7 +175,7 @@ class ControlAPI:
         self._tombstone_lock = asyncio.Lock()
 
     # ---------------------------------------------------------------- status
-    async def status(self) -> Dict[str, Any]:
+    async def status(self) -> dict[str, Any]:
         """Overview snapshot: accounts + rate limits + tasks + warnings.
 
         Account rows are enriched with their credential status
@@ -214,9 +215,7 @@ class ControlAPI:
         except Exception:
             LOG.debug("status reconciliation failed", exc_info=True)
 
-    async def _enrich_accounts(
-        self, accounts: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+    async def _enrich_accounts(self, accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Add 'credential' + 'cooldowns' to manager status dicts (in place)."""
         if not isinstance(accounts, list):
             return accounts
@@ -237,12 +236,11 @@ class ControlAPI:
             except Exception:
                 counts = {}
             for account in accounts:
-                if isinstance(account, dict) and account.get("name") \
-                        and "cooldowns" not in account:
+                if isinstance(account, dict) and account.get("name") and "cooldowns" not in account:
                     account["cooldowns"] = counts.get(account["name"], 0)
         return accounts
 
-    def _credential_state(self, name: str) -> Optional[str]:
+    def _credential_state(self, name: str) -> str | None:
         """'db' | 'missing' | None (no service wired). Never a value.
 
         ('env' no longer exists at runtime — the encrypted store is the
@@ -256,14 +254,12 @@ class ControlAPI:
             return None
 
     # -------------------------------------------------------------- accounts
-    async def accounts_list(self) -> List[Dict[str, Any]]:
+    async def accounts_list(self) -> list[dict[str, Any]]:
         """Every account: name, discord id (when running), status,
         credential status and active-cooldown count."""
         return await self._enrich_accounts(await self._accounts.accounts())
 
-    async def accounts_add(
-        self, payload: Dict[str, Any], surface: str = "api"
-    ) -> Dict[str, Any]:
+    async def accounts_add(self, payload: dict[str, Any], surface: str = "api") -> dict[str, Any]:
         """Register + persist an account; optionally store its credential.
 
         payload: {name (required), token_ref?, sync_group?, enabled?,
@@ -280,8 +276,7 @@ class ControlAPI:
         """
         if not isinstance(payload, dict) or not payload.get("name"):
             raise ValueError("account payload needs at least {'name': ...}")
-        allowed = {"name", "token_ref", "sync_group", "enabled", "plugins",
-                   "credential"}
+        allowed = {"name", "token_ref", "sync_group", "enabled", "plugins", "credential"}
         unknown = set(payload) - allowed
         if unknown:
             raise ValueError(f"unknown account payload keys: {sorted(unknown)}")
@@ -299,16 +294,17 @@ class ControlAPI:
             credential = credential.strip()
             if self._credentials_svc is None:
                 raise RuntimeError(
-                    "a credential was supplied but credential storage is not "
-                    "configured on this api"
+                    "a credential was supplied but credential storage is not configured on this api"
                 )
-        out = await _resolved(self._accounts.add_account(
-            payload["name"],
-            token_ref=payload.get("token_ref"),
-            enabled=enabled,
-            sync_group=payload.get("sync_group"),
-            plugins=plugins or None,
-        ))
+        out = await _resolved(
+            self._accounts.add_account(
+                payload["name"],
+                token_ref=payload.get("token_ref"),
+                enabled=enabled,
+                sync_group=payload.get("sync_group"),
+                plugins=plugins or None,
+            )
+        )
         name = out.get("name", payload["name"]) if isinstance(out, dict) else payload["name"]
         self._audit_mgmt(name, "mgmt:account.created", surface)
         if credential is not None:
@@ -322,7 +318,7 @@ class ControlAPI:
                 out["credential"] = self._credential_state(name)
         return out
 
-    async def accounts_remove(self, name: str, surface: str = "api") -> Dict[str, Any]:
+    async def accounts_remove(self, name: str, surface: str = "api") -> dict[str, Any]:
         """Remove a STOPPED account from runtime + database (cascade).
 
         Cascade (spec §32): the account's stored credential and every one
@@ -335,13 +331,10 @@ class ControlAPI:
         delete the NEW account's credential/cooldown/access state.
         """
         out = await _resolved(self._accounts.remove_account(name))
-        if isinstance(out, dict) and (
-            out.get("recreated") or not out.get("removed", True)
-        ):
+        if isinstance(out, dict) and (out.get("recreated") or not out.get("removed", True)):
             # the manager preserved a re-created same-named account —
             # cascading now would destroy ITS state
-            self._audit_mgmt(name, "mgmt:account.remove-aborted", surface,
-                             extra="recreated=true")
+            self._audit_mgmt(name, "mgmt:account.remove-aborted", surface, extra="recreated=true")
             return out
         self._audit_mgmt(name, "mgmt:account.removed", surface)
         # Access row cascade: clear the admin/perms/prefix row so the
@@ -369,37 +362,29 @@ class ControlAPI:
                 LOG.exception("cooldown cascade failed for %r", name)
         return out
 
-    async def accounts_info(self, name: str) -> Dict[str, Any]:
+    async def accounts_info(self, name: str) -> dict[str, Any]:
         """Account details page (spec §8): status/identity/runtime/plugins/rate."""
         out = await _resolved(self._accounts.details(name))
         if isinstance(out, dict) and "credential" not in out:
             out["credential"] = self._credential_state(out.get("name", name))
         return out
 
-    async def accounts_enable(self, name: str, enabled: bool) -> Dict[str, Any]:
-        return await _resolved(
-            self._accounts.set_enabled(name, parse_bool(enabled, "enabled"))
-        )
+    async def accounts_enable(self, name: str, enabled: bool) -> dict[str, Any]:
+        return await _resolved(self._accounts.set_enabled(name, parse_bool(enabled, "enabled")))
 
-    async def accounts_start(
-        self, name: Optional[str] = None, surface: str = "api"
-    ) -> Dict[str, Any]:
+    async def accounts_start(self, name: str | None = None, surface: str = "api") -> dict[str, Any]:
         """Start one account (None = every enabled account)."""
         out = await self._accounts.start(name) if name else await self._accounts.start_all()
         self._audit_mgmt(name or "system", "mgmt:account.started", surface)
         return out
 
-    async def accounts_stop(
-        self, name: Optional[str] = None, surface: str = "api"
-    ) -> Dict[str, Any]:
+    async def accounts_stop(self, name: str | None = None, surface: str = "api") -> dict[str, Any]:
         """Stop one account (None = all) — graceful."""
         out = await self._accounts.stop(name) if name else await self._accounts.stop_all()
         self._audit_mgmt(name or "system", "mgmt:account.stopped", surface)
         return out
 
-    async def accounts_emergency_stop(
-        self, name: str, surface: str = "api"
-    ) -> Dict[str, Any]:
+    async def accounts_emergency_stop(self, name: str, surface: str = "api") -> dict[str, Any]:
         """Account-scoped emergency stop: cancel its tasks NOW + disconnect."""
         out = await _resolved(self._accounts.emergency_stop(name))
         self._audit_mgmt(name, "mgmt:account.estop", surface)
@@ -411,13 +396,13 @@ class ControlAPI:
     # the account manager (which keeps its in-memory record authoritative
     # and re-runs the attach), so a RUNNING account's plugin set follows
     # instantly — no next-start semantics.
-    async def accounts_plugins_list(self, account: str) -> List[str]:
+    async def accounts_plugins_list(self, account: str) -> list[str]:
         """Sorted plugin names assigned to the account."""
         return await _resolved(self._accounts.assigned_plugins(account))
 
     async def accounts_plugin_assign(
         self, account: str, plugin: str, surface: str = "api"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Assign ONE plugin to an account (idempotent; re-attaches NOW).
 
         Raises:
@@ -428,49 +413,50 @@ class ControlAPI:
         self._validate_account_known(account)
         self._validate_plugins_known([plugin])
         await _resolved(self._accounts.assign_plugin(account, plugin))
-        self._audit_mgmt(account, "mgmt:account.plugin_assigned", surface,
-                         extra=f"plugin={plugin}")
+        self._audit_mgmt(account, "mgmt:account.plugin_assigned", surface, extra=f"plugin={plugin}")
         return {"account": account, "plugin": plugin}
 
     async def accounts_plugin_unassign(
         self, account: str, plugin: str, surface: str = "api"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Remove ONE plugin assignment (idempotent; re-attaches NOW).
 
         ``existed`` reports the pre-state (False when the plugin was not
         assigned — not an error).
         """
         self._validate_account_known(account)
-        existed = bool(await _resolved(
-            self._accounts.unassign_plugin(account, plugin)))
-        self._audit_mgmt(account, "mgmt:account.plugin_unassigned", surface,
-                         extra=f"plugin={plugin} existed={existed}")
+        existed = bool(await _resolved(self._accounts.unassign_plugin(account, plugin)))
+        self._audit_mgmt(
+            account,
+            "mgmt:account.plugin_unassigned",
+            surface,
+            extra=f"plugin={plugin} existed={existed}",
+        )
         return {"account": account, "plugin": plugin, "existed": existed}
 
     async def accounts_plugins_set(
-        self, account: str, plugins: List[str], surface: str = "api"
-    ) -> Dict[str, Any]:
+        self, account: str, plugins: list[str], surface: str = "api"
+    ) -> dict[str, Any]:
         """REPLACE the account's whole assignment set (re-attaches NOW).
 
         ALL names are validated BEFORE anything is written: an unknown
         name rejects the whole call (all-or-nothing), never a partial set.
         """
-        if not isinstance(plugins, (list, tuple)) or not all(
-                isinstance(p, str) for p in plugins):
+        if not isinstance(plugins, (list, tuple)) or not all(isinstance(p, str) for p in plugins):
             raise ValueError(f"'plugins' must be a list of strings, got {plugins!r}")
         self._validate_account_known(account)
         self._validate_plugins_known(list(plugins))
-        stored = list(await _resolved(
-            self._accounts.set_account_plugins(account, list(plugins))))
-        self._audit_mgmt(account, "mgmt:account.plugin_set", surface,
-                         extra=f"plugins={len(stored)}")
+        stored = list(await _resolved(self._accounts.set_account_plugins(account, list(plugins))))
+        self._audit_mgmt(
+            account, "mgmt:account.plugin_set", surface, extra=f"plugins={len(stored)}"
+        )
         return {"account": account, "plugins": stored}
 
     def _validate_account_known(self, account: str) -> None:
         """AccountError when the account is not registered (typo trap)."""
         self._accounts.get(account)
 
-    def _validate_plugins_known(self, plugins: List[str]) -> None:
+    def _validate_plugins_known(self, plugins: list[str]) -> None:
         """Reject unknown plugin names up front with the discovered list.
 
         The discovered/installed set comes from the plugin manager (the
@@ -481,18 +467,21 @@ class ControlAPI:
         known = self._known_plugin_names()
         unknown = [p for p in plugins if p not in known]
         if unknown:
-            raise ValueError(
-                f"unknown plugin(s) {unknown} (known plugins: {known})"
-            )
+            raise ValueError(f"unknown plugin(s) {unknown} (known plugins: {known})")
 
-    def _known_plugin_names(self) -> List[str]:
+    def _known_plugin_names(self) -> list[str]:
         """Sorted discovered plugin names (typo-trap source of truth)."""
         try:
             names = getattr(self._plugins, "names", None)
             if callable(names):
                 return sorted(set(names() or []))
-            return sorted({m.get("name") for m in self._plugins.manifests()
-                           if isinstance(m, dict) and m.get("name")})
+            return sorted(
+                {
+                    m.get("name")
+                    for m in self._plugins.manifests()
+                    if isinstance(m, dict) and m.get("name")
+                }
+            )
         except Exception:
             LOG.exception("could not list discovered plugins")
             return []
@@ -509,6 +498,7 @@ class ControlAPI:
         if callable(getter):
             return tuple(getter(plugin))
         from .settings_manager import Setting
+
         for manifest in self._plugins.manifests():
             if not (isinstance(manifest, dict) and manifest.get("name") == plugin):
                 continue
@@ -516,17 +506,20 @@ class ControlAPI:
             for entry in manifest.get("settings") or []:
                 if not isinstance(entry, dict) or not entry.get("name"):
                     continue
-                settings.append(Setting(
-                    entry["name"], entry.get("type", "str"),
-                    entry.get("default"), entry.get("description", ""),
-                    min_value=entry.get("min"), max_value=entry.get("max"),
-                ))
+                settings.append(
+                    Setting(
+                        entry["name"],
+                        entry.get("type", "str"),
+                        entry.get("default"),
+                        entry.get("description", ""),
+                        min_value=entry.get("min"),
+                        max_value=entry.get("max"),
+                    )
+                )
             return tuple(settings)
         raise ValueError(f"unknown plugin {plugin!r} (no schema available)")
 
-    def _validate_profile_settings(
-        self, plugin: str, settings: Any
-    ) -> Dict[str, Any]:
+    def _validate_profile_settings(self, plugin: str, settings: Any) -> dict[str, Any]:
         """Validate a profile's settings dict against the plugin's schema.
 
         Same validation path as /api/plugins/set-setting: unknown keys
@@ -548,7 +541,7 @@ class ControlAPI:
                 f"unknown setting key(s) {unknown} for plugin {plugin!r} "
                 f"(known: {sorted(defs)}; reserved: [{reserved!r}])"
             )
-        cleaned: Dict[str, Any] = {}
+        cleaned: dict[str, Any] = {}
         for key, value in settings.items():
             if key == reserved:
                 continue
@@ -565,25 +558,24 @@ class ControlAPI:
     # and enforces "binding requires assignment" (accounts_plugin_profile).
     def _profile_repo(self) -> Any:
         """PluginProfilesRepository, or None on stacks without a database."""
-        return getattr(self._database, "plugin_profiles", None) \
-            if self._database is not None else None
+        return (
+            getattr(self._database, "plugin_profiles", None) if self._database is not None else None
+        )
 
     def _require_profile_repo(self) -> Any:
         """Honest failure on stacks built without profile storage."""
         repo = self._profile_repo()
         if repo is None:
-            raise RuntimeError(
-                "plugin profiles are not configured on this api")
+            raise RuntimeError("plugin profiles are not configured on this api")
         return repo
 
     def _binding_repo(self) -> Any:
         """AccountPluginsRepository (bindings), or None without a database."""
-        return getattr(self._database, "account_plugins", None) \
-            if self._database is not None else None
+        return (
+            getattr(self._database, "account_plugins", None) if self._database is not None else None
+        )
 
-    async def plugin_profiles_list(
-        self, plugin: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+    async def plugin_profiles_list(self, plugin: str | None = None) -> list[dict[str, Any]]:
         """Every profile (or one plugin's), plugin-then-name order.
 
         Each row: plugin, name, description, settings, created_at,
@@ -592,17 +584,16 @@ class ControlAPI:
         repo = self._profile_repo()
         if repo is None:
             return []
-        return [record.to_dict()
-                for record in await _resolved(repo.list(plugin))]
+        return [record.to_dict() for record in await _resolved(repo.list(plugin))]
 
     async def plugin_profile_create(
         self,
         plugin: str,
         name: str,
         description: str = "",
-        settings: Optional[Dict[str, Any]] = None,
+        settings: dict[str, Any] | None = None,
         surface: str = "api",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Create one plugin profile (settings validated against schema).
 
         Raises:
@@ -619,19 +610,21 @@ class ControlAPI:
         self._validate_plugins_known([plugin])
         cleaned = self._validate_profile_settings(plugin, settings)
         try:
-            record = await repo.create(
-                plugin, name.strip(), description, cleaned)
+            record = await repo.create(plugin, name.strip(), description, cleaned)
         except DatabaseError as exc:
             # duplicate (plugin, name) is a client conflict, not a 500 —
             # mirror the update path's conversion
             if "already exists" in str(exc):
                 raise ValueError(
-                    f"profile {name.strip()!r} already exists for plugin "
-                    f"{plugin!r}") from exc
+                    f"profile {name.strip()!r} already exists for plugin {plugin!r}"
+                ) from exc
             raise
         self._audit_mgmt(
-            "system", "mgmt:plugin_profile.created", surface,
-            extra=f"plugin={plugin} profile={record.name}")
+            "system",
+            "mgmt:plugin_profile.created",
+            surface,
+            extra=f"plugin={plugin} profile={record.name}",
+        )
         return record.to_dict()
 
     async def plugin_profile_update(
@@ -639,11 +632,11 @@ class ControlAPI:
         plugin: str,
         name: str,
         *,
-        name_new: Optional[str] = None,
-        description: Optional[str] = None,
-        settings: Optional[Dict[str, Any]] = None,
+        name_new: str | None = None,
+        description: str | None = None,
+        settings: dict[str, Any] | None = None,
         surface: str = "api",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Update name/description/settings of one profile.
 
         At least one field is required; a rename refuses an existing
@@ -654,12 +647,9 @@ class ControlAPI:
         repo = self._require_profile_repo()
         if name_new is None and description is None and settings is None:
             raise ValueError(
-                "profile update needs at least one of "
-                "{'name_new', 'description', 'settings'}"
+                "profile update needs at least one of {'name_new', 'description', 'settings'}"
             )
-        if name_new is not None and (
-            not isinstance(name_new, str) or not name_new.strip()
-        ):
+        if name_new is not None and (not isinstance(name_new, str) or not name_new.strip()):
             raise ValueError("field 'name_new' must be a non-empty string")
         if description is not None and not isinstance(description, str):
             raise ValueError("field 'description' must be a string")
@@ -667,35 +657,34 @@ class ControlAPI:
         current = await repo.get(plugin, name)
         if current is None:
             known = [record.name for record in await repo.list(plugin)]
-            raise ValueError(
-                f"unknown profile {name!r} for plugin {plugin!r} "
-                f"(known: {known})")
-        cleaned = None if settings is None \
-            else self._validate_profile_settings(plugin, settings)
+            raise ValueError(f"unknown profile {name!r} for plugin {plugin!r} (known: {known})")
+        cleaned = None if settings is None else self._validate_profile_settings(plugin, settings)
         try:
             updated = await repo.update(
-                plugin, name, name_new=name_new, description=description,
-                settings=cleaned)
+                plugin, name, name_new=name_new, description=description, settings=cleaned
+            )
         except DatabaseError as exc:
             if "already exists" in str(exc):
                 raise ValueError(str(exc)) from exc  # 400, not a db fault
             raise
         if updated is None:  # vanished mid-update (never silent)
-            raise ValueError(
-                f"profile {name!r} of plugin {plugin!r} disappeared mid-update")
+            raise ValueError(f"profile {name!r} of plugin {plugin!r} disappeared mid-update")
         if updated.name != current.name:
             # the rename cascade moved every bound account's pointer in
             # the DB — the in-memory records must follow (F3 pattern)
             await self._refresh_all_plugin_profiles()
         await self._refresh_live_settings(None, plugin)
         self._audit_mgmt(
-            "system", "mgmt:plugin_profile.updated", surface,
-            extra=f"plugin={plugin} profile={updated.name}")
+            "system",
+            "mgmt:plugin_profile.updated",
+            surface,
+            extra=f"plugin={plugin} profile={updated.name}",
+        )
         return updated.to_dict()
 
     async def plugin_profile_delete(
         self, plugin: str, name: str, surface: str = "api"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Delete one profile; its account bindings cascade to NULL.
 
         Idempotent: deleting a missing profile reports ``existed=False``
@@ -707,17 +696,20 @@ class ControlAPI:
             await self._refresh_all_plugin_profiles()
             await self._refresh_live_settings(None, plugin)
         self._audit_mgmt(
-            "system", "mgmt:plugin_profile.deleted", surface,
-            extra=f"plugin={plugin} profile={name} existed={existed}")
+            "system",
+            "mgmt:plugin_profile.deleted",
+            surface,
+            extra=f"plugin={plugin} profile={name} existed={existed}",
+        )
         return {"plugin": plugin, "profile": name, "existed": existed}
 
     async def accounts_plugin_profile(
         self,
         account: str,
         plugin: str,
-        profile: Optional[str],
+        profile: str | None,
         surface: str = "api",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Bind (or clear: profile=None) the account's profile for a plugin.
 
         Binding REQUIRES the plugin to be assigned to the account (an
@@ -728,13 +720,10 @@ class ControlAPI:
         """
         repo = self._require_profile_repo()
         if self._binding_repo() is None:
-            raise RuntimeError(
-                "plugin profile storage is not configured on this api")
+            raise RuntimeError("plugin profile storage is not configured on this api")
         self._validate_account_known(account)
         self._validate_plugins_known([plugin])
-        if profile is not None and (
-            not isinstance(profile, str) or not profile.strip()
-        ):
+        if profile is not None and (not isinstance(profile, str) or not profile.strip()):
             raise ValueError("field 'profile' must be a non-empty string or null")
         assigned = await self._assigned_plugins(account)
         if plugin not in assigned:
@@ -748,32 +737,31 @@ class ControlAPI:
             if record is None:
                 known = [row.name for row in await repo.list(plugin)]
                 raise ValueError(
-                    f"unknown profile {profile!r} for plugin {plugin!r} "
-                    f"(known: {known})")
+                    f"unknown profile {profile!r} for plugin {plugin!r} (known: {known})"
+                )
         await self._binding_repo().set_profile(account, plugin, profile)
         self._set_account_plugin_profile(account, plugin, profile)
         await self._refresh_live_settings(account, plugin)
         self._audit_mgmt(
-            account, "mgmt:account.plugin_profile", surface,
-            extra=f"plugin={plugin} profile={profile or '-'}")
+            account,
+            "mgmt:account.plugin_profile",
+            surface,
+            extra=f"plugin={plugin} profile={profile or '-'}",
+        )
         return {"account": account, "plugin": plugin, "profile": profile}
 
-    async def accounts_plugin_profiles(
-        self, account: str
-    ) -> Dict[str, Optional[str]]:
+    async def accounts_plugin_profiles(self, account: str) -> dict[str, str | None]:
         """``{plugin: profile name or None}`` for every ASSIGNED plugin."""
         self._validate_account_known(account)
         assigned = await self._assigned_plugins(account)
-        bindings: Dict[str, Optional[str]] = {}
+        bindings: dict[str, str | None] = {}
         binding_repo = self._binding_repo()
         reader = getattr(binding_repo, "bindings", None)
         if callable(reader):
             bindings = dict(await reader(account) or {})
         return {plugin: bindings.get(plugin) for plugin in assigned}
 
-    async def accounts_effective_settings(
-        self, account: str, plugin: str
-    ) -> Dict[str, Any]:
+    async def accounts_effective_settings(self, account: str, plugin: str) -> dict[str, Any]:
         """Effective settings for one (account, plugin), fully merged.
 
         Merge order (highest wins): plugin Setting defaults <- the global
@@ -789,11 +777,10 @@ class ControlAPI:
         assigned = await self._assigned_plugins(account)
         if plugin not in assigned:
             raise ValueError(
-                f"plugin {plugin!r} is not assigned to account {account!r} "
-                f"(assigned: {assigned})"
+                f"plugin {plugin!r} is not assigned to account {account!r} (assigned: {assigned})"
             )
         reserved = plugin_scopes.CHANNELS_KEY
-        merged: Dict[str, Any] = {
+        merged: dict[str, Any] = {
             setting.name: setting.validate(setting.default)
             for setting in self._plugin_schema(plugin)
         }
@@ -809,8 +796,8 @@ class ControlAPI:
             for key, value in global_layer.items():
                 if key != reserved:
                     merged[key] = value
-        profile_name: Optional[str] = None
-        scope: Optional[Dict[str, Any]] = None
+        profile_name: str | None = None
+        scope: dict[str, Any] | None = None
         binding_repo = self._binding_repo()
         profile_repo = self._profile_repo()
         bindings_reader = getattr(binding_repo, "bindings", None)
@@ -823,18 +810,16 @@ class ControlAPI:
                     if key != reserved:
                         merged[key] = value
                 raw_scope = (record.settings or {}).get(reserved)
-                scope = plugin_scopes.validate(raw_scope) \
-                    if raw_scope is not None else None
+                scope = plugin_scopes.validate(raw_scope) if raw_scope is not None else None
         if self._database is not None:  # per-account overrides (highest)
-            overrides = await self._database.plugins.settings(account, plugin) \
-                or {}
+            overrides = await self._database.plugins.settings(account, plugin) or {}
             for key, value in overrides.items():
                 if key != reserved:  # the scope is profile-owned
                     merged[key] = value
         merged[reserved] = scope
         return merged
 
-    async def accounts_channels(self, account: str) -> List[Dict[str, Any]]:
+    async def accounts_channels(self, account: str) -> list[dict[str, Any]]:
         """The account's visible TEXT channels, from the live client cache.
 
         ``[{"guild_id", "guild_name", "channels": [{"id", "name",
@@ -857,51 +842,61 @@ class ControlAPI:
     def _require_plugin_data(self) -> Any:
         """The shared PluginDataStore, or an honest error."""
         if self._plugin_data is None:
-            raise RuntimeError(
-                "plugin-data store is not configured on this api")
+            raise RuntimeError("plugin-data store is not configured on this api")
         return self._plugin_data
 
     @staticmethod
-    def _data_scope(guild_id: Any, channel_id: Any) -> List[str]:
+    def _data_scope(guild_id: Any, channel_id: Any) -> list[str]:
         for name, value in (("guild_id", guild_id), ("channel_id", channel_id)):
             if not isinstance(value, str) or not (value == "0" or value.isdigit()):
                 raise ValueError(
                     f"field '{name}' must be a digit string or '0' "
-                    f"(snowflakes are STRINGS end to end), got {value!r}")
+                    f"(snowflakes are STRINGS end to end), got {value!r}"
+                )
         return [str(guild_id), str(channel_id)]
 
-    async def accounts_data_list(self, account: str, *,
-                                 plugin: Optional[str] = None,
-                                 guild_id: Optional[str] = None,
-                                 channel_id: Optional[str] = None
-                                 ) -> List[Dict[str, Any]]:
+    async def accounts_data_list(
+        self,
+        account: str,
+        *,
+        plugin: str | None = None,
+        guild_id: str | None = None,
+        channel_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """AccountPluginData scope nodes for one account (optionally
         narrowed by plugin/guild/channel) — the UI's universal browser.
         READ path: absent documents are simply absent (standalone
         copies, no inheritance)."""
         self._validate_account_known(account)
-        for name, value in (("guild_id", guild_id), ("channel_id", channel_id)):
+        for _name, value in (("guild_id", guild_id), ("channel_id", channel_id)):
             if value is not None:
-                self._data_scope(value, "0")   # validates the one dim
+                self._data_scope(value, "0")  # validates the one dim
         return await self._require_plugin_data().list(
-            account, plugin, guild_id=guild_id, channel_id=channel_id)
+            account, plugin, guild_id=guild_id, channel_id=channel_id
+        )
 
-    async def accounts_data_get(self, account: str, plugin: str, *,
-                                guild_id: str = "0",
-                                channel_id: str = "0"
-                                ) -> Optional[Dict[str, Any]]:
+    async def accounts_data_get(
+        self, account: str, plugin: str, *, guild_id: str = "0", channel_id: str = "0"
+    ) -> dict[str, Any] | None:
         """One document (None when the scope node is empty)."""
         self._validate_account_known(account)
         if not isinstance(plugin, str) or not plugin.strip():
             raise ValueError("field 'plugin' must be a non-empty string")
         gid, cid = self._data_scope(guild_id, channel_id)
         return await self._require_plugin_data().get(
-            account, plugin.strip(), guild_id=gid, channel_id=cid)
+            account, plugin.strip(), guild_id=gid, channel_id=cid
+        )
 
-    async def accounts_data_put(self, account: str, plugin: str,
-                                guild_id: str, channel_id: str, data: Any, *,
-                                expected_version: Optional[int] = None
-                                ) -> Dict[str, Any]:
+    async def accounts_data_put(
+        self,
+        account: str,
+        plugin: str,
+        guild_id: str,
+        channel_id: str,
+        data: Any,
+        *,
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
         """Write one document. ``expected_version`` carries the
         optimistic-write guard (a racing writer raises VersionConflict —
         a 400 naming the current version)."""
@@ -909,25 +904,25 @@ class ControlAPI:
         if not isinstance(plugin, str) or not plugin.strip():
             raise ValueError("field 'plugin' must be a non-empty string")
         if not isinstance(data, dict):
-            raise ValueError(
-                f"field 'data' must be a JSON object, got {type(data).__name__}")
+            raise ValueError(f"field 'data' must be a JSON object, got {type(data).__name__}")
         gid, cid = self._data_scope(guild_id, channel_id)
         return await self._require_plugin_data().put(
-            account, plugin.strip(), gid, cid, data,
-            expected_version=expected_version)
+            account, plugin.strip(), gid, cid, data, expected_version=expected_version
+        )
 
-    async def accounts_data_delete(self, account: str, plugin: str, *,
-                                   guild_id: str = "0",
-                                   channel_id: str = "0") -> bool:
+    async def accounts_data_delete(
+        self, account: str, plugin: str, *, guild_id: str = "0", channel_id: str = "0"
+    ) -> bool:
         """Remove one scope node's document (True when it existed)."""
         self._validate_account_known(account)
         if not isinstance(plugin, str) or not plugin.strip():
             raise ValueError("field 'plugin' must be a non-empty string")
         gid, cid = self._data_scope(guild_id, channel_id)
         return await self._require_plugin_data().delete(
-            account, plugin.strip(), guild_id=gid, channel_id=cid)
+            account, plugin.strip(), guild_id=gid, channel_id=cid
+        )
 
-    async def _assigned_plugins(self, account: str) -> List[str]:
+    async def _assigned_plugins(self, account: str) -> list[str]:
         """Sorted assigned plugins, memory-first via the account manager
         (repository bindings' keys as the duck-typed fallback)."""
         reader = getattr(self._accounts, "assigned_plugins", None)
@@ -937,11 +932,9 @@ class ControlAPI:
         fallback = getattr(binding_repo, "bindings", None)
         if not callable(fallback):
             return []
-        return sorted((await fallback(account) or {}))
+        return sorted(await fallback(account) or {})
 
-    def _set_account_plugin_profile(
-        self, account: str, plugin: str, profile: Optional[str]
-    ) -> None:
+    def _set_account_plugin_profile(self, account: str, plugin: str, profile: str | None) -> None:
         """Propagate ONE binding change into the manager's memory record
         (FINAL-PHASE F3 pattern, same as _refresh_account_group): the
         status poll serves Account.plugin_profiles, but the repository
@@ -951,11 +944,11 @@ class ControlAPI:
             if account_obj is not None and hasattr(account_obj, "plugin_profiles"):
                 account_obj.plugin_profiles[plugin] = profile
         except Exception:
-            LOG.debug("plugin profile memory refresh failed for %r", account,
-                      exc_info=True)
+            LOG.debug("plugin profile memory refresh failed for %r", account, exc_info=True)
 
-    async def _refresh_live_settings(self, account: Optional[str] = None,
-                                     plugin: Optional[str] = None) -> None:
+    async def _refresh_live_settings(
+        self, account: str | None = None, plugin: str | None = None
+    ) -> None:
         """Push a profile-layer change into RUNNING plugins' settings."""
         refresh = getattr(self._plugins, "refresh_settings", None)
         if not callable(refresh):
@@ -989,11 +982,10 @@ class ControlAPI:
                 if account_obj is not None and hasattr(account_obj, "plugin_profiles"):
                     account_obj.plugin_profiles = dict(bound)
             except Exception:
-                LOG.debug("plugin profile memory refresh failed for %r", name,
-                          exc_info=True)
+                LOG.debug("plugin profile memory refresh failed for %r", name, exc_info=True)
 
     # ------------------------------------------------------ account settings
-    async def account_setting_get(self, name: str) -> Dict[str, Any]:
+    async def account_setting_get(self, name: str) -> dict[str, Any]:
         """Resolved framework account settings (reconnect policy...).
 
         Facade over SettingsManager.account_settings — validated against
@@ -1005,7 +997,7 @@ class ControlAPI:
 
     async def account_setting_set(
         self, name: str, key: str, value: Any, surface: str = "api"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Set ONE framework account setting (validated + persisted).
 
         Raises SettingsValidationError (a ValueError) for unknown keys or
@@ -1013,17 +1005,14 @@ class ControlAPI:
         SettingChanged on success; the account manager picks reconnect
         changes up on the next reconnect decision.
         """
-        validated = await _resolved(
-            self._settings.set_account_setting(name, key, value)
-        )
-        self._audit_mgmt(name, "mgmt:account.setting", surface,
-                         extra=f"key={key}")
+        validated = await _resolved(self._settings.set_account_setting(name, key, value))
+        self._audit_mgmt(name, "mgmt:account.setting", surface, extra=f"key={key}")
         return {"account": name, "key": key, "value": validated}
 
     # ----------------------------------------------------------- credentials
     async def accounts_set_credential(
         self, name: str, credential: str, surface: str = "api"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Store (replace) one account's credential — encrypt-at-rest only.
 
         No network activity whatsoever. Unknown accounts raise the
@@ -1039,9 +1028,9 @@ class ControlAPI:
         self._audit_mgmt(name, "mgmt:credential.stored", surface)
         return {"account": name, "credential": self._credential_state(name)}
 
-    async def accounts_credential_status(self) -> List[Dict[str, Any]]:
+    async def accounts_credential_status(self) -> list[dict[str, Any]]:
         """[{name, credential}] for every account — display-safe, no values."""
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         for account in await self._accounts.accounts():
             name = account.get("name") if isinstance(account, dict) else None
             if not name:
@@ -1051,7 +1040,7 @@ class ControlAPI:
 
     async def credentials_import_env(
         self, overwrite: bool = False, surface: str = "api"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """MIGRATION-ONLY: explicit one-shot import of legacy .env tokens.
 
         Reads each registered account's ``DISCORD_TOKEN_<NAME>`` value from
@@ -1068,7 +1057,9 @@ class ControlAPI:
             await self._env_account_tokens(), overwrite
         )
         self._audit_mgmt(
-            "system", "mgmt:credential.imported", surface,
+            "system",
+            "mgmt:credential.imported",
+            surface,
             extra=(
                 f"imported={len(report.get('imported') or [])} "
                 f"skipped={len(report.get('skipped') or [])} "
@@ -1077,7 +1068,7 @@ class ControlAPI:
         )
         return report
 
-    async def _env_account_tokens(self) -> Dict[str, str]:
+    async def _env_account_tokens(self) -> dict[str, str]:
         """account -> token mapping from the legacy .env view (no DB writes).
 
         Enumerates REGISTERED accounts and resolves each
@@ -1097,6 +1088,7 @@ class ControlAPI:
             if path:
                 try:
                     from .credentials import Credentials as _Creds
+
                     fresh = _Creds.from_file(str(path))
                     if fresh is not None:
                         credentials = fresh
@@ -1105,7 +1097,7 @@ class ControlAPI:
         token_for = getattr(credentials, "token_for", None)
         if not callable(token_for):
             return {}
-        tokens: Dict[str, str] = {}
+        tokens: dict[str, str] = {}
         for account in await self._accounts.accounts():
             name = account.get("name") if isinstance(account, dict) else None
             if not name:
@@ -1116,9 +1108,7 @@ class ControlAPI:
         return tokens
 
     # ------------------------------------------------------------- cooldowns
-    async def cooldowns_list(
-        self, account: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+    async def cooldowns_list(self, account: str | None = None) -> list[dict[str, Any]]:
         """Active persistent cooldowns of one account (None = every account).
 
         JSON-safe rows: account/plugin/cooldown_key, the REMAINING seconds
@@ -1127,7 +1117,7 @@ class ControlAPI:
         if self._cooldowns is None:
             return []
         if account is not None:
-            names: List[str] = [account]
+            names: list[str] = [account]
         else:
             names = [
                 row.get("name")
@@ -1135,20 +1125,22 @@ class ControlAPI:
                 if isinstance(row, dict) and row.get("name")
             ]
         now = _time.time()
-        rows: List[Dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         for name in names:
             if not name:
                 continue
             for row in await self._cooldowns.active_for(name):
                 expires_at = float(row.get("expires_at", 0.0) or 0.0)
-                rows.append({
-                    "account": row.get("account", name),
-                    "plugin": row.get("plugin"),
-                    "cooldown_key": row.get("cooldown_key"),
-                    "remaining_s": round(max(0.0, expires_at - now), 1),
-                    "source": row.get("source"),
-                    "reason": row.get("reason") or "",
-                })
+                rows.append(
+                    {
+                        "account": row.get("account", name),
+                        "plugin": row.get("plugin"),
+                        "cooldown_key": row.get("cooldown_key"),
+                        "remaining_s": round(max(0.0, expires_at - now), 1),
+                        "source": row.get("source"),
+                        "reason": row.get("reason") or "",
+                    }
+                )
         rows.sort(key=lambda r: r["remaining_s"])  # soonest-expiring first
         return rows
 
@@ -1156,18 +1148,16 @@ class ControlAPI:
         self,
         account: str,
         plugin: str,
-        cooldown_key: Optional[str] = None,
+        cooldown_key: str | None = None,
         surface: str = "api",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Clear ONE cooldown (``cooldown_key`` given) or ALL of a plugin."""
         if self._cooldowns is None:
             raise RuntimeError("cooldown service is not configured on this api")
         for label, value in (("account", account), ("plugin", plugin)):
             if not isinstance(value, str) or not value:
                 raise ValueError(f"cooldown {label} must be a non-empty string")
-        if cooldown_key is not None and (
-            not isinstance(cooldown_key, str) or not cooldown_key
-        ):
+        if cooldown_key is not None and (not isinstance(cooldown_key, str) or not cooldown_key):
             raise ValueError("cooldown_key must be a non-empty string when given")
         cleared = 0
         if cooldown_key:
@@ -1178,7 +1168,9 @@ class ControlAPI:
                 if key and await self._cooldowns.clear(account, plugin, key):
                     cleared += 1
         self._audit_mgmt(
-            account, "mgmt:cooldown.cleared", surface,
+            account,
+            "mgmt:cooldown.cleared",
+            surface,
             extra=f"plugin={plugin} key={cooldown_key or '*'} cleared={cleared}",
         )
         return {
@@ -1189,16 +1181,15 @@ class ControlAPI:
         }
 
     # --------------------------------------------------------------- plugins
-    async def plugins_manifests(self) -> List[Dict[str, Any]]:
+    async def plugins_manifests(self) -> list[dict[str, Any]]:
         """Installed plugins incl. their settings schema (auto-generated UIs)."""
         return self._plugins.manifests()
 
-    async def plugins_state(self, account: str) -> List[Dict[str, Any]]:
+    async def plugins_state(self, account: str) -> list[dict[str, Any]]:
         """Per-account plugin runtime state incl. resolved settings + errors."""
         return self._plugins.states(account)
 
-    async def plugins_reload(self, plugin: str,
-                             surface: str = "api") -> Dict[str, Any]:
+    async def plugins_reload(self, plugin: str, surface: str = "api") -> dict[str, Any]:
         """Hot-reload one plugin (detach → re-import → re-attach).
 
         The reserved name ``"__rescan__"`` re-scans the plugin directory
@@ -1216,29 +1207,24 @@ class ControlAPI:
             if str(exc).startswith("unknown plugin"):
                 raise ValueError(f"unknown plugin {plugin!r}") from exc
             raise
-        self._audit_mgmt("system", "mgmt:plugin.reloaded", surface,
-                         extra=f"plugin={plugin}")
+        self._audit_mgmt("system", "mgmt:plugin.reloaded", surface, extra=f"plugin={plugin}")
         return out
 
-    async def plugins_unload(self, plugin: str,
-                             surface: str = "api") -> Dict[str, Any]:
+    async def plugins_unload(self, plugin: str, surface: str = "api") -> dict[str, Any]:
         """Unload a plugin (detach everywhere, unregister UI; assignments
         stay in the DB so reload restores them)."""
         out = self._plugins.unload_plugin(plugin)
         if inspect.iscoroutine(out):
             out = await out
-        self._audit_mgmt("system", "mgmt:plugin.unloaded", surface,
-                         extra=f"plugin={plugin}")
+        self._audit_mgmt("system", "mgmt:plugin.unloaded", surface, extra=f"plugin={plugin}")
         return out
 
-    async def plugins_set_enabled(
-        self, account: str, plugin: str, enabled: bool
-    ) -> Dict[str, Any]:
+    async def plugins_set_enabled(self, account: str, plugin: str, enabled: bool) -> dict[str, Any]:
         """Enable/disable a plugin on an account (lifecycle hooks fire)."""
         await self._plugins.set_enabled(account, plugin, parse_bool(enabled, "enabled"))
         return {"account": account, "plugin": plugin, "enabled": enabled}
 
-    async def plugins_settings(self, account: str) -> List[Dict[str, Any]]:
+    async def plugins_settings(self, account: str) -> list[dict[str, Any]]:
         """Resolved settings per plugin for one account."""
         return [
             {"name": state["name"], "settings": state["settings"]}
@@ -1247,7 +1233,7 @@ class ControlAPI:
 
     async def plugins_set_setting(
         self, account: str, plugin: str, key: str, value: Any
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Change ONE plugin setting for ONE account (validated + persisted).
 
         ``value=None`` means RESET: the account-layer override is DELETED
@@ -1260,9 +1246,7 @@ class ControlAPI:
         out = await self._plugins.set_setting(account, plugin, key, value)
         return {"account": account, "plugin": plugin, "key": key, "value": out}
 
-    async def plugins_clear_setting(
-        self, account: str, plugin: str, key: str
-    ) -> Dict[str, Any]:
+    async def plugins_clear_setting(self, account: str, plugin: str, key: str) -> dict[str, Any]:
         """Reset ONE plugin setting: DELETE the account-layer override.
 
         Delegates to PluginManager.clear_setting when it exists (it also
@@ -1275,22 +1259,23 @@ class ControlAPI:
         if callable(clear):
             effective = await _resolved(clear(account, plugin, key))
         else:
-            effective = await _resolved(
-                self._settings.clear_plugin_setting(account, plugin, key)
-            )
+            effective = await _resolved(self._settings.clear_plugin_setting(account, plugin, key))
         return {
-            "account": account, "plugin": plugin, "key": key,
-            "cleared": True, "value": effective,
+            "account": account,
+            "plugin": plugin,
+            "key": key,
+            "cleared": True,
+            "value": effective,
         }
 
     # ------------------------------------------------------------ sync groups
-    async def groups_list(self) -> List[Dict[str, Any]]:
+    async def groups_list(self) -> list[dict[str, Any]]:
         """Every sync group with its member count (sorted by name)."""
         if self._sync_groups is None:
             return []
         return await _resolved(self._sync_groups.list_groups())
 
-    async def groups_get(self, group: Any) -> Dict[str, Any]:
+    async def groups_get(self, group: Any) -> dict[str, Any]:
         """One group by id or name (SyncGroupError when unknown)."""
         self._require_groups()
         out = await _resolved(self._sync_groups.get_group(group))
@@ -1298,9 +1283,7 @@ class ControlAPI:
             raise SyncGroupError(f"unknown sync group {group!r}")
         return out
 
-    async def groups_create(
-        self, payload: Dict[str, Any], surface: str = "api"
-    ) -> Dict[str, Any]:
+    async def groups_create(self, payload: dict[str, Any], surface: str = "api") -> dict[str, Any]:
         """Create a group (may have zero members).
 
         payload: {name (required), description?, enabled?}. Unknown keys are
@@ -1319,22 +1302,21 @@ class ControlAPI:
         enabled = payload.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ValueError("field 'enabled' must be a boolean")
-        out = await _resolved(self._sync_groups.create_group(
-            payload["name"], description, enabled=enabled))
-        self._audit_mgmt("system", "mgmt:group.created", surface,
-                         extra=f"group={out.get('name')}")
+        out = await _resolved(
+            self._sync_groups.create_group(payload["name"], description, enabled=enabled)
+        )
+        self._audit_mgmt("system", "mgmt:group.created", surface, extra=f"group={out.get('name')}")
         return out
 
     async def groups_update(
-        self, group: Any, payload: Dict[str, Any], surface: str = "api"
-    ) -> Dict[str, Any]:
+        self, group: Any, payload: dict[str, Any], surface: str = "api"
+    ) -> dict[str, Any]:
         """Update name/description/enabled; a rename moves every member's
         runtime pacing scope with it (no stale group:<old> mapping)."""
         self._require_groups()
         if not isinstance(payload, dict) or not payload:
             raise ValueError(
-                "group update payload needs at least one of "
-                "{'name', 'description', 'enabled'}"
+                "group update payload needs at least one of {'name', 'description', 'enabled'}"
             )
         allowed = {"name", "description", "enabled"}
         unknown = set(payload) - allowed
@@ -1350,73 +1332,70 @@ class ControlAPI:
         # limiter, but never Account.record — propagate the new name into
         # the memory records the 1 Hz poll serves (same F3 pattern as the
         # membership endpoints below; idempotent for non-rename updates).
-        for member in await _resolved(
-                self._sync_groups.get_group_members(out["name"])):
+        for member in await _resolved(self._sync_groups.get_group_members(out["name"])):
             self._refresh_account_group(member, out.get("name"))
-        self._audit_mgmt("system", "mgmt:group.updated", surface,
-                         extra=f"group={out.get('name')}")
+        self._audit_mgmt("system", "mgmt:group.updated", surface, extra=f"group={out.get('name')}")
         return out
 
     async def groups_delete(
         self, group: Any, detach_members: bool = False, surface: str = "api"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Delete a group (accounts are NEVER deleted). Refuses while
         members remain unless detach_members is explicitly True."""
         self._require_groups()
         detach_members = parse_bool(detach_members, "detach_members")
-        out = await _resolved(
-            self._sync_groups.delete_group(group, detach_members=detach_members)
-        )
+        out = await _resolved(self._sync_groups.delete_group(group, detach_members=detach_members))
         # Detached members' Account.records still name the deleted group —
         # clear them (the repo + limiter are already clean) so the account
         # cards / group picker show Independent, not a dangling group name.
         for member in out.get("detached") or []:
             self._refresh_account_group(member, None)
         self._audit_mgmt(
-            "system", "mgmt:group.deleted", surface,
+            "system",
+            "mgmt:group.deleted",
+            surface,
             extra=f"group={out.get('deleted')} detached={len(out.get('detached') or [])}",
         )
         return out
 
     async def groups_add_account(
         self, group: Any, account: str, surface: str = "api"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Put an account in a group (replaces any previous membership)."""
         self._require_groups()
-        out = await _resolved(
-            self._sync_groups.add_account_to_group(group, account))
+        out = await _resolved(self._sync_groups.add_account_to_group(group, account))
         self._refresh_account_group(account, out.get("group"))
-        self._audit_mgmt(account, "mgmt:group.member_added", surface,
-                         extra=f"group={out.get('group')}")
+        self._audit_mgmt(
+            account, "mgmt:group.member_added", surface, extra=f"group={out.get('group')}"
+        )
         return out
 
     async def groups_remove_account(
         self, group: Any, account: str, surface: str = "api"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Remove an account from one group (back to per-account pacing)."""
         self._require_groups()
-        out = await _resolved(
-            self._sync_groups.remove_account_from_group(group, account))
+        out = await _resolved(self._sync_groups.remove_account_from_group(group, account))
         if out.get("existed"):
             self._refresh_account_group(account, None)
-        self._audit_mgmt(account, "mgmt:group.member_removed", surface,
-                         extra=f"group={out.get('group')}")
+        self._audit_mgmt(
+            account, "mgmt:group.member_removed", surface, extra=f"group={out.get('group')}"
+        )
         return out
 
     async def groups_set_account(
         self, account: str, group: Any, surface: str = "api"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Set/replace an account's group (None -> G and G1 -> G2)."""
         self._require_groups()
         out = await _resolved(self._sync_groups.set_account_group(account, group))
         self._refresh_account_group(account, out.get("group"))
-        self._audit_mgmt(account, "mgmt:group.member_set", surface,
-                         extra=f"group={out.get('group')}")
+        self._audit_mgmt(
+            account, "mgmt:group.member_set", surface, extra=f"group={out.get('group')}"
+        )
         return out
 
-    async def groups_clear_account(
-        self, account: str, surface: str = "api"
-    ) -> Dict[str, Any]:
+    async def groups_clear_account(self, account: str, surface: str = "api") -> dict[str, Any]:
         """Remove the account from any group (group -> None)."""
         self._require_groups()
         out = await _resolved(self._sync_groups.clear_account_group(account))
@@ -1424,7 +1403,7 @@ class ControlAPI:
         self._audit_mgmt(account, "mgmt:group.member_cleared", surface)
         return out
 
-    async def groups_snapshot(self, group: Any) -> Dict[str, Any]:
+    async def groups_snapshot(self, group: Any) -> dict[str, Any]:
         """Group snapshot: identity/metadata + members + runtime pacing
         info. Member rows are enriched with the account manager's live
         status (derived — no duplicate runtime registry)."""
@@ -1449,28 +1428,28 @@ class ControlAPI:
     def _require_groups(self) -> None:
         """Honest failure on stacks built without the group manager."""
         if self._sync_groups is None:
-            raise RuntimeError(
-                "sync group manager is not configured on this api")
+            raise RuntimeError("sync group manager is not configured on this api")
 
     # ---------------------------------------------------------------- fleet
     def _require_fleet(self) -> None:
         """Honest failure on stacks built without the fleet service."""
         if self._fleet is None:
-            raise RuntimeError(
-                "fleet service is not configured on this api")
+            raise RuntimeError("fleet service is not configured on this api")
 
-    async def fleet_groups(self) -> List[Dict[str, Any]]:
+    async def fleet_groups(self) -> list[dict[str, Any]]:
         """Fleet Hub list: one overview bundle per group (union of sync
         groups and live fleet state — a group with state but no sync row
         or vice versa still shows). Pure reads over the projection."""
         self._require_fleet()
         fleet = self._fleet
-        names: List[str] = []
+        names: list[str] = []
         if self._sync_groups is not None:
             try:
-                names = [str(g.get("name"))
-                         for g in await self._sync_groups.list_groups()
-                         if g.get("name")]
+                names = [
+                    str(g.get("name"))
+                    for g in await self._sync_groups.list_groups()
+                    if g.get("name")
+                ]
             except Exception:
                 names = []
         for state in [fleet.group_state(n) for n in list(fleet._groups)]:
@@ -1481,27 +1460,27 @@ class ControlAPI:
             state = fleet.group_state(name)
             members = fleet.members(name)
             assignments = fleet.assignments(group_name=name)
-            counts: Dict[str, int] = {}
+            counts: dict[str, int] = {}
             for rec in assignments:
                 counts[rec.status] = counts.get(rec.status, 0) + 1
-            cooldowns = await fleet.cooldowns(
-                scope_type="group", scope_id=name, active_only=True)
+            cooldowns = await fleet.cooldowns(scope_type="group", scope_id=name, active_only=True)
             transitions = await fleet.transitions(group_name=name, limit=1)
-            bundles.append({
-                "group": name,
-                "exists": state is not None,
-                "paused": bool(state.paused) if state else False,
-                "generation": state.generation if state else None,
-                "member_count": len(members),
-                "members": [m.to_dict() for m in members],
-                "assignment_counts": counts,
-                "active_cooldowns": len(cooldowns),
-                "last_transition": (transitions[0].to_dict()
-                                    if transitions else None),
-            })
+            bundles.append(
+                {
+                    "group": name,
+                    "exists": state is not None,
+                    "paused": bool(state.paused) if state else False,
+                    "generation": state.generation if state else None,
+                    "member_count": len(members),
+                    "members": [m.to_dict() for m in members],
+                    "assignment_counts": counts,
+                    "active_cooldowns": len(cooldowns),
+                    "last_transition": (transitions[0].to_dict() if transitions else None),
+                }
+            )
         return bundles
 
-    async def fleet_group(self, group: str) -> Dict[str, Any]:
+    async def fleet_group(self, group: str) -> dict[str, Any]:
         """One group's FULL hub bundle: members, assignments, active
         cooldowns (with source), transition history (newest first)."""
         self._require_fleet()
@@ -1512,8 +1491,10 @@ class ControlAPI:
             # never joined to management): provision the projection row
             # so the hub works for it — orchestration simply shows empty.
             # Genuinely-unknown names still 400 (no sync row, no fleet).
-            if self._sync_groups is None or \
-                    await self._sync_groups.get_group_by_name(group) is None:
+            if (
+                self._sync_groups is None
+                or await self._sync_groups.get_group_by_name(group) is None
+            ):
                 raise ValueError(f"unknown fleet group {group!r}")
             state = await fleet.provision_group(group)
         assignments = fleet.assignments(group_name=group)
@@ -1523,14 +1504,13 @@ class ControlAPI:
             "generation": state.generation,
             "members": [m.to_dict() for m in fleet.members(group)],
             "assignments": [r.to_dict() for r in assignments],
-            "cooldowns": [c.to_dict() for c in await fleet.cooldowns(
-                active_only=True)],
-            "transitions": [t.to_dict() for t in
-                            await fleet.transitions(group_name=group,
-                                                    limit=50)],
+            "cooldowns": [c.to_dict() for c in await fleet.cooldowns(active_only=True)],
+            "transitions": [
+                t.to_dict() for t in await fleet.transitions(group_name=group, limit=50)
+            ],
         }
 
-    async def fleet_op(self, op: str, **params: Any) -> Dict[str, Any]:
+    async def fleet_op(self, op: str, **params: Any) -> dict[str, Any]:
         """The hub's ONE mutation dispatch: every operation flows
         through FleetService (rollout B's single-service rule); the op
         table is explicit, params validated by the service itself."""
@@ -1538,8 +1518,7 @@ class ControlAPI:
         fleet = self._fleet
         op = str(op or "")
         if op == "join":
-            event = await fleet.join_group(str(params.get("account")),
-                                           str(params.get("group")))
+            event = await fleet.join_group(str(params.get("account")), str(params.get("group")))
         elif op == "leave":
             event = await fleet.leave_group(str(params.get("account")))
         elif op == "group_pause":
@@ -1551,30 +1530,30 @@ class ControlAPI:
         elif op == "member_resume":
             event = await fleet.resume_member(str(params.get("account")))
         elif op == "assign":
-            rec = await fleet.assign_task(str(params.get("assignment")),
-                                          str(params.get("account")))
+            rec = await fleet.assign_task(str(params.get("assignment")), str(params.get("account")))
             return rec.to_dict()
         elif op == "withdraw":
             rec = await fleet.withdraw_task(str(params.get("assignment")))
             return rec.to_dict()
         elif op == "suspend":
-            rec = await fleet.suspend_task(str(params.get("assignment")),
-                                           str(params.get("reason") or
-                                               "operator suspend"))
+            rec = await fleet.suspend_task(
+                str(params.get("assignment")), str(params.get("reason") or "operator suspend")
+            )
             return rec.to_dict()
         elif op == "resume_task":
             rec = await fleet.resume_task(str(params.get("assignment")))
             return rec.to_dict()
         elif op == "cancel":
-            rec = await fleet.cancel_task(str(params.get("assignment")),
-                                          str(params.get("reason") or
-                                              "operator cancel"))
+            rec = await fleet.cancel_task(
+                str(params.get("assignment")), str(params.get("reason") or "operator cancel")
+            )
             return rec.to_dict()
         elif op == "handoff":
-            rec = await fleet.handoff(str(params.get("assignment")),
-                                      str(params.get("account")),
-                                      str(params.get("reason") or
-                                          "operator handoff"))
+            rec = await fleet.handoff(
+                str(params.get("assignment")),
+                str(params.get("account")),
+                str(params.get("reason") or "operator handoff"),
+            )
             return rec.to_dict()
         elif op == "cooldown":
             rec = await fleet.apply_cooldown(
@@ -1589,10 +1568,9 @@ class ControlAPI:
             return rec.to_dict()
         else:
             raise ValueError(f"unknown fleet op {op!r}")
-        return event.__dict__ if hasattr(event, "__dict__") else {
-            "kind": str(event)}
+        return event.__dict__ if hasattr(event, "__dict__") else {"kind": str(event)}
 
-    def _refresh_account_group(self, account: str, group: Optional[str]) -> None:
+    def _refresh_account_group(self, account: str, group: str | None) -> None:
         """Propagate a membership change into the account manager's memory
         record (FINAL-PHASE F3 pattern, same as _refresh_account_profiles):
         the 1 Hz dashboard poll reads record.sync_group, and the sync-group
@@ -1603,20 +1581,19 @@ class ControlAPI:
             if account_obj is not None:
                 account_obj.record.sync_group = group
         except Exception:
-            LOG.debug("group memory refresh failed for %r", account,
-                      exc_info=True)
+            LOG.debug("group memory refresh failed for %r", account, exc_info=True)
 
     # ------------------------------------------------------- UI extension
-    async def ui_stats(self, account: str) -> List[Dict[str, Any]]:
+    async def ui_stats(self, account: str) -> list[dict[str, Any]]:
         """Per-account Home-tab stat cards from every enabled plugin."""
         return await _resolved(self._plugins.ui_stats(account))
 
-    async def ui_panels(self) -> List[Dict[str, Any]]:
+    async def ui_panels(self) -> list[dict[str, Any]]:
         """Plugin-contributed sidebar panels (framework-level)."""
         return await _resolved(self._plugins.ui_panels())
 
     # ------------------------------------------- dashboard UI extension (D)
-    async def dashboard_ui_navigation(self) -> List[Dict[str, Any]]:
+    async def dashboard_ui_navigation(self) -> list[dict[str, Any]]:
         """Plugin pages for the sidebar, VISIBILITY-CHECKED.
 
         Same fail-closed contract as page retrieval: a page whose check
@@ -1627,34 +1604,36 @@ class ControlAPI:
         account-dependent parts with component checks instead.
         """
         registry = self._plugins.ui_registry
-        nav: List[Dict[str, Any]] = []
+        nav: list[dict[str, Any]] = []
         for plugin_name in registry.list_plugins():
             layout = registry.get_layout(plugin_name)
             if not layout:
                 continue
-            for page in (layout.get("children") or []):
+            for page in layout.get("children") or []:
                 if page.get("type") != "page":
                     continue
                 page_id = page.get("id", "")
                 if not await registry.check_visibility(
-                        plugin_name, page_id,
-                        CheckContext(plugin=plugin_name,
-                                     component_id=page_id,
-                                     component_type="page")):
+                    plugin_name,
+                    page_id,
+                    CheckContext(plugin=plugin_name, component_id=page_id, component_type="page"),
+                ):
                     continue
-                nav.append({
-                    "plugin": plugin_name,
-                    "page_id": page_id,
-                    "title": page.get("title", plugin_name),
-                    "icon": page.get("icon", ""),
-                    "order": page.get("order", 0),
-                    "account_scoped": page.get("account_scoped", False),
-                })
+                nav.append(
+                    {
+                        "plugin": plugin_name,
+                        "page_id": page_id,
+                        "title": page.get("title", plugin_name),
+                        "icon": page.get("icon", ""),
+                        "order": page.get("order", 0),
+                        "account_scoped": page.get("account_scoped", False),
+                    }
+                )
         return sorted(nav, key=lambda n: (n.get("order", 0), n["plugin"]))
 
-    async def dashboard_ui_page(self, plugin: str,
-                                page_id: str,
-                                account: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    async def dashboard_ui_page(
+        self, plugin: str, page_id: str, account: str | None = None
+    ) -> dict[str, Any] | None:
         """One page's full serialized component tree; None when the
         plugin has no UI or the page id is unknown (route -> 404).
 
@@ -1670,14 +1649,12 @@ class ControlAPI:
         layout = registry.get_layout(plugin)
         if not layout:
             return None
-        for page in (layout.get("children") or []):
+        for page in layout.get("children") or []:
             if page.get("id") == page_id:
-                return await registry.visible_tree(plugin, page,
-                                                   account=account)
+                return await registry.visible_tree(plugin, page, account=account)
         return None
 
-    async def _ui_account_context(self, plugin: str,
-                                  account: Optional[str]):
+    async def _ui_account_context(self, plugin: str, account: str | None):
         """Validate a browser-supplied account for UI dispatch.
 
         Returns (account, services) — services is None only for
@@ -1689,22 +1666,27 @@ class ControlAPI:
         if account is None:
             return None, None
         from core.errors import PluginError
+
         try:
             self._plugins.active_instance_for(plugin, account)
         except PluginError as exc:
-            raise UIError(
-                f"invalid account context for plugin {plugin!r}: {exc}") from exc
+            raise UIError(f"invalid account context for plugin {plugin!r}: {exc}") from exc
         services = self._plugins.services_for(account, plugin)
         if services is None:
             raise UIError(
                 f"account {account!r} has no active services wiring — "
-                f"start the account before account-scoped UI actions")
+                f"start the account before account-scoped UI actions"
+            )
         return account, services
 
-    async def dashboard_ui_action(self, plugin: str, component_id: str,
-                                  payload: Dict[str, Any],
-                                  surface: str = "api",
-                                  account: Optional[str] = None) -> Dict[str, Any]:
+    async def dashboard_ui_action(
+        self,
+        plugin: str,
+        component_id: str,
+        payload: dict[str, Any],
+        surface: str = "api",
+        account: str | None = None,
+    ) -> dict[str, Any]:
         """Dispatch a registered component action (visibility-checked).
 
         Raises UIError (a ValueError -> honest 400 at the interface) for
@@ -1714,17 +1696,22 @@ class ControlAPI:
         """
         registry = self._plugins.ui_registry
         account, services = await self._ui_account_context(plugin, account)
-        context = ActionContext(plugin=plugin, component_id=component_id,
-                                account=account, services=services)
-        result = await registry.dispatch_action(
-            plugin, component_id, payload, context)
-        return {"success": result.success, "message": result.message,
-                "data": result.data, "field_errors": result.field_errors,
-                "refresh": result.refresh, "modal": result.modal}
+        context = ActionContext(
+            plugin=plugin, component_id=component_id, account=account, services=services
+        )
+        result = await registry.dispatch_action(plugin, component_id, payload, context)
+        return {
+            "success": result.success,
+            "message": result.message,
+            "data": result.data,
+            "field_errors": result.field_errors,
+            "refresh": result.refresh,
+            "modal": result.modal,
+        }
 
-    async def dashboard_ui_data(self, plugin: str,
-                                component_id: str,
-                                account: Optional[str] = None) -> Any:
+    async def dashboard_ui_data(
+        self, plugin: str, component_id: str, account: str | None = None
+    ) -> Any:
         """Fetch a data-provider result (visibility-checked, JSON-safe).
 
         Raises UIError when the plugin/component is unknown, hidden, or
@@ -1735,13 +1722,17 @@ class ControlAPI:
         account, _services = await self._ui_account_context(plugin, account)
         # the outer context carries the validated account; the registry
         # pins a precise per-component CheckContext per provider call
-        context = CheckContext(plugin=plugin, component_id=component_id,
-                               component_type="", account=account,
-                               services=_services)
+        context = CheckContext(
+            plugin=plugin,
+            component_id=component_id,
+            component_type="",
+            account=account,
+            services=_services,
+        )
         return await registry.get_data(plugin, component_id, context)
 
     # ------------------------------------------------------ admin access
-    async def admin_overview(self) -> Dict[str, Any]:
+    async def admin_overview(self) -> dict[str, Any]:
         """The admin panel's full view: admin ids, mudae bot id, and every
         account's access row.
 
@@ -1753,44 +1744,40 @@ class ControlAPI:
         return {
             "admins": [str(i) for i in await access.admin_ids()],
             "mudae_bot_id": str(await access.mudae_bot_id())
-            if await access.mudae_bot_id() is not None else None,
+            if await access.mudae_bot_id() is not None
+            else None,
             "accounts": rows,
         }
 
-    async def admin_set_ids(self, ids: List[int],
-                            surface: str = "api") -> Dict[str, Any]:
+    async def admin_set_ids(self, ids: list[int], surface: str = "api") -> dict[str, Any]:
         access = self._require_access()
         out = {"admins": await access.set_admin_ids(ids)}
-        self._audit_mgmt("system", "mgmt:admin.ids_set", surface,
-                         extra=f"count={len(out['admins'])}")
+        self._audit_mgmt(
+            "system", "mgmt:admin.ids_set", surface, extra=f"count={len(out['admins'])}"
+        )
         return out
 
-    async def admin_add_id(self, user_id: int,
-                           surface: str = "api") -> Dict[str, Any]:
+    async def admin_add_id(self, user_id: int, surface: str = "api") -> dict[str, Any]:
         access = self._require_access()
         out = {"admins": await access.add_admin(user_id)}
-        self._audit_mgmt("system", "mgmt:admin.added", surface,
-                         extra=f"user_id={user_id}")
+        self._audit_mgmt("system", "mgmt:admin.added", surface, extra=f"user_id={user_id}")
         return out
 
-    async def admin_remove_id(self, user_id: int,
-                              surface: str = "api") -> Dict[str, Any]:
+    async def admin_remove_id(self, user_id: int, surface: str = "api") -> dict[str, Any]:
         access = self._require_access()
         out = {"admins": await access.remove_admin(user_id)}
-        self._audit_mgmt("system", "mgmt:admin.removed", surface,
-                         extra=f"user_id={user_id}")
+        self._audit_mgmt("system", "mgmt:admin.removed", surface, extra=f"user_id={user_id}")
         return out
 
-    async def admin_account_flag(self, account: str, is_admin: bool,
-                                 surface: str = "api") -> Dict[str, Any]:
+    async def admin_account_flag(
+        self, account: str, is_admin: bool, surface: str = "api"
+    ) -> dict[str, Any]:
         self._require_access()
         out = await _resolved(self._access.set_admin_flag(account, is_admin))
-        self._audit_mgmt(account, "mgmt:admin.flag_set", surface,
-                         extra=f"is_admin={is_admin}")
+        self._audit_mgmt(account, "mgmt:admin.flag_set", surface, extra=f"is_admin={is_admin}")
         return out
 
-    async def admin_perms(self, account: str,
-                           surface: str = "api") -> Dict[str, Any]:
+    async def admin_perms(self, account: str, surface: str = "api") -> dict[str, Any]:
         """Read the per-account command-permission list.
 
         ``surface`` is reserved (mgmt audit vocabulary): reads are not
@@ -1798,62 +1785,63 @@ class ControlAPI:
         Ids serialize as strings (snowflake-safe transport).
         """
         access = self._require_access()
-        return {"account": account,
-                "allowed_user_ids": [str(i) for i in
-                                     await access.allowed_user_ids(account)]}
+        return {
+            "account": account,
+            "allowed_user_ids": [str(i) for i in await access.allowed_user_ids(account)],
+        }
 
-    async def admin_perms_set(self, account: str, ids: List[int],
-                              surface: str = "api") -> Dict[str, Any]:
+    async def admin_perms_set(
+        self, account: str, ids: list[int], surface: str = "api"
+    ) -> dict[str, Any]:
         access = self._require_access()
-        out = {"account": account,
-               "allowed_user_ids": await access.set_allowed_user_ids(
-                   account, ids)}
-        self._audit_mgmt(account, "mgmt:admin.perms_set", surface,
-                         extra=f"count={len(out['allowed_user_ids'])}")
+        out = {
+            "account": account,
+            "allowed_user_ids": await access.set_allowed_user_ids(account, ids),
+        }
+        self._audit_mgmt(
+            account, "mgmt:admin.perms_set", surface, extra=f"count={len(out['allowed_user_ids'])}"
+        )
         return out
 
-    async def admin_perms_add(self, account: str, user_id: int,
-                              surface: str = "api") -> Dict[str, Any]:
+    async def admin_perms_add(
+        self, account: str, user_id: int, surface: str = "api"
+    ) -> dict[str, Any]:
         access = self._require_access()
-        out = {"account": account,
-               "allowed_user_ids": await access.add_allowed(account, user_id)}
-        self._audit_mgmt(account, "mgmt:admin.perm_added", surface,
-                         extra=f"user_id={user_id}")
+        out = {"account": account, "allowed_user_ids": await access.add_allowed(account, user_id)}
+        self._audit_mgmt(account, "mgmt:admin.perm_added", surface, extra=f"user_id={user_id}")
         return out
 
-    async def admin_perms_remove(self, account: str, user_id: int,
-                                 surface: str = "api") -> Dict[str, Any]:
+    async def admin_perms_remove(
+        self, account: str, user_id: int, surface: str = "api"
+    ) -> dict[str, Any]:
         access = self._require_access()
-        out = {"account": account,
-               "allowed_user_ids": await access.remove_allowed(
-                   account, user_id)}
-        self._audit_mgmt(account, "mgmt:admin.perm_removed", surface,
-                         extra=f"user_id={user_id}")
+        out = {
+            "account": account,
+            "allowed_user_ids": await access.remove_allowed(account, user_id),
+        }
+        self._audit_mgmt(account, "mgmt:admin.perm_removed", surface, extra=f"user_id={user_id}")
         return out
 
-    async def admin_prefix(self, account: str,
-                            surface: str = "api") -> Dict[str, Any]:
+    async def admin_prefix(self, account: str, surface: str = "api") -> dict[str, Any]:
         """Read the per-account self-command prefix configuration.
 
         ``surface`` is reserved (mgmt audit vocabulary): reads are not
         audited — only admin_prefix_set is.
         """
         access = self._require_access()
-        return {"account": account,
-                **await access.prefix_config(account)}
+        return {"account": account, **await access.prefix_config(account)}
 
-    async def admin_prefix_set(self, account: str, mode: str,
-                               symbol: str = "",
-                               surface: str = "api") -> Dict[str, Any]:
+    async def admin_prefix_set(
+        self, account: str, mode: str, symbol: str = "", surface: str = "api"
+    ) -> dict[str, Any]:
         access = self._require_access()
-        out = {"account": account,
-               **await access.set_prefix_config(account, mode, symbol)}
-        self._audit_mgmt(account, "mgmt:admin.prefix_set", surface,
-                         extra=f"mode={mode} symbol={symbol!r}")
+        out = {"account": account, **await access.set_prefix_config(account, mode, symbol)}
+        self._audit_mgmt(
+            account, "mgmt:admin.prefix_set", surface, extra=f"mode={mode} symbol={symbol!r}"
+        )
         return out
 
-    async def admin_mudae_id(self,
-                              surface: str = "api") -> Dict[str, Any]:
+    async def admin_mudae_id(self, surface: str = "api") -> dict[str, Any]:
         """Read the framework-level Mudae bot id.
 
         ``surface`` is reserved (mgmt audit vocabulary): reads are not
@@ -1862,19 +1850,15 @@ class ControlAPI:
         access = self._require_access()
         return {"mudae_bot_id": await access.mudae_bot_id()}
 
-    async def admin_mudae_id_set(self, user_id,
-                                 surface: str = "api") -> Dict[str, Any]:
+    async def admin_mudae_id_set(self, user_id, surface: str = "api") -> dict[str, Any]:
         access = self._require_access()
         if user_id is not None and not str(user_id).strip().lstrip("-").isdigit():
             raise ValueError("mudae bot id must be an integer (or null)")
-        await access.set_mudae_bot_id(
-            int(user_id) if user_id is not None else None)
-        self._audit_mgmt("system", "mgmt:admin.mudae_id_set", surface,
-                         extra=f"value={user_id}")
+        await access.set_mudae_bot_id(int(user_id) if user_id is not None else None)
+        self._audit_mgmt("system", "mgmt:admin.mudae_id_set", surface, extra=f"value={user_id}")
         return {"mudae_bot_id": await access.mudae_bot_id()}
 
-    async def admin_forget_account(self, account: str,
-                                   surface: str = "api") -> Dict[str, Any]:
+    async def admin_forget_account(self, account: str, surface: str = "api") -> dict[str, Any]:
         """Remove an account's access row (admin/perms/prefix) — cleanup
         for accounts deleted before the cascade existed, or manual prune."""
         access = self._require_access()
@@ -1885,12 +1869,11 @@ class ControlAPI:
     def _require_access(self) -> Any:
         access = getattr(self, "_access", None)
         if access is None:
-            raise RuntimeError(
-                "admin access store not wired on this api")
+            raise RuntimeError("admin access store not wired on this api")
         return access
 
     # ------------------------------------------------------------- rate limits
-    async def ratelimit_policies(self) -> List[Dict[str, Any]]:
+    async def ratelimit_policies(self) -> list[dict[str, Any]]:
         """Every stored policy with its level/owner scope."""
         return self._limiter.policies()
 
@@ -1901,8 +1884,8 @@ class ControlAPI:
         jitter_min: float = 0.0,
         jitter_max: float = 0.0,
         level: str = "global",
-        owner: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        owner: str | None = None,
+    ) -> dict[str, Any]:
         """Set a policy. Enforces the safety floor: an interval at or below the
         configured floor is REJECTED (see the Policies page for the value).
 
@@ -1925,9 +1908,7 @@ class ControlAPI:
         await self._write_removed_defaults(level, owner, action, removed=False)
         return {"action": action, "level": level, "owner": owner, "policy": str(policy)}
 
-    async def ratelimit_clear(
-        self, level: str, owner: Optional[str], action: str
-    ) -> Dict[str, Any]:
+    async def ratelimit_clear(self, level: str, owner: str | None, action: str) -> dict[str, Any]:
         # normalize FIRST: the engine strips internally and the repo delete
         # must target the same key or the row silently survives a "clear"
         action = (action or "").strip()
@@ -1940,70 +1921,80 @@ class ControlAPI:
         return {"cleared": removed, "level": level, "owner": owner, "action": action}
 
     async def ratelimit_effective(
-        self, action: str, account: Optional[str] = None, plugin: Optional[str] = None
-    ) -> Dict[str, Any]:
+        self, action: str, account: str | None = None, plugin: str | None = None
+    ) -> dict[str, Any]:
         """What actually paces this (account, plugin, action) right now."""
         return self._limiter.effective(action, account, plugin)
 
-    async def ratelimit_stats(self) -> Dict[str, Any]:
+    async def ratelimit_stats(self) -> dict[str, Any]:
         """Visualization data: policies, cooldowns, last fires, counters."""
         return self._limiter.stats()
 
-    async def ratelimit_warnings(self) -> List[Dict[str, Any]]:
+    async def ratelimit_warnings(self) -> list[dict[str, Any]]:
         """Safety review of the current configuration."""
         return self._limiter.warnings()
 
-    async def ratelimit_set_floor(self, seconds: float) -> Dict[str, Any]:
+    async def ratelimit_set_floor(self, seconds: float) -> dict[str, Any]:
         """Raise the pacing floor (never below MIN_ACTION_INTERVAL; persisted)."""
         floor = self._limiter.set_floor(seconds)
         await self._persist_floor(floor)
         return {"floor": floor}
 
-    async def ratelimit_lane(self) -> Dict[str, Any]:
+    async def ratelimit_lane(self) -> dict[str, Any]:
         """Sequential send lane state (REMOVED — returns stub for compat)."""
-        return {"enabled": False, "prefixrate": 0, "removed": True,
-                "reason": "fleet send lane removed: sync groups + per-account "
-                           "pacing replace it without throttling single accounts"}
+        return {
+            "enabled": False,
+            "prefixrate": 0,
+            "removed": True,
+            "reason": "fleet send lane removed: sync groups + per-account "
+            "pacing replace it without throttling single accounts",
+        }
 
     async def ratelimit_set_lane(
         self, enabled: Any = None, prefixrate: Any = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Lane configuration (REMOVED — accepts and returns stub for compat)."""
-        return {"enabled": False, "prefixrate": 0, "removed": True,
-                "note": "fleet send lane removed; setting ignored"}
-    async def _persist_policy(self, level: str, owner: Optional[str],
-                              policy: Any) -> None:
+        return {
+            "enabled": False,
+            "prefixrate": 0,
+            "removed": True,
+            "note": "fleet send lane removed; setting ignored",
+        }
+
+    async def _persist_policy(self, level: str, owner: str | None, policy: Any) -> None:
         """Best-effort awaited policy write (pacing never depends on the DB)."""
-        repo = getattr(self._database, "policies", None) \
-            if self._database is not None else None
+        repo = getattr(self._database, "policies", None) if self._database is not None else None
         if repo is None:
             return
         try:
-            await repo.set(level, owner, policy.action, policy.interval,
-                           policy.jitter_min, policy.jitter_max)
+            await repo.set(
+                level, owner, policy.action, policy.interval, policy.jitter_min, policy.jitter_max
+            )
         except Exception as exc:
-            LOG.warning("could not persist rate policy %r at %s/%s: %s "
-                        "(policy is still active in memory)",
-                        policy.action, level, owner or "-", exc)
+            LOG.warning(
+                "could not persist rate policy %r at %s/%s: %s (policy is still active in memory)",
+                policy.action,
+                level,
+                owner or "-",
+                exc,
+            )
 
-    async def _forget_policy(self, level: str, owner: Optional[str],
-                             action: str) -> None:
+    async def _forget_policy(self, level: str, owner: str | None, action: str) -> None:
         """Best-effort awaited policy delete."""
-        repo = getattr(self._database, "policies", None) \
-            if self._database is not None else None
+        repo = getattr(self._database, "policies", None) if self._database is not None else None
         if repo is None:
             return
         try:
             await repo.delete(level, owner, action)
         except Exception as exc:
-            LOG.warning("could not delete rate policy %r at %s/%s: %s",
-                        action, level, owner or "-", exc)
+            LOG.warning(
+                "could not delete rate policy %r at %s/%s: %s", action, level, owner or "-", exc
+            )
 
     async def _persist_floor(self, floor: float) -> None:
         """Persist the raised floor (kv): a restart must not silently revert
         a post-incident safety measure to the configured default floor."""
-        kv = getattr(self._database, "kv", None) \
-            if self._database is not None else None
+        kv = getattr(self._database, "kv", None) if self._database is not None else None
         if kv is None:
             return
         try:
@@ -2012,7 +2003,7 @@ class ControlAPI:
             LOG.warning("could not persist rate-limit floor: %s", exc)
 
     async def _write_removed_defaults(
-        self, level: str, owner: Optional[str], action: str, *, removed: bool
+        self, level: str, owner: str | None, action: str, *, removed: bool
     ) -> None:
         """Tombstone bookkeeping: a CLEARED first-boot default must never be
         re-seeded from the config file on the next boot; an explicit SET
@@ -2023,8 +2014,7 @@ class ControlAPI:
         without the other's entry — lost tombstones resurrected cleared
         defaults on boot.
         """
-        kv = getattr(self._database, "kv", None) \
-            if self._database is not None else None
+        kv = getattr(self._database, "kv", None) if self._database is not None else None
         if kv is None:
             return
         key = f"{level}|{owner or ''}|{action}"
@@ -2045,31 +2035,33 @@ class ControlAPI:
 
     # ------------------------------------------------------------------ tasks
     async def tasks_list(
-        self, status: Optional[str] = None, account: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+        self, status: str | None = None, account: str | None = None
+    ) -> list[dict[str, Any]]:
         """Queued/running tasks (and recent ones) with optional filters."""
         return self._scheduler.tasks(status=status, account=account)
 
-    async def tasks_cancel(self, task_id: int) -> Dict[str, Any]:
+    async def tasks_cancel(self, task_id: int) -> dict[str, Any]:
         return {"cancelled": self._scheduler.cancel(int(task_id)), "task_id": task_id}
 
     async def tasks_cancel_matching(
-        self, account: Optional[str] = None, plugin: Optional[str] = None
-    ) -> Dict[str, Any]:
+        self, account: str | None = None, plugin: str | None = None
+    ) -> dict[str, Any]:
         """Emergency-stop helper: cancel every matching task."""
         return {"cancelled": self._scheduler.cancel_matching(account=account, plugin=plugin)}
 
-    async def tasks_history(self, limit: int = 50, account: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def tasks_history(
+        self, limit: int = 50, account: str | None = None
+    ) -> list[dict[str, Any]]:
         # scheduler.history() is async now (aiosqlite repo reads)
         return await _resolved(self._scheduler.history(limit=limit, account=account))
 
     # ------------------------------------------------------------- simulation
-    async def simulation_list(self) -> List[Dict[str, Any]]:
+    async def simulation_list(self) -> list[dict[str, Any]]:
         if self._simulation is None:
             return []
         return self._simulation.list()
 
-    async def simulation_run(self, name: str) -> Dict[str, Any]:
+    async def simulation_run(self, name: str) -> dict[str, Any]:
         """Run one scenario offline; returns the full timed report."""
         if self._simulation is None:
             raise RuntimeError("simulation runner not configured")
@@ -2077,22 +2069,20 @@ class ControlAPI:
 
     # ------------------------------------------------------------------- logs
     async def logs_tail(
-        self, n: int = 100, account: Optional[str] = None, severity: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+        self, n: int = 100, account: str | None = None, severity: str | None = None
+    ) -> list[dict[str, Any]]:
         """Structured log tail (dashboard Logs page + CLI 'logs')."""
         return self._logs.tail(n, account=account, severity=severity)
 
-    def logs_service(self) -> "LogService":
+    def logs_service(self) -> LogService:
         """The live service (dashboard WS subscribes to this)."""
         return self._logs
 
-    def audit_recorder(self) -> Optional["AuditRecorder"]:
+    def audit_recorder(self) -> AuditRecorder | None:
         """The live audit recorder (dashboard WS subscription point)."""
         return self._audit
 
-    async def audit_tail(
-        self, n: int = 100, account: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+    async def audit_tail(self, n: int = 100, account: str | None = None) -> list[dict[str, Any]]:
         if self._audit is None:
             return []
         # AuditRecorder.history() is async now (aiosqlite repo reads)
@@ -2100,20 +2090,21 @@ class ControlAPI:
 
     # ---------------------------------------------------------------- system
     @property
-    def dashboard_token(self) -> Optional[str]:
+    def dashboard_token(self) -> str | None:
         return self._credentials.dashboard_token if self._credentials else None
 
-    async def emergency_stop_all(self, surface: str = "api") -> Dict[str, Any]:
+    async def emergency_stop_all(self, surface: str = "api") -> dict[str, Any]:
         """GLOBAL emergency stop: cancel all tasks, stop all accounts, halt."""
         cancelled = self._scheduler.cancel_matching()
         await self._scheduler.stop(drain=False)
         stopped = await self._accounts.stop_all()
-        self._logs.error("system", f"GLOBAL EMERGENCY STOP executed ({cancelled} task(s) cancelled)")
-        self._audit_mgmt("system", "mgmt:estop", surface,
-                         extra=f"cancelled={cancelled}")
+        self._logs.error(
+            "system", f"GLOBAL EMERGENCY STOP executed ({cancelled} task(s) cancelled)"
+        )
+        self._audit_mgmt("system", "mgmt:estop", surface, extra=f"cancelled={cancelled}")
         return {"cancelled_tasks": cancelled, "accounts": stopped, "halted": True}
 
-    async def system_resume(self) -> Dict[str, Any]:
+    async def system_resume(self) -> dict[str, Any]:
         """Resume after a GLOBAL emergency stop.
 
         Re-arms the scheduler (stop() left it terminal — every task had
@@ -2127,7 +2118,7 @@ class ControlAPI:
         self._logs.info("system", "resume after emergency stop: scheduler re-armed")
         return {"resumed": True, "status": await self.status()}
 
-    async def shutdown(self) -> Dict[str, Any]:
+    async def shutdown(self) -> dict[str, Any]:
         """Graceful shutdown of the scheduler + accounts (quit/dashboard).
 
         Does NOT close the database: the persistence queues (logs/audit)
@@ -2142,8 +2133,7 @@ class ControlAPI:
         return {"shutdown": True}
 
     # ------------------------------------------------------- mgmt audit trail
-    def _audit_mgmt(self, account: str, action: str, surface: str = "",
-                    extra: str = "") -> None:
+    def _audit_mgmt(self, account: str, action: str, surface: str = "", extra: str = "") -> None:
         """One management audit row — value-free by construction (spec audit).
 
         The note names the calling surface ('cli' / 'dashboard' / 'api')
@@ -2166,4 +2156,4 @@ class ControlAPI:
             LOG.debug("management audit write failed", exc_info=True)
 
 
-__all__ = ["ControlAPI", "parse_bool", "LANE_KV_KEY"]
+__all__ = ["LANE_KV_KEY", "ControlAPI", "parse_bool"]

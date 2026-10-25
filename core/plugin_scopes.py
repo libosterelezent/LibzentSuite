@@ -26,11 +26,12 @@ phase — the services layer's send gate, the dashboard UI picker, the
 command interface — validates and evaluates EXACTLY this structure.
 The validation lives here and nowhere else.
 """
+
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-__all__ = ["validate", "channel_allowed", "CHANNELS_KEY"]
+__all__ = ["CHANNELS_KEY", "channel_allowed", "validate"]
 
 #: the reserved top-level settings key carrying the scope
 CHANNELS_KEY = "channels"
@@ -41,7 +42,7 @@ def _err(field: str, problem: str) -> ValueError:
     return ValueError(f"channel scope field {field!r}: {problem}")
 
 
-def validate(scope: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def validate(scope: dict[str, Any] | None) -> dict[str, Any] | None:
     """Parse + validate a channel scope; returns a normalized COPY.
 
     ``scope`` is the VALUE of the reserved ``"channels"`` key:
@@ -62,26 +63,24 @@ def validate(scope: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
     unknown_keys = sorted(set(scope) - {"channels"})
     if unknown_keys:
-        raise _err(CHANNELS_KEY,
-                   f"unknown key(s) {unknown_keys} (supports: ['channels'])")
+        raise _err(CHANNELS_KEY, f"unknown key(s) {unknown_keys} (supports: ['channels'])")
 
     ids_raw = scope.get("channels", [])
     if not isinstance(ids_raw, list):
         raise _err("channels", f"must be a list of channel ids, got {type(ids_raw).__name__}")
 
-    cleaned: List[str] = []
+    cleaned: list[str] = []
     for index, channel_id in enumerate(ids_raw):
         field = f"channels[{index}]"
         if not isinstance(channel_id, str) or not channel_id.strip():
-            raise _err(field,
-                       f"must be a non-empty string, got {channel_id!r}")
+            raise _err(field, f"must be a non-empty string, got {channel_id!r}")
         cleaned.append(channel_id.strip())
 
     return {"channels": cleaned}
 
 
 def channel_allowed(
-    scope: Optional[Dict[str, Any]],
+    scope: dict[str, Any] | None,
     guild_id: Any,
     channel_id: Any,
 ) -> bool:

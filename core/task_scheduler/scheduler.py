@@ -52,17 +52,19 @@ Retries carry NO scheduler delay — they re-enter limiter.acquire immediately; 
 through the ``_sleep`` seam (deterministic tests) and are capped at
 ``1 + max_retries`` total attempts.
 """
+
 from __future__ import annotations
 
 import asyncio
-import re
 import heapq
 import inspect
 import itertools
 import math
+import re
 import time
 from collections import deque
-from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional
+from contextlib import suppress
+from typing import TYPE_CHECKING, Any
 
 from core._asyncutil import outer_cancel_pending
 from core.errors import FlowBlocked, SchedulerError, ServerRateLimit
@@ -87,6 +89,9 @@ from .tasks import (
     TERMINAL_STATUSES,
     Task,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 #: how many finished-task rows/dicts we keep in memory for tasks()/history()
 _FINISHED_KEEP = 500
@@ -126,12 +131,14 @@ _HEAP_STALE_COMPACT_THRESHOLD = 16
 #: TargetGone are therefore NOT listed: the adapter also raises them
 #: AFTER the request reached Discord (HTTP 5xx, button-click timeout,
 #: NotFound on send), so they are ambiguous.
-_PRE_WIRE_ERROR_KINDS = frozenset({
-    "AccountError",     # unknown account (sender pre-flight)
-    "SchedulerError",   # unsupported action (dispatch table miss)
-    "FetchRequired",    # DM target unresolvable from cache (pre-wire)
-    "CacheInvalid",     # cache validation failed (pre-wire)
-})
+_PRE_WIRE_ERROR_KINDS = frozenset(
+    {
+        "AccountError",  # unknown account (sender pre-flight)
+        "SchedulerError",  # unsupported action (dispatch table miss)
+        "FetchRequired",  # DM target unresolvable from cache (pre-wire)
+        "CacheInvalid",  # cache validation failed (pre-wire)
+    }
+)
 
 
 class _AcquireCancelled(Exception):
@@ -171,7 +178,7 @@ class _GrantGate:
     """
 
     def __init__(self) -> None:
-        self._heap: List[tuple] = []  # (priority, seq, future)
+        self._heap: list[tuple] = []  # (priority, seq, future)
         self._cycle_pending = False
         self._cycles: set = set()  # strong refs (create_task GC hazard)
 
@@ -246,7 +253,7 @@ class TaskScheduler:
         retry_backoff: float = 0.5,
         max_backoff: float = 30.0,
         history_repo: Any = None,
-        dispatch_guard: Optional[Callable[[Task], Awaitable[Any]]] = None,
+        dispatch_guard: Callable[[Task], Awaitable[Any]] | None = None,
     ) -> None:
         for label, value in (
             ("default_timeout", default_timeout),
@@ -275,23 +282,23 @@ class TaskScheduler:
         self._guard = dispatch_guard
 
         self._seq = itertools.count(1)
-        self._tasks: Dict[int, Task] = {}  # live (queued/running) by id
-        self._finished_rows: Deque[dict] = deque(maxlen=_FINISHED_KEEP)
-        self._finished_tasks: Deque[Task] = deque(maxlen=_FINISHED_KEEP)
-        self._counts: Dict[str, int] = {
+        self._tasks: dict[int, Task] = {}  # live (queued/running) by id
+        self._finished_rows: deque[dict] = deque(maxlen=_FINISHED_KEEP)
+        self._finished_tasks: deque[Task] = deque(maxlen=_FINISHED_KEEP)
+        self._counts: dict[str, int] = {
             STATUS_COMPLETED: 0,
             STATUS_FAILED: 0,
             STATUS_CANCELLED: 0,
             STATUS_TIMED_OUT: 0,
         }
-        self._queues: Dict[str, list] = {}  # account -> heap of (prio, id, task)
-        self._lane_events: Dict[str, asyncio.Event] = {}
-        self._lanes: Dict[str, asyncio.Task] = {}
+        self._queues: dict[str, list] = {}  # account -> heap of (prio, id, task)
+        self._lane_events: dict[str, asyncio.Event] = {}
+        self._lanes: dict[str, asyncio.Task] = {}
         # LOW anti-starvation bookkeeping (see LOW_STARVATION_S): queued
         # LOW tasks per account in submission order + pops since a LOW
         # task last ran. The heap itself stays the sole ordering authority.
-        self._low_lanes: Dict[str, Deque[Task]] = {}
-        self._pops_since_low: Dict[str, int] = {}
+        self._low_lanes: dict[str, deque[Task]] = {}
+        self._pops_since_low: dict[str, int] = {}
         self._worker_refs: set = set()  # strong refs to spawned lane tasks
         self._tail_refs: set = set()  # strong refs to scheduled finish tails
         self._acquire_refs: set = set()  # strong refs to preemptible acquires
@@ -304,11 +311,11 @@ class TaskScheduler:
         # is an ack-awaiting sequential loop, structurally bounded by the
         # 30s task-ack timeout cancel).
         self._depth_hwm = 0
-        self._wait_samples: Deque[float] = deque(maxlen=_FINISHED_KEEP)
+        self._wait_samples: deque[float] = deque(maxlen=_FINISHED_KEEP)
         self._last_pressure_warn = 0.0
         self._stopped = False
         self._stop_failed = False  # stop owner died mid-teardown: faulted gate
-        self._stop_latch: Optional["asyncio.Future[None]"] = None  # single-flight stop
+        self._stop_latch: asyncio.Future[None] | None = None  # single-flight stop
         self._sweeping = False  # estop barrier: lanes must not start new sends
 
     # ----------------------------------------------------------- lifecycle
@@ -357,10 +364,13 @@ class TaskScheduler:
                 floor = max(floor, int(await self._history_repo.max_id()))
             except Exception as exc:
                 floor = max(floor, int(time.time()))
-                self._log("warning", "scheduler",
-                          f"could not read task history high-water mark "
-                          f"({type(exc).__name__}: {exc}); ids seeded from "
-                          f"the epoch offset {floor} (collision-proof)")
+                self._log(
+                    "warning",
+                    "scheduler",
+                    f"could not read task history high-water mark "
+                    f"({type(exc).__name__}: {exc}); ids seeded from "
+                    f"the epoch offset {floor} (collision-proof)",
+                )
         self._seq = itertools.count(floor + 1)
         return floor + 1
 
@@ -385,7 +395,7 @@ class TaskScheduler:
         self._sweeping = False
         self._started = True
 
-    def set_dispatch_guard(self, guard: Optional[Callable[[Task], Awaitable[Any]]]) -> None:
+    def set_dispatch_guard(self, guard: Callable[[Task], Awaitable[Any]] | None) -> None:
         """Attach/replace/clear the fleet dispatch gate (PHASE 9 §4).
 
         Late-binding on purpose: bootstrap wires the policy engine after
@@ -394,7 +404,7 @@ class TaskScheduler:
         """
         self._guard = guard
 
-    async def _guard_decision(self, task: Task) -> Optional[Any]:
+    async def _guard_decision(self, task: Task) -> Any | None:
         """One guard evaluation; None means 'no opinion' (absent guard,
         or the guard itself errored — logged loudly, treated as allowed:
         a broken policy engine must not wedge every dispatch, and the
@@ -404,9 +414,11 @@ class TaskScheduler:
         try:
             return await self._guard(task)
         except Exception:
-            self._log("warning", "fleet",
-                      f"dispatch guard error for task={task.id}"
-                      f" account={task.account} (fail-open)")
+            self._log(
+                "warning",
+                "fleet",
+                f"dispatch guard error for task={task.id} account={task.account} (fail-open)",
+            )
             return None
 
     async def _await_guard(self, task: Task) -> None:
@@ -425,8 +437,11 @@ class TaskScheduler:
             if isinstance(retry_at, (int, float)):
                 delay = max(0.05, min(float(retry_at) - time.time(), 5.0))
             await asyncio.sleep(delay)
-            if (task.cancelled or self._sweeping
-                    or task.status not in (STATUS_QUEUED, STATUS_RUNNING)):
+            if (
+                task.cancelled
+                or self._sweeping
+                or task.status not in (STATUS_QUEUED, STATUS_RUNNING)
+            ):
                 return
 
     async def stop(self, *, drain: bool = True, timeout: float = 10.0) -> None:
@@ -459,9 +474,7 @@ class TaskScheduler:
         if self._stopped:
             return
         if self._stop_latch is not None:
-            failed = (
-                self._stop_latch.done() and self._stop_latch.exception() is not None
-            )
+            failed = self._stop_latch.done() and self._stop_latch.exception() is not None
             if not failed:
                 # a stop is already in flight: join it (shielded — cancelling
                 # THIS caller must never cancel the underlying teardown). A
@@ -472,9 +485,7 @@ class TaskScheduler:
                     # wait_for (not bare wait) so the shield wrapper itself is
                     # awaited: an owner failure surfaces HERE and its exception
                     # is retrieved, never leaked to the gc warning hook
-                    await asyncio.wait_for(
-                        asyncio.shield(in_flight), timeout=30.0
-                    )
+                    await asyncio.wait_for(asyncio.shield(in_flight), timeout=30.0)
                 except asyncio.TimeoutError:
                     # 30s join budget exhausted while the owner still drains:
                     # returning "success" here would let the caller close the
@@ -525,13 +536,12 @@ class TaskScheduler:
                 # bounded: a lane whose finish tail parks on a stuck DB
                 # write must not hang stop() forever ("stop() never
                 # hangs" contract); the tails below are joined bounded
-                _, stuck = await asyncio.wait(
-                    list(self._lanes.values()), timeout=5.0)
+                _, stuck = await asyncio.wait(list(self._lanes.values()), timeout=5.0)
                 for lane in stuck:
-                    label = lane.get_name() if hasattr(lane, "get_name") \
-                        else repr(lane)
-                    self._log("warning", "scheduler",
-                              f"lane {label} did not settle within 5s of stop")
+                    label = lane.get_name() if hasattr(lane, "get_name") else repr(lane)
+                    self._log(
+                        "warning", "scheduler", f"lane {label} did not settle within 5s of stop"
+                    )
             # join every pending finish tail (sync-cancel, lane and sweep
             # tails alike; bounded — each tail is at most one awaited
             # repo.add) so their history rows land BEFORE the caller
@@ -545,9 +555,7 @@ class TaskScheduler:
             # (bounded, shielded) so nothing keeps sending, but do NOT mark
             # the scheduler stopped — a later stop() must be able to retry
             if not latch.done():
-                latch.set_exception(
-                    SchedulerError("scheduler stop was cancelled mid-teardown")
-                )
+                latch.set_exception(SchedulerError("scheduler stop was cancelled mid-teardown"))
             await self._abort_stop()
             raise
         except BaseException as exc:
@@ -591,8 +599,7 @@ class TaskScheduler:
         try:
             if self._lanes:
                 await asyncio.wait(
-                    [asyncio.shield(t) for t in list(self._lanes.values())
-                     if not t.done()],
+                    [asyncio.shield(t) for t in list(self._lanes.values()) if not t.done()],
                     timeout=2.0,
                 )
         except Exception:
@@ -629,10 +636,9 @@ class TaskScheduler:
         if lane is None or lane.done():
             return
         lane.cancel()
-        try:
+        # pragma: no cover - reap is best-effort
+        with suppress(Exception):
             await asyncio.wait({lane}, timeout=2.0)
-        except Exception:  # pragma: no cover - reap is best-effort
-            pass
 
     # ------------------------------------------------------------- submit
     def submit(
@@ -641,15 +647,15 @@ class TaskScheduler:
         plugin: str,
         action: str,
         *,
-        channel_id: Optional[int] = None,
-        user_id: Optional[int] = None,
-        content: Optional[str] = None,
-        message_id: Optional[int] = None,
+        channel_id: int | None = None,
+        user_id: int | None = None,
+        content: str | None = None,
+        message_id: int | None = None,
         priority: Priority = Priority.NORMAL,
-        name: Optional[str] = None,
-        timeout: Optional[float] = None,
+        name: str | None = None,
+        timeout: float | None = None,
         retries: int = 0,
-        fleet_assignment: Optional[str] = None,
+        fleet_assignment: str | None = None,
     ) -> Task:
         """Validate, queue and publish one task; returns the live Task.
 
@@ -668,8 +674,11 @@ class TaskScheduler:
                 raise SchedulerError(f"task {label} must be a non-empty string, got {value!r}")
         if content is not None and not isinstance(content, str):
             raise SchedulerError(f"content must be a string or None, got {type(content).__name__}")
-        for label, value in (("channel_id", channel_id), ("user_id", user_id),
-                             ("message_id", message_id)):
+        for label, value in (
+            ("channel_id", channel_id),
+            ("user_id", user_id),
+            ("message_id", message_id),
+        ):
             if value is None:
                 continue
             if isinstance(value, bool) or not isinstance(value, int):
@@ -684,24 +693,32 @@ class TaskScheduler:
             timeout_s = self._default_timeout
         else:
             if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
-                raise SchedulerError(f"timeout must be a number of seconds or None, got {timeout!r}")
+                raise SchedulerError(
+                    f"timeout must be a number of seconds or None, got {timeout!r}"
+                )
             timeout_s = float(timeout)
             if not math.isfinite(timeout_s) or timeout_s < 0:
-                raise SchedulerError(f"timeout must be a finite value >= 0 seconds, got {timeout!r}")
+                raise SchedulerError(
+                    f"timeout must be a finite value >= 0 seconds, got {timeout!r}"
+                )
         if isinstance(retries, bool) or not isinstance(retries, int):
             raise SchedulerError(f"retries must be an int >= 0, got {retries!r}")
         if retries < 0:
             raise SchedulerError(f"retries must be >= 0, got {retries!r}")
         if fleet_assignment is not None and (
-                not isinstance(fleet_assignment, str)
-                or not fleet_assignment.strip()):
+            not isinstance(fleet_assignment, str) or not fleet_assignment.strip()
+        ):
             raise SchedulerError(
-                f"fleet_assignment must be a non-empty string or None, "
-                f"got {fleet_assignment!r}")
+                f"fleet_assignment must be a non-empty string or None, got {fleet_assignment!r}"
+            )
 
         task = Task(
             id=next(self._seq),
-            name=(name.strip() if isinstance(name, str) and name.strip() else f"{plugin.strip()}:{action.strip()}"),
+            name=(
+                name.strip()
+                if isinstance(name, str) and name.strip()
+                else f"{plugin.strip()}:{action.strip()}"
+            ),
             account=account.strip(),
             plugin=plugin.strip(),
             action=action.strip(),
@@ -712,8 +729,9 @@ class TaskScheduler:
             priority=int(prio),
             timeout_s=timeout_s,
             max_retries=retries,
-            fleet_assignment=(fleet_assignment.strip()
-                              if isinstance(fleet_assignment, str) else None),
+            fleet_assignment=(
+                fleet_assignment.strip() if isinstance(fleet_assignment, str) else None
+            ),
         )
         try:
             self._ensure_lane(task.account)  # validates a running loop FIRST:
@@ -737,7 +755,11 @@ class TaskScheduler:
             f"queued task {task.id} ({task.name}) account={task.account!r} "
             f"priority={prio.name} retries={task.max_retries}",
         )
-        self._emit(TaskQueued(account=task.account, task_id=task.id, plugin=task.plugin, action=task.action))
+        self._emit(
+            TaskQueued(
+                account=task.account, task_id=task.id, plugin=task.plugin, action=task.action
+            )
+        )
         return task
 
     def _ensure_lane(self, account: str) -> None:
@@ -812,7 +834,11 @@ class TaskScheduler:
         return 0
 
     def cancel_matching(
-        self, *, account: Optional[str] = None, plugin: Optional[str] = None, action: Optional[str] = None
+        self,
+        *,
+        account: str | None = None,
+        plugin: str | None = None,
+        action: str | None = None,
     ) -> int:
         """Cancel every live task matching ALL given filters.
 
@@ -839,7 +865,7 @@ class TaskScheduler:
         return count
 
     # ------------------------------------------------------------ queries
-    def get(self, task_id: int) -> Optional[Task]:
+    def get(self, task_id: int) -> Task | None:
         """The Task object for task_id (live first, then recently finished)."""
         task = self._tasks.get(task_id)
         if task is not None:
@@ -849,9 +875,9 @@ class TaskScheduler:
                 return finished
         return None
 
-    def tasks(self, *, status: Optional[str] = None, account: Optional[str] = None) -> List[dict]:
+    def tasks(self, *, status: str | None = None, account: str | None = None) -> list[dict]:
         """Live queued/running tasks plus recently finished ones, newest last."""
-        rows: List[dict] = [t.as_dict() for t in sorted(self._tasks.values(), key=lambda t: t.id)]
+        rows: list[dict] = [t.as_dict() for t in sorted(self._tasks.values(), key=lambda t: t.id)]
         rows.extend(self._finished_rows)
         if status is not None:
             rows = [r for r in rows if r.get("status") == status]
@@ -859,7 +885,7 @@ class TaskScheduler:
             rows = [r for r in rows if r.get("account") == account]
         return rows
 
-    async def history(self, limit: int = 50, account: Optional[str] = None) -> List[dict]:
+    async def history(self, limit: int = 50, account: str | None = None) -> list[dict]:
         """Finished tasks, newest last — repo-backed (awaited), else the
         in-memory tail."""
         try:
@@ -870,7 +896,11 @@ class TaskScheduler:
             try:
                 return list(await self._history_repo.recent(limit, account))
             except Exception:
-                self._log("warning", "scheduler", "task history read failed; falling back to in-memory tail")
+                self._log(
+                    "warning",
+                    "scheduler",
+                    "task history read failed; falling back to in-memory tail",
+                )
         rows = list(self._finished_rows)
         if account is not None:
             rows = [r for r in rows if r.get("account") == account]
@@ -897,16 +927,20 @@ class TaskScheduler:
         queued = [t for t in live if t.status == STATUS_QUEUED]
         pressure = self.pressure()
         rank = {"PRESSURED": 2, "CRITICAL": 3}
-        if (rank.get(pressure["level"], 0) >= 2
-                and time.monotonic() - self._last_pressure_warn >= 60.0):
+        if (
+            rank.get(pressure["level"], 0) >= 2
+            and time.monotonic() - self._last_pressure_warn >= 60.0
+        ):
             self._last_pressure_warn = time.monotonic()
             self._log(
-                "warning", "scheduler",
+                "warning",
+                "scheduler",
                 f"scheduler pressure {pressure['level']}: depth="
                 f"{pressure['depth']} accounts={pressure['accounts']} "
                 f"oldest={pressure['oldest_queued_age_s']:.1f}s "
                 f"max_lane={pressure['max_lane_depth']} — watch for "
-                "producer backpressure (telemetry only; nothing dropped)")
+                "producer backpressure (telemetry only; nothing dropped)",
+            )
         waits = sorted(self._wait_samples)
         return {
             "queued": len(queued),
@@ -921,15 +955,14 @@ class TaskScheduler:
             "queued_depth_hwm": self._depth_hwm,
             "oldest_queued_age_s": round(pressure["oldest_queued_age_s"], 3),
             "queued_by_priority": {
-                p.name: sum(1 for t in queued if t.priority == p.value)
-                for p in Priority},
+                p.name: sum(1 for t in queued if t.priority == p.value) for p in Priority
+            },
             "queued_by_account": pressure["queued_by_account"],
             "wait_p50_s": round(waits[len(waits) // 2], 4) if waits else 0.0,
-            "wait_p95_s": round(waits[int(len(waits) * 0.95)], 4)
-            if waits else 0.0,
-            "wait_p99_s": round(waits[min(len(waits) - 1,
-                                          int(len(waits) * 0.99))], 4)
-            if waits else 0.0,
+            "wait_p95_s": round(waits[int(len(waits) * 0.95)], 4) if waits else 0.0,
+            "wait_p99_s": round(waits[min(len(waits) - 1, int(len(waits) * 0.99))], 4)
+            if waits
+            else 0.0,
             "pressure": pressure["level"],
         }
 
@@ -966,7 +999,7 @@ class TaskScheduler:
         except Exception:
             floor = 1.5
         oldest = max((now - t.submitted_mono for t in queued), default=0.0)
-        per_account: Dict[str, int] = {}
+        per_account: dict[str, int] = {}
         for t in queued:
             per_account[t.account] = per_account.get(t.account, 0) + 1
         max_lane = max(per_account.values(), default=0)
@@ -977,11 +1010,15 @@ class TaskScheduler:
             level = "PRESSURED"
         if depth > 8 * n or oldest > max(20.0, 12 * floor) or max_lane > 12:
             level = "CRITICAL"
-        return {"level": level, "depth": depth, "accounts": n,
-                "pacing_floor_s": floor,
-                "oldest_queued_age_s": oldest,
-                "max_lane_depth": max_lane,
-                "queued_by_account": per_account}
+        return {
+            "level": level,
+            "depth": depth,
+            "accounts": n,
+            "pacing_floor_s": floor,
+            "oldest_queued_age_s": oldest,
+            "max_lane_depth": max_lane,
+            "queued_by_account": per_account,
+        }
 
     # ---------------------------------------------------- worker machinery
     def _pop_next(self, account: str, heap: list) -> Task:
@@ -996,15 +1033,10 @@ class TaskScheduler:
         strictness is bit-for-bit unchanged whenever the rule is off.
         """
         low_lane = self._low_lanes.get(account)
-        if (low_lane is not None
-                and self._pops_since_low.get(account, 0)
-                >= _LOW_AGING_POP_INTERVAL):
-            while low_lane and (low_lane[0].status != STATUS_QUEUED
-                                or low_lane[0].cancelled):
+        if low_lane is not None and self._pops_since_low.get(account, 0) >= _LOW_AGING_POP_INTERVAL:
+            while low_lane and (low_lane[0].status != STATUS_QUEUED or low_lane[0].cancelled):
                 low_lane.popleft()  # lazily drop stale registrations
-            if (low_lane
-                    and time.monotonic() - low_lane[0].submitted_mono
-                    > LOW_STARVATION_S):
+            if low_lane and time.monotonic() - low_lane[0].submitted_mono > LOW_STARVATION_S:
                 chosen = low_lane.popleft()
                 heap[:] = [entry for entry in heap if entry[1] != chosen.id]
                 heapq.heapify(heap)
@@ -1014,8 +1046,7 @@ class TaskScheduler:
         if task.priority == Priority.LOW.value:
             self._pops_since_low[account] = 0
         else:
-            self._pops_since_low[account] = (
-                self._pops_since_low.get(account, 0) + 1)
+            self._pops_since_low[account] = self._pops_since_low.get(account, 0) + 1
         return task
 
     async def _lane(self, account: str) -> None:
@@ -1052,17 +1083,22 @@ class TaskScheduler:
                     while tb.tb_next is not None:
                         tb = tb.tb_next
                     code = tb.tb_frame.f_code
-                    detail += (f" @ {code.co_filename.rsplit('/', 1)[-1]}"
-                               f":{tb.tb_lineno} in {code.co_name}")
-                self._log("error", "scheduler",
-                          f"lane {account!r} worker error on task {task.id} "
-                          f"(contained): {detail}")
+                    detail += (
+                        f" @ {code.co_filename.rsplit('/', 1)[-1]}:{tb.tb_lineno} in {code.co_name}"
+                    )
+                self._log(
+                    "error",
+                    "scheduler",
+                    f"lane {account!r} worker error on task {task.id} (contained): {detail}",
+                )
                 try:  # the stranded task must still reach a terminal state
                     await self._finish(task, STATUS_FAILED, error=detail)
                 except Exception:
-                    self._log("error", "scheduler",
-                              f"task {task.id} terminal fallback failed "
-                              f"after lane error: {detail}")
+                    self._log(
+                        "error",
+                        "scheduler",
+                        f"task {task.id} terminal fallback failed after lane error: {detail}",
+                    )
 
     async def _sleep(self, seconds: float) -> None:
         """Retry-backoff seam (patched to instant in unit tests)."""
@@ -1108,7 +1144,7 @@ class TaskScheduler:
             parts.append(f"ch={channel}")
         return " ".join(parts)[:79]
 
-    async def _reap_acquire(self, acquire_task: "asyncio.Task") -> None:
+    async def _reap_acquire(self, acquire_task: asyncio.Task) -> None:
         """Bounded-join a cancelled acquire so the engine's waiter cleanup
         (prune + wake successors) lands before we report the lane free."""
         try:
@@ -1117,13 +1153,13 @@ class TaskScheduler:
         except Exception:  # pragma: no cover - reap is best-effort
             pass
 
-    def _on_acquire_done(self, acquire_task: "asyncio.Task") -> None:
+    def _on_acquire_done(self, acquire_task: asyncio.Task) -> None:
         """Drop the strong ref; retrieve any failure (GC hygiene)."""
         self._acquire_refs.discard(acquire_task)
         if not acquire_task.cancelled():
             acquire_task.exception()
 
-    async def _acquire_preemptible(self, task: Task) -> Optional[Any]:
+    async def _acquire_preemptible(self, task: Task) -> Any | None:
         """limiter.acquire raced against the task's cancellation event.
 
         Returns the Grant, or ``None`` when the task was cancelled while
@@ -1144,16 +1180,13 @@ class TaskScheduler:
         if task.cancel_event is None:
             task.cancel_event = asyncio.Event()
         acquire_task = loop.create_task(
-            self._limiter.acquire(
-                task.action, task.account, task.plugin, task.priority
-            )
+            self._limiter.acquire(task.action, task.account, task.plugin, task.priority)
         )
         self._acquire_refs.add(acquire_task)
         acquire_task.add_done_callback(self._on_acquire_done)
         waker = loop.create_task(task.cancel_event.wait())
         try:
-            await asyncio.wait({acquire_task, waker},
-                               return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait({acquire_task, waker}, return_when=asyncio.FIRST_COMPLETED)
         except asyncio.CancelledError:
             acquire_task.cancel()  # lane teardown: don't leave a parked child
             raise
@@ -1190,37 +1223,47 @@ class TaskScheduler:
         cancelled); a cancel landing while the acquire itself is parked
         preempts it (see _acquire_preemptible).
         """
-        started_mono: Optional[float] = None
+        started_mono: float | None = None
         try:
             while True:
                 # checkpoint 0: cancelled (or estop sweeping) before we even
                 # ask for a grant
                 # (a retry iteration legitimately re-enters here while RUNNING)
-                if (task.cancelled or self._sweeping
-                        or task.status not in (STATUS_QUEUED, STATUS_RUNNING)):
+                if (
+                    task.cancelled
+                    or self._sweeping
+                    or task.status not in (STATUS_QUEUED, STATUS_RUNNING)
+                ):
                     await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                     return
 
                 # fleet gate (PHASE 9 §4): park — still queued — until the
                 # guard allows; never consumes an attempt, never sends
                 await self._await_guard(task)
-                if (task.cancelled or self._sweeping
-                        or task.status not in (STATUS_QUEUED, STATUS_RUNNING)):
+                if (
+                    task.cancelled
+                    or self._sweeping
+                    or task.status not in (STATUS_QUEUED, STATUS_RUNNING)
+                ):
                     await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                     return
 
                 await self._gate.enter(int(task.priority), task.id)
                 # checkpoint 0.5: cancelled while parked on the GATE — never
                 # reach the limiter (no grant consumed, no clock stamps)
-                if (task.cancelled or self._sweeping
-                        or task.status not in (STATUS_QUEUED, STATUS_RUNNING)):
+                if (
+                    task.cancelled
+                    or self._sweeping
+                    or task.status not in (STATUS_QUEUED, STATUS_RUNNING)
+                ):
                     await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                     return
                 try:
                     grant = await self._acquire_preemptible(task)
                 except _AcquireCancelled:
                     await self._finish(
-                        task, STATUS_FAILED,
+                        task,
+                        STATUS_FAILED,
                         error="rate limiter acquire was cancelled",
                         started_mono=started_mono,
                     )
@@ -1232,7 +1275,8 @@ class TaskScheduler:
                     raise
                 except Exception as exc:
                     await self._finish(
-                        task, STATUS_FAILED,
+                        task,
+                        STATUS_FAILED,
                         error=f"rate limiter error: {type(exc).__name__}: {exc}",
                         started_mono=started_mono,
                     )
@@ -1246,8 +1290,11 @@ class TaskScheduler:
                 task.grant_jitter_ms = float(getattr(grant, "jitter_s", 0.0) or 0.0) * 1000.0
 
                 # checkpoint 1: cancelled while waiting for the grant
-                if (task.cancelled or self._sweeping
-                        or task.status not in (STATUS_QUEUED, STATUS_RUNNING)):
+                if (
+                    task.cancelled
+                    or self._sweeping
+                    or task.status not in (STATUS_QUEUED, STATUS_RUNNING)
+                ):
                     await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                     return
 
@@ -1265,13 +1312,14 @@ class TaskScheduler:
                     task.started_at = time.time()
                     # G2: queue-wait sample — monotonic (the wall-clock diff
                     # could go negative/absurd on an NTP step)
-                    self._wait_samples.append(
-                        max(0.0, time.monotonic() - task.submitted_mono))
+                    self._wait_samples.append(max(0.0, time.monotonic() - task.submitted_mono))
                     started_mono = time.monotonic()
-                    self._emit(TaskStarted(account=task.account, task_id=task.id, action=task.action))
+                    self._emit(
+                        TaskStarted(account=task.account, task_id=task.id, action=task.action)
+                    )
 
                 timed_out = False
-                retryable: Optional[BaseException] = None
+                retryable: BaseException | None = None
                 try:
                     task.sender_ran = True  # the API call is going out NOW
                     if task.timeout_s and task.timeout_s > 0:
@@ -1282,7 +1330,8 @@ class TaskScheduler:
                     if self._outer_cancelled():
                         raise  # worker cancellation (stop sweep)
                     await self._finish(
-                        task, STATUS_FAILED,
+                        task,
+                        STATUS_FAILED,
                         error="sender was cancelled before completing",
                         started_mono=started_mono,
                     )
@@ -1302,7 +1351,11 @@ class TaskScheduler:
                             task.account, task.action, exc.retry_after, exc.global_
                         )
                     except Exception:
-                        self._log("warning", "scheduler", f"task {task.id}: report_server_limit failed (continuing)")
+                        self._log(
+                            "warning",
+                            "scheduler",
+                            f"task {task.id}: report_server_limit failed (continuing)",
+                        )
                     retryable = exc
                 except ConnectionError as exc:
                     retryable = exc
@@ -1312,7 +1365,8 @@ class TaskScheduler:
                         await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                         return
                     await self._finish(
-                        task, STATUS_FAILED,
+                        task,
+                        STATUS_FAILED,
                         error=f"{type(exc).__name__}: {exc}",
                         started_mono=started_mono,
                     )
@@ -1323,7 +1377,8 @@ class TaskScheduler:
                         await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                         return
                     await self._finish(
-                        task, STATUS_FAILED,
+                        task,
+                        STATUS_FAILED,
                         error=f"{type(exc).__name__}: {exc}",
                         started_mono=started_mono,
                     )
@@ -1335,7 +1390,8 @@ class TaskScheduler:
                         return
                     task.wire_sent = True  # the sender returned a result
                     await self._finish(
-                        task, STATUS_COMPLETED,
+                        task,
+                        STATUS_COMPLETED,
                         summary=self._summarize(result, task),
                         started_mono=started_mono,
                     )
@@ -1349,10 +1405,11 @@ class TaskScheduler:
                     # TERMINAL, never auto-retried: a retry could duplicate
                     # the message, the primary anti-flag hazard here
                     await self._finish(
-                        task, STATUS_TIMED_OUT,
+                        task,
+                        STATUS_TIMED_OUT,
                         error=f"timed out after {task.timeout_s:g}s "
-                              f"(outcome unknown; not retried to avoid a "
-                              f"duplicate send)",
+                        f"(outcome unknown; not retried to avoid a "
+                        f"duplicate send)",
                         started_mono=started_mono,
                     )
                     return
@@ -1379,7 +1436,8 @@ class TaskScheduler:
                 if exc is not None:
                     self._classify_wire(task, exc)
                 await self._finish(
-                    task, STATUS_FAILED,
+                    task,
+                    STATUS_FAILED,
                     error=f"{type(exc).__name__}: {exc}" if exc is not None else "failed",
                     started_mono=started_mono,
                 )
@@ -1425,10 +1483,10 @@ class TaskScheduler:
         task: Task,
         status: str,
         *,
-        error: Optional[str] = None,
-        summary: Optional[str] = None,
-        started_mono: Optional[float] = None,
-    ) -> Optional[dict]:
+        error: str | None = None,
+        summary: str | None = None,
+        started_mono: float | None = None,
+    ) -> dict | None:
         """Synchronous exactly-once half of a terminal transition.
 
         Applies the status/error/summary fields, finished-task memory,
@@ -1473,21 +1531,17 @@ class TaskScheduler:
         """
         heap = self._queues.get(account)
         if heap is not None:
-            stale = sum(
-                1 for _, _, t in heap
-                if t.status != STATUS_QUEUED or t.cancelled
-            )
+            stale = sum(1 for _, _, t in heap if t.status != STATUS_QUEUED or t.cancelled)
             if stale > _HEAP_STALE_COMPACT_THRESHOLD:
                 heap[:] = [
-                    entry for entry in heap
-                    if entry[2].status == STATUS_QUEUED
-                    and not entry[2].cancelled
+                    entry
+                    for entry in heap
+                    if entry[2].status == STATUS_QUEUED and not entry[2].cancelled
                 ]
                 heapq.heapify(heap)
         low_lane = self._low_lanes.get(account)
         if low_lane is not None:
-            live = [t for t in low_lane
-                    if t.status == STATUS_QUEUED and not t.cancelled]
+            live = [t for t in low_lane if t.status == STATUS_QUEUED and not t.cancelled]
             if len(live) != len(low_lane):
                 low_lane.clear()
                 low_lane.extend(live)
@@ -1497,9 +1551,9 @@ class TaskScheduler:
         task: Task,
         status: str,
         *,
-        error: Optional[str] = None,
-        summary: Optional[str] = None,
-        started_mono: Optional[float] = None,
+        error: str | None = None,
+        summary: str | None = None,
+        started_mono: float | None = None,
     ) -> None:
         """Apply ONE terminal transition: fields, memory, repo, audit, event.
 
@@ -1519,9 +1573,7 @@ class TaskScheduler:
             task, status, error=error, summary=summary, started_mono=started_mono
         )
         if row is not None:
-            tail = self._spawn_finish_tail(
-                task, status, row, error=error, summary=summary
-            )
+            tail = self._spawn_finish_tail(task, status, row, error=error, summary=summary)
             await asyncio.shield(tail)
 
     async def _finish_tail(
@@ -1530,8 +1582,8 @@ class TaskScheduler:
         status: str,
         row: dict,
         *,
-        error: Optional[str] = None,
-        summary: Optional[str] = None,
+        error: str | None = None,
+        summary: str | None = None,
     ) -> None:
         """Persistence + notification half of a terminal transition.
 
@@ -1545,19 +1597,22 @@ class TaskScheduler:
                 try:
                     await self._history_repo.add(row)
                 except Exception as exc:
-                    self._log("warning", "scheduler",
-                              f"task {task.id} history write failed (continuing): "
-                              f"{type(exc).__name__}: {exc}")
+                    self._log(
+                        "warning",
+                        "scheduler",
+                        f"task {task.id} history write failed (continuing): "
+                        f"{type(exc).__name__}: {exc}",
+                    )
 
-        # AUDIT INTEGRITY: only record an outbound row when the task
-        # actually reached the wire — sender_ran means the sender was
-        # invoked, and wire_sent=False means the terminal failure was
-        # PROVABLY pre-wire (sender pre-flight: account/run-state/channel
-        # validation/DM resolution — see _classify_wire). Both must hold:
-        # a cancel while queued/parked on the grant, a limiter error and
-        # a pre-flight failure never sent, so none may appear in the
-        # trail (the pacing checks read audit timestamps as real send
-        # times — a phantom row delayed the next real send).
+            # AUDIT INTEGRITY: only record an outbound row when the task
+            # actually reached the wire — sender_ran means the sender was
+            # invoked, and wire_sent=False means the terminal failure was
+            # PROVABLY pre-wire (sender pre-flight: account/run-state/channel
+            # validation/DM resolution — see _classify_wire). Both must hold:
+            # a cancel while queued/parked on the grant, a limiter error and
+            # a pre-flight failure never sent, so none may appear in the
+            # trail (the pacing checks read audit timestamps as real send
+            # times — a phantom row delayed the next real send).
             auditable = task.sender_ran and task.wire_sent is not False
             if self._audit is not None and auditable and task.action in _AUDITED_ACTIONS:
                 note = f"plugin={task.plugin} task={task.id}"
@@ -1575,7 +1630,9 @@ class TaskScheduler:
                         note=note,
                     )
                 except Exception:
-                    self._log("warning", "scheduler", f"task {task.id} audit record failed (continuing)")
+                    self._log(
+                        "warning", "scheduler", f"task {task.id} audit record failed (continuing)"
+                    )
 
             if status == STATUS_COMPLETED:
                 self._emit(
@@ -1587,20 +1644,28 @@ class TaskScheduler:
                     )
                 )
             elif status in (STATUS_FAILED, STATUS_TIMED_OUT):
-                self._emit(TaskFailed(
-                    account=task.account, task_id=task.id,
-                    error=error or status,
-                    error_kind=self._error_kind(error or ""),
-                ))
+                self._emit(
+                    TaskFailed(
+                        account=task.account,
+                        task_id=task.id,
+                        error=error or status,
+                        error_kind=self._error_kind(error or ""),
+                    )
+                )
             elif status == STATUS_CANCELLED:
                 self._emit(TaskCancelled(account=task.account, task_id=task.id))
         finally:
             self._inflight_tails -= 1
 
     def _spawn_finish_tail(
-        self, task: Task, status: str, row: dict, *,
-        error: Optional[str] = None, summary: Optional[str] = None,
-    ) -> "asyncio.Task":
+        self,
+        task: Task,
+        status: str,
+        row: dict,
+        *,
+        error: str | None = None,
+        summary: str | None = None,
+    ) -> asyncio.Task:
         """Schedule one finish tail as an independent task (strong ref)."""
         tail = asyncio.get_running_loop().create_task(
             self._finish_tail(task, status, row, error=error, summary=summary),
@@ -1610,7 +1675,7 @@ class TaskScheduler:
         tail.add_done_callback(self._on_tail_done)
         return tail
 
-    def _on_tail_done(self, tail: "asyncio.Task") -> None:
+    def _on_tail_done(self, tail: asyncio.Task) -> None:
         """Drop the strong ref; retrieve any failure (a shielded owner that
         was cancelled mid-await would otherwise leave it unretrieved)."""
         self._tail_refs.discard(tail)
@@ -1633,7 +1698,9 @@ class TaskScheduler:
         try:
             self._spawn_finish_tail(task, status, row)
         except RuntimeError:
-            self._log("warning", "scheduler", f"task {task.id} history write skipped (no running loop)")
+            self._log(
+                "warning", "scheduler", f"task {task.id} history write skipped (no running loop)"
+            )
 
 
 __all__ = ["TaskScheduler"]

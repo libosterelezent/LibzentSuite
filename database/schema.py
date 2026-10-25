@@ -4,6 +4,7 @@ Each entry: (version, name, sql). The runner (database/db.py) records applied
 versions in `schema_migrations` and applies pending ones in order inside a
 transaction per migration.
 """
+
 from __future__ import annotations
 
 MIGRATIONS: list[tuple[int, str, str]] = [
@@ -263,7 +264,6 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         ALTER TABLE account_plugins ADD COLUMN profile TEXT;
         """,
     ),
-
     (
         8,
         "drop legacy profile tables",
@@ -277,7 +277,6 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         DROP TABLE IF EXISTS profiles;
         """,
     ),
-
     (
         9,
         "fleet orchestration state",

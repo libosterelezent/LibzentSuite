@@ -10,18 +10,21 @@ the cascade is manual, exactly like the audited old implementation).
 Token VALUES never enter the database; only the ``.env`` key referencing
 them (``token_ref``) is persisted.
 """
+
 from __future__ import annotations
 
 import json
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from core.errors import DatabaseError
-
 from database.models import AccountRecord
 
 from .base import BaseRepository, loads_tolerant
+
+if TYPE_CHECKING:
+    import builtins
 
 __all__ = ["AccountsRepository"]
 
@@ -34,9 +37,15 @@ _INSERT = """
 #: per-account tables (keyed by account NAME) removed by ``delete``
 #: (``account_plugins`` included: an orphaned row would let a re-created
 #: same-named account silently inherit the dead account's plugin grants)
-_DEPENDENT_TABLES = ("account_settings", "plugin_settings", "plugin_states",
-                     "api_cache", "credentials",
-                     "cooldowns", "account_plugins")
+_DEPENDENT_TABLES = (
+    "account_settings",
+    "plugin_settings",
+    "plugin_states",
+    "api_cache",
+    "credentials",
+    "cooldowns",
+    "account_plugins",
+)
 #: kv rows keyed by PREFIX (PHASE-4 S3-G5 defense-in-depth): plugin state
 #: lives in kv under these prefixes; the service-level cascade is primary,
 #: the repo-level sweep is the backstop for unwired/limited services.
@@ -69,9 +78,9 @@ class AccountsRepository(BaseRepository):
         self,
         name: str,
         *,
-        token_ref: Optional[str] = None,
+        token_ref: str | None = None,
         enabled: bool = True,
-        sync_group: Optional[str] = None,
+        sync_group: str | None = None,
     ) -> AccountRecord:
         """Insert a new account and return its persisted record.
 
@@ -96,14 +105,14 @@ class AccountsRepository(BaseRepository):
         return record
 
     # ----------------------------------------------------------------- read
-    async def get(self, name: str) -> Optional[AccountRecord]:
+    async def get(self, name: str) -> AccountRecord | None:
         """One account by name (None when unknown)."""
         row = await self._fetch_one("SELECT * FROM accounts WHERE name = ?", (name,))
         if row is None:
             return None
         return await self._record(row)
 
-    async def list(self) -> List[AccountRecord]:
+    async def list(self) -> builtins.list[AccountRecord]:
         """All accounts ordered by name."""
         rows = await self._fetch_all("SELECT * FROM accounts ORDER BY name")
         return [await self._record(row) for row in rows]
@@ -115,14 +124,16 @@ class AccountsRepository(BaseRepository):
         Raises DatabaseError when the account does not exist — silently
         updating zero rows would hide caller bugs.
         """
-        async with self._tx(f"set enabled={bool(enabled)} for account {name!r}") as conn:
-            async with conn.execute(
+        async with (
+            self._tx(f"set enabled={bool(enabled)} for account {name!r}") as conn,
+            conn.execute(
                 "UPDATE accounts SET enabled = ? WHERE name = ?", (int(bool(enabled)), name)
-            ) as cur:
-                if cur.rowcount == 0:
-                    raise DatabaseError(f"unknown account: {name!r}")
+            ) as cur,
+        ):
+            if cur.rowcount == 0:
+                raise DatabaseError(f"unknown account: {name!r}")
 
-    async def set_settings(self, name: str, settings: Dict[str, Any]) -> None:
+    async def set_settings(self, name: str, settings: dict[str, Any]) -> None:
         """Replace the account's whole framework-settings JSON blob.
 
         Raises DatabaseError for an unknown account, a non-dict payload, or
@@ -136,12 +147,14 @@ class AccountsRepository(BaseRepository):
             raise DatabaseError(
                 f"account settings for {name!r} are not JSON-serializable: {exc}"
             ) from exc
-        async with self._tx(f"store settings for account {name!r}") as conn:
-            async with conn.execute(
+        async with (
+            self._tx(f"store settings for account {name!r}") as conn,
+            conn.execute(
                 "UPDATE accounts SET settings_json = ? WHERE name = ?", (payload, name)
-            ) as cur:
-                if cur.rowcount == 0:
-                    raise DatabaseError(f"unknown account: {name!r}")
+            ) as cur,
+        ):
+            if cur.rowcount == 0:
+                raise DatabaseError(f"unknown account: {name!r}")
 
     async def delete(self, name: str) -> bool:
         """Delete an account AND every dependent row; True when it existed.
@@ -152,9 +165,7 @@ class AccountsRepository(BaseRepository):
         and cooldowns. Other accounts' rows are untouched.
         """
         async with self._tx(f"delete account {name!r}") as conn:
-            async with conn.execute(
-                "DELETE FROM accounts WHERE name = ?", (name,)
-            ) as cur:
+            async with conn.execute("DELETE FROM accounts WHERE name = ?", (name,)) as cur:
                 existed = cur.rowcount > 0
             if existed:
                 for table in _DEPENDENT_TABLES:
@@ -173,14 +184,10 @@ class AccountsRepository(BaseRepository):
                         .replace("_", "\\_")
                         + "%"
                     )
-                    await conn.execute(
-                        "DELETE FROM kv WHERE key LIKE ? ESCAPE '\\'",
-                        (pattern,))
+                    await conn.execute("DELETE FROM kv WHERE key LIKE ? ESCAPE '\\'", (pattern,))
                 # access rows (admin flag / perms / prefix / user_id) live
                 # under 'access:account:<name>' — an EXACT-match delete,
                 # never a prefix sweep: 'access:account:bob%' would also
                 # wipe bob2/bobby's authorization rows (review finding #5)
-                await conn.execute(
-                    "DELETE FROM kv WHERE key = ?",
-                    (f"access:account:{name}",))
+                await conn.execute("DELETE FROM kv WHERE key = ?", (f"access:account:{name}",))
         return existed

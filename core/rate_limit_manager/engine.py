@@ -62,6 +62,7 @@ Other documented decisions (INTEGRATION.md: pick the safest option):
   rows into memory. Pacing safety never depends on the database.
 - single-event-loop assumption, like the audited limiter (no locks).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -71,12 +72,13 @@ import math
 import random
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Protocol, Tuple
+from typing import Any, Protocol
+
+from database.models import POLICY_LEVELS
 
 from ..errors import RatePolicyError, UnsafePolicyError
 from ..event_bus import EventBus, RateLimitTriggered
 from ..priority import Priority
-from database.models import POLICY_LEVELS
 from .policies import (
     MAX_INTERVAL,
     MIN_ACTION_INTERVAL,
@@ -97,11 +99,11 @@ GLOBAL_KEY = "__global__"
 #: (displaces) the learned default — it composes with the floor alone, so
 #: a per-account prefixrate override is authoritative whenever it is the
 #: only stored layer and may deliberately pace below the study rate.
-DEFAULT_ACTION_INTERVALS: Dict[str, float] = {
-    "message": 2.6,    # sustained zero-throttle send rate, account-global
+DEFAULT_ACTION_INTERVALS: dict[str, float] = {
+    "message": 2.6,  # sustained zero-throttle send rate, account-global
     "dm": 2.6,
-    "reaction": 2.5,   # shared account bucket — serial only
-    "button": 3.0,     # interaction route — independent bucket
+    "reaction": 2.5,  # shared account bucket — serial only
+    "button": 3.0,  # interaction route — independent bucket
 }
 
 #: jitter window paired with the learned defaults (no-policy traffic):
@@ -109,7 +111,7 @@ DEFAULT_ACTION_INTERVALS: Dict[str, float] = {
 #: human-like pause keeps sim/live traffic shapes comparable. Stored
 #: policies keep their own jitter composition (max-of-mins/max-of-maxes)
 #: and never inherit this window.
-DEFAULT_JITTER: Tuple[float, float] = (0.2, 0.8)
+DEFAULT_JITTER: tuple[float, float] = (0.2, 0.8)
 
 #: default interval for actions with NO learned default AND no stored
 #: policy: they used to pace at the bare floor (0.05 s — up to 20
@@ -118,7 +120,7 @@ DEFAULT_JITTER: Tuple[float, float] = (0.2, 0.8)
 #: alone, exactly like the learned defaults).
 UNSTUDIED_ACTION_INTERVAL = 1.2
 
-_LEVEL_RANK: Dict[str, int] = {name: i for i, name in enumerate(POLICY_LEVELS)}
+_LEVEL_RANK: dict[str, int] = {name: i for i, name in enumerate(POLICY_LEVELS)}
 
 #: FINAL-PHASE (F2): hard bound on the effective-config memo. The natural
 #: key space is actions × (accounts+1) × (plugins+1) — a few hundred even
@@ -189,8 +191,8 @@ class Grant:
     """
 
     action: str
-    account: Optional[str] = None
-    plugin: Optional[str] = None
+    account: str | None = None
+    plugin: str | None = None
     wait_s: float = 0.0
     jitter_s: float = 0.0
     reason: str = ""
@@ -208,13 +210,13 @@ class _Entry:
     priority: int
     seq: int
     action: str
-    account: Optional[str]
-    plugin: Optional[str]
-    future: "asyncio.Future[None]"
+    account: str | None
+    plugin: str | None
+    future: asyncio.Future[None]
     jitter: float = 0.0
     cancelled: bool = False
 
-    def __lt__(self, other: "_Entry") -> bool:
+    def __lt__(self, other: _Entry) -> bool:
         return (self.priority, self.seq) < (other.priority, other.seq)
 
 
@@ -229,13 +231,13 @@ class RateLimitManager:
 
     def __init__(
         self,
-        bus: Optional[EventBus],
+        bus: EventBus | None,
         logger: Any,
         policy_repo: Any = None,
         *,
         floor: float = MIN_ACTION_INTERVAL,
-        clock: Optional[Clock] = None,
-        jitter_seed: Optional[int] = None,
+        clock: Clock | None = None,
+        jitter_seed: int | None = None,
         lane_enabled: Any = _UNSET,
         lane_prefixrate: Any = _UNSET,
         kv_repo: Any = None,
@@ -267,24 +269,23 @@ class RateLimitManager:
             )
         # FINAL-PHASE (F2): effective-config memoization state
         self._config_version: int = 0
-        self._effective_cache: Dict[
-            Tuple[str, Optional[str], Optional[str]],
-            Tuple[int, Tuple[float, float, float,
-                             Tuple[Tuple[str, Optional[str], float], ...]]],
+        self._effective_cache: dict[
+            tuple[str, str | None, str | None],
+            tuple[int, tuple[float, float, float, tuple[tuple[str, str | None, float], ...]]],
         ] = {}
         self._clock = clock if clock is not None else SystemClock()
         self._jitter_rng = random.Random(jitter_seed)
         #: (level, owner, action) -> RatePolicy — the live policy table
-        self._policies: Dict[Tuple[str, Optional[str], str], RatePolicy] = {}
+        self._policies: dict[tuple[str, str | None, str], RatePolicy] = {}
         #: fleet-wide 429 cooldown (monotonic "until" timestamp)
         self._global_until: float = 0.0
         #: (account, action) -> monotonic "until" timestamp
-        self._account_cooldowns: Dict[Tuple[str, str], float] = {}
+        self._account_cooldowns: dict[tuple[str, str], float] = {}
         #: 429 telemetry: per-account throttle hits + fleet total
         #: (replaces Discord bucket capture — user accounts receive NO
         #: X-RateLimit headers on success responses, so per-route bucket
         #: state was never observable; 429 counts ARE)
-        self._hits_429: Dict[str, int] = {}
+        self._hits_429: dict[str, int] = {}
         self._hits_429_total = 0
         #: pacing key (owner, action) -> monotonic time of the last expected
         #: WIRE send (grant + jitter). TWO SCOPES share this table (spec:
@@ -294,16 +295,16 @@ class RateLimitManager:
         #:   ("group:grinders", "message") per-ACCOUNT/GROUP scope — the
         #:                               shared clock serializing every member
         #:                               account of the group
-        self._last_fire: Dict[Tuple[str, str], float] = {}
+        self._last_fire: dict[tuple[str, str], float] = {}
         #: account -> group name (framework-fed metadata, no API involved)
-        self._groups: Dict[str, str] = {}
+        self._groups: dict[str, str] = {}
         #: pacing key -> heap of pending _Entry waiters
-        self._pending: Dict[Tuple[str, str], List[_Entry]] = {}
+        self._pending: dict[tuple[str, str], list[_Entry]] = {}
         self._seq = itertools.count()
         #: pacing key -> that key's OWN wake event (per-key wakes: a grant
         #: touches only its key; global mutations set every event). Created
         #: lazily on first park, dropped when the key's last waiter exits.
-        self._wake_events: Dict[Tuple[str, str], asyncio.Event] = {}
+        self._wake_events: dict[tuple[str, str], asyncio.Event] = {}
         # counters for stats()
         self._grants = 0
         self._waits = 0
@@ -316,9 +317,7 @@ class RateLimitManager:
         try:
             value = float(seconds)
         except (TypeError, ValueError) as exc:
-            raise RatePolicyError(
-                f"safety floor must be a number, got {seconds!r}"
-            ) from exc
+            raise RatePolicyError(f"safety floor must be a number, got {seconds!r}") from exc
         if not math.isfinite(value):
             raise RatePolicyError(f"safety floor must be finite, got {seconds!r}")
         if value < MIN_ACTION_INTERVAL:
@@ -375,24 +374,20 @@ class RateLimitManager:
             try:
                 stored_floor = await self._kv.get(KV_FLOOR_KEY)
                 if stored_floor is not None:
-                    self._floor = max(
-                        self._floor,
-                        self._validated_floor(float(stored_floor)))
+                    self._floor = max(self._floor, self._validated_floor(float(stored_floor)))
                     self._invalidate_effective_cache()
             except Exception as exc:
-                self._log("warning",
-                          f"could not load persisted floor: {exc}")
+                self._log("warning", f"could not load persisted floor: {exc}")
             try:  # cleared-policy tombstones: seeding must skip these keys
                 stored_removed = await self._kv.get(KV_REMOVED_KEY)
                 if isinstance(stored_removed, list):
                     self._removed_defaults = set(stored_removed)
             except Exception as exc:
-                self._log("warning",
-                          f"could not load cleared-policy list: {exc}")
+                self._log("warning", f"could not load cleared-policy list: {exc}")
 
     # ------------------------------------------------------------- policies
     def set_policy(
-        self, policy: RatePolicy, level: str = "global", owner: Optional[str] = None
+        self, policy: RatePolicy, level: str = "global", owner: str | None = None
     ) -> RatePolicy:
         """Store a RatePolicy at (level, owner) — memory only (the ControlAPI
         layer persists the edit).
@@ -416,7 +411,7 @@ class RateLimitManager:
         jitter_min: float = 0.0,
         jitter_max: float = 0.0,
         level: str = "global",
-        owner: Optional[str] = None,
+        owner: str | None = None,
     ) -> RatePolicy:
         """Convenience used by ControlAPI: build + store a policy in one call.
 
@@ -431,9 +426,7 @@ class RateLimitManager:
         )
         return self._store(policy, level, owner)
 
-    def _store(
-        self, policy: RatePolicy, level: str, owner: Optional[str]
-    ) -> RatePolicy:
+    def _store(self, policy: RatePolicy, level: str, owner: str | None) -> RatePolicy:
         """Shared set path: validate scope, enforce the floor, wake waiters.
 
         MEMORY ONLY — persisting the edit is the ControlAPI layer's job
@@ -451,13 +444,11 @@ class RateLimitManager:
         self._policies[(level, owner, policy.action)] = policy
         self._invalidate_effective_cache()  # F2: policy mutation
         scope = f"{level}/{owner}" if owner else level
-        self._log(
-            "info", f"rate policy set: {policy.action}={policy} at {scope}"
-        )
+        self._log("info", f"rate policy set: {policy.action}={policy} at {scope}")
         self._wake_all()  # a policy edit can change every key's pacing
         return policy
 
-    def clear_policy(self, level: str, owner: Optional[str], action: str) -> bool:
+    def clear_policy(self, level: str, owner: str | None, action: str) -> bool:
         """Remove one stored policy from MEMORY. True when it existed.
 
         Persisting the removal is the ControlAPI layer's job (the engine no
@@ -473,13 +464,11 @@ class RateLimitManager:
         if existed:
             self._invalidate_effective_cache()  # F2: policy removed
             scope = f"{level}/{owner}" if owner else level
-            self._log(
-                "info", f"rate policy cleared: {action!r} at {scope}"
-            )
+            self._log("info", f"rate policy cleared: {action!r} at {scope}")
             self._wake_all()
         return existed
 
-    def policies(self) -> List[dict]:
+    def policies(self) -> list[dict]:
         """Every stored policy as ``{level, owner, action, interval, jitter}``,
         sorted by (action, level, owner) — deterministic for CLI/UI."""
         level_rank = _LEVEL_RANK
@@ -502,9 +491,7 @@ class RateLimitManager:
         )
         return rows
 
-    def effective(
-        self, action: str, account: Optional[str] = None, plugin: Optional[str] = None
-    ) -> dict:
+    def effective(self, action: str, account: str | None = None, plugin: str | None = None) -> dict:
         """Compose all applicable policy levels for one action.
 
         Returns ``{"action", "interval", "jitter": [min, max], "sources": [...]}``
@@ -531,8 +518,7 @@ class RateLimitManager:
         impossible. The public dict shape (fresh objects per call) is
         unchanged — callers may mutate their dict freely.
         """
-        interval, jmin, jmax, sources = self._effective_payload(
-            action, account, plugin)
+        interval, jmin, jmax, sources = self._effective_payload(action, account, plugin)
         return {
             "action": action,
             "interval": interval,
@@ -543,17 +529,15 @@ class RateLimitManager:
             ],
         }
 
-    def effective_interval(
-        self, action: str, account: Optional[str] = None
-    ) -> float:
+    def effective_interval(self, action: str, account: str | None = None) -> float:
         """The effective interval (seconds) for one action+account — the
         number the ``prefixrate`` command shows. Floors apply; the value
         reflects all stored policy layers."""
         return self._effective_payload(action, account, None)[0]
 
     def _effective_payload(
-        self, action: str, account: Optional[str], plugin: Optional[str]
-    ) -> Tuple[float, float, float, Tuple[Tuple[str, Optional[str], float], ...]]:
+        self, action: str, account: str | None, plugin: str | None
+    ) -> tuple[float, float, float, tuple[tuple[str, str | None, float], ...]]:
         """Cached composition as an immutable tuple; never raises.
 
         Failure-harmless by construction: any cache error bypasses to the
@@ -580,47 +564,39 @@ class RateLimitManager:
         return payload
 
     def _compute_effective(
-        self, action: str, account: Optional[str], plugin: Optional[str]
-    ) -> Tuple[float, float, float, Tuple[Tuple[str, Optional[str], float], ...]]:
+        self, action: str, account: str | None, plugin: str | None
+    ) -> tuple[float, float, float, tuple[tuple[str, str | None, float], ...]]:
         """The (uncached) composition — the pre-F2 effective() body."""
 
-        def _applies(level: str, owner: Optional[str]) -> bool:
+        def _applies(level: str, owner: str | None) -> bool:
             if level == "global":
                 return True
             if level == "account":
                 return account is not None and owner == account
             if level == "plugin":
                 return plugin is not None and owner == plugin
-            return (
-                account is not None
-                and plugin is not None
-                and owner == f"{account}/{plugin}"
-            )
+            return account is not None and plugin is not None and owner == f"{account}/{plugin}"
 
         applicable = [
             (level, owner, policy)
             for (level, owner, act), policy in self._policies.items()
             if act == action and _applies(level, owner)
         ]
-        applicable.sort(
-            key=lambda item: (_LEVEL_RANK.get(item[0], 99), item[1] or "")
-        )
+        applicable.sort(key=lambda item: (_LEVEL_RANK.get(item[0], 99), item[1] or ""))
         # the learned default is a FALLBACK, not a policy layer: it
         # applies only when NO policy is stored for the action — a stored
         # policy (e.g. prefixrate's per-account override) REPLACES it and
         # composes with the floor alone, so operators can pace below the
         # study default deliberately (the 429 cooldown still backstops).
         if applicable:
-            interval = max(
-                [self._floor] + [p.interval for _, _, p in applicable]
-            )
+            interval = max([self._floor] + [p.interval for _, _, p in applicable])
         else:
             # unstudied action: the conservative 1.2 s default (never the
             # bare floor) — displaced by any stored policy, like the
             # learned defaults
             interval = max(
-                self._floor,
-                DEFAULT_ACTION_INTERVALS.get(action, UNSTUDIED_ACTION_INTERVAL))
+                self._floor, DEFAULT_ACTION_INTERVALS.get(action, UNSTUDIED_ACTION_INTERVAL)
+            )
         if applicable:
             jmin = max(p.jitter_min for _, _, p in applicable)
             jmax = max(p.jitter_max for _, _, p in applicable)
@@ -633,9 +609,10 @@ class RateLimitManager:
         else:
             jmin, jmax = 0.0, 0.0
         return (
-            interval, jmin, jmax,
-            tuple((level, owner, policy.interval)
-                  for level, owner, policy in applicable),
+            interval,
+            jmin,
+            jmax,
+            tuple((level, owner, policy.interval) for level, owner, policy in applicable),
         )
 
     def _invalidate_effective_cache(self) -> None:
@@ -712,16 +689,16 @@ class RateLimitManager:
                 if not waiter.cancelled and not waiter.future.done():
                     waiter.future.set_exception(
                         RatePolicyError(
-                            f"account {account!r} was removed while this "
-                            f"acquire was waiting"
+                            f"account {account!r} was removed while this acquire was waiting"
                         )
                     )
         prefix = f"{account}/"
-        for key in [k for k in self._policies
-                    if k[0] in ("account", "account_plugin")
-                    and (k[1] == account
-                         or (k[0] == "account_plugin"
-                             and str(k[1]).startswith(prefix)))]:
+        for key in [
+            k
+            for k in self._policies
+            if k[0] in ("account", "account_plugin")
+            and (k[1] == account or (k[0] == "account_plugin" and str(k[1]).startswith(prefix)))
+        ]:
             del self._policies[key]
         self._drop_group_stamps(group)
         # FINAL-PHASE (F2): always invalidate — the cache may hold entries
@@ -735,11 +712,10 @@ class RateLimitManager:
             try:
                 await self._repo.delete_account(account)
             except Exception as exc:  # guarded: removal must never fail on it
-                self._log("warning",
-                          f"policy row cascade failed for {account!r}: {exc}")
+                self._log("warning", f"policy row cascade failed for {account!r}: {exc}")
 
     # ------------------------------------------------------------ group scope
-    def set_account_group(self, account: str, group: Optional[str]) -> None:
+    def set_account_group(self, account: str, group: str | None) -> None:
         """Register which GROUP an account operates in (per-account/group
         rate scope, spec: accounts in the same group serialize their API
         activity against one shared clock).
@@ -766,7 +742,7 @@ class RateLimitManager:
             # fleet-wide wakes
             self._wake_all()
 
-    def _drop_group_stamps(self, group: Optional[str]) -> None:
+    def _drop_group_stamps(self, group: str | None) -> None:
         """Drop a group's shared pacing stamps when its LAST member left.
 
         ``('group:<x>', action)`` stamps would otherwise outlive the group
@@ -782,11 +758,11 @@ class RateLimitManager:
         for key in [k for k in self._last_fire if k[0] == prefix]:
             del self._last_fire[key]
 
-    def account_groups(self) -> Dict[str, str]:
+    def account_groups(self) -> dict[str, str]:
         """account -> group mapping (stats/UI)."""
         return dict(self._groups)
 
-    def _pacing_keys(self, account: Optional[str], action: str) -> List[Tuple[str, str]]:
+    def _pacing_keys(self, account: str | None, action: str) -> list[tuple[str, str]]:
         """Every pacing clock this acquisition must respect.
 
         Per-TASK scope is always present: ``(account, action)`` — the
@@ -812,8 +788,8 @@ class RateLimitManager:
     async def acquire(
         self,
         action: str,
-        account: Optional[str] = None,
-        plugin: Optional[str] = None,
+        account: str | None = None,
+        plugin: str | None = None,
         priority: Priority = Priority.NORMAL,
     ) -> Grant:
         """Wait for permission to fire one action; returns a Grant.
@@ -848,8 +824,7 @@ class RateLimitManager:
         # the wire gap to interval - jitter_max or even invert it (probe
         # P1/P2/P7). The draw rides the entry so _grant_ready stamps the
         # clocks correctly.
-        jitter_min, jitter_max = self._effective_payload(
-            action, account, plugin)[1:3]
+        jitter_min, jitter_max = self._effective_payload(action, account, plugin)[1:3]
         jitter_s = 0.0
         if jitter_max > 0:
             jitter_s = max(0.0, self._jitter_rng.uniform(jitter_min, jitter_max))
@@ -932,9 +907,7 @@ class RateLimitManager:
         if seconds > 0:
             await asyncio.sleep(seconds)
 
-    async def _wait_either(
-        self, seconds: float, key: Tuple[str, str]
-    ) -> None:
+    async def _wait_either(self, seconds: float, key: tuple[str, str]) -> None:
         """Sleep ``seconds`` through the seam, but wake early on the
         waiter's OWN key's event (grant succession) or an all-key mutation
         (policy/cooldown/floor/prune) so waiters recompute instead of
@@ -956,7 +929,7 @@ class RateLimitManager:
                 task.cancel()
             await asyncio.gather(sleeper, waker, return_exceptions=True)
 
-    def _entry_wait(self, entry: _Entry) -> Tuple[float, bool]:
+    def _entry_wait(self, entry: _Entry) -> tuple[float, bool]:
         """How long THIS entry should wait before re-checking, and whether a
         server cooldown is currently part of what blocks it.
 
@@ -972,7 +945,7 @@ class RateLimitManager:
             return wait, server_wait > 0
         return POLL_INTERVAL, False
 
-    def _entry_block(self, entry: _Entry) -> Tuple[float, float]:
+    def _entry_block(self, entry: _Entry) -> tuple[float, float]:
         """(total block, server block) in seconds until `entry` may be granted.
 
         Total = max(fleet-wide cooldown, account+action cooldown, Discord
@@ -987,8 +960,7 @@ class RateLimitManager:
             if until is not None and now < until:
                 server_waits.append(until - now)
         server_wait = max(server_waits)
-        interval = self._effective_payload(
-            entry.action, entry.account, entry.plugin)[0]
+        interval = self._effective_payload(entry.action, entry.account, entry.plugin)[0]
         # BOTH scopes compose (max): per-task (the account's own clock) and,
         # when grouped, the shared group clock stamped by every member
         pacing_wait = 0.0
@@ -999,7 +971,7 @@ class RateLimitManager:
         pacing_wait = max(0.0, pacing_wait)
         return max(server_wait, pacing_wait), server_wait
 
-    def _grant_ready(self, only: Optional[Tuple[str, str]] = None) -> None:
+    def _grant_ready(self, only: tuple[str, str] | None = None) -> None:
         """Grant every pacing-key head whose block has elapsed.
 
         ``only`` restricts the sweep to a single pacing key (the hot acquire
@@ -1038,7 +1010,7 @@ class RateLimitManager:
             if granted:
                 self._wake_key(key)
 
-    def _prune(self, key: Tuple[str, str]) -> None:
+    def _prune(self, key: tuple[str, str]) -> None:
         """Drop dead waiters from one key's heap (ported from the old limiter).
 
         PHASE-4 (S3-G1): an emptied heap's dict key is popped too — a
@@ -1055,7 +1027,7 @@ class RateLimitManager:
             return
         heapq.heapify(heap)
 
-    def _key_event(self, key: Tuple[str, str]) -> asyncio.Event:
+    def _key_event(self, key: tuple[str, str]) -> asyncio.Event:
         """This pacing key's wake event, created lazily on first park
         (3.10-safe: asyncio.Event binds its loop on first wait, so lazy
         creation inside the running loop is the correct seam)."""
@@ -1065,7 +1037,7 @@ class RateLimitManager:
             self._wake_events[key] = event
         return event
 
-    def _wake_key(self, key: Tuple[str, str]) -> None:
+    def _wake_key(self, key: tuple[str, str]) -> None:
         """Wake the waiters parked on ONE pacing key (grant succession).
 
         Never creates an event: a key with no parked waiter has nothing to
@@ -1085,11 +1057,11 @@ class RateLimitManager:
     @staticmethod
     def _validate_acquire_args(
         action: Any, account: Any, plugin: Any
-    ) -> Tuple[str, Optional[str], Optional[str]]:
+    ) -> tuple[str, str | None, str | None]:
         """Boundary validation for acquire() — malformed input never crashes
         the process, it raises a precise RatePolicyError instead."""
 
-        def _name(value: Any, what: str, allow_none: bool) -> Optional[str]:
+        def _name(value: Any, what: str, allow_none: bool) -> str | None:
             if value is None:
                 if allow_none:
                     return None
@@ -1121,9 +1093,7 @@ class RateLimitManager:
         try:
             wait = float(retry_after)
         except (TypeError, ValueError) as exc:
-            raise RatePolicyError(
-                f"retry_after must be a number, got {retry_after!r}"
-            ) from exc
+            raise RatePolicyError(f"retry_after must be a number, got {retry_after!r}") from exc
         if not math.isfinite(wait):
             raise RatePolicyError(f"retry_after must be finite, got {retry_after!r}")
         wait = max(0.0, wait)
@@ -1150,8 +1120,9 @@ class RateLimitManager:
         # while we write — expired (account, action) rows were retained
         # forever (only account removal pruned them), and plugin-supplied
         # action strings made that an unbounded distinct-key family.
-        for key in [k for k, until in self._account_cooldowns.items()
-                    if k[0] == account and until <= now]:
+        for key in [
+            k for k, until in self._account_cooldowns.items() if k[0] == account and until <= now
+        ]:
             del self._account_cooldowns[key]
         self._account_cooldowns[(account, action)] = max(
             self._account_cooldowns.get((account, action), 0.0), now + wait
@@ -1162,15 +1133,12 @@ class RateLimitManager:
             scope = " (fleet-wide)"
         self._log(
             "warning",
-            f"server rate limit on {action!r}: cooling account {account!r} "
-            f"{wait:.2f}s{scope}",
+            f"server rate limit on {action!r}: cooling account {account!r} {wait:.2f}s{scope}",
             account=account,
         )
         self._wake_all()  # a cooldown can block waiters on any key
 
-    def cooldown_remaining(
-        self, account: Optional[str] = None, action: Optional[str] = None
-    ) -> float:
+    def cooldown_remaining(self, account: str | None = None, action: str | None = None) -> float:
         """Seconds left on the most relevant server cooldown (0 when none).
 
         Filters: account=None means every account; action=None means every
@@ -1197,8 +1165,7 @@ class RateLimitManager:
         for the process lifetime (only prune_account removed them before).
         """
         now = self._clock.now()
-        for key in [k for k, until in self._account_cooldowns.items()
-                    if until <= now]:
+        for key in [k for k, until in self._account_cooldowns.items() if until <= now]:
             del self._account_cooldowns[key]
         # plugin-supplied action strings would otherwise grow _last_fire
         # without bound (and stats() sorts all of it every second); any
@@ -1214,8 +1181,8 @@ class RateLimitManager:
         last-fire ages per pacing key, and grant/wait counters."""
         self._sweep_expired_cooldowns()  # the 1s dashboard poll owns expiry
         now = self._clock.now()
-        accounts: Dict[str, Dict[str, float]] = {}
-        for (acct, act) in sorted(self._account_cooldowns):
+        accounts: dict[str, dict[str, float]] = {}
+        for acct, act in sorted(self._account_cooldowns):
             until = self._account_cooldowns[(acct, act)]
             left = round(max(0.0, until - now), 3)
             if left > 0:
@@ -1244,7 +1211,7 @@ class RateLimitManager:
             "avg_wait_s": avg,
         }
 
-    def warnings(self) -> List[dict]:
+    def warnings(self) -> list[dict]:
         """Advisory safety review of the configuration.
 
         Entries are ``{"level", "code", "message"}`` sorted danger > warn >
@@ -1256,51 +1223,52 @@ class RateLimitManager:
         actions left with zero jitter (metronomic pacing).
         """
         stored = (
-            (policy, level, owner)
-            for (level, owner, _action), policy in self._policies.items()
+            (policy, level, owner) for (level, owner, _action), policy in self._policies.items()
         )
         items = evaluate_policies(stored, self._floor)
         items.extend(self._learned_default_warnings())
         return sort_warnings(items)
 
-    def _learned_default_warnings(self) -> List[dict]:
+    def _learned_default_warnings(self) -> list[dict]:
         """Engine-level verdicts around the learned-default displacement."""
-        out: List[dict] = []
-        stored_actions = {
-            action for (_level, _owner, action) in self._policies
-        }
+        out: list[dict] = []
+        stored_actions = {action for (_level, _owner, action) in self._policies}
         for (level, owner, action), policy in self._policies.items():
             learned = DEFAULT_ACTION_INTERVALS.get(action)
             if learned is None or policy.interval >= learned:
                 continue
             scope = f"{level}/{owner}" if owner else level
-            out.append({
-                "level": "warn",
-                "code": "faster_than_learned",
-                "message": (
-                    f"policy {action}@{scope} {policy.interval:.2f}s is "
-                    f"faster than the learned zero-throttle rate "
-                    f"{learned:.2f}s — it REPLACES the learned default "
-                    f"wherever it applies (deliberate prefixrate escape "
-                    f"hatch; the 429 cooldown still backstops)"
-                ),
-            })
+            out.append(
+                {
+                    "level": "warn",
+                    "code": "faster_than_learned",
+                    "message": (
+                        f"policy {action}@{scope} {policy.interval:.2f}s is "
+                        f"faster than the learned zero-throttle rate "
+                        f"{learned:.2f}s — it REPLACES the learned default "
+                        f"wherever it applies (deliberate prefixrate escape "
+                        f"hatch; the 429 cooldown still backstops)"
+                    ),
+                }
+            )
         for action, learned in DEFAULT_ACTION_INTERVALS.items():
             if action in stored_actions:
                 continue  # a stored policy displaces the default here
             _jmin, jmax = self._effective_payload(action, None, None)[1:3]
             if jmax > 0:
                 continue
-            out.append({
-                "level": "info",
-                "code": "default_no_jitter",
-                "message": (
-                    f"action {action!r} runs on the learned default "
-                    f"{learned:.2f}s with no jitter — default pacing is "
-                    f"metronomic; widen DEFAULT_JITTER or store a policy "
-                    f"with a jitter range"
-                ),
-            })
+            out.append(
+                {
+                    "level": "info",
+                    "code": "default_no_jitter",
+                    "message": (
+                        f"action {action!r} runs on the learned default "
+                        f"{learned:.2f}s with no jitter — default pacing is "
+                        f"metronomic; widen DEFAULT_JITTER or store a policy "
+                        f"with a jitter range"
+                    ),
+                }
+            )
         return out
 
     # --------------------------------------------------------------- helpers
@@ -1327,13 +1295,13 @@ class RateLimitManager:
 
 
 __all__ = [
-    "RateLimitManager",
-    "Grant",
-    "Clock",
-    "SystemClock",
-    "ManualClock",
     "GLOBAL_KEY",
-    "KV_LANE_KEY",
     "KV_FLOOR_KEY",
+    "KV_LANE_KEY",
     "KV_REMOVED_KEY",
+    "Clock",
+    "Grant",
+    "ManualClock",
+    "RateLimitManager",
+    "SystemClock",
 ]

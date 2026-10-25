@@ -20,15 +20,17 @@ Contract (spec §29 — the record path never touches SQLite):
   (bounded by ``timeout``). A batch interrupted by cancellation is kept
   and written first, so shutdown loses nothing it had already dequeued.
 """
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import queue
 import sys
 import threading
+from typing import Any
 
 from ._asyncutil import outer_cancel_pending
-from typing import Any, Dict, List, Optional
 
 #: default cap on queued-but-undrained items
 MAX_INFLIGHT = 10_000
@@ -42,16 +44,16 @@ class PersistQueue:
             raise ValueError(f"max_inflight must be >= 1, got {max_inflight!r}")
         self._label = label
         self._max = int(max_inflight)
-        self._q: "queue.SimpleQueue[Dict[str, Any]]" = queue.SimpleQueue()
+        self._q: queue.SimpleQueue[dict[str, Any]] = queue.SimpleQueue()
         self._lock = threading.Lock()
-        self._worker: Optional["asyncio.Task"] = None
+        self._worker: asyncio.Task | None = None
         self._stopping = False
         self._stopped = False
-        self._draining: Optional["asyncio.Future[None]"] = None
+        self._draining: asyncio.Future[None] | None = None
         self._repo: Any = None
         self._batch = 50
         self._interval = 0.25  # floor below: 0 would busy-spin the loop
-        self._carry: List[Dict[str, Any]] = []  # dequeued, not yet written
+        self._carry: list[dict[str, Any]] = []  # dequeued, not yet written
         self._notified = False
         self.db_failures = 0
         self.dropped = 0
@@ -68,7 +70,7 @@ class PersistQueue:
         """True once a stop() completed: puts are counted dropped from then."""
         return self._stopped
 
-    def put(self, item: Dict[str, Any]) -> None:
+    def put(self, item: dict[str, Any]) -> None:
         """Enqueue one dict; check+put run under the lock so the cap and
         the stop flag are exact, not advisory."""
         with self._lock:  # stop() flips _stopped under this lock then sweeps
@@ -81,13 +83,14 @@ class PersistQueue:
                 return
             self._q.put(item)
 
-    def stats(self) -> Dict[str, int]:
+    def stats(self) -> dict[str, int]:
         with self._lock:
             return {"db_failures": self.db_failures, "dropped": self.dropped}
 
     # ----------------------------------------------------------- lifecycle
-    async def start(self, repo: Any, *, batch: int = 50,
-                    interval: float = 0.25) -> Optional["asyncio.Task"]:
+    async def start(
+        self, repo: Any, *, batch: int = 50, interval: float = 0.25
+    ) -> asyncio.Task | None:
         """Spawn the worker (idempotent: a live worker is returned as-is)."""
         if repo is None:
             return self._worker
@@ -112,7 +115,8 @@ class PersistQueue:
         self._batch = max(1, int(batch))
         self._interval = max(0.05, float(interval))
         self._worker = asyncio.get_running_loop().create_task(
-            self._run(), name=f"{self._label}-persistence")
+            self._run(), name=f"{self._label}-persistence"
+        )
         return self._worker
 
     async def stop(self, timeout: float = 5.0) -> None:
@@ -146,20 +150,18 @@ class PersistQueue:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     break
-                await asyncio.wait(
-                    {asyncio.shield(draining)}, timeout=remaining)
+                await asyncio.wait({asyncio.shield(draining)}, timeout=remaining)
             if self._stopping:
                 # judged: warn, don't raise (see docstring) — but make the
                 # hazard impossible to miss on the console
-                try:
+                with contextlib.suppress(Exception):
                     sys.stderr.write(
                         f"[libzent] {self._label} persistence: stop"
                         f"() join timed out after {timeout:g}s while the "
                         f"owner's drain is still running — do NOT close "
                         f"the database under it (queued rows may be lost)"
-                        "\n")
-                except Exception:
-                    pass
+                        "\n"
+                    )
             return
         worker = self._worker
         if worker is None:
@@ -185,8 +187,7 @@ class PersistQueue:
             # clear ``_stopping`` (a later stop joined a never-resolved
             # future and returned without draining; a later start() spun
             # forever on ``while self._stopping``)
-            await asyncio.wait(
-                {worker}, timeout=min(0.5, max(0.0, float(timeout))))
+            await asyncio.wait({worker}, timeout=min(0.5, max(0.0, float(timeout))))
             worker.cancel()  # no-op when it already exited gracefully
             await asyncio.gather(worker, return_exceptions=True)
             await self._drain_inline(loop, deadline)
@@ -240,7 +241,7 @@ class PersistQueue:
             self._carry = []
 
     # --------------------------------------------------------------- drain
-    def _next_batch(self) -> List[Dict[str, Any]]:
+    def _next_batch(self) -> list[dict[str, Any]]:
         """Carry-over first (order!), then up to ``batch`` queued items."""
         batch = self._carry
         self._carry = []
@@ -260,7 +261,7 @@ class PersistQueue:
             else:
                 await asyncio.sleep(self._interval)
 
-    async def _write(self, batch: List[Dict[str, Any]]) -> None:
+    async def _write(self, batch: list[dict[str, Any]]) -> None:
         """Persist one batch; never raises except to propagate cancellation
         (the batch is then kept in ``_carry`` for the inline drain)."""
         repo = self._repo
@@ -281,7 +282,7 @@ class PersistQueue:
         except asyncio.CancelledError:
             raise
 
-    async def _write_each(self, repo: Any, batch: List[Dict[str, Any]]) -> None:
+    async def _write_each(self, repo: Any, batch: list[dict[str, Any]]) -> None:
         while batch:
             item = batch[0]
             try:
@@ -312,13 +313,13 @@ class PersistQueue:
         if self._notified:
             return
         self._notified = True
-        try:
+        # even stderr must never break the drain
+        with contextlib.suppress(Exception):
             sys.stderr.write(
                 f"[libzent] {self._label} persistence failing: "
                 f"{type(exc).__name__}: {exc} "
-                "(further errors counted silently)\n")
-        except Exception:
-            pass  # even stderr must never break the drain
+                "(further errors counted silently)\n"
+            )
 
 
-__all__ = ["PersistQueue", "MAX_INFLIGHT"]
+__all__ = ["MAX_INFLIGHT", "PersistQueue"]

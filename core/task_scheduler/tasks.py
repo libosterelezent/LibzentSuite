@@ -21,18 +21,17 @@ Design notes:
   * ``as_dict()`` is the JSON-safe snapshot used for task listings, the
     history repository row, and stats — floats are rounded.
 """
+
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Literal
 
 from core.priority import Priority
 
 #: All valid task statuses (contract: "queued|running|completed|failed|cancelled|timed_out").
-TaskStatus = Literal[
-    "queued", "running", "completed", "failed", "cancelled", "timed_out"
-]
+TaskStatus = Literal["queued", "running", "completed", "failed", "cancelled", "timed_out"]
 
 STATUS_QUEUED: TaskStatus = "queued"
 STATUS_RUNNING: TaskStatus = "running"
@@ -52,9 +51,7 @@ TASK_STATUSES = (
 )
 
 #: Statuses from which a task never transitions again.
-TERMINAL_STATUSES = frozenset(
-    {STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED, STATUS_TIMED_OUT}
-)
+TERMINAL_STATUSES = frozenset({STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED, STATUS_TIMED_OUT})
 
 
 @dataclass
@@ -96,24 +93,24 @@ class Task:
     account: str
     plugin: str
     action: str
-    channel_id: Optional[int] = None
-    user_id: Optional[int] = None
-    content: Optional[str] = None
+    channel_id: int | None = None
+    user_id: int | None = None
+    content: str | None = None
     #: target message for reaction/button actions (emoji / custom_id rides
     #: in ``content``; the scheduler treats both opaquely)
-    message_id: Optional[int] = None
+    message_id: int | None = None
     priority: int = Priority.NORMAL
     submitted_at: float = field(default_factory=time.time)
     #: monotonic twin of submitted_at — the ONLY clock age math may use
     submitted_mono: float = field(default_factory=time.monotonic, repr=False)
-    started_at: Optional[float] = None
-    finished_at: Optional[float] = None
+    started_at: float | None = None
+    finished_at: float | None = None
     attempts: int = 0
     max_retries: int = 0
     timeout_s: float = 30.0
     status: TaskStatus = STATUS_QUEUED
-    error: Optional[str] = None
-    result_summary: Optional[str] = None
+    error: str | None = None
+    result_summary: str | None = None
     grant_wait_ms: float = 0.0
     grant_jitter_ms: float = 0.0
     cancelled: bool = False
@@ -129,7 +126,7 @@ class Task:
     # a STRING assignment id, or None for the independent flow. The
     #: fleet gate reads it: on a group-managed account only linked
     #: dispatches run (D1 suspends the independent flow).
-    fleet_assignment: Optional[str] = None
+    fleet_assignment: str | None = None
     #: Tri-state wire classification for the audit gate. None = unknown
     #: (default: the sender started but its outcome does not prove
     #: whether a request reached the wire — budget-expiry timeout, cancel
@@ -139,14 +136,14 @@ class Task:
     #: the scheduler's pre-wire set: account lookup / run-state check /
     #: cache validation / DM resolution all failed before any client
     #: call) — no audit row may exist for a send that never happened.
-    wire_sent: Optional[bool] = None
+    wire_sent: bool | None = None
 
     @property
     def is_terminal(self) -> bool:
         """True once the task reached a final status (no further transitions)."""
         return self.status in TERMINAL_STATUSES
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         """JSON-safe snapshot of the task (all floats rounded, no objects)."""
         return {
             "id": self.id,
@@ -181,14 +178,14 @@ class Task:
 
 
 __all__ = [
-    "Task",
-    "TaskStatus",
-    "TASK_STATUSES",
-    "TERMINAL_STATUSES",
-    "STATUS_QUEUED",
-    "STATUS_RUNNING",
+    "STATUS_CANCELLED",
     "STATUS_COMPLETED",
     "STATUS_FAILED",
-    "STATUS_CANCELLED",
+    "STATUS_QUEUED",
+    "STATUS_RUNNING",
     "STATUS_TIMED_OUT",
+    "TASK_STATUSES",
+    "TERMINAL_STATUSES",
+    "Task",
+    "TaskStatus",
 ]

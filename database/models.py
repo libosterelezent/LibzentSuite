@@ -5,11 +5,12 @@ persisted state. Repositories (database/repositories/*) construct/return them;
 managers consume them. Keep this module dependency-free (no imports from
 core.* beyond nothing) so database/ stays independently testable.
 """
+
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 #: policy levels (spec §5): most specific wins-by-composition (max interval)
 POLICY_LEVELS = ("global", "account", "plugin", "account_plugin")
@@ -25,16 +26,19 @@ class AccountRecord:
 
     id: int
     name: str
-    token_ref: Optional[str] = None      # .env key; token VALUES never stored
+    token_ref: str | None = None  # .env key; token VALUES never stored
     enabled: bool = True
-    sync_group: Optional[str] = None     # accounts that act in sync (optional)
-    settings: Dict[str, Any] = field(default_factory=dict)   # framework layer
+    sync_group: str | None = None  # accounts that act in sync (optional)
+    settings: dict[str, Any] = field(default_factory=dict)  # framework layer
     created_at: float = field(default_factory=time.time)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "id": self.id, "name": self.name, "token_ref": self.token_ref,
-            "enabled": self.enabled, "sync_group": self.sync_group,
+            "id": self.id,
+            "name": self.name,
+            "token_ref": self.token_ref,
+            "enabled": self.enabled,
+            "sync_group": self.sync_group,
             "settings": dict(self.settings),
             "created_at": round(self.created_at, 3),
         }
@@ -57,10 +61,12 @@ class SyncGroupRecord:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "id": self.id, "name": self.name,
-            "description": self.description, "enabled": self.enabled,
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "enabled": self.enabled,
             "created_at": round(self.created_at, 3),
             "updated_at": round(self.updated_at, 3),
         }
@@ -80,14 +86,17 @@ class PluginProfileRecord:
     plugin: str
     name: str
     description: str = ""
-    settings: Dict[str, Any] = field(default_factory=dict)
+    settings: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "id": self.id, "plugin": self.plugin, "name": self.name,
-            "description": self.description, "settings": dict(self.settings),
+            "id": self.id,
+            "plugin": self.plugin,
+            "name": self.name,
+            "description": self.description,
+            "settings": dict(self.settings),
             "created_at": round(self.created_at, 3),
             "updated_at": round(self.updated_at, 3),
         }
@@ -100,12 +109,14 @@ class PluginMetadata:
     name: str
     version: str = "0.0.0"
     description: str = ""
-    settings_manifest: List[Dict[str, Any]] = field(default_factory=list)
+    settings_manifest: list[dict[str, Any]] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "name": self.name, "version": self.version,
-            "description": self.description, "settings": list(self.settings_manifest),
+            "name": self.name,
+            "version": self.version,
+            "description": self.description,
+            "settings": list(self.settings_manifest),
         }
 
 
@@ -121,7 +132,7 @@ class RatePolicyRecord:
     """
 
     level: str
-    owner: Optional[str]
+    owner: str | None
     action: str
     interval: float
     jitter_min: float = 0.0
@@ -129,18 +140,19 @@ class RatePolicyRecord:
 
     def __post_init__(self) -> None:
         if self.level not in POLICY_LEVELS:
-            raise ValueError(
-                f"policy level {self.level!r} not in {POLICY_LEVELS}"
-            )
+            raise ValueError(f"policy level {self.level!r} not in {POLICY_LEVELS}")
         if self.level == "global":
             self.owner = None
         elif not self.owner:
             raise ValueError(f"policy level {self.level!r} requires an owner")
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "level": self.level, "owner": self.owner, "action": self.action,
-            "interval": self.interval, "jitter": [self.jitter_min, self.jitter_max],
+            "level": self.level,
+            "owner": self.owner,
+            "action": self.action,
+            "interval": self.interval,
+            "jitter": [self.jitter_min, self.jitter_max],
         }
 
 
@@ -154,10 +166,13 @@ class FleetGroupState:
     generation: int = 1
     updated_at: float = field(default_factory=time.time)
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {"group_name": self.group_name, "paused": self.paused,
-                "generation": self.generation,
-                "updated_at": round(self.updated_at, 3)}
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "group_name": self.group_name,
+            "paused": self.paused,
+            "generation": self.generation,
+            "updated_at": round(self.updated_at, 3),
+        }
 
 
 @dataclass
@@ -166,15 +181,20 @@ class FleetMemberRecord:
 
     account: str
     group_name: str
-    mode: str                    # ExecutionMode value
-    eligibility: str             # MemberEligibility value
+    mode: str  # ExecutionMode value
+    eligibility: str  # MemberEligibility value
     since: float = field(default_factory=time.time)
     version: int = 1
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {"account": self.account, "group_name": self.group_name,
-                "mode": self.mode, "eligibility": self.eligibility,
-                "since": round(self.since, 3), "version": self.version}
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "account": self.account,
+            "group_name": self.group_name,
+            "mode": self.mode,
+            "eligibility": self.eligibility,
+            "since": round(self.since, 3),
+            "version": self.version,
+        }
 
 
 @dataclass
@@ -184,27 +204,33 @@ class FleetAssignmentRecord:
     id: str
     group_name: str
     task_id: str
-    status: str                   # AssignmentStatus value
-    account: Optional[str] = None
+    status: str  # AssignmentStatus value
+    account: str | None = None
     priority: int = 0
     created_at: float = field(default_factory=time.time)
-    started_at: Optional[float] = None
-    stopped_at: Optional[float] = None
+    started_at: float | None = None
+    stopped_at: float | None = None
     resume_policy: str = ""
     version: int = 1
     generation: int = 1
-    error: Optional[str] = None
+    error: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {"id": self.id, "group_name": self.group_name,
-                "task_id": self.task_id, "status": self.status,
-                "account": self.account, "priority": int(self.priority),
-                "created_at": round(self.created_at, 3),
-                "started_at": self.started_at,
-                "stopped_at": self.stopped_at,
-                "resume_policy": self.resume_policy,
-                "version": self.version, "generation": self.generation,
-                "error": self.error}
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "group_name": self.group_name,
+            "task_id": self.task_id,
+            "status": self.status,
+            "account": self.account,
+            "priority": int(self.priority),
+            "created_at": round(self.created_at, 3),
+            "started_at": self.started_at,
+            "stopped_at": self.stopped_at,
+            "resume_policy": self.resume_policy,
+            "version": self.version,
+            "generation": self.generation,
+            "error": self.error,
+        }
 
 
 @dataclass
@@ -218,14 +244,19 @@ class FleetCooldownRecord:
     started_at: float
     expires_at: float
     source: str = "manual"
-    cleared_at: Optional[float] = None
+    cleared_at: float | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {"id": self.id, "scope_type": self.scope_type,
-                "scope_id": self.scope_id, "reason": self.reason,
-                "started_at": round(self.started_at, 3),
-                "expires_at": round(self.expires_at, 3),
-                "source": self.source, "cleared_at": self.cleared_at}
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "scope_type": self.scope_type,
+            "scope_id": self.scope_id,
+            "reason": self.reason,
+            "started_at": round(self.started_at, 3),
+            "expires_at": round(self.expires_at, 3),
+            "source": self.source,
+            "cleared_at": self.cleared_at,
+        }
 
 
 @dataclass
@@ -239,22 +270,35 @@ class FleetTransitionRecord:
     reason: str
     correlation_id: str
     occurred_at: float
-    task_id: Optional[str] = None
-    assignment_id: Optional[str] = None
-    account: Optional[str] = None
+    task_id: str | None = None
+    assignment_id: str | None = None
+    account: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {"id": self.id, "kind": self.kind,
-                "group_name": self.group_name,
-                "generation": self.generation, "reason": self.reason,
-                "correlation_id": self.correlation_id,
-                "occurred_at": round(self.occurred_at, 3),
-                "task_id": self.task_id, "assignment_id": self.assignment_id,
-                "account": self.account}
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "group_name": self.group_name,
+            "generation": self.generation,
+            "reason": self.reason,
+            "correlation_id": self.correlation_id,
+            "occurred_at": round(self.occurred_at, 3),
+            "task_id": self.task_id,
+            "assignment_id": self.assignment_id,
+            "account": self.account,
+        }
 
 
-__all__ = ["AccountRecord", "SyncGroupRecord",
-           "PluginProfileRecord", "PluginMetadata", "RatePolicyRecord",
-           "POLICY_LEVELS",
-           "FleetGroupState", "FleetMemberRecord", "FleetAssignmentRecord",
-           "FleetCooldownRecord", "FleetTransitionRecord"]
+__all__ = [
+    "POLICY_LEVELS",
+    "AccountRecord",
+    "FleetAssignmentRecord",
+    "FleetCooldownRecord",
+    "FleetGroupState",
+    "FleetMemberRecord",
+    "FleetTransitionRecord",
+    "PluginMetadata",
+    "PluginProfileRecord",
+    "RatePolicyRecord",
+    "SyncGroupRecord",
+]

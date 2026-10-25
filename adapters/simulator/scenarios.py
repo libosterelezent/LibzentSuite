@@ -25,12 +25,14 @@ Documented decisions (contract ambiguities — see INTEGRATION.md ground rules):
     config/) ride into the stack as the SettingsManager GLOBAL layer via
     :data:`DEMO_PLUGIN_SETTINGS`, exactly like the audited SimulatedCluster.
 """
+
 from __future__ import annotations
 
 import asyncio
+import itertools
 import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from adapters.simulator.world import (
     SYNTHETIC_ALPHA_ID,
@@ -40,6 +42,9 @@ from adapters.simulator.world import (
     SimWorld,
     WorldMessage,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 #: the single account every scenario runs (synthetic ids only)
 ACCOUNT_NAME = "alpha"
@@ -64,7 +69,7 @@ MAX_CHUNK_LENGTH = 2000
 
 #: demo plugin settings (sim pacing in seconds; production values live in
 #: config/). The runner passes this as the SettingsManager global layer.
-DEMO_PLUGIN_SETTINGS: Dict[str, Dict[str, Any]] = {
+DEMO_PLUGIN_SETTINGS: dict[str, dict[str, Any]] = {
     "soulcopy": {
         "dm_read_timeout": 3.0,
         "inter_chunk_delay": 0.05,
@@ -90,13 +95,13 @@ class Scenario:
     description: str
     #: action -> {"interval": seconds, "jitter": [min, max]} (applied pre-run,
     #: clamped to the 1.5s floor by the runner)
-    policies: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    policies: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: builds users/channels/responder pages on a fresh world
     world_setup: Callable[[SimWorld], None] = lambda world: None
     #: async; receives the ScenarioAPI facade built by the runner
     script: Callable[[Any], Awaitable[None]] = None  # type: ignore[assignment]
     #: (audit dicts, world) -> failure strings; [] means pass
-    checks: Callable[[List[dict], SimWorld], List[str]] = None  # type: ignore[assignment]
+    checks: Callable[[list[dict], SimWorld], list[str]] = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -122,9 +127,9 @@ class ScenarioAPI:
     #: (channel_id, content, author_id) -> deliver an inbound message
     owner_says: Callable[[int, str, int], None]
     #: fresh list of the collected audit dicts (normalized)
-    audit_entries: Callable[[], List[dict]]
+    audit_entries: Callable[[], list[dict]]
     #: plugin settings overrides the runner applied (global layer)
-    settings_overrides: Dict[str, Dict[str, Any]]
+    settings_overrides: dict[str, dict[str, Any]]
     #: the mention-prefix RemoteControl bridge (control_mention scenario)
     remote: Any = None
     #: the wired RateLimitManager — the send lane is PRESENT but disabled
@@ -144,15 +149,13 @@ SHORT_PAGES = [
 ]
 
 
-def _roster_pages(count: int, per_page: int = 100) -> List[str]:
+def _roster_pages(count: int, per_page: int = 100) -> list[str]:
     """Synthetic name roster split into Mudae-style DM pages (no header)."""
     names = [f"sim-user-{i:04d}" for i in range(count)]
-    return [
-        "\n".join(names[i:i + per_page]) for i in range(0, count, per_page)
-    ]
+    return ["\n".join(names[i : i + per_page]) for i in range(0, count, per_page)]
 
 
-def _base_world(pages: List[str], reply_delay: float = 0.01) -> Callable[[SimWorld], None]:
+def _base_world(pages: list[str], reply_delay: float = 0.01) -> Callable[[SimWorld], None]:
     """world_setup factory: owner + mudae + alpha, trigger channel, responder."""
 
     def setup(world: SimWorld) -> None:
@@ -186,30 +189,29 @@ async def _trigger_and_settle(api: ScenarioAPI) -> None:
 
 
 # -------------------------------------------------------------------- checks
-def _outbound(audit: List[dict], account: str = ACCOUNT_NAME) -> List[dict]:
+def _outbound(audit: list[dict], account: str = ACCOUNT_NAME) -> list[dict]:
     """Audit entries of one account's outbound sends, oldest first."""
     entries = [
         entry
         for entry in audit
-        if str(entry.get("direction", "")) == "out"
-        and entry.get("account", account) == account
+        if str(entry.get("direction", "")) == "out" and entry.get("account", account) == account
     ]
     return sorted(entries, key=lambda entry: float(entry.get("ts") or 0.0))
 
 
-def _delivered_chunks(world: SimWorld) -> List[WorldMessage]:
+def _delivered_chunks(world: SimWorld) -> list[WorldMessage]:
     """Every delivered message that starts with the import prefix."""
     return [m for m in world.journal if m.content.startswith(IMPORT_PREFIX)]
 
 
-def _checks_basic(audit: List[dict], world: SimWorld) -> List[str]:
+def _checks_basic(audit: list[dict], world: SimWorld) -> list[str]:
     """soulcopy_basic: 2 pages -> >= 2 outbound sends and one prefixed chunk.
 
     The workload plugin is the tests/fixtures/sim_plugins/soulcopy
     fixture (the framework bundles no plugins); the checks only read
     world/audit observables, so they are unchanged by the move.
     """
-    failures: List[str] = []
+    failures: list[str] = []
     outbound = _outbound(audit)
     if len(outbound) < 2:
         failures.append(
@@ -227,14 +229,12 @@ def _checks_basic(audit: List[dict], world: SimWorld) -> List[str]:
     return failures
 
 
-def _checks_multichunk(audit: List[dict], world: SimWorld) -> List[str]:
+def _checks_multichunk(audit: list[dict], world: SimWorld) -> list[str]:
     """soulcopy_multichunk: >= 2 chunks, each <= 2000 chars incl. prefix."""
-    failures: List[str] = []
+    failures: list[str] = []
     chunks = _delivered_chunks(world)
     if len(chunks) < 2:
-        failures.append(
-            f"long roster should produce >= 2 chunks, saw {len(chunks)}"
-        )
+        failures.append(f"long roster should produce >= 2 chunks, saw {len(chunks)}")
     for message in chunks:
         if len(message.content) > MAX_CHUNK_LENGTH:
             failures.append(
@@ -244,21 +244,19 @@ def _checks_multichunk(audit: List[dict], world: SimWorld) -> List[str]:
     return failures
 
 
-def _checks_pacing(audit: List[dict], world: SimWorld) -> List[str]:
+def _checks_pacing(audit: list[dict], world: SimWorld) -> list[str]:
     """pacing_respected: every outbound gap >= interval - tolerance."""
-    failures: List[str] = []
+    failures: list[str] = []
     outbound = _outbound(audit)
     if len(outbound) < 3:
-        failures.append(
-            f"expected >= 3 outbound sends to measure pacing, saw {len(outbound)}"
-        )
+        failures.append(f"expected >= 3 outbound sends to measure pacing, saw {len(outbound)}")
         return failures
     stamps = [float(entry.get("ts") or 0.0) for entry in outbound]
     if any(stamp <= 0.0 for stamp in stamps):
         failures.append("audit entries lack usable timestamps - cannot verify pacing")
         return failures
     minimum = PACING_INTERVAL - PACING_TOLERANCE
-    for previous, current in zip(stamps, stamps[1:]):
+    for previous, current in itertools.pairwise(stamps):
         gap = current - previous
         if gap < minimum:
             failures.append(
@@ -268,9 +266,9 @@ def _checks_pacing(audit: List[dict], world: SimWorld) -> List[str]:
     return failures
 
 
-def _checks_server_429(audit: List[dict], world: SimWorld) -> List[str]:
+def _checks_server_429(audit: list[dict], world: SimWorld) -> list[str]:
     """server_429_respected: blocked send retried AFTER the server wait."""
-    failures: List[str] = []
+    failures: list[str] = []
     blocked = world.blocked_sends
     if not blocked:
         failures.append("the queued one-shot server limit never fired (no blocked send)")
@@ -282,9 +280,7 @@ def _checks_server_429(audit: List[dict], world: SimWorld) -> List[str]:
     gap = export.ts - float(blocked[0]["ts"])
     minimum = RETRY_AFTER - RETRY_TOLERANCE
     if gap < minimum:
-        failures.append(
-            f"retry came {gap:.3f}s after the 429 (expected >= {minimum:.2f}s)"
-        )
+        failures.append(f"retry came {gap:.3f}s after the 429 (expected >= {minimum:.2f}s)")
     if not _delivered_chunks(world):
         failures.append("flow did not complete after the 429 (no chunk delivered)")
     # retry is proven by world evidence alone (blocked attempt + later
@@ -294,9 +290,9 @@ def _checks_server_429(audit: List[dict], world: SimWorld) -> List[str]:
     return failures
 
 
-def _checks_channel_gone(audit: List[dict], world: SimWorld) -> List[str]:
+def _checks_channel_gone(audit: list[dict], world: SimWorld) -> list[str]:
     """channel_gone_aborts: mid-flow deletion stops the flow with no chunks."""
-    failures: List[str] = []
+    failures: list[str] = []
     if world.channel_exists(SYNTHETIC_GUILD_CHANNEL):
         failures.append("trigger channel still exists - deletion never happened")
     # NON-MUTATING lookup: dm_channel_for would CREATE the channel inside
@@ -317,7 +313,7 @@ def _checks_channel_gone(audit: List[dict], world: SimWorld) -> List[str]:
     return failures
 
 
-def _estop_halt_ts(audit: List[dict]) -> Optional[float]:
+def _estop_halt_ts(audit: list[dict]) -> float | None:
     """Timestamp of the owner-driven global estop (None when it never ran)."""
     for entry in audit:
         if "mgmt:estop" in str(entry.get("action", "")):
@@ -327,7 +323,7 @@ def _estop_halt_ts(audit: List[dict]) -> Optional[float]:
     return None
 
 
-def _checks_estop_halt(audit: List[dict], world: SimWorld) -> List[str]:
+def _checks_estop_halt(audit: list[dict], world: SimWorld) -> list[str]:
     """estop_halt: zero sends after the halt, resume re-arms the pipeline.
 
     Evidence is purely world/audit-side: the mgmt:estop audit row stamps
@@ -336,12 +332,13 @@ def _checks_estop_halt(audit: List[dict], world: SimWorld) -> List[str]:
     small grace absorbs a send that was already mid-flight when the
     cancellation landed — the next paced chunk would be >= 1.5s out).
     """
-    failures: List[str] = []
+    failures: list[str] = []
     estop_ts = _estop_halt_ts(audit)
     if estop_ts is None:
         return ["the owner estop never executed (no mgmt:estop audit entry)"]
     retriggers = [
-        m for m in world.journal
+        m
+        for m in world.journal
         if m.author_id == SYNTHETIC_OWNER_ID
         and m.content.strip() == TRIGGER_WORD
         and m.ts > estop_ts
@@ -351,9 +348,9 @@ def _checks_estop_halt(audit: List[dict], world: SimWorld) -> List[str]:
         return failures
     resume_ts = retriggers[0].ts
     late = [
-        m for m in world.journal
-        if m.author_id == SYNTHETIC_ALPHA_ID
-        and estop_ts + ESTOP_GRACE_S < m.ts < resume_ts
+        m
+        for m in world.journal
+        if m.author_id == SYNTHETIC_ALPHA_ID and estop_ts + ESTOP_GRACE_S < m.ts < resume_ts
     ]
     if late:
         failures.append(
@@ -376,10 +373,10 @@ async def _script_channel_gone(api: ScenarioAPI) -> None:
     """Start the flow, delete the trigger channel once the export went out."""
     api.owner_says(api.channel_id, TRIGGER_WORD, api.owner_id)
     delivered = await _await_true(
-        lambda: api.world.find_delivery(
-            author_id=api.account_user_id, content=EXPORT_COMMAND
-        )
-        is not None,
+        lambda: (
+            api.world.find_delivery(author_id=api.account_user_id, content=EXPORT_COMMAND)
+            is not None
+        ),
         timeout=20.0,
     )
     if not delivered:
@@ -402,18 +399,16 @@ async def _script_estop_halt(api: ScenarioAPI) -> None:
         raise RuntimeError("ControlAPI not exposed on the scenario facade")
     mention = f"<@{api.account_user_id}>"
     api.owner_says(api.channel_id, TRIGGER_WORD, api.owner_id)
-    flowing = await _await_true(
-        lambda: _delivered_chunks(api.world) != [], timeout=20.0
-    )
+    flowing = await _await_true(lambda: _delivered_chunks(api.world) != [], timeout=20.0)
     if not flowing:
         raise RuntimeError("no chunk delivered before the estop - cannot stage the halt")
     # owner mentions the account with estop: RemoteControl -> ControlAPI
     # .emergency_stop_all() (cancel tasks, stop scheduler, stop accounts)
     api.owner_says(api.channel_id, f"{mention} estop", api.owner_id)
     stopped = await _await_true(
-        lambda: str(getattr(
-            api.accounts.get(ACCOUNT_NAME).runtime, "status", ""
-        ).value) == "stopped",
+        lambda: (
+            str(getattr(api.accounts.get(ACCOUNT_NAME).runtime, "status", "").value) == "stopped"
+        ),
         timeout=15.0,
     )
     if not stopped:
@@ -430,7 +425,7 @@ async def _script_estop_halt(api: ScenarioAPI) -> None:
 
 
 # ------------------------------------------------------------------ registry
-async def _script_control_mention(api: "ScenarioAPI") -> None:
+async def _script_control_mention(api: ScenarioAPI) -> None:
     """Owner drives @account commands; a stranger tries and gets nothing."""
     mention = f"<@{api.account_user_id}>"
     api.owner_says(api.channel_id, f"{mention} status", api.owner_id)
@@ -442,10 +437,11 @@ async def _script_control_mention(api: "ScenarioAPI") -> None:
     await api.world.wait_for_quiet(api.channel_id, quiet=0.6, limit=15.0)
 
 
-def _checks_control_mention(audit: List[dict], world: SimWorld) -> List[str]:
-    failures: List[str] = []
+def _checks_control_mention(audit: list[dict], world: SimWorld) -> list[str]:
+    failures: list[str] = []
     out = [
-        e for e in audit
+        e
+        for e in audit
         if e.get("direction") == "out" and e.get("note", "").find("plugin=control") >= 0
     ]
     if not out:
@@ -459,19 +455,20 @@ def _checks_control_mention(audit: List[dict], world: SimWorld) -> List[str]:
     if estop_replies:
         failures.append("non-owner mention was answered — owner gating broken")
     stranger_msgs = [
-        m for m in world.journal
+        m
+        for m in world.journal
         if m.channel_id == SYNTHETIC_GUILD_CHANNEL and m.content.endswith("estop")
     ]
     if not stranger_msgs:
-        failures.append(
-            "stranger mention never landed - owner-gating check is void"
-        )
+        failures.append("stranger mention never landed - owner-gating check is void")
         return failures
     stranger_ts = stranger_msgs[-1].ts
     later = [
-        m for m in world.journal
+        m
+        for m in world.journal
         if m.channel_id == SYNTHETIC_GUILD_CHANNEL
-        and m.author_id == SYNTHETIC_ALPHA_ID and m.ts > stranger_ts
+        and m.author_id == SYNTHETIC_ALPHA_ID
+        and m.ts > stranger_ts
     ]
     if later:
         failures.append(
@@ -481,8 +478,7 @@ def _checks_control_mention(audit: List[dict], world: SimWorld) -> List[str]:
     return failures
 
 
-
-SCENARIOS: Dict[str, Scenario] = {
+SCENARIOS: dict[str, Scenario] = {
     "soulcopy_basic": Scenario(
         name="soulcopy_basic",
         description=(
@@ -567,13 +563,13 @@ SCENARIOS: Dict[str, Scenario] = {
 
 
 __all__ = [
-    "Scenario",
-    "ScenarioAPI",
-    "SCENARIOS",
     "ACCOUNT_NAME",
+    "DEMO_PLUGIN_SETTINGS",
     "EXPORT_COMMAND",
     "IMPORT_PREFIX",
+    "SCENARIOS",
     "TRIGGER_WORD",
-    "DEMO_PLUGIN_SETTINGS",
+    "Scenario",
+    "ScenarioAPI",
     "quiet_window",
 ]

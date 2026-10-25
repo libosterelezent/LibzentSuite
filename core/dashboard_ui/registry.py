@@ -33,6 +33,7 @@ Pure core: stdlib + the builder package only. Nothing here imports from
 adapters/, interfaces/, database/ or the dashboard itself (Stage D's
 routes call INTO this registry).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -41,12 +42,20 @@ import inspect
 import logging
 import math
 from collections import deque
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from .builders import Layout, UIContainer
 from .context import ActionContext, ActionResult, CheckContext
-from .errors import (AccountContextError, ComponentDisabledError,
-                   ResultValidationError, TreeValidationError, UIError)
+from .errors import (
+    AccountContextError,
+    ComponentDisabledError,
+    ResultValidationError,
+    TreeValidationError,
+    UIError,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 LOG = logging.getLogger("libzent.dashboard_ui.registry")
 
@@ -69,26 +78,27 @@ class DashboardUIRegistry:
 
     def __init__(self, *, offload_sync: bool = False) -> None:
         # plugin_name -> component_id -> action callback
-        self._actions: Dict[str, Dict[str, Callable]] = {}
+        self._actions: dict[str, dict[str, Callable]] = {}
         # sync-callback execution policy (see _invoke)
         self._offload_sync = offload_sync
         self._sync_slots = asyncio.Semaphore(self.SYNC_MAX_CONCURRENT)
         import concurrent.futures
+
         self._sync_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=self.SYNC_MAX_CONCURRENT,
-            thread_name_prefix="dui-sync")
+            max_workers=self.SYNC_MAX_CONCURRENT, thread_name_prefix="dui-sync"
+        )
         # plugin_name -> component_id -> visibility check callable
-        self._checks: Dict[str, Dict[str, Callable]] = {}
+        self._checks: dict[str, dict[str, Callable]] = {}
         # plugin_name -> component_id -> data provider callable
-        self._providers: Dict[str, Dict[str, Callable]] = {}
+        self._providers: dict[str, dict[str, Callable]] = {}
         # plugin_name -> serialized (JSON-safe) layout snapshot
-        self._layouts: Dict[str, dict] = {}
+        self._layouts: dict[str, dict] = {}
         # plugin_name -> frozen builder tree (kept for re-serialization)
-        self._builders: Dict[str, Layout] = {}
+        self._builders: dict[str, Layout] = {}
         # (plugin_name, account|None) -> live plugin instance | None
-        self._instance_resolver: Optional[Callable] = None
+        self._instance_resolver: Callable | None = None
         # plugin_name -> component_id -> node (the dispatch index)
-        self._nodes: Dict[str, Dict[str, Any]] = {}
+        self._nodes: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------ attachment
     def attach(self, plugin_name: str, layout: Layout) -> dict:
@@ -105,29 +115,29 @@ class DashboardUIRegistry:
         from the sync ``initialize_dashboard_ui`` plugin hook.
         """
         if not isinstance(plugin_name, str) or not plugin_name:
-            raise UIError(
-                f"plugin_name must be a non-empty str, got {plugin_name!r}")
+            raise UIError(f"plugin_name must be a non-empty str, got {plugin_name!r}")
         if not isinstance(layout, Layout):
-            raise UIError(
-                f"attach() expects a Layout instance, got {type(layout).__name__}")
+            raise UIError(f"attach() expects a Layout instance, got {type(layout).__name__}")
         if layout._frozen:
             raise UIError(
                 "layout is already attached (frozen) — build a fresh tree "
-                "instead of re-attaching a live one")
+                "instead of re-attaching a live one"
+            )
         errors = layout.validate()
         if errors:
             raise TreeValidationError(
                 f"invalid dashboard UI layout for plugin {plugin_name!r}:\n"
-                + "\n".join(f"  - {e}" for e in errors))
+                + "\n".join(f"  - {e}" for e in errors)
+            )
         # replacement: only now that the new tree has validated is it safe
         # to drop the old one (a failed validation keeps the old layout)
         if plugin_name in self._layouts:
             self.detach(plugin_name)
         layout._freeze()
-        nodes: Dict[str, Any] = {}
-        actions: Dict[str, Callable] = {}
-        checks: Dict[str, Callable] = {}
-        providers: Dict[str, Callable] = {}
+        nodes: dict[str, Any] = {}
+        actions: dict[str, Callable] = {}
+        checks: dict[str, Callable] = {}
+        providers: dict[str, Callable] = {}
         queue: deque = deque([layout])
         while queue:
             node = queue.popleft()
@@ -157,7 +167,12 @@ class DashboardUIRegistry:
         LOG.info(
             "attached dashboard UI for plugin %r (%d component(s), "
             "%d action(s), %d check(s), %d provider(s))",
-            plugin_name, len(nodes), len(actions), len(checks), len(providers))
+            plugin_name,
+            len(nodes),
+            len(actions),
+            len(checks),
+            len(providers),
+        )
         return copy.deepcopy(snapshot)
 
     def detach(self, plugin_name: str) -> bool:
@@ -188,13 +203,13 @@ class DashboardUIRegistry:
             if isinstance(node, UIContainer):
                 queue.extend(node._children)
 
-    def get_layout(self, plugin_name: str) -> Optional[dict]:
+    def get_layout(self, plugin_name: str) -> dict | None:
         """The stored JSON-safe snapshot (a copy — callers may mutate it);
         None when the plugin has no UI registered."""
         snapshot = self._layouts.get(plugin_name)
         return copy.deepcopy(snapshot) if snapshot is not None else None
 
-    def list_plugins(self) -> List[str]:
+    def list_plugins(self) -> list[str]:
         """Plugin names with an active UI (sorted for determinism)."""
         return sorted(self._layouts)
 
@@ -213,8 +228,7 @@ class DashboardUIRegistry:
             raise UIError("instance resolver must be callable")
         self._instance_resolver = resolver
 
-    def _bind_runtime_callback(self, plugin_name: str, callback,
-                               account, what: str):
+    def _bind_runtime_callback(self, plugin_name: str, callback, account, what: str):
         """Rebind a bound method to its LIVE plugin runtime.
 
         Boot-time UI registration instantiates a throwaway plugin object;
@@ -246,7 +260,7 @@ class DashboardUIRegistry:
                 except UIError:
                     raise
                 except Exception:
-                    prepared = None   # prep is best-effort
+                    prepared = None  # prep is best-effort
                 if prepared is not None:
                     return prepared
             return callback
@@ -259,7 +273,8 @@ class DashboardUIRegistry:
         except Exception as exc:
             raise UIError(
                 f"{what} of plugin {plugin_name!r}: runtime context "
-                f"lookup failed ({type(exc).__name__})") from exc
+                f"lookup failed ({type(exc).__name__})"
+            ) from exc
         if live is not None and not isinstance(bound_on, type(live)):
             # bound to a collaborator (self.helper.do) — not name-
             # rebindable; runs as registered per the documented contract
@@ -267,17 +282,19 @@ class DashboardUIRegistry:
         if live is None:
             raise UIError(
                 f"{what} of plugin {plugin_name!r} requires an active "
-                f"plugin runtime — start an account running this plugin")
+                f"plugin runtime — start an account running this plugin"
+            )
         rebound = getattr(live, callback.__name__, None)
         if not callable(rebound):
             raise UIError(
                 f"{what} of plugin {plugin_name!r}: live runtime has no "
-                f"method {callback.__name__!r}")
+                f"method {callback.__name__!r}"
+            )
         return rebound
 
     MAX_FORM_FIELDS = 64
 
-    def _validate_form_submission(self, form_node, payload: dict) -> Dict[str, str]:
+    def _validate_form_submission(self, form_node, payload: dict) -> dict[str, str]:
         """Schema validation for one form submission.
 
         Guaranteed by the framework (spec 4.4): required presence, value
@@ -287,12 +304,20 @@ class DashboardUIRegistry:
         owns those). Business rules remain the plugin's responsibility.
         Returns {field_id: message}; empty = valid.
         """
-        errors: Dict[str, str] = {}
+        errors: dict[str, str] = {}
         if len(payload) > self.MAX_FORM_FIELDS:
             return {"_form": f"payload exceeds {self.MAX_FORM_FIELDS} fields"}
-        from .components import (TextInput, NumberInput, Textarea, Select,
-                                 MultiSelect, Checkbox, Toggle)
-        known: Dict[str, Any] = {}
+        from .components import (
+            Checkbox,
+            MultiSelect,
+            NumberInput,
+            Select,
+            Textarea,
+            TextInput,
+            Toggle,
+        )
+
+        known: dict[str, Any] = {}
         for child in getattr(form_node, "_children", []):
             cid = child.get_id()
             if cid:
@@ -314,8 +339,11 @@ class DashboardUIRegistry:
                     errors[cid] = f"{label}: required"
                 continue
             if isinstance(field, NumberInput):
-                if isinstance(value, bool) or not isinstance(value, (int, float)) \
-                        or not math.isfinite(value):
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                ):
                     errors[cid] = f"{label}: must be a number"
                     continue
                 lo = getattr(field, "_min_value", None)
@@ -328,12 +356,10 @@ class DashboardUIRegistry:
             if isinstance(field, (Select, MultiSelect)):
                 options = getattr(field, "_options", None) or []
                 if not options:
-                    continue   # live options: validated by the submit
-                allowed = {str(o.get("value") if isinstance(o, dict) else o)
-                           for o in options}
+                    continue  # live options: validated by the submit
+                allowed = {str(o.get("value") if isinstance(o, dict) else o) for o in options}
                 if isinstance(field, MultiSelect):
-                    if not isinstance(value, list) or \
-                            not all(isinstance(v, str) for v in value):
+                    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                         errors[cid] = f"{label}: must be a list of choices"
                     elif any(v not in allowed for v in value):
                         errors[cid] = f"{label}: contains an undeclared choice"
@@ -360,12 +386,11 @@ class DashboardUIRegistry:
         walk = node
         while walk is not None:
             if getattr(walk, "_disabled", False):
-                where = ("ancestor "
-                         + (walk.get_id() if walk is not node else ""))
+                where = "ancestor " + (walk.get_id() if walk is not node else "")
                 raise ComponentDisabledError(
                     f"component {component_id!r} of plugin "
-                    f"{plugin_name!r} is disabled"
-                    + (f" (by {where})" if walk is not node else ""))
+                    f"{plugin_name!r} is disabled" + (f" (by {where})" if walk is not node else "")
+                )
             walk = getattr(walk, "_parent", None)
 
     # ------------------------------------------------------------- dispatch
@@ -386,31 +411,29 @@ class DashboardUIRegistry:
         node = self._find_node(plugin_name, component_id)
         account = getattr(context, "account", None)
         if not await self.check_visibility(
-                plugin_name, component_id,
-                self._check_context(plugin_name, node, account)):
-            raise UIError(
-                f"component {component_id!r} of plugin {plugin_name!r} "
-                f"is not available")
+            plugin_name, component_id, self._check_context(plugin_name, node, account)
+        ):
+            raise UIError(f"component {component_id!r} of plugin {plugin_name!r} is not available")
         callback = self._actions.get(plugin_name, {}).get(component_id)
         if callback is None:
             raise UIError(
-                f"component {component_id!r} of plugin {plugin_name!r} "
-                f"declares no action")
+                f"component {component_id!r} of plugin {plugin_name!r} declares no action"
+            )
         # enforcement, in order: disabled (incl. ancestors), then the
         # account requirement, then runtime rebinding
         self._assert_enabled(plugin_name, node, component_id)
         if getattr(node, "_action_require_account", False) and not account:
             raise AccountContextError(
                 f"action {component_id!r} of plugin {plugin_name!r} "
-                f"requires an account context — select an account")
+                f"requires an account context — select an account"
+            )
         callback = self._bind_runtime_callback(
-            plugin_name, callback, account,
-            f"action {component_id!r}")
+            plugin_name, callback, account, f"action {component_id!r}"
+        )
         if payload is None:
             payload = {}
         if not isinstance(payload, dict):
-            raise UIError(
-                f"action payload must be a dict, got {type(payload).__name__}")
+            raise UIError(f"action payload must be a dict, got {type(payload).__name__}")
         # FORM submissions are schema-validated server-side BEFORE the
         # callback runs — frontend constraints are usability, not trust
         if getattr(node, "_type_name", "") == "form":
@@ -432,17 +455,21 @@ class DashboardUIRegistry:
         except Exception as exc:
             LOG.warning(
                 "action %r of plugin %r failed: %s: %s",
-                component_id, plugin_name, type(exc).__name__, exc,
-                exc_info=True)
+                component_id,
+                plugin_name,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             raise UIError(
                 f"action {component_id!r} of plugin {plugin_name!r} "
-                f"failed: {type(exc).__name__}: {exc}") from exc
+                f"failed: {type(exc).__name__}: {exc}"
+            ) from exc
         result = self._normalize_result(raw, plugin_name, component_id)
         self._validate_result(result, plugin_name, component_id)
         return result
 
-    def _validate_result(self, result: "ActionResult",
-                         plugin_name: str, component_id: str) -> None:
+    def _validate_result(self, result: ActionResult, plugin_name: str, component_id: str) -> None:
         """Cross-the-wire guarantees for action results (spec 4.3).
 
         data must be JSON-safe (no non-finite floats, cyclic structures
@@ -450,18 +477,21 @@ class DashboardUIRegistry:
         exist in the same plugin's layout. Malformed results raise UIError
         naming the plugin/component — they never degrade to a fake success.
         """
+
         def walk(value, path, depth):
             if depth > 16:
                 raise ResultValidationError(
                     f"action {component_id!r} of {plugin_name!r}: result "
-                    f"data nests deeper than 16 levels at {path}")
+                    f"data nests deeper than 16 levels at {path}"
+                )
             if value is None or isinstance(value, (str, bool)):
                 return
             if isinstance(value, float):
                 if not math.isfinite(value):
                     raise UIError(
                         f"action {component_id!r} of {plugin_name!r}: result "
-                        f"data contains a non-finite float at {path}")
+                        f"data contains a non-finite float at {path}"
+                    )
                 return
             if isinstance(value, int):
                 return
@@ -470,32 +500,35 @@ class DashboardUIRegistry:
                     if not isinstance(k, str):
                         raise UIError(
                             f"action {component_id!r} of {plugin_name!r}: "
-                            f"result data has a non-string key at {path}")
+                            f"result data has a non-string key at {path}"
+                        )
                     walk(v, f"{path}.{k}", depth + 1)
                 return
             if isinstance(value, (list, tuple)):
                 if len(value) > 500:
                     raise UIError(
                         f"action {component_id!r} of {plugin_name!r}: result "
-                        f"data list at {path} exceeds 500 items")
+                        f"data list at {path} exceeds 500 items"
+                    )
                 for i, v in enumerate(value):
                     walk(v, f"{path}[{i}]", depth + 1)
                 return
             raise ResultValidationError(
                 f"action {component_id!r} of {plugin_name!r}: result data "
-                f"contains unsupported {type(value).__name__} at {path}")
+                f"contains unsupported {type(value).__name__} at {path}"
+            )
+
         if result.data is not None:
             walk(result.data, "data", 0)
         if result.message and not isinstance(result.message, str):
-            raise UIError(
-                f"action {component_id!r} of {plugin_name!r}: message must "
-                f"be a string")
+            raise UIError(f"action {component_id!r} of {plugin_name!r}: message must be a string")
         known = self._nodes.get(plugin_name, {})
         for target in result.refresh:
             if target not in known:
                 raise ResultValidationError(
                     f"action {component_id!r} of {plugin_name!r}: refresh "
-                    f"names unknown component {target!r}")
+                    f"names unknown component {target!r}"
+                )
 
     async def get_data(
         self,
@@ -515,20 +548,18 @@ class DashboardUIRegistry:
         node = self._find_node(plugin_name, component_id)
         account = getattr(context, "account", None)
         if not await self.check_visibility(
-                plugin_name, component_id,
-                self._check_context(plugin_name, node, account)):
-            raise UIError(
-                f"component {component_id!r} of plugin {plugin_name!r} "
-                f"is not available")
+            plugin_name, component_id, self._check_context(plugin_name, node, account)
+        ):
+            raise UIError(f"component {component_id!r} of plugin {plugin_name!r} is not available")
         provider = self._providers.get(plugin_name, {}).get(component_id)
         if provider is None:
             raise UIError(
-                f"component {component_id!r} of plugin {plugin_name!r} "
-                f"declares no data provider")
+                f"component {component_id!r} of plugin {plugin_name!r} declares no data provider"
+            )
         self._assert_enabled(plugin_name, node, component_id)
         provider = self._bind_runtime_callback(
-            plugin_name, provider, account,
-            f"data provider {component_id!r}")
+            plugin_name, provider, account, f"data provider {component_id!r}"
+        )
         check_context = self._check_context(plugin_name, node, account)
         try:
             raw = await self._invoke(provider, check_context)
@@ -539,11 +570,16 @@ class DashboardUIRegistry:
         except Exception as exc:
             LOG.warning(
                 "data provider %r of plugin %r failed: %s: %s",
-                component_id, plugin_name, type(exc).__name__, exc,
-                exc_info=True)
+                component_id,
+                plugin_name,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             raise UIError(
                 f"data provider {component_id!r} of plugin {plugin_name!r} "
-                f"failed: {type(exc).__name__}: {exc}") from exc
+                f"failed: {type(exc).__name__}: {exc}"
+            ) from exc
         return self._bound_json_safe(raw, plugin_name, component_id)
 
     async def check_visibility(
@@ -566,28 +602,30 @@ class DashboardUIRegistry:
             self._lookup_node(plugin_name, component_id),
             getattr(context, "account", None),
             cache={},
-            services=getattr(context, "services", None))
+            services=getattr(context, "services", None),
+        )
         return bool(allowed)
 
     def _lookup_node(self, plugin_name: str, component_id: str) -> Any:
         """Builder node for one id; None when unknown (denies closed)."""
         if not self._nodes.get(plugin_name):
-            LOG.debug("visibility check for unknown plugin %r — closed",
-                      plugin_name)
+            LOG.debug("visibility check for unknown plugin %r — closed", plugin_name)
             return None
         node = self._nodes[plugin_name].get(component_id)
         if node is None:
             LOG.debug(
                 "visibility check for unknown component %r of plugin %r — closed",
-                component_id, plugin_name)
+                component_id,
+                plugin_name,
+            )
         return node
 
     async def _chain_allowed(
         self,
         plugin_name: str,
         node: Any,
-        account: Optional[str],
-        cache: Dict[int, bool],
+        account: str | None,
+        cache: dict[int, bool],
         services: Any = None,
     ) -> bool:
         """Ancestor-chain verdict for one builder node (root-first).
@@ -600,7 +638,7 @@ class DashboardUIRegistry:
         """
         if node is None:
             return False
-        chain: List[Any] = []
+        chain: list[Any] = []
         seen: set[int] = set()
         walker: Any = node
         while walker is not None and id(walker) not in seen:
@@ -617,20 +655,21 @@ class DashboardUIRegistry:
             if check is None:
                 cache[key] = True
                 continue
-            check_context = self._check_context(
-                plugin_name, candidate, account, services)
+            check_context = self._check_context(plugin_name, candidate, account, services)
             try:
                 check = self._bind_runtime_callback(
-                    plugin_name, check, account,
-                    f"visibility check {candidate.get_id()!r}")
+                    plugin_name, check, account, f"visibility check {candidate.get_id()!r}"
+                )
                 allowed = await self._invoke(check, check_context)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 LOG.warning(
-                    "visibility check for %r of plugin %r raised — "
-                    "failing closed",
-                    candidate.get_id(), plugin_name, exc_info=True)
+                    "visibility check for %r of plugin %r raised — failing closed",
+                    candidate.get_id(),
+                    plugin_name,
+                    exc_info=True,
+                )
                 cache[key] = False
                 return False
             if not allowed:
@@ -643,9 +682,9 @@ class DashboardUIRegistry:
         self,
         plugin_name: str,
         node: dict,
-        account: Optional[str] = None,
+        account: str | None = None,
         services: Any = None,
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """A copy of a serialized ``node`` with every visibility-denied
         subtree pruned (``None`` when the node itself is denied).
 
@@ -659,30 +698,27 @@ class DashboardUIRegistry:
         """
         if not self._nodes.get(plugin_name):
             return None
-        cache: Dict[int, bool] = {}
-        return await self._visible_copy(plugin_name, node, account, cache,
-                                        services=services)
+        cache: dict[int, bool] = {}
+        return await self._visible_copy(plugin_name, node, account, cache, services=services)
 
     async def _visible_copy(
         self,
         plugin_name: str,
         node: Any,
-        account: Optional[str],
-        cache: Dict[int, bool],
+        account: str | None,
+        cache: dict[int, bool],
         services: Any = None,
-    ) -> Optional[dict]:
+    ) -> dict | None:
         if not isinstance(node, dict):
             return node
         builder = self._lookup_node(plugin_name, node.get("id"))
-        if not await self._chain_allowed(plugin_name, builder, account,
-                                         cache, services=services):
+        if not await self._chain_allowed(plugin_name, builder, account, cache, services=services):
             return None
         if "children" in node:
             out = dict(node)
             kept: list = []
             for child in node["children"]:
-                copy = await self._visible_copy(
-                    plugin_name, child, account, cache, services)
+                copy = await self._visible_copy(plugin_name, child, account, cache, services)
                 if copy is not None:
                     kept.append(copy)
             out["children"] = kept
@@ -691,9 +727,9 @@ class DashboardUIRegistry:
 
     # -------------------------------------------------------------- helpers
     @staticmethod
-    def _check_context(plugin_name: str, node: Any,
-                       account: Optional[str],
-                       services: Any = None) -> CheckContext:
+    def _check_context(
+        plugin_name: str, node: Any, account: str | None, services: Any = None
+    ) -> CheckContext:
         """A CheckContext describing one node (the check's own component)."""
         return CheckContext(
             plugin=plugin_name,
@@ -711,9 +747,7 @@ class DashboardUIRegistry:
             raise UIError(f"no dashboard UI registered for plugin {plugin_name!r}")
         node = nodes.get(component_id)
         if node is None:
-            raise UIError(
-                f"unknown component id {component_id!r} for plugin "
-                f"{plugin_name!r}")
+            raise UIError(f"unknown component id {component_id!r} for plugin {plugin_name!r}")
         return node
 
     #: sync-callback offloading (constructor-configurable): a bounded
@@ -752,20 +786,20 @@ class DashboardUIRegistry:
             try:
                 result = await asyncio.wait_for(
                     loop.run_in_executor(self._sync_executor, fn, *args),
-                    timeout=self.SYNC_TIMEOUT_S)
+                    timeout=self.SYNC_TIMEOUT_S,
+                )
                 # the offloaded callable may still return an awaitable
                 # (async __call__ / partial): await it here, on the loop
                 if inspect.isawaitable(result):
                     result = await result
                 return result
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
                 raise UIError(
-                    f"synchronous callback exceeded "
-                    f"{self.SYNC_TIMEOUT_S}s and was abandoned")
+                    f"synchronous callback exceeded {self.SYNC_TIMEOUT_S}s and was abandoned"
+                ) from exc
 
     @staticmethod
-    def _normalize_result(raw: Any, plugin_name: str,
-                          component_id: str) -> ActionResult:
+    def _normalize_result(raw: Any, plugin_name: str, component_id: str) -> ActionResult:
         """Coerce a callback's return value into an ActionResult.
 
         Accepted shapes: ActionResult (as-is), None (plain success), str
@@ -779,8 +813,7 @@ class DashboardUIRegistry:
         if isinstance(raw, str):
             return ActionResult(success=True, message=raw)
         if isinstance(raw, dict):
-            keys = {"success", "message", "data", "field_errors",
-                    "refresh", "modal", "open_modal"}
+            keys = {"success", "message", "data", "field_errors", "refresh", "modal", "open_modal"}
             # ANY result-shaped key opts into result parsing — a callback
             # returning a bare {"refresh": [...]} (e.g. a refresh button
             # with no message) used to fall through to a data payload,
@@ -803,8 +836,7 @@ class DashboardUIRegistry:
             return ActionResult(success=raw)
         return ActionResult(success=True, data=raw)
 
-    def _bound_json_safe(self, raw: Any, plugin_name: str,
-                         component_id: str) -> Any:
+    def _bound_json_safe(self, raw: Any, plugin_name: str, component_id: str) -> Any:
         """Validate/cap a provider result so only JSON crosses the wire.
 
         Lists are truncated at :data:`MAX_DATA_ITEMS` (with a warning);
@@ -817,21 +849,24 @@ class DashboardUIRegistry:
                     raise UIError(
                         f"data provider {component_id!r} of plugin "
                         f"{plugin_name!r} returned a non-finite float "
-                        f"at {path}")
+                        f"at {path}"
+                    )
                 return value
             if isinstance(value, dict):
                 if depth >= MAX_DATA_DEPTH:
                     raise UIError(
                         f"data provider {component_id!r} of plugin "
                         f"{plugin_name!r} exceeded the nesting depth "
-                        f"limit ({MAX_DATA_DEPTH}) at {path}")
+                        f"limit ({MAX_DATA_DEPTH}) at {path}"
+                    )
                 out = {}
                 for key, item in value.items():
                     if not isinstance(key, str):
                         raise UIError(
                             f"data provider {component_id!r} of plugin "
                             f"{plugin_name!r} returned a non-str dict key "
-                            f"at {path}: {key!r}")
+                            f"at {path}: {key!r}"
+                        )
                     out[key] = validate(item, f"{path}.{key}", depth + 1)
                 return out
             if isinstance(value, (list, tuple)):
@@ -839,22 +874,26 @@ class DashboardUIRegistry:
                     raise UIError(
                         f"data provider {component_id!r} of plugin "
                         f"{plugin_name!r} exceeded the nesting depth "
-                        f"limit ({MAX_DATA_DEPTH}) at {path}")
+                        f"limit ({MAX_DATA_DEPTH}) at {path}"
+                    )
                 items = list(value)
                 if len(items) > MAX_DATA_ITEMS:
                     LOG.warning(
-                        "data provider %r of plugin %r returned %d items "
-                        "— truncated to %d",
-                        component_id, plugin_name, len(items), MAX_DATA_ITEMS)
+                        "data provider %r of plugin %r returned %d items — truncated to %d",
+                        component_id,
+                        plugin_name,
+                        len(items),
+                        MAX_DATA_ITEMS,
+                    )
                     items = items[:MAX_DATA_ITEMS]
-                return [validate(item, f"{path}[{i}]", depth + 1)
-                        for i, item in enumerate(items)]
+                return [validate(item, f"{path}[{i}]", depth + 1) for i, item in enumerate(items)]
             raise UIError(
                 f"data provider {component_id!r} of plugin {plugin_name!r} "
                 f"returned a non-JSON-safe value at {path}: "
-                f"{type(value).__name__}")
+                f"{type(value).__name__}"
+            )
 
         return validate(raw, "$", 0)
 
 
-__all__ = ["DashboardUIRegistry", "MAX_DATA_ITEMS", "MAX_DATA_DEPTH"]
+__all__ = ["MAX_DATA_DEPTH", "MAX_DATA_ITEMS", "DashboardUIRegistry"]

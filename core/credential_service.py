@@ -25,12 +25,14 @@ Precedence on credential resolution (spec §17):
     neither                     -> MISSING_CREDENTIAL
 The .env import command is EXPLICIT and one-shot per account.
 """
+
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -45,12 +47,11 @@ DEFAULT_KEY_PATH = Path("state/credentials.key")
 class CredentialService:
     """Encrypt-at-rest credential storage over the credentials repository."""
 
-    def __init__(self, repository: Optional[Any] = None,
-                 key_path: Path | str | None = None) -> None:
+    def __init__(self, repository: Any | None = None, key_path: Path | str | None = None) -> None:
         self._repo = repository
         self._key_path = Path(key_path) if key_path is not None else DEFAULT_KEY_PATH
-        self._fernet: Optional[Fernet] = None
-        self._memory: dict = {}       # runtime cache: account -> plaintext (§14)
+        self._fernet: Fernet | None = None
+        self._memory: dict = {}  # runtime cache: account -> plaintext (§14)
         self._runtime_sources: dict = {}  # account -> "db" | "env"
         self._db_accounts: set = set()  # accounts with a stored credential
         self._delete_generation: int = 0  # PHASE-4 await-race guard (S5-L1)
@@ -59,7 +60,7 @@ class CredentialService:
         # tombstone — deleting A's newly written ciphertext. Keyed by
         # account so only the account that was ACTUALLY deleted
         # invalidates an in-flight store/resolve.
-        self._delete_gens: Dict[str, int] = {}
+        self._delete_gens: dict[str, int] = {}
         #: True once refresh() read the stored-account list: distinguishes
         #: "no credentials stored" (empty set, KNOWN) from "not looked yet"
         self._db_accounts_known = False
@@ -94,21 +95,23 @@ class CredentialService:
             # which the key was world-readable) and O_EXCL so two processes
             # booting together can never overwrite each other's key
             fd = self._create_key_file()
-        except FileExistsError:
+        except FileExistsError as exc:
             existing = self._read_key_file()
             if existing:
                 return existing
             if not self._empty_keyfile_safe_to_heal():
                 raise CredentialsError(
-                    f"credential key file {self._key_path} exists but is "
-                    "empty")
+                    f"credential key file {self._key_path} exists but is empty"
+                ) from exc
             # a crash between the O_EXCL create and the write left an EMPTY
             # file; when nothing was ever encrypted with the lost key it
             # guarded nothing — regenerate it instead of failing every boot
             LOG.warning(
                 "credential key file %s is empty and no credentials are "
                 "stored; regenerating (a crash likely interrupted key "
-                "creation)", self._key_path)
+                "creation)",
+                self._key_path,
+            )
             try:
                 self._key_path.unlink()
                 fd = self._create_key_file()
@@ -117,34 +120,34 @@ class CredentialService:
                 if existing:
                     return existing
                 raise CredentialsError(
-                    f"credential key file {self._key_path} exists but is "
-                    "empty") from None
+                    f"credential key file {self._key_path} exists but is empty"
+                ) from None
             except OSError as exc:
                 raise CredentialsError(
                     f"credential key file {self._key_path} exists but is "
-                    f"empty and could not be regenerated: {exc}") from exc
+                    f"empty and could not be regenerated: {exc}"
+                ) from exc
         with os.fdopen(fd, "wb") as fh:
             fh.write(key)
-        LOG.info("generated new credential master key at %s "
-                 "(lose it and stored credentials must be re-entered)",
-                 self._key_path)
+        LOG.info(
+            "generated new credential master key at %s "
+            "(lose it and stored credentials must be re-entered)",
+            self._key_path,
+        )
         return key
 
     def _create_key_file(self) -> int:
         """Open the key file for exclusive creation (0600); fd or FileExistsError."""
-        return os.open(str(self._key_path),
-                       os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        return os.open(str(self._key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 
     def _empty_keyfile_safe_to_heal(self) -> bool:
         """An empty key file may be regenerated only when we KNOW nothing
         was encrypted yet (no repository, or a refresh saw zero stored
         credentials) — otherwise the original key may exist in a backup
         and failing loudly is the recoverable path."""
-        return self._repo is None or (
-            self._db_accounts_known and not self._db_accounts
-        )
+        return self._repo is None or (self._db_accounts_known and not self._db_accounts)
 
-    def _read_key_file(self) -> Optional[bytes]:
+    def _read_key_file(self) -> bytes | None:
         """The stored key (stripped) or None when absent/blank.
 
         FINAL-PHASE (F7): a pre-existing key with loose permissions is
@@ -163,17 +166,18 @@ class CredentialService:
         # O_EXCL; a later chmod/restore that loosened it gets FIXED here),
         # and warn when it could not be tightened (POSIX-only; skipped
         # silently elsewhere) — group/world read on a master key is bad
-        try:
+        with contextlib.suppress(OSError, NotImplementedError):
             os.chmod(self._key_path, 0o600)
-        except (OSError, NotImplementedError):
-            pass
         try:
             mode = os.stat(self._key_path).st_mode & 0o777
             if mode & 0o077:
                 LOG.warning(
                     "credential key file %s has loose permissions (%04o; "
                     "expected 0600) — tighten it: chmod 600 %s",
-                    self._key_path, mode, self._key_path)
+                    self._key_path,
+                    mode,
+                    self._key_path,
+                )
         except OSError:
             pass  # stat raced a delete: the read above already succeeded
         return text.encode() if text else None
@@ -200,17 +204,19 @@ class CredentialService:
             LOG.warning(
                 "credential master key could not be loaded (%s: %s) — "
                 "every stored credential will fail to decrypt until the "
-                "key is fixed", type(exc).__name__, exc)
+                "key is fixed",
+                type(exc).__name__,
+                exc,
+            )
         except InvalidToken:
             LOG.warning(
                 "master key does not decrypt the stored credentials "
                 "(%d account(s)) — they were stored under a different "
                 "key; re-enter them via the dashboard/CLI",
-                len(self._db_accounts))
+                len(self._db_accounts),
+            )
         except Exception as exc:
-            LOG.warning(
-                "boot decrypt canary failed unexpectedly (%s: %s)",
-                type(exc).__name__, exc)
+            LOG.warning("boot decrypt canary failed unexpectedly (%s: %s)", type(exc).__name__, exc)
 
     @property
     def fernet(self) -> Fernet:
@@ -223,7 +229,8 @@ class CredentialService:
                 raise CredentialsError(
                     f"credential master key in {self._key_path} is not a "
                     "valid Fernet key (corrupt file? restore it, or delete "
-                    "it and re-enter the stored credentials)") from exc
+                    "it and re-enter the stored credentials)"
+                ) from exc
         return self._fernet
 
     # ------------------------------------------------------------ storage
@@ -249,16 +256,14 @@ class CredentialService:
                 # The repo UPSERT may still have committed AFTER the
                 # delete — tombstone it or a later resolve() would
                 # resurrect the deleted token from SQLite.
-                try:
+                with contextlib.suppress(Exception):
                     await self._repo.delete(account)
-                except Exception:
-                    pass
                 return
             self._db_accounts.add(account)
         self._memory[account] = token
         self._runtime_sources[account] = "db"
 
-    async def resolve(self, account: str) -> Optional[str]:
+    async def resolve(self, account: str) -> str | None:
         """Runtime resolution — DATABASE ONLY (no .env fallback).
 
         The decrypted credential comes exclusively from the encrypted
@@ -270,10 +275,10 @@ class CredentialService:
         if cached is not None:
             return cached
         if self._repo is not None and account not in self._db_accounts:
-            try:  # unknown name: one list query keeps status() truthful —
-                await self.refresh()  # a nicety that must not fail resolution
-            except Exception:
-                pass
+            # unknown name: one list query keeps status() truthful — a
+            # nicety that must not fail resolution
+            with contextlib.suppress(Exception):
+                await self.refresh()
         if self._repo is not None:
             del_gen = self._delete_gens.get(account, 0)
             ciphertext = await self._repo.load(account)
@@ -315,8 +320,7 @@ class CredentialService:
         # and bump THIS account's generation so in-flight stores/resolves
         # for OTHER accounts are untouched (review finding #4)
         self._delete_gens[account] = self._delete_gens.get(account, 0) + 1
-        existed = await self._repo.delete(account) \
-            if self._repo is not None else False
+        existed = await self._repo.delete(account) if self._repo is not None else False
         return existed
 
     # ------------------------------------------------------------- status
@@ -331,8 +335,7 @@ class CredentialService:
             return "db"
         return "missing"
 
-    async def import_from_env(self, env_tokens: dict,
-                              overwrite: bool = False) -> dict:
+    async def import_from_env(self, env_tokens: dict, overwrite: bool = False) -> dict:
         """Explicit one-shot import of legacy .env tokens (spec §17).
 
         Never silently overwrites: accounts with an existing DB credential
@@ -341,8 +344,7 @@ class CredentialService:
         account NAMES only (no token material).
         """
         imported, skipped, failed = [], [], {}
-        known = await self._repo.accounts_with_credential() \
-            if self._repo else []
+        known = await self._repo.accounts_with_credential() if self._repo else []
         for account, token in env_tokens.items():
             if not token:
                 continue
@@ -357,7 +359,10 @@ class CredentialService:
         return {"imported": imported, "skipped": skipped, "failed": failed}
 
     def __repr__(self) -> str:  # safety net: never leak material
-        return f"<CredentialService repo={self._repo is not None} " \
-               f"cached={sorted(self._memory)} key={str(self._key_path)!r}>"
+        return (
+            f"<CredentialService repo={self._repo is not None} "
+            f"cached={sorted(self._memory)} key={str(self._key_path)!r}>"
+        )
 
-__all__ = ["CredentialService", "KEY_ENV", "DEFAULT_KEY_PATH"]
+
+__all__ = ["DEFAULT_KEY_PATH", "KEY_ENV", "CredentialService"]

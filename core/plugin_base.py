@@ -36,23 +36,16 @@ handler is contained by the executor, and the plugin manager binds each
 declared handler to the per-account plugin instance before invocation
 (handlers may be plain methods — see CommandSpec).
 """
+
 from __future__ import annotations
 
 import abc
-import logging
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     ClassVar,
-    Dict,
-    FrozenSet,
-    List,
-    Optional,
     Protocol,
-    Sequence,
-    Tuple,
     runtime_checkable,
 )
 
@@ -60,6 +53,9 @@ from .dashboard_ui.errors import UIError
 from .priority import Priority
 
 if TYPE_CHECKING:  # runtime duck-typing avoids import cycles / hard deps
+    import logging
+    from collections.abc import Callable, Sequence
+
     from .credentials import Credentials
     from .dashboard_ui.builders import DashboardUIToolset, Layout
     from .event_bus import Event, MessageReceived
@@ -73,10 +69,11 @@ class StatCard:
     The dashboard renders these in its own metric-card template —
     plugins provide structured values, never HTML.
     """
+
     label: str
     value: str
     sub: str = ""
-    level: str = ""          # "" | "ok" | "warn" | "err" (color)
+    level: str = ""  # "" | "ok" | "warn" | "err" (color)
 
 
 @dataclass(frozen=True)
@@ -88,6 +85,7 @@ class PanelSection:
           "list"     -> data = [{"label","value"}] (key-value list)
           "text"     -> data = str (rendered as a paragraph, escaped)
     """
+
     kind: str
     title: str = ""
     data: Any = None
@@ -100,13 +98,14 @@ class UIPanel:
     The dashboard renders each panel with its own templates; plugin
     values are esc()'d at render time (structured data, never raw HTML).
     """
-    id: str                     # unique: "plugin_name:panel_id"
+
+    id: str  # unique: "plugin_name:panel_id"
     title: str
-    icon: str = ""              # SVG path data (24x24 viewBox); empty = default
-    sections: Tuple[PanelSection, ...] = ()
+    icon: str = ""  # SVG path data (24x24 viewBox); empty = default
+    sections: tuple[PanelSection, ...] = ()
 
 
-class PluginBase(abc.ABC):
+class PluginBase(abc.ABC):  # noqa: B024 -- contract marker; every hook is optional by design
     """Contract every plugin module must fulfil.
 
     A plugin module discovered by :class:`core.plugin_manager.loader.PluginLoader`
@@ -122,22 +121,22 @@ class PluginBase(abc.ABC):
     #: one-line description for CLI/dashboard listings
     description: ClassVar[str] = ""
     #: everything the plugin supports; resolved per account by SettingsManager
-    settings: ClassVar[Sequence["Setting"]] = ()
+    settings: ClassVar[Sequence[Setting]] = ()
     #: self-commands the plugin declares (per-account command interface).
     #: Declared ONCE on the class — the loader validates the tuple at
     #: discovery and the plugin manager binds each handler to the
     #: per-(account, plugin) instance. See :class:`CommandSpec`.
-    COMMANDS: ClassVar[Tuple["CommandSpec", ...]] = ()
+    COMMANDS: ClassVar[tuple[CommandSpec, ...]] = ()
     #: PHASE 9 (§5) opt-in FLEET capability, DEFAULT OFF: an instance of
     #: ``core.fleet.FleetTaskHandler`` (see core/fleet/capability.py).
     #: Plugins without it — ping and every simple plugin — are never
     #: mounted into fleet management. The framework owns the lifecycle;
     #: the handler only supplies the flow (prepare/execute/suspend/
     #: recover) and its task declarations.
-    fleet_handler: ClassVar[Optional[Any]] = None
+    fleet_handler: ClassVar[Any | None] = None
 
     # ---------------------------------------------------------- UI extension
-    async def ui_stats(self, ctx: "PluginContext") -> Sequence["StatCard"]:
+    async def ui_stats(self, ctx: PluginContext) -> Sequence[StatCard]:
         """Stat cards this plugin contributes to the Home tab.
 
         Called when the dashboard fetches /api/ui/stats. Return a list
@@ -146,7 +145,7 @@ class PluginBase(abc.ABC):
         """
         return ()
 
-    async def ui_panels(self, ctx: "PluginContext") -> Sequence["UIPanel"]:
+    async def ui_panels(self, ctx: PluginContext) -> Sequence[UIPanel]:
         """Sidebar panels this plugin contributes.
 
         Called when the dashboard fetches /api/ui/panels. Each UIPanel
@@ -156,7 +155,7 @@ class PluginBase(abc.ABC):
         return ()
 
     # ------------------------------------------------------ dashboard UI (C)
-    def initialize_dashboard_ui(self, ui: "DashboardUIToolset") -> None:
+    def initialize_dashboard_ui(self, ui: DashboardUIToolset) -> None:
         """Optional hook for declaring this plugin's dashboard interface.
 
         Called during plugin activation with a DashboardUIToolset. Build a
@@ -172,7 +171,7 @@ class PluginBase(abc.ABC):
         """
         return None
 
-    def attach_dashboard_ui(self, layout: "Layout") -> None:
+    def attach_dashboard_ui(self, layout: Layout) -> None:
         """Attach a completed UI layout to the framework.
 
         The layout is validated, frozen, and registered. Call this from
@@ -184,26 +183,26 @@ class PluginBase(abc.ABC):
         registry = getattr(self, "_ui_registry", None)
         if registry is None:
             raise UIError(
-                "no UI registry wired — attach_dashboard_ui requires a "
-                "managed plugin lifecycle")
+                "no UI registry wired — attach_dashboard_ui requires a managed plugin lifecycle"
+            )
         # the plugin name is the class-declared slug (self.name)
         registry.attach(self.name, layout)
 
     # ------------------------------------------------------------- lifecycle
-    async def on_load(self, ctx: "PluginContext") -> None:
+    async def on_load(self, ctx: PluginContext) -> None:  # noqa: B027  # optional lifecycle hook
         """Called once when the plugin is first enabled on an account."""
 
-    async def on_enable(self, ctx: "PluginContext") -> None:
+    async def on_enable(self, ctx: PluginContext) -> None:  # noqa: B027  # optional lifecycle hook
         """Called every time the plugin becomes active (after on_load)."""
 
-    async def on_disable(self, ctx: "PluginContext") -> None:
+    async def on_disable(self, ctx: PluginContext) -> None:  # noqa: B027  # optional lifecycle hook
         """Called when the plugin is disabled or the account stops."""
 
-    async def on_unload(self, ctx: "PluginContext") -> None:
+    async def on_unload(self, ctx: PluginContext) -> None:  # noqa: B027  # optional lifecycle hook
         """Called when the plugin is removed from the account (last call)."""
 
     # ---------------------------------------------------------------- events
-    async def handle_event(self, ctx: "PluginContext", event: "Event") -> None:
+    async def handle_event(self, ctx: PluginContext, event: Event) -> None:  # noqa: B027  # optional hook
         """Dispatch point for every ``MessageReceived`` seen by the account.
 
         Implementations MUST filter fast for unrelated events (check the
@@ -230,9 +229,9 @@ class PluginContext:
     #: plugin name
     plugin: str
     #: resolved + validated settings for THIS account (live view)
-    settings: Dict[str, Any]
+    settings: dict[str, Any]
     #: per-(account, plugin) services facade (sends, waits, credentials)
-    services: "PluginServices"
+    services: PluginServices
     #: pre-scoped logger: libzent.<account>.<plugin>
     logger: logging.Logger
     #: setting keys the user set EXPLICITLY in any settings layer (None =
@@ -241,7 +240,7 @@ class PluginContext:
     #: choice that happens to match it. Plugins that force a setting at
     #: runtime (e.g. an auto-disable latch) consult this to avoid
     #: clobbering an explicit user re-enable on the next load.
-    explicit_settings: Optional[FrozenSet[str]] = None
+    explicit_settings: frozenset[str] | None = None
 
     def __repr__(self) -> str:
         return f"<PluginContext {self.account}:{self.plugin} settings={sorted(self.settings)}>"
@@ -258,6 +257,7 @@ class ArgSpec:
     failures render the auto-generated usage line back to the invoker
     (exactly like the original's MissingRequiredArgument handlers).
     """
+
     #: placeholder name — renders as ``<name>`` in usage lines
     name: str
     #: str | int | float, or any callable(text) -> value (raises
@@ -268,19 +268,19 @@ class ArgSpec:
     #: consume the REMAINING tokens as a list (``rollstop <p...>``)
     greedy: bool = False
     #: allowed values (checked AFTER conversion)
-    choices: Optional[Tuple[Any, ...]] = None
+    choices: tuple[Any, ...] | None = None
 
 
-def _convert_arg(spec: "ArgSpec", token: str) -> Any:
-    if spec.kind is str or callable(spec.kind) is False and spec.kind is None:
+def _convert_arg(spec: ArgSpec, token: str) -> Any:
+    if spec.kind is str or (callable(spec.kind) is False and spec.kind is None):
         value: Any = token
     elif spec.kind in (int, float):
         try:
             value = spec.kind(token)
         except (TypeError, ValueError):
             raise ValueError(
-                f"<{spec.name}> must be a valid "
-                f"{spec.kind.__name__}, got {token!r}") from None
+                f"<{spec.name}> must be a valid {spec.kind.__name__}, got {token!r}"
+            ) from None
     elif callable(spec.kind):
         try:
             value = spec.kind(token)
@@ -292,15 +292,15 @@ def _convert_arg(spec: "ArgSpec", token: str) -> Any:
         # time instead so the typo surfaces immediately
         raise ValueError(
             f"<{spec.name}> has an unsupported kind {spec.kind!r} "
-            f"(use str, int, float or a callable)")
+            f"(use str, int, float or a callable)"
+        )
     if spec.choices is not None and value not in spec.choices:
         allowed = "/".join(str(c) for c in spec.choices)
-        raise ValueError(
-            f"<{spec.name}> must be one of: {allowed} (got {token!r})")
+        raise ValueError(f"<{spec.name}> must be one of: {allowed} (got {token!r})")
     return value
 
 
-def parse_command_args(spec: "CommandSpec", argv: List[str]) -> Dict[str, Any]:
+def parse_command_args(spec: CommandSpec, argv: list[str]) -> dict[str, Any]:
     """Parse ``argv`` against the command's declared ArgSpecs.
 
     Returns the name->value dict for ``ctx.parsed``. Raises ValueError
@@ -308,7 +308,7 @@ def parse_command_args(spec: "CommandSpec", argv: List[str]) -> Dict[str, Any]:
     conversion, an unsupported ArgSpec kind, disallowed choices, or
     leftover tokens.
     """
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
     rest = list(argv or [])
     for arg in spec.args:
         if arg.greedy:
@@ -337,22 +337,20 @@ def parse_command_args(spec: "CommandSpec", argv: List[str]) -> Dict[str, Any]:
         out[arg.name] = _convert_arg(arg, rest.pop(0))
     if rest:
         raise ValueError(
-            f"unexpected argument {rest[0]!r} — this command takes "
-            f"{len(spec.args)} argument(s)")
+            f"unexpected argument {rest[0]!r} — this command takes {len(spec.args)} argument(s)"
+        )
     return out
 
 
-def usage_line(spec: "CommandSpec") -> str:
+def usage_line(spec: CommandSpec) -> str:
     """Auto-generated usage: ``<a> <b> [c...]`` from the ArgSpecs
     (empty when the command declares none — falls back to spec.usage)."""
     parts = []
     for arg in spec.args:
         if arg.greedy:
-            parts.append(f"[{arg.name}...]" if not arg.required
-                         else f"<{arg.name}...>")
+            parts.append(f"[{arg.name}...]" if not arg.required else f"<{arg.name}...>")
         else:
-            parts.append(f"<{arg.name}>" if arg.required
-                         else f"[{arg.name}]")
+            parts.append(f"<{arg.name}>" if arg.required else f"[{arg.name}]")
     return " ".join(parts)
 
 
@@ -389,11 +387,11 @@ class CommandSpec:
     usage: str = ""
     #: declarative positional arguments — when present the executor
     #: parses/validates them and fills ``ctx.parsed`` before the handler
-    args: Tuple[ArgSpec, ...] = ()
+    args: tuple[ArgSpec, ...] = ()
     #: defaults to the plugin's display name
     category: str = ""
     #: async def handler(ctx: CommandContext, args: List[str]) -> str
-    handler: Optional[Callable] = None
+    handler: Callable | None = None
 
 
 @runtime_checkable
@@ -411,10 +409,10 @@ class CommandSettingsApi(Protocol):
     under ``"channels"``).
     """
 
-    def schema(self) -> Sequence["Setting"]:
+    def schema(self) -> Sequence[Setting]:
         """The plugin's setting schema (declared order)."""
 
-    async def effective(self) -> Dict[str, Any]:
+    async def effective(self) -> dict[str, Any]:
         """Merged effective settings incl. the reserved ``channels`` scope."""
 
     async def set(self, key: str, value: Any) -> Any:
@@ -426,10 +424,10 @@ class CommandSettingsApi(Protocol):
     async def clear(self, key: str) -> Any:
         """Remove one per-account override; returns the newly-effective value."""
 
-    async def binding(self) -> Optional[str]:
+    async def binding(self) -> str | None:
         """Name of the account's bound profile for this plugin (None = none)."""
 
-    async def profiles(self) -> List[Dict[str, Any]]:
+    async def profiles(self) -> list[dict[str, Any]]:
         """The plugin's available profiles (``name``/``description`` rows)."""
 
 
@@ -451,25 +449,24 @@ class CommandContext:
     #: plugin name the command belongs to ("selfcmd" for framework verbs)
     plugin: str
     #: per-(account, plugin) services facade (paced sends, credentials...)
-    services: "PluginServices"
+    services: PluginServices
     #: pre-scoped logger: libzent.<account>.<plugin>
     logger: logging.Logger
     #: channel the command was invoked in
     channel_id: int = 0
     #: guild of the invoking channel (None for DMs)
-    guild_id: Optional[int] = None
+    guild_id: int | None = None
     #: validated settings surface (None on stripped stacks)
-    settings_api: Optional[CommandSettingsApi] = None
+    settings_api: CommandSettingsApi | None = None
     #: verbatim argument remainder (whitespace-normalized by the parser)
     raw: str = ""
     #: the invoking Discord user id (None when unknown) — admin-gated
     #: handlers check it against the AccessManager
-    invoker_id: Optional[int] = None
+    invoker_id: int | None = None
     #: PARSED arguments when the spec declares ArgSpecs (name -> typed
     #: value; greedy args are lists). Empty dict for spec-less commands
     #: (they read the raw ``args`` list instead).
-    parsed: Dict[str, Any] = field(default_factory=dict)
-
+    parsed: dict[str, Any] = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -522,13 +519,19 @@ class PluginServices(Protocol):
     async def open_dm(self, user_id: int) -> int:
         """Resolve (opening if needed) the DM channel id for a user."""
 
-    async def add_reaction(self, channel_id: int, message_id: int, emoji: str,
-                           *, priority: Priority = Priority.NORMAL) -> None:
+    async def add_reaction(
+        self, channel_id: int, message_id: int, emoji: str, *, priority: Priority = Priority.NORMAL
+    ) -> None:
         """React to a message through the paced pipeline (kakerareact)."""
 
-    async def click_button(self, channel_id: int, message_id: int,
-                           custom_id: str, *,
-                           priority: Priority = Priority.NORMAL) -> None:
+    async def click_button(
+        self,
+        channel_id: int,
+        message_id: int,
+        custom_id: str,
+        *,
+        priority: Priority = Priority.NORMAL,
+    ) -> None:
         """Click a message component by custom_id (kakeraloot) — paced and
         audited like a send."""
 
@@ -536,9 +539,15 @@ class PluginServices(Protocol):
         """Resolve a user (cached per account in the database); None when
         the account's client cannot resolve them."""
 
-    async def cooldown_set(self, key: str, duration_s: float, *,
-                           source: str = "plugin", reason: str = "",
-                           metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def cooldown_set(
+        self,
+        key: str,
+        duration_s: float,
+        *,
+        source: str = "plugin",
+        reason: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Start (or replace) a persistent cooldown for this account+plugin.
 
         ``duration_s`` counts from NOW; the absolute expiry is persisted so
@@ -554,7 +563,7 @@ class PluginServices(Protocol):
     async def cooldown_clear(self, key: str) -> bool:
         """Remove one cooldown; True when it existed."""
 
-    async def cooldown_list(self) -> List[Dict[str, Any]]:
+    async def cooldown_list(self) -> list[dict[str, Any]]:
         """Every ACTIVE cooldown of this account+plugin, soonest first."""
 
     async def state_get(self, key: str, default: Any = None) -> Any:
@@ -568,17 +577,17 @@ class PluginServices(Protocol):
         existed."""
 
     async def wait_for_message(
-        self, check: Callable[["MessageReceived"], bool], timeout: float
-    ) -> Optional["MessageReceived"]:
+        self, check: Callable[[MessageReceived], bool], timeout: float
+    ) -> MessageReceived | None:
         """Wait for one matching inbound message; None on timeout."""
 
     async def collect_messages(
-        self, check: Callable[["MessageReceived"], bool], idle_timeout: float
-    ) -> List["MessageReceived"]:
+        self, check: Callable[[MessageReceived], bool], idle_timeout: float
+    ) -> list[MessageReceived]:
         """Collect matching inbound messages until ``idle_timeout`` passes
         with no new match (port of the audited container semantics)."""
 
-    def publish(self, event: "Event") -> None:
+    def publish(self, event: Event) -> None:
         """Publish an event on the shared bus (fire-and-forget safe)."""
 
     def validate_channel(self, channel_id: int) -> None:
@@ -589,7 +598,7 @@ class PluginServices(Protocol):
         """Human-readable channel label (``#name`` / DM partner)."""
 
     @property
-    def credentials(self) -> "Credentials":
+    def credentials(self) -> Credentials:
         """Fleet credentials (mudae id, owner ids) — never hardcoded."""
 
     @property
@@ -601,10 +610,18 @@ class PluginServices(Protocol):
         """Plugin name this facade was created for."""
 
     @property
-    def settings(self) -> Dict[str, Any]:
+    def settings(self) -> dict[str, Any]:
         """Resolved settings of this (account, plugin) pair."""
 
 
-__all__ = ["PluginBase", "PluginContext", "PluginServices", "CommandSpec",
-           "CommandContext", "CommandSettingsApi",
-           "StatCard", "PanelSection", "UIPanel"]
+__all__ = [
+    "CommandContext",
+    "CommandSettingsApi",
+    "CommandSpec",
+    "PanelSection",
+    "PluginBase",
+    "PluginContext",
+    "PluginServices",
+    "StatCard",
+    "UIPanel",
+]

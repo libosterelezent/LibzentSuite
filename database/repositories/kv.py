@@ -7,10 +7,11 @@ by hand or by an older version) is returned as its raw string instead of
 crashing the read — the audited old code stored raw strings, so this
 tolerance keeps old files readable.
 """
+
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+from typing import Any
 
 from core.errors import DatabaseError
 
@@ -32,9 +33,7 @@ class KvRepository(BaseRepository):
 
         Corrupt JSON falls back to the raw string (see module docstring).
         """
-        row = await self._fetch_one(
-            "SELECT value FROM kv WHERE key = ?", (key,), what="read kv"
-        )
+        row = await self._fetch_one("SELECT value FROM kv WHERE key = ?", (key,), what="read kv")
         if row is None:
             return default
         return loads_tolerant(row["value"], row["value"], f"kv[{key!r}]")
@@ -58,13 +57,13 @@ class KvRepository(BaseRepository):
 
     async def delete(self, key: str) -> bool:
         """Remove one entry; True when a row was deleted."""
-        async with self._tx(f"kv delete {key!r}") as conn:
-            async with conn.execute(
-                "DELETE FROM kv WHERE key = ?", (key,)
-            ) as cur:
-                return cur.rowcount > 0
+        async with (
+            self._tx(f"kv delete {key!r}") as conn,
+            conn.execute("DELETE FROM kv WHERE key = ?", (key,)) as cur,
+        ):
+            return cur.rowcount > 0
 
-    async def prefix(self, p: str) -> Dict[str, Any]:
+    async def prefix(self, p: str) -> dict[str, Any]:
         """All entries whose key starts with ``p`` (key -> decoded value).
 
         LIKE wildcards inside the prefix (%, _) are escaped so a literal
@@ -73,9 +72,7 @@ class KvRepository(BaseRepository):
         """
         if not isinstance(p, str):
             raise DatabaseError("kv prefix must be a string")
-        pattern = (
-            p.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-        )
+        pattern = p.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         rows = await self._fetch_all(
             "SELECT key, value FROM kv WHERE key LIKE ? ESCAPE '\\' ORDER BY key",
             (pattern,),
@@ -94,11 +91,9 @@ class KvRepository(BaseRepository):
         """
         if not isinstance(p, str) or not p:
             raise DatabaseError("kv delete_prefix needs a non-empty string")
-        pattern = (
-            p.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-        )
-        async with self._tx(f"kv delete_prefix {p!r}") as conn:
-            async with conn.execute(
-                "DELETE FROM kv WHERE key LIKE ? ESCAPE '\\'", (pattern,)
-            ) as cur:
-                return int(cur.rowcount or 0)
+        pattern = p.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        async with (
+            self._tx(f"kv delete_prefix {p!r}") as conn,
+            conn.execute("DELETE FROM kv WHERE key LIKE ? ESCAPE '\\'", (pattern,)) as cur,
+        ):
+            return int(cur.rowcount or 0)

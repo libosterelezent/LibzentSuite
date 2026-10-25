@@ -27,16 +27,20 @@ seam the simulation runner uses.
 ``build_simulation`` produces a fully in-memory stack over the simulator for
 tests, `main.py --sim` and the dashboard's Simulation page.
 """
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import os
 import stat
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any
 
+from .account_manager import AccountManager
+from .account_manager.lifecycle import LifecycleGovernor
 from .api import ControlAPI
 from .audit import AuditRecorder
 from .config import ProjectConfig, load_config
@@ -45,26 +49,44 @@ from .credential_service import CredentialService
 from .credentials import Credentials
 from .errors import RatePolicyError, UnsafePolicyError
 from .event_bus import EventBus
-from .logging_service import LogService, ServiceLogger, attach_stdlib_bridge, claim_stderr_pipeline, detach_stdlib_bridge, release_stderr_pipeline
+from .logging_service import (
+    LogService,
+    ServiceLogger,
+    attach_stdlib_bridge,
+    claim_stderr_pipeline,
+    detach_stdlib_bridge,
+    release_stderr_pipeline,
+)
 from .plugin_manager import PluginManager
 from .plugin_state import PluginStateService
 from .rate_limit_manager import RateLimitManager
 from .settings_manager import SettingsManager
 from .sync_group_manager import SyncGroupManager
 from .task_scheduler import TaskScheduler
-from .account_manager import AccountManager
-from .account_manager.lifecycle import LifecycleGovernor
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 ROOT_LOGGER = logging.getLogger("libzent")
 
 
 #: bus events worth a structured log line (MessageReceived is far too chatty)
-_LOGGED_EVENTS = frozenset((
-    "AccountConnected", "AccountDisconnected", "AccountFailed",
-    "PluginLoaded", "PluginUnloaded", "PluginEnabledChanged",
-    "TaskCompleted", "TaskFailed", "TaskCancelled",
-    "RateLimitTriggered", "ScenarioStarted", "ScenarioFinished",
-))
+_LOGGED_EVENTS = frozenset(
+    (
+        "AccountConnected",
+        "AccountDisconnected",
+        "AccountFailed",
+        "PluginLoaded",
+        "PluginUnloaded",
+        "PluginEnabledChanged",
+        "TaskCompleted",
+        "TaskFailed",
+        "TaskCancelled",
+        "RateLimitTriggered",
+        "ScenarioStarted",
+        "ScenarioFinished",
+    )
+)
 
 
 def _wire_event_logging(bus: EventBus, logs: LogService) -> None:
@@ -75,11 +97,12 @@ def _wire_event_logging(bus: EventBus, logs: LogService) -> None:
         if type(event).__name__ not in _LOGGED_EVENTS:
             return
         detail = " ".join(
-            f"{key}={value!r}" for key, value in vars(event).items()
-            if key not in ("ts", "account")
+            f"{key}={value!r}" for key, value in vars(event).items() if key not in ("ts", "account")
         )
         logs.record(
-            "INFO", "events", f"{type(event).__name__} {detail}".strip(),
+            "INFO",
+            "events",
+            f"{type(event).__name__} {detail}".strip(),
             account=getattr(event, "account", None) or None,
             event=type(event).__name__,
         )
@@ -87,8 +110,9 @@ def _wire_event_logging(bus: EventBus, logs: LogService) -> None:
     bus.subscribe(Event, _on_event)
 
 
-async def _seed_config_defaults(limiter: RateLimitManager, config: ProjectConfig,
-                                database: Any) -> None:
+async def _seed_config_defaults(
+    limiter: RateLimitManager, config: ProjectConfig, database: Any
+) -> None:
     """Apply config-file policies ONLY where the DB has none (first boot).
 
     For each (level, owner, action): if the DB already has a policy, the
@@ -103,8 +127,10 @@ async def _seed_config_defaults(limiter: RateLimitManager, config: ProjectConfig
         # DB read failure: apply config defaults as a safe fallback — but
         # say so (silent swallow hid 'why do removed defaults reappear?')
         ROOT_LOGGER.warning(
-            "could not read stored policies (%s: %s); applying config "
-            "defaults as a fallback", type(exc).__name__, exc)
+            "could not read stored policies (%s: %s); applying config defaults as a fallback",
+            type(exc).__name__,
+            exc,
+        )
     removed = getattr(limiter, "removed_default", None)
     if not callable(removed):  # vintage manager shape (attr/property):
         removed = None  # no tombstone knowledge -> seed normally
@@ -121,26 +147,26 @@ async def _seed_config_defaults(limiter: RateLimitManager, config: ProjectConfig
             # a below-floor config value must not brick the boot — clamp to
             # the floor like load_persisted does for hand-edited DB rows
             ROOT_LOGGER.warning(
-                "config default for %s %s clamped to the safety floor (%s)",
-                where, action, exc)
+                "config default for %s %s clamped to the safety floor (%s)", where, action, exc
+            )
             floor = getattr(limiter, "floor_value", 1.5)
             if callable(floor):  # property vs method across manager vintages
                 floor = floor()
             try:
-                limiter.set_policy_values(action, max(interval, float(floor)),
-                                          jmin, jmax, level, owner)
+                limiter.set_policy_values(
+                    action, max(interval, float(floor)), jmin, jmax, level, owner
+                )
             except RatePolicyError as exc:
                 ROOT_LOGGER.warning(
-                    "skipping invalid config default for %s %s (%s)",
-                    where, action, exc)
+                    "skipping invalid config default for %s %s (%s)", where, action, exc
+                )
         except ValueError as exc:
             # a malformed spec (e.g. interval "fast") must not brick the
             # boot either — skip THIS policy with a warning, matching the
             # floor clamp above (RatePolicyError is a ValueError too)
             ROOT_LOGGER.warning(
-                "skipping invalid config default for %s %s (%s)",
-                where, action, exc)
-
+                "skipping invalid config default for %s %s (%s)", where, action, exc
+            )
 
     for action, spec in (config.policies.get("global") or {}).items():
         _seed(action, spec, "global", None, "global")
@@ -149,7 +175,7 @@ async def _seed_config_defaults(limiter: RateLimitManager, config: ProjectConfig
             _seed(action, spec, "account", account, f"account {account}")
 
 
-def _policy_triple(action: str, spec: Dict[str, Any], where: str) -> tuple:
+def _policy_triple(action: str, spec: dict[str, Any], where: str) -> tuple:
     """{'interval': 2.0, 'jitter': [0.1, 0.5]} -> (2.0, 0.1, 0.5)."""
     try:
         interval = float(spec["interval"])
@@ -166,22 +192,30 @@ def _policy_triple(action: str, spec: Dict[str, Any], where: str) -> tuple:
 class Framework:
     """The fully wired stack (managers + api), built by :func:`build`."""
 
-    def __init__(self, api: ControlAPI, bus: EventBus, logs: LogService,
-                 limiter: RateLimitManager, scheduler: TaskScheduler,
-                 accounts: AccountManager, plugins: PluginManager,
-                 settings: SettingsManager,
-                 audit: AuditRecorder, database: Any,
-                 credentials: Credentials, config: ProjectConfig,
-                 credential_service: Any = None,
-                 cooldowns: Any = None,
-                 plugin_state: Any = None,
-                 sync_groups: Any = None,
-                 fleet: Any = None,
-                 plugin_data: Any = None,
-                 cooldown_resync_stop: Optional[Callable[[], Any]] = None,
-                 fleet_reconciler_stop: Optional[Callable[[], Any]] = None,
-                 claims_stderr: bool = False,
-                 ) -> None:
+    def __init__(
+        self,
+        api: ControlAPI,
+        bus: EventBus,
+        logs: LogService,
+        limiter: RateLimitManager,
+        scheduler: TaskScheduler,
+        accounts: AccountManager,
+        plugins: PluginManager,
+        settings: SettingsManager,
+        audit: AuditRecorder,
+        database: Any,
+        credentials: Credentials,
+        config: ProjectConfig,
+        credential_service: Any = None,
+        cooldowns: Any = None,
+        plugin_state: Any = None,
+        sync_groups: Any = None,
+        fleet: Any = None,
+        plugin_data: Any = None,
+        cooldown_resync_stop: Callable[[], Any] | None = None,
+        fleet_reconciler_stop: Callable[[], Any] | None = None,
+        claims_stderr: bool = False,
+    ) -> None:
         self.api = api
         self.bus = bus
         self.logs = logs
@@ -261,7 +295,7 @@ class Framework:
             # steps above keeps their final warnings on the console
             steps.append(("stderr pipeline", release_stderr_pipeline))
         steps = tuple(steps)
-        interrupted: Optional[BaseException] = None
+        interrupted: BaseException | None = None
         for label, step in steps:
             try:
                 outcome = step()
@@ -271,17 +305,18 @@ class Framework:
                 if interrupted is None:
                     interrupted = exc
                     ROOT_LOGGER.warning(
-                        "shutdown step %r was cancelled (continuing teardown)",
-                        label)
+                        "shutdown step %r was cancelled (continuing teardown)", label
+                    )
             except KeyboardInterrupt as exc:  # a second Ctrl-C / the
                 if interrupted is None:  # dashboard's exit signal landing
                     interrupted = exc  # mid-teardown must NOT skip the
                     ROOT_LOGGER.warning(  # remaining steps (db.close!)
-                        "shutdown step %r interrupted (continuing teardown)",
-                        label)
+                        "shutdown step %r interrupted (continuing teardown)", label
+                    )
             except Exception as exc:
-                ROOT_LOGGER.warning("shutdown step %r failed: %s: %s",
-                                    label, type(exc).__name__, exc)
+                ROOT_LOGGER.warning(
+                    "shutdown step %r failed: %s: %s", label, type(exc).__name__, exc
+                )
         if interrupted is not None:
             raise interrupted
 
@@ -302,8 +337,7 @@ class Framework:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            ROOT_LOGGER.warning("cooldown resync shutdown failed: %s: %s",
-                                type(exc).__name__, exc)
+            ROOT_LOGGER.warning("cooldown resync shutdown failed: %s: %s", type(exc).__name__, exc)
 
     async def _stop_fleet_reconciler(self) -> None:
         stop = self._fleet_reconciler_stop
@@ -317,8 +351,7 @@ class Framework:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            ROOT_LOGGER.warning("fleet reconciler shutdown failed: %s: %s",
-                                type(exc).__name__, exc)
+            ROOT_LOGGER.warning("fleet reconciler shutdown failed: %s: %s", type(exc).__name__, exc)
 
     async def _close_plugin_data(self) -> None:
         if self.plugin_data is not None:
@@ -329,8 +362,7 @@ class Framework:
         detach_stdlib_bridge()  # then stop ingesting stdlib
 
 
-async def _security_audit(database: Any, credential_service: Any,
-                          env_file: str) -> None:
+async def _security_audit(database: Any, credential_service: Any, env_file: str) -> None:
     """FINAL-PHASE (F7): boot-time setup security pass (warn-only).
 
     1. Permission audit: the DB, its WAL sidecar, the credential key and
@@ -344,8 +376,7 @@ async def _security_audit(database: Any, credential_service: Any,
     if os.name == "posix":
         for label, path in (
             ("database", getattr(database, "_path", None)),
-            ("credential key",
-             str(getattr(credential_service, "_key_path", "") or "")),
+            ("credential key", str(getattr(credential_service, "_key_path", "") or "")),
             ("env file", env_file),
         ):
             if not path or path == ":memory:":
@@ -354,8 +385,11 @@ async def _security_audit(database: Any, credential_service: Any,
                 mode = stat.S_IMODE(os.stat(path).st_mode)
                 if mode & 0o077:
                     ROOT_LOGGER.warning(
-                        "insecure permissions %04o on %s (%s) — "
-                        "chmod 600 recommended", mode, path, label)
+                        "insecure permissions %04o on %s (%s) — chmod 600 recommended",
+                        mode,
+                        path,
+                        label,
+                    )
             except OSError:
                 continue
     # mismatch canary: one decrypt probe over the stored accounts
@@ -367,8 +401,10 @@ async def _security_audit(database: Any, credential_service: Any,
             # the probe handles its own expected failures; anything that
             # still escapes must be VISIBLE, not double-swallowed
             ROOT_LOGGER.warning(
-                "boot decrypt canary raised %s: %s (key misconfiguration "
-                "must not be silent)", type(exc).__name__, exc)
+                "boot decrypt canary raised %s: %s (key misconfiguration must not be silent)",
+                type(exc).__name__,
+                exc,
+            )
 
 
 async def build(
@@ -377,12 +413,12 @@ async def build(
     config_dir: str = "config",
     db_path: str = "state/libzent.db",
     plugin_dir: str = "plugins",
-    client_factory: Optional[Callable[[str, str], Any]] = None,
+    client_factory: Callable[[str, str], Any] | None = None,
     simulation_runner: Any = None,
-    credentials: Optional[Credentials] = None,
+    credentials: Credentials | None = None,
     database: Any = None,
     quiet: bool = False,
-    credential_key_path: Optional[Path] = None,
+    credential_key_path: Path | None = None,
 ) -> Framework:
     """Compose the live framework (the boot flow of ``main.py``).
 
@@ -410,15 +446,23 @@ async def build(
         config = load_config(config_dir)
 
         from database.db import Database
+
         database = database if database is not None else Database(db_path)
         await database.connect()  # open + pragmas + migrations, FIRST
         return await _assemble(
-            cleanups, _time, credentials, config, database,
-            plugin_dir=plugin_dir, client_factory=client_factory,
+            cleanups,
+            _time,
+            credentials,
+            config,
+            database,
+            plugin_dir=plugin_dir,
+            client_factory=client_factory,
             simulation_runner=simulation_runner,
             credential_key_path=credential_key_path,
-            env_file=env_file, db_path=db_path,
-            stderr_claimed=stderr_claimed)
+            env_file=env_file,
+            db_path=db_path,
+            stderr_claimed=stderr_claimed,
+        )
     except BaseException:
         for label, undo in reversed(cleanups):
             try:
@@ -426,32 +470,37 @@ async def build(
                 if inspect.iscoroutine(outcome):
                     await outcome
             except asyncio.CancelledError:
-                ROOT_LOGGER.warning(
-                    "build cleanup step %r was cancelled (continuing)", label)
+                ROOT_LOGGER.warning("build cleanup step %r was cancelled (continuing)", label)
             except KeyboardInterrupt:
-                ROOT_LOGGER.warning(
-                    "build cleanup step %r interrupted (continuing)", label)
+                ROOT_LOGGER.warning("build cleanup step %r interrupted (continuing)", label)
             except Exception as exc:
-                ROOT_LOGGER.warning("build cleanup step %r failed: %s: %s",
-                                    label, type(exc).__name__, exc)
+                ROOT_LOGGER.warning(
+                    "build cleanup step %r failed: %s: %s", label, type(exc).__name__, exc
+                )
         await _safe_close(database)
         raise
 
 
 async def _safe_close(database: Any) -> None:
-    try:
+    with contextlib.suppress(Exception):
         await database.close()
-    except Exception:
-        pass
 
 
-async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
-                    config: ProjectConfig, database: Any, *, plugin_dir: str,
-                    client_factory: Optional[Callable[[str, str], Any]],
-                    simulation_runner: Any,
-                    credential_key_path: Optional[Path] = None,
-                    env_file: str = ".env", stderr_claimed: bool = False,
-                    db_path: str = "state/libzent.db") -> Framework:
+async def _assemble(
+    cleanups: list,
+    _time: Any,
+    credentials: Credentials,
+    config: ProjectConfig,
+    database: Any,
+    *,
+    plugin_dir: str,
+    client_factory: Callable[[str, str], Any] | None,
+    simulation_runner: Any,
+    credential_key_path: Path | None = None,
+    env_file: str = ".env",
+    stderr_claimed: bool = False,
+    db_path: str = "state/libzent.db",
+) -> Framework:
     """Wire every manager over an already-connected database."""
 
     # shared services over the database (credentials encrypted at rest,
@@ -484,7 +533,8 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     from database.plugin_data import PluginDataStore
 
     plugin_data_store = PluginDataStore(
-        Path(db_path).expanduser().absolute().parent / "plugin-data.db")
+        Path(db_path).expanduser().absolute().parent / "plugin-data.db"
+    )
     await plugin_data_store.connect()
     cleanups.append(("plugin-data store", plugin_data_store.close))
 
@@ -511,9 +561,13 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
             "and ignored by the rate engine (enabled=%r prefixrate=%r) — "
             "manage the send lane from the dashboard/commands instead; "
             "remove the section to silence this warning",
-            lane_cfg.get("enabled"), lane_cfg.get("prefixrate"))
+            lane_cfg.get("enabled"),
+            lane_cfg.get("prefixrate"),
+        )
     limiter = RateLimitManager(
-        bus, ServiceLogger(logs, "ratelimit"), database.policies,
+        bus,
+        ServiceLogger(logs, "ratelimit"),
+        database.policies,
         kv_repo=database.kv,
     )
     await limiter.load_persisted()  # stored policies + lane config -> memory
@@ -528,14 +582,18 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     # Runtime pacing itself stays in the limiter; this manager only keeps
     # the engine's account->group metadata in sync with persistence.
     sync_groups = SyncGroupManager(
-        database.sync_groups, ServiceLogger(logs, "sync-groups"),
-        accounts_repo=database.accounts, limiter=limiter,
+        database.sync_groups,
+        ServiceLogger(logs, "sync-groups"),
+        accounts_repo=database.accounts,
+        limiter=limiter,
     )
     await sync_groups.load()
 
     settings = SettingsManager(
-        bus, ServiceLogger(logs, "settings"),
-        plugin_repo=database.plugins, account_settings_repo=database.account_settings,
+        bus,
+        ServiceLogger(logs, "settings"),
+        plugin_repo=database.plugins,
+        account_settings_repo=database.account_settings,
         global_layer=config.global_settings,
     )
     await settings.load()
@@ -543,7 +601,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     await audit.start_persistence(database.audit)
     cleanups.append(("audit persistence", audit.stop_persistence))
 
-    sender_box: Dict[str, Any] = {"send": None}
+    sender_box: dict[str, Any] = {"send": None}
 
     async def _sender(task: Any) -> Any:
         hook = sender_box["send"]
@@ -552,17 +610,23 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         return await hook(task)
 
     scheduler = TaskScheduler(
-        bus, ServiceLogger(logs, "scheduler"), limiter, _sender,
-        audit=audit, history_repo=database.tasks,
+        bus,
+        ServiceLogger(logs, "scheduler"),
+        limiter,
+        _sender,
+        audit=audit,
+        history_repo=database.tasks,
     )
     # prefixrate command bridge: the hub needs the limiter for get/set of
     # an account's send pacing (registered once; tests may stub it)
     from .plugin_manager.commands import COMMAND_HUB, PacingBackend
+
     COMMAND_HUB.pacing = PacingBackend(limiter)
     # AccessManager: the admin panel's store (admins, per-account command
     # perms, prefixes, mudae id) over the kv repo; one-time env migration
     # seeds admins from OWNER_USER_IDS when the stored list is empty.
     from .access_manager import AccessManager
+
     access = AccessManager(database.kv, credentials=credentials)
     await access.migrate_from_credentials()
     await access.warm_prefix_cache()
@@ -574,9 +638,13 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     cleanups.append(("scheduler", lambda: scheduler.stop(drain=False)))
 
     plugins = PluginManager(
-        bus, ServiceLogger(logs, "plugins"), settings,
-        plugin_repo=database.plugins, plugin_dir=plugin_dir,
-        credential_service=credential_service, cooldowns=cooldowns,
+        bus,
+        ServiceLogger(logs, "plugins"),
+        settings,
+        plugin_repo=database.plugins,
+        plugin_dir=plugin_dir,
+        credential_service=credential_service,
+        cooldowns=cooldowns,
         plugin_state=plugin_state,
     )
     # the self-command executor's command gate reads this attribute; it
@@ -591,23 +659,31 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     plugins.init_boot_dashboard_uis()
     await plugins.persist_metadata()
 
-
     if client_factory is None:
         from adapters.discord import RealClientFactory
 
         client_factory = RealClientFactory(
             credentials,
             command_prefix=getattr(credentials, "self_command_prefix", ""),
-            access_manager=access)
+            access_manager=access,
+        )
 
     accounts = AccountManager(
-        bus, ServiceLogger(logs, "accounts"), database.accounts,
-        plugins, scheduler, settings, audit,
-        client_factory, credentials, limiter=limiter,
+        bus,
+        ServiceLogger(logs, "accounts"),
+        database.accounts,
+        plugins,
+        scheduler,
+        settings,
+        audit,
+        client_factory,
+        credentials,
+        limiter=limiter,
         api_cache_repo=database.cache,
-        credential_service=credential_service, cooldowns=cooldowns,
+        credential_service=credential_service,
+        cooldowns=cooldowns,
         plugin_state=plugin_state,
-        plugin_data=plugin_data_store,   # PHASE 10: data_* plugin API
+        plugin_data=plugin_data_store,  # PHASE 10: data_* plugin API
         lifecycle=LifecycleGovernor(),  # PHASE-4 (S4): anti-thrash defaults
         sync_groups=sync_groups,
         account_plugins=database.account_plugins,  # capability source
@@ -623,7 +699,9 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         ROOT_LOGGER.warning(
             "could not read stored-credential accounts (%s: %s); status "
             "pages may show credentials as missing until the next refresh",
-            type(exc).__name__, exc)
+            type(exc).__name__,
+            exc,
+        )
     await _security_audit(database, credential_service, env_file)
     await cooldowns.restore()
 
@@ -637,8 +715,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     async def _cooldown_resync_loop() -> None:
         while not cooldown_resync_stop_evt.is_set():
             try:
-                await asyncio.wait_for(cooldown_resync_stop_evt.wait(),
-                                       timeout=30.0)
+                await asyncio.wait_for(cooldown_resync_stop_evt.wait(), timeout=30.0)
                 return
             except asyncio.TimeoutError:
                 pass
@@ -647,8 +724,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
             except asyncio.CancelledError:
                 raise
             except Exception:
-                ROOT_LOGGER.debug("periodic cooldown resync failed",
-                                  exc_info=True)
+                ROOT_LOGGER.debug("periodic cooldown resync failed", exc_info=True)
 
     cooldown_resync_task = asyncio.create_task(_cooldown_resync_loop())
 
@@ -661,8 +737,9 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
             except asyncio.CancelledError:
                 pass
             except Exception as exc:
-                ROOT_LOGGER.warning("cooldown resync task teardown failed: "
-                                    "%s: %s", type(exc).__name__, exc)
+                ROOT_LOGGER.warning(
+                    "cooldown resync task teardown failed: %s: %s", type(exc).__name__, exc
+                )
 
     cleanups.append(("cooldown resync", _stop_cooldown_resync_task))
 
@@ -683,8 +760,7 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
                 # whole file, loudly — a silently-unmatched plugin name
                 # would read as "created" while attaching nothing
                 raise ValueError(
-                    f"unknown plugin(s) {unknown} (known plugins: "
-                    f"{sorted(discovered_plugins)})"
+                    f"unknown plugin(s) {unknown} (known plugins: {sorted(discovered_plugins)})"
                 )
             await accounts.add_account(
                 payload["name"],
@@ -694,8 +770,9 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
                 plugins=config_plugins,
             )
         except Exception:
-            logs.error("config", "could not register account from config dir",
-                       account=payload.get("name"))
+            logs.error(
+                "config", "could not register account from config dir", account=payload.get("name")
+            )
 
     scheduler.start()
 
@@ -707,11 +784,11 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     # service layers mode/eligibility/assignments on top through seams.
     from core.event_bus import AccountConnected, AccountDisconnected, FleetStateChanged
     from core.fleet import (
+        OBS_ACCOUNT_CONNECTED,
+        OBS_ACCOUNT_DISCONNECTED,
         FleetObservations,
         FleetPolicy,
         FleetService,
-        OBS_ACCOUNT_CONNECTED,
-        OBS_ACCOUNT_DISCONNECTED,
         Observation,
     )
 
@@ -732,10 +809,15 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
         # PHASE 9 §3: persisted first (service), then published — the
         # dashboard forwards these to WS clients as "fleet" frames so
         # the Fleet Hub converges without polling
-        publisher=lambda ev: bus.publish_nowait(FleetStateChanged(
-            account=ev.account_id or "",
-            kind=ev.kind, group=ev.group_id, reason=ev.reason,
-            generation=ev.generation)),
+        publisher=lambda ev: bus.publish_nowait(
+            FleetStateChanged(
+                account=ev.account_id or "",
+                kind=ev.kind,
+                group=ev.group_id,
+                reason=ev.reason,
+                generation=ev.generation,
+            )
+        ),
     )
     await fleet.load()
     scheduler.set_dispatch_guard(FleetPolicy(fleet).scheduler_guard())
@@ -746,14 +828,21 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     fleet_observations = FleetObservations(fleet)
 
     async def _on_account_event(event) -> None:
-        kind = (OBS_ACCOUNT_CONNECTED if isinstance(event, AccountConnected)
-                else OBS_ACCOUNT_DISCONNECTED)
-        await fleet_observations.observe(Observation(
-            source_account=str(event.account or ""),
-            observation_type=kind,
-            message_id=f"{kind}@{event.ts}",
-            observed_at=float(event.ts),
-            reason=str(getattr(event, "reason", "") or kind)))
+        kind = (
+            OBS_ACCOUNT_CONNECTED
+            if isinstance(event, AccountConnected)
+            else OBS_ACCOUNT_DISCONNECTED
+        )
+        await fleet_observations.observe(
+            Observation(
+                source_account=str(event.account or ""),
+                observation_type=kind,
+                message_id=f"{kind}@{event.ts}",
+                observed_at=float(event.ts),
+                reason=str(getattr(event, "reason", "") or kind),
+            )
+        )
+
     bus.subscribe(AccountConnected, _on_account_event)
     bus.subscribe(AccountDisconnected, _on_account_event)
 
@@ -782,11 +871,19 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
             simulation_runner = None
 
     api = ControlAPI(
-        accounts=accounts, plugins=plugins, settings=settings,
+        accounts=accounts,
+        plugins=plugins,
+        settings=settings,
         access=access,
-        limiter=limiter, scheduler=scheduler, logs=logs, audit=audit,
-        simulation=simulation_runner, credentials=credentials, database=database,
-        credentials_svc=credential_service, cooldowns=cooldowns,
+        limiter=limiter,
+        scheduler=scheduler,
+        logs=logs,
+        audit=audit,
+        simulation=simulation_runner,
+        credentials=credentials,
+        database=database,
+        credentials_svc=credential_service,
+        cooldowns=cooldowns,
         sync_groups=sync_groups,
         fleet=fleet,
         plugin_data=plugin_data_store,
@@ -807,20 +904,32 @@ async def _assemble(cleanups: list, _time: Any, credentials: Credentials,
     # (the SPA routes the home/plugins/activity/policies/admin/tools views
     # through the generic renderer).
     from core.framework_ui import attach_framework_ui
+
     try:
         attach_framework_ui(plugins.ui_registry, api)
     except Exception:
         logging.getLogger("libzent.bootstrap").exception(
-            "framework UI attach failed — dashboard falls back "
-            "to the legacy panels")
+            "framework UI attach failed — dashboard falls back to the legacy panels"
+        )
     return Framework(
-        api=api, bus=bus, logs=logs, limiter=limiter, scheduler=scheduler,
-        accounts=accounts, plugins=plugins, settings=settings,
-        audit=audit, database=database, credentials=credentials, config=config,
+        api=api,
+        bus=bus,
+        logs=logs,
+        limiter=limiter,
+        scheduler=scheduler,
+        accounts=accounts,
+        plugins=plugins,
+        settings=settings,
+        audit=audit,
+        database=database,
+        credentials=credentials,
+        config=config,
         fleet=fleet,
         plugin_data=plugin_data_store,
-        credential_service=credential_service, cooldowns=cooldowns,
-        plugin_state=plugin_state, sync_groups=sync_groups,
+        credential_service=credential_service,
+        cooldowns=cooldowns,
+        plugin_state=plugin_state,
+        sync_groups=sync_groups,
         cooldown_resync_stop=_stop_cooldown_resync_task,
         fleet_reconciler_stop=fleet_reconciler.stop,
         claims_stderr=stderr_claimed,

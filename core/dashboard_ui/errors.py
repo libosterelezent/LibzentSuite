@@ -18,16 +18,17 @@ subclasses pinpoint what went wrong:
                                  attached/frozen;
   * ActionRegistrationError    — a non-callable registered as an action.
 """
+
 from __future__ import annotations
 
 __all__ = [
-    "UIError",
-    "InvalidComponentIdError",
-    "DuplicateComponentIdError",
-    "InvalidChildError",
-    "TreeValidationError",
-    "FrozenLayoutError",
     "ActionRegistrationError",
+    "DuplicateComponentIdError",
+    "FrozenLayoutError",
+    "InvalidChildError",
+    "InvalidComponentIdError",
+    "TreeValidationError",
+    "UIError",
 ]
 
 
@@ -90,6 +91,7 @@ class ActionRegistrationError(UIError):
 # ════════════════════════════════ Stage B/C hardening: precise categories
 # All are UIErrors (same HTTP convention) — subclasses let callers and
 # tests distinguish WHY an operation was refused.
+
 
 class ComponentDisabledError(UIError):
     """A disabled component (or a descendant of one) was invoked —

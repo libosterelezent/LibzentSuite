@@ -4,23 +4,25 @@ NEVER touches state/libzent.db or state/credentials.key: every run gets
 a tempfile workspace; the bootstrap's ``credential_key_path`` kwarg keeps
 a concurrent live process safe. Fakes/simulation only — no real Discord.
 """
+
 from __future__ import annotations
 
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace as NS
-from typing import Any, Dict, List, Optional
-
-from benchmark.collector import PerfCollector
+from typing import TYPE_CHECKING, Any
 
 from core.bootstrap import build
 from core.credentials import Credentials
+
+if TYPE_CHECKING:
+    from benchmark.collector import PerfCollector
 
 
 class TemporaryWorkspace:
     """Context manager: fresh state dir (db, credential key, config dir)."""
 
-    def __enter__(self) -> "TemporaryWorkspace":
+    def __enter__(self) -> TemporaryWorkspace:
         self._tmp = tempfile.TemporaryDirectory(prefix="sm-bench-")
         self.root = Path(self._tmp.name)
         self.db_path = str(self.root / "bench.db")
@@ -39,10 +41,10 @@ class BenchFakeClient:
     def __init__(self, *, fail_connect: bool = False) -> None:
         self.connected = False
         self.fail_connect = fail_connect
-        self.user_id: Optional[int] = 111
+        self.user_id: int | None = 111
         self.on_message = None
         self.on_disconnect = None
-        self.sent: List[Any] = []
+        self.sent: list[Any] = []
         self._next_id = 1000
 
     async def connect(self) -> None:
@@ -67,13 +69,16 @@ class BenchFakeClient:
     async def fetch_user(self, user_id: int) -> NS:
         return NS(id=user_id)
 
-    def cached_snapshot(self) -> Dict[str, Any]:
+    def cached_snapshot(self) -> dict[str, Any]:
         return {
             "user": {"id": self.user_id},
-            "guilds": [{
-                "id": 10, "name": "bench",
-                "channels": [{"id": 100, "name": "grind", "dm": False}],
-            }],
+            "guilds": [
+                {
+                    "id": 10,
+                    "name": "bench",
+                    "channels": [{"id": 100, "name": "grind", "dm": False}],
+                }
+            ],
             "dm_channels": [],
         }
 
@@ -82,7 +87,7 @@ class BenchClientFactory:
     """ClientFactory protocol double — records every client (leak counter)."""
 
     def __init__(self) -> None:
-        self.clients: List[BenchFakeClient] = []
+        self.clients: list[BenchFakeClient] = []
 
     def __call__(self, name: str, token: str) -> BenchFakeClient:
         client = BenchFakeClient()
@@ -94,15 +99,17 @@ class BenchClientFactory:
 class BenchStack:
     """A real-bootstrap framework over a temp workspace + fake clients."""
 
-    def __init__(self, framework: Any, factory: BenchClientFactory,
-                 workspace: TemporaryWorkspace) -> None:
+    def __init__(
+        self, framework: Any, factory: BenchClientFactory, workspace: TemporaryWorkspace
+    ) -> None:
         self.framework = framework
         self.factory = factory
         self.workspace = workspace
 
     @classmethod
-    async def build(cls, ws: TemporaryWorkspace, *,
-                    perf: Optional[PerfCollector] = None) -> "BenchStack":
+    async def build(
+        cls, ws: TemporaryWorkspace, *, perf: PerfCollector | None = None
+    ) -> BenchStack:
         factory = BenchClientFactory()
         if perf is not None:
             with perf.stage("bootstrap"):
@@ -133,8 +140,7 @@ class BenchStack:
         # make resolution instant for lifecycle benchmarks (no decrypt)
         self.framework.credential_service._memory[name] = token
 
-    async def shutdown(self, *, perf: Optional[PerfCollector] = None
-                       ) -> None:
+    async def shutdown(self, *, perf: PerfCollector | None = None) -> None:
         if perf is not None:
             with perf.stage("shutdown"):
                 await self.framework.shutdown()

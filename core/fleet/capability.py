@@ -14,13 +14,17 @@ Handlers speak the generic vocabulary only (§10b): task definitions,
 assignments, channel scopes. Game knowledge stays in the plugin (and
 its parser pack).
 """
+
 from __future__ import annotations
 
-from typing import Any, Optional, Sequence
+from typing import TYPE_CHECKING, Any
 
 from .models import TaskDefinition, validate_channel_scope
 
-__all__ = ["FleetTaskHandler", "handler_of", "definitions_of"]
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+__all__ = ["FleetTaskHandler", "definitions_of", "handler_of"]
 
 
 class FleetTaskHandler:
@@ -54,11 +58,9 @@ class FleetTaskHandler:
         """Pre-dispatch setup; returns a token for execute()."""
         return None
 
-    async def execute(self, ctx: Any, assignment: Any,
-                      prepared: Any) -> None:
+    async def execute(self, ctx: Any, assignment: Any, prepared: Any) -> None:
         """One dispatch unit. REQUIRED."""
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement execute()")
+        raise NotImplementedError(f"{type(self).__name__} must implement execute()")
 
     async def suspend(self, ctx: Any, assignment: Any) -> None:
         """Stop producing dispatch units (drain-friendly)."""
@@ -69,7 +71,7 @@ class FleetTaskHandler:
         return None
 
 
-def handler_of(plugin: Any) -> Optional[FleetTaskHandler]:
+def handler_of(plugin: Any) -> FleetTaskHandler | None:
     """The plugin's fleet capability, or None (the default). Only real
     FleetTaskHandler instances count — a stray attribute never mounts
     a plugin into the fleet."""
@@ -90,7 +92,8 @@ def definitions_of(plugin: Any) -> list:
         if not isinstance(definition, TaskDefinition):
             raise ValueError(
                 "task_definitions() must yield TaskDefinition objects, "
-                f"got {type(definition).__name__}")
+                f"got {type(definition).__name__}"
+            )
         # re-run the channel-scope validation explicitly so a subclass
         # that bypassed __post_init__ (e.g. object.__new__) is caught
         validate_channel_scope(definition.channel_scope)

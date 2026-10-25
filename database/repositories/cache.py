@@ -14,20 +14,21 @@ traffic that looks robotic. With the table, each entity costs ONE call for
 the lifetime of the account. Rows are invalidated when Discord says a target
 is gone (TargetGone) — a stale row then heals on the next resolution.
 """
+
 from __future__ import annotations
 
 import json
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
-from .base import BaseRepository
 from ..connection import DatabaseError
+from .base import BaseRepository
 
 
 class CacheRepository(BaseRepository):
     """Read/write the account-scoped API entity cache."""
 
-    async def get(self, account: str, kind: str, key: str) -> Optional[Any]:
+    async def get(self, account: str, kind: str, key: str) -> Any | None:
         """Cached value for (account, kind, key); None on a miss/corrupt row."""
         row = await self._fetch_one(
             "SELECT value_json FROM api_cache WHERE account=? AND kind=? AND key=?",
@@ -50,8 +51,7 @@ class CacheRepository(BaseRepository):
             payload = json.dumps(value)
         except (TypeError, ValueError) as exc:
             raise DatabaseError(
-                f"api cache value for {account}/{kind}/{key} is not "
-                f"JSON-serializable: {exc}"
+                f"api cache value for {account}/{kind}/{key} is not JSON-serializable: {exc}"
             ) from exc
         async with self._tx(f"api cache write {account}/{kind}/{key}") as conn:
             await conn.execute(
@@ -64,22 +64,22 @@ class CacheRepository(BaseRepository):
 
     async def delete(self, account: str, kind: str, key: str) -> bool:
         """Drop one cached value; True when a row existed."""
-        async with self._tx(f"api cache delete {account}/{kind}/{key}") as conn:
-            async with conn.execute(
+        async with (
+            self._tx(f"api cache delete {account}/{kind}/{key}") as conn,
+            conn.execute(
                 "DELETE FROM api_cache WHERE account=? AND kind=? AND key=?",
                 (account, kind, str(key)),
-            ) as cur:
-                return cur.rowcount > 0
+            ) as cur,
+        ):
+            return cur.rowcount > 0
 
-    async def drop_account(self, account: str, kind: Optional[str] = None) -> int:
+    async def drop_account(self, account: str, kind: str | None = None) -> int:
         """Invalidate every cached entity for one account (optionally one
         kind); returns how many rows were dropped. Used when an account is
         removed (full) or a target went stale (kind-scoped maintenance)."""
         async with self._tx(f"api cache drop {account}") as conn:
             if kind is None:
-                async with conn.execute(
-                    "DELETE FROM api_cache WHERE account=?", (account,)
-                ) as cur:
+                async with conn.execute("DELETE FROM api_cache WHERE account=?", (account,)) as cur:
                     return cur.rowcount
             async with conn.execute(
                 "DELETE FROM api_cache WHERE account=? AND kind=?",
@@ -87,7 +87,7 @@ class CacheRepository(BaseRepository):
             ) as cur:
                 return cur.rowcount
 
-    async def counts(self) -> Dict[str, int]:
+    async def counts(self) -> dict[str, int]:
         """Row counts per account (diagnostics for the Advanced page)."""
         rows = await self._fetch_all(
             "SELECT account, COUNT(*) AS n FROM api_cache GROUP BY account",

@@ -40,16 +40,20 @@ one framework runs per process. Tests that build several managers bind
 the last one (documented last-wins) — executor-level tests can call
 ``PluginManager.execute_self_command`` directly, bypassing the hub.
 """
+
 from __future__ import annotations
 
 import asyncio
 import functools
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any
 
 from ..errors import DOMAIN_ERRORS
 from ..plugin_base import ArgSpec, CommandContext, CommandSpec, usage_line
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
 LOG = logging.getLogger("libzent.selfcommands")
 
@@ -89,24 +93,24 @@ class PacingBackend:
     def __init__(self, limiter: Any) -> None:
         self._limiter = limiter
 
-    def get(self, account: str) -> Optional[float]:
+    def get(self, account: str) -> float | None:
         try:
             return float(self._limiter.effective_interval("message", account))
         except Exception:
             return None
 
-    def set(self, account: str, seconds: float) -> Optional[float]:
+    def set(self, account: str, seconds: float) -> float | None:
         """Set the ACCOUNT's message interval; returns the previous
         effective interval (None on failure)."""
         try:
-            previous = float(
-                self._limiter.effective_interval("message", account))
+            previous = float(self._limiter.effective_interval("message", account))
             self._limiter.set_policy_values(
-                "message", seconds, 0.1, 0.5,
-                level="account", owner=account)
+                "message", seconds, 0.1, 0.5, level="account", owner=account
+            )
             return previous
         except Exception:
             return None
+
 
 #: hard cap on one command reply (Discord's own limit is 2000; the same
 #: headroom convention as core.remote_control)
@@ -134,16 +138,18 @@ def _ported(command: Callable) -> Callable:
     errors render their (safe) message bare — ``error: …`` — exactly like
     the retired mention bridge did; internal failures raise on and the
     executor masks them (``failed internally, see logs``)."""
+
     @functools.wraps(command)
-    async def guarded(ctx: CommandContext, args: List[str]) -> str:
+    async def guarded(ctx: CommandContext, args: list[str]) -> str:
         try:
             return await command(ctx, args)
         except _DOMAIN_ERRORS as exc:
             return f"error: {exc}" if str(exc) else f"error: {type(exc).__name__}"
+
     return guarded
 
 
-def _fmt_uptime(seconds: Optional[float]) -> str:
+def _fmt_uptime(seconds: float | None) -> str:
     """Human uptime: 1h23m / 4m05s / 12s ('-' when unknown)."""
     if seconds is None or seconds < 0:
         return "-"
@@ -158,29 +164,28 @@ def _fmt_uptime(seconds: Optional[float]) -> str:
 
 
 # ------------------------------------------------------- framework handlers
-async def _pg_handler(ctx: CommandContext, args: List[str]) -> str:
+async def _pg_handler(ctx: CommandContext, args: list[str]) -> str:
     """Gateway latency + uptime of THIS account (self-command layer)."""
     stats = COMMAND_HUB.runtime_stats(ctx.account)
     latency = stats.get("latency_ms")
     uptime = stats.get("uptime_s")
     latency_text = f"{latency:.0f}ms" if isinstance(latency, (int, float)) else "-"
-    return (f"{ctx.account}: gateway {latency_text} · "
-            f"uptime {_fmt_uptime(uptime)}")
+    return f"{ctx.account}: gateway {latency_text} · uptime {_fmt_uptime(uptime)}"
 
 
-async def _say_handler(ctx: CommandContext, args: List[str]) -> str:
+async def _say_handler(ctx: CommandContext, args: list[str]) -> str:
     """Repeat the invoker's message verbatim (whitespace-normalized)."""
     if not args:
         raise ValueError("say needs something to repeat")
     return " ".join(args)
 
 
-async def _help_handler(ctx: CommandContext, args: List[str]) -> str:
+async def _help_handler(ctx: CommandContext, args: list[str]) -> str:
     """Plugin-grouped listing of every registered command (dynamic,
     paginated). ``help`` -> page 1, ``help <N>`` -> page N,
     ``help <command>`` -> usage + description."""
     specs = COMMAND_HUB.specs(ctx.account)
-    if args and args[0].isdigit():            # help 2 -> page 2
+    if args and args[0].isdigit():  # help 2 -> page 2
         pages = _paginate_help(_render_help_body(specs))
         n = int(args[0])
         if not 1 <= n <= len(pages):
@@ -203,7 +208,7 @@ async def _help_handler(ctx: CommandContext, args: List[str]) -> str:
     return pages[0] + suffix
 
 
-async def _prefixrate_handler(ctx: CommandContext, args: List[str]) -> str:
+async def _prefixrate_handler(ctx: CommandContext, args: list[str]) -> str:
     """Show or set THIS account's send pacing (message-action interval).
 
     ``prefixrate`` -> the current effective interval; ``prefixrate 2.0``
@@ -216,8 +221,7 @@ async def _prefixrate_handler(ctx: CommandContext, args: List[str]) -> str:
         try:
             seconds = float(args[0])
         except (TypeError, ValueError):
-            raise ValueError(f"prefixrate needs a number of seconds "
-                             f"(got {args[0]!r})") from None
+            raise ValueError(f"prefixrate needs a number of seconds (got {args[0]!r})") from None
         if seconds <= 0:
             raise ValueError("prefixrate must be > 0 seconds")
         await _require_admin(ctx)  # mutation branch: admin-only
@@ -229,8 +233,8 @@ async def _prefixrate_handler(ctx: CommandContext, args: List[str]) -> str:
             previous = backend.get(ctx.account)
             try:
                 await api.ratelimit_set(
-                    "message", seconds, 0.1, 0.5,
-                    level="account", owner=ctx.account)
+                    "message", seconds, 0.1, 0.5, level="account", owner=ctx.account
+                )
             except _DOMAIN_ERRORS as exc:
                 raise ValueError(str(exc)) from exc
             except ValueError:
@@ -243,15 +247,15 @@ async def _prefixrate_handler(ctx: CommandContext, args: List[str]) -> str:
                 raise ValueError("the limiter rejected the value")
         note = ""
         if seconds < 2.6:
-            note = ("\n⚠ below the measured safe rate (~2.6s) — expect "
-                    "429s under sustained sending")
-        return (f"prefixrate: {previous:.2f}s → {seconds:.2f}s "
-                f"for {ctx.account}{note}")
+            note = "\n⚠ below the measured safe rate (~2.6s) — expect 429s under sustained sending"
+        return f"prefixrate: {previous:.2f}s → {seconds:.2f}s for {ctx.account}{note}"
     current = backend.get(ctx.account)
     if current is None:
         raise ValueError("could not read the current pacing")
-    return (f"prefixrate for {ctx.account}: {current:.2f}s between sends "
-            f"(prefixrate <seconds> to change)")
+    return (
+        f"prefixrate for {ctx.account}: {current:.2f}s between sends "
+        f"(prefixrate <seconds> to change)"
+    )
 
 
 async def _require_admin(ctx: CommandContext) -> Any:
@@ -265,7 +269,7 @@ async def _require_admin(ctx: CommandContext) -> Any:
     return access
 
 
-async def _adminlist_handler(ctx: CommandContext, args: List[str]) -> str:
+async def _adminlist_handler(ctx: CommandContext, args: list[str]) -> str:
     access = await _require_admin(ctx)
     admins = await access.admin_ids()
     lines = [f"admins: {', '.join(str(a) for a in admins) or '(none)'}"]
@@ -276,21 +280,22 @@ async def _adminlist_handler(ctx: CommandContext, args: List[str]) -> str:
         lines.append(
             f"{name}: {'ADMIN ' if row.get('is_admin') else ''}"
             f"prefix={row.get('prefix_mode', 'mention')}"
-            f"{row.get('prefix_symbol', '') and repr(row['prefix_symbol']) or ''} "
-            f"perms=[{perms}]")
+            f"{(row.get('prefix_symbol', '') and repr(row['prefix_symbol'])) or ''} "
+            f"perms=[{perms}]"
+        )
     return "\n".join(lines)
 
 
-async def _adminperms_handler(ctx: CommandContext, args: List[str]) -> str:
+async def _adminperms_handler(ctx: CommandContext, args: list[str]) -> str:
     access = await _require_admin(ctx)
     if len(args) < 2 or args[1] not in ("add", "remove", "list"):
-        raise ValueError("usage: adminperms <account> <add|remove|list> "
-                         "[user_id]")
+        raise ValueError("usage: adminperms <account> <add|remove|list> [user_id]")
     account, op = args[0], args[1]
     if op == "list":
         ids = await access.allowed_user_ids(account)
         return f"{account} command perms: " + (
-            ", ".join(str(x) for x in ids) if ids else "(empty — admins only)")
+            ", ".join(str(x) for x in ids) if ids else "(empty — admins only)"
+        )
     if len(args) < 3 or not args[2].isdigit():
         raise ValueError("usage: adminperms <account> <add|remove> <user_id>")
     user_id = int(args[2])
@@ -300,20 +305,22 @@ async def _adminperms_handler(ctx: CommandContext, args: List[str]) -> str:
         await access.remove_allowed(account, user_id)
     ids = await access.allowed_user_ids(account)
     return f"{account} command perms -> " + (
-        ", ".join(str(x) for x in ids) if ids else "(empty — admins only)")
+        ", ".join(str(x) for x in ids) if ids else "(empty — admins only)"
+    )
 
 
-async def _adminprefix_handler(ctx: CommandContext, args: List[str]) -> str:
+async def _adminprefix_handler(ctx: CommandContext, args: list[str]) -> str:
     access = await _require_admin(ctx)
     if len(args) < 2 or args[1] not in ("mention", "symbol", "both"):
-        raise ValueError("usage: adminprefix <account> "
-                         "<mention|symbol|both> [symbol]")
+        raise ValueError("usage: adminprefix <account> <mention|symbol|both> [symbol]")
     account, mode = args[0], args[1]
     symbol = args[2] if len(args) > 2 else ""
     await access.set_prefix_config(account, mode, symbol)
-    return (f"{account} prefix -> {mode}"
-            f"{f' {symbol!r}' if symbol else ''} "
-            f"(applies on next connect/rebuild)")
+    return (
+        f"{account} prefix -> {mode}"
+        f"{f' {symbol!r}' if symbol else ''} "
+        f"(applies on next connect/rebuild)"
+    )
 
 
 # ------------------------------------------- ported remote-control commands
@@ -322,7 +329,7 @@ async def _adminprefix_handler(ctx: CommandContext, args: List[str]) -> str:
 # ControlAPI calls, same reply text (one unified command layer — no more
 # mention-prefix race when prefix_mode=mention).
 @_ported
-async def _status_handler(ctx: CommandContext, args: List[str]) -> str:
+async def _status_handler(ctx: CommandContext, args: list[str]) -> str:
     """Fleet overview: uptime, task counters, per-account status lines."""
     if args:
         return "'status' takes no arguments"
@@ -337,8 +344,11 @@ async def _status_handler(ctx: CommandContext, args: List[str]) -> str:
     for account in accounts:
         lines.append(
             f"· {account.get('name')}: {account.get('status')}"
-            + (f" (lat {account.get('latency_ms'):.0f}ms)"
-               if account.get("latency_ms") is not None else "")
+            + (
+                f" (lat {account.get('latency_ms'):.0f}ms)"
+                if account.get("latency_ms") is not None
+                else ""
+            )
         )
     warnings = status.get("warnings") or []
     if warnings:
@@ -347,17 +357,14 @@ async def _status_handler(ctx: CommandContext, args: List[str]) -> str:
 
 
 @_ported
-async def _accounts_handler(ctx: CommandContext, args: List[str]) -> str:
+async def _accounts_handler(ctx: CommandContext, args: list[str]) -> str:
     """``accounts [list]|info <n>|start <n>|stop <n>``."""
     api = _framework_api()
     if not args or args[0] == "list":
         accounts = await api.accounts_list()
         if not accounts:
             return "no accounts registered"
-        return "\n".join(
-            f"· {a['name']}: {a.get('status')}"
-            for a in accounts
-        )
+        return "\n".join(f"· {a['name']}: {a.get('status')}" for a in accounts)
     sub, rest = args[0], args[1:]
     if sub == "info" and len(rest) == 1:
         info = await api.accounts_info(rest[0])
@@ -383,7 +390,7 @@ async def _accounts_handler(ctx: CommandContext, args: List[str]) -> str:
 
 
 @_ported
-async def _plugins_handler(ctx: CommandContext, args: List[str]) -> str:
+async def _plugins_handler(ctx: CommandContext, args: list[str]) -> str:
     """``plugins <account> [<plugin> on|off]``."""
     api = _framework_api()
     if not args:
@@ -391,11 +398,14 @@ async def _plugins_handler(ctx: CommandContext, args: List[str]) -> str:
     account = args[0]
     if len(args) == 1:
         states = await api.plugins_state(account)
-        return "\n".join(
-            f"{'+' if s['enabled'] else '-'} {s['name']}"
-            + (f" ({s['error_count']} err)" if s.get("error_count") else "")
-            for s in states
-        ) or "no plugins"
+        return (
+            "\n".join(
+                f"{'+' if s['enabled'] else '-'} {s['name']}"
+                + (f" ({s['error_count']} err)" if s.get("error_count") else "")
+                for s in states
+            )
+            or "no plugins"
+        )
     plugin, flag = args[1], (args[2].lower() if len(args) > 2 else "")
     if flag not in ("on", "off"):
         return "usage: plugins <account> <plugin> on|off"
@@ -405,7 +415,7 @@ async def _plugins_handler(ctx: CommandContext, args: List[str]) -> str:
 
 
 @_ported
-async def _ratelimit_handler(ctx: CommandContext, args: List[str]) -> str:
+async def _ratelimit_handler(ctx: CommandContext, args: list[str]) -> str:
     """``ratelimit [show|warnings]`` — rate-limit state."""
     api = _framework_api()
     sub = ctx.parsed.get("view") or (args[0].lower() if args else "show")
@@ -427,33 +437,34 @@ async def _ratelimit_handler(ctx: CommandContext, args: List[str]) -> str:
 
 
 @_ported
-async def _lane_handler(ctx: CommandContext, args: List[str]) -> str:
+async def _lane_handler(ctx: CommandContext, args: list[str]) -> str:
     """``lane [show]`` — send-lane state (read-only)."""
     api = _framework_api()
     lane = await api.ratelimit_lane()
     if not lane.get("enabled"):
         return "send lane: off (per-account pacing only)"
     state = "PAUSED (all outbound holds)" if lane.get("paused") else "active"
-    return (f"send lane: on ({state}) · spacing {lane.get('prefixrate')}s · "
-            f"waiting {lane.get('waiting')} · grants {lane.get('grants')}")
+    return (
+        f"send lane: on ({state}) · spacing {lane.get('prefixrate')}s · "
+        f"waiting {lane.get('waiting')} · grants {lane.get('grants')}"
+    )
 
 
 @_ported
-async def _tasks_handler(ctx: CommandContext, args: List[str]) -> str:
+async def _tasks_handler(ctx: CommandContext, args: list[str]) -> str:
     """``tasks`` — queued/running tasks (first 10)."""
     api = _framework_api()
     rows = await api.tasks_list()
     if not rows:
         return "no queued/running tasks"
     return "\n".join(
-        f"· #{t['id']} {t.get('account')}/{t.get('plugin')} {t.get('action')}"
-        f" [{t.get('status')}]"
+        f"· #{t['id']} {t.get('account')}/{t.get('plugin')} {t.get('action')} [{t.get('status')}]"
         for t in rows[:10]
     ) + (f"\n(+{len(rows) - 10} more)" if len(rows) > 10 else "")
 
 
 @_ported
-async def _estop_handler(ctx: CommandContext, args: List[str]) -> str:
+async def _estop_handler(ctx: CommandContext, args: list[str]) -> str:
     """``estop [account]`` — EMERGENCY STOP (always invokable).
 
     SAFETY: this verb is never gated by visibility or plugin state —
@@ -467,7 +478,11 @@ async def _estop_handler(ctx: CommandContext, args: List[str]) -> str:
         ctx.logger.info(
             "account-scoped estop reply may be undeliverable (account "
             "%s is stopped) — reply was: emergency stop %s: %s task(s) "
-            "cancelled", target, target, out.get("cancelled_tasks", 0))
+            "cancelled",
+            target,
+            target,
+            out.get("cancelled_tasks", 0),
+        )
         return f"emergency stop {target}: {out.get('cancelled_tasks', 0)} task(s) cancelled"
     out = await api.emergency_stop_all()
     return (
@@ -477,7 +492,7 @@ async def _estop_handler(ctx: CommandContext, args: List[str]) -> str:
 
 
 @_ported
-async def _simulation_handler(ctx: CommandContext, args: List[str]) -> str:
+async def _simulation_handler(ctx: CommandContext, args: list[str]) -> str:
     """``simulation [list]`` — available scenarios (run lives in the
     dashboard)."""
     api = _framework_api()
@@ -516,8 +531,7 @@ FRAMEWORK_COMMANDS: Sequence[CommandSpec] = (
         name="ratelimit",
         help="Show policies or warnings",
         usage="show|warnings",
-        args=(ArgSpec("view", choices=("show", "warnings"),
-                      required=False, default="show"),),
+        args=(ArgSpec("view", choices=("show", "warnings"), required=False, default="show"),),
         category=FRAMEWORK_CATEGORY,
         handler=_ratelimit_handler,
     ),
@@ -547,8 +561,7 @@ FRAMEWORK_COMMANDS: Sequence[CommandSpec] = (
         name="simulation",
         help="List simulation scenarios",
         usage="list",
-        args=(ArgSpec("view", choices=("list",),
-                      required=False, default="list"),),
+        args=(ArgSpec("view", choices=("list",), required=False, default="list"),),
         category=FRAMEWORK_CATEGORY,
         handler=_simulation_handler,
     ),
@@ -637,12 +650,12 @@ HELP_DESC_WIDTH = 25
 HELP_PAGE_CHARS = 1750
 
 
-def _paginate_help(body: str) -> List[str]:
+def _paginate_help(body: str) -> list[str]:
     """Split the rendered help on GROUP boundaries into <=page-budget
     chunks (never mid-group; a single oversized group stays whole)."""
     groups = [g for g in body.split("\n\n") if g.strip()]
-    pages: List[str] = []
-    current: List[str] = []
+    pages: list[str] = []
+    current: list[str] = []
     used = 0
     for g in groups:
         if current and used + len(g) + 2 > HELP_PAGE_CHARS:
@@ -661,20 +674,18 @@ def _render_help_body(specs: Sequence[CommandSpec]) -> str:
     Category groups are joined with a BLANK line (``"\\n\\n"``) — the
     boundary :func:`_paginate_help` splits on.
     """
-    groups: Dict[str, List[CommandSpec]] = {}
+    groups: dict[str, list[CommandSpec]] = {}
     for spec in specs:
         category = spec.category or NO_CATEGORY
         groups.setdefault(category, []).append(spec)
-    plugin_categories = sorted(
-        c for c in groups if c not in (UTILITIES_CATEGORY, NO_CATEGORY))
-    ordered = plugin_categories + [
-        c for c in (UTILITIES_CATEGORY, NO_CATEGORY) if c in groups]
+    plugin_categories = sorted(c for c in groups if c not in (UTILITIES_CATEGORY, NO_CATEGORY))
+    ordered = plugin_categories + [c for c in (UTILITIES_CATEGORY, NO_CATEGORY) if c in groups]
     width = max((len(s.name) for s in specs), default=0) + 2
     width = max(width, 10)
-    blocks: List[str] = []
+    blocks: list[str] = []
     for category in ordered:
         header = category if category == NO_CATEGORY else category.upper()
-        lines: List[str] = [header]
+        lines: list[str] = [header]
         for spec in sorted(groups[category], key=lambda s: s.name):
             desc = spec.help
             if len(desc) > HELP_DESC_WIDTH:
@@ -710,12 +721,12 @@ class SelfCommandHub:
     def __init__(self) -> None:
         self._manager: Any = None
         #: account -> registry entries (spec order = registration order)
-        self._entries: Dict[str, List[RegisteredCommand]] = {}
+        self._entries: dict[str, list[RegisteredCommand]] = {}
         #: account -> the live client's rebuild callback (latest wins)
-        self._subscribers: Dict[str, Callable[[List[CommandSpec]], None]] = {}
+        self._subscribers: dict[str, Callable[[list[CommandSpec]], None]] = {}
         #: account -> zero-arg stats provider (latency/uptime, set by the
         #: client when it subscribes)
-        self._stats: Dict[str, Callable[[], Dict[str, Any]]] = {}
+        self._stats: dict[str, Callable[[], dict[str, Any]]] = {}
         #: optional PacingBackend (bootstrap registers; prefixrate uses)
         self.pacing: Any = None
         #: optional AccessManager (bootstrap registers; admin* verbs use)
@@ -761,8 +772,7 @@ class SelfCommandHub:
         except Exception:
             # a replaced/reconnecting client: contained, never fatal —
             # the NEXT subscriber (fresh connect) pulls fresh state.
-            LOG.debug("self-command subscriber failed for %r", account,
-                      exc_info=True)
+            LOG.debug("self-command subscriber failed for %r", account, exc_info=True)
 
     def forget(self, account: str) -> None:
         """Drop every trace of an account (detached/removed cascade)."""
@@ -770,10 +780,10 @@ class SelfCommandHub:
         self._subscribers.pop(account, None)
         self._stats.pop(account, None)
 
-    def _collect(self, account: str) -> List[RegisteredCommand]:
+    def _collect(self, account: str) -> list[RegisteredCommand]:
         """Framework commands first (reserved), then the manager's
         plugin entries — first registration of a name wins."""
-        entries: List[RegisteredCommand] = []
+        entries: list[RegisteredCommand] = []
         for spec in FRAMEWORK_COMMANDS:
             entries.append(RegisteredCommand(spec=spec, plugin=FRAMEWORK_PLUGIN))
         manager = self._manager
@@ -792,7 +802,9 @@ class SelfCommandHub:
                 LOG.warning(
                     "self-command %r declared by plugin %r collides with a "
                     "reserved framework name — the plugin's is dropped",
-                    spec.name, plugin)
+                    spec.name,
+                    plugin,
+                )
                 continue
             entries.append(RegisteredCommand(spec=spec, plugin=plugin))
         return entries
@@ -801,8 +813,8 @@ class SelfCommandHub:
     def subscribe(
         self,
         account: str,
-        rebuild: Callable[[List[CommandSpec]], None],
-        stats_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        rebuild: Callable[[list[CommandSpec]], None],
+        stats_provider: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         """A live client subscribes: register the rebuild callback, then
         REFRESH from the bound manager and deliver the result — a fresh
@@ -816,7 +828,7 @@ class SelfCommandHub:
     def unsubscribe(
         self,
         account: str,
-        rebuild: Optional[Callable[[List[CommandSpec]], None]] = None,
+        rebuild: Callable[[list[CommandSpec]], None] | None = None,
     ) -> None:
         """The client disconnected/stopped: drop its callback and stats
         provider (a reconnect re-subscribes both).
@@ -830,17 +842,17 @@ class SelfCommandHub:
         self._stats.pop(account, None)
 
     # ------------------------------------------------------------- reads
-    def entries(self, account: str) -> List[RegisteredCommand]:
+    def entries(self, account: str) -> list[RegisteredCommand]:
         """Current registry entries (fresh recompute — never stale)."""
         if account not in self._entries:
             self.refresh(account)
         return list(self._entries.get(account, ()))
 
-    def specs(self, account: str) -> List[CommandSpec]:
+    def specs(self, account: str) -> list[CommandSpec]:
         """Just the specs (help rendering / registration)."""
         return [entry.spec for entry in self.entries(account)]
 
-    def runtime_stats(self, account: str) -> Dict[str, Any]:
+    def runtime_stats(self, account: str) -> dict[str, Any]:
         """Latest latency/uptime from the account's client ({} = none)."""
         provider = self._stats.get(account)
         if provider is None:
@@ -856,11 +868,11 @@ class SelfCommandHub:
         self,
         account: str,
         name: str,
-        args: List[str],
+        args: list[str],
         channel_id: int,
         *,
-        guild_id: Optional[int] = None,
-        invoker_id: Optional[int] = None,
+        guild_id: int | None = None,
+        invoker_id: int | None = None,
         raw: str = "",
     ) -> None:
         """Route one invocation to the bound manager (fully contained).
@@ -880,8 +892,8 @@ class SelfCommandHub:
             return
         try:
             await execute(
-                account, name, args, channel_id,
-                guild_id=guild_id, invoker_id=invoker_id, raw=raw)
+                account, name, args, channel_id, guild_id=guild_id, invoker_id=invoker_id, raw=raw
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -892,10 +904,17 @@ class SelfCommandHub:
 
 
 __all__ = [
-    "SelfCommandHub", "RegisteredCommand", "FRAMEWORK_COMMANDS",
-    "FRAMEWORK_PLUGIN", "UTILITIES_CATEGORY", "SETTINGS_CATEGORY",
-    "FRAMEWORK_CATEGORY", "NO_CATEGORY",
-    "MAX_REPLY_CHARS", "render_help", "COMMAND_HUB",
+    "COMMAND_HUB",
+    "FRAMEWORK_CATEGORY",
+    "FRAMEWORK_COMMANDS",
+    "FRAMEWORK_PLUGIN",
+    "MAX_REPLY_CHARS",
+    "NO_CATEGORY",
+    "SETTINGS_CATEGORY",
+    "UTILITIES_CATEGORY",
+    "RegisteredCommand",
+    "SelfCommandHub",
+    "render_help",
 ]
 
 

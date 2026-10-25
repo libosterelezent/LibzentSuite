@@ -17,16 +17,20 @@ Behaviour highlights (audit-proven unless noted):
     (audit fix: the world-level view used to leak other accounts' DMs),
   * ``latency_ms`` is synthetic but deterministic per client (seedable).
 """
+
 from __future__ import annotations
 
 import random
 import time
 from types import SimpleNamespace
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 
 from adapters.base import DiscordMessage
 from adapters.simulator.world import SimWorld, WorldMessage, to_discord_message
 from core.errors import ServerRateLimit, TargetGone
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 #: synthetic latency band (milliseconds) — heartbeat stand-in
 LATENCY_MIN_MS = 40.0
@@ -41,7 +45,7 @@ class SimClient:
         world: SimWorld,
         user_id: int,
         *,
-        seed: Optional[int] = None,
+        seed: int | None = None,
         fail_connect: bool = False,
     ) -> None:
         """Bind the client to a world as one user.
@@ -56,11 +60,11 @@ class SimClient:
         """
         self._world = world
         self.user_id = user_id
-        self.on_message: Optional[Callable[[DiscordMessage], None]] = None
-        self.on_disconnect: Optional[Callable[[str], None]] = None
-        self.on_reaction: Optional[Callable[..., None]] = None
-        self.on_message_edit: Optional[Callable[[DiscordMessage], None]] = None
-        self.on_message_delete: Optional[Callable[..., None]] = None
+        self.on_message: Callable[[DiscordMessage], None] | None = None
+        self.on_disconnect: Callable[[str], None] | None = None
+        self.on_reaction: Callable[..., None] | None = None
+        self.on_message_edit: Callable[[DiscordMessage], None] | None = None
+        self.on_message_delete: Callable[..., None] | None = None
         self.connected = False
         self.fail_connect = fail_connect
         self._rng = random.Random(seed)
@@ -120,7 +124,7 @@ class SimClient:
         if not self.connected:
             raise ConnectionError("sim client not connected")
 
-    def _guard_send(self, channel_id: Optional[int]) -> Optional[ServerRateLimit]:
+    def _guard_send(self, channel_id: int | None) -> ServerRateLimit | None:
         """Common send pre-checks: connection + queued one-shot server limit.
 
         Raises ConnectionError when not connected; returns a pending
@@ -188,7 +192,7 @@ class SimClient:
         self.open_dm_calls.append(int(user_id))  # observable for API-trim tests
         return self._world.dm_channel_for(self.user_id, user_id)
 
-    async def fetch_user(self, user_id: int) -> Optional[SimpleNamespace]:
+    async def fetch_user(self, user_id: int) -> SimpleNamespace | None:
         """None when the world does not know the user, else id/name attrs."""
         if user_id not in self._world.users:
             return None
@@ -234,7 +238,7 @@ class SimClient:
             "latency_ms": self.latency_ms,
         }
 
-    def _dm_recipient(self, channel_id: int) -> Optional[int]:
+    def _dm_recipient(self, channel_id: int) -> int | None:
         """The OTHER member of a DM channel pair, as seen by this account."""
         for pair in self._world.dm_pairs_of(channel_id):
             other = pair[0] if pair[1] == self.user_id else pair[1]
@@ -276,8 +280,14 @@ class SimClient:
             self.on_message(to_discord_message(self._world, message))
 
     def reaction_event(
-        self, kind: str, message_id: int, channel_id: int,
-        guild_id: "int | None", user_id: int, emoji: str, raw: Any,
+        self,
+        kind: str,
+        message_id: int,
+        channel_id: int,
+        guild_id: int | None,
+        user_id: int,
+        emoji: str,
+        raw: Any,
     ) -> None:
         """World reaction dispatch -> on_reaction. The world pushes EVERY
         reaction (gateway truth, reactor included); the CLIENT drops the
@@ -287,8 +297,7 @@ class SimClient:
             return
         if not self.can_see(channel_id):
             return  # a DM conversation between other accounts
-        self.on_reaction(
-            kind, message_id, channel_id, guild_id, user_id, emoji, raw)
+        self.on_reaction(kind, message_id, channel_id, guild_id, user_id, emoji, raw)
 
     def can_see(self, channel_id: int) -> bool:
         """Gateway-truth visibility: a client only ever sees channels it
@@ -296,7 +305,7 @@ class SimClient:
         sim must not leak them either (reactions/edits/deletes used to
         fan out to EVERY subscriber)."""
         if channel_id not in self._world.dm_channels:
-            return True   # guild channels are public
+            return True  # guild channels are public
         pairs = self._world.dm_pairs_of(channel_id)
         return not pairs or self.user_id in pairs[0]
 
@@ -316,9 +325,7 @@ class SimClient:
         if channel_id not in self._world.channels:
             raise TargetGone("", f"channel {channel_id} vanished")
         if not any(
-            m.id == message_id
-            for messages in self._world.history.values()
-            for m in messages
+            m.id == message_id for messages in self._world.history.values() for m in messages
         ):
             # resolve the target BEFORE consuming the one-shot limit (a
             # 429 is never spent on a send whose target is already gone)
@@ -347,19 +354,15 @@ class SimClient:
             for message in messages:
                 if message.id == message_id:
                     for top in message.components:
-                        for component in (top.walk() if isinstance(
-                                top, DiscordComponent) else ()):
+                        for component in top.walk() if isinstance(top, DiscordComponent) else ():
                             if component.custom_id == custom_id:
-                                limit = self._world.take_server_limit(
-                                    self.user_id, channel_id)
+                                limit = self._world.take_server_limit(self.user_id, channel_id)
                                 if limit is not None:
                                     raise limit
-                                self.button_clicks.append(
-                                    (message_id, custom_id))
+                                self.button_clicks.append((message_id, custom_id))
                                 return None
-                    raise TargetGone(
-                        "", f"custom_id {custom_id!r} not on message {message_id}")
+                    raise TargetGone("", f"custom_id {custom_id!r} not on message {message_id}")
         raise TargetGone("", f"message {message_id} vanished")
 
 
-__all__ = ["SimClient", "LATENCY_MIN_MS", "LATENCY_MAX_MS"]
+__all__ = ["LATENCY_MAX_MS", "LATENCY_MIN_MS", "SimClient"]

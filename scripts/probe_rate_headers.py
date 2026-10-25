@@ -26,6 +26,7 @@ The token is read from the LZ_PROBE_TOKEN environment variable when set
 The token is used ONLY for the Authorization header; it is never logged.
 All probe requests are read-only GETs (nothing sent/deleted/modified).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,16 +35,21 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 HEADER_KEYS = [
-    "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset",
-    "X-RateLimit-Reset-After", "X-RateLimit-Bucket", "X-RateLimit-Scope",
-    "X-RateLimit-Global", "Retry-After",
+    "X-RateLimit-Limit",
+    "X-RateLimit-Remaining",
+    "X-RateLimit-Reset",
+    "X-RateLimit-Reset-After",
+    "X-RateLimit-Bucket",
+    "X-RateLimit-Scope",
+    "X-RateLimit-Global",
+    "Retry-After",
 ]
 
 
-def _fmt_reset(reset_epoch: Optional[str]) -> str:
+def _fmt_reset(reset_epoch: str | None) -> str:
     if not reset_epoch:
         return "-"
     try:
@@ -57,9 +63,9 @@ def _fmt_reset(reset_epoch: Optional[str]) -> str:
         return str(reset_epoch)
 
 
-def _bucket_snapshot(http_client: Any) -> Dict[str, Dict[str, Any]]:
+def _bucket_snapshot(http_client: Any) -> dict[str, dict[str, Any]]:
     """The library's internal bucket state (what it actually paces by)."""
-    out: Dict[str, Dict[str, Any]] = {}
+    out: dict[str, dict[str, Any]] = {}
     for key, bucket in getattr(http_client, "_buckets", {}).items():
         out[key] = {
             "limit": getattr(bucket, "limit", None),
@@ -70,8 +76,9 @@ def _bucket_snapshot(http_client: Any) -> Dict[str, Dict[str, Any]]:
     return out
 
 
-async def probe(token: str, routes: List[Dict[str, Any]],
-                burst: int, delay: float) -> List[Dict[str, Any]]:
+async def probe(
+    token: str, routes: list[dict[str, Any]], burst: int, delay: float
+) -> list[dict[str, Any]]:
     """Probe each route via discord.py-self's HTTP client."""
     import discord
     from discord.http import HTTPClient
@@ -81,7 +88,7 @@ async def probe(token: str, routes: List[Dict[str, Any]],
     # token via static_login (which is how Client.start does it)
     http = HTTPClient(loop=loop)
     await http.startup()  # opens the curl session + fetches browser headers
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
 
     try:
         # login (validates the token, establishes the session)
@@ -101,9 +108,9 @@ async def probe(token: str, routes: List[Dict[str, Any]],
                 t0 = time.monotonic()
                 try:
                     from discord.http import Route
+
                     # Route takes a RELATIVE path (library adds the base)
-                    path = route["url"].replace(
-                        "https://discord.com/api/v9", "")
+                    path = route["url"].replace("https://discord.com/api/v9", "")
                     route_obj = Route(method, path)
                     if params:
                         resp = await http.request(route_obj, params=params)
@@ -118,7 +125,7 @@ async def probe(token: str, routes: List[Dict[str, Any]],
                     # so an absent status is marked "?" instead of 200.
                     headers = getattr(resp, "headers", None) or {}
 
-                    entry: Dict[str, Any] = {
+                    entry: dict[str, Any] = {
                         "route": label,
                         "url": url,
                         "attempt": attempt + 1,
@@ -129,23 +136,26 @@ async def probe(token: str, routes: List[Dict[str, Any]],
                     for key in HEADER_KEYS:
                         val = headers.get(key) or headers.get(key.lower())
                         if val is not None:
-                            entry[key.replace("X-RateLimit-", "")
-                                  .replace("-", "_").lower()] = val
+                            entry[key.replace("X-RateLimit-", "").replace("-", "_").lower()] = val
 
                     results.append(entry)
                     status = entry["status"]
                     rem = entry.get("remaining", "-")
                     lim = entry.get("limit", "-")
-                    print(f"  {label:<18} attempt {attempt+1}: "
-                          f"HTTP {status}  limit={lim} remaining={rem} "
-                          f"({entry['elapsed_ms']}ms)")
+                    print(
+                        f"  {label:<18} attempt {attempt + 1}: "
+                        f"HTTP {status}  limit={lim} remaining={rem} "
+                        f"({entry['elapsed_ms']}ms)"
+                    )
                     if status == 429:
                         break  # don't hammer past a 429
 
                 except discord.HTTPException as exc:
                     elapsed = (time.monotonic() - t0) * 1000
-                    entry: Dict[str, Any] = {
-                        "route": label, "url": url, "attempt": attempt + 1,
+                    entry: dict[str, Any] = {
+                        "route": label,
+                        "url": url,
+                        "attempt": attempt + 1,
                         "status": getattr(exc, "status", "?"),
                         "error": str(exc),
                         "elapsed_ms": round(elapsed, 1),
@@ -155,17 +165,17 @@ async def probe(token: str, routes: List[Dict[str, Any]],
                     resp = getattr(exc, "response", None)
                     exc_headers = getattr(resp, "headers", None) or {}
                     for key in HEADER_KEYS:
-                        val = (exc_headers.get(key)
-                               or exc_headers.get(key.lower()))
+                        val = exc_headers.get(key) or exc_headers.get(key.lower())
                         if val is not None:
-                            entry[key.replace("X-RateLimit-", "")
-                                  .replace("-", "_").lower()] = val
+                            entry[key.replace("X-RateLimit-", "").replace("-", "_").lower()] = val
                     results.append(entry)
                     rem = entry.get("remaining", "-")
                     lim = entry.get("limit", "-")
-                    print(f"  {label:<18} attempt {attempt+1}: "
-                          f"HTTP {entry['status']} — {exc} "
-                          f"limit={lim} remaining={rem}")
+                    print(
+                        f"  {label:<18} attempt {attempt + 1}: "
+                        f"HTTP {entry['status']} — {exc} "
+                        f"limit={lim} remaining={rem}"
+                    )
                     break
 
         # the library's internal state after all probing
@@ -175,28 +185,31 @@ async def probe(token: str, routes: List[Dict[str, Any]],
             print("LIBRARY INTERNAL BUCKET STATE (what discord.py-self paces by):")
             for key, state in sorted(buckets.items()):
                 print(f"  {key}:")
-                print(f"    limit={state['limit']} "
-                      f"remaining={state['remaining']} "
-                      f"pending={state['pending']}")
+                print(
+                    f"    limit={state['limit']} "
+                    f"remaining={state['remaining']} "
+                    f"pending={state['pending']}"
+                )
     finally:
         await http.close()
 
     return results
 
 
-def print_report(results: List[Dict[str, Any]]) -> None:
+def print_report(results: list[dict[str, Any]]) -> None:
     """Human table + bucket grouping."""
     print(f"\n{'=' * 92}")
     print("DISCORD RATE LIMIT HEADERS — PER ROUTE (via discord.py-self HTTP client)")
     print("=" * 92)
-    print(f"\n{'Route':<18} {'Status':<8} {'Limit':<7} {'Remaining':<10} "
-          f"{'Reset':<14} {'Scope':<8} {'Bucket':<22} {'Time'}")
+    print(
+        f"\n{'Route':<18} {'Status':<8} {'Limit':<7} {'Remaining':<10} "
+        f"{'Reset':<14} {'Scope':<8} {'Bucket':<22} {'Time'}"
+    )
     print("-" * 92)
 
     for r in results:
         if "error" in r:
-            extra = (f"  Retry-After={r['retry_after']}s"
-                     if r.get("retry_after") else "")
+            extra = f"  Retry-After={r['retry_after']}s" if r.get("retry_after") else ""
             print(f"{r['route']:<18} ERROR: {r['error'][:60]}{extra}")
             continue
         status = r.get("status", "?")
@@ -225,7 +238,7 @@ def print_report(results: List[Dict[str, Any]]) -> None:
                 print(f"{'':>18} └─ {' | '.join(extras)}")
 
     # bucket grouping
-    buckets: Dict[str, List[str]] = {}
+    buckets: dict[str, list[str]] = {}
     for r in results:
         bucket = r.get("bucket")
         if bucket and "error" not in r:
@@ -234,18 +247,21 @@ def print_report(results: List[Dict[str, Any]]) -> None:
     if buckets:
         print(f"\n{'─' * 92}")
         print("BUCKET GROUPS (routes sharing a hash share a rate limit):")
-        for bucket, routes in sorted(buckets.items(),
-                                     key=lambda x: -len(x[1])):
+        for bucket, routes in sorted(buckets.items(), key=lambda x: -len(x[1])):
             marker = " ← SHARES" if len(routes) > 1 else ""
             print(f"  {bucket[:20]:<22} {', '.join(routes)}{marker}")
 
     # header presence summary
     print(f"\n{'─' * 92}")
-    with_headers = [r for r in results
-                    if any(r.get(k.replace("X-RateLimit-", "")
-                             .replace("-", "_").lower())
-                           for k in HEADER_KEYS
-                           if "RateLimit" in k)]
+    with_headers = [
+        r
+        for r in results
+        if any(
+            r.get(k.replace("X-RateLimit-", "").replace("-", "_").lower())
+            for k in HEADER_KEYS
+            if "RateLimit" in k
+        )
+    ]
     print(f"Routes returning rate-limit headers: {len(with_headers)}/{len(results)}")
     if not with_headers:
         print("\n⚠ Discord returned NO rate-limit headers on any route.")
@@ -268,7 +284,7 @@ def print_report(results: List[Dict[str, Any]]) -> None:
 
 async def run(args: argparse.Namespace) -> int:
     API = "https://discord.com/api/v9"
-    routes: List[Dict[str, Any]] = []
+    routes: list[dict[str, Any]] = []
 
     def add(label: str, url: str, **kw: Any) -> None:
         routes.append({"label": label, "url": f"{API}{url}", **kw})
@@ -283,8 +299,7 @@ async def run(args: argparse.Namespace) -> int:
         if not args.channel:
             print("error: --channel <id> required", file=sys.stderr)
             return 1
-        add("messages", f"/channels/{args.channel}/messages",
-            params={"limit": "1"})
+        add("messages", f"/channels/{args.channel}/messages", params={"limit": "1"})
     if args.route == "gateway":
         add("gateway", "/gateway")
     if args.route == "notes":
@@ -294,8 +309,10 @@ async def run(args: argparse.Namespace) -> int:
         print(f"error: unknown route {args.route!r}", file=sys.stderr)
         return 1
 
-    print(f"Probing {len(routes)} route(s) via discord.py-self HTTP client "
-          f"(burst={args.burst}, delay={args.delay}s)...")
+    print(
+        f"Probing {len(routes)} route(s) via discord.py-self HTTP client "
+        f"(burst={args.burst}, delay={args.delay}s)..."
+    )
     results = await probe(args.token, routes, args.burst, args.delay)
     print_report(results)
 
@@ -314,29 +331,36 @@ async def run(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Discord per-route rate-limit header inspector "
-                    "(uses discord.py-self's own HTTP client)")
-    parser.add_argument("--token", default=None,
-                        help="the Discord account token (fallback when "
-                             "LZ_PROBE_TOKEN is not set; the environment "
-                             "variable is preferred so the token never "
-                             "appears in process tables)")
-    parser.add_argument("--route", default="all",
-                        help="me | channels | guilds | gateway | notes | "
-                             "messages (needs --channel)")
-    parser.add_argument("--channel", type=int,
-                        help="channel id for the messages route")
-    parser.add_argument("--burst", type=int, default=1,
-                        help="requests per route (default 1; use >1 to "
-                             "observe remaining-count decrementing)")
-    parser.add_argument("--delay", type=float, default=2.0,
-                        help="seconds between requests (default 2)")
-    parser.add_argument("--json", default=None,
-                        help="write a JSON report to this path")
+        "(uses discord.py-self's own HTTP client)"
+    )
+    parser.add_argument(
+        "--token",
+        default=None,
+        help="the Discord account token (fallback when "
+        "LZ_PROBE_TOKEN is not set; the environment "
+        "variable is preferred so the token never "
+        "appears in process tables)",
+    )
+    parser.add_argument(
+        "--route",
+        default="all",
+        help="me | channels | guilds | gateway | notes | messages (needs --channel)",
+    )
+    parser.add_argument("--channel", type=int, help="channel id for the messages route")
+    parser.add_argument(
+        "--burst",
+        type=int,
+        default=1,
+        help="requests per route (default 1; use >1 to observe remaining-count decrementing)",
+    )
+    parser.add_argument(
+        "--delay", type=float, default=2.0, help="seconds between requests (default 2)"
+    )
+    parser.add_argument("--json", default=None, help="write a JSON report to this path")
     args = parser.parse_args()
     args.token = args.token or os.environ.get("LZ_PROBE_TOKEN")
     if not args.token:
-        parser.error("a token is required: set LZ_PROBE_TOKEN or pass "
-                     "--token")
+        parser.error("a token is required: set LZ_PROBE_TOKEN or pass --token")
     return asyncio.run(run(args))
 
 

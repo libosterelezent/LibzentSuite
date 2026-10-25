@@ -14,12 +14,12 @@ comments claimed 1007), plus ``echo_close_code`` for answering a peer
 close, and ``decode_frame`` rejects non-minimal extended length
 encodings. Everything else stays verbatim.
 """
+
 from __future__ import annotations
 
 import base64
 import hashlib
 import struct
-from typing import Optional, Tuple
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -82,7 +82,7 @@ def encode_pong(payload: bytes) -> bytes:
     return encode_frame(OP_PONG, payload)
 
 
-def encode_close_frame(code: Optional[int] = 1000) -> bytes:
+def encode_close_frame(code: int | None = 1000) -> bytes:
     """
     Encode a CLOSE frame (RFC 6455 §5.5.1) carrying ``code`` (struct-packed
     ``>H``). Sent before the socket is dropped after a protocol violation
@@ -95,7 +95,7 @@ def encode_close_frame(code: Optional[int] = 1000) -> bytes:
     return encode_frame(OP_CLOSE, struct.pack(">H", code))
 
 
-def echo_close_code(payload: bytes) -> Optional[int]:
+def echo_close_code(payload: bytes) -> int | None:
     """Status code to answer a peer CLOSE frame with (RFC 6455 §5.5.1/§7.4).
 
     A well-formed peer code is echoed verbatim; a codeless close is
@@ -113,7 +113,7 @@ def echo_close_code(payload: bytes) -> Optional[int]:
     return code
 
 
-def decode_frame(buffer: bytes) -> Tuple[int, bool, bytes, int]:
+def decode_frame(buffer: bytes) -> tuple[int, bool, bytes, int]:
     """Decode ONE client->server frame from the head of `buffer`.
 
     Client frames MUST be masked (RFC §5.1); the payload is unmasked here.
@@ -139,14 +139,14 @@ def decode_frame(buffer: bytes) -> Tuple[int, bool, bytes, int]:
     if length == 126:
         if len(buffer) < offset + 2:
             raise IncompleteFrame("incomplete extended length")
-        (length,) = struct.unpack(">H", buffer[offset:offset + 2])
+        (length,) = struct.unpack(">H", buffer[offset : offset + 2])
         if length < 126:  # ROUND-3: non-minimal encoding (16-bit form < 126)
             raise ProtocolViolation("non-minimal 16-bit length encoding")
         offset += 2
     elif length == 127:
         if len(buffer) < offset + 8:
             raise IncompleteFrame("incomplete extended length")
-        (length,) = struct.unpack(">Q", buffer[offset:offset + 8])
+        (length,) = struct.unpack(">Q", buffer[offset : offset + 8])
         if length < 65536:  # ROUND-3: non-minimal encoding (64-bit form < 2^16)
             raise ProtocolViolation("non-minimal 64-bit length encoding")
         offset += 8
@@ -156,11 +156,11 @@ def decode_frame(buffer: bytes) -> Tuple[int, bool, bytes, int]:
     if masked:
         if len(buffer) < offset + 4:
             raise IncompleteFrame("incomplete mask")
-        mask_key = buffer[offset:offset + 4]
+        mask_key = buffer[offset : offset + 4]
         offset += 4
     if len(buffer) < offset + length:
         raise IncompleteFrame("incomplete payload")
-    payload = buffer[offset:offset + length]
+    payload = buffer[offset : offset + length]
     if masked:
         payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
     return opcode, fin, payload, offset + length

@@ -9,10 +9,12 @@ Usage:
   python main.py --dashboard --port N   also serve the browser dashboard (+WS)
   python main.py --headless             run forever with no terminal (daemon mode)
 """
+
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
 import signal
@@ -21,8 +23,7 @@ import sys
 from core.bootstrap import build
 
 
-async def run_sim(name: str | None, list_only: bool,
-                  plugin_dir: str = "plugins") -> int:
+async def run_sim(name: str | None, list_only: bool, plugin_dir: str = "plugins") -> int:
     """Run scenario(s) through the offline SimulationRunner (no network)."""
     from adapters.simulator import SCENARIOS, SimulationRunner
 
@@ -63,10 +64,11 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
         # the TELEMETRY singleton read the env var at IMPORT time (before
         # this point), so setting the variable alone enabled nothing
         from database.telemetry import TELEMETRY
+
         TELEMETRY.enabled = True
         logging.getLogger("libzent").info(
-            "DEBUG MODE: libzent tree at DEBUG, discord at INFO, "
-            "DB worker telemetry enabled")
+            "DEBUG MODE: libzent tree at DEBUG, discord at INFO, DB worker telemetry enabled"
+        )
     try:
         framework = await build(
             env_file=args.env,
@@ -97,21 +99,31 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
                 # FINAL-PHASE (F7): the dashboard would run WITHOUT auth
                 # (loopback + credential routes stay locked, but start/
                 # stop/estop are drivable by any local process).
-                print("WARNING: dashboard starting WITHOUT auth on "
-                      "127.0.0.1 — set DASHBOARD_TOKEN in .env; "
-                      "credential management stays locked", flush=True)
+                print(
+                    "WARNING: dashboard starting WITHOUT auth on "
+                    "127.0.0.1 — set DASHBOARD_TOKEN in .env; "
+                    "credential management stays locked",
+                    flush=True,
+                )
             try:
                 dashboard = DashboardServer(
-                    api, token=api.dashboard_token, port=args.port,
-                    bus=framework.bus, exit_signal=True)
+                    api,
+                    token=api.dashboard_token,
+                    port=args.port,
+                    bus=framework.bus,
+                    exit_signal=True,
+                )
                 dashboard.start().attach_logs(api.logs_service())
                 if api.audit_recorder() is not None:
                     dashboard.attach_audit(api.audit_recorder())
             except (OSError, OverflowError, ValueError) as exc:
                 # bind failures: port in use / out of range (0-65535) —
                 # a clean line + exit 2, never a raw bind traceback
-                print(f"error: cannot start dashboard on port {args.port}: "
-                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                print(
+                    f"error: cannot start dashboard on port {args.port}: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
                 return 2
             print(f"dashboard: {dashboard.url}")
 
@@ -127,20 +139,16 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
                 task.cancel()
 
             for sig in (signal.SIGTERM, signal.SIGINT):
-                try:
+                with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
                     loop.add_signal_handler(sig, _sig_stop)
-                except (NotImplementedError, RuntimeError, ValueError):
-                    pass
             try:
                 exit_code = await task
             except asyncio.CancelledError:
                 exit_code = 130
             finally:
                 for sig in (signal.SIGTERM, signal.SIGINT):
-                    try:
+                    with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
                         loop.remove_signal_handler(sig)
-                    except (NotImplementedError, RuntimeError, ValueError):
-                        pass
         elif args.headless:
             print("running headless — Ctrl-C / SIGTERM to stop")
             await _wait_for_stop_signal()
@@ -161,18 +169,14 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
 
             loop = asyncio.get_running_loop()
             for sig, code in ((signal.SIGTERM, 0), (signal.SIGINT, 130)):
-                try:
+                with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
                     loop.add_signal_handler(sig, _sig_exit, code)
-                except (NotImplementedError, RuntimeError, ValueError):
-                    pass
             try:
                 await repl.run()
             finally:
                 for sig in (signal.SIGTERM, signal.SIGINT):
-                    try:
+                    with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
                         loop.remove_signal_handler(sig)
-                    except (NotImplementedError, RuntimeError, ValueError):
-                        pass
     finally:
         # ALWAYS runs (start-all failure, dashboard bind error, Ctrl-C...):
         # a leaked database connection/worker thread can hang process exit
@@ -206,10 +210,8 @@ async def _wait_for_stop_signal() -> None:
         pass
     finally:
         for sig in installed:
-            try:
+            with contextlib.suppress(Exception):
                 loop.remove_signal_handler(sig)
-            except Exception:
-                pass
 
 
 def main() -> int:
@@ -221,39 +223,68 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         prog="libzent", description="LibzentSuite automation framework"
     )
-    parser.add_argument("--sim", metavar="NAME", const="", default=None, nargs="?",
-                        help="run a simulation scenario (no network); omit NAME to list")
+    parser.add_argument(
+        "--sim",
+        metavar="NAME",
+        const="",
+        default=None,
+        nargs="?",
+        help="run a simulation scenario (no network); omit NAME to list",
+    )
     parser.add_argument("--sim-list", action="store_true", help="list scenarios")
-    parser.add_argument("--bench", metavar="SCENARIO", const="", default=None, nargs="?",
-                        help="run the framework benchmark (isolated temp "
-                             "state, fakes only); omit SCENARIO for all; "
-                             "pass '--bench --list' to list; extra flags "
-                             "pass through to the bench CLI")
+    parser.add_argument(
+        "--bench",
+        metavar="SCENARIO",
+        const="",
+        default=None,
+        nargs="?",
+        help="run the framework benchmark (isolated temp "
+        "state, fakes only); omit SCENARIO for all; "
+        "pass '--bench --list' to list; extra flags "
+        "pass through to the bench CLI",
+    )
     parser.add_argument("--config", default="config", help="config directory (default: ./config)")
-    parser.add_argument("--plugins", default="plugins", help="plugin directory (default: ./plugins)")
+    parser.add_argument(
+        "--plugins", default="plugins", help="plugin directory (default: ./plugins)"
+    )
     parser.add_argument("--env", default=".env", help="credentials file (default: ./.env)")
-    parser.add_argument("--start-all", action="store_true",
-                        help="start every enabled account on boot")
-    parser.add_argument("--dashboard", action="store_true",
-                        help="serve the GUI dashboard (browser + WS)")
-    parser.add_argument("--headless", action="store_true",
-                        help="run forever with no terminal (use with --dashboard)")
+    parser.add_argument(
+        "--start-all", action="store_true", help="start every enabled account on boot"
+    )
+    parser.add_argument(
+        "--dashboard", action="store_true", help="serve the GUI dashboard (browser + WS)"
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="run forever with no terminal (use with --dashboard)",
+    )
     parser.add_argument("--port", type=int, default=8070, help="dashboard port (default 8070)")
-    parser.add_argument("--debug", action="store_true",
-                        help="debugging mode: DEBUG-level structured logs "
-                             "(dashboard Logs page), discord gateway INFO "
-                             "lines (reconnect/close-code visibility), DB "
-                             "worker telemetry, scheduler pressure in "
-                             "status")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="debugging mode: DEBUG-level structured logs "
+        "(dashboard Logs page), discord gateway INFO "
+        "lines (reconnect/close-code visibility), DB "
+        "worker telemetry, scheduler pressure in "
+        "status",
+    )
     parser.add_argument("--db", default="state/libzent.db", help="sqlite persistence file")
     args, extra = parser.parse_known_args()
 
     if args.sim is not None or args.sim_list:
-        if (args.start_all or args.dashboard or args.headless
-                or extra or args.db != "state/libzent.db"):
-            print("error: --sim/--sim-list cannot be combined with live-stack "
-                  "flags (--start-all/--dashboard/--headless/--db or a command)",
-                  file=sys.stderr)
+        if (
+            args.start_all
+            or args.dashboard
+            or args.headless
+            or extra
+            or args.db != "state/libzent.db"
+        ):
+            print(
+                "error: --sim/--sim-list cannot be combined with live-stack "
+                "flags (--start-all/--dashboard/--headless/--db or a command)",
+                file=sys.stderr,
+            )
             return 2
         try:
             return asyncio.run(run_sim(args.sim or None, args.sim_list, args.plugins))
@@ -268,13 +299,23 @@ def main() -> int:
             bench_argv.extend(["--scenario", args.bench])
         # everything except the main parser's own flags passes through
         # (values included — the bench parser validates the rest)
-        owned = {"--sim", "--sim-list", "--bench", "--config", "--plugins",
-                 "--env", "--start-all", "--dashboard", "--headless",
-                 "--port", "--db", "--debug"}
+        owned = {
+            "--sim",
+            "--sim-list",
+            "--bench",
+            "--config",
+            "--plugins",
+            "--env",
+            "--start-all",
+            "--dashboard",
+            "--headless",
+            "--port",
+            "--db",
+            "--debug",
+        }
         # parse_known_args already consumed the main parser's flags; every
         # remaining token belongs to the bench CLI — pass verbatim
-        bench_argv.extend(
-            tok for tok in extra if tok.split("=", 1)[0] not in owned)
+        bench_argv.extend(tok for tok in extra if tok.split("=", 1)[0] not in owned)
         return run_bench_cli(bench_argv)
     try:
         return asyncio.run(run_app(args, extra))

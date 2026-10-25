@@ -20,30 +20,32 @@ callbacks, data providers):
 Pure stdlib; no imports from adapters/, interfaces/, database/ or the
 dashboard itself.
 """
+
 from __future__ import annotations
 
 import contextvars
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 #: id of the dashboard VIEW (browser tab) serving the current request.
 #: NOT an identity (auth is one shared token) — it only keeps per-view
 #: UI state (which row a modal is looking at) from bleeding between two
 #: open tabs. Set by the dashboard server around each request; callbacks
 #: read it through :func:`current_view_id`.
-_VIEW_ID: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
-    "dashboard_view_id", default=None)
+_VIEW_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "dashboard_view_id", default=None
+)
 
 _VIEW_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
-def clean_view_id(raw: Any) -> Optional[str]:
+def clean_view_id(raw: Any) -> str | None:
     """A client-supplied view id if well-formed, else None."""
     return raw if isinstance(raw, str) and _VIEW_ID_RE.match(raw) else None
 
 
-def current_view_id() -> Optional[str]:
+def current_view_id() -> str | None:
     """The current request's dashboard view id (None = unknown/legacy)."""
     return _VIEW_ID.get()
 
@@ -73,7 +75,7 @@ class CheckContext:
     #: serialization type of the component ("page", "button", ...)
     component_type: str
     #: selected account, when relevant (None = no account context)
-    account: Optional[str] = None
+    account: str | None = None
     #: the account's services facade, when an account context exists
     services: Any = None
 
@@ -94,7 +96,7 @@ class ActionContext:
     #: the component whose action fires
     component_id: str
     #: selected account, when relevant (None = no account context)
-    account: Optional[str] = None
+    account: str | None = None
     #: the plugin's services facade (paced sends, settings, state)
     services: Any = None
 
@@ -123,9 +125,9 @@ class ActionResult:
     success: bool
     message: str = ""
     data: Any = None
-    field_errors: Dict[str, str] = field(default_factory=dict)
-    refresh: List[str] = field(default_factory=list)
-    modal: Optional[str] = None
+    field_errors: dict[str, str] = field(default_factory=dict)
+    refresh: list[str] = field(default_factory=list)
+    modal: str | None = None
 
 
-__all__ = ["CheckContext", "ActionContext", "ActionResult"]
+__all__ = ["ActionContext", "ActionResult", "CheckContext"]

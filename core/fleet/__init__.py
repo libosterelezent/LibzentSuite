@@ -9,7 +9,10 @@ transitions (E), hub view (F) and recovery (G) build ON these models.
 Design source: docs/design/fleet-orchestration-hub.md (decisions locked
 2026-10-22; editable-while-running locked 2026-10-23).
 """
+
+from .capability import FleetTaskHandler, definitions_of, handler_of
 from .models import (
+    POLICY_CHECK_ORDER,
     AssignmentStatus,
     AssignmentStrategy,
     CooldownRecord,
@@ -21,7 +24,6 @@ from .models import (
     InvalidDefinition,
     MemberEligibility,
     MetricHint,
-    POLICY_CHECK_ORDER,
     PolicyDecision,
     TaskAssignment,
     TaskDefinition,
@@ -30,18 +32,17 @@ from .models import (
     observation_dedup_key,
     validate_channel_scope,
 )
-from .policy import FleetPolicy
-from .service import FleetService
 from .observations import (
-    FleetObservations,
-    Observation,
     OBS_ACCOUNT_CONNECTED,
     OBS_ACCOUNT_DISCONNECTED,
     OBS_LIMIT_MARKER,
     OBS_SERVER_COOLDOWN,
+    FleetObservations,
+    Observation,
 )
-from .capability import FleetTaskHandler, definitions_of, handler_of
+from .policy import FleetPolicy
 from .reconciler import FleetReconciler
+from .service import FleetService
 from .transitions import (
     ASSIGNMENT_TRANSITIONS,
     MEMBER_TRANSITIONS,
@@ -53,49 +54,49 @@ from .transitions import (
 )
 
 __all__ = [
-    # models
-    "MemberEligibility",
-    "ExecutionMode",
-    "AssignmentStatus",
-    "TransitionMode",
-    "AssignmentStrategy",
-    "FieldClass",
-    "CooldownScopeType",
-    "CooldownSource",
-    "CooldownRecord",
-    "effective_cooldown",
-    "MetricHint",
-    "TaskDefinition",
-    "TaskAssignment",
-    "PolicyDecision",
-    "FleetEvent",
-    "observation_dedup_key",
-    "POLICY_CHECK_ORDER",
-    "validate_channel_scope",
-    "InvalidDefinition",
-    # service
-    "FleetService",
-    # policy
-    "FleetPolicy",
-    # observations (rollout D)
-    "FleetObservations",
-    "Observation",
-    "OBS_LIMIT_MARKER",
-    "OBS_SERVER_COOLDOWN",
-    "OBS_ACCOUNT_DISCONNECTED",
-    "OBS_ACCOUNT_CONNECTED",
-    # capability (§5)
-    "FleetTaskHandler",
-    "handler_of",
-    "definitions_of",
-    # reconciler (§9)
-    "FleetReconciler",
+    "ASSIGNMENT_TRANSITIONS",
     # transitions
     "MEMBER_TRANSITIONS",
-    "ASSIGNMENT_TRANSITIONS",
+    "OBS_ACCOUNT_CONNECTED",
+    "OBS_ACCOUNT_DISCONNECTED",
+    "OBS_LIMIT_MARKER",
+    "OBS_SERVER_COOLDOWN",
+    "POLICY_CHECK_ORDER",
+    "AssignmentStatus",
+    "AssignmentStrategy",
+    "CooldownRecord",
+    "CooldownScopeType",
+    "CooldownSource",
+    "ExecutionMode",
+    "FieldClass",
+    "FleetEvent",
+    # observations (rollout D)
+    "FleetObservations",
+    # policy
+    "FleetPolicy",
+    # reconciler (§9)
+    "FleetReconciler",
+    # service
+    "FleetService",
+    # capability (§5)
+    "FleetTaskHandler",
+    "InvalidDefinition",
     "InvalidTransition",
-    "validate_member_transition",
-    "member_can_transition",
-    "validate_assignment_transition",
+    # models
+    "MemberEligibility",
+    "MetricHint",
+    "Observation",
+    "PolicyDecision",
+    "TaskAssignment",
+    "TaskDefinition",
+    "TransitionMode",
     "assignment_can_transition",
+    "definitions_of",
+    "effective_cooldown",
+    "handler_of",
+    "member_can_transition",
+    "observation_dedup_key",
+    "validate_assignment_transition",
+    "validate_channel_scope",
+    "validate_member_transition",
 ]

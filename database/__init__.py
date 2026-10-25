@@ -10,6 +10,7 @@ Tables: accounts, account_settings, plugins, plugin_settings, plugin_states,
 profiles, profile_plugins, account_profiles, rate_limit_policies, audit_logs,
 logs, task_history, kv, schema_migrations.
 """
+
 from .db import Database
 
 __all__ = ["Database"]

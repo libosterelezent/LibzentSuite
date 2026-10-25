@@ -4,6 +4,7 @@ Both the REPL and one-shot mode route through :func:`run_command`, which calls
 ONLY ``core.api.ControlAPI`` methods — the same facade the dashboard uses, so
 the two interfaces can never drift apart in capability.
 """
+
 from .commands import (
     HELP,
     QuitRequested,
@@ -33,12 +34,9 @@ from .commands import (
 from .repl import Repl, run_once
 
 __all__ = [
-    "Repl",
-    "run_command",
-    "run_once",
     "HELP",
-    "help_text",
     "QuitRequested",
+    "Repl",
     "UsageError",
     "format_account_info",
     "format_account_plugins",
@@ -59,4 +57,7 @@ __all__ = [
     "format_status",
     "format_tasks",
     "format_warnings",
+    "help_text",
+    "run_command",
+    "run_once",
 ]

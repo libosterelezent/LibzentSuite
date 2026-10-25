@@ -20,18 +20,23 @@ Mention syntax: the message must START with the account's own mention —
 followed by whitespace and the command line. Each account answers only to
 ITS OWN mention, so ``@alpha status`` and ``@beta status`` are independent.
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import shlex
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any
 
-from .credentials import Credentials
 from .errors import DOMAIN_ERRORS
 from .event_bus import Event, EventBus, MessageReceived
 from .priority import Priority
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from .credentials import Credentials
 
 #: domain errors render their (safe, human-written) message bare; anything
 #: else is an internal failure and must not leak into a Discord channel.
@@ -69,14 +74,14 @@ class RemoteControl:
         self._credentials = credentials
         self._logger = logger or LOG
         self._cooldown_s = max(0.0, float(reply_cooldown_s))
-        self._last_reply_at: Dict[str, float] = {}
-        self._unsub: Optional[Callable[[], None]] = None
+        self._last_reply_at: dict[str, float] = {}
+        self._unsub: Callable[[], None] | None = None
         self._pending: set = set()  # strong refs for fire-and-forget tasks
-        self._handlers: Dict[str, Callable[[Any, str], Any]] = {}
+        self._handlers: dict[str, Callable[[Any, str], Any]] = {}
         self._register_commands()
 
     # ------------------------------------------------------------- lifecycle
-    def start(self) -> "RemoteControl":
+    def start(self) -> RemoteControl:
         """Subscribe to inbound messages (idempotent)."""
         if self._unsub is None:
             self._unsub = self._bus.subscribe(MessageReceived, self._on_message)
@@ -113,7 +118,7 @@ class RemoteControl:
         self._pending.add(task)
         task.add_done_callback(self._pending.discard)
 
-    def _extract_command(self, event: MessageReceived) -> Optional[str]:
+    def _extract_command(self, event: MessageReceived) -> str | None:
         """'<@uid> status accounts' -> 'status accounts' when the mention is
         THIS account's own. Returns '' for a BARE mention (owner invoked us
         without a command -> help), None when the message is not ours."""
@@ -132,7 +137,7 @@ class RemoteControl:
         text = (event.content or "").strip()
         for prefix in (f"<@{user_id}>", f"<@!{user_id}>"):
             if text.startswith(prefix):
-                return text[len(prefix):].strip()
+                return text[len(prefix) :].strip()
         return None
 
     async def _handle(self, event: MessageReceived, line: str) -> None:
@@ -163,17 +168,20 @@ class RemoteControl:
             reply = reply[: MAX_REPLY_CHARS - 20] + "\n… (truncated)"
         try:
             self._scheduler.submit(
-                account, "control", "message",
-                channel_id=int(event.channel_id), content=reply,
-                priority=Priority.NORMAL, name=f"control-reply-{event.message_id}",
+                account,
+                "control",
+                "message",
+                channel_id=int(event.channel_id),
+                content=reply,
+                priority=Priority.NORMAL,
+                name=f"control-reply-{event.message_id}",
             )
         except Exception:
             # e.g. the global `estop` just stopped the scheduler: the reply
             # CANNOT be delivered in-band. Log at ERROR with the full text —
             # the owner's confirmation must at least survive in the logs.
             self._logger.error(
-                "remote control reply undeliverable (scheduler stopped?) — "
-                "reply was: %s", reply
+                "remote control reply undeliverable (scheduler stopped?) — reply was: %s", reply
             )
 
     # -------------------------------------------------------------- commands
@@ -231,8 +239,11 @@ class RemoteControl:
         for account in accounts:
             lines.append(
                 f"· {account.get('name')}: {account.get('status')}"
-                + (f" (lat {account.get('latency_ms'):.0f}ms)"
-                   if account.get("latency_ms") is not None else "")
+                + (
+                    f" (lat {account.get('latency_ms'):.0f}ms)"
+                    if account.get("latency_ms") is not None
+                    else ""
+                )
             )
         warnings = status.get("warnings") or []
         if warnings:
@@ -244,10 +255,7 @@ class RemoteControl:
             accounts = await api.accounts_list()
             if not accounts:
                 return "no accounts registered"
-            return "\n".join(
-                f"· {a['name']}: {a.get('status')}"
-                for a in accounts
-            )
+            return "\n".join(f"· {a['name']}: {a.get('status')}" for a in accounts)
         sub, rest = args[0], args[1:]
         if sub == "info" and len(rest) == 1:
             info = await api.accounts_info(rest[0])
@@ -275,11 +283,14 @@ class RemoteControl:
         account = args[0]
         if len(args) == 1:
             states = await api.plugins_state(account)
-            return "\n".join(
-                f"{'+' if s['enabled'] else '-'} {s['name']}"
-                + (f" ({s['error_count']} err)" if s.get("error_count") else "")
-                for s in states
-            ) or "no plugins"
+            return (
+                "\n".join(
+                    f"{'+' if s['enabled'] else '-'} {s['name']}"
+                    + (f" ({s['error_count']} err)" if s.get("error_count") else "")
+                    for s in states
+                )
+                or "no plugins"
+            )
         plugin, flag = args[1], (args[2].lower() if len(args) > 2 else "")
         if flag not in ("on", "off"):
             return "usage: plugins <account> <plugin> on|off"
@@ -309,8 +320,10 @@ class RemoteControl:
         if not lane.get("enabled"):
             return "send lane: off (per-account pacing only)"
         state = "PAUSED (all outbound holds)" if lane.get("paused") else "active"
-        return (f"send lane: on ({state}) · spacing {lane.get('prefixrate')}s · "
-                f"waiting {lane.get('waiting')} · grants {lane.get('grants')}")
+        return (
+            f"send lane: on ({state}) · spacing {lane.get('prefixrate')}s · "
+            f"waiting {lane.get('waiting')} · grants {lane.get('grants')}"
+        )
 
     async def _cmd_tasks(self, api: Any, args: list) -> str:
         rows = await api.tasks_list()
@@ -328,7 +341,11 @@ class RemoteControl:
             self._logger.info(
                 "account-scoped estop reply may be undeliverable (account "
                 "%s is stopped) — reply was: emergency stop %s: %s task(s) "
-                "cancelled", args[0], args[0], out.get("cancelled_tasks", 0))
+                "cancelled",
+                args[0],
+                args[0],
+                out.get("cancelled_tasks", 0),
+            )
             return f"emergency stop {args[0]}: {out.get('cancelled_tasks', 0)} task(s) cancelled"
         if args:
             return "usage: estop [account]"
@@ -345,4 +362,4 @@ class RemoteControl:
         return "\n".join(f"· {s['name']}: {s.get('description', '')}" for s in scenarios)
 
 
-__all__ = ["RemoteControl", "MAX_REPLY_CHARS"]
+__all__ = ["MAX_REPLY_CHARS", "RemoteControl"]

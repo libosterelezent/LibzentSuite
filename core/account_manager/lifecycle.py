@@ -34,11 +34,15 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 __all__ = [
-    "OUTCOME_STARTED", "OUTCOME_STOPPED", "OUTCOME_RATE_LIMITED",
-    "LifecycleDecision", "LifecyclePolicy", "LifecycleGovernor",
+    "OUTCOME_RATE_LIMITED",
+    "OUTCOME_STARTED",
+    "OUTCOME_STOPPED",
+    "LifecycleDecision",
+    "LifecycleGovernor",
+    "LifecyclePolicy",
     "LifecycleRateLimited",
 ]
 
@@ -55,11 +59,10 @@ class LifecycleRateLimited(Exception):
     manager wraps it into an AccountError with the same message.
     """
 
-    def __init__(self, account: str, op: str, retry_after_s: float,
-                 reason: str) -> None:
+    def __init__(self, account: str, op: str, retry_after_s: float, reason: str) -> None:
         super().__init__(
-            f"account {account!r} {op} rate-limited ({reason}): retry in "
-            f"{retry_after_s:.1f}s")
+            f"account {account!r} {op} rate-limited ({reason}): retry in {retry_after_s:.1f}s"
+        )
         self.account = account
         self.op = op
         self.retry_after_s = float(retry_after_s)
@@ -69,10 +72,11 @@ class LifecycleRateLimited(Exception):
 @dataclass(frozen=True)
 class LifecycleDecision:
     """One governor verdict for a lifecycle operation request."""
+
     allowed: bool
-    outcome: str            # OUTCOME_* vocabulary
+    outcome: str  # OUTCOME_* vocabulary
     retry_after_s: float = 0.0
-    reason: str = ""        # "account_cooldown" | "global_bucket" | ""
+    reason: str = ""  # "account_cooldown" | "global_bucket" | ""
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,7 @@ class LifecyclePolicy:
         "bad token"); escalates from start_retry only on streak >= 2.
       stop_cooldown 0 — stopping is the safety direction.
     """
+
     start_burst: int = 5
     start_refill_s: float = 5.0
     stop_burst: int = 16
@@ -110,9 +115,14 @@ class LifecyclePolicy:
             v = getattr(self, name)
             if not isinstance(v, int) or isinstance(v, bool) or v < 1:
                 raise ValueError(f"{name} must be an int >= 1, got {v!r}")
-        for name in ("start_refill_s", "stop_refill_s",
-                     "restart_cooldown_s", "start_retry_cooldown_s",
-                     "invalid_credential_retry_s", "stop_cooldown_s"):
+        for name in (
+            "start_refill_s",
+            "stop_refill_s",
+            "restart_cooldown_s",
+            "start_retry_cooldown_s",
+            "invalid_credential_retry_s",
+            "stop_cooldown_s",
+        ):
             v = getattr(self, name)
             try:
                 fv = float(v)
@@ -125,29 +135,26 @@ class LifecyclePolicy:
 class _TokenBucket:
     """Monotonic token bucket (clock injectable for deterministic tests)."""
 
-    __slots__ = ("capacity", "refill_s", "_tokens", "_last", "_clock")
+    __slots__ = ("_clock", "_last", "_tokens", "capacity", "refill_s")
 
-    def __init__(self, capacity: int, refill_s: float,
-                 clock: Optional[Any] = None) -> None:
+    def __init__(self, capacity: int, refill_s: float, clock: Any | None = None) -> None:
         self.capacity = int(capacity)
         self.refill_s = max(float(refill_s), 1e-9)
         self._tokens = float(capacity)
         self._clock = clock or time.monotonic
         self._last: float = self._clock()
 
-    def try_acquire(self) -> Tuple[bool, float]:
+    def try_acquire(self) -> tuple[bool, float]:
         """(ok, retry_after_s) for one token."""
         now = self._clock()
-        self._tokens = min(
-            float(self.capacity),
-            self._tokens + (now - self._last) / self.refill_s)
+        self._tokens = min(float(self.capacity), self._tokens + (now - self._last) / self.refill_s)
         self._last = now
         if self._tokens >= 1.0:
             self._tokens -= 1.0
             return True, 0.0
         return False, (1.0 - self._tokens) * self.refill_s
 
-    def peek(self) -> Tuple[bool, float]:
+    def peek(self) -> tuple[bool, float]:
         """(ok, retry_after_s) WITHOUT consuming a token (no state write).
 
         Observability mirror of :meth:`try_acquire`: same verdict for a
@@ -156,9 +163,7 @@ class _TokenBucket:
         state it reports on.
         """
         now = self._clock()
-        tokens = min(
-            float(self.capacity),
-            self._tokens + (now - self._last) / self.refill_s)
+        tokens = min(float(self.capacity), self._tokens + (now - self._last) / self.refill_s)
         if tokens >= 1.0:
             return True, 0.0
         return False, (1.0 - tokens) * self.refill_s
@@ -167,6 +172,7 @@ class _TokenBucket:
 @dataclass
 class _Pacer:
     """Per-account lifecycle op timestamps (monotonic)."""
+
     last_start: float = 0.0
     last_stop: float = 0.0
     last_failed_start: float = 0.0
@@ -182,30 +188,34 @@ class LifecycleGovernor:
     and reports outcomes via ``commit`` so cooldowns track reality.
     """
 
-    def __init__(self, policy: Optional[LifecyclePolicy] = None, *,
-                 clock: Optional[Any] = None,
-                 enabled: bool = True) -> None:
+    def __init__(
+        self,
+        policy: LifecyclePolicy | None = None,
+        *,
+        clock: Any | None = None,
+        enabled: bool = True,
+    ) -> None:
         self.policy = policy or LifecyclePolicy()
         self.enabled = enabled
         self._clock = clock or time.monotonic
-        self._pacers: Dict[str, _Pacer] = {}
+        self._pacers: dict[str, _Pacer] = {}
         self._start_bucket = _TokenBucket(
-            self.policy.start_burst, self.policy.start_refill_s, self._clock)
+            self.policy.start_burst, self.policy.start_refill_s, self._clock
+        )
         self._stop_bucket = _TokenBucket(
-            self.policy.stop_burst, self.policy.stop_refill_s, self._clock)
-        self.counters: Dict[str, int] = {
-            "decisions": 0, "allowed": 0, "refused": 0, "bypassed": 0}
+            self.policy.stop_burst, self.policy.stop_refill_s, self._clock
+        )
+        self.counters: dict[str, int] = {"decisions": 0, "allowed": 0, "refused": 0, "bypassed": 0}
 
     # ------------------------------------------------------------ decisions
-    def precheck(self, account: str, op: str, *,
-                 status: Any = None,
-                 bypass: bool = False) -> LifecycleDecision:
+    def precheck(
+        self, account: str, op: str, *, status: Any = None, bypass: bool = False
+    ) -> LifecycleDecision:
         """Decide one lifecycle request. ``op`` is 'start' or 'stop'."""
         self.counters["decisions"] += 1
         if not self.enabled or bypass:
             self.counters["bypassed"] += 1
-            return LifecycleDecision(
-                True, OUTCOME_STARTED if op == "start" else OUTCOME_STOPPED)
+            return LifecycleDecision(True, OUTCOME_STARTED if op == "start" else OUTCOME_STOPPED)
         now = self._clock()
         pacer = self._pacers.get(account)
         if op == "start":
@@ -214,34 +224,30 @@ class LifecycleGovernor:
             if ready > now:
                 self.counters["refused"] += 1
                 return LifecycleDecision(
-                    False, OUTCOME_RATE_LIMITED, ready - now,
-                    "account_cooldown")
+                    False, OUTCOME_RATE_LIMITED, ready - now, "account_cooldown"
+                )
             ok, retry = self._start_bucket.try_acquire()
             if not ok:
                 self.counters["refused"] += 1
-                return LifecycleDecision(
-                    False, OUTCOME_RATE_LIMITED, retry, "global_bucket")
+                return LifecycleDecision(False, OUTCOME_RATE_LIMITED, retry, "global_bucket")
         elif op == "stop":
             if self.policy.stop_cooldown_s > 0 and pacer:
                 ready = pacer.last_stop + self.policy.stop_cooldown_s
                 if ready > now:
                     self.counters["refused"] += 1
                     return LifecycleDecision(
-                        False, OUTCOME_RATE_LIMITED, ready - now,
-                        "account_cooldown")
+                        False, OUTCOME_RATE_LIMITED, ready - now, "account_cooldown"
+                    )
             ok, retry = self._stop_bucket.try_acquire()
             if not ok:
                 self.counters["refused"] += 1
-                return LifecycleDecision(
-                    False, OUTCOME_RATE_LIMITED, retry, "global_bucket")
+                return LifecycleDecision(False, OUTCOME_RATE_LIMITED, retry, "global_bucket")
         else:  # pragma: no cover - internal misuse
             raise ValueError(f"unknown lifecycle op {op!r}")
         self.counters["allowed"] += 1
-        return LifecycleDecision(
-            True, OUTCOME_STARTED if op == "start" else OUTCOME_STOPPED)
+        return LifecycleDecision(True, OUTCOME_STARTED if op == "start" else OUTCOME_STOPPED)
 
-    def commit(self, account: str, op: str, *, ok: bool,
-               invalid_credential: bool = False) -> None:
+    def commit(self, account: str, op: str, *, ok: bool, invalid_credential: bool = False) -> None:
         """Record the outcome so cooldowns track reality."""
         pacer = self._pacers.setdefault(account, _Pacer())
         now = self._clock()
@@ -284,8 +290,7 @@ class LifecycleGovernor:
         evaluates each account exactly once.
         """
         if not self.enabled:
-            return LifecycleDecision(
-                True, OUTCOME_STARTED if op == "start" else OUTCOME_STOPPED)
+            return LifecycleDecision(True, OUTCOME_STARTED if op == "start" else OUTCOME_STOPPED)
         now = self._clock()
         pacer = self._pacers.get(account)
         if op == "start":
@@ -293,26 +298,24 @@ class LifecycleGovernor:
             ready = (since + cooldown) if since else 0.0
             if ready > now:
                 return LifecycleDecision(
-                    False, OUTCOME_RATE_LIMITED, ready - now,
-                    "account_cooldown")
+                    False, OUTCOME_RATE_LIMITED, ready - now, "account_cooldown"
+                )
             ok, retry = self._start_bucket.peek()
         elif op == "stop":
             if self.policy.stop_cooldown_s > 0 and pacer:
                 ready = pacer.last_stop + self.policy.stop_cooldown_s
                 if ready > now:
                     return LifecycleDecision(
-                        False, OUTCOME_RATE_LIMITED, ready - now,
-                        "account_cooldown")
+                        False, OUTCOME_RATE_LIMITED, ready - now, "account_cooldown"
+                    )
             ok, retry = self._stop_bucket.peek()
         else:  # pragma: no cover - internal misuse
             raise ValueError(f"unknown lifecycle op {op!r}")
         if not ok:
-            return LifecycleDecision(
-                False, OUTCOME_RATE_LIMITED, retry, "global_bucket")
-        return LifecycleDecision(
-            True, OUTCOME_STARTED if op == "start" else OUTCOME_STOPPED)
+            return LifecycleDecision(False, OUTCOME_RATE_LIMITED, retry, "global_bucket")
+        return LifecycleDecision(True, OUTCOME_STARTED if op == "start" else OUTCOME_STOPPED)
 
-    def stats(self) -> Dict[str, Any]:
+    def stats(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
             "policy": {
@@ -322,8 +325,7 @@ class LifecycleGovernor:
                 "stop_refill_s": self.policy.stop_refill_s,
                 "restart_cooldown_s": self.policy.restart_cooldown_s,
                 "start_retry_cooldown_s": self.policy.start_retry_cooldown_s,
-                "invalid_credential_retry_s":
-                    self.policy.invalid_credential_retry_s,
+                "invalid_credential_retry_s": self.policy.invalid_credential_retry_s,
                 "stop_cooldown_s": self.policy.stop_cooldown_s,
             },
             "counters": dict(self.counters),
@@ -335,8 +337,11 @@ class LifecycleGovernor:
         }
 
     # ------------------------------------------------------------- helpers
-    def _start_cooldown(self, pacer: Optional[_Pacer], status: Any,
-                        ) -> Tuple[float, float]:
+    def _start_cooldown(
+        self,
+        pacer: _Pacer | None,
+        status: Any,
+    ) -> tuple[float, float]:
         """(cooldown_seconds, reference_monotonic) for a start request.
 
         The reference is the timestamp the cooldown is measured FROM:
@@ -347,12 +352,16 @@ class LifecycleGovernor:
         status_value = getattr(status, "value", status)
         if status_value == "invalid_credential" and pacer is not None:
             if pacer.invalid_streak >= policy.invalid_streak_threshold:
-                return (policy.invalid_credential_retry_s,
-                        pacer.last_invalid or pacer.last_failed_start)
+                return (
+                    policy.invalid_credential_retry_s,
+                    pacer.last_invalid or pacer.last_failed_start,
+                )
             if pacer.last_failed_start:
                 return (policy.start_retry_cooldown_s, pacer.last_failed_start)
-        if status_value in ("failed", "missing_credential") \
-                and pacer is not None and pacer.last_failed_start:
+        if (
+            status_value in ("failed", "missing_credential")
+            and pacer is not None
+            and pacer.last_failed_start
+        ):
             return (policy.start_retry_cooldown_s, pacer.last_failed_start)
-        return (policy.restart_cooldown_s,
-                pacer.last_stop if pacer else 0.0)
+        return (policy.restart_cooldown_s, pacer.last_stop if pacer else 0.0)

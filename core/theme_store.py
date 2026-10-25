@@ -21,6 +21,7 @@ envelope, never the semantics):
 Atomic write (tmp + os.replace) so a crash mid-save can never leave a
 truncated file behind.
 """
+
 from __future__ import annotations
 
 import json
@@ -58,8 +59,7 @@ def save(state: dict) -> None:
     except (TypeError, ValueError) as exc:
         raise ValueError(f"theme state is not JSON-serializable: {exc}") from exc
     if len(raw.encode("utf-8")) > MAX_BYTES:
-        raise ValueError(f"theme state too large (>{MAX_BYTES} bytes) — "
-                         "trim the custom CSS")
+        raise ValueError(f"theme state too large (>{MAX_BYTES} bytes) — trim the custom CSS")
     PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = PATH.with_suffix(".json.tmp")
     tmp.write_text(raw, encoding="utf-8")

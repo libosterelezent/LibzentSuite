@@ -694,7 +694,12 @@ class TestUiRegressionContracts(unittest.TestCase):
         event_bus = (ROOT / "core" / "event_bus.py").read_text(encoding="utf-8")
         self.assertIn("class FleetStateChanged(Event):", event_bus)
         bootstrap = (ROOT / "core" / "bootstrap.py").read_text(encoding="utf-8")
-        self.assertIn("publisher=lambda ev: bus.publish_nowait(FleetStateChanged(", bootstrap)
+        # whitespace-normalized: the formatter may wrap the publisher lambda
+        # across lines — the seam is the contract, not its line-wrapping
+        self.assertIn(
+            "publisher=lambda ev: bus.publish_nowait( FleetStateChanged(",
+            " ".join(bootstrap.split()),
+        )
         self.assertIn("FLEET_EVENT_TYPES", SERVER_PATH.read_text(encoding="utf-8"))
         store = (STATIC_DIR / "js" / "store.js").read_text(encoding="utf-8")
         self.assertRegex(store, r"fleet:\s*null")

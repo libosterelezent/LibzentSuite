@@ -15,10 +15,11 @@ every row; legacy rows are still decoded transparently in ``_get``).
 All methods async (aiosqlite underneath). Plugins obtain
 this service through PluginServices (approved plugin API), not directly.
 """
+
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any
 
 from .errors import PluginError
 
@@ -28,11 +29,11 @@ class PluginStateService:
 
     SCOPE_SEPARATOR = ":"
 
-    def __init__(self, kv_repository: Optional[Any] = None) -> None:
+    def __init__(self, kv_repository: Any | None = None) -> None:
         self._kv = kv_repository
 
     # -------------------------------------------------------------- scoping
-    def _key(self, scope: str, owner: Optional[str], key: str) -> str:
+    def _key(self, scope: str, owner: str | None, key: str) -> str:
         """Namespace a user key inside its scope (collision-free)."""
         if not key or any(c in key for c in ("\x00",)):
             raise PluginError(f"state key {key!r} must be a non-empty string")
@@ -56,8 +57,10 @@ class PluginStateService:
         contain the separators (NAME_RE / plugin slugs forbid them).
         """
         for component in (account, plugin):
-            if not component or not isinstance(component, str) or any(
-                c in component for c in (self.SCOPE_SEPARATOR, "/", "\x00")
+            if (
+                not component
+                or not isinstance(component, str)
+                or any(c in component for c in (self.SCOPE_SEPARATOR, "/", "\x00"))
             ):
                 raise PluginError(
                     f"pair scope component {component!r} must be a non-empty "
@@ -102,8 +105,7 @@ class PluginStateService:
         await self._set(self._plugin_key(plugin, key), value)
 
     # ------------------------------------------------------- account+plugin
-    async def get_pair(self, account: str, plugin: str, key: str,
-                       default: Any = None) -> Any:
+    async def get_pair(self, account: str, plugin: str, key: str, default: Any = None) -> Any:
         return await self._get(self._pair_key(account, plugin, key), default)
 
     async def set_pair(self, account: str, plugin: str, key: str, value: Any) -> None:
@@ -164,7 +166,7 @@ class PluginStateService:
         # RAW value: the kv repository JSON-encodes on write (it used to be
         # pre-encoded here, double-encoding every row — and rows written
         # via raw kv.set then read back as the caller's default, silently)
-        payload = ({self._STR_TAG: value} if isinstance(value, str) else value)
+        payload = {self._STR_TAG: value} if isinstance(value, str) else value
         await self._kv.set(stored_key, payload)
 
     async def _delete(self, stored_key: str) -> bool:

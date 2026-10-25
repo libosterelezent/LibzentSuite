@@ -9,17 +9,20 @@ table, in the same transaction style as the other account writes.
 This layer is persistence ONLY: it knows nothing about the pacing engine
 (``RateLimitManager`` runtime synchronization is SyncGroupManager's job).
 """
+
 from __future__ import annotations
 
 import sqlite3
 import time
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING
 
 from core.errors import DatabaseError
-
 from database.models import SyncGroupRecord
 
 from .base import BaseRepository
+
+if TYPE_CHECKING:
+    import builtins
 
 __all__ = ["SyncGroupsRepository"]
 
@@ -66,21 +69,17 @@ class SyncGroupsRepository(BaseRepository):
             raise DatabaseError(f"sync group {name!r} could not be read back")
         return record
 
-    async def get(self, group_id: int) -> Optional[SyncGroupRecord]:
+    async def get(self, group_id: int) -> SyncGroupRecord | None:
         """One group by id (None when unknown)."""
-        row = await self._fetch_one(
-            "SELECT * FROM sync_groups WHERE id = ?", (int(group_id),)
-        )
+        row = await self._fetch_one("SELECT * FROM sync_groups WHERE id = ?", (int(group_id),))
         return _record(row) if row is not None else None
 
-    async def get_by_name(self, name: str) -> Optional[SyncGroupRecord]:
+    async def get_by_name(self, name: str) -> SyncGroupRecord | None:
         """One group by name (None when unknown)."""
-        row = await self._fetch_one(
-            "SELECT * FROM sync_groups WHERE name = ?", (name,)
-        )
+        row = await self._fetch_one("SELECT * FROM sync_groups WHERE name = ?", (name,))
         return _record(row) if row is not None else None
 
-    async def list(self) -> List[SyncGroupRecord]:
+    async def list(self) -> builtins.list[SyncGroupRecord]:
         """All groups ordered by name."""
         rows = await self._fetch_all("SELECT * FROM sync_groups ORDER BY name")
         return [_record(row) for row in rows]
@@ -89,10 +88,10 @@ class SyncGroupsRepository(BaseRepository):
         self,
         group_id: int,
         *,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
-        enabled: Optional[bool] = None,
-    ) -> Optional[SyncGroupRecord]:
+        name: str | None = None,
+        description: str | None = None,
+        enabled: bool | None = None,
+    ) -> SyncGroupRecord | None:
         """Update ONLY the given fields (None = keep); bumps updated_at.
 
         A RENAME rewrites every member's ``accounts.sync_group`` pointer in
@@ -114,12 +113,10 @@ class SyncGroupsRepository(BaseRepository):
                 await conn.execute(
                     "UPDATE sync_groups SET name = ?, description = ?,"
                     " enabled = ?, updated_at = ? WHERE id = ?",
-                    (new_name, new_description, int(new_enabled), time.time(),
-                     int(group_id)),
+                    (new_name, new_description, int(new_enabled), time.time(), int(group_id)),
                 )
             except sqlite3.IntegrityError as exc:
-                raise DatabaseError(
-                    f"sync group {new_name!r} already exists") from exc
+                raise DatabaseError(f"sync group {new_name!r} already exists") from exc
             if new_name != group.name:
                 # keep the membership pointers consistent with the rename
                 await conn.execute(
@@ -134,15 +131,15 @@ class SyncGroupsRepository(BaseRepository):
         Member ACCOUNTS are never touched here — detaching members is the
         manager's decision (it must refuse or explicitly detach first).
         """
-        async with self._tx(f"delete sync group #{group_id}") as conn:
-            async with conn.execute(
-                "DELETE FROM sync_groups WHERE id = ?", (int(group_id),)
-            ) as cur:
-                existed = cur.rowcount > 0
+        async with (
+            self._tx(f"delete sync group #{group_id}") as conn,
+            conn.execute("DELETE FROM sync_groups WHERE id = ?", (int(group_id),)) as cur,
+        ):
+            existed = cur.rowcount > 0
         return existed
 
     # ----------------------------------------------------------- membership
-    async def members(self, group_name: str) -> List[str]:
+    async def members(self, group_name: str) -> builtins.list[str]:
         """Account names whose membership points at this group (sorted)."""
         return [
             row["name"]
@@ -152,7 +149,7 @@ class SyncGroupsRepository(BaseRepository):
             )
         ]
 
-    async def membership_counts(self) -> Dict[str, int]:
+    async def membership_counts(self) -> dict[str, int]:
         """group name -> member count (one GROUP BY; groups with no members
         are simply absent from the map)."""
         return {
@@ -164,19 +161,15 @@ class SyncGroupsRepository(BaseRepository):
             )
         }
 
-    async def account_group_name(self, account: str) -> Optional[str]:
+    async def account_group_name(self, account: str) -> str | None:
         """The group name this account points at (None when none/unknown)."""
-        row = await self._fetch_one(
-            "SELECT sync_group FROM accounts WHERE name = ?", (account,)
-        )
+        row = await self._fetch_one("SELECT sync_group FROM accounts WHERE name = ?", (account,))
         if row is None:
             return None
         group = row["sync_group"]
         return group if group else None
 
-    async def set_account_group(
-        self, account: str, group: Optional[str]
-    ) -> None:
+    async def set_account_group(self, account: str, group: str | None) -> None:
         """Point an account's membership at a group (None = leave every
         group). One membership per account by construction: the UPDATE
         replaces any previous pointer.
@@ -199,7 +192,7 @@ class SyncGroupsRepository(BaseRepository):
                 if cur.rowcount == 0:
                     raise DatabaseError(f"unknown account: {account!r}")
 
-    async def detach_members(self, group_name: str) -> List[str]:
+    async def detach_members(self, group_name: str) -> builtins.list[str]:
         """Clear the membership of every member; returns their names."""
         affected = await self.members(group_name)
         async with self._tx(f"detach members of sync group {group_name!r}") as conn:

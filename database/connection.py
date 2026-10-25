@@ -36,22 +36,26 @@ a read snapshot, and its later write returns SQLITE_BUSY immediately
 connection commits in between — exactly the "sim runner + live" pattern.
 Repos never manage cursors/commits themselves.
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
 import stat
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from time import perf_counter
-from typing import Any, AsyncIterator, List, Optional, Sequence
-
-from .telemetry import TELEMETRY
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
 from core.errors import DatabaseError  # ONE class for the whole framework
+
+from .telemetry import TELEMETRY
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Sequence
 
 LOG = logging.getLogger("libzent.database")
 
@@ -94,8 +98,8 @@ class _TaskGuard:
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
-        self._owner: Optional[asyncio.Task] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._owner: asyncio.Task | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def _check_loop(self) -> None:
         """One connection, one event loop — forever.
@@ -112,7 +116,8 @@ class _TaskGuard:
             raise DatabaseError(
                 "database connection used from multiple event loops; keep one "
                 "Database per loop (use asyncio.run_coroutine_threadsafe to "
-                "submit work to the owning loop)")
+                "submit work to the owning loop)"
+            )
 
     @asynccontextmanager
     async def hold(self) -> AsyncIterator[bool]:
@@ -139,7 +144,8 @@ class _TaskGuard:
                 f"task {task!r} waited for the connection held by "
                 f"{self._owner!r}; awaiting other database work (e.g. gather) "
                 f"inside a write()/read() block deadlocks the single "
-                f"connection")
+                f"connection"
+            )
         self._owner = task
         try:
             yield True
@@ -167,7 +173,7 @@ def _touch_private(path: Path) -> None:
         # through a symlink an attacker parked at the database path.
         fd = os.open(str(path), os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
         os.close(fd)
-    except FileExistsError:
+    except FileExistsError as exc:
         # a normal restart finds the previous boot's REGULAR file — fine.
         # Anything else (a symlink squat would aim the database at another
         # file) is refused loud, never followed: lstat does not resolve it.
@@ -178,7 +184,8 @@ def _touch_private(path: Path) -> None:
         if not stat.S_ISREG(mode):
             raise DatabaseError(
                 f"refusing database path {str(path)!r}: existing entry "
-                f"is not a regular file (symlink?)")
+                f"is not a regular file (symlink?)"
+            ) from exc
     except OSError:
         pass
 
@@ -188,7 +195,7 @@ class DatabaseConnection:
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path) if str(path) != ":memory:" else ":memory:"
-        self._conn: Optional[aiosqlite.Connection] = None
+        self._conn: aiosqlite.Connection | None = None
         self._guard = _TaskGuard()  # one transaction state -> one guard
         self._connect_lock = asyncio.Lock()  # concurrent connect()s leak workers
 
@@ -237,17 +244,18 @@ class DatabaseConnection:
                     conn.row_factory = aiosqlite.Row
                     for pragma in PRAGMAS:
                         # entries are either full "PRAGMA x=y" strings or (name, value)
-                        statement = pragma if isinstance(pragma, str) else (
-                            f"PRAGMA {pragma[0]}={pragma[1]}")
+                        statement = (
+                            pragma
+                            if isinstance(pragma, str)
+                            else (f"PRAGMA {pragma[0]}={pragma[1]}")
+                        )
                         await conn.execute(statement)
                     await conn.commit()
                 except BaseException:
                     # never leak the worker thread when setup fails (it would keep
                     # the interpreter alive at exit)
-                    try:
+                    with suppress(Exception):
                         await conn.close()
-                    except Exception:
-                        pass
                     raise
             finally:
                 os.umask(_umask)
@@ -269,8 +277,9 @@ class DatabaseConnection:
         guard = self._guard
         locked = await guard.acquire_bounded(timeout)
         if not locked:
-            LOG.warning("database close: transaction still running after "
-                        "%.1fs; closing anyway", timeout)
+            LOG.warning(
+                "database close: transaction still running after %.1fs; closing anyway", timeout
+            )
         conn, self._conn = self._conn, None
         try:
             if conn is not None:
@@ -287,8 +296,7 @@ class DatabaseConnection:
 
     def _require(self) -> aiosqlite.Connection:
         if self._conn is None:
-            raise DatabaseError(
-                "database is not connected (await Database.connect() first)")
+            raise DatabaseError("database is not connected (await Database.connect() first)")
         return self._conn
 
     # ------------------------------------------------------------- queries
@@ -312,8 +320,7 @@ class DatabaseConnection:
                     _ok = False
                     raise
                 finally:
-                    TELEMETRY.record("write_stmt", perf_counter() - _t0,
-                                     ok=_ok)
+                    TELEMETRY.record("write_stmt", perf_counter() - _t0, ok=_ok)
                 if outer:
                     await conn.commit()
                 return
@@ -322,8 +329,7 @@ class DatabaseConnection:
             if outer:
                 await conn.commit()
 
-    async def fetch_all(self, sql: str,
-                        params: Sequence[Any] = ()) -> List[aiosqlite.Row]:
+    async def fetch_all(self, sql: str, params: Sequence[Any] = ()) -> list[aiosqlite.Row]:
         async with self._guard.hold():
             conn = self._require()
             if TELEMETRY.enabled:
@@ -343,8 +349,7 @@ class DatabaseConnection:
             async with conn.execute(sql, tuple(params)) as cursor:
                 return list(await cursor.fetchall())
 
-    async def fetch_one(self, sql: str,
-                        params: Sequence[Any] = ()) -> Optional[aiosqlite.Row]:
+    async def fetch_one(self, sql: str, params: Sequence[Any] = ()) -> aiosqlite.Row | None:
         async with self._guard.hold():
             conn = self._require()
             if TELEMETRY.enabled:
@@ -415,8 +420,7 @@ class DatabaseConnection:
                         LOG.debug("rollback failed", exc_info=True)
                     raise
                 finally:
-                    TELEMETRY.record("transaction", perf_counter() - _t0,
-                                     ok=_ok)
+                    TELEMETRY.record("transaction", perf_counter() - _t0, ok=_ok)
                 return
             try:
                 yield conn
@@ -447,4 +451,4 @@ class DatabaseConnection:
             yield self._require()
 
 
-__all__ = ["DatabaseConnection", "DatabaseError", "PRAGMAS"]
+__all__ = ["PRAGMAS", "DatabaseConnection", "DatabaseError"]

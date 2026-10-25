@@ -12,11 +12,15 @@ cascades — cleaning up an account's rows when the account is deleted is
 the account-delete path's job, exactly like the other name-keyed
 per-account tables (``account_profiles``, ``plugin_settings``, ...).
 """
+
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING
 
 from .base import BaseRepository
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 __all__ = ["AccountPluginsRepository"]
 
@@ -34,8 +38,7 @@ class AccountPluginsRepository(BaseRepository):
         """
         async with self._tx(f"assign plugin {plugin!r} to account {account!r}") as conn:
             await conn.execute(
-                "INSERT OR IGNORE INTO account_plugins (account, plugin)"
-                " VALUES (?, ?)",
+                "INSERT OR IGNORE INTO account_plugins (account, plugin) VALUES (?, ?)",
                 (account, plugin),
             )
 
@@ -45,28 +48,25 @@ class AccountPluginsRepository(BaseRepository):
         Deleting a row that is not there is NOT an error — the end state
         ("plugin not assigned") already holds.
         """
-        async with self._tx(
-            f"unassign plugin {plugin!r} from account {account!r}"
-        ) as conn:
+        async with self._tx(f"unassign plugin {plugin!r} from account {account!r}") as conn:
             await conn.execute(
                 "DELETE FROM account_plugins WHERE account = ? AND plugin = ?",
                 (account, plugin),
             )
 
-    async def plugins_of(self, account: str) -> List[str]:
+    async def plugins_of(self, account: str) -> list[str]:
         """Sorted plugin names assigned to this account ([] when none —
         including when the account itself is unknown to the accounts
         table, which this layer never consults)."""
         return [
             row["plugin"]
             for row in await self._fetch_all(
-                "SELECT plugin FROM account_plugins WHERE account = ?"
-                " ORDER BY plugin",
+                "SELECT plugin FROM account_plugins WHERE account = ? ORDER BY plugin",
                 (account,),
             )
         ]
 
-    async def set_plugins(self, account: str, plugins: Iterable[str]) -> List[str]:
+    async def set_plugins(self, account: str, plugins: Iterable[str]) -> list[str]:
         """FULL replacement: the account ends up with exactly ``plugins``.
 
         Delete-then-insert in ONE transaction, so a concurrent reader
@@ -75,29 +75,25 @@ class AccountPluginsRepository(BaseRepository):
         equality checks stable no matter how the caller ordered it.
         Returns the stored sorted list (empty input clears the account).
         """
-        cleaned = sorted({p for p in (plugins or [])})
+        cleaned = sorted(set(plugins or []))
         async with self._tx(f"set plugins of account {account!r}") as conn:
             # Diff rather than wipe: plugins that stay assigned keep their
             # profile binding (account_plugins.profile).
             if cleaned:
                 marks = ",".join("?" * len(cleaned))
                 await conn.execute(
-                    "DELETE FROM account_plugins WHERE account = ?"
-                    f" AND plugin NOT IN ({marks})",
+                    f"DELETE FROM account_plugins WHERE account = ? AND plugin NOT IN ({marks})",
                     (account, *cleaned),
                 )
             else:
-                await conn.execute(
-                    "DELETE FROM account_plugins WHERE account = ?", (account,)
-                )
+                await conn.execute("DELETE FROM account_plugins WHERE account = ?", (account,))
             await conn.executemany(
-                "INSERT OR IGNORE INTO account_plugins (account, plugin)"
-                " VALUES (?, ?)",
+                "INSERT OR IGNORE INTO account_plugins (account, plugin) VALUES (?, ?)",
                 [(account, plugin) for plugin in cleaned],
             )
         return cleaned
 
-    async def all_assignments(self) -> Dict[str, List[str]]:
+    async def all_assignments(self) -> dict[str, list[str]]:
         """Every assignment as ``{account: [plugin, ...]}`` for boot restore.
 
         One bulk read. Accounts with ZERO plugins are OMITTED (they have
@@ -106,10 +102,9 @@ class AccountPluginsRepository(BaseRepository):
         directly. Each account's list is sorted; keys iterate in sorted
         order.
         """
-        assignments: Dict[str, List[str]] = {}
+        assignments: dict[str, list[str]] = {}
         for row in await self._fetch_all(
-            "SELECT account, plugin FROM account_plugins"
-            " ORDER BY account, plugin"
+            "SELECT account, plugin FROM account_plugins ORDER BY account, plugin"
         ):
             assignments.setdefault(row["account"], []).append(row["plugin"])
         return assignments
@@ -119,9 +114,7 @@ class AccountPluginsRepository(BaseRepository):
     # plugin setting profile: NULL = plugin defaults. Kept SEPARATE from
     # the assignment methods above so their return shapes stay frozen —
     # profile-aware consumers use bindings()/all_bindings() instead.
-    async def set_profile(
-        self, account: str, plugin: str, profile: Optional[str]
-    ) -> bool:
+    async def set_profile(self, account: str, plugin: str, profile: str | None) -> bool:
         """Bind the assignment to a profile (None = clear, back to defaults).
 
         UPDATE-only and idempotent: setting the same binding again writes
@@ -131,30 +124,28 @@ class AccountPluginsRepository(BaseRepository):
         manager's rule). Whether the profile NAME exists is not checked
         here either: profile rows belong to PluginProfilesRepository.
         """
-        async with self._tx(
-            f"set plugin profile of {account!r}/{plugin!r} to {profile!r}"
-        ) as conn:
-            async with conn.execute(
-                "UPDATE account_plugins SET profile = ?"
-                " WHERE account = ? AND plugin = ?",
+        async with (
+            self._tx(f"set plugin profile of {account!r}/{plugin!r} to {profile!r}") as conn,
+            conn.execute(
+                "UPDATE account_plugins SET profile = ? WHERE account = ? AND plugin = ?",
                 (profile, account, plugin),
-            ) as cur:
-                return cur.rowcount > 0
+            ) as cur,
+        ):
+            return cur.rowcount > 0
 
-    async def bindings(self, account: str) -> Dict[str, Optional[str]]:
+    async def bindings(self, account: str) -> dict[str, str | None]:
         """``{plugin: profile name or None}`` for every plugin assigned to
         the account ({} when none — including when the account itself is
         unknown to the accounts table, which this layer never consults)."""
         return {
             row["plugin"]: row["profile"]
             for row in await self._fetch_all(
-                "SELECT plugin, profile FROM account_plugins"
-                " WHERE account = ? ORDER BY plugin",
+                "SELECT plugin, profile FROM account_plugins WHERE account = ? ORDER BY plugin",
                 (account,),
             )
         }
 
-    async def all_bindings(self) -> Dict[str, Dict[str, Optional[str]]]:
+    async def all_bindings(self) -> dict[str, dict[str, str | None]]:
         """Every binding as ``{account: {plugin: profile or None}}``.
 
         One bulk read for boot restore, shaped like all_assignments but
@@ -162,10 +153,9 @@ class AccountPluginsRepository(BaseRepository):
         OMITTED by the same convention (``bindings.get(account, {})``).
         Keys iterate in sorted order.
         """
-        out: Dict[str, Dict[str, Optional[str]]] = {}
+        out: dict[str, dict[str, str | None]] = {}
         for row in await self._fetch_all(
-            "SELECT account, plugin, profile FROM account_plugins"
-            " ORDER BY account, plugin"
+            "SELECT account, plugin, profile FROM account_plugins ORDER BY account, plugin"
         ):
             out.setdefault(row["account"], {})[row["plugin"]] = row["profile"]
         return out

@@ -21,32 +21,33 @@ Design decisions (documented per the INTEGRATION ground rules):
   rate; the floor still applies on every path.
 * persistence is best-effort: pacing safety never depends on the database.
 """
+
 from .engine import (
-    Clock,
-    Grant,
     KV_FLOOR_KEY,
     KV_LANE_KEY,
     KV_REMOVED_KEY,
+    UNSTUDIED_ACTION_INTERVAL,
+    Clock,
+    Grant,
     ManualClock,
     RateLimitManager,
     SystemClock,
-    UNSTUDIED_ACTION_INTERVAL,
 )
 from .lane import MAX_PREFIXRATE, GlobalSendLane
 from .policies import MIN_ACTION_INTERVAL, RatePolicy
 
 __all__ = [
-    "RateLimitManager",
-    "RatePolicy",
-    "Grant",
+    "KV_FLOOR_KEY",
+    "KV_LANE_KEY",
+    "KV_REMOVED_KEY",
+    "MAX_PREFIXRATE",
     "MIN_ACTION_INTERVAL",
     "UNSTUDIED_ACTION_INTERVAL",
-    "GlobalSendLane",
-    "MAX_PREFIXRATE",
     "Clock",
-    "SystemClock",
+    "GlobalSendLane",
+    "Grant",
     "ManualClock",
-    "KV_LANE_KEY",
-    "KV_FLOOR_KEY",
-    "KV_REMOVED_KEY",
+    "RateLimitManager",
+    "RatePolicy",
+    "SystemClock",
 ]

@@ -6,14 +6,18 @@ through ``_tx`` (serialized transaction context). SQL stays inside repos;
 core services consume repository methods; plugins consume plugin-facing
 services — never this layer (spec §30/§31).
 """
+
 from __future__ import annotations
 
 import json
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Optional, Sequence
+from typing import TYPE_CHECKING, Any
 
 from ..connection import DatabaseError
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Sequence
 
 LOG = logging.getLogger("libzent.database")
 
@@ -25,7 +29,7 @@ __all__ = ["BaseRepository", "loads_tolerant"]
 CORRUPT = object()
 
 
-def loads_tolerant(raw: Optional[str], default: Any, context: str) -> Any:
+def loads_tolerant(raw: str | None, default: Any, context: str) -> Any:
     """``json.loads`` with a safety net: corrupt/missing values return ``default``.
 
     Never raises — a damaged row must not take the framework down. Reads
@@ -49,16 +53,16 @@ class BaseRepository:
         self._db = database
 
     # ------------------------------------------------------------------ reads
-    async def _fetch_all(self, sql: str, params: Sequence[Any] = (),
-                         *, what: str = "read") -> list:
+    async def _fetch_all(self, sql: str, params: Sequence[Any] = (), *, what: str = "read") -> list:
         """SELECT -> all rows (WAL read; never takes the writer lock)."""
         try:
             return await self._db.connection.fetch_all(sql, params)
         except Exception as exc:
             raise DatabaseError(f"database {what} failed: {exc}") from exc
 
-    async def _fetch_one(self, sql: str, params: Sequence[Any] = (),
-                         *, what: str = "read") -> Optional[Any]:
+    async def _fetch_one(
+        self, sql: str, params: Sequence[Any] = (), *, what: str = "read"
+    ) -> Any | None:
         """SELECT -> first row or None."""
         try:
             return await self._db.connection.fetch_one(sql, params)

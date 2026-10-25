@@ -1,11 +1,11 @@
 """Small asyncio helpers shared by the event bus and the task scheduler."""
+
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
 
 
-def cancellation_attributable(task: Optional["asyncio.Task"] = None) -> bool:
+def cancellation_attributable(task: asyncio.Task | None = None) -> bool:
     """True when this interpreter can TELL an outer ``Task.cancel()`` apart
     from a handler that merely raised ``CancelledError`` internally.
 
@@ -20,8 +20,7 @@ def cancellation_attributable(task: Optional["asyncio.Task"] = None) -> bool:
     return getattr(task, "cancelling", None) is not None
 
 
-def outer_cancel_pending(task: Optional["asyncio.Task"] = None, *,
-                          unknown: bool = False) -> bool:
+def outer_cancel_pending(task: asyncio.Task | None = None, *, unknown: bool = False) -> bool:
     """True when ``task`` (default: the current one) has a PENDING cancel
     request from outside (``Task.cancel()``), as opposed to a handler that
     merely raised ``CancelledError`` by itself.
@@ -46,4 +45,4 @@ def outer_cancel_pending(task: Optional["asyncio.Task"] = None, *,
         return unknown
 
 
-__all__ = ["outer_cancel_pending", "cancellation_attributable"]
+__all__ = ["cancellation_attributable", "outer_cancel_pending"]

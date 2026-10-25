@@ -33,13 +33,15 @@ DESIGN — how sends await task completion (the lead asked for this):
     plugins treat the calls as fire-and-await-ack. Callers wanting the
     message shape can use ``scheduler.get(task_id)`` / history.
 """
+
 from __future__ import annotations
 
 import asyncio
-import re
+import contextlib
 import logging
+import re
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..errors import (
     AccessDenied,
@@ -62,6 +64,9 @@ from ..event_bus import (
 from ..priority import Priority
 from .cache import DiscordCache, resolve_dm_channel
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 LOG = logging.getLogger("libzent.services")
 
 
@@ -77,7 +82,7 @@ class TaskAckRegistry:
         """
         self._bus = bus
         self._scheduler = scheduler
-        self._futures: Dict[int, "asyncio.Future[Any]"] = {}
+        self._futures: dict[int, asyncio.Future[Any]] = {}
         bus.subscribe(TaskCompleted, self._on_completed)
         bus.subscribe(TaskFailed, self._on_failed)
         bus.subscribe(TaskCancelled, self._on_cancelled)
@@ -90,7 +95,7 @@ class TaskAckRegistry:
 
     #: FlowBlocked family, reconstructed across the task-ack seam so the
     #: plugin-side catch (the flow-abort contract) actually fires
-    _FLOW_CLASSES = {
+    _FLOW_CLASSES: ClassVar[dict[str, type[Exception]]] = {
         "FlowBlocked": FlowBlocked,
         "CacheInvalid": CacheInvalid,
         "TargetGone": TargetGone,
@@ -107,7 +112,7 @@ class TaskAckRegistry:
     #: Constructed with a single message string (not the (account, reason)
     #: FlowBlocked shape). ``ServerRateLimit`` stays UNMAPPED: the scheduler
     #: always retries it at least once, so it stays retried-invisible here.
-    _TRANSIENT_CLASSES = {
+    _TRANSIENT_CLASSES: ClassVar[dict[str, type[Exception]]] = {
         "ConnectionError": ConnectionError,
         "TimeoutError": TimeoutError,
         # stdlib subclasses: reconstructed as their own type so plugins
@@ -125,17 +130,13 @@ class TaskAckRegistry:
         kind = getattr(event, "error_kind", "") or ""
         blocked = self._FLOW_CLASSES.get(kind)
         if blocked is not None:
-            future.set_exception(
-                blocked(event.account, self._flow_reason(event.error))
-            )
+            future.set_exception(blocked(event.account, self._flow_reason(event.error)))
             return
         transient = self._TRANSIENT_CLASSES.get(kind)
         if transient is not None:
             future.set_exception(transient(self._flow_reason(event.error)))
             return
-        future.set_exception(
-            SchedulerError(f"task {event.task_id} failed: {event.error}")
-        )
+        future.set_exception(SchedulerError(f"task {event.task_id} failed: {event.error}"))
 
     @staticmethod
     def _flow_reason(error: str) -> str:
@@ -151,12 +152,10 @@ class TaskAckRegistry:
     def _on_cancelled(self, event: TaskCancelled) -> None:
         future = self._futures.pop(event.task_id, None)
         if future is not None and not future.done():
-            future.set_exception(
-                SchedulerError(f"task {event.task_id} was cancelled")
-            )
+            future.set_exception(SchedulerError(f"task {event.task_id} was cancelled"))
 
     # --------------------------------------------------------------- await
-    def register(self, task_id: int) -> "asyncio.Future[Any]":
+    def register(self, task_id: int) -> asyncio.Future[Any]:
         """Create + register the future for ``task_id`` (loop-safe).
 
         Raises SchedulerError when a LIVE future already exists for the
@@ -166,10 +165,8 @@ class TaskAckRegistry:
         """
         existing = self._futures.get(task_id)
         if existing is not None and not existing.done():
-            raise SchedulerError(
-                f"task {task_id} is already being awaited"
-            )
-        future: "asyncio.Future[Any]" = asyncio.get_running_loop().create_future()
+            raise SchedulerError(f"task {task_id} is already being awaited")
+        future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._futures[task_id] = future
         return future
 
@@ -197,17 +194,16 @@ class TaskAckRegistry:
         except asyncio.TimeoutError:
             self._futures.pop(task_id, None)
             cancel = getattr(self._scheduler, "cancel", None)
-            if callable(cancel):  # best-effort: queued tasks die now instead
-                try:  # of delivering a surprise duplicate later
+            # best-effort: queued tasks die now instead of delivering a
+            # surprise duplicate later
+            if callable(cancel):
+                with contextlib.suppress(Exception):
                     cancel(task_id)
-                except Exception:
-                    pass
             raise SchedulerError(
-                f"task {task_id} did not complete within {timeout:.0f}s "
-                "(cancelled)"
+                f"task {task_id} did not complete within {timeout:.0f}s (cancelled)"
             ) from None
 
-    def pending(self) -> List[int]:
+    def pending(self) -> list[int]:
         """Task ids currently awaited (introspection/tests)."""
         return sorted(self._futures)
 
@@ -231,7 +227,7 @@ class MessageWaiterRegistry:
     """
 
     def __init__(self, bus: EventBus) -> None:
-        self._by_account: Dict[str, List[Callable[[MessageReceived], None]]] = {}
+        self._by_account: dict[str, list[Callable[[MessageReceived], None]]] = {}
         self._unsub = bus.subscribe(MessageReceived, self._on_message)
 
     def _on_message(self, event: Event) -> None:
@@ -246,16 +242,14 @@ class MessageWaiterRegistry:
             except Exception:  # isolation: the waiter owns its failure
                 LOG.debug("message waiter raised", exc_info=True)
 
-    def add(self, account: str,
-            handler: Callable[[MessageReceived], None]) -> Callable[[], None]:
+    def add(self, account: str, handler: Callable[[MessageReceived], None]) -> Callable[[], None]:
         """Register one waiter; returns the idempotent unsubscribe."""
         self._by_account.setdefault(account, []).append(handler)
 
         def _remove() -> None:
-            try:
+            with contextlib.suppress(ValueError):
                 self._by_account.get(account, []).remove(handler)
-            except ValueError:
-                pass
+
         return _remove
 
     def forget_account(self, account: str) -> None:
@@ -267,7 +261,7 @@ class MessageWaiterRegistry:
             self._unsub()
             self._unsub = None
 
-    def pending(self) -> Dict[str, int]:
+    def pending(self) -> dict[str, int]:
         return {name: len(hs) for name, hs in self._by_account.items()}
 
 
@@ -297,10 +291,10 @@ class AccountPluginServices:
         scheduler: Any,
         credentials: Any,
         cache: DiscordCache,
-        settings_dict: Optional[Dict[str, Any]] = None,
-        ack_registry: Optional[TaskAckRegistry] = None,
-        waiter_registry: Optional[MessageWaiterRegistry] = None,
-        client_getter: Optional[Callable[[], Any]] = None,
+        settings_dict: dict[str, Any] | None = None,
+        ack_registry: TaskAckRegistry | None = None,
+        waiter_registry: MessageWaiterRegistry | None = None,
+        client_getter: Callable[[], Any] | None = None,
         api_cache_repo: Any = None,
         cooldowns: Any = None,
         plugin_state: Any = None,
@@ -313,7 +307,7 @@ class AccountPluginServices:
         self._credentials = credentials
         self._cache = cache
         #: live settings view — the plugin manager refreshes this dict IN PLACE
-        self._settings_dict: Dict[str, Any] = (
+        self._settings_dict: dict[str, Any] = (
             settings_dict if isinstance(settings_dict, dict) else {}
         )
         self._ack_registry = ack_registry
@@ -346,7 +340,7 @@ class AccountPluginServices:
         return self._client_getter() if self._client_getter is not None else None
 
     @property
-    def account_username(self) -> Optional[str]:
+    def account_username(self) -> str | None:
         """The account's own Discord username (None offline/pre-connect).
 
         Used to attribute Mudae's per-user limit messages ("**name**,
@@ -371,8 +365,12 @@ class AccountPluginServices:
         ``task_ack_timeout``, or when ``scheduler.submit`` rejects the task.
         """
         task = self._scheduler.submit(
-            self._account, self._plugin, "message",
-            channel_id=int(channel_id), content=content, priority=priority,
+            self._account,
+            self._plugin,
+            "message",
+            channel_id=int(channel_id),
+            content=content,
+            priority=priority,
         )
         await self._acks.wait_for_task(task.id, self.task_ack_timeout)
         return None
@@ -382,8 +380,12 @@ class AccountPluginServices:
     ) -> None:
         """Send a DM through the task pipeline (fire-and-ack; see send_message)."""
         task = self._scheduler.submit(
-            self._account, self._plugin, "dm",
-            user_id=int(user_id), content=content, priority=priority,
+            self._account,
+            self._plugin,
+            "dm",
+            user_id=int(user_id),
+            content=content,
+            priority=priority,
         )
         await self._acks.wait_for_task(task.id, self.task_ack_timeout)
         return None
@@ -396,12 +398,16 @@ class AccountPluginServices:
         both, so a DM is resolved once per account lifetime, not per boot).
         """
         return await resolve_dm_channel(
-            self._cache, self._client(), int(user_id), self._account,
+            self._cache,
+            self._client(),
+            int(user_id),
+            self._account,
             self._api_cache,
         )
 
-    async def add_reaction(self, channel_id: int, message_id: int, emoji: str,
-                           *, priority: Priority = Priority.NORMAL) -> None:
+    async def add_reaction(
+        self, channel_id: int, message_id: int, emoji: str, *, priority: Priority = Priority.NORMAL
+    ) -> None:
         """React to a message through the paced pipeline (kakerareact).
 
         The emoji is the task payload; pacing/floor/lane/audit apply exactly
@@ -409,20 +415,34 @@ class AccountPluginServices:
         robotic timing gets flagged).
         """
         task = self._scheduler.submit(
-            self._account, self._plugin, "reaction",
-            channel_id=int(channel_id), message_id=int(message_id),
-            content=str(emoji), priority=priority,
+            self._account,
+            self._plugin,
+            "reaction",
+            channel_id=int(channel_id),
+            message_id=int(message_id),
+            content=str(emoji),
+            priority=priority,
         )
         await self._acks.wait_for_task(task.id, self.task_ack_timeout)
 
-    async def click_button(self, channel_id: int, message_id: int, custom_id: str,
-                           *, priority: Priority = Priority.NORMAL) -> None:
+    async def click_button(
+        self,
+        channel_id: int,
+        message_id: int,
+        custom_id: str,
+        *,
+        priority: Priority = Priority.NORMAL,
+    ) -> None:
         """Click a message component by custom_id (kakeraloot) — paced,
         audited, with the adapter resolving the live message on demand."""
         task = self._scheduler.submit(
-            self._account, self._plugin, "button",
-            channel_id=int(channel_id), message_id=int(message_id),
-            content=str(custom_id), priority=priority,
+            self._account,
+            self._plugin,
+            "button",
+            channel_id=int(channel_id),
+            message_id=int(message_id),
+            content=str(custom_id),
+            priority=priority,
         )
         await self._acks.wait_for_task(task.id, self.task_ack_timeout)
 
@@ -457,13 +477,16 @@ class AccountPluginServices:
                 fresh_name = str(user.get("name") or "")
             else:
                 fresh_name = str(getattr(user, "name", "") or "")
-            try:
-                await self._api_cache.set(self._account, "user", str(user_id), {
-                    "id": user_id,
-                    "name": fresh_name,
-                })
-            except Exception:
-                pass
+            with contextlib.suppress(Exception):
+                await self._api_cache.set(
+                    self._account,
+                    "user",
+                    str(user_id),
+                    {
+                        "id": user_id,
+                        "name": fresh_name,
+                    },
+                )
         return user
 
     # ------------------------------------------------------------- cooldowns
@@ -476,9 +499,15 @@ class AccountPluginServices:
             )
         return self._cooldowns
 
-    async def cooldown_set(self, key: str, duration_s: float, *,
-                           source: str = "plugin", reason: str = "",
-                           metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def cooldown_set(
+        self,
+        key: str,
+        duration_s: float,
+        *,
+        source: str = "plugin",
+        reason: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Start (or replace) a cooldown for THIS (account, plugin) pair.
 
         ``duration_s`` seconds from NOW; the absolute expiry is persisted,
@@ -486,34 +515,31 @@ class AccountPluginServices:
         Returns the cooldown row (never contains token material).
         """
         return await self._require_cooldowns().set(
-            self._account, self._plugin, key, duration_s,
-            source=source, reason=reason, metadata=metadata,
+            self._account,
+            self._plugin,
+            key,
+            duration_s,
+            source=source,
+            reason=reason,
+            metadata=metadata,
         )
 
     async def cooldown_remaining(self, key: str) -> float:
         """Seconds left on a cooldown (0.0 when none/expired)."""
-        return await self._require_cooldowns().remaining(
-            self._account, self._plugin, key
-        )
+        return await self._require_cooldowns().remaining(self._account, self._plugin, key)
 
     async def cooldown_active(self, key: str) -> bool:
         """True when a cooldown is currently active for this key."""
-        return await self._require_cooldowns().is_active(
-            self._account, self._plugin, key
-        )
+        return await self._require_cooldowns().is_active(self._account, self._plugin, key)
 
     async def cooldown_clear(self, key: str) -> bool:
         """Remove one cooldown (memory + database); True when it existed."""
-        return await self._require_cooldowns().clear(
-            self._account, self._plugin, key
-        )
+        return await self._require_cooldowns().clear(self._account, self._plugin, key)
 
-    async def cooldown_list(self) -> List[Dict[str, Any]]:
+    async def cooldown_list(self) -> list[dict[str, Any]]:
         """Every ACTIVE cooldown of this (account, plugin) pair, soonest
         expiry first."""
-        return await self._require_cooldowns().active_for(
-            self._account, plugin=self._plugin
-        )
+        return await self._require_cooldowns().active_for(self._account, plugin=self._plugin)
 
     # ----------------------------------------------------------- plugin state
     def _require_plugin_state(self) -> Any:
@@ -534,16 +560,12 @@ class AccountPluginServices:
 
     async def state_set(self, key: str, value: Any) -> None:
         """Persist one value in this (account, plugin) scope (JSON value)."""
-        await self._require_plugin_state().set_pair(
-            self._account, self._plugin, key, value
-        )
+        await self._require_plugin_state().set_pair(self._account, self._plugin, key, value)
 
     async def state_delete(self, key: str) -> bool:
         """Delete one value from this (account, plugin) scope; True when it
         existed."""
-        return await self._require_plugin_state().delete_pair(
-            self._account, self._plugin, key
-        )
+        return await self._require_plugin_state().delete_pair(self._account, self._plugin, key)
 
     # -------------------------------------------- plugin data (PHASE 10/B3)
     def _require_plugin_data(self) -> Any:
@@ -556,48 +578,51 @@ class AccountPluginServices:
             )
         return self._plugin_data
 
-    async def data_get(self, guild_id: str = "0",
-                       channel_id: str = "0") -> Optional[Dict[str, Any]]:
+    async def data_get(self, guild_id: str = "0", channel_id: str = "0") -> dict[str, Any] | None:
         """Read ONE AccountPluginData document from the FIXED scope
         lattice (account -> plugin -> guild -> channel; "0" = the
         plugin-global/guild-level sentinel). Returns the document dict
         ({"data", "version", "updated_at"}) or None — STANDALONE COPIES
         never fall through to a parent scope."""
         return await self._require_plugin_data().get(
-            self._account, self._plugin,
-            guild_id=guild_id, channel_id=channel_id)
+            self._account, self._plugin, guild_id=guild_id, channel_id=channel_id
+        )
 
-    async def data_put(self, guild_id: str, channel_id: str, data: Any, *,
-                       expected_version: Optional[int] = None
-                       ) -> Dict[str, Any]:
+    async def data_put(
+        self, guild_id: str, channel_id: str, data: Any, *, expected_version: int | None = None
+    ) -> dict[str, Any]:
         """Write one document in this (account, plugin) scope. The
         optimistic guard: pass the version you READ (VersionConflict on
         a racing writer — refetch and re-apply); omit for the simple
         last-writer-wins path."""
         return await self._require_plugin_data().put(
-            self._account, self._plugin, guild_id, channel_id, data,
-            expected_version=expected_version)
+            self._account,
+            self._plugin,
+            guild_id,
+            channel_id,
+            data,
+            expected_version=expected_version,
+        )
 
-    async def data_list(self, *, guild_id: Optional[str] = None,
-                        channel_id: Optional[str] = None
-                        ) -> List[Dict[str, Any]]:
+    async def data_list(
+        self, *, guild_id: str | None = None, channel_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Every document this (account, plugin) pair stored (optionally
         filtered by scope dimensions) — the UI's universal browser."""
         return await self._require_plugin_data().list(
-            self._account, self._plugin,
-            guild_id=guild_id, channel_id=channel_id)
+            self._account, self._plugin, guild_id=guild_id, channel_id=channel_id
+        )
 
-    async def data_delete(self, guild_id: str = "0",
-                          channel_id: str = "0") -> bool:
+    async def data_delete(self, guild_id: str = "0", channel_id: str = "0") -> bool:
         """Remove one document (True when it existed)."""
         return await self._require_plugin_data().delete(
-            self._account, self._plugin,
-            guild_id=guild_id, channel_id=channel_id)
+            self._account, self._plugin, guild_id=guild_id, channel_id=channel_id
+        )
 
     # -------------------------------------------------------------- inbound
     async def wait_for_message(
         self, check: Callable[[MessageReceived], bool], timeout: float
-    ) -> Optional[MessageReceived]:
+    ) -> MessageReceived | None:
         """Wait for ONE matching inbound message; ``None`` on timeout.
 
         Fast-returns on the FIRST match (ported audit fix — it must not sit
@@ -606,11 +631,9 @@ class AccountPluginServices:
         bus logger.
         """
         if not isinstance(timeout, (int, float)) or timeout <= 0:
-            raise AccountError(
-                f"wait_for_message timeout must be > 0, got {timeout!r}"
-            )
+            raise AccountError(f"wait_for_message timeout must be > 0, got {timeout!r}")
         loop = asyncio.get_running_loop()
-        future: "asyncio.Future[MessageReceived]" = loop.create_future()
+        future: asyncio.Future[MessageReceived] = loop.create_future()
 
         def _handler(event: Event) -> None:
             if not isinstance(event, MessageReceived) or event.account != self._account:
@@ -619,11 +642,13 @@ class AccountPluginServices:
                 match = bool(check(event))
             except Exception as exc:  # surface raising checks to the waiter
                 if not future.done():
-                    future.set_exception(AccountError(
-                        f"wait_for_message check failed on account "
-                        f"{self._account!r} plugin {self._plugin!r}: "
-                        f"{type(exc).__name__}: {exc}"
-                    ))
+                    future.set_exception(
+                        AccountError(
+                            f"wait_for_message check failed on account "
+                            f"{self._account!r} plugin {self._plugin!r}: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    )
                 return
             if match and not future.done():
                 future.set_result(event)
@@ -645,7 +670,7 @@ class AccountPluginServices:
 
     async def collect_messages(
         self, check: Callable[[MessageReceived], bool], idle_timeout: float
-    ) -> List[MessageReceived]:
+    ) -> list[MessageReceived]:
         """Collect matching messages until ``idle_timeout`` passes unmatched.
 
         Idle-window semantics ported from the audited container: EVERY match
@@ -655,11 +680,9 @@ class AccountPluginServices:
         "no messages").
         """
         if not isinstance(idle_timeout, (int, float)) or idle_timeout <= 0:
-            raise AccountError(
-                f"collect_messages idle_timeout must be > 0, got {idle_timeout!r}"
-            )
-        queue: "asyncio.Queue[MessageReceived]" = asyncio.Queue()
-        failure: List[BaseException] = []
+            raise AccountError(f"collect_messages idle_timeout must be > 0, got {idle_timeout!r}")
+        queue: asyncio.Queue[MessageReceived] = asyncio.Queue()
+        failure: list[BaseException] = []
 
         def _handler(event: Event) -> None:
             if not isinstance(event, MessageReceived) or event.account != self._account:
@@ -682,7 +705,7 @@ class AccountPluginServices:
             unsubscribe = self._waiter_registry.add(self._account, _handler)
         else:
             unsubscribe = self._bus.subscribe(MessageReceived, _handler)
-        collected: List[MessageReceived] = []
+        collected: list[MessageReceived] = []
         try:
             while True:
                 if failure:
@@ -738,7 +761,7 @@ class AccountPluginServices:
         return self._plugin
 
     @property
-    def settings(self) -> Dict[str, Any]:
+    def settings(self) -> dict[str, Any]:
         """LIVE resolved settings dict — refreshed in place by the plugin manager."""
         return self._settings_dict
 

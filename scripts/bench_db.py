@@ -27,6 +27,7 @@ run 3x and compare medians before drawing conclusions.
 Usage:
     python3 scripts/bench_db.py [--records 1000] [--repeat 3]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -137,8 +138,16 @@ async def bench_legacy_inline(n: int, tmp: Path) -> dict:
             conn.execute(
                 "INSERT INTO logs (ts, severity, source, account, plugin,"
                 " task_id, event, message) VALUES (?,?,?,?,?,?,?,?)",
-                (e["ts"], e["severity"], e["source"], e["account"], e["plugin"],
-                 e["task_id"], e["event"], e["message"]),
+                (
+                    e["ts"],
+                    e["severity"],
+                    e["source"],
+                    e["account"],
+                    e["plugin"],
+                    e["task_id"],
+                    e["event"],
+                    e["message"],
+                ),
             )
             conn.commit()
     finally:
@@ -164,8 +173,14 @@ async def bench_queued_aiosqlite(n: int, tmp: Path) -> dict:
     t0 = loop.time()
     for i in range(n):
         e = make_entry(i)
-        service.record(e["severity"], e["source"], e["message"],
-                       account=e["account"], plugin=e["plugin"], event=e["event"])
+        service.record(
+            e["severity"],
+            e["source"],
+            e["message"],
+            account=e["account"],
+            plugin=e["plugin"],
+            event=e["event"],
+        )
     # wait until every record hit the database (queue fully drained)
     deadline = loop.time() + 60.0
     while loop.time() < deadline:
@@ -184,8 +199,9 @@ async def bench_queued_aiosqlite(n: int, tmp: Path) -> dict:
 
 
 def render_table(results: list[tuple[str, dict]]) -> str:
-    header = (f"{'harness':<22}{'records':>8}{'wall':>9}{'max stall':>11}"
-              f"{'med stall':>11}{'per-rec':>9}")
+    header = (
+        f"{'harness':<22}{'records':>8}{'wall':>9}{'max stall':>11}{'med stall':>11}{'per-rec':>9}"
+    )
     lines = [header, "-" * len(header)]
     for name, r in results:
         per_rec_ms = (r["wall_s"] / r["records"] * 1000.0) if r["records"] else float("nan")
@@ -198,10 +214,13 @@ def render_table(results: list[tuple[str, dict]]) -> str:
 
 
 async def main_async(records: int, repeat: int) -> int:
-    print(f"bench_db — {records} persisted log records per harness, "
-          f"{repeat} run(s) each (spec §40)")
-    print("stall = longest continuous period the event loop could not run "
-          "other work (ticker, ~1ms resolution)\n")
+    print(
+        f"bench_db — {records} persisted log records per harness, {repeat} run(s) each (spec §40)"
+    )
+    print(
+        "stall = longest continuous period the event loop could not run "
+        "other work (ticker, ~1ms resolution)\n"
+    )
     all_results: list[tuple[str, dict]] = []
     with tempfile.TemporaryDirectory(prefix="sm-bench-") as raw:
         tmp = Path(raw)

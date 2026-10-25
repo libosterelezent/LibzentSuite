@@ -17,16 +17,20 @@ revoked) the cache raises a :class:`core.errors.TargetGone` (a
 ``FlowBlocked`` subclass) with a human reason — that account's plugin flow
 stops while every other account keeps running.
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from ..errors import AccountError, FlowBlocked, TargetGone
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 LOG = logging.getLogger("libzent.cache")
 
@@ -44,11 +48,11 @@ class ChannelInfo:
 
     channel_id: int
     name: str = ""
-    guild_id: Optional[int] = None
+    guild_id: int | None = None
     dm: bool = False
-    recipient: Optional[int] = None
+    recipient: int | None = None
     deleted: bool = False
-    gone_since: Optional[float] = None
+    gone_since: float | None = None
 
 
 class DiscordCache:
@@ -57,19 +61,19 @@ class DiscordCache:
     def __init__(self, account: str) -> None:
         """``account``: owning account name (used in every error message)."""
         self.account = account
-        self.user_id: Optional[int] = None
+        self.user_id: int | None = None
         self.user_name: str = ""
-        self.guilds: Dict[int, Dict[str, Any]] = {}
-        self.channels: Dict[int, ChannelInfo] = {}
+        self.guilds: dict[int, dict[str, Any]] = {}
+        self.channels: dict[int, ChannelInfo] = {}
         #: recipient user_id -> DM channel id index (stale-start audit):
         #: dm_channel_for used to be an O(channels) scan on EVERY DM send
         #: — with thousands of guild channels cached that dominated the
         #: hot path. Maintained by record_dm / ingest_snapshot; entries
         #: are advisory (dm_channel_for falls back to the scan when the
         #: recipient is absent, so pre-index rows keep working).
-        self._dm_index: Dict[int, int] = {}
+        self._dm_index: dict[int, int] = {}
         #: listeners notified on invalidations (manager logs / dashboard)
-        self._on_invalidate: List[Callable[[str, int, str], None]] = []
+        self._on_invalidate: list[Callable[[str, int, str], None]] = []
         #: single-flight lock serializing DM resolution + invalidation for
         #: this account (shared by resolve_dm_channel/invalidate_dm_channel:
         #: a plugin-side open_dm and a lane dm send must dedupe to ONE
@@ -80,7 +84,7 @@ class DiscordCache:
         self.ready = False
 
     # ------------------------------------------------------------ ingestion
-    def ingest_snapshot(self, snapshot: Dict[str, Any]) -> None:
+    def ingest_snapshot(self, snapshot: dict[str, Any]) -> None:
         """Replace/merge cache contents from a client ``cached_snapshot``.
 
         Zero fetches: only what the client already holds. DM merge rule
@@ -122,15 +126,17 @@ class DiscordCache:
         # deleted=True entry was retained forever (gone_since existed
         # precisely for this sweep); a fresh READY is the truth point.
         cutoff = time.time() - 86400.0  # gone >24h: not coming back quietly
-        stale = [cid for cid, info in self.channels.items()
-                 if info.deleted and info.gone_since is not None
-                 and info.gone_since < cutoff]
+        stale = [
+            cid
+            for cid, info in self.channels.items()
+            if info.deleted and info.gone_since is not None and info.gone_since < cutoff
+        ]
         for cid in stale:
             del self.channels[cid]
         if stale:  # drop index entries pointing at swept channels
             self._dm_index = {
-                recipient: cid for recipient, cid in self._dm_index.items()
-                if cid in self.channels}
+                recipient: cid for recipient, cid in self._dm_index.items() if cid in self.channels
+            }
         self.ready = True
 
     # ------------------------------------------------------------ DM helper
@@ -138,7 +144,7 @@ class DiscordCache:
         """Count of live (non-deleted) DM channels — details page metric."""
         return sum(1 for c in self.channels.values() if c.dm and not c.deleted)
 
-    def dm_channel_for(self, user_id: int) -> Optional[int]:
+    def dm_channel_for(self, user_id: int) -> int | None:
         """Cached DM channel id for ``user_id`` (None when not cached).
 
         O(1) through the recipient index; falls back to the legacy scan
@@ -155,8 +161,7 @@ class DiscordCache:
                 return info.channel_id
         return None
 
-    def _reindex_dm(self, channel_id: int, was: Optional[int],
-                    now: Optional[int]) -> None:
+    def _reindex_dm(self, channel_id: int, was: int | None, now: int | None) -> None:
         """Maintain the recipient→channel index across one DM row update.
 
         Drops a stale mapping only when THIS channel owned it (a different
@@ -168,7 +173,7 @@ class DiscordCache:
         if now is not None:
             self._dm_index[now] = channel_id
 
-    def record_dm(self, channel_id: int, recipient: Optional[int]) -> ChannelInfo:
+    def record_dm(self, channel_id: int, recipient: int | None) -> ChannelInfo:
         """Record a DM channel learned AFTER READY (via ``client.open_dm``).
 
         Creates the entry or refreshes the recipient on an existing one (the
@@ -193,8 +198,7 @@ class DiscordCache:
         info.gone_since = None
         return info
 
-    def learn_channel(self, channel_id: int, guild_id: Optional[int],
-                      name: str = "") -> None:
+    def learn_channel(self, channel_id: int, guild_id: int | None, name: str = "") -> None:
         """Teach the cache a channel seen in INBOUND traffic.
 
         The READY snapshot is the only other teacher — without this, a
@@ -210,7 +214,8 @@ class DiscordCache:
             )
             return
         self.channels[channel_id] = ChannelInfo(
-            channel_id=channel_id, name=name or f"channel-{channel_id}",
+            channel_id=channel_id,
+            name=name or f"channel-{channel_id}",
             guild_id=guild_id,
         )
         guild = self.guilds.get(guild_id)
@@ -275,7 +280,7 @@ class DiscordCache:
         """
         return self.channel(channel_id)
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:
         """JSON-safe cache summary (manager status / dashboard)."""
         guild_list = [
             {"id": gid, "name": g["name"], "channels": len(g["channels"])}
@@ -293,7 +298,7 @@ class DiscordCache:
 
 
 async def resolve_dm_channel(
-    cache: Optional["DiscordCache"],
+    cache: DiscordCache | None,
     client: Any,
     user_id: int,
     account: str = "",
@@ -322,7 +327,7 @@ async def resolve_dm_channel(
         AccountError: full miss and no live client available.
     """
     user_id = int(user_id)
-    async with (cache._dm_lock if cache is not None else nullcontext()):
+    async with cache._dm_lock if cache is not None else nullcontext():
         if cache is not None:
             cached = cache.dm_channel_for(user_id)
             if cached is not None:
@@ -348,8 +353,9 @@ async def resolve_dm_channel(
         # not-running path of send_hook raises and TaskAckRegistry
         # reconstructs across the ack seam), so the scheduler retries.
         try:
-            channel_id = int(await asyncio.wait_for(
-                client.open_dm(user_id), timeout=_OPEN_DM_TIMEOUT_S))
+            channel_id = int(
+                await asyncio.wait_for(client.open_dm(user_id), timeout=_OPEN_DM_TIMEOUT_S)
+            )
         except asyncio.TimeoutError:
             raise ConnectionError(
                 f"account {account!r}: opening a DM with {user_id} timed "
@@ -358,15 +364,14 @@ async def resolve_dm_channel(
         if cache is not None:
             cache.record_dm(channel_id, user_id)
         if cache_repo is not None:
-            try:
+            # persistence must never break the send path
+            with suppress(Exception):
                 await cache_repo.set(account, "dm", str(user_id), channel_id)
-            except Exception:
-                pass  # persistence must never break the send path
         return channel_id
 
 
 async def invalidate_dm_channel(
-    cache: Optional["DiscordCache"], cache_repo: Any, user_id: int, account: str = ""
+    cache: DiscordCache | None, cache_repo: Any, user_id: int, account: str = ""
 ) -> None:
     """Drop every cached DM mapping for a user (memory + database).
 
@@ -379,7 +384,7 @@ async def invalidate_dm_channel(
     write and resurrect the dead row).
     """
     user_id = int(user_id)
-    async with (cache._dm_lock if cache is not None else nullcontext()):
+    async with cache._dm_lock if cache is not None else nullcontext():
         if cache is not None:
             cached = cache.dm_channel_for(user_id)
             if cached is not None:
@@ -391,8 +396,10 @@ async def invalidate_dm_channel(
                 LOG.warning(
                     "persistent dm row for account %s user %d survived "
                     "invalidation (db delete failed); it is ignored until "
-                    "a fresh open succeeds", account, user_id,
+                    "a fresh open succeeds",
+                    account,
+                    user_id,
                 )
 
 
-__all__ = ["ChannelInfo", "DiscordCache", "resolve_dm_channel", "invalidate_dm_channel"]
+__all__ = ["ChannelInfo", "DiscordCache", "invalidate_dm_channel", "resolve_dm_channel"]

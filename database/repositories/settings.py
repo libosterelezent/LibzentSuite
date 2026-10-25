@@ -11,10 +11,11 @@ after a restart; without it, stored reconnect settings would be invisible
 until first write. Removing it would silently drop functionality the spine
 already codes against.
 """
+
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any
 
 from core.errors import DatabaseError
 
@@ -26,18 +27,20 @@ __all__ = ["AccountSettingsRepository"]
 class AccountSettingsRepository(BaseRepository):
     """Framework account settings: get/set/delete keyed by (account, key)."""
 
-    async def get(self, name: str) -> Dict[str, Any]:
+    async def get(self, name: str) -> dict[str, Any]:
         """All stored settings for one account ({} when none/corrupt).
 
         Corrupt value rows are skipped with a warning — one bad row must not
         hide the healthy ones.
         """
-        out: Dict[str, Any] = {}
+        out: dict[str, Any] = {}
         for row in await self._fetch_all(
             "SELECT key, value_json FROM account_settings WHERE account = ? ORDER BY key",
             (name,),
         ):
-            value = loads_tolerant(row["value_json"], CORRUPT, f"account_settings[{name!r}].{row['key']}")
+            value = loads_tolerant(
+                row["value_json"], CORRUPT, f"account_settings[{name!r}].{row['key']}"
+            )
             if value is not CORRUPT:
                 out[row["key"]] = value
         return out
@@ -54,9 +57,7 @@ class AccountSettingsRepository(BaseRepository):
         try:
             payload = json.dumps(value)
         except (TypeError, ValueError) as exc:
-            raise DatabaseError(
-                f"setting {name!r}.{key} is not JSON-serializable: {exc}"
-            ) from exc
+            raise DatabaseError(f"setting {name!r}.{key} is not JSON-serializable: {exc}") from exc
         async with self._tx(f"store account setting {name!r}.{key}") as conn:
             await conn.execute(
                 """INSERT INTO account_settings (account, key, value_json) VALUES (?, ?, ?)
@@ -66,14 +67,16 @@ class AccountSettingsRepository(BaseRepository):
 
     async def delete(self, name: str, key: str) -> bool:
         """Remove one setting; True when a row was actually deleted."""
-        async with self._tx(f"delete account setting {name!r}.{key}") as conn:
-            async with conn.execute(
+        async with (
+            self._tx(f"delete account setting {name!r}.{key}") as conn,
+            conn.execute(
                 "DELETE FROM account_settings WHERE account = ? AND key = ?", (name, key)
-            ) as cur:
-                return cur.rowcount > 0
+            ) as cur,
+        ):
+            return cur.rowcount > 0
 
     # -------------------------------------------------- spine compat helper
-    async def list_accounts(self) -> List[str]:
+    async def list_accounts(self) -> list[str]:
         """Sorted names of accounts that have at least one stored setting.
 
         Consumed by SettingsManager._ensure_loaded (probed with hasattr) to
@@ -81,5 +84,7 @@ class AccountSettingsRepository(BaseRepository):
         """
         return [
             row["account"]
-            for row in await self._fetch_all("SELECT DISTINCT account FROM account_settings ORDER BY account")
+            for row in await self._fetch_all(
+                "SELECT DISTINCT account FROM account_settings ORDER BY account"
+            )
         ]

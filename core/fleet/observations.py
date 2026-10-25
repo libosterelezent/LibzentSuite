@@ -14,13 +14,14 @@ move work within the transition tables. Rollout D's acceptance
 ("parser output alone cannot bypass state/policy") is a property of
 this module's shape, and its tests.
 """
+
 from __future__ import annotations
 
 import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 
 from .models import (
     AssignmentStatus,
@@ -30,13 +31,16 @@ from .models import (
     observation_dedup_key,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 __all__ = [
-    "Observation",
-    "FleetObservations",
+    "OBS_ACCOUNT_CONNECTED",
+    "OBS_ACCOUNT_DISCONNECTED",
     "OBS_LIMIT_MARKER",
     "OBS_SERVER_COOLDOWN",
-    "OBS_ACCOUNT_DISCONNECTED",
-    "OBS_ACCOUNT_CONNECTED",
+    "FleetObservations",
+    "Observation",
 ]
 
 LOG = logging.getLogger("libzent.fleet.observations")
@@ -64,7 +68,7 @@ class Observation:
     observation_type: str
     message_id: str = ""
     observed_at: float = field(default_factory=time.time)
-    cooldown_window_s: Optional[float] = None
+    cooldown_window_s: float | None = None
     reason: str = ""
 
 
@@ -79,11 +83,10 @@ class FleetObservations:
 
     MAX_SEEN = 4096
 
-    def __init__(self, fleet: Any,
-                 *, time_fn: Optional[Callable[[], float]] = None) -> None:
+    def __init__(self, fleet: Any, *, time_fn: Callable[[], float] | None = None) -> None:
         self._fleet = fleet
         self._now = time_fn or time.time
-        self._seen: "OrderedDict[tuple, bool]" = OrderedDict()
+        self._seen: OrderedDict[tuple, bool] = OrderedDict()
 
     # ------------------------------------------------------------- intake
 
@@ -92,8 +95,7 @@ class FleetObservations:
         False when it was a duplicate, an unknown type, or a
         non-member's report (observations about accounts the fleet does
         not manage are not its business — D1)."""
-        key = observation_dedup_key(
-            obs.source_account, obs.message_id, obs.observation_type)
+        key = observation_dedup_key(obs.source_account, obs.message_id, obs.observation_type)
         if key in self._seen:
             return False
         self._seen[key] = True
@@ -113,15 +115,16 @@ class FleetObservations:
             # a handler exists
             return False
         if self._fleet.member(obs.source_account) is None:
-            return False        # not fleet-managed: D1 boundary
+            return False  # not fleet-managed: D1 boundary
         try:
             await handler(obs)
         except Exception:
             # an observation handler failure is logged, never raised —
             # a bad report must not take down the reporter's flow; the
             # dedup entry stays so the poisoned message replays harmlessly
-            LOG.exception("observation handler failed (%s from %s)",
-                          obs.observation_type, obs.source_account)
+            LOG.exception(
+                "observation handler failed (%s from %s)", obs.observation_type, obs.source_account
+            )
             return False
         return True
 
@@ -133,13 +136,19 @@ class FleetObservations:
         strategy reassigns the account's live work."""
         window = obs.cooldown_window_s
         if not isinstance(window, (int, float)) or window <= 0:
-            LOG.warning("limit marker from %s without a positive window"
-                        " — cooldown skipped (never invented)", obs.source_account)
+            LOG.warning(
+                "limit marker from %s without a positive window"
+                " — cooldown skipped (never invented)",
+                obs.source_account,
+            )
             return
         await self._fleet.apply_cooldown(
-            CooldownScopeType.ACCOUNT, obs.source_account,
-            obs.reason or "observed limit marker", float(window),
-            source=CooldownSource.OBSERVED)
+            CooldownScopeType.ACCOUNT,
+            obs.source_account,
+            obs.reason or "observed limit marker",
+            float(window),
+            source=CooldownSource.OBSERVED,
+        )
         await self._relay(obs.source_account, obs.reason or "observed limit")
 
     async def _on_server_cooldown(self, obs: Observation) -> None:
@@ -150,9 +159,12 @@ class FleetObservations:
         if not isinstance(window, (int, float)) or window <= 0:
             return
         await self._fleet.apply_cooldown(
-            CooldownScopeType.ACCOUNT, obs.source_account,
-            obs.reason or "server cooldown", float(window),
-            source=CooldownSource.SERVER)
+            CooldownScopeType.ACCOUNT,
+            obs.source_account,
+            obs.reason or "server cooldown",
+            float(window),
+            source=CooldownSource.SERVER,
+        )
         await self._relay(obs.source_account, obs.reason or "server cooldown")
 
     async def _on_disconnected(self, obs: Observation) -> None:
@@ -163,8 +175,7 @@ class FleetObservations:
         member = self._fleet.member(obs.source_account)
         if member is None or member.eligibility != MemberEligibility.ELIGIBLE:
             return
-        await self._fleet.mark_eligibility(
-            obs.source_account, MemberEligibility.WAITING)
+        await self._fleet.mark_eligibility(obs.source_account, MemberEligibility.WAITING)
 
     async def _on_connected(self, obs: Observation) -> None:
         """Back online: WAITING -> ELIGIBLE. PAUSED members stay paused
@@ -172,8 +183,7 @@ class FleetObservations:
         member = self._fleet.member(obs.source_account)
         if member is None or member.eligibility != MemberEligibility.WAITING:
             return
-        await self._fleet.mark_eligibility(
-            obs.source_account, MemberEligibility.ELIGIBLE)
+        await self._fleet.mark_eligibility(obs.source_account, MemberEligibility.ELIGIBLE)
 
     # -------------------------------------------------------------- relay
 
@@ -182,13 +192,11 @@ class FleetObservations:
         them to the group queue, hand each to the next ELIGIBLE member.
         No eligible member -> the task stays QUEUED (never forced onto a
         cooling/paused account — assign_task re-validates everything)."""
-        live = self._fleet.assignments(
-            account=account, status=AssignmentStatus.RUNNING)
-        live += self._fleet.assignments(
-            account=account, status=AssignmentStatus.ASSIGNED)
+        live = self._fleet.assignments(account=account, status=AssignmentStatus.RUNNING)
+        live += self._fleet.assignments(account=account, status=AssignmentStatus.ASSIGNED)
         for rec in live:
             await self._fleet.suspend_task(rec.id, reason)
-            await self._fleet.resume_task(rec.id)     # SUSPENDED -> QUEUED
+            await self._fleet.resume_task(rec.id)  # SUSPENDED -> QUEUED
             await self._reassign(rec.id, exclude=account)
 
     async def _reassign(self, assignment_id: str, *, exclude: str) -> bool:
@@ -196,13 +204,14 @@ class FleetObservations:
         if rec is None:
             return False
         candidates = sorted(
-            m.account for m in self._fleet.members(rec.group_name)
-            if m.account != exclude
-            and m.eligibility == MemberEligibility.ELIGIBLE)
+            m.account
+            for m in self._fleet.members(rec.group_name)
+            if m.account != exclude and m.eligibility == MemberEligibility.ELIGIBLE
+        )
         for candidate in candidates:
             try:
                 await self._fleet.assign_task(assignment_id, candidate)
                 return True
             except ValueError:
-                continue        # raced out of eligibility — next member
+                continue  # raced out of eligibility — next member
         return False

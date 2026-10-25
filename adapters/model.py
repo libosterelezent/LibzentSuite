@@ -24,12 +24,13 @@ No blocking I/O anywhere in conversion (§17/§15): the converter reads only
 what the library event already holds; missing optionals stay ``None``
 rather than triggering fetches.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, Optional, Tuple
+from typing import Any
 
 
 # ------------------------------------------------------------------ entities
@@ -50,7 +51,7 @@ class DiscordChannel:
     id: int
     name: str = ""
     type: str = ""
-    guild_id: Optional[int] = None
+    guild_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class DiscordEmbedField:
     One embed field (name/value/inline) — the unit kakerareact-style
     parsing reads via :meth:`DiscordEmbed.field_map`.
     """
+
     name: str = ""
     value: str = ""
     inline: bool = False
@@ -77,19 +79,19 @@ class DiscordEmbed:
     description: str = ""
     url: str = ""
     type: str = ""
-    color: Optional[int] = None
-    timestamp: Optional[str] = None
+    color: int | None = None
+    timestamp: str | None = None
     author_name: str = ""
     author_url: str = ""
     author_icon: str = ""
     footer_text: str = ""
     footer_icon: str = ""
-    fields: Tuple[DiscordEmbedField, ...] = ()
+    fields: tuple[DiscordEmbedField, ...] = ()
     thumbnail: str = ""
     image: str = ""
 
     @property
-    def colour(self) -> Optional[int]:
+    def colour(self) -> int | None:
         """British spelling alias (mirrors the library's dual naming)."""
         return self.color
 
@@ -110,23 +112,23 @@ class DiscordComponent:
 
     type: int = 0
     type_name: str = "unknown"
-    custom_id: Optional[str] = None
+    custom_id: str | None = None
     label: str = ""
-    style: Optional[int] = None
+    style: int | None = None
     disabled: bool = False
-    emoji: Optional[str] = None
-    url: Optional[str] = None
-    options: Tuple[Tuple[str, str, str, bool], ...] = ()
-    components: Tuple["DiscordComponent", ...] = ()
+    emoji: str | None = None
+    url: str | None = None
+    options: tuple[tuple[str, str, str, bool], ...] = ()
+    components: tuple[DiscordComponent, ...] = ()
 
-    def walk(self) -> Tuple["DiscordComponent", ...]:
+    def walk(self) -> tuple[DiscordComponent, ...]:
         """Every component in the tree, depth-first (self included)."""
         out = [self]
         for child in self.components:
             out.extend(child.walk())
         return tuple(out)
 
-    def find(self, custom_id: str) -> Optional["DiscordComponent"]:
+    def find(self, custom_id: str) -> DiscordComponent | None:
         """Locate a component by custom_id anywhere in the tree."""
         for component in self.walk():
             if component.custom_id == custom_id:
@@ -139,6 +141,7 @@ class DiscordAttachment:
     """
     One message attachment (file): id, filename, url, size, content type.
     """
+
     id: int = 0
     filename: str = ""
     url: str = ""
@@ -151,9 +154,9 @@ class DiscordReaction:
     """Aggregate reaction state as carried ON the message (no user info —
     per-user reaction events are ``ReactionAdded`` on the bus)."""
 
-    emoji: str = ""          # printable repr (name or <:name:id>)
+    emoji: str = ""  # printable repr (name or <:name:id>)
     name: str = ""
-    id: Optional[int] = None
+    id: int | None = None
     count: int = 0
     me: bool = False
 
@@ -178,11 +181,11 @@ class DiscordMessageReference:
     aliases value 0 = reply).
     """
 
-    message_id: Optional[int] = None
-    channel_id: Optional[int] = None
-    guild_id: Optional[int] = None
+    message_id: int | None = None
+    channel_id: int | None = None
+    guild_id: int | None = None
     type_name: str = "reply"
-    referenced: Optional["DiscordMessage"] = None
+    referenced: DiscordMessage | None = None
     #: how many message_snapshots the raw event carried (1 when absent) —
     #: lets plugins detect multi-forward truncation of ``referenced``
     snapshot_count: int = 1
@@ -210,18 +213,18 @@ class DiscordMessage:
     content: str
     dm: bool = False
     # ------------------------------------------------------ rich additions
-    guild_id: Optional[int] = None
-    author: Optional[DiscordUser] = None
-    channel: Optional[DiscordChannel] = None
-    embeds: Tuple[DiscordEmbed, ...] = ()
-    components: Tuple[DiscordComponent, ...] = ()
-    attachments: Tuple[DiscordAttachment, ...] = ()
-    reactions: Tuple[DiscordReaction, ...] = ()
-    reference: Optional[DiscordMessageReference] = None
-    created_at: Optional[datetime] = None
+    guild_id: int | None = None
+    author: DiscordUser | None = None
+    channel: DiscordChannel | None = None
+    embeds: tuple[DiscordEmbed, ...] = ()
+    components: tuple[DiscordComponent, ...] = ()
+    attachments: tuple[DiscordAttachment, ...] = ()
+    reactions: tuple[DiscordReaction, ...] = ()
+    reference: DiscordMessageReference | None = None
+    created_at: datetime | None = None
     #: library-specific escape hatch — see module docstring; repr=False so
     #: logging/audit can never accidentally dump it
-    raw: Optional[Any] = field(default=None, repr=False)
+    raw: Any | None = field(default=None, repr=False)
 
     # ------------------------------------------------------------ helpers
     def __repr__(self) -> str:
@@ -236,7 +239,7 @@ class DiscordMessage:
         return f"<msg ch={self.channel_id} author={self.author_id}: {preview!r}>"
 
     @property
-    def buttons(self) -> Tuple[DiscordComponent, ...]:
+    def buttons(self) -> tuple[DiscordComponent, ...]:
         """Every BUTTON component in the tree (kakeraloot convenience)."""
         out: list = []
         for top in self.components:
@@ -245,7 +248,7 @@ class DiscordMessage:
                     out.append(component)
         return tuple(out)
 
-    def button(self, custom_id: str) -> Optional[DiscordComponent]:
+    def button(self, custom_id: str) -> DiscordComponent | None:
         """Find a button by custom_id anywhere in the component tree."""
         for top in self.components:
             found = top.find(custom_id)
@@ -288,7 +291,7 @@ def _text(value: Any) -> str:
     return value if isinstance(value, str) else ("" if value is None else str(value))
 
 
-def _optional_int(value: Any) -> Optional[int]:
+def _optional_int(value: Any) -> int | None:
     try:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
@@ -318,12 +321,14 @@ def convert_component(component: Any) -> DiscordComponent:
     emoji = getattr(component, "emoji", None)
     options = []
     for option in getattr(component, "options", None) or ():
-        options.append((
-            _text(getattr(option, "label", "")),
-            _text(getattr(option, "value", "")),
-            _text(getattr(option, "description", "")),
-            bool(getattr(option, "default", False)),
-        ))
+        options.append(
+            (
+                _text(getattr(option, "label", "")),
+                _text(getattr(option, "value", "")),
+                _text(getattr(option, "description", "")),
+                bool(getattr(option, "default", False)),
+            )
+        )
     return DiscordComponent(
         type=ctype,
         type_name=_COMPONENT_TYPE_NAMES.get(ctype, "unknown"),
@@ -449,7 +454,7 @@ def _forward_snapshot_view(snapshot: Any, reference: Any) -> Any:
     """
     channel_id = _optional_int(getattr(reference, "channel_id", None))
     guild_id = _optional_int(getattr(reference, "guild_id", None))
-    guild = (SimpleNamespace(id=guild_id) if guild_id is not None else None)
+    guild = SimpleNamespace(id=guild_id) if guild_id is not None else None
     return SimpleNamespace(
         id=getattr(snapshot, "id", None),
         content=getattr(snapshot, "content", ""),
@@ -467,7 +472,10 @@ def _forward_snapshot_view(snapshot: Any, reference: Any) -> Any:
 
 
 def convert_message(
-    message: Any, *, dm: bool, viewer_id: Optional[int] = None,
+    message: Any,
+    *,
+    dm: bool,
+    viewer_id: int | None = None,
     _depth: int = 0,
 ) -> DiscordMessage:
     """Library message -> rich DiscordMessage (pure, non-blocking, no fetch).
@@ -492,17 +500,24 @@ def convert_message(
         # DeletedReferencedMessage (the deleted-reply marker: a _deleted
         # flag upstream, a _parent slot in discord.py-self) is not a
         # message — leave None rather than feed a sentinel to the DTO
-        if (resolved is not None and hasattr(resolved, "id")
-                and not getattr(resolved, "_deleted", False)
-                and not hasattr(resolved, "_parent")):
+        if (
+            resolved is not None
+            and hasattr(resolved, "id")
+            and not getattr(resolved, "_deleted", False)
+            and not hasattr(resolved, "_parent")
+        ):
             referenced = resolved
     snapshots = getattr(message, "message_snapshots", None) or ()
-    if referenced is None and reference is not None:
+    if (
+        referenced is None
+        and reference is not None
+        and snapshots
+        and _reference_type_name(reference) == "forward"
+    ):
         # round-3 F4-4: a FORWARD keeps its content in message_snapshots
         # (the fork leaves reference.resolved None) — hydrate additively
         # from the snapshot so the forwarded content is not invisible
-        if snapshots and _reference_type_name(reference) == "forward":
-            referenced = _forward_snapshot_view(snapshots[0], reference)
+        referenced = _forward_snapshot_view(snapshots[0], reference)
     if _depth >= _MAX_REFERENCED_DEPTH:
         referenced = None
 
@@ -515,7 +530,7 @@ def convert_message(
             _optional_int(getattr(ref, "guild_id", None)),
         )
 
-    def _ref_channel_id(ref_msg: Any) -> Optional[int]:
+    def _ref_channel_id(ref_msg: Any) -> int | None:
         # the referenced message may expose channel_id directly (snapshot
         # views, other DTOs) or only channel.id (library Message objects)
         if ref_msg is None:
@@ -543,7 +558,8 @@ def convert_message(
                 # all cases (same-channel replies/forwards) — inherit the
                 # OUTER dm flag so DM-channel references are not mislabeled
                 convert_message(referenced, dm=dm, _depth=_depth + 1)
-                if referenced is not None else None
+                if referenced is not None
+                else None
             ),
             snapshot_count=len(snapshots) or 1,
         )
@@ -588,8 +604,16 @@ def convert_message(
 
 
 __all__ = [
-    "DiscordUser", "DiscordChannel", "DiscordEmbed", "DiscordEmbedField",
-    "DiscordComponent", "DiscordAttachment", "DiscordReaction",
-    "DiscordMessageReference", "DiscordMessage",
-    "convert_message", "convert_component", "convert_embed",
+    "DiscordAttachment",
+    "DiscordChannel",
+    "DiscordComponent",
+    "DiscordEmbed",
+    "DiscordEmbedField",
+    "DiscordMessage",
+    "DiscordMessageReference",
+    "DiscordReaction",
+    "DiscordUser",
+    "convert_component",
+    "convert_embed",
+    "convert_message",
 ]

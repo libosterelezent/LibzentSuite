@@ -15,9 +15,10 @@ Two inviolable boundaries (spec §4):
     a group-managed member is NONE of this engine's business — its
     independent dispatch flows untouched.
 """
+
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Any
 
 from .models import (
     AssignmentStatus,
@@ -26,6 +27,9 @@ from .models import (
     PolicyDecision,
     effective_cooldown,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 __all__ = ["FleetPolicy"]
 
@@ -48,8 +52,8 @@ class FleetPolicy:
         self,
         fleet: Any,
         *,
-        account_connected: Optional[Callable[[str], Awaitable[bool]]] = None,
-        group_enabled: Optional[Callable[[str], Awaitable[bool]]] = None,
+        account_connected: Callable[[str], Awaitable[bool]] | None = None,
+        group_enabled: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self._fleet = fleet
         self._connected = account_connected
@@ -57,9 +61,7 @@ class FleetPolicy:
 
     # ------------------------------------------------------------- checks
 
-    async def evaluate(self, account: str, *,
-                       assignment_id: Optional[str] = None
-                       ) -> PolicyDecision:
+    async def evaluate(self, account: str, *, assignment_id: str | None = None) -> PolicyDecision:
         """The §4 verdict for one account's dispatch. ``assignment_id``
         opts into the task-validity checks (generation fence, held-by-
         account); the scheduler-level guard evaluates account scope."""
@@ -73,8 +75,7 @@ class FleetPolicy:
         if not member_maybe:
             # not fleet-managed (or fleet empty): independent dispatch
             # is untouched (D1) — allowed, no fleet reason to give
-            return PolicyDecision(
-                allowed=True, reason="not fleet-managed")
+            return PolicyDecision(allowed=True, reason="not fleet-managed")
 
         member = self._fleet.member(account)
         group_name = member.group_name
@@ -82,40 +83,33 @@ class FleetPolicy:
 
         # 2. group enabled / not paused
         if state is None:
-            return PolicyDecision(
-                allowed=False,
-                reason=f"group {group_name!r} has no fleet state")
+            return PolicyDecision(allowed=False, reason=f"group {group_name!r} has no fleet state")
         if state.paused:
-            return PolicyDecision(
-                allowed=False, reason=f"group {group_name!r} is paused")
+            return PolicyDecision(allowed=False, reason=f"group {group_name!r} is paused")
         if self._enabled is not None and not await self._enabled(group_name):
-            return PolicyDecision(
-                allowed=False, reason=f"group {group_name!r} is disabled")
+            return PolicyDecision(allowed=False, reason=f"group {group_name!r} is disabled")
 
         # 3. account connected + eligible + not paused
         if self._connected is not None and not await self._connected(account):
-            return PolicyDecision(
-                allowed=False, reason=f"account {account!r} is not connected")
+            return PolicyDecision(allowed=False, reason=f"account {account!r} is not connected")
         if member.eligibility != MemberEligibility.ELIGIBLE:
             return PolicyDecision(
-                allowed=False,
-                reason=f"account {account!r} is {member.eligibility}")
+                allowed=False, reason=f"account {account!r} is {member.eligibility}"
+            )
 
         # 4. cooldowns permit — most-restrictive across the composed
         #    scopes (group + account [+ the assignment's task])
-        task_id: Optional[str] = None
+        task_id: str | None = None
         if assignment_id is not None:
             rec = self._fleet.assignment(assignment_id)
             task_id = rec.task_id if rec is not None else None
-        scopes = [(CooldownScopeType.GROUP, group_name),
-                  (CooldownScopeType.ACCOUNT, account)]
+        scopes = [(CooldownScopeType.GROUP, group_name), (CooldownScopeType.ACCOUNT, account)]
         if task_id is not None:
             scopes.append((CooldownScopeType.TASK, task_id))
         blocking = []
         now = self._fleet.now()
         for scope_type, scope_id in scopes:
-            records = await self._fleet.policy_cooldowns(
-                scope_type=scope_type, scope_id=scope_id)
+            records = await self._fleet.policy_cooldowns(scope_type=scope_type, scope_id=scope_id)
             effective = effective_cooldown(records, now=now)
             if effective is not None:
                 blocking.append(effective)
@@ -123,9 +117,9 @@ class FleetPolicy:
         if worst is not None:
             return PolicyDecision(
                 allowed=False,
-                reason=f"cooldown ({worst.scope_type}:{worst.scope_id})"
-                       f" — {worst.reason}",
-                retry_at=worst.expires_at)
+                reason=f"cooldown ({worst.scope_type}:{worst.scope_id}) — {worst.reason}",
+                retry_at=worst.expires_at,
+            )
 
         # 5. task assigned + valid (§4 task_valid) — and D1's ownership
         #    fence: on a group-managed account, ONLY fleet-linked
@@ -134,27 +128,28 @@ class FleetPolicy:
         #    account leaves (leave restores Independent cleanly, §8).
         if assignment_id is None:
             return PolicyDecision(
-                allowed=False,
-                reason="independent flow suspended (group-managed)")
+                allowed=False, reason="independent flow suspended (group-managed)"
+            )
         rec = self._fleet.assignment(assignment_id)
         if rec is None:
             return PolicyDecision(
-                allowed=False,
-                reason=f"unknown fleet assignment {assignment_id!r}")
+                allowed=False, reason=f"unknown fleet assignment {assignment_id!r}"
+            )
         if rec.account != account:
             return PolicyDecision(
                 allowed=False,
-                reason=f"assignment {assignment_id!r} is held by "
-                       f"{rec.account!r}, not {account!r}")
+                reason=f"assignment {assignment_id!r} is held by {rec.account!r}, not {account!r}",
+            )
         if rec.status != AssignmentStatus.ASSIGNED:
             return PolicyDecision(
-                allowed=False,
-                reason=f"assignment {assignment_id!r} is {rec.status}")
+                allowed=False, reason=f"assignment {assignment_id!r} is {rec.status}"
+            )
         if rec.generation != state.generation:
             return PolicyDecision(
                 allowed=False,
                 reason=f"assignment generation {rec.generation} != live"
-                       f" {state.generation} — stale dispatch fenced")
+                f" {state.generation} — stale dispatch fenced",
+            )
 
         # 6. prerequisites: suspend/resume own this at the service level
         #    (SUSPENDED never reaches dispatch); nothing further here.
@@ -170,8 +165,11 @@ class FleetPolicy:
         the full assignment validation; unlinked submits on members are
         the SUSPENDED independent flow (D1).
         """
+
         async def guard(task: Any) -> PolicyDecision:
             return await self.evaluate(
                 str(getattr(task, "account", "")),
-                assignment_id=getattr(task, "fleet_assignment", None))
+                assignment_id=getattr(task, "fleet_assignment", None),
+            )
+
         return guard
