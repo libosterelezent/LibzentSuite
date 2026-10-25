@@ -145,8 +145,10 @@ class LoopLagMonitor:
         task, self._task = self._task, None
         if task is not None:
             task.cancel()
-            # the final starving wake IS recorded before cancel
-            with contextlib.suppress(Exception):
+            # the final starving wake IS recorded before cancel; awaiting a
+            # cancelled task re-raises CancelledError (BaseException — NOT
+            # covered by Exception), so the original tuple is preserved
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
 
     async def _run(self) -> None:

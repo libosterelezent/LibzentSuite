@@ -181,3 +181,26 @@ Shutdown paths are ordered so one failing stage cannot strand the others:
   TypeName: msg"`), never an exception out of `SimulationRunner.run`; every
   teardown step (account stop, scheduler stop, db close, unsubscribes) is
   individually guarded and appends to `failures` on error.
+
+### Addendum (2026-10-25): `contextlib.suppress(Exception)` is not `except (CancelledError, Exception)` at await points
+
+Rewriting `try/except (asyncio.CancelledError, Exception): pass` around an
+`await task` into `with contextlib.suppress(Exception):` silently WIDENS the
+propagated exception set: since Python 3.8, `asyncio.CancelledError` derives
+from `BaseException`, so `except Exception` does not catch it — but the
+explicit two-element tuple does. Awaiting a task that has been `.cancel()`ed
+re-raises `CancelledError` inside the awaiting coroutine, so the suppression
+set must name it explicitly.
+
+Observed consequence (2026-10-25): the ruff SIM105 baseline pass rewrote
+`benchmark/sampler.py::Sampler.stop` this way; every benchmark scenario then
+crashed at teardown with `CancelledError` propagating out of
+`session.stop()` (8 test errors on Linux, where the subsystem is importable;
+Windows never reached the code because `import resource` fails first).
+Fixed by restoring the explicit tuple:
+`contextlib.suppress(asyncio.CancelledError, Exception)`.
+
+Rule of thumb for this codebase: when a `try/except` block wraps an `await`,
+preserve the exception tuple verbatim through any suppression rewrite, and
+check whether `CancelledError` was named on purpose (task teardown usually
+names it deliberately).
