@@ -25,11 +25,13 @@ jobs:
           UV_PYTHON_PREFERENCE: only-system
         run: uv sync --locked
       - name: Ruff lint (production tree)
-        run: uv run --frozen ruff check main.py core adapters interfaces database benchmark scripts \
-          && echo "ruff check clean"
+        run: |
+          uv run --frozen ruff check main.py core adapters interfaces database benchmark scripts \
+            && echo "ruff check clean"
       - name: Ruff format check (production tree)
-        run: uv run --frozen ruff format --check main.py core adapters interfaces database benchmark scripts \
-          && echo "ruff format clean"
+        run: |
+          uv run --frozen ruff format --check main.py core adapters interfaces database benchmark scripts \
+            && echo "ruff format clean"
       - name: Mypy strict (advisory ratchet — legacy error baseline must shrink, never grow)
         continue-on-error: true
         run: uv run --frozen mypy
