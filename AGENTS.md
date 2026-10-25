@@ -100,7 +100,18 @@ The root `AGENTS.md`, `ARCHITECTURE.md`, and `INTEGRATION.md` are the places for
 
 Use **Ruff for Python linting and formatting** and **mypy for static type checking**. Use stable releases compatible with Python 3.10+, check the tools' current official documentation when adopting new options, and keep one canonical configuration (prefer a root `pyproject.toml`). Do not maintain competing Ruff/Black/isort configurations for the same job.
 
-The observed repository configuration did not include a root Ruff or mypy config, and current CI ran Pyflakes plus unittest. Therefore do not claim Ruff/mypy are already enforced. When introducing them, do so deliberately: add them as development/CI tools, establish the baseline, fix new and touched code first, then ratchet legacy coverage toward the full production tree. Do not add a blanket ignore to make the first run appear clean.
+Ruff and mypy were adopted 2026-10-25: the canonical configuration lives in
+the root `pyproject.toml`, dependencies are declared in `[project]` with dev
+tools in the `[dependency-groups] dev` table, and `uv.lock` is the pinned
+universal resolution — CI installs it with `uv sync --frozen` and runs every
+check through `uv run --frozen` (ruff's `F` rules superseded the former
+pyflakes step). `requirements.txt` is a generated pip-compat export of the
+lock (`uv export --format requirements-txt --no-hashes --no-dev
+--no-emit-project -o requirements.txt`) — regenerate it, never hand-edit.
+The mypy strict run is an advisory CI step until the legacy error baseline
+reaches zero — fix strictness in modules as they are touched and ratchet
+coverage outward; never add a blanket ignore or a blanket suppression to
+shrink the count.
 
 ### Ruff baseline
 
@@ -158,7 +169,9 @@ mypy
 python -m unittest discover -s tests -t . -v
 ```
 
-Until Ruff/mypy configuration and dependencies are added, use the repository's existing test commands and the checks currently configured in CI. Do not imply a command succeeded unless it was actually run.
+Local checks: `ruff check`, `ruff format --check`, `mypy` (advisory until the
+baseline clears), then the suite. Do not imply a command succeeded unless it
+was actually run.
 
 Official references:
 - Ruff configuration and formatter: https://docs.astral.sh/ruff/configuration/ and https://docs.astral.sh/ruff/formatter/
