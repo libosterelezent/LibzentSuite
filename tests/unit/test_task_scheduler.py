@@ -484,7 +484,9 @@ class TestRetry(SchedulerTestBase):
     async def test_timeout_marks_timed_out(self) -> None:
         task = self.scheduler.submit("alpha", "p", "message", timeout=0.05)
         self.sender.outcomes.append(("sleep", 0.5))
-        await self.settle(0.3)
+        # wait for the transition, not the clock: a fixed settle raced the
+        # timeout sweep under load
+        self.assertTrue(await self.wait_until(lambda: task.status == "timed_out"))
         self.assertEqual(task.status, "timed_out")
         self.assertIn("timed out", task.error)
         failed = self.recorder.of(TaskFailed)
@@ -846,6 +848,9 @@ class TestHistoryAndStats(SchedulerTestBase):
         t3 = self.scheduler.submit("beta", "p", "message")
         self.sender.outcomes.append(("raise", FlowBlocked("beta", "nope")))
         self.assertTrue(await self.wait_until(lambda: t3.status == "failed"))
+        # the history ROW write trails the in-memory status flip by a tick —
+        # wait for the record itself, not the status
+        self.assertTrue(await self.wait_until(lambda: len(self.repo.add_calls) >= 3))
 
         self.assertEqual(len(self.repo.add_calls), 3)
         self.assertEqual([c["id"] for c in self.repo.add_calls], [t1.id, t2.id, t3.id])
