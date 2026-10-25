@@ -12,9 +12,8 @@ import sys
 import time
 from typing import TYPE_CHECKING, Any
 
-from benchmark import SCHEMA
 from benchmark.collector import PerfCollector
-from benchmark.report import compare, load_json, render_table, to_json
+from benchmark.report import SCHEMA, compare, load_json, render_table, to_json
 from benchmark.sampler import SamplerSession, SpikeCapture
 from benchmark.scenarios import BENCH_SCENARIOS
 
