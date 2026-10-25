@@ -59,14 +59,16 @@ a local dashboard.
 
 ```bash
 git clone <this repo> && cd LibzentSuite
-pip install -r requirements.lock.txt  # pinned runtime dependency versions
+pip install -r requirements.txt       # pinned runtime dependency versions
 cp .env.example .env                  # then edit it (see below)
 chmod 600 .env
 ```
 
-For reproducible installs, use the pinned runtime lock. When developing or
-running CI checks, install `requirements-dev.lock.txt`, which also includes
-the pinned linting tool. See `requirements.txt` for lock refresh commands.
+Dependency versions are pinned by `uv.lock` (the universal resolution
+committed at the repo root); `requirements.txt` is a generated
+pip-compatible export of it — regenerate with `uv export`, never hand-edit.
+Development and CI tooling (ruff, mypy) lives in the `dev` dependency
+group: `uv sync --frozen` installs the exact locked environment.
 
 `.env` needs:
 
@@ -289,11 +291,12 @@ contributed by plugins) on `http://127.0.0.1:8070` with live WebSocket
 push; set `DASHBOARD_TOKEN` in `.env` to require auth. The complete
 REST/WS/CLI/self-command reference is `knowledgebase/API_ENDPOINTS.md`.
 
-Dependencies: Python ≥ 3.10; direct runtime constraints are in
-`requirements.txt`, with the pinned runtime install set in
-`requirements.lock.txt`. Live mode additionally needs the user-account client
-fork `discord.py-self` (included in the runtime lock), imported lazily —
-simulations/tests never require a live network connection.
+Dependencies: Python ≥ 3.10; direct runtime constraints live in
+`pyproject.toml`, with the exact pinned resolution in `uv.lock`
+(`requirements.txt` is the generated pip-compat export). Live mode
+additionally needs the user-account client fork `discord.py-self` (included
+in the resolution), imported lazily — simulations/tests never require a live
+network connection.
 
 ## Architecture: who calls what
 
