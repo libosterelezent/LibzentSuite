@@ -1,0 +1,75 @@
+[project]
+# Application metadata + dependency declaration for uv (uv.lock is the
+# pinned universal resolution; AGENTS.md §8/§9). Version is a placeholder —
+# the framework does not yet publish releases.
+name = "libzentsuite"
+version = "0.0.0"
+description = "Game-agnostic, multi-account Discord flow-orchestration framework"
+requires-python = ">=3.10"
+dependencies = [
+    "aiosqlite>=0.20",
+    "cryptography>=42",
+    "discord.py-self>=2.1.0",
+]
+
+[dependency-groups]
+# Dev/CI tooling (AGENTS.md §8) — installed by `uv sync` alongside the
+# runtime lock; NOT runtime dependencies.
+dev = [
+    "mypy==2.4.0",
+    "ruff==0.17.2",
+]
+
+[tool.ruff]
+# Engineering standards: AGENTS.md §8 — Ruff owns linting, import sorting,
+# and formatting for this repository (one canonical config; no competing
+# Black/isort/pyflakes setups).
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+# The AGENTS.md §8 baseline rule set. TCH is written TC here: upstream
+# renamed the flake8-type-checking codes (TCH remains a deprecated alias
+# in ruff 0.17.x; TC is the current canonical name).
+select = [
+    "E4",   # pycodestyle errors (imports, lines)
+    "E7",   # pycodestyle (statements)
+    "E9",   # pycodestyle (runtime)
+    "F",    # pyflakes (supersedes the CI pyflakes step)
+    "W",    # pycodestyle warnings
+    "I",    # isort — import sorting
+    "UP",   # pyupgrade — target Python 3.10+
+    "B",    # flake8-bugbear — likely bugs
+    "SIM",  # flake8-simplify
+    "C4",   # flake8-comprehensions
+    "PIE",  # flake8-pie — misc constructs
+    "RUF",  # ruff-specific rules
+    "TC",   # flake8-type-checking — runtime-unneeded typing imports
+]
+ignore = [
+    # House style: documentation strings and comments deliberately use
+    # typographic punctuation and glyphs (em dashes, arrows, ×). These
+    # three rules would rewrite intentional prose to plain ASCII.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+docstring-code-format = true
+
+[tool.mypy]
+# AGENTS.md §8 mypy baseline. Strict checking; the production tree only
+# (tests are a later ratchet). Legacy debt is tracked — see the CI mypy
+# step and the baseline count it reports; do not add blanket ignores to
+# shrink it.
+python_version = "3.10"
+strict = true
+warn_unreachable = true
+warn_unused_configs = true
+show_error_codes = true
+pretty = true
+files = ["core", "adapters", "database", "interfaces", "plugins", "benchmark", "scripts"]
