@@ -45,50 +45,50 @@ function homeMount(root) {
     el("div", {class: "overview-panel-head"},
       el("div", {}, el("h2", {}, "Account profiles"),
         el("p", {class: "dim"}, "Connection and session status")),
-      el("a", {class: "overview-link", href: "#/accounts"}, "Manage accounts", ico("chevron-right"))),
+      el("a", {class: "overview-link", href: "#/accounts"}, "Manage accounts", "→")),
     accountTable,
     el("div", {class: "overview-panel-foot"}, accountCount,
-      el("a", {class: "overview-link", href: "#/accounts"}, "View all accounts", ico("chevron-right"))));
+      el("a", {class: "overview-link", href: "#/accounts"}, "View all accounts", "→")));
 
   const taskPanel = el("section", {class: "overview-panel"},
     el("div", {class: "overview-panel-head"},
       el("div", {}, el("h2", {}, "Task execution"),
         el("p", {class: "dim", id: "overview-task-summary"}, "Live scheduler queue")),
-      el("a", {class: "overview-link", href: "#/activity"}, "View queue", ico("chevron-right"))),
+      el("a", {class: "overview-link", href: "#/activity"}, "View queue", "→")),
     taskHost,
     el("div", {class: "overview-panel-foot"},
       el("span", {class: "overview-footnote"}, "Live task state"),
-      el("a", {class: "overview-link", href: "#/activity"}, "Open activity", ico("chevron-right"))));
+      el("a", {class: "overview-link", href: "#/activity"}, "Open activity", "→")));
 
   const activityPanel = el("section", {class: "overview-panel"},
     el("div", {class: "overview-panel-head"},
       el("div", {}, el("h2", {}, "Recent activity"),
         el("p", {class: "dim"}, "Latest runtime events")),
-      el("a", {class: "overview-link", href: "#/activity"}, "Open logs", ico("chevron-right"))),
+      el("a", {class: "overview-link", href: "#/activity"}, "Open logs", "→")),
     activityHost,
     el("div", {class: "overview-panel-foot"},
       el("span", {class: "overview-footnote"}, "Newest events first"),
-      el("a", {class: "overview-link", href: "#/activity"}, "View history", ico("chevron-right"))));
+      el("a", {class: "overview-link", href: "#/activity"}, "View history", "→")));
 
   const pluginsPanel = el("section", {class: "overview-panel"},
     el("div", {class: "overview-panel-head"},
       el("div", {}, el("h2", {}, "Plugins"),
         el("p", {class: "dim"}, "Installed extensions")),
-      el("a", {class: "overview-link", href: "#/plugins"}, "Manage", ico("chevron-right"))),
+      el("a", {class: "overview-link", href: "#/plugins"}, "Manage", "→")),
     pluginHost,
     el("div", {class: "overview-panel-foot"},
       el("span", {class: "overview-footnote", id: "overview-plugin-count"}, "Plugin inventory"),
-      el("a", {class: "overview-link", href: "#/plugins"}, "View plugins", ico("chevron-right"))));
+      el("a", {class: "overview-link", href: "#/plugins"}, "View plugins", "→")));
 
   const runtimePanel = el("section", {class: "overview-panel"},
     el("div", {class: "overview-panel-head"},
       el("div", {}, el("h2", {}, "Local instance"),
         el("p", {class: "dim"}, "Runtime health at a glance")),
-      el("a", {class: "overview-link", href: "#/tools"}, "Details", ico("chevron-right"))),
+      el("a", {class: "overview-link", href: "#/tools"}, "Details", "→")),
     runtimeHost,
     el("div", {class: "overview-panel-foot"},
       el("span", {class: "overview-footnote"}, "Data stays on this instance"),
-      el("a", {class: "overview-link", href: "#/tools"}, "Diagnostics", ico("chevron-right"))));
+      el("a", {class: "overview-link", href: "#/tools"}, "Diagnostics", "→")));
 
   const mainGrid = el("div", {class: "overview-main-grid"}, accountPanel, taskPanel);
   const lowerGrid = el("div", {class: "overview-lower-grid"},
@@ -448,13 +448,13 @@ routerAdd("/settings", "Settings", container => {
       el("div", {}, el("h2", {}, "Framework administration"),
         el("p", {class: "dim"}, "Command permissions and framework identity."))),
     el("div", {class: "overview-settings-body"},
-      el("a", {class: "btn btn-secondary", href: "#/admin"}, "Open administration", ico("chevron-right"))));
+      el("a", {class: "btn btn-secondary", href: "#/admin"}, "Open administration", "→")));
   const runtime = el("section", {class: "overview-panel overview-settings-card"},
     el("div", {class: "overview-panel-head"},
       el("div", {}, el("h2", {}, "Local runtime"),
         el("p", {class: "dim"}, "Diagnostics, logs, and current service status."))),
     el("div", {class: "overview-settings-body"},
-      el("a", {class: "btn btn-secondary", href: "#/tools"}, "Open diagnostics", ico("chevron-right"))));
+      el("a", {class: "btn btn-secondary", href: "#/tools"}, "Open diagnostics", "→")));
   container.append(
     el("div", {class: "view-hdr"},
       el("div", {}, el("h1", {}, "Settings"),
