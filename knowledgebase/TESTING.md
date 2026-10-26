@@ -134,3 +134,25 @@ current stance is offline-only. Live Discord behaviour (real
   (completeness, per-account FIFO, overflow, slice yielding, reentrancy,
   deferral invariant).
 * `tests/unit/test_audit_duplicate_fix.py` — attach_audit idempotence.
+
+### Addendum (2026-10-26): uv-locked workflow is the canonical test/CI path
+
+Since the ruff/mypy/uv adoption (2026-10-25, AGENTS.md §8), the canonical
+commands are:
+
+    uv sync --locked                      # exact CI environment from uv.lock
+    uv run --frozen ruff check main.py core adapters interfaces database benchmark scripts
+    uv run --frozen ruff format --check main.py core adapters interfaces database benchmark scripts
+    uv run --frozen mypy                  # advisory ratchet (baseline tracked)
+    uv run --frozen python -m unittest discover -s tests -t .
+
+CI (tests.yml) runs exactly these via `uv sync --locked` + `uv run --frozen`;
+`requirements.txt` is the generated pip-compatible export of `uv.lock`
+(regenerate with `uv export` — never hand-edit). Everything above this
+addendum describes the historical pip flow and remains accurate as
+background; where they disagree, the uv flow wins.
+
+Platform note (2026-10-25): the benchmark subsystem imports the Unix-only
+`resource` module and is un-importable on Windows; the benchmark and
+`tests/unit/test_benchmark*.py` / benchmark-related `test_residual_risk`
+tests execute on Linux (dev platform and CI) only.
