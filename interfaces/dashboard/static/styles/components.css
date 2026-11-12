@@ -606,7 +606,6 @@ body[data-hero="off"] .hero { display: none; }
   border-radius: var(--r-sm); padding: var(--sp-1) var(--sp-2); }
 .pill-row .ms-pill .k { text-transform: uppercase; letter-spacing: .06em; }
 
-
 /* ═══════════════════════════════════════════════════════════════════════════
    THEME DRAWER (theme.js panel) — appended block, GPT audit task 10.
 

@@ -56,15 +56,6 @@ const THEME_FONTS = {
 
 /* ── Theme presets ───────────────────────────────────────────────────────── */
 const THEME_PRESETS = {
-  workspace: {
-    label: "Workspace",
-    tokens: {
-      "--bg": "#f5f6f8", "--surface": "#ffffff", "--surface2": "#f8f9fb",
-      "--surface3": "#f0f2f6", "--border": "#e3e6ed", "--border2": "#d4dae5",
-      "--text": "#202431", "--dim": "#687083", "--faint": "#9098a8",
-      "--surface2-rgb": "248,249,251", "--on-accent": "#ffffff",
-    },
-  },
   carbon: {
     label: "Carbon",
     tokens: {
@@ -103,7 +94,7 @@ const THEME_PRESETS = {
 const THEME_ACCENTS = [
   { hex: "#a0a0a0", rgb: "160,160,160", label: "Grey" },
   { hex: "#e2e2e2", rgb: "226,226,226", label: "Light" },
-  { hex: "#603bc4", rgb: "96,59,196", label: "Violet" },
+  { hex: "#8b5cf6", rgb: "139,92,246", label: "Violet" },
   { hex: "#ec4899", rgb: "236,72,153", label: "Pink" },
   { hex: "#10b981", rgb: "16,185,129", label: "Emerald" },
   { hex: "#f59e0b", rgb: "245,158,11", label: "Amber" },
@@ -115,7 +106,7 @@ const THEME_ACCENTS = [
 /* Defaults every known field falls back to when its persisted value is
    malformed (wrong type, out of range, not in the catalog). */
 const THEME_DEFAULTS = {
-  preset: "workspace", accent: "#603bc4", radius: 6, density: 1,
+  preset: "carbon", accent: "#a0a0a0", radius: 3, density: 1,
   fontUi: "Inter", fontMono: "JetBrains Mono",
 };
 const THEME_GLOBAL_KEYS = [
@@ -156,10 +147,10 @@ const themeState = {
   scope: "global",
   updated_at: 0,
   global: {
-    preset: "workspace",
-    accent: "#603bc4",
-    accentRgb: "96,59,196",
-    radius: 6,
+    preset: "carbon",
+    accent: "#a0a0a0",
+    accentRgb: "160,160,160",
+    radius: 3,
     density: 1,
     fontUi: "Inter",
     fontMono: "JetBrains Mono",
@@ -455,7 +446,6 @@ function themeApply() {
   Object.entries(preset.tokens).forEach(([k, v]) => {
     root.style.setProperty(k, v);
   });
-  root.style.colorScheme = g.preset === "workspace" ? "light" : "dark";
 
   // 2. Accent (defense in depth: state is normalized at every entry
   //    point, but apply never trusts g.accent blindly)

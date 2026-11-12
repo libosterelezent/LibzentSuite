@@ -7,14 +7,13 @@
    ═══════════════════════════════════════════════════════════════════════════ */
 
 const NAV_MAIN = [
-  {hash: "/home", label: "Overview", icon: "home", area: "workspace"},
-  {hash: "/accounts", label: "Accounts", icon: "users", area: "workspace"},
-  {hash: "/activity", label: "Activity & Tasks", icon: "activity", area: "workspace"},
-  {hash: "/groups", label: "Fleet", icon: "bolt", area: "workspace"},
-  {hash: "/policies", label: "Policies", icon: "shield", area: "workspace"},
-  {hash: "/plugins", label: "Plugins", icon: "plug", area: "workspace"},
-  {hash: "/tools", label: "Tools & Diagnostics", icon: "tools", area: "system"},
-  {hash: "/settings", label: "Settings", icon: "gear", area: "system"},
+  {hash: "/home",     label: "Home",     icon: "home"},
+  {hash: "/accounts", label: "Accounts", icon: "users"},
+  {hash: "/activity", label: "Activity", icon: "activity"},
+  {hash: "/groups",   label: "Fleet",    icon: "bolt"},
+  {hash: "/policies", label: "Policies", icon: "shield"},
+  {hash: "/admin",    label: "Admin",    icon: "admin"},
+  {hash: "/tools",    label: "Tools",    icon: "tools"},
 ];
 
 function buildChrome() {
@@ -22,52 +21,20 @@ function buildChrome() {
 
   /* ── sidebar ── */
   const snav = $("snav");
-  const workspaceSwitcher = el("div", {class: "workspace-switcher", "aria-label": "Current workspace"},
-    el("span", {class: "workspace-monogram"}, "LZ"),
-    el("span", {class: "workspace-info"},
-      el("strong", {}, "Personal workspace"),
-      el("small", {}, "Personal · Local")),
-    el("span", {class: "workspace-caret", "aria-hidden": "true"}, "⌄"));
-  snav.before(workspaceSwitcher);
-
-  /* Move the live socket status into the persistent sidebar footer, as in
-     the Figma shell. The same DOM nodes are retained so status updates keep
-     using the existing WS.onStatus handler. */
-  const sideFoot = $("side-foot");
-  const conn = $("conn");
-  const sideToggle = $("side-toggle");
-  sideFoot.textContent = "";
-  const runtime = el("div", {class: "side-runtime"},
-    el("div", {class: "side-runtime-caption"}, "Local instance"),
-    conn,
-    el("div", {class: "side-runtime-endpoint"}, (location.host || "localhost") + " · local"));
-  const profile = el("div", {class: "side-profile"},
-    el("span", {class: "side-avatar"}, "LZ"),
-    el("span", {class: "side-profile-copy"},
-      el("strong", {}, "Personal workspace"),
-      el("small", {}, "Workspace owner")),
-    sideToggle);
-  sideFoot.append(runtime, profile);
-
   const renderNav = () => {
     snav.textContent = "";
-    for (const area of ["workspace", "system"]) {
-      const items = NAV_MAIN.filter(n => n.area === area);
-      snav.append(el("div", {class: "snav-label"}, area === "workspace" ? "Workspace" : "System"));
-      for (const n of items) {
-        const a = el("a", {class: "snav-item", href: "#" + n.hash, dataset: {hash: n.hash}},
-          ico(n.icon), el("span", {}, n.label));
-        const count = n.hash === "/accounts" ? (storeGet("accounts") || []).length
-          : n.hash === "/activity" ? (storeGet("tasks") || []).filter(t => ["queued", "running"].includes(String(t.status || ""))).length : 0;
-        if (count > 0) a.append(el("span", {class: "snav-count"}, String(count)));
-        snav.append(a);
-      }
+    snav.append(el("div", {class: "snav-label"}, "Workspace"));
+    for (const n of NAV_MAIN) {
+      snav.append(el("a", {class: "snav-item", href: "#" + n.hash, dataset: {hash: n.hash}},
+        ico(n.icon), el("span", {}, n.label)));
     }
-
     const pluginPages = (storeGet("navigation") || []).filter(p => p.plugin !== "$framework");
     if (pluginPages.length) {
-      snav.append(el("div", {class: "snav-label"}, "Plugin pages"));
+      snav.append(el("div", {class: "snav-label"}, "Plugins"));
       for (const p of pluginPages) {
+        /* plugin pages carry their own icon path from the builder — render
+           it inline (same stroke language); icon-less pages fall back to
+           the sprite plug symbol (never a bare dot) */
         const mark = p.icon
           ? el("svg", {class: "snav-ico", viewBox: "0 0 24 24", fill: "none",
                        stroke: "currentColor", "stroke-width": "2", "aria-hidden": "true"},
@@ -75,29 +42,35 @@ function buildChrome() {
           : ico("plug", "snav-ico");
         snav.append(el("a", {
           class: "snav-item snav-plugin",
-          href: "#/plugins/" + encodeURIComponent(p.plugin) + "/" + encodeURIComponent(p.page_id),
+          href: `#/plugins/${encodeURIComponent(p.plugin)}/${encodeURIComponent(p.page_id)}`,
         }, mark, el("span", {}, p.title)));
       }
+      snav.append(el("a", {class: "snav-item snav-dim", href: "#/plugins"},
+        el("span", {}, "manage plugins…")));
     }
   };
   renderNav();
-  storeSubscribe((key) => {
-    if (["navigation", "accounts", "tasks"].includes(key)) renderNav();
-  });
+  storeSubscribe((key) => { if (key === "navigation") renderNav(); });
 
   /* active tab highlight follows the route */
   Router.onRoute((route, params) => {
-    const currentPath = (location.hash || "#/home").replace(/^#/, "");
-    $(".snav-item").forEach(a => {
-      const path = a.dataset.hash || "";
-      a.classList.toggle("on", currentPath === path || currentPath.startsWith(path + "/"));
-    });
+    $$(".snav-item").forEach(a => a.classList.toggle("on",
+      a.dataset.hash === location.hash ||
+      (a.dataset.hash === "/accounts" && location.hash.startsWith("#/accounts"))));
     const crumb = $("page-crumb"), title = $("page-title");
     if (route) {
+      const leaf = route.pattern.split("/").filter(Boolean)[0] || "";
+      const nav = NAV_MAIN.find(n => n.hash === "/" + leaf);
+      /* proper-case the leaf for non-nav routes (plugin pages etc.) */
+      const section = nav ? nav.label
+        : leaf.charAt(0).toUpperCase() + leaf.slice(1);
+      crumb.textContent = section;
       const t = params && params.name ? params.name : (route.title || "");
-      crumb.textContent = "Workspace";
-      crumb.style.display = "";
       title.textContent = t;
+      /* single title in the header: hide the crumb when it duplicates the
+         title (was case-sensitive: "plugins" vs "Plugins" both showed) */
+      crumb.style.display =
+        t.toLowerCase() === section.toLowerCase() ? "none" : "";
     }
   });
 
@@ -132,10 +105,6 @@ function buildChrome() {
     if (typeof themeOpen === "function") themeOpen();
     else toast("theme engine not loaded", "err");
   };
-  const helpBtn = $("help-btn");
-  if (helpBtn) helpBtn.onclick = () => navigate("/tools");
-  const notificationsBtn = $("notifications-btn");
-  if (notificationsBtn) notificationsBtn.onclick = () => navigate("/activity");
 
   /* ── topbar: search — accounts, groups, plugin pages; Ctrl+K focuses ── */
   const box = $("search"), results = $("search-results");

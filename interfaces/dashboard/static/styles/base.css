@@ -33,11 +33,7 @@
      a faint cool shift; a hardcoded violet ignored the theme engine) */
   --plugin: color-mix(in srgb, var(--accent) 85%, #b080d0);
   --surface2-rgb: 24, 24, 24;
-  --on-accent: #ffffff;
-  /* Fixed navy navigation rail from the LibzentSuite workspace design. */
-  --sidebar-bg: #181d2a; --sidebar-surface: #202636; --sidebar-border: #303647;
-  --sidebar-text: #bec5d4; --sidebar-muted: #8791a6; --sidebar-strong: #ffffff;
-  --sidebar-active: #33284f; --sidebar-accent: #ad90f3;
+  --on-accent: #0a0a0a;
 
   /* fonts — selectable via the theme engine */
   --font: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
@@ -53,7 +49,7 @@
   /* radius — LOW per user preference (was 12/8/16) */
   --r: 3px; --r-sm: 2px; --r-lg: 4px;
   --gap: var(--sp-3); --gap-sm: var(--sp-2); --gap-lg: var(--sp-5);
-  --ctrl-h: 36px; --sidebar-w: 224px; --sidebar-w-rail: 64px; --hdr-h: 64px;
+  --ctrl-h: 36px; --sidebar-w: 244px; --sidebar-w-rail: 64px; --hdr-h: 56px;
 
   /* density multiplier — the theme engine scales all padding via this */
   --density: 1;
