@@ -26,3 +26,8 @@ docs/_build/
 # the knowledgebase is committed; only its generated machine data is local
 knowledgebase/
 knowledgebase_*.db
+
+# python build artifacts (uv build / pip install -e .)
+/dist/
+/build/
+*.egg-info/
