@@ -3,10 +3,11 @@
 A multi-account Discord automation framework designed around one principle:
 **your accounts should behave like well-paced humans, not bots.**
 
-Built for Mudae farming with any number of accounts that share a pacing
-clock so they look like one user, back off instantly when
-Discord says so, and never make an unnecessary API call — all managed from
-a local dashboard.
+A multi-account Discord selfbot orchestration framework: any number of
+accounts share a pacing clock, back off instantly when Discord says so,
+and never make an unnecessary API call — all managed from a local
+dashboard. Game-specific logic lives in pluggable parser packs, not the
+core.
 
 > ⚠️ Selfbot usage violates Discord's Terms of Service and can get accounts
 > suspended. The safety systems (learned pacing defaults, human-like
@@ -42,7 +43,7 @@ a local dashboard.
   settings merge defaults ← profile ← per-account overrides
 - **Admin panel** — DB-backed command authorization (per-account Discord
   user-id allowlists, framework admin list, per-account command prefix
-  mention/symbol/both, Mudae bot id) replacing the `OWNER_USER_IDS` env
+  mention/symbol/both, the primary bot bot id) replacing the `OWNER_USER_IDS` env
   model, with a one-time migration
 - **Turn-taking across accounts** — shared sync-group clocks make N
   accounts emit the cadence of ONE careful user; cooldowns persist
@@ -73,7 +74,7 @@ group: `uv sync --frozen` installs the exact locked environment.
 `.env` needs:
 
 ```ini
-MUDAE_BOT_ID=432610292342587392       # Mudae's public bot id (DB setting wins once set in the Admin tab)
+MUDAE_BOT_ID=432610292342587392       # the primary bot's public bot id (DB setting wins once set in the Admin tab)
 OWNER_USER_IDS=123456789012345678     # YOUR Discord user id — migrated ONE TIME into the DB admin list
 DASHBOARD_TOKEN=pick-a-long-random-string
 ```
@@ -123,7 +124,7 @@ python3 main.py accounts list          # one-shot command mode
 | **Plugins** | per-account enable/disable, settings, the **profile library** (named setting bundles with channel scopes — edit/delete; creation happens from an account's MEMORY flow) |
 | **Activity** | the task queue/history, pacing cooldowns, live log stream + every Discord interaction (audit) |
 | **Policies** | pacing policies, effective rates, safety warnings, the 429 throttle card |
-| **Admin** | framework admin ids, per-account command permissions + prefixes (mention/symbol/both), Mudae bot id |
+| **Admin** | framework admin ids, per-account command permissions + prefixes (mention/symbol/both), the primary bot bot id |
 | **Tools** | offline simulations, emergency stop, shutdown, credential import |
 
 Plugin profiles are named SETTINGS presets (bundles applied to a plugin's
@@ -224,7 +225,7 @@ Pacing composes on every outbound action — the strictest wins:
 
 Plus: a hard sanity floor nothing can go below, server 429s always earn
 paced retries (with per-account + fleet throttle telemetry on the
-Policies tab), cooldowns Mudae reports are persisted with absolute
+Policies tab), cooldowns the primary bot reports are persisted with absolute
 expiry, DM channels resolve once and are cached forever, and the
 framework itself makes zero self-initiated API calls — every call is a
 plugin action through the pipeline above.
