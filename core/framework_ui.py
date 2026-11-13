@@ -1014,7 +1014,7 @@ def _build_admin(ui: DashboardUIToolset, api: Any):
         )
         .set_description(
             "DB-backed access control: the admin list, per-account admin "
-            "flags, prefixes and the Mudae bot id. Stale rows (accounts "
+            "flags, prefixes and the Primary bot id. Stale rows (accounts "
             "removed before the cleanup cascade existed) carry a remove "
             "action."
         )
@@ -1048,13 +1048,13 @@ def _build_admin(ui: DashboardUIToolset, api: Any):
             "refresh": ["adm-ids", "adm-accounts"],
         }
 
-    async def set_mudae(ctx, payload):
-        raw = payload.get("adm-mudae-id")
+    async def set_primary_bot_id(ctx, payload):
+        raw = payload.get("adm-primary-bot-id")
         if raw is None or str(raw).strip() == "":
-            await api.admin_mudae_id_set(None, surface="dashboard")
-            return {"success": True, "message": "mudae bot id cleared"}
-        await api.admin_mudae_id_set(str(raw).strip(), surface="dashboard")
-        return {"success": True, "message": "mudae bot id saved"}
+            await api.admin_primary_bot_id_set(None, surface="dashboard")
+            return {"success": True, "message": "primary bot id cleared"}
+        await api.admin_primary_bot_id_set(str(raw).strip(), surface="dashboard")
+        return {"success": True, "message": "primary bot id saved"}
 
     async def set_prefix(ctx, payload):
         account = str(payload.get("pr-account") or "").strip()
@@ -1136,21 +1136,21 @@ def _build_admin(ui: DashboardUIToolset, api: Any):
         )
     )
 
-    # ── box 2: the Mudae bot id ─────────────────────────────────────
-    mudae_box = (
-        ui.Container(component_id="adm-mudae-box")
+    # ── box 2: the Primary bot id ─────────────────────────────────────
+    primary_bot_box = (
+        ui.Container(component_id="adm-primary-bot-box")
         .set_gap("10px")
         .add_component(
-            ui.Header(component_id="adm-mudae-h")
-            .set_title("Mudae bot id")
-            .set_subtitle("The bot every Mudae flow listens to")
+            ui.Header(component_id="adm-primary-bot-h")
+            .set_title("Primary bot id")
+            .set_subtitle("The bot every the primary bot flow listens to")
         )
         .add_component(
-            ui.Form(component_id="adm-mudae-form")
-            .set_submit_action(set_mudae)
+            ui.Form(component_id="adm-primary-bot-form")
+            .set_submit_action(set_primary_bot_id)
             .set_submit_label("Save")
             .add_fields(
-                ui.TextInput(component_id="adm-mudae-id")
+                ui.TextInput(component_id="adm-primary-bot-id")
                 .set_label("Bot user id")
                 .set_placeholder("integer, or empty to clear")
                 .set_max_length(32)
@@ -1201,7 +1201,7 @@ def _build_admin(ui: DashboardUIToolset, api: Any):
             ui.Grid(component_id="adm-top-grid")
             .set_columns(2)
             .add_component(ids_box)
-            .add_component(mudae_box)
+            .add_component(primary_bot_box)
         ),
         ui.Section(component_id="adm-prefix-sec").add_component(prefix_form),
         ui.Section(component_id="adm-accounts-sec")

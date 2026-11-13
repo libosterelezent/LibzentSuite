@@ -338,7 +338,7 @@ async def message_burst(
         lambda plugin: NS(
             account="bench",
             plugin=plugin,
-            credentials=NS(mudae_bot_id=999, owner_user_ids=frozenset({OWNER})),
+            credentials=NS(bot_id=999, owner_user_ids=frozenset({OWNER})),
             settings={},
             logger=__import__("logging").getLogger("bench"),
             send_message=_noop_send,

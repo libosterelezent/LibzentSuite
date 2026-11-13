@@ -22,7 +22,7 @@ Plugin contract (unchanged from the audited original):
     workload fixture).
 
 CONTRACT NOTE (A3 decision, documented for A6): the pinned PluginServices
-protocol gained ``open_dm(user_id) -> int`` — flow plugins need the Mudae
+protocol gained ``open_dm(user_id) -> int`` — flow plugins need the target bot
 DM channel id to filter collected pages. The account manager implements it
 (the underlying DiscordClient protocol already exposes ``open_dm``).
 
@@ -250,7 +250,7 @@ class PluginContext:
 class ArgSpec:
     """One declarative positional argument of a self-command.
 
-    This is the ENDPOINT for original-MudaeScript-style grammar:
+    This is the ENDPOINT for bot-flow-style grammar:
     ``rollset <profile_name> <roulette> <channel_id> <userstack>
     <ignore_keys>`` is five ArgSpecs — the executor parses, converts and
     validates them BEFORE the handler runs, filling ``ctx.parsed``;
@@ -356,7 +356,7 @@ def usage_line(spec: CommandSpec) -> str:
 
 @dataclass(frozen=True)
 class CommandSpec:
-    """One plugin-declared self-command (Mudae-style grammar).
+    """One plugin-declared self-command (bot-command-style grammar).
 
     Declared on the plugin class as part of ``COMMANDS`` (the ONE
     declaration mechanism — there is no runtime/on_load registration; the
@@ -479,7 +479,7 @@ class PluginServices(Protocol):
     never sleep to self-throttle.
 
     NOTE: ``open_dm`` was added by A3 (see module docstring) — flow
-    plugins use it to learn the Mudae DM channel id before collecting
+    plugins use it to learn the primary bot's DM channel id before collecting
     pages.
 
     PERSISTENT PLUGIN API (public, documented): ``cooldown_*`` and ``state_*``
@@ -599,7 +599,7 @@ class PluginServices(Protocol):
 
     @property
     def credentials(self) -> Credentials:
-        """Fleet credentials (mudae id, owner ids) — never hardcoded."""
+        """Fleet credentials (primary bot id, owner ids) — never hardcoded."""
 
     @property
     def account(self) -> str:

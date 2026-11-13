@@ -343,7 +343,7 @@ class AccountPluginServices:
     def account_username(self) -> str | None:
         """The account's own Discord username (None offline/pre-connect).
 
-        Used to attribute Mudae's per-user limit messages ("**name**,
+        Used to attribute the primary bot's per-user limit messages ("**name**,
         the roulette is limited...") — a shared channel must not park OUR
         rolling on ANOTHER user's limit. Read defensively through the
         adapter's underlying library client.
@@ -747,7 +747,7 @@ class AccountPluginServices:
     # ------------------------------------------------------------ properties
     @property
     def credentials(self) -> Any:
-        """Fleet credentials (mudae id, owner ids) — never hardcoded."""
+        """Fleet credentials (primary bot id, owner ids) — never hardcoded."""
         return self._credentials
 
     @property

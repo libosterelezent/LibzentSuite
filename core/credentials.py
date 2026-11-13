@@ -20,12 +20,12 @@ DB-backed store for
   * per-account COMMAND PERMISSIONS (the Discord user ids allowed to
     invoke that one account's self-commands),
   * per-account ADMIN flags and PREFIX configurations,
-  * the framework-level ``MUDAE_BOT_ID`` setting (DB value with the env
+  * the framework-level ``PRIMARY_BOT_ID`` setting (DB value with the env
     value as a read-only fallback),
 
 and :class:`FrameworkCredentials` is the DB-first view handed to plugin
 services as ``services.credentials`` (plugins keep reading
-``.owner_user_ids`` / ``.mudae_bot_id``; the values now come from the
+``.owner_user_ids`` / ``.primary_bot_id``; the values now come from the
 admin-managed store, falling back to env when the DB value is unset).
 """
 
@@ -155,23 +155,23 @@ class Credentials:
 
     # ------------------------------------------------------------- aggregates
     @property
-    def mudae_bot_id(self) -> int:
-        """Mudae bot user id (env value — LEGACY fallback).
+    def primary_bot_id(self) -> int:
+        """the primary bot bot user id (env value — LEGACY fallback).
 
         The authoritative source is the admin-panel setting served by
-        :class:`AccessManager.mudae_bot_id` (DB first, this env value as
+        :class:`AccessManager.primary_bot_id` (DB first, this env value as
         the fallback when the DB value is unset). Plugins never read this
         property directly — they see the DB-first view through
         ``services.credentials`` (:class:`FrameworkCredentials`).
         """
-        raw = self.require("MUDAE_BOT_ID")
+        raw = self.require("PRIMARY_BOT_ID")
         try:
             return int(raw)
         except ValueError as exc:
             # truncated repr: the raw value can be arbitrarily long and
             # must not be echoed wholesale into logs/errors
             shown = raw if len(raw) <= 40 else raw[:37] + "..."
-            raise CredentialsError(f"MUDAE_BOT_ID is not an integer: {shown!r}") from exc
+            raise CredentialsError(f"PRIMARY_BOT_ID is not an integer: {shown!r}") from exc
 
     @property
     def owner_user_ids(self) -> frozenset[int]:

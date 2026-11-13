@@ -105,8 +105,8 @@ from adapters.simulator.scenarios import (
 )
 from adapters.simulator.world import (
     SYNTHETIC_ALPHA_ID,
+    SYNTHETIC_BOT_ID,
     SYNTHETIC_GUILD_CHANNEL,
-    SYNTHETIC_MUDAE_ID,
     SYNTHETIC_OWNER_ID,
     SimWorld,
 )
@@ -145,7 +145,7 @@ _LOG_LINES_CAP = 2000
 #: prefix of the plugin loader's synthetic parent module names (see
 #: core.plugin_manager.loader). The runner purges the ones ITS discover
 #: created so repeated sim runs do not grow sys.modules forever.
-_PLUGIN_MODULE_PREFIX = "_mudae_plugroot"
+_PLUGIN_MODULE_PREFIX = "_plugin_root"
 
 
 def _reap_scenario_task(task: asyncio.Task[None]) -> None:
@@ -159,7 +159,7 @@ def _purge_plugin_modules(names: set[str]) -> None:
 
     The sim's single-use PluginLoader never rescans, so its own
     stale-parent purge never fires — every run leaked one generation of
-    ``_mudae_plugroot_N`` modules (~21KB measured). The runner diffs
+    ``_plugin_root_N`` modules (~21KB measured). The runner diffs
     sys.modules around ITS discover call and pops exactly those entries
     (loader-private state is never touched). Classes and instances stay
     functional — only the import registry entries go, the same contract
@@ -432,11 +432,11 @@ class SimulationRunner:
 
             if self._credentials is not None:
                 # overlay the SYNTHETIC ids the scenarios script against: fleet
-                # credentials carry real OWNER/MUDAE ids, which would silently
-                # break owner-gating and Mudae-page matching in every scenario
+                # credentials carry real OWNER/bot ids, which would silently
+                # break owner-gating and the primary bot-page matching in every scenario
                 merged = {
                     **self._credentials.snapshot(),
-                    "MUDAE_BOT_ID": str(SYNTHETIC_MUDAE_ID),
+                    "PRIMARY_BOT_ID": str(SYNTHETIC_BOT_ID),
                     "OWNER_USER_IDS": str(SYNTHETIC_OWNER_ID),
                     f"DISCORD_TOKEN_{ACCOUNT_NAME.upper()}": f"sim-token-{ACCOUNT_NAME}",
                 }
@@ -444,7 +444,7 @@ class SimulationRunner:
             else:
                 credentials = Credentials.from_values(
                     {
-                        "MUDAE_BOT_ID": str(SYNTHETIC_MUDAE_ID),
+                        "PRIMARY_BOT_ID": str(SYNTHETIC_BOT_ID),
                         "OWNER_USER_IDS": str(SYNTHETIC_OWNER_ID),
                         f"DISCORD_TOKEN_{ACCOUNT_NAME.upper()}": f"sim-token-{ACCOUNT_NAME}",
                     }
@@ -605,7 +605,7 @@ class SimulationRunner:
                     channel_id=SYNTHETIC_GUILD_CHANNEL,
                     owner_id=SYNTHETIC_OWNER_ID,
                     account_user_id=SYNTHETIC_ALPHA_ID,
-                    mudae_id=SYNTHETIC_MUDAE_ID,
+                    bot_id=SYNTHETIC_BOT_ID,
                     owner_says=(
                         lambda channel_id, content, author_id: world.deliver(
                             channel_id, author_id, content

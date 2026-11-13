@@ -268,7 +268,7 @@ class SimClient:
 
         DM parity: a DM is delivered only to the two members of its pair
         (non-creating world lookup) — every client used to receive every
-        DM, so account B's on_message fired for pages between A and Mudae.
+        DM, so account B's on_message fired for pages between A and the primary bot.
         """
         if message.author_id == self.user_id:
             return

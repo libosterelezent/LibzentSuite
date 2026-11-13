@@ -128,7 +128,7 @@ class PluginLoader:
         self._records = {}
         # synthetic parent package so '<dir>/<name>/__init__.py' plugins can
         # use relative imports ('from .plugin import X') without sys.path
-        parent_name = f"_mudae_plugroot_{next(_PARENT_SEQ)}"
+        parent_name = f"_plugin_root_{next(_PARENT_SEQ)}"
         self._parent_names.append(parent_name)
         parent = types.ModuleType(parent_name)
         parent.__path__ = [str(self._dir)]

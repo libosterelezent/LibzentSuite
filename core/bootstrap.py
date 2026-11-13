@@ -623,7 +623,7 @@ async def _assemble(
 
     COMMAND_HUB.pacing = PacingBackend(limiter)
     # AccessManager: the admin panel's store (admins, per-account command
-    # perms, prefixes, mudae id) over the kv repo; one-time env migration
+    # perms, prefixes, primary bot id) over the kv repo; one-time env migration
     # seeds admins from OWNER_USER_IDS when the stored list is empty.
     from .access_manager import AccessManager
 

@@ -1749,7 +1749,7 @@ class RealClientFactory:
         command_prefix: str = "",
         access_manager: Any = None,
     ) -> None:
-        self._credentials = credentials  # kept for metadata only (mudae id, owner ids)
+        self._credentials = credentials  # kept for metadata only (bot id, owner ids)
         self._logger = logger or LOG
         # ONE gate per process (the factory is built once in bootstrap):
         # every client this factory produces IDENTIFYs through it.

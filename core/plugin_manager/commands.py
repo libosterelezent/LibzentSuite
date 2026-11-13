@@ -20,7 +20,7 @@ FRAMEWORK COMMANDS: the retired RemoteControl mention verbs
 ``estop``/``simulation``, category "Framework"), the admin* settings
 verbs, ``pg`` and ``say`` (category "Utilities") and the dynamic
 ``help`` ("No Category") are declared HERE, not by plugins — matching
-Mudae's layout. They are first-class :class:`CommandSpec`s, so the
+the primary bot's layout. They are first-class :class:`CommandSpec`s, so the
 registry treats them exactly like plugin-declared verbs (and the
 ``help`` listing is built dynamically from whatever the registry holds —
 ``snipewatch``-style extras a later plugin declares appear in the help
@@ -61,7 +61,7 @@ LOG = logging.getLogger("libzent.selfcommands")
 #: attribution: the audit rows read ``<account>/selfcmd``)
 FRAMEWORK_PLUGIN = "selfcmd"
 
-#: category headers, in the order Mudae uses: plugin categories (sorted,
+#: category headers, in the order the primary bot uses: plugin categories (sorted,
 #: from the specs) come first, then Settings, then Utilities, then No
 #: Category.
 UTILITIES_CATEGORY = "Utilities"
@@ -611,7 +611,7 @@ FRAMEWORK_COMMANDS: Sequence[CommandSpec] = (
         name="help",
         help="Shows this message",
         usage="[command]",
-        category="",  # renders under "No Category" like Mudae
+        category="",  # renders under "No Category" like the primary bot
         handler=_help_handler,
     ),
 )
@@ -622,7 +622,7 @@ _FRAMEWORK_NAMES = frozenset(spec.name for spec in FRAMEWORK_COMMANDS)
 def render_help(specs: Sequence[CommandSpec]) -> str:
     """The categorized ``help`` text for one account's spec list.
 
-    Layout (Mudae-style)::
+    Layout (the primary bot-style)::
 
         Roll:
           rollinfo    ...

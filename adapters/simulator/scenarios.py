@@ -5,7 +5,7 @@ Each :class:`Scenario` bundles everything the runner needs:
     the runner clamps every interval to the 1.5s safety floor — simulations
     never configure unsafe pacing,
   * ``world_setup`` — builds the synthetic topology (users, the trigger
-    channel, the scripted Mudae responder and its pages),
+    channel, the scripted the primary bot responder and its pages),
   * ``script``     — drives the built stack (usually: the owner types the
     soulcopy fixture's trigger, then the world settles),
   * ``checks``     — pure post-mortem over (audit dicts, world) returning
@@ -36,8 +36,8 @@ from typing import TYPE_CHECKING, Any
 
 from adapters.simulator.world import (
     SYNTHETIC_ALPHA_ID,
+    SYNTHETIC_BOT_ID,
     SYNTHETIC_GUILD_CHANNEL,
-    SYNTHETIC_MUDAE_ID,
     SYNTHETIC_OWNER_ID,
     SimWorld,
     WorldMessage,
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 
 #: the single account every scenario runs (synthetic ids only)
 ACCOUNT_NAME = "alpha"
-#: Mudae command the soulcopy workload fixture sends to request the export
+#: the primary bot command the soulcopy workload fixture sends to request the export
 EXPORT_COMMAND = "$slud-s"
 #: prefix the fixture puts on every produced chunk (soulcopy textutils)
 IMPORT_PREFIX = "$soulcopy "
@@ -122,8 +122,8 @@ class ScenarioAPI:
     owner_id: int
     #: synthetic user id of the running account ("alpha")
     account_user_id: int
-    #: synthetic Mudae responder user id
-    mudae_id: int
+    #: synthetic the primary bot responder user id
+    bot_id: int
     #: (channel_id, content, author_id) -> deliver an inbound message
     owner_says: Callable[[int, str, int], None]
     #: fresh list of the collected audit dicts (normalized)
@@ -150,20 +150,20 @@ SHORT_PAGES = [
 
 
 def _roster_pages(count: int, per_page: int = 100) -> list[str]:
-    """Synthetic name roster split into Mudae-style DM pages (no header)."""
+    """Synthetic name roster split into the primary bot-style DM pages (no header)."""
     names = [f"sim-user-{i:04d}" for i in range(count)]
     return ["\n".join(names[i : i + per_page]) for i in range(0, count, per_page)]
 
 
 def _base_world(pages: list[str], reply_delay: float = 0.01) -> Callable[[SimWorld], None]:
-    """world_setup factory: owner + mudae + alpha, trigger channel, responder."""
+    """world_setup factory: owner + primary-bot + alpha, trigger channel, responder."""
 
     def setup(world: SimWorld) -> None:
         world.add_user(SYNTHETIC_OWNER_ID, "sim-owner")
-        world.add_user(SYNTHETIC_MUDAE_ID, "mudae")
+        world.add_user(SYNTHETIC_BOT_ID, "primary-bot")
         world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
         world.add_channel(SYNTHETIC_GUILD_CHANNEL, "grind-channel")
-        world.responder_id = SYNTHETIC_MUDAE_ID
+        world.responder_id = SYNTHETIC_BOT_ID
         world.reply_delay = reply_delay
         world.add_response(EXPORT_COMMAND, pages)
 
@@ -297,9 +297,9 @@ def _checks_channel_gone(audit: list[dict], world: SimWorld) -> list[str]:
         failures.append("trigger channel still exists - deletion never happened")
     # NON-MUTATING lookup: dm_channel_for would CREATE the channel inside
     # what must stay a pure post-mortem check
-    dm_channel = world.peek_dm_channel(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+    dm_channel = world.peek_dm_channel(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
     if not (dm_channel is not None and world.messages_of(dm_channel)):
-        failures.append("no Mudae DM pages arrived - the flow never started (test is void)")
+        failures.append("no the primary bot DM pages arrived - the flow never started (test is void)")
     chunks = _delivered_chunks(world)
     if chunks:
         failures.append(
@@ -482,7 +482,7 @@ SCENARIOS: dict[str, Scenario] = {
     "soulcopy_basic": Scenario(
         name="soulcopy_basic",
         description=(
-            "Owner triggers slcopy; Mudae answers with 2 short pages and the "
+            "Owner triggers slcopy; the primary bot answers with 2 short pages and the "
             "plugin delivers a single $soulcopy chunk back to the channel."
         ),
         policies={"message": {"interval": 1.5, "jitter": [0.0, 0.05]}},

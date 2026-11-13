@@ -1733,7 +1733,7 @@ class ControlAPI:
 
     # ------------------------------------------------------ admin access
     async def admin_overview(self) -> dict[str, Any]:
-        """The admin panel's full view: admin ids, mudae bot id, and every
+        """The admin panel's full view: admin ids, primary bot id, and every
         account's access row.
 
         Ids serialize as STRINGS: Discord snowflakes exceed JavaScript
@@ -1743,8 +1743,8 @@ class ControlAPI:
         rows = await access.all_account_rows()
         return {
             "admins": [str(i) for i in await access.admin_ids()],
-            "mudae_bot_id": str(await access.mudae_bot_id())
-            if await access.mudae_bot_id() is not None
+            "primary_bot_id": str(await access.primary_bot_id())
+            if await access.primary_bot_id() is not None
             else None,
             "accounts": rows,
         }
@@ -1841,22 +1841,22 @@ class ControlAPI:
         )
         return out
 
-    async def admin_mudae_id(self, surface: str = "api") -> dict[str, Any]:
-        """Read the framework-level Mudae bot id.
+    async def admin_primary_bot_id(self, surface: str = "api") -> dict[str, Any]:
+        """Read the framework-level Primary bot id.
 
         ``surface`` is reserved (mgmt audit vocabulary): reads are not
-        audited — only admin_mudae_id_set is.
+        audited — only admin_primary_bot_id_set is.
         """
         access = self._require_access()
-        return {"mudae_bot_id": await access.mudae_bot_id()}
+        return {"primary_bot_id": await access.primary_bot_id()}
 
-    async def admin_mudae_id_set(self, user_id, surface: str = "api") -> dict[str, Any]:
+    async def admin_primary_bot_id_set(self, user_id, surface: str = "api") -> dict[str, Any]:
         access = self._require_access()
         if user_id is not None and not str(user_id).strip().lstrip("-").isdigit():
-            raise ValueError("mudae bot id must be an integer (or null)")
-        await access.set_mudae_bot_id(int(user_id) if user_id is not None else None)
-        self._audit_mgmt("system", "mgmt:admin.mudae_id_set", surface, extra=f"value={user_id}")
-        return {"mudae_bot_id": await access.mudae_bot_id()}
+            raise ValueError("primary bot id must be an integer (or null)")
+        await access.set_primary_bot_id(int(user_id) if user_id is not None else None)
+        self._audit_mgmt("system", "mgmt:admin.primary_bot_id_set", surface, extra=f"value={user_id}")
+        return {"primary_bot_id": await access.primary_bot_id()}
 
     async def admin_forget_account(self, account: str, surface: str = "api") -> dict[str, Any]:
         """Remove an account's access row (admin/perms/prefix) — cleanup

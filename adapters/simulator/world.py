@@ -43,7 +43,7 @@ SYNTHETIC_OWNER_ID = 1001
 SYNTHETIC_ALPHA_ID = 2001
 SYNTHETIC_BETA_ID = 2002
 SYNTHETIC_GUILD_CHANNEL = 500
-SYNTHETIC_MUDAE_ID = 999_999
+SYNTHETIC_BOT_ID = 999_999
 
 #: custom-emoji repr "<:name:id>" / "<a:name:id>" -> (bare name, id); the
 #: inverse of adapters.model._emoji_repr (unicode emoji pass through)
@@ -612,8 +612,8 @@ class SimWorld:
 __all__ = [
     "SYNTHETIC_ALPHA_ID",
     "SYNTHETIC_BETA_ID",
+    "SYNTHETIC_BOT_ID",
     "SYNTHETIC_GUILD_CHANNEL",
-    "SYNTHETIC_MUDAE_ID",
     "SYNTHETIC_OWNER_ID",
     "SimWorld",
     "WorldMessage",
