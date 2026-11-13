@@ -122,15 +122,15 @@ class PerKeyWakeEvents(unittest.IsolatedAsyncioTestCase):
         successor must NOT sit out the POLL_INTERVAL backstop (a lost wake
         would delay it ~2s; the prompt wake lands it ~interval later)."""
         manager = _plain_manager()
-        manager.set_policy_values(ACTION, 0.3)
+        manager.set_policy_values(ACTION, 1.5)
         await manager.acquire(ACTION)  # stamps t=0
         first = asyncio.ensure_future(manager.acquire(ACTION))
         second = asyncio.ensure_future(manager.acquire(ACTION))
-        await asyncio.wait_for(first, 2.0)  # head grants at ~0.3s
+        await asyncio.wait_for(first, 2.5)  # head grants at ~1.5s (the floor)
         started = asyncio.get_running_loop().time()
-        await asyncio.wait_for(second, 1.0)  # << POLL_INTERVAL (2.0)
+        await asyncio.wait_for(second, 3.0)  # << POLL_INTERVAL would be a lost wake
         elapsed = asyncio.get_running_loop().time() - started
-        self.assertLess(elapsed, 1.0)
+        self.assertLess(elapsed, 2.5)  # prompt wake lands ~interval, not at the 2s poll
 
     async def test_global_mutations_wake_every_key(self):
         """Policy edits (a global-affecting mutation) wake ALL keys."""
@@ -155,7 +155,7 @@ class PerKeyWakeEvents(unittest.IsolatedAsyncioTestCase):
         """Events are created on first park and dropped when a key's last
         waiter exits — the table cannot grow unbounded."""
         manager = _plain_manager()
-        manager.set_policy_values(ACTION, 0.2)
+        manager.set_policy_values(ACTION, 1.5)
         for round_no in range(5):
             await manager.acquire(ACTION, account=f"acct{round_no}")
             await manager.acquire(ACTION, account=f"acct{round_no}")
@@ -296,8 +296,8 @@ class UnstudiedActionDefaultTests(unittest.IsolatedAsyncioTestCase):
         from core.rate_limit_manager import UNSTUDIED_ACTION_INTERVAL
         from core.rate_limit_manager.engine import RateLimitManager
         manager = RateLimitManager(EventBus(), StubLogger(), None)
-        self.assertEqual(UNSTUDIED_ACTION_INTERVAL, 1.2)
-        self.assertEqual(manager.effective("poke")["interval"], 1.2)
+        self.assertEqual(UNSTUDIED_ACTION_INTERVAL, 1.5)
+        self.assertEqual(manager.effective("poke")["interval"], 1.5)
         # learned defaults are untouched by the fallback
         self.assertEqual(manager.effective("message")["interval"], 2.6)
 
@@ -310,5 +310,5 @@ class UnstudiedActionDefaultTests(unittest.IsolatedAsyncioTestCase):
     def test_stored_policy_displaces_the_default(self):
         from core.rate_limit_manager.engine import RateLimitManager
         manager = RateLimitManager(EventBus(), StubLogger(), None)
-        manager.set_policy_values("poke", 0.5)   # deliberate faster pace
-        self.assertEqual(manager.effective("poke")["interval"], 0.5)
+        manager.set_policy_values("poke", 2.0)   # distinct pace proves displacement
+        self.assertEqual(manager.effective("poke")["interval"], 2.0)

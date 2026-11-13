@@ -269,7 +269,7 @@ class TestSetPolicy(unittest.TestCase):
         manager = make_manager()
         with self.assertRaises(UnsafePolicyError) as ctx:
             manager.set_policy_values("message", 0.03)
-        self.assertIn("0.05", str(ctx.exception))
+        self.assertIn("1.5", str(ctx.exception))
         # UnsafePolicyError is a RatePolicyError (interfaces render it the same)
         self.assertIsInstance(ctx.exception, RatePolicyError)
         self.assertEqual(manager.policies(), [])  # nothing stored on refusal
@@ -444,17 +444,18 @@ class TestEffectiveComposition(unittest.TestCase):
 
     def test_empty_case_falls_back_to_unstudied_default(self):
         eff = self.manager.effective("unknown-action")
-        self.assertEqual(eff["interval"], 1.2)   # max(floor, 1.2 default)
+        self.assertEqual(eff["interval"], 1.5)   # max(floor, 1.2 unstudied default)
         self.assertEqual(eff["jitter"], [0.0, 0.0])
         self.assertEqual(eff["sources"], [])
         self.assertEqual(eff["action"], "unknown-action")
 
     def test_unknown_action_for_account_uses_unstudied_default(self):
         # "poke" now has a LEARNED default (rate study); a genuinely
-        # unconfigured action paces at the 1.2 s unstudied default
+        # unconfigured action paces at the unstudied default, clamped
+        # up to the 1.5 s floor
         fresh = make_manager()
         eff = fresh.effective("other", account="alpha", plugin="soulcopy")
-        self.assertEqual(eff["interval"], 1.2)
+        self.assertEqual(eff["interval"], 1.5)
         self.assertEqual(eff["sources"], [])
 
     def test_learned_default_applies_without_policy(self):
@@ -464,7 +465,7 @@ class TestEffectiveComposition(unittest.TestCase):
         eff = fresh.effective("message")
         self.assertEqual(eff["interval"], 2.6)   # rate-study derived
         self.assertEqual(eff["sources"], [])     # a default, not a policy
-        self.assertEqual(fresh.effective("other")["interval"], 1.2)
+        self.assertEqual(fresh.effective("other")["interval"], 1.5)
 
     def test_losing_level_jitter_cannot_speed_up_winner(self):
         """MAX-across-levels: account_plugin LOSES to global on interval,

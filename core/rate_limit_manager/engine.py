@@ -114,11 +114,12 @@ DEFAULT_ACTION_INTERVALS: dict[str, float] = {
 DEFAULT_JITTER: tuple[float, float] = (0.2, 0.8)
 
 #: default interval for actions with NO learned default AND no stored
-#: policy: they used to pace at the bare floor (0.05 s — up to 20
-#: sends/s/account, perfectly metronomic). A stored policy at ANY scope
+#: policy: unstudied actions pace AT the safety floor (1.5 s — the floor
+#: was raised 2026-10-26 from the former 0.05 s anti-loop minimum, which
+#: made the old 1.2 s fallback unreachable). A stored policy at ANY scope
 #: still REPLACES this fallback entirely (it composes with the floor
 #: alone, exactly like the learned defaults).
-UNSTUDIED_ACTION_INTERVAL = 1.2
+UNSTUDIED_ACTION_INTERVAL = 1.5
 
 _LEVEL_RANK: dict[str, int] = {name: i for i, name in enumerate(POLICY_LEVELS)}
 

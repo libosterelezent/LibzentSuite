@@ -80,8 +80,8 @@ can never make itself FASTER than a global rule — only slower. Levels mirror
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `MIN_ACTION_INTERVAL` | `0.05` | hard sanity floor (an absolute minimum against zero-delay tight loops — Discord's own per-route bucket limits are the ACTUAL pacing constraint since the learned-rate study); enforced at SET time by the manager, not by `RatePolicy` |
-| `UNSTUDIED_ACTION_INTERVAL` | `1.2` | the DEFAULT RATE for actions with no learned default and no stored policy (they used to pace at the bare floor — 0.05 s, up to 20 sends/s/account); displaced by any stored policy, exactly like the learned defaults |
+| `MIN_ACTION_INTERVAL` | `1.5` | hard safety floor — no configured action may pace faster than 1.5 s per action (the documented contract; INTEGRATION.md, root ARCHITECTURE.md §14). Raised 2026-10-26 from the former 0.05 s anti-loop sanity minimum. Enforced at SET time by the manager, not by `RatePolicy`; raise-only at runtime via `set_floor` |
+| `UNSTUDIED_ACTION_INTERVAL` | `1.2` | the DEFAULT RATE for actions with no learned default and no stored policy; composes with the floor via max(), so the EFFECTIVE rate is the 1.5 s floor since the 2026-10-26 floor raise. Displaced by any stored policy, exactly like the learned defaults |
 | `MAX_INTERVAL` | `86400.0` | one-day-per-action sanity cap |
 | `MAX_JITTER` | `3600.0` | one-hour jitter sanity cap |
 
@@ -129,7 +129,7 @@ Applicability per level: `global` always; `account` when `owner == account`;
 `RateLimitManager._validated_floor` accepts only finite values
 `>= MIN_ACTION_INTERVAL` (raises `RatePolicyError` otherwise).
 **`RateLimitManager.set_floor(seconds)`** may only RAISE the floor — never
-lower it, never below `MIN_ACTION_INTERVAL` (0.05 s); a lowering request
+lower it, never below `MIN_ACTION_INTERVAL` (1.5 s); a lowering request
 raises `RatePolicyError`. The floor starts at `MIN_ACTION_INTERVAL`, is
 persisted in kv (`ratelimit:floor`) so a restart cannot revert a
 post-incident raise, and is woken into waiters via `_wake_waiters()` after

@@ -326,9 +326,11 @@ managers bind/unbind (last-wins, documented for test isolation).
   safest-wins (max) semantics, so a per-account `prefixrate` override
   is authoritative whenever it is the only stored layer. Discord's own
   per-route bucket limits (read by the library on write routes) are the
-  ACTUAL pacing constraint; the hard floor (`MIN_ACTION_INTERVAL`)
-  dropped to 0.05 s accordingly (an absolute sanity minimum against
-  zero-delay tight loops, not a safety claim).
+  ACTUAL pacing constraint; the hard floor (`MIN_ACTION_INTERVAL`) was dropped to 0.05 s accordingly
+  (an absolute sanity minimum against zero-delay tight loops, not a safety
+  claim). 2026-10-26 correction: the floor was raised to 1.5 s — the
+  documented safety floor per the root ARCHITECTURE.md §14 and
+  INTEGRATION.md.
 * **429 telemetry** — user accounts receive no `X-RateLimit` headers on
   success responses, so per-route bucket state was never observable;
   429 hits ARE. `hits_429` counts per-account throttle hits + a fleet

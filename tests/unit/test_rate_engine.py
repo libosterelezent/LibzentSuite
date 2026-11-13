@@ -135,12 +135,13 @@ class PacingBasics(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(manager._clock.now(), 4.0, places=6)
 
     async def test_no_policy_paces_at_unstudied_default(self):
-        # no stored policy -> interval = max(floor, 1.2 s unstudied default)
+        # no stored policy -> interval = max(floor, unstudied default);
+        # the 1.5 s floor clamps the 1.2 s unstudied fallback
         manager = make_manager()
         first = await manager.acquire(ACTION)
         self.assertEqual(first.wait_s, 0.0)
         second = await manager.acquire(ACTION)
-        self.assertAlmostEqual(second.wait_s, 1.2, places=6)
+        self.assertAlmostEqual(second.wait_s, 1.5, places=6)
 
     async def test_pacing_event_published(self):
         bus = EventBus()
@@ -564,11 +565,11 @@ class WakeMechanics(unittest.IsolatedAsyncioTestCase):
         await self._let_loop_settle(manager, 1)
         manager.clear_policy("global", None, ACTION)
         await self._let_loop_settle(manager, 2)
-        # cleared -> the 1.2 s unstudied default (>= floor)
-        self.assertAlmostEqual(manager.gates[-1][0], 1.2, places=6)
+        # cleared -> the unstudied default, clamped to the 1.5 s floor
+        self.assertAlmostEqual(manager.gates[-1][0], 1.5, places=6)
         manager.gates[-1][1].set()
         grant = await task
-        self.assertAlmostEqual(grant.wait_s, 1.2, places=6)
+        self.assertAlmostEqual(grant.wait_s, 1.5, places=6)
 
 
 class FloorSemantics(unittest.IsolatedAsyncioTestCase):
@@ -619,7 +620,7 @@ class FloorSemantics(unittest.IsolatedAsyncioTestCase):
                     False, [], {}, 86400.1, -1.0, 0.03):
             with self.assertRaises(RatePolicyError):
                 manager.set_floor(bad)
-        self.assertEqual(manager.floor_value, 0.05)  # nothing applied
+        self.assertEqual(manager.floor_value, 1.5)  # nothing applied
 
     async def test_set_floor_coerces_numeric_strings(self):
         manager = make_manager()
@@ -649,7 +650,7 @@ class FloorSemantics(unittest.IsolatedAsyncioTestCase):
             manager = make_manager()
             manager._kv = kv
             await manager.load_persisted()
-            self.assertEqual(manager.floor_value, 0.05)
+            self.assertEqual(manager.floor_value, 1.5)
 
     async def test_persisted_floor_row_shape_matrix(self):
         """Every persisted shape either validates or is skipped — never a
@@ -659,14 +660,22 @@ class FloorSemantics(unittest.IsolatedAsyncioTestCase):
         from tests.unit._fake_kv import FakeKv
 
         for good, expected in ((2.5, 2.5), ("2.5", 2.5), ("86400", 86400.0),
-                               (86400.0, 86400.0),
-                               (0.05, 0.05), (1.4, 1.4), (1.0, 1.0)):
+                               (86400.0, 86400.0)):
             kv = FakeKv()
             kv.rows["ratelimit:floor"] = good
             manager = make_manager()
             manager._kv = kv
             await manager.load_persisted()
             self.assertEqual(manager.floor_value, expected)
+        # a persisted row BELOW the constructor floor (1.5) is ignored —
+        # a floor row can only ever raise, never lower
+        for low in (0.05, 1.4, 1.0):
+            kv = FakeKv()
+            kv.rows["ratelimit:floor"] = low
+            manager = make_manager()
+            manager._kv = kv
+            await manager.load_persisted()
+            self.assertEqual(manager.floor_value, 1.5, low)
         for bad in (float("nan"), -1.0, False, [], {}, "", "1e999",
                     86400.5, [86400.0], 0.03):
             kv = FakeKv()
@@ -674,7 +683,7 @@ class FloorSemantics(unittest.IsolatedAsyncioTestCase):
             manager = make_manager()
             manager._kv = kv
             await manager.load_persisted()
-            self.assertEqual(manager.floor_value, 0.05)
+            self.assertEqual(manager.floor_value, 1.5)
         # a persisted floor below the constructor floor never lowers it
         kv = FakeKv()
         kv.rows["ratelimit:floor"] = 2.0
@@ -726,7 +735,7 @@ class StatsShape(unittest.IsolatedAsyncioTestCase):
             {"floor", "lane", "groups", "policies", "cooldowns", "hits_429", "last_fire_ages",
              "grants", "waits", "avg_wait_s"},
         )
-        self.assertEqual(stats["floor"], 0.05)
+        self.assertEqual(stats["floor"], 1.5)
         self.assertEqual(stats["lane"]["enabled"], False)
         self.assertEqual(stats["groups"], {})
         self.assertEqual(len(stats["policies"]), 2)

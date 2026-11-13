@@ -91,7 +91,7 @@ and the `REMOTE_CONTROL` env now gates that simulator behavior only
 
 | Mitigation | Where |
 |---|---|
-| Safety floor | `MIN_ACTION_INTERVAL = 0.05 s` hard sanity minimum (zero-delay loop prevention; raise-only, `UnsafePolicyError` below it); the EFFECTIVE safety net is the learned per-action defaults that apply when no policy is stored (message/dm 2.6 s, reaction 2.5 s, component 3.0 s — [core/rate_limit_manager/engine.py](../core/rate_limit_manager/engine.py)) |
+| Safety floor | `MIN_ACTION_INTERVAL = 1.5 s` hard safety floor (raise-only via `set_floor`, `UnsafePolicyError` below it) — aligned with the documented contract in INTEGRATION.md / ARCHITECTURE.md §14 as of 2026-10-26; the value before that date was a 0.05 s anti-loop sanity minimum. The EFFECTIVE pacing net remains the learned per-action defaults that apply when no policy is stored (message/dm 2.6 s, reaction 2.5 s, component 3.0 s — [core/rate_limit_manager/engine.py](../core/rate_limit_manager/engine.py)) |
 | Human-like jitter | Uniform jitter window sampled after every grant; warning taxonomy flags `no_jitter` / `narrow_jitter` / `aggressive` configurations |
 | Server limits respected | `ServerRateLimit` (429 / Retry-After, route + fleet-global) → cooldowns waited out before anything else; the simulator scenario `server_429_respected` pins the behaviour |
 | Server-wide send lane | Optional GlobalSendLane serializes every outbound action of the whole fleet, spaced by `prefixrate` (0 = pause) |
