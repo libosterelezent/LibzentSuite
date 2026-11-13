@@ -34,6 +34,7 @@ import math
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from adapters.base import DiscordMessage
@@ -471,6 +472,37 @@ class RealDiscordClient:
             return when_mentioned
         return env_prefix if env_prefix else when_mentioned
 
+    def _fork_memory_options(self) -> dict[str, Any]:
+        """better.py-self constructor options shared by the Bot and plain
+        Client paths: memory-bounded caches (LRU eviction — evicted members
+        re-cache on message/mention), a frozen startup object graph after
+        READY (fewer GC pauses on large accounts), a dispatch-backlog
+        warning threshold (slow handlers become visible instead of silently
+        queueing), and on-disk cache persistence for fast warm restarts.
+
+        The snapshot holds the raw READY payload, so the library writes it
+        owner-only (0600, atomic rename) next to the rest of our runtime
+        state. ``persistence_max_age`` bounds staleness to one day: a warm
+        cache is worth replaying only for quick restart cycles, and the
+        parent directory is ensured here because the library's atomic
+        writer requires it to exist rather than creating it. Persistence
+        is keyed to the account name — with none set (pre-manager test
+        constructions) the option is omitted entirely."""
+        options: dict[str, Any] = {
+            "max_member_cache": 500,
+            "max_total_member_cache": 5000,
+            "max_thread_cache": 200,
+            "max_total_thread_cache": 1000,
+            "gc_freeze": True,
+            "dispatch_backlog_warning": 500,
+        }
+        if self._account:
+            persistence_dir = Path("state")
+            persistence_dir.mkdir(parents=True, exist_ok=True)
+            options["persistence_path"] = persistence_dir / f"{self._account}-cache.bin"
+            options["persistence_max_age"] = 86400.0
+        return options
+
     async def connect(self) -> None:
         """Import the library, wire callbacks, start the client, await ready.
 
@@ -535,6 +567,7 @@ class RealDiscordClient:
                     owner_ids=set(self._owner_ids),
                     help_command=None,
                     max_ratelimit_timeout=MAX_RATELIMIT_TIMEOUT_S,
+                    **self._fork_memory_options(),
                 )
             except TypeError as exc:
                 raise AccountError(
@@ -543,7 +576,10 @@ class RealDiscordClient:
                 ) from exc
         else:
             try:
-                self._client = discord.Client(max_ratelimit_timeout=MAX_RATELIMIT_TIMEOUT_S)
+                self._client = discord.Client(
+                    max_ratelimit_timeout=MAX_RATELIMIT_TIMEOUT_S,
+                    **self._fork_memory_options(),
+                )
             except TypeError:
                 self._logger.warning(
                     "discord client library ignores max_ratelimit_timeout — "
