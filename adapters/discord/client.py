@@ -548,7 +548,8 @@ class RealDiscordClient:
         # responding), whereas self_bot=True would dispatch only the
         # account's OWN messages. user_bot's _skip_check lets every
         # message reach dispatch, so ownership is enforced by OUR
-        # invoker gate (allowed_invoker) — fail-closed. With no prefix,
+        # invoker gate (allowed_invoker_async, installed as a Bot-level
+        # check) — fail-closed. With no prefix,
         # behavior is exactly today's (plain Client, no command
         # machinery).
         if self._commands_on:
@@ -596,8 +597,9 @@ class RealDiscordClient:
         # library's ext.commands Bot in user_bot mode — ANY owner from
         # OWNER_USER_IDS (including a different framework account's
         # user) can invoke commands on this account; the adapter's
-        # allowed_invoker gate enforces ownership fail-closed (non-owners
-        # get no reply at all). The plugin EVENT path keeps the
+        # Bot-level invoker gate (allowed_invoker_async) enforces
+        # ownership fail-closed (non-owners get no reply at all). The
+        # plugin EVENT path keeps the
         # self-echo filter below: a command never becomes a plugin
         # event, and a plugin's own output never re-triggers anything.
         if self._commands_on:
@@ -656,7 +658,7 @@ class RealDiscordClient:
             # every message through process_commands — user_bot mode lets
             # the library hand EVERY message to dispatch (its _skip_check
             # never skips), and ownership is enforced per-invocation by
-            # _dispatch_self_command's allowed_invoker gate, so random
+            # the Bot-level _invoker_gate check, so random
             # users can never fire a command (fail-closed).
             # This runs BEFORE the self-echo filter: commands and events
             # are SEPARATE paths (a command never becomes a plugin event,
@@ -1008,9 +1010,16 @@ class RealDiscordClient:
 
         The Bot runs in user_bot mode: dispatch receives messages from
         EVERYONE, and each invocation is gated on the actual TYPER being
-        an OWNER_USER_IDS owner (allowed_invoker — fail-closed on an
+        an allowed invoker (allowed_invoker_async — fail-closed on an
         empty owner set or an unknown invoker). Any owner can command
         any framework account; non-owners get no reply at all.
+
+        The gate is installed as a Bot-level check (``bot.add_check``):
+        the library evaluates global checks in ``Command.prepare`` via
+        ``can_run`` BEFORE argument parsing, so an unauthorized invocation
+        never spends parsing work and surfaces as a CheckFailure to
+        on_command_error (which drops it silently — the gate itself logs
+        the rejection at debug).
 
         The concrete verb set comes from the process-wide self-command
         registry (:data:`core.plugin_manager.commands.COMMAND_HUB`): the
@@ -1029,12 +1038,20 @@ class RealDiscordClient:
         bot = self._client
         adapter = self
 
+        # global check: evaluated once per invocation, before parsing
+        bot.add_check(self._bot_invoker_gate)
+
         @bot.event
         async def on_command_error(ctx, error):
             # unknown commands are NOT pass-throughs — silently drop them
-            # (a typo'd prefix must not leak content into the event bus)
-            if not isinstance(error, ext_commands.errors.CommandNotFound):
-                adapter._logger.debug("self-command error: %s", error, exc_info=True)
+            # (a typo'd prefix must not leak content into the event bus).
+            # CheckFailure is the _invoker_gate rejection above (already
+            # logged with the invoker id) — drop it without a second trace.
+            if isinstance(
+                error, (ext_commands.errors.CommandNotFound, ext_commands.errors.CheckFailure)
+            ):
+                return
+            adapter._logger.debug("self-command error: %s", error, exc_info=True)
 
         # registry-driven verbs: subscribe delivers the CURRENT set and
         # every later publish (assignment/enable mutations) rebuilds us
@@ -1111,6 +1128,27 @@ class RealDiscordClient:
                 return False
         return self.allowed_invoker(invoker_id)
 
+    async def _bot_invoker_gate(self, ctx: Any) -> bool:
+        """Bot-level check form of the command gate (user_bot mode
+        delivers every message — gate on the REAL typer; any owner may
+        command this account, and the account's own id passes too when
+        the account itself is an owner).
+
+        Installed once per client via ``bot.add_check`` in
+        :meth:`_install_command_layer`; the library evaluates it in
+        ``Command.prepare`` BEFORE argument parsing, so unauthorized
+        invocations never spend parsing work and surface as a
+        CheckFailure to on_command_error."""
+        invoker = getattr(getattr(ctx, "author", None), "id", None)
+        allowed = await self.allowed_invoker_async(invoker)
+        if not allowed:
+            self._logger.debug(
+                "self-command %s ignored: invoker %s is not an owner",
+                getattr(getattr(ctx, "command", None), "name", "?"),
+                invoker,
+            )
+        return allowed
+
     def self_command_allowed(self) -> bool:
         """Account-level view of the gate: is the ACCOUNT'S OWN user id
         an owner? Kept for callers that ask whether the account may
@@ -1160,17 +1198,12 @@ class RealDiscordClient:
         return [], ""
 
     async def _dispatch_self_command(self, ctx: Any, name: str) -> None:
-        """One invocation: owner gate, parse, hub dispatch (contained)."""
+        """One invocation: parse and hub-dispatch (contained).
+
+        Authorization is NOT handled here: the Bot-level ``_invoker_gate``
+        (installed in :meth:`_install_command_layer`) already rejected
+        unauthorized invokers before the library parsed any arguments."""
         try:
-            # user_bot mode delivers every message — gate on the REAL
-            # typer (any owner may command this account; the account's
-            # own id passes too when the account itself is an owner)
-            invoker = getattr(getattr(ctx, "author", None), "id", None)
-            if not await self.allowed_invoker_async(invoker):
-                self._logger.debug(
-                    "self-command %s ignored: invoker %s is not an owner", name, invoker
-                )
-                return
             message = getattr(ctx, "message", None)
             # re-parse on the content FOLLOWING the library-parsed prefix
             # (ctx.prefix) — see _parse_invocation for the boundary fix
@@ -1186,7 +1219,7 @@ class RealDiscordClient:
                 args,
                 channel.id,
                 guild_id=guild_id,
-                invoker_id=invoker,
+                invoker_id=getattr(getattr(ctx, "author", None), "id", None),
                 raw=raw,
             )
         except asyncio.CancelledError:
