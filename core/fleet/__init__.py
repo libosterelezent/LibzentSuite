@@ -6,7 +6,7 @@ This package is PURE at rollout A — the service (B), policy engine (C),
 scheduler/limiter integration (C), parser observations (D), ownership
 transitions (E), hub view (F) and recovery (G) build ON these models.
 
-Design source: docs/design/fleet-orchestration-hub.md (decisions locked
+Design source: plans/design/fleet-orchestration-hub.md (decisions locked
 2026-10-22; editable-while-running locked 2026-10-23).
 """
 
