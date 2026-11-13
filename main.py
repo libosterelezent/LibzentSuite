@@ -91,7 +91,6 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
                 print(f"live mode unavailable: {exc}", file=sys.stderr)
                 return 2  # the finally below still shuts the stack down
 
-
         if argv:  # one-shot command mode
             from interfaces.cli import run_once
 
@@ -270,8 +269,8 @@ def main() -> int:
             "--plugins",
             "--env",
             "--start-all",
-                        "--headless",
-                        "--db",
+            "--headless",
+            "--db",
             "--debug",
         }
         # parse_known_args already consumed the main parser's flags; every

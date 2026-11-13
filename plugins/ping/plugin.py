@@ -117,22 +117,5 @@ class PingPlugin(PluginBase):
         ),
     )
 
-    # ------------------------------------------------------ dashboard UI
-    async def _ui_ping(self, ctx: Any, payload: dict[str, Any]) -> dict[str, Any]:
-        """Dashboard action: same path as the self-command."""
-        channel = payload.get("ping-channel")
-        text = str(payload.get("ping-text") or "").strip()
-        if not channel or not text:
-            return {
-                "success": False,
-                "field_errors": {"ping-channel" if not channel else "ping-text": "required"},
-            }
-        pctx = self._ctx
-        if pctx is None:
-            return {"success": False, "message": "plugin not active"}
-        reply = await self._ping(pctx, int(channel), text)
-        ok = reply.startswith("sent to")
-        return {"success": ok, "message": reply}
-
 
 __all__ = ["PingPlugin"]

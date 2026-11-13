@@ -103,17 +103,3 @@ class PingPluginTests(unittest.IsolatedAsyncioTestCase):
         reserved = {s.name for s in FRAMEWORK_COMMANDS}
         self.assertNotIn(PingPlugin.COMMANDS[0].name, reserved)
 
-    async def test_ui_action_requires_both_fields(self) -> None:
-        self.plugin._ctx = self.ctx
-        out = await self.plugin._ui_ping(None, {"ping-channel": 1})
-        self.assertFalse(out["success"])
-        self.assertIn("field_errors", out)
-
-    async def test_ui_action_happy_path(self) -> None:
-        self.plugin._ctx = self.ctx
-        out = await self.plugin._ui_ping(
-            None, {"ping-channel": 555, "ping-text": "from dashboard"})
-        self.assertTrue(out["success"])
-        self.assertEqual(self.services.sent,
-                         [(555, "from dashboard")])
-
