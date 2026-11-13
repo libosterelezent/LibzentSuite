@@ -95,6 +95,7 @@ The root `AGENTS.md`, `ARCHITECTURE.md`, and `INTEGRATION.md` are the places for
 - For API or model changes, test serialization and compatibility at the boundary. For UI changes, test interaction states, stale-data/loading/error flows, accessibility-relevant keyboard behavior, responsive layout where tooling supports it, and backend persistence where relevant.
 - Run the narrowest relevant tests first. Then run the adjacent unit/integration tests. Run the full suite before claiming repository-wide correctness when practical; if it cannot be run, state exactly what was and was not run.
 - Do not weaken tests, delete assertions, skip failures, or loosen validation just to achieve a green run. Fix the cause or document a genuinely pre-existing failure with reproducible evidence.
+- Do not run tests without cleaning up the residual cached data that was produced and kept on the previous run, start tests with fresh point.
 
 ## 8. Formatting, linting, and type checking
 

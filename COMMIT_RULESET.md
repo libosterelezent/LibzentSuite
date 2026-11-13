@@ -1,6 +1,6 @@
 # COMMIT RULESET — how every change lands in this repository
 
-> Established 2026-10-21 (Mudae parser / dashboard-hardening round).
+> Established 2026-10-21 (parser / dashboard-hardening round).
 > Every future commit series follows this exactly.
 
 ## 1. Before committing
@@ -20,7 +20,7 @@
   (the dashboard round: 13 files → 13 commits, each describing that
   file's changes).
 * A cohesive new feature may group its own package files into ONE
-  commit (the parser engine: `parsers/mudae/**` landed together),
+  commit (the parser engine: `parsers/` landed together),
   with its tests and docs as separate follow-up commits.
 * Commit in **dependency order**: foundation → feature → tests → docs.
 
@@ -43,6 +43,7 @@
   message if the user asked for "all changes").
 * Commit only after the final diff review. The working tree ends
   **clean** — everything relevant committed, nothing extra.
+* Push to remote only when there are five or more commits have been committed.
 
 ## 5. After the series
 
