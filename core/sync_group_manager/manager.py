@@ -32,16 +32,63 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal, Protocol, overload
 
 from ..errors import SyncGroupError
 from ..names import GROUP_NAME_RE as NAME_RE
+
+if TYPE_CHECKING:
+    import builtins
+
+    from database.models import AccountRecord, SyncGroupRecord
 
 __all__ = ["NAME_RE", "SyncGroupManager"]
 
 #: what the group CRUD/membership methods accept as the group reference:
 #: the stable int id or the unique name.
 GroupRef = int | str
+
+
+class GroupsRepo(Protocol):
+    """The sync-groups persistence surface this manager consumes
+    (satisfied structurally by ``database.repositories.SyncGroupsRepository``)."""
+
+    async def create(
+        self, name: str, description: str = "", *, enabled: bool = True
+    ) -> SyncGroupRecord: ...
+    async def get(self, group_id: int) -> SyncGroupRecord | None: ...
+    async def get_by_name(self, name: str) -> SyncGroupRecord | None: ...
+    async def list(self) -> builtins.list[SyncGroupRecord]: ...
+    async def update(
+        self,
+        group_id: int,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        enabled: bool | None = None,
+    ) -> SyncGroupRecord | None: ...
+    async def delete(self, group_id: int) -> bool: ...
+    async def members(self, group_name: str) -> builtins.list[str]: ...
+    async def membership_counts(self) -> dict[str, int]: ...
+    async def account_group_name(self, account: str) -> str | None: ...
+    async def set_account_group(self, account: str, group: str | None) -> None: ...
+    async def detach_members(self, group_name: str) -> builtins.list[str]: ...
+
+
+class AccountsReader(Protocol):
+    """The read surface over accounts this manager needs (existence
+    validation + boot restore); satisfied by ``AccountsRepository``."""
+
+    async def list(self) -> builtins.list[AccountRecord]: ...
+
+
+class PacingRegistrar(Protocol):
+    """The limiter's runtime membership surface (account -> shared group
+    clock). Accessed defensively at runtime — doubles missing a member
+    simply no-op (see ``_sync_runtime``)."""
+
+    def set_account_group(self, account: str, group: str | None) -> None: ...
+    def account_groups(self) -> dict[str, str]: ...
 
 
 class SyncGroupManager:
@@ -51,11 +98,11 @@ class SyncGroupManager:
 
     def __init__(
         self,
-        groups_repo: Any,
-        logger: Any = None,
+        groups_repo: GroupsRepo,
+        logger: logging.Logger | None = None,
         *,
-        accounts_repo: Any = None,
-        limiter: Any = None,
+        accounts_repo: AccountsReader | None = None,
+        limiter: PacingRegistrar | None = None,
     ) -> None:
         """``groups_repo``: SyncGroupsRepository; ``accounts_repo`` (optional)
         enables account validation + boot restore; ``limiter`` (optional,
@@ -68,7 +115,7 @@ class SyncGroupManager:
         self._limiter = limiter
         self._logger = logger or logging.getLogger("libzent.sync_groups")
         #: name -> SyncGroupRecord (cache; refresh via load()/mutators)
-        self._cache: dict[str, Any] = {}
+        self._cache: dict[str, SyncGroupRecord] = {}
         #: serializes persist+runtime-sync per membership change so the
         #: database and the limiter mapping can never disagree (the repo's
         #: own write lock serializes the SQL; this extends the critical
@@ -411,9 +458,21 @@ class SyncGroupManager:
             )
         return name.strip()
 
-    async def _resolve(self, group: GroupRef, *, required: bool = True) -> Any | None:
-        """GroupRef (int id | str name) -> SyncGroupRecord."""
-        record = None
+    @overload
+    async def _resolve(
+        self, group: GroupRef, *, required: Literal[True] = ...
+    ) -> SyncGroupRecord: ...
+
+    @overload
+    async def _resolve(
+        self, group: GroupRef, *, required: Literal[False]
+    ) -> SyncGroupRecord | None: ...
+
+    async def _resolve(self, group: GroupRef, *, required: bool = True) -> SyncGroupRecord | None:
+        """GroupRef (int id | str name) -> SyncGroupRecord. With
+        ``required=True`` (the default) an unresolved reference raises
+        instead of returning None."""
+        record: SyncGroupRecord | None = None
         try:
             if isinstance(group, int) and not isinstance(group, bool):
                 record = await self._repo.get(group)
@@ -429,7 +488,8 @@ class SyncGroupManager:
             raise SyncGroupError(f"unknown sync group {group!r} (known groups: {known})")
         return record
 
-    async def _repo_get_by_name(self, name: str) -> Any | None:
+    async def _repo_get_by_name(self, name: str) -> SyncGroupRecord | None:
+        record: SyncGroupRecord | None
         try:
             record = await self._repo.get_by_name(name)
         except Exception:
@@ -441,7 +501,7 @@ class SyncGroupManager:
 
     async def _members(self, group_name: str) -> list[str]:
         try:
-            return await self._repo.members(group_name) or []
+            return await self._repo.members(group_name)
         except Exception:
             self._logger.exception("could not read members of sync group %r", group_name)
             return []
