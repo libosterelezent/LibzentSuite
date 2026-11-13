@@ -109,6 +109,12 @@ main.py (argparse entry, signal handling, surface wiring)
 | `plugins_clear_setting(account, plugin, key)` | Remove one override |
 
 ### 3.6 Sync groups (8 methods)
+
+> **DEPRECATED (2026-11-13)** — sync groups are superseded by the
+> Workspace unification (`roadmap.md`, W0–W5). This section documents
+> the layer as it exists in code until W5 removes it; build nothing
+> new against it.
+
 | Method | Purpose |
 |---|---|
 | `groups_list()` | All groups with member counts |
@@ -122,6 +128,13 @@ main.py (argparse entry, signal handling, surface wiring)
 | `groups_clear_account(account, surface)` | Remove from any group |
 
 ### 3.7 Fleet orchestration (3 methods)
+
+> **DEPRECATED (2026-11-13)** — fleet is superseded by the Workspace
+> unification (`roadmap.md`). Transitions, generation fences,
+> reconciler and the policy check order carry over into the workspace
+> core; the rest is redesigned as the chain layer. Documented as-is
+> until W5 removes it.
+
 | Method | Purpose |
 |---|---|
 | `fleet_groups()` | Fleet state for all groups |
@@ -204,6 +217,14 @@ PluginServices request
 ---
 
 ## 5. Fleet orchestration (Phase 9)
+
+> **DEPRECATED (2026-11-13)** — superseded by the Workspace
+> unification (`roadmap.md`: decision record + phases W0–W5). The
+> correctness core below (§5.1 state machine, §5.2 transitions/
+> reconciler/policy, §5.4 invariants minus the group/fleet split
+> itself) carries into `core/workspace/` renamed-not-redesigned;
+> observations/relay and FleetTaskHandler become the chain layer.
+> This section stays accurate for the code that exists until W5.
 
 ### 5.1 State machine
 ```

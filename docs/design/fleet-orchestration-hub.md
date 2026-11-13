@@ -1,10 +1,19 @@
 # Fleet Orchestration Hub — Design Spec (PHASE 9)
 
+> **DEPRECATED (2026-11-13)** — this spec's subject (the fleet layer)
+> is superseded by the Workspace unification; see `roadmap.md` for
+> the decision record and phases W0–W5, and
+> `knowledgebase/WORKSPACE_SUPERSESSION.md` for the supersession
+> summary. Retained as the historical design record for the
+> correctness core (transition tables, generation fences, reconciler,
+> policy check order) that carries into `core/workspace/` unchanged.
+> Build nothing new against the fleet surface.
+
 Status: DECISIONS LOCKED by the operator (2026-10-22). Sources: GPT consult
 (`state/ui-rebuild-2026-10-22/consult-B2-fleet-hub-gpt.md`, repo-connected),
 lead-engineer counter-positions, operator answers. Companion: PHASE 10
-(plugin metrics) in `TODO + Ideas.md`, and the B3 account-data discussion
-(this spec's §7 is its seed).
+(plugin metrics) in the roadmap (formerly `TODO + Ideas.md`), and the B3
+account-data discussion (this spec's §7 is its seed).
 
 ## 0. Locked decisions
 
