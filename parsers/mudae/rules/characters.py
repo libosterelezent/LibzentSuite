@@ -12,9 +12,8 @@ The handler claims a message only when the embed actually looks like a
 character card (a stats signal present) — markers alone never produce
 a phantom character.
 """
-from __future__ import annotations
 
-from typing import Optional
+from __future__ import annotations
 
 from ..enums import MessageFamily
 from ..models import CharacterInfo, parse_number
@@ -25,10 +24,8 @@ __all__ = ["CHARACTER_RULE", "handle_character"]
 
 
 def handle_character(ctx: RuleContext) -> RuleResult:
-    claims = ctx.groups("characters.claims_rank") \
-        or ctx.groups("characters.claims_rank_alt")
-    likes = ctx.groups("characters.likes_rank") \
-        or ctx.groups("characters.likes_rank_alt")
+    claims = ctx.groups("characters.claims_rank") or ctx.groups("characters.claims_rank_alt")
+    likes = ctx.groups("characters.likes_rank") or ctx.groups("characters.likes_rank_alt")
     kakera = ctx.groups("characters.kakera_value")
     # a character card needs at least one stats signal
     if not (claims or likes or kakera):
@@ -45,29 +42,29 @@ def handle_character(ctx: RuleContext) -> RuleResult:
         likes_rank=_rank(likes, "likes"),
         kakera_value=_rank(kakera, "kakera"),
         keys=extract_keys(ctx.all_groups("keys.entry")),
-        starwish_count=len(
-            ctx.all_groups("characters.starwish_marker")),
+        starwish_count=len(ctx.all_groups("characters.starwish_marker")),
         claimed_by=_text(owner_groups, "owner"),
-        claimable=True if ctx.marker("characters.claimable_marker")
+        claimable=True
+        if ctx.marker("characters.claimable_marker")
         else (False if owner_groups else None),
     )
     return RuleResult(matched=True, character=character)
 
 
-def _text(groups: Optional[dict], key: str) -> Optional[str]:
+def _text(groups: dict | None, key: str) -> str | None:
     if not groups:
         return None
     value = groups.get(key)
     return value.strip() if isinstance(value, str) else None
 
 
-def _clean_series(value: Optional[str]) -> Optional[str]:
+def _clean_series(value: str | None) -> str | None:
     if value is None:
         return None
     return value.strip().rstrip("|").strip() or None
 
 
-def _rank(groups: Optional[dict], key: str) -> Optional[int]:
+def _rank(groups: dict | None, key: str) -> int | None:
     if not groups:
         return None
     number = parse_number(groups.get(key))
@@ -98,5 +95,5 @@ CHARACTER_RULE = Rule(
     ),
     priority=10,
     description="Roll/info character embeds (name, series, ranks, "
-                "kakera value, keys, spheres, ownership footer)",
+    "kakera value, keys, spheres, ownership footer)",
 )

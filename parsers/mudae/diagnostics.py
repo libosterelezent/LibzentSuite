@@ -6,10 +6,10 @@ callers (and the future dashboard) can render them without catching.
 
 Codes are stable strings; treat them as an API.
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
 
 from .enums import Severity
 
@@ -26,11 +26,18 @@ CODE_SKIPPED_SOURCE = "skipped_source"
 CODE_LOAD_FALLBACK = "load_fallback"
 
 __all__ = [
-    "Diagnostic", "Diagnostics",
-    "CODE_UNKNOWN_FORMAT", "CODE_OVERSIZED_INPUT", "CODE_AMBIGUOUS_MATCH",
-    "CODE_NO_MATCH", "CODE_REJECTED_OVERRIDE", "CODE_CORRUPT_STORE",
-    "CODE_OUTDATED_STORE", "CODE_DISABLED_RULE", "CODE_SKIPPED_SOURCE",
+    "CODE_AMBIGUOUS_MATCH",
+    "CODE_CORRUPT_STORE",
+    "CODE_DISABLED_RULE",
     "CODE_LOAD_FALLBACK",
+    "CODE_NO_MATCH",
+    "CODE_OUTDATED_STORE",
+    "CODE_OVERSIZED_INPUT",
+    "CODE_REJECTED_OVERRIDE",
+    "CODE_SKIPPED_SOURCE",
+    "CODE_UNKNOWN_FORMAT",
+    "Diagnostic",
+    "Diagnostics",
 ]
 
 
@@ -42,8 +49,8 @@ class Diagnostic:
     code: str
     message: str
     #: related setting ID, rule ID or source path when applicable
-    subject: Optional[str] = None
-    detail: Optional[str] = None
+    subject: str | None = None
+    detail: str | None = None
 
     def to_dict(self) -> dict:
         """JSON-friendly representation (future dashboard boundary)."""
@@ -60,11 +67,16 @@ class Diagnostics:
     """Mutable collector handed around during one parse / load."""
 
     def __init__(self) -> None:
-        self._items: List[Diagnostic] = []
+        self._items: list[Diagnostic] = []
 
-    def add(self, severity: Severity, code: str, message: str,
-            subject: Optional[str] = None,
-            detail: Optional[str] = None) -> Diagnostic:
+    def add(
+        self,
+        severity: Severity,
+        code: str,
+        message: str,
+        subject: str | None = None,
+        detail: str | None = None,
+    ) -> Diagnostic:
         item = Diagnostic(severity, code, message, subject, detail)
         self._items.append(item)
         return item
@@ -79,13 +91,13 @@ class Diagnostics:
         return self.add(Severity.ERROR, code, message, **kw)
 
     @property
-    def items(self) -> Tuple[Diagnostic, ...]:
+    def items(self) -> tuple[Diagnostic, ...]:
         return tuple(self._items)
 
     def has(self, code: str) -> bool:
         return any(item.code == code for item in self._items)
 
-    def to_list(self) -> List[dict]:
+    def to_list(self) -> list[dict]:
         return [item.to_dict() for item in self._items]
 
     def __len__(self) -> int:

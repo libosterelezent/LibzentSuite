@@ -11,29 +11,29 @@ SAME required-groups contract), and the catalog exposes
 ``default_version`` so a future dashboard can offer "reset to the new
 default" with a diff. Overrides are never auto-rewritten by an update.
 """
+
 from __future__ import annotations
 
-from typing import Dict
+from typing import TYPE_CHECKING
 
 from ..enums import MessageFamily, TargetSource
-from ..exceptions import UnsupportedLocaleError
 from ..locales import get_locale
-from ..settings.models import (
-    MessageStringSetting,
-    RegexPatternSetting,
-)
+
+if TYPE_CHECKING:
+    from ..settings.models import (
+        MessageStringSetting,
+        RegexPatternSetting,
+    )
 
 __all__ = ["default_patterns", "default_strings"]
 
 
-def default_patterns(locale: str = "en"
-                     ) -> Dict[str, RegexPatternSetting]:
+def default_patterns(locale: str = "en") -> dict[str, RegexPatternSetting]:
     """All built-in regex defaults for a locale, keyed by stable ID."""
     return get_locale(locale).pattern_map()
 
 
-def default_strings(locale: str = "en"
-                    ) -> Dict[str, MessageStringSetting]:
+def default_strings(locale: str = "en") -> dict[str, MessageStringSetting]:
     """All built-in message-string defaults for a locale."""
     return get_locale(locale).string_map()
 

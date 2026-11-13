@@ -4,12 +4,10 @@ Each rule is small and self-contained; the family split keeps an
 administrator's override scoped (editing the loot payout pattern can
 never affect character parsing — different settings, different rule).
 """
+
 from __future__ import annotations
 
-from typing import Optional
-
 from ..enums import (
-    CooldownKind,
     KakeraEventKind,
     MessageFamily,
 )
@@ -25,13 +23,18 @@ from ..models import (
 from .base import PatternBinding, Rule, RuleContext, RuleResult, StringBinding
 
 __all__ = [
-    "KAKERA_REACTION_RULE", "KAKERALOOT_PAYOUT_RULE",
-    "KAKERALOOT_PROFILE_RULE", "TRADE_INSUFFICIENT_RULE", "TRADE_GIFT_RULE",
-    "TRADE_GIVE_CONFIRM_RULE", "WISHLIST_RULE", "MARRIAGE_RULE",
+    "KAKERALOOT_PAYOUT_RULE",
+    "KAKERALOOT_PROFILE_RULE",
+    "KAKERA_REACTION_RULE",
+    "MARRIAGE_RULE",
+    "TRADE_GIFT_RULE",
+    "TRADE_GIVE_CONFIRM_RULE",
+    "TRADE_INSUFFICIENT_RULE",
+    "WISHLIST_RULE",
 ]
 
 
-def _int(groups: Optional[dict], key: str) -> Optional[int]:
+def _int(groups: dict | None, key: str) -> int | None:
     if not groups:
         return None
     number = parse_number(groups.get(key))
@@ -48,28 +51,29 @@ def handle_kakera_reaction(ctx: RuleContext) -> RuleResult:
     usernames = []
     if groups:
         username = (groups.get("username") or "").strip() or None
-        events.append(KakeraEvent(
-            kind=KakeraEventKind.REACTION,
-            amount=_int(groups, "amount"),
-            username=username,
-            spheres=_int(ctx.groups("kakera.spheres_gained"),
-                         "spheres"),
-            metadata={"tag": "($k)"},
-        ))
+        events.append(
+            KakeraEvent(
+                kind=KakeraEventKind.REACTION,
+                amount=_int(groups, "amount"),
+                username=username,
+                spheres=_int(ctx.groups("kakera.spheres_gained"), "spheres"),
+                metadata={"tag": "($k)"},
+            )
+        )
         if username:
             usernames.append(username)
     if sphere_groups:
-        sphere_username = (sphere_groups.get("username") or "").strip() \
-            or None
-        events.append(KakeraEvent(
-            kind=KakeraEventKind.SPHERE_CLICK,
-            amount=_int(sphere_groups, "spheres"),
-            username=sphere_username,
-        ))
+        sphere_username = (sphere_groups.get("username") or "").strip() or None
+        events.append(
+            KakeraEvent(
+                kind=KakeraEventKind.SPHERE_CLICK,
+                amount=_int(sphere_groups, "spheres"),
+                username=sphere_username,
+            )
+        )
         if sphere_username:
             usernames.append(sphere_username)
-    return RuleResult(matched=True, kakera_events=tuple(events),
-                      usernames=tuple(usernames))
+    return RuleResult(matched=True, kakera_events=tuple(events), usernames=tuple(usernames))
 
 
 KAKERA_REACTION_RULE = Rule(
@@ -99,21 +103,24 @@ def handle_claim_event(ctx: RuleContext) -> RuleResult:
     amount = _int(groups, "kakera")
     return RuleResult(
         matched=True,
-        kakera_events=(KakeraEvent(
-            kind=KakeraEventKind.CLAIM_GAIN,
-            amount=amount,
-            username=(groups.get("username") or "").strip() or None,
-            metadata={"character":
-                      (groups.get("character") or "").strip() or None},
-        ),) if amount is not None else ())
+        kakera_events=(
+            KakeraEvent(
+                kind=KakeraEventKind.CLAIM_GAIN,
+                amount=amount,
+                username=(groups.get("username") or "").strip() or None,
+                metadata={"character": (groups.get("character") or "").strip() or None},
+            ),
+        )
+        if amount is not None
+        else (),
+    )
 
 
 CLAIM_EVENT_RULE = Rule(
     rule_id="claim.added_to_collection",
     family=MessageFamily.CLAIM,
     handler=handle_claim_event,
-    patterns=(PatternBinding("claim.added_to_collection",
-                             required=True),),
+    patterns=(PatternBinding("claim.added_to_collection", required=True),),
     strings=(),
     priority=25,
     description="Claim events (custom claim-message servers)",
@@ -132,20 +139,19 @@ def handle_kakeraloot_payout(ctx: RuleContext) -> RuleResult:
     if stacked:
         parsed_stacked = parse_number(stacked.get("stacked"))
         parsed_stock = parse_number(stacked.get("stock"))
-        stacked_value = (float(parsed_stacked)
-                         if isinstance(parsed_stacked, float) else
-                         parsed_stacked)
-        stock_value = (float(parsed_stock)
-                       if isinstance(parsed_stock, float) else parsed_stock)
+        stacked_value = (
+            float(parsed_stacked) if isinstance(parsed_stacked, float) else parsed_stacked
+        )
+        stock_value = float(parsed_stock) if isinstance(parsed_stock, float) else parsed_stock
     info = KakeralootInfo(
         kakera_gained=amount,
         rolls_stacked=stacked_value,
         stock=stock_value,
     )
-    event = KakeraEvent(
-        kind=KakeraEventKind.LOOT, amount=amount)
-    return RuleResult(matched=True, kakeraloot=info,
-                      kakera_events=(event,) if amount is not None else ())
+    event = KakeraEvent(kind=KakeraEventKind.LOOT, amount=amount)
+    return RuleResult(
+        matched=True, kakeraloot=info, kakera_events=(event,) if amount is not None else ()
+    )
 
 
 KAKERALOOT_PAYOUT_RULE = Rule(
@@ -166,10 +172,10 @@ def handle_kakeraloot_profile(ctx: RuleContext) -> RuleResult:
     groups = ctx.groups("usernames.kakeraloot_title")
     if not groups:
         return RuleResult(matched=False)
-    info = KakeralootInfo(
-        username=(groups.get("username") or "").strip() or None)
-    return RuleResult(matched=True, kakeraloot=info,
-                      usernames=(info.username,) if info.username else ())
+    info = KakeralootInfo(username=(groups.get("username") or "").strip() or None)
+    return RuleResult(
+        matched=True, kakeraloot=info, usernames=(info.username,) if info.username else ()
+    )
 
 
 KAKERALOOT_PROFILE_RULE = Rule(
@@ -191,9 +197,10 @@ def handle_trade_insufficient(ctx: RuleContext) -> RuleResult:
     amount = _int(groups, "amount")
     trade = TradeInfo(kind=KakeraEventKind.TRADE_DEFICIT, amount=amount)
     return RuleResult(
-        matched=True, trade=trade,
-        kakera_events=(KakeraEvent(
-            kind=KakeraEventKind.TRADE_DEFICIT, amount=amount),))
+        matched=True,
+        trade=trade,
+        kakera_events=(KakeraEvent(kind=KakeraEventKind.TRADE_DEFICIT, amount=amount),),
+    )
 
 
 TRADE_INSUFFICIENT_RULE = Rule(
@@ -214,14 +221,14 @@ def handle_trade_gift(ctx: RuleContext) -> RuleResult:
     trade = TradeInfo(
         kind=KakeraEventKind.GIFT,
         amount=_int(groups, "amount"),
-        from_user_id=int(groups["from_id"]) if groups.get("from_id")
-        else None,
+        from_user_id=int(groups["from_id"]) if groups.get("from_id") else None,
         to_user_id=int(groups["to_id"]) if groups.get("to_id") else None,
     )
     return RuleResult(
-        matched=True, trade=trade,
-        kakera_events=(KakeraEvent(
-            kind=KakeraEventKind.GIFT, amount=trade.amount),))
+        matched=True,
+        trade=trade,
+        kakera_events=(KakeraEvent(kind=KakeraEventKind.GIFT, amount=trade.amount),),
+    )
 
 
 TRADE_GIFT_RULE = Rule(
@@ -245,8 +252,8 @@ def handle_trade_give_confirm(ctx: RuleContext) -> RuleResult:
         username=(groups.get("username") or "").strip() or None,
     )
     return RuleResult(
-        matched=True, trade=trade,
-        usernames=(trade.username,) if trade.username else ())
+        matched=True, trade=trade, usernames=(trade.username,) if trade.username else ()
+    )
 
 
 TRADE_GIVE_CONFIRM_RULE = Rule(
@@ -263,8 +270,7 @@ TRADE_GIVE_CONFIRM_RULE = Rule(
 # ------------------------------------------------------------ wishlist
 def handle_wishlist(ctx: RuleContext) -> RuleResult:
     stock_groups = ctx.groups("wishlist.stock")
-    refill_groups = (ctx.groups("wishlist.refill")
-                     or ctx.groups("wishlist.refill_alt"))
+    refill_groups = ctx.groups("wishlist.refill") or ctx.groups("wishlist.refill_alt")
     if not (stock_groups or refill_groups):
         return RuleResult(matched=False)
     info = WishlistInfo(
@@ -300,22 +306,22 @@ def handle_marriage(ctx: RuleContext) -> RuleResult:
         return RuleResult(matched=False)
     spheres = _int(ctx.groups("kakera.spheres_gained"), "spheres")
     info = MarriageInfo(
-        user_a=(pair.get("user_a") or "").strip() or None
-        if pair else None,
-        character=(pair.get("character") or "").strip() or None
-        if pair else None,
+        user_a=(pair.get("user_a") or "").strip() or None if pair else None,
+        character=(pair.get("character") or "").strip() or None if pair else None,
         kakera_bonus=_int(bonus, "amount") if bonus else None,
         tier=(bonus.get("tier") or "").strip() or None if bonus else None,
         spheres=spheres,
     )
     events = []
     if info.kakera_bonus is not None:
-        events.append(KakeraEvent(
-            kind=KakeraEventKind.MARRIAGE_BONUS,
-            amount=info.kakera_bonus,
-            metadata={"tier": info.tier} if info.tier else {}))
-    return RuleResult(matched=True, marriage=info,
-                      kakera_events=tuple(events))
+        events.append(
+            KakeraEvent(
+                kind=KakeraEventKind.MARRIAGE_BONUS,
+                amount=info.kakera_bonus,
+                metadata={"tier": info.tier} if info.tier else {},
+            )
+        )
+    return RuleResult(matched=True, marriage=info, kakera_events=tuple(events))
 
 
 MARRIAGE_RULE = Rule(

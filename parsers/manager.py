@@ -6,7 +6,7 @@ generic formats...) plug in WITHOUT touching plugin or framework code::
 
     from parsers import PARSER_MANAGER
 
-    result = PARSER_MANAGER.parse_event(event)          # default: mudae
+    result = PARSER_MANAGER.parse_event(event)  # default: mudae
     if result.family is MessageFamily.CHARACTER:
         ...
 
@@ -39,15 +39,23 @@ The backend contract is one callable:
 result type with a ``family``-like discriminator; MudaeParser's
 ``ParseResult`` is the reference implementation).
 """
+
 from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 __all__ = [
-    "ParserBackend", "ParserManager", "PARSER_MANAGER",
-    "DEFAULT_PARSER", "UnknownParserError", "parse",
+    "DEFAULT_PARSER",
+    "PARSER_MANAGER",
+    "ParserBackend",
+    "ParserManager",
+    "UnknownParserError",
+    "parse",
 ]
 
 DEFAULT_PARSER = "mudae"
@@ -68,7 +76,7 @@ class ParserBackend:
     #: the families/categories the backend can produce (loose strings —
     #: each backend defines its own vocabulary; MudaeParser uses
     #: MessageFamily values)
-    families: Tuple[str, ...] = ()
+    families: tuple[str, ...] = ()
     version: str = ""
 
 
@@ -81,29 +89,37 @@ class ParserManager:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._backends: Dict[str, ParserBackend] = {}
-        self._instances: Dict[str, Any] = {}
+        self._backends: dict[str, ParserBackend] = {}
+        self._instances: dict[str, Any] = {}
 
     # -------------------------------------------------------- registration
-    def register_parser(self, name: str, factory: Callable[[], Any],
-                        *, description: str = "",
-                        families: Tuple[str, ...] = (),
-                        version: str = "", replace: bool = False) -> None:
+    def register_parser(
+        self,
+        name: str,
+        factory: Callable[[], Any],
+        *,
+        description: str = "",
+        families: tuple[str, ...] = (),
+        version: str = "",
+        replace: bool = False,
+    ) -> None:
         """Register (or replace) a backend. Duplicate names are
         rejected unless ``replace`` is explicit — silent replacement
         would mask typos."""
         if not name or not callable(factory):
-            raise ValueError(
-                "a parser backend needs a non-empty name and a "
-                "callable factory")
+            raise ValueError("a parser backend needs a non-empty name and a callable factory")
         with self._lock:
             if name in self._backends and not replace:
                 raise ValueError(
-                    f"parser {name!r} is already registered "
-                    f"(pass replace=True to override)")
+                    f"parser {name!r} is already registered (pass replace=True to override)"
+                )
             self._backends[name] = ParserBackend(
-                name=name, factory=factory, description=description,
-                families=tuple(families), version=version)
+                name=name,
+                factory=factory,
+                description=description,
+                families=tuple(families),
+                version=version,
+            )
             self._instances.pop(name, None)
 
     def unregister_parser(self, name: str) -> bool:
@@ -114,12 +130,12 @@ class ParserManager:
             self._instances.pop(name, None)
             return existed
 
-    def available(self) -> Tuple[str, ...]:
+    def available(self) -> tuple[str, ...]:
         """Registered backend names (sorted)."""
         with self._lock:
             return tuple(sorted(self._backends))
 
-    def catalog(self) -> Dict[str, dict]:
+    def catalog(self) -> dict[str, dict]:
         """Backend metadata for inspection (no instantiation)."""
         with self._lock:
             return {
@@ -139,41 +155,39 @@ class ParserManager:
             backend = self._backends.get(name)
             if backend is None:
                 raise UnknownParserError(
-                    f"no parser backend {name!r} "
-                    f"(available: {', '.join(sorted(self._backends))})")
+                    f"no parser backend {name!r} (available: {', '.join(sorted(self._backends))})"
+                )
             instance = self._instances.get(name)
             if instance is None:
                 instance = backend.factory()
                 self._instances[name] = instance
             return instance
 
-    def parse(self, message: Any, *,
-              account_username: Optional[str] = None,
-              parser: str = DEFAULT_PARSER) -> Any:
+    def parse(
+        self, message: Any, *, account_username: str | None = None, parser: str = DEFAULT_PARSER
+    ) -> Any:
         """Dispatch one message to a backend (its contract result)."""
         backend = self.backend(parser)
         return backend.parse(message, account_username=account_username)
 
-    def parse_event(self, event: Any, *,
-                    account_username: Optional[str] = None,
-                    parser: str = DEFAULT_PARSER) -> Any:
+    def parse_event(
+        self, event: Any, *, account_username: str | None = None, parser: str = DEFAULT_PARSER
+    ) -> Any:
         """Parse a framework ``MessageReceived``/``MessageEdited`` bus
         event: unwraps the rich ``event.message`` DTO (adapters.model.
         DiscordMessage — already the duck-typed shape parsers accept)
         and dispatches. Plain messages/strings pass through unchanged."""
         message = getattr(event, "message", None)
         if message is None:
-            if isinstance(event, str) or hasattr(event, "content") \
-                    or hasattr(event, "embeds"):
+            if isinstance(event, str) or hasattr(event, "content") or hasattr(event, "embeds"):
                 message = event  # a message object passed directly
             else:
                 from .mudae.exceptions import InvalidMessageError
 
                 raise InvalidMessageError(
-                    "event carries no parsable message payload "
-                    "(event.message is None)")
-        return self.parse(message, account_username=account_username,
-                          parser=parser)
+                    "event carries no parsable message payload (event.message is None)"
+                )
+        return self.parse(message, account_username=account_username, parser=parser)
 
     def reset(self) -> None:
         """Drop all backends + cached instances (test isolation)."""
@@ -191,6 +205,7 @@ def register_builtin_parsers(manager: ParserManager) -> None:
     and apply process-wide on the next parse (the settings manager
     publishes immutable snapshots; MudaeParser re-reads its snapshot
     per parse)."""
+
     def build_mudae() -> Any:
         from .mudae import MudaeParser, MudaeParserSettingsManager
 
@@ -200,10 +215,20 @@ def register_builtin_parsers(manager: ParserManager) -> None:
         name="mudae",
         factory=build_mudae,
         description="Mudae bot messages: characters, kakera, keys, "
-                    "spheres, cooldowns, timers, claims, trades, loot",
-        families=("character", "kakera", "keys", "cooldown", "timer",
-                  "claim", "trade", "kakeraloot", "wishlist", "marriage",
-                  "username"),
+        "spheres, cooldowns, timers, claims, trades, loot",
+        families=(
+            "character",
+            "kakera",
+            "keys",
+            "cooldown",
+            "timer",
+            "claim",
+            "trade",
+            "kakeraloot",
+            "wishlist",
+            "marriage",
+            "username",
+        ),
         version="1.0",
     )
 
@@ -213,8 +238,8 @@ PARSER_MANAGER = ParserManager()
 register_builtin_parsers(PARSER_MANAGER)
 
 
-def parse(message: Any, *, account_username: Optional[str] = None,
-          parser: str = DEFAULT_PARSER) -> Any:
+def parse(
+    message: Any, *, account_username: str | None = None, parser: str = DEFAULT_PARSER
+) -> Any:
     """Module-level convenience over :data:`PARSER_MANAGER`."""
-    return PARSER_MANAGER.parse(
-        message, account_username=account_username, parser=parser)
+    return PARSER_MANAGER.parse(message, account_username=account_username, parser=parser)

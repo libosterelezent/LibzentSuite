@@ -33,19 +33,25 @@ Packages:
     ``mudae`` registered; future parser libraries register through
     ``ParserManager.register_parser`` without touching framework code.
 """
+
 from __future__ import annotations
 
 from .manager import (
     DEFAULT_PARSER,
+    PARSER_MANAGER,
     ParserBackend,
     ParserManager,
-    PARSER_MANAGER,
     UnknownParserError,
     parse,
     register_builtin_parsers,
 )
 
 __all__ = [
-    "ParserManager", "PARSER_MANAGER", "ParserBackend", "DEFAULT_PARSER",
-    "UnknownParserError", "parse", "register_builtin_parsers",
+    "DEFAULT_PARSER",
+    "PARSER_MANAGER",
+    "ParserBackend",
+    "ParserManager",
+    "UnknownParserError",
+    "parse",
+    "register_builtin_parsers",
 ]

@@ -12,21 +12,20 @@ across old and new rules. Unknown messages return an UNKNOWN-family
 result with diagnostics — expected nonmatches never raise. Programmer
 errors (unusable input) raise :class:`InvalidMessageError`.
 """
+
 from __future__ import annotations
 
-from typing import Any, Iterable, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any
 
 from .diagnostics import (
     CODE_AMBIGUOUS_MATCH,
-    CODE_DISABLED_RULE,
     CODE_NO_MATCH,
     CODE_UNKNOWN_FORMAT,
     Diagnostics,
 )
 from .enums import MessageFamily
-from .exceptions import InvalidMessageError
 from .models import ParseResult
-from .normalization import NormalizedMessage, TextSource, normalize_message
+from .normalization import NormalizedMessage, normalize_message
 from .registry import DEFAULT_RULES
 from .rules.base import Rule, RuleContext, RuleResult
 from .rules.usernames import USERNAME_PATTERN_IDS, extract_usernames
@@ -34,6 +33,9 @@ from .settings.manager import (
     EffectiveConfig,
     MudaeParserSettingsManager,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 __all__ = ["MudaeParser"]
 
@@ -49,21 +51,24 @@ class MudaeParser:
     :class:`EffectiveConfig` (hermetic — tests, simulations).
     """
 
-    def __init__(self,
-                 source: Optional[MudaeParserSettingsManager
-                                  | EffectiveConfig] = None,
-                 rules: Optional[Sequence[Rule]] = None) -> None:
+    def __init__(
+        self,
+        source: MudaeParserSettingsManager | EffectiveConfig | None = None,
+        rules: Sequence[Rule] | None = None,
+    ) -> None:
         if source is None:
-            source = MudaeParserSettingsManager(
-                storage=_NoStorage())
+            source = MudaeParserSettingsManager(storage=_NoStorage())
         self._source = source
-        self._rules: Tuple[Rule, ...] = tuple(
-            rules if rules is not None else DEFAULT_RULES)
+        self._rules: tuple[Rule, ...] = tuple(rules if rules is not None else DEFAULT_RULES)
 
     # ------------------------------------------------------------ parsing
-    def parse(self, message: Any,
-              *, account_username: Optional[str] = None,
-              _snapshot: Optional[EffectiveConfig] = None) -> ParseResult:
+    def parse(
+        self,
+        message: Any,
+        *,
+        account_username: str | None = None,
+        _snapshot: EffectiveConfig | None = None,
+    ) -> ParseResult:
         """Parse one Discord message (duck-typed object or plain str).
 
         ``account_username`` is caller CONTEXT ONLY: it is echoed on
@@ -74,31 +79,28 @@ class MudaeParser:
         snapshot across the parse (used to guarantee/test that an
         update mid-parse can never split a message across configs).
         """
-        config = _snapshot if _snapshot is not None \
-            else self._snapshot()
+        config = _snapshot if _snapshot is not None else self._snapshot()
         diagnostics = Diagnostics()
         normalized = normalize_message(message, diagnostics)
         if not normalized.sources:
-            diagnostics.info(CODE_NO_MATCH,
-                             "message exposes no parseable text")
+            diagnostics.info(CODE_NO_MATCH, "message exposes no parseable text")
             return ParseResult(
                 family=MessageFamily.UNKNOWN,
                 account_username=account_username,
-                diagnostics=diagnostics)
+                diagnostics=diagnostics,
+            )
 
-        matched = self._run_rules(config, normalized, diagnostics,
-                                  account_username)
+        matched = self._run_rules(config, normalized, diagnostics, account_username)
         usernames = self._username_pass(config, normalized, matched)
-        result = self._assemble(matched, usernames, account_username,
-                                normalized, diagnostics)
+        result = self._assemble(matched, usernames, account_username, normalized, diagnostics)
         return result
 
     @property
-    def rules(self) -> Tuple[Rule, ...]:
+    def rules(self) -> tuple[Rule, ...]:
         return self._rules
 
     @staticmethod
-    def _string_ids(rule: Rule) -> Tuple[str, ...]:
+    def _string_ids(rule: Rule) -> tuple[str, ...]:
         return tuple(binding.setting_id for binding in rule.strings)
 
     def _snapshot(self) -> EffectiveConfig:
@@ -107,28 +109,32 @@ class MudaeParser:
         return self._source
 
     # ------------------------------------------------------------ engine
-    def _run_rules(self, config: EffectiveConfig,
-                   normalized: NormalizedMessage,
-                   diagnostics: Diagnostics,
-                   account_username: Optional[str]
-                   ) -> List[Tuple[Rule, RuleResult]]:
+    def _run_rules(
+        self,
+        config: EffectiveConfig,
+        normalized: NormalizedMessage,
+        diagnostics: Diagnostics,
+        account_username: str | None,
+    ) -> list[tuple[Rule, RuleResult]]:
         """Run every rule; return the matched (rule, result) pairs in
         priority order. The first is the winner; extras are flagged as
         ambiguous (honest detection beats silent first-wins)."""
         marker_cache: dict = {}
-        matched: List[Tuple[Rule, RuleResult]] = []
+        matched: list[tuple[Rule, RuleResult]] = []
         for rule in self._rules:
             if not self._gate(rule, config, normalized, marker_cache):
                 continue
             group_dicts = self._collect(rule, config, normalized)
             required_ok = all(
-                group_dicts.get(binding.setting_id)
-                for binding in rule.patterns if binding.required)
+                group_dicts.get(binding.setting_id) for binding in rule.patterns if binding.required
+            )
             if not required_ok:
                 continue
             context = RuleContext(
-                markers={setting_id: marker_cache.get(setting_id, False)
-                         for setting_id in self._string_ids(rule)},
+                markers={
+                    setting_id: marker_cache.get(setting_id, False)
+                    for setting_id in self._string_ids(rule)
+                },
                 group_dicts=group_dicts,
                 account_username=account_username,
                 raw_sources={},
@@ -141,7 +147,8 @@ class MudaeParser:
                 diagnostics.error(
                     "handler_failed",
                     f"rule {rule.rule_id!r} handler raised; rule skipped",
-                    subject=rule.rule_id)
+                    subject=rule.rule_id,
+                )
                 continue
             if outcome.matched:
                 matched.append((rule, outcome))
@@ -149,13 +156,14 @@ class MudaeParser:
             names = ", ".join(rule.rule_id for rule, _ in matched)
             diagnostics.warning(
                 CODE_AMBIGUOUS_MATCH,
-                "message matched multiple rules; lowest-priority-order "
-                "rule wins",
-                detail=names)
+                "message matched multiple rules; lowest-priority-order rule wins",
+                detail=names,
+            )
         return matched
 
-    def _gate(self, rule: Rule, config: EffectiveConfig,
-              normalized: NormalizedMessage, marker_cache: dict) -> bool:
+    def _gate(
+        self, rule: Rule, config: EffectiveConfig, normalized: NormalizedMessage, marker_cache: dict
+    ) -> bool:
         """String-marker gate: every required marker must match, and
         at least one declared marker must match when any exist."""
         if not rule.strings:
@@ -169,6 +177,7 @@ class MudaeParser:
                 if setting is not None:
                     for source in normalized.by_source(setting.target):
                         from .settings.validator import matches_string
+
                         if matches_string(setting, source.value):
                             hit = True
                             break
@@ -179,8 +188,7 @@ class MudaeParser:
                 return False
         return any_match
 
-    def _collect(self, rule: Rule, config: EffectiveConfig,
-                 normalized: NormalizedMessage) -> dict:
+    def _collect(self, rule: Rule, config: EffectiveConfig, normalized: NormalizedMessage) -> dict:
         """Run the rule's patterns against sources of their declared
         target kind; group dicts per setting ID (first or all)."""
         group_dicts: dict = {}
@@ -189,11 +197,10 @@ class MudaeParser:
             if compiled is None:
                 continue  # disabled or unknown: handler degrades
             setting = compiled.setting
-            found: List[dict] = []
+            found: list[dict] = []
             for source in normalized.by_source(setting.target):
                 for match in compiled.regex.finditer(source.value):
-                    groups = {key: value for key, value
-                              in match.groupdict().items()}
+                    groups = dict(match.groupdict().items())
                     found.append(groups)
                     if binding.multiplicity == "first":
                         break
@@ -202,13 +209,15 @@ class MudaeParser:
                 if len(found) >= _MAX_MATCHES_PER_PATTERN:
                     break
             if found:
-                group_dicts[binding.setting_id] = found[
-                    :_MAX_MATCHES_PER_PATTERN]
+                group_dicts[binding.setting_id] = found[:_MAX_MATCHES_PER_PATTERN]
         return group_dicts
 
-    def _username_pass(self, config: EffectiveConfig,
-                       normalized: NormalizedMessage,
-                       matched: List[Tuple[Rule, RuleResult]]) -> tuple:
+    def _username_pass(
+        self,
+        config: EffectiveConfig,
+        normalized: NormalizedMessage,
+        matched: list[tuple[Rule, RuleResult]],
+    ) -> tuple:
         """Cross-cutting username extraction (message text only)."""
         group_dicts: dict = {}
         for setting_id in USERNAME_PATTERN_IDS:
@@ -231,20 +240,23 @@ class MudaeParser:
                     extracted.append(name)
         return tuple(extracted)
 
-    def _assemble(self, matched: List[Tuple[Rule, RuleResult]],
-                  usernames: tuple, account_username: Optional[str],
-                  normalized: NormalizedMessage,
-                  diagnostics: Diagnostics) -> ParseResult:
+    def _assemble(
+        self,
+        matched: list[tuple[Rule, RuleResult]],
+        usernames: tuple,
+        account_username: str | None,
+        normalized: NormalizedMessage,
+        diagnostics: Diagnostics,
+    ) -> ParseResult:
         if not matched:
-            diagnostics.info(
-                CODE_UNKNOWN_FORMAT,
-                "message did not match any known Mudae format")
+            diagnostics.info(CODE_UNKNOWN_FORMAT, "message did not match any known Mudae format")
             return ParseResult(
                 family=MessageFamily.UNKNOWN,
                 usernames=usernames,
                 account_username=account_username,
                 sources_seen=normalized.kinds(),
-                diagnostics=diagnostics)
+                diagnostics=diagnostics,
+            )
         rule, outcome = matched[0]
         return ParseResult(
             family=rule.family,
@@ -277,5 +289,4 @@ class _NoStorage:
     def save(self, document):  # pragma: no cover - never called
         from .exceptions import SettingsPersistenceError
 
-        raise SettingsPersistenceError(
-            "this parser was built without a persistence backend")
+        raise SettingsPersistenceError("this parser was built without a persistence backend")

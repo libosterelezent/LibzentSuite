@@ -15,11 +15,12 @@ chosen from the corpus:
 These are IDENTIFICATION anchors, not extraction: the variable fields
 around them are parsed by the regex patterns in ``patterns.py``.
 """
+
 from __future__ import annotations
 
 from ...enums import (
-    MessageFamily,
     MatchMode,
+    MessageFamily,
     TargetSource,
 )
 from ...settings.models import MessageStringSetting as S
@@ -64,8 +65,7 @@ DEFAULT_STRINGS = (
     S(
         setting_id="cooldowns.dk_ready",
         name="$dk ready",
-        description="Fixed reply when $dk (daily kakera) is ready "
-                    "(live-verified).",
+        description="Fixed reply when $dk (daily kakera) is ready (live-verified).",
         family=MessageFamily.COOLDOWN,
         target=TargetSource.CONTENT,
         text="$dk is ready!",
@@ -87,8 +87,7 @@ DEFAULT_STRINGS = (
     S(
         setting_id="cooldowns.claim_wait_marker",
         name="Claim wait marker",
-        description="Identifies the \"can't claim yet\" state of a "
-                    "$tu-style timer.",
+        description='Identifies the "can\'t claim yet" state of a $tu-style timer.',
         family=MessageFamily.COOLDOWN,
         target=TargetSource.CONTENT,
         text="you can't claim for another",
@@ -99,8 +98,7 @@ DEFAULT_STRINGS = (
     S(
         setting_id="cooldowns.claim_ready_marker",
         name="Claim ready marker",
-        description="Identifies the \"can claim right now\" state of a "
-                    "$tu-style timer.",
+        description='Identifies the "can claim right now" state of a $tu-style timer.',
         family=MessageFamily.COOLDOWN,
         target=TargetSource.CONTENT,
         text="__can__ claim right now!",
@@ -111,8 +109,7 @@ DEFAULT_STRINGS = (
     S(
         setting_id="cooldowns.timer_marker",
         name="Timer reply marker",
-        description="Identifies $tu-style timer replies via the rolls "
-                    "inventory phrase.",
+        description="Identifies $tu-style timer replies via the rolls inventory phrase.",
         family=MessageFamily.COOLDOWN,
         target=TargetSource.CONTENT,
         text="rolls (+**",
@@ -120,13 +117,11 @@ DEFAULT_STRINGS = (
         case_sensitive=True,
         priority=46,
     ),
-
     # ------------------------------------------- kakera (kakera_reaction.jsonl)
     S(
         setting_id="kakera.reaction_marker",
         name="Kakera reaction marker",
-        description="Identifies kakera reaction gain replies via the "
-                    "trailing ($k) tag.",
+        description="Identifies kakera reaction gain replies via the trailing ($k) tag.",
         family=MessageFamily.KAKERA,
         target=TargetSource.CONTENT,
         text="($k)",
@@ -138,8 +133,8 @@ DEFAULT_STRINGS = (
         setting_id="kakera.reaction_prefix",
         name="Kakera reaction prefix",
         description="Stable opening of reaction replies (handles the "
-                    "kakeraD \"turns into\" variant too, which contains "
-                    "the same segment).",
+        'kakeraD "turns into" variant too, which contains '
+        "the same segment).",
         family=MessageFamily.KAKERA,
         target=TargetSource.CONTENT,
         text="(Free) **",
@@ -147,13 +142,12 @@ DEFAULT_STRINGS = (
         case_sensitive=True,
         priority=31,
     ),
-
     # ------------------------------------------------------ characters
     S(
         setting_id="characters.roll_marker",
         name="Roll embed marker",
         description="Identifies roll/info character embeds via the "
-                    "claims-rank label in the description.",
+        "claims-rank label in the description.",
         family=MessageFamily.CHARACTER,
         target=TargetSource.EMBED_DESCRIPTION,
         text="Claims:",
@@ -164,7 +158,7 @@ DEFAULT_STRINGS = (
     S(
         setting_id="characters.roll_marker_alt",
         name="Roll embed marker (info layout)",
-        description="Info-layout variant using \"Claim Rank:\".",
+        description='Info-layout variant using "Claim Rank:".',
         family=MessageFamily.CHARACTER,
         target=TargetSource.EMBED_DESCRIPTION,
         text="Claim Rank:",
@@ -187,8 +181,8 @@ DEFAULT_STRINGS = (
         setting_id="characters.claimable_marker",
         name="Claimable roll marker",
         description="Suffix marking an open roll (server-dependent "
-                    "claim style; live-verified on a react-to-claim "
-                    "server).",
+        "claim style; live-verified on a react-to-claim "
+        "server).",
         family=MessageFamily.CHARACTER,
         target=TargetSource.EMBED_DESCRIPTION,
         text="React with any emoji to claim!",
@@ -196,7 +190,6 @@ DEFAULT_STRINGS = (
         case_sensitive=True,
         priority=13,
     ),
-
     # -------------------------------------------------------------- trade
     S(
         setting_id="trade.insufficient_marker",
@@ -231,13 +224,11 @@ DEFAULT_STRINGS = (
         case_sensitive=True,
         priority=62,
     ),
-
     # ---------------------------------------------------------- kakeraloot
     S(
         setting_id="kakeraloot.payout_marker",
         name="Loot payout marker",
-        description="Identifies $kl payout replies via the stacked-rolls "
-                    "phrase.",
+        description="Identifies $kl payout replies via the stacked-rolls phrase.",
         family=MessageFamily.KAKERALOOT,
         target=TargetSource.CONTENT,
         text="rolls stacked",
@@ -248,8 +239,7 @@ DEFAULT_STRINGS = (
     S(
         setting_id="kakeraloot.profile_marker",
         name="Loot profile marker",
-        description="Identifies Kakeraloot profile embeds via the title "
-                    "suffix.",
+        description="Identifies Kakeraloot profile embeds via the title suffix.",
         family=MessageFamily.KAKERALOOT,
         target=TargetSource.EMBED_TITLE,
         text=" - Kakeraloots",
@@ -257,7 +247,6 @@ DEFAULT_STRINGS = (
         case_sensitive=True,
         priority=71,
     ),
-
     # ---------------------------------------------------------- wishlist
     S(
         setting_id="wishlist.refill_marker",
@@ -270,7 +259,6 @@ DEFAULT_STRINGS = (
         case_sensitive=True,
         priority=80,
     ),
-
     # ---------------------------------------------------------- marriage
     S(
         setting_id="marriage.marker",

@@ -24,19 +24,23 @@ Only OVERRIDES are persisted — never defaults (they live in version
 control), never credentials or Discord data (nothing here is
 account-related).
 """
+
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
 import time
-from typing import Any, Optional, Protocol
+from typing import Any, Protocol
 
 from ..exceptions import CorruptSettingsError
 
 __all__ = [
-    "SCHEMA_VERSION", "ParserSettingsStorage", "JSONFileSettingsStorage",
+    "SCHEMA_VERSION",
+    "JSONFileSettingsStorage",
     "MemorySettingsStorage",
+    "ParserSettingsStorage",
 ]
 
 SCHEMA_VERSION = 1
@@ -45,7 +49,7 @@ SCHEMA_VERSION = 1
 class ParserSettingsStorage(Protocol):
     """Storage contract the settings manager depends on."""
 
-    def load(self) -> Optional[dict]:
+    def load(self) -> dict | None:
         """Return the stored document, or None when nothing is stored.
 
         Raises CorruptSettingsError when a file exists but cannot be
@@ -57,34 +61,29 @@ class ParserSettingsStorage(Protocol):
         ...
 
 
-def _normalize_document(raw: Any) -> Optional[dict]:
+def _normalize_document(raw: Any) -> dict | None:
     """Validate the loaded shape; None when empty, raise when junk."""
     if raw is None:
         return None
     if not isinstance(raw, dict):
-        raise CorruptSettingsError(
-            f"settings document is {type(raw).__name__}, expected object")
+        raise CorruptSettingsError(f"settings document is {type(raw).__name__}, expected object")
     version = raw.get("schema_version")
     if not isinstance(version, int):
-        raise CorruptSettingsError("settings document lacks an integer "
-                                   "schema_version")
+        raise CorruptSettingsError("settings document lacks an integer schema_version")
     if version > SCHEMA_VERSION:
         # written by a NEWER build — do not guess at its meaning
         raise CorruptSettingsError(
-            f"settings schema_version {version} is newer than supported "
-            f"{SCHEMA_VERSION}")
+            f"settings schema_version {version} is newer than supported {SCHEMA_VERSION}"
+        )
     for key in ("patterns", "strings"):
         section = raw.get(key, {})
         if section is None:
             continue
         if not isinstance(section, dict):
-            raise CorruptSettingsError(
-                f"settings section {key!r} is corrupt")
+            raise CorruptSettingsError(f"settings section {key!r} is corrupt")
         for setting_id, payload in section.items():
-            if not isinstance(setting_id, str) or \
-                    not isinstance(payload, dict):
-                raise CorruptSettingsError(
-                    f"settings entry {key}/{setting_id!r} is corrupt")
+            if not isinstance(setting_id, str) or not isinstance(payload, dict):
+                raise CorruptSettingsError(f"settings entry {key}/{setting_id!r} is corrupt")
     return raw
 
 
@@ -98,30 +97,27 @@ class JSONFileSettingsStorage:
     def path(self) -> str:
         return self._path
 
-    def load(self) -> Optional[dict]:
+    def load(self) -> dict | None:
         if not os.path.exists(self._path):
             return None
         try:
-            with open(self._path, "r", encoding="utf-8") as handle:
+            with open(self._path, encoding="utf-8") as handle:
                 raw = json.load(handle)
         except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
             # preserve the corrupt file for inspection, never delete
             self._quarantine()
-            raise CorruptSettingsError(
-                f"settings file {self._path} is unreadable: {exc}") from exc
+            raise CorruptSettingsError(f"settings file {self._path} is unreadable: {exc}") from exc
         return _normalize_document(raw)
 
     def save(self, document: dict) -> None:
         document = dict(document)
         document["schema_version"] = SCHEMA_VERSION
         document["saved_at"] = time.time()
-        text = json.dumps(
-            document, ensure_ascii=False, sort_keys=True, indent=2)
+        text = json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2)
         directory = os.path.dirname(self._path) or "."
         os.makedirs(directory, exist_ok=True)
         # atomic: temp file in the SAME directory, then replace
-        fd, tmp_path = tempfile.mkstemp(
-            dir=directory, prefix=".parser-settings-", suffix=".tmp")
+        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".parser-settings-", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(text)
@@ -129,35 +125,29 @@ class JSONFileSettingsStorage:
                 os.fsync(handle.fileno())
             os.replace(tmp_path, self._path)
         except OSError:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
-            except OSError:
-                pass
             raise
 
     def _quarantine(self) -> None:
         """Rename a corrupt file aside (best effort)."""
-        try:
-            os.replace(self._path,
-                       f"{self._path}.corrupt-{int(time.time())}")
-        except OSError:
-            pass
+        with contextlib.suppress(OSError):
+            os.replace(self._path, f"{self._path}.corrupt-{int(time.time())}")
 
 
 class MemorySettingsStorage:
     """In-memory storage for tests and ephemeral stacks (no disk)."""
 
     def __init__(self) -> None:
-        self.document: Optional[dict] = None
+        self.document: dict | None = None
         self.save_calls = 0
         #: set to True in tests to simulate a failing backend
         self.fail_save = False
 
-    def load(self) -> Optional[dict]:
+    def load(self) -> dict | None:
         if self.document is None:
             return None
-        return _normalize_document(json.loads(
-            json.dumps(self.document)))  # deep-copy guard
+        return _normalize_document(json.loads(json.dumps(self.document)))  # deep-copy guard
 
     def save(self, document: dict) -> None:
         if self.fail_save:

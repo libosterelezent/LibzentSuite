@@ -15,16 +15,17 @@ Two audiences, kept deliberately separate:
 Expected nonmatches never raise: parsing an unrelated message returns an
 UNKNOWN-family result, not an exception.
 """
+
 from __future__ import annotations
 
 __all__ = [
-    "MudaeParserError",
-    "InvalidMessageError",
-    "UnknownSettingError",
-    "DuplicateSettingError",
-    "UnsupportedLocaleError",
-    "SettingsPersistenceError",
     "CorruptSettingsError",
+    "DuplicateSettingError",
+    "InvalidMessageError",
+    "MudaeParserError",
+    "SettingsPersistenceError",
+    "UnknownSettingError",
+    "UnsupportedLocaleError",
 ]
 
 

@@ -12,11 +12,12 @@ Design rules:
   * every model carries a ``to_dict()`` for the future dashboard's JSON
     boundary without sacrificing typed fields here.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from .diagnostics import Diagnostics
 from .enums import (
@@ -27,13 +28,22 @@ from .enums import (
 )
 
 __all__ = [
-    "parse_number", "parse_duration_minutes", "KeyInfo", "CharacterInfo",
-    "CooldownInfo", "KakeraEvent", "WishlistInfo", "KakeralootInfo",
-    "TradeInfo", "MarriageInfo", "TimerInfo", "ParseResult",
+    "CharacterInfo",
+    "CooldownInfo",
+    "KakeraEvent",
+    "KakeralootInfo",
+    "KeyInfo",
+    "MarriageInfo",
+    "ParseResult",
+    "TimerInfo",
+    "TradeInfo",
+    "WishlistInfo",
+    "parse_duration_minutes",
+    "parse_number",
 ]
 
 
-def parse_number(text: Optional[str]) -> Optional[float]:
+def parse_number(text: str | None) -> float | None:
     """Parse Mudae's number formats: ``1,282,329`` / ``957,055,879.6``.
 
     Returns int when the value is integral (kakera counts), float when
@@ -56,9 +66,9 @@ def parse_number(text: Optional[str]) -> Optional[float]:
 
 
 def parse_duration_minutes(
-    minutes: Optional[str] = None,
-    hours: Optional[str] = None,
-) -> Optional[timedelta]:
+    minutes: str | None = None,
+    hours: str | None = None,
+) -> timedelta | None:
     """Build a typed duration from captured minute/hour text groups.
 
     Dataset formats: ``**43** min`` → minutes="43"; ``**2h 59** min`` →
@@ -91,14 +101,16 @@ class KeyInfo:
 
     key_number: int
     #: tier slug from the emoji name: bronze|silver|gold|chaos
-    key_type: Optional[str] = None
+    key_type: str | None = None
     #: "+N% kakera value" percentage when present (info form: None)
-    value_pct: Optional[int] = None
+    value_pct: int | None = None
 
     def to_dict(self) -> dict:
-        return {"key_number": self.key_number,
-                "key_type": self.key_type,
-                "value_pct": self.value_pct}
+        return {
+            "key_number": self.key_number,
+            "key_type": self.key_type,
+            "value_pct": self.value_pct,
+        }
 
 
 @dataclass(frozen=True)
@@ -106,26 +118,26 @@ class CharacterInfo:
     """A waifu/husbando character as presented by a roll/info embed."""
 
     #: character name — embed author name (dataset: ``author=<NAME>``)
-    name: Optional[str] = None
+    name: str | None = None
     #: series — first segment of the embed description
-    series: Optional[str] = None
-    claims_rank: Optional[int] = None
-    likes_rank: Optional[int] = None
+    series: str | None = None
+    claims_rank: int | None = None
+    likes_rank: int | None = None
     #: base kakera value (``**8,658**<:kakera:..>``)
-    kakera_value: Optional[int] = None
+    kakera_value: int | None = None
     #: key entries found in the description (may be empty)
-    keys: Tuple[KeyInfo, ...] = ()
+    keys: tuple[KeyInfo, ...] = ()
     #: starwish indicators (``<:sw:..>`` — $sw = $starwish, wiki
     #: verified) adjacent to the series; usually 0 or 1
     starwish_count: int = 0
     #: ``Belongs to <U>`` footer → claimed/owned by that user
-    claimed_by: Optional[str] = None
+    claimed_by: str | None = None
     #: True when the roll is still open ("React with any emoji to
     #: claim!" suffix — live-verified server variant); None = unknown
-    claimable: Optional[bool] = None
+    claimable: bool | None = None
 
     @property
-    def is_claimed(self) -> Optional[bool]:
+    def is_claimed(self) -> bool | None:
         """True/False from the footer; None when no footer observed."""
         return None if self.claimed_by is None else True
 
@@ -153,16 +165,16 @@ class CooldownInfo:
     """
 
     kind: CooldownKind
-    remaining: Optional[timedelta] = None
-    username: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    remaining: timedelta | None = None
+    username: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
             "kind": self.kind.value,
-            "remaining_seconds":
-                None if self.remaining is None
-                else int(self.remaining.total_seconds()),
+            "remaining_seconds": None
+            if self.remaining is None
+            else int(self.remaining.total_seconds()),
             "username": self.username,
             "metadata": dict(self.metadata),
         }
@@ -173,12 +185,12 @@ class KakeraEvent:
     """One kakera-amount event (gain, deficit, gift, bonus...)."""
 
     kind: KakeraEventKind
-    amount: Optional[int] = None
+    amount: int | None = None
     #: username as extracted from the message text (not account context)
-    username: Optional[str] = None
+    username: str | None = None
     #: sphere amounts riding along (``**+24** <:sp:..>``)
-    spheres: Optional[int] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    spheres: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -194,21 +206,23 @@ class KakeraEvent:
 class WishlistInfo:
     """Wishlist stock/refill line (``$oh/$oc/$oq/$ot`` + stock)."""
 
-    stock: Optional[int] = None
-    refill_in: Optional[timedelta] = None
-    oh_left: Optional[int] = None
-    oc_left: Optional[int] = None
-    oq_left: Optional[int] = None
-    ot_left: Optional[int] = None
+    stock: int | None = None
+    refill_in: timedelta | None = None
+    oh_left: int | None = None
+    oc_left: int | None = None
+    oq_left: int | None = None
+    ot_left: int | None = None
 
     def to_dict(self) -> dict:
         return {
             "stock": self.stock,
-            "refill_in_seconds":
-                None if self.refill_in is None
-                else int(self.refill_in.total_seconds()),
-            "oh_left": self.oh_left, "oc_left": self.oc_left,
-            "oq_left": self.oq_left, "ot_left": self.ot_left,
+            "refill_in_seconds": None
+            if self.refill_in is None
+            else int(self.refill_in.total_seconds()),
+            "oh_left": self.oh_left,
+            "oc_left": self.oc_left,
+            "oq_left": self.oq_left,
+            "ot_left": self.ot_left,
         }
 
 
@@ -216,11 +230,11 @@ class WishlistInfo:
 class KakeralootInfo:
     """$kl payout line / Kakeraloot profile headline numbers."""
 
-    kakera_gained: Optional[int] = None
-    rolls_stacked: Optional[float] = None
-    stock: Optional[float] = None
+    kakera_gained: int | None = None
+    rolls_stacked: float | None = None
+    stock: float | None = None
     #: profile embed title username (``user - Kakeraloots``)
-    username: Optional[str] = None
+    username: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -236,11 +250,11 @@ class TradeInfo:
     """Trade / gift / give-confirmation events."""
 
     kind: KakeraEventKind
-    amount: Optional[int] = None
-    username: Optional[str] = None
-    from_user_id: Optional[int] = None
-    to_user_id: Optional[int] = None
-    spheres: Optional[int] = None
+    amount: int | None = None
+    username: str | None = None
+    from_user_id: int | None = None
+    to_user_id: int | None = None
+    spheres: int | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -257,11 +271,11 @@ class TradeInfo:
 class MarriageInfo:
     """``X and **Y** are now married!`` + bonus lines."""
 
-    user_a: Optional[str] = None
-    character: Optional[str] = None
-    kakera_bonus: Optional[int] = None
-    tier: Optional[str] = None
-    spheres: Optional[int] = None
+    user_a: str | None = None
+    character: str | None = None
+    kakera_bonus: int | None = None
+    tier: str | None = None
+    spheres: int | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -277,16 +291,16 @@ class MarriageInfo:
 class TimerInfo:
     """$tu-style claim/rolls status (the timers family)."""
 
-    can_claim: Optional[bool] = None
-    claim_resets_in: Optional[timedelta] = None
-    rolls_left: Optional[int] = None
-    mk_rolls: Optional[int] = None
-    rolls_reset_in: Optional[timedelta] = None
-    can_react: Optional[bool] = None
-    react_power_pct: Optional[int] = None
+    can_claim: bool | None = None
+    claim_resets_in: timedelta | None = None
+    rolls_left: int | None = None
+    mk_rolls: int | None = None
+    rolls_reset_in: timedelta | None = None
+    can_react: bool | None = None
+    react_power_pct: int | None = None
 
     def to_dict(self) -> dict:
-        def secs(value: Optional[timedelta]) -> Optional[int]:
+        def secs(value: timedelta | None) -> int | None:
             return None if value is None else int(value.total_seconds())
 
         return {
@@ -312,18 +326,18 @@ class ParseResult:
     """
 
     family: MessageFamily = MessageFamily.UNKNOWN
-    matched_rules: Tuple[str, ...] = ()
-    sources_seen: Tuple[TargetSource, ...] = ()
-    character: Optional[CharacterInfo] = None
-    kakera_events: Tuple[KakeraEvent, ...] = ()
-    cooldowns: Tuple[CooldownInfo, ...] = ()
-    timer: Optional[TimerInfo] = None
-    wishlist: Optional[WishlistInfo] = None
-    kakeraloot: Optional[KakeralootInfo] = None
-    trade: Optional[TradeInfo] = None
-    marriage: Optional[MarriageInfo] = None
-    usernames: Tuple[str, ...] = ()
-    account_username: Optional[str] = None
+    matched_rules: tuple[str, ...] = ()
+    sources_seen: tuple[TargetSource, ...] = ()
+    character: CharacterInfo | None = None
+    kakera_events: tuple[KakeraEvent, ...] = ()
+    cooldowns: tuple[CooldownInfo, ...] = ()
+    timer: TimerInfo | None = None
+    wishlist: WishlistInfo | None = None
+    kakeraloot: KakeralootInfo | None = None
+    trade: TradeInfo | None = None
+    marriage: MarriageInfo | None = None
+    usernames: tuple[str, ...] = ()
+    account_username: str | None = None
     diagnostics: Diagnostics = field(default_factory=Diagnostics)
 
     def to_dict(self) -> dict:
@@ -332,18 +346,14 @@ class ParseResult:
             "family": self.family.value,
             "matched_rules": list(self.matched_rules),
             "sources_seen": [s.value for s in self.sources_seen],
-            "character":
-                self.character.to_dict() if self.character else None,
+            "character": self.character.to_dict() if self.character else None,
             "kakera_events": [e.to_dict() for e in self.kakera_events],
             "cooldowns": [c.to_dict() for c in self.cooldowns],
             "timer": self.timer.to_dict() if self.timer else None,
-            "wishlist":
-                self.wishlist.to_dict() if self.wishlist else None,
-            "kakeraloot":
-                self.kakeraloot.to_dict() if self.kakeraloot else None,
+            "wishlist": self.wishlist.to_dict() if self.wishlist else None,
+            "kakeraloot": self.kakeraloot.to_dict() if self.kakeraloot else None,
             "trade": self.trade.to_dict() if self.trade else None,
-            "marriage":
-                self.marriage.to_dict() if self.marriage else None,
+            "marriage": self.marriage.to_dict() if self.marriage else None,
             "usernames": list(self.usernames),
             "account_username": self.account_username,
             "diagnostics": self.diagnostics.to_list(),

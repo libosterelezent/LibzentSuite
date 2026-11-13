@@ -9,19 +9,23 @@ locale-independent); missing IDs simply leave that locale without a
 default for them and the manager reports it at load. Do not invent
 families or targets in a locale pack — validation is shared.
 """
-from __future__ import annotations
 
-from typing import Dict
+from __future__ import annotations
 
 from .base import LocalePack
 from .en import ENGLISH_LOCALE
 
-__all__ = ["register_locale", "get_locale", "available_locales",
-           "DEFAULT_LOCALE", "LocalePack"]
+__all__ = [
+    "DEFAULT_LOCALE",
+    "LocalePack",
+    "available_locales",
+    "get_locale",
+    "register_locale",
+]
 
 DEFAULT_LOCALE = "en"
 
-_REGISTRY: Dict[str, LocalePack] = {ENGLISH_LOCALE.code: ENGLISH_LOCALE}
+_REGISTRY: dict[str, LocalePack] = {ENGLISH_LOCALE.code: ENGLISH_LOCALE}
 
 
 def register_locale(pack: LocalePack, *, replace: bool = False) -> None:

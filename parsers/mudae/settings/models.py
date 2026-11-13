@@ -11,21 +11,24 @@ software update can reason about outdated user overrides (see
 ``parsers/mudae/docs`` — versioning note: a shipped default bump does
 not rewrite overrides; the catalog exposes both for diffing).
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from dataclasses import dataclass
 
 from ..enums import (
-    CaseSensitivity,
-    MessageFamily,
     MatchMode,
+    MessageFamily,
     TargetSource,
 )
 
 __all__ = [
-    "SettingBase", "RegexPatternSetting", "MessageStringSetting",
-    "ValidationIssue", "ValidationReport", "UpdateResult",
+    "MessageStringSetting",
+    "RegexPatternSetting",
+    "SettingBase",
+    "UpdateResult",
+    "ValidationIssue",
+    "ValidationReport",
 ]
 
 
@@ -64,8 +67,8 @@ class RegexPatternSetting(SettingBase):
 
     expression: str = ""
     case_sensitive: bool = True
-    required_groups: Tuple[str, ...] = ()
-    optional_groups: Tuple[str, ...] = ()
+    required_groups: tuple[str, ...] = ()
+    optional_groups: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -86,6 +89,7 @@ class MessageStringSetting(SettingBase):
 
 # ----------------------------------------------------------- API results
 
+
 @dataclass(frozen=True)
 class ValidationIssue:
     """One finding from validating a candidate setting."""
@@ -93,11 +97,10 @@ class ValidationIssue:
     code: str
     message: str
     #: which requirement failed (syntax/group/length/target/mode/...)
-    subject: Optional[str] = None
+    subject: str | None = None
 
     def to_dict(self) -> dict:
-        return {"code": self.code, "message": self.message,
-                "subject": self.subject}
+        return {"code": self.code, "message": self.message, "subject": self.subject}
 
 
 @dataclass(frozen=True)
@@ -105,11 +108,10 @@ class ValidationReport:
     """Structured outcome of validating candidate settings."""
 
     ok: bool
-    issues: Tuple[ValidationIssue, ...] = ()
+    issues: tuple[ValidationIssue, ...] = ()
 
     def to_dict(self) -> dict:
-        return {"ok": self.ok,
-                "issues": [issue.to_dict() for issue in self.issues]}
+        return {"ok": self.ok, "issues": [issue.to_dict() for issue in self.issues]}
 
 
 @dataclass(frozen=True)
@@ -122,11 +124,14 @@ class UpdateResult:
 
     ok: bool
     setting_id: str
-    errors: Tuple[ValidationIssue, ...] = ()
+    errors: tuple[ValidationIssue, ...] = ()
     #: non-fatal notes (e.g. fallback applied at load time)
-    notes: Tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
-        return {"ok": self.ok, "setting_id": self.setting_id,
-                "errors": [e.to_dict() for e in self.errors],
-                "notes": list(self.notes)}
+        return {
+            "ok": self.ok,
+            "setting_id": self.setting_id,
+            "errors": [e.to_dict() for e in self.errors],
+            "notes": list(self.notes),
+        }

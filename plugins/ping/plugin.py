@@ -14,13 +14,13 @@ Named ``ping`` (not ``say``) because the framework reserves ``say`` as
 a retired RemoteControl mention verb — a plugin re-declaring it is
 dropped at collection time.
 """
+
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from core.errors import FlowBlocked
-from core.event_bus import Event
 from core.plugin_base import (
     ArgSpec,
     CommandContext,
@@ -28,10 +28,10 @@ from core.plugin_base import (
     PluginBase,
     PluginContext,
 )
-from core.settings_manager import Setting
 
 if TYPE_CHECKING:
     from core.dashboard_ui.builders import DashboardUIToolset
+    from core.event_bus import Event
 
 LOG = logging.getLogger("libzent.ping")
 
@@ -47,9 +47,9 @@ class PingPlugin(PluginBase):
     settings: tuple = ()
 
     def __init__(self) -> None:
-        self._ctx: Optional[PluginContext] = None
+        self._ctx: PluginContext | None = None
         #: (channel_id, text) pairs sent this activation — ui_stats feed
-        self._sent: List[Dict[str, Any]] = []
+        self._sent: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------ lifecycle
     async def on_load(self, ctx: PluginContext) -> None:
@@ -70,8 +70,7 @@ class PingPlugin(PluginBase):
         return  # ping is command-driven; it never reacts to traffic
 
     # ------------------------------------------------------------ the action
-    async def _ping(self, ctx: PluginContext, channel_id: int,
-                    text: str) -> str:
+    async def _ping(self, ctx: PluginContext, channel_id: int, text: str) -> str:
         """Validate, send through the paced pipeline, remember the send.
 
         Returns the operator reply; raises nothing on FlowBlocked (one
@@ -80,25 +79,20 @@ class PingPlugin(PluginBase):
         try:
             ctx.services.validate_channel(channel_id)
         except FlowBlocked as exc:
-            ctx.logger.info("ping: channel %s unusable — %s",
-                            channel_id, exc)
+            ctx.logger.info("ping: channel %s unusable — %s", channel_id, exc)
             return f"channel unusable: {exc}"
         try:
             await ctx.services.send_message(channel_id, text)
         except FlowBlocked as exc:
-            ctx.logger.info("ping: send to %s blocked — %s",
-                            channel_id, exc)
+            ctx.logger.info("ping: send to %s blocked — %s", channel_id, exc)
             return f"send blocked: {exc}"
-        self._sent.append({"channel_id": channel_id,
-                           "text": text[:80]})
+        self._sent.append({"channel_id": channel_id, "text": text[:80]})
         where = ctx.services.describe_channel(channel_id)
-        ctx.logger.info("ping: delivered to %s (%s)",
-                        where, channel_id)
+        ctx.logger.info("ping: delivered to %s (%s)", where, channel_id)
         return f"sent to {where}"
 
     # ------------------------------------------------------- self-commands
-    async def _cmd_ping(self, cmd: CommandContext,
-                        args: List[str]) -> str:
+    async def _cmd_ping(self, cmd: CommandContext, args: list[str]) -> str:
         """``ping <channel_id> <text...>`` handler (bound per account)."""
         if not cmd.services or len(args) < 2:
             return "usage: ping <channel_id> <text...>"
@@ -125,30 +119,31 @@ class PingPlugin(PluginBase):
     )
 
     # ------------------------------------------------------ dashboard UI
-    async def ui_stats(self, ctx: "PluginContext"):
+    async def ui_stats(self, ctx: PluginContext):
         from core.plugin_base import StatCard
 
         return (
-            StatCard(label="ping sends",
-                     value=str(len(self._sent)),
-                     sub="this activation",
-                     level="ok" if self._sent else ""),
+            StatCard(
+                label="ping sends",
+                value=str(len(self._sent)),
+                sub="this activation",
+                level="ok" if self._sent else "",
+            ),
         )
 
-    def initialize_dashboard_ui(self, ui: "DashboardUIToolset") -> None:
+    def initialize_dashboard_ui(self, ui: DashboardUIToolset) -> None:
         """A small page: channel + text form, one Send button."""
         page = (
             ui.Page(component_id="ping")
             .set_title("Ping")
             .set_icon("M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0V8zM12 18v4")
-            .set_description("Send a provided message to a chosen "
-                             "channel (paced + audited).")
+            .set_description("Send a provided message to a chosen channel (paced + audited).")
             .add_section(
-                ui.Section(component_id="ping-sec")
-                .add_component(
+                ui.Section(component_id="ping-sec").add_component(
                     ui.Form(component_id="ping-form")
-                    .set_description("The message rides the SAME paced "
-                                     "pipeline as all plugin traffic.")
+                    .set_description(
+                        "The message rides the SAME paced pipeline as all plugin traffic."
+                    )
                     .set_submit_action(self._ui_ping)
                     .set_submit_label("Send")
                     .set_close_on_submit(False)
@@ -158,21 +153,24 @@ class PingPlugin(PluginBase):
                         .set_placeholder("123456789"),
                         ui.Textarea(component_id="ping-text")
                         .set_label("Message")
-                        .set_placeholder("text to send")))))
+                        .set_placeholder("text to send"),
+                    )
+                )
+            )
+        )
         layout = ui.Layout()
         layout.add_page(page)
         self.attach_dashboard_ui(layout)
 
-    async def _ui_ping(self, ctx: Any,
-                       payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _ui_ping(self, ctx: Any, payload: dict[str, Any]) -> dict[str, Any]:
         """Dashboard action: same path as the self-command."""
         channel = payload.get("ping-channel")
         text = str(payload.get("ping-text") or "").strip()
         if not channel or not text:
-            return {"success": False,
-                    "field_errors": {
-                        "ping-channel" if not channel else "ping-text":
-                            "required" }}
+            return {
+                "success": False,
+                "field_errors": {"ping-channel" if not channel else "ping-text": "required"},
+            }
         pctx = self._ctx
         if pctx is None:
             return {"success": False, "message": "plugin not active"}

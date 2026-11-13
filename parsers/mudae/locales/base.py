@@ -7,16 +7,19 @@ locales register another pack with the same shape (see
 Python so they are diffable, testable and available with no settings
 file present.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import TYPE_CHECKING
 
 from ..exceptions import DuplicateSettingError
-from ..settings.models import (
-    MessageStringSetting,
-    RegexPatternSetting,
-)
+
+if TYPE_CHECKING:
+    from ..settings.models import (
+        MessageStringSetting,
+        RegexPatternSetting,
+    )
 
 __all__ = ["LocalePack"]
 
@@ -26,26 +29,26 @@ class LocalePack:
     """All built-in defaults for one locale."""
 
     code: str
-    patterns: Tuple[RegexPatternSetting, ...]
-    strings: Tuple[MessageStringSetting, ...]
+    patterns: tuple[RegexPatternSetting, ...]
+    strings: tuple[MessageStringSetting, ...]
 
     def __post_init__(self) -> None:
-        seen: Dict[str, str] = {}
+        seen: dict[str, str] = {}
         for setting in self.patterns:
             if setting.setting_id in seen:
                 raise DuplicateSettingError(
-                    f"duplicate pattern id {setting.setting_id!r} in "
-                    f"locale {self.code!r}")
+                    f"duplicate pattern id {setting.setting_id!r} in locale {self.code!r}"
+                )
             seen[setting.setting_id] = "pattern"
         for setting in self.strings:
             if setting.setting_id in seen:
                 raise DuplicateSettingError(
-                    f"duplicate string id {setting.setting_id!r} in "
-                    f"locale {self.code!r}")
+                    f"duplicate string id {setting.setting_id!r} in locale {self.code!r}"
+                )
             seen[setting.setting_id] = "string"
 
-    def pattern_map(self) -> Dict[str, RegexPatternSetting]:
+    def pattern_map(self) -> dict[str, RegexPatternSetting]:
         return {p.setting_id: p for p in self.patterns}
 
-    def string_map(self) -> Dict[str, MessageStringSetting]:
+    def string_map(self) -> dict[str, MessageStringSetting]:
         return {s.setting_id: s for s in self.strings}

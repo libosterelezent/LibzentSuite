@@ -1,4 +1,5 @@
 """English locale pack — default patterns and message strings."""
+
 from __future__ import annotations
 
 from ..base import LocalePack

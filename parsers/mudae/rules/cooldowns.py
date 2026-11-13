@@ -5,9 +5,8 @@ regex for the variable fields (extraction) — the two setting kinds
 working together explicitly. Durations are typed: missing duration is
 ``None``, never zero, and never inferred from unrelated numbers.
 """
-from __future__ import annotations
 
-from typing import Optional
+from __future__ import annotations
 
 from ..enums import CooldownKind, MessageFamily
 from ..models import (
@@ -18,24 +17,27 @@ from ..models import (
 from .base import PatternBinding, Rule, RuleContext, RuleResult, StringBinding
 
 __all__ = [
-    "ROULETTE_LIMIT_RULE", "RT_COOLDOWN_RULE", "RT_AVAILABLE_RULE",
-    "DK_READY_RULE", "REACT_COOLDOWN_RULE", "CLAIM_TIMER_RULE",
+    "CLAIM_TIMER_RULE",
+    "DK_READY_RULE",
+    "REACT_COOLDOWN_RULE",
+    "ROULETTE_LIMIT_RULE",
+    "RT_AVAILABLE_RULE",
+    "RT_COOLDOWN_RULE",
 ]
 
 
-def _username(groups: Optional[dict]) -> Optional[str]:
+def _username(groups: dict | None) -> str | None:
     if not groups:
         return None
     value = groups.get("username")
-    return value.strip() if isinstance(value, str) and value.strip() \
-        else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def handle_roulette_limit(ctx: RuleContext) -> RuleResult:
     groups = ctx.groups("cooldowns.roulette_limit")
     if not groups:
         return RuleResult(matched=False)
-    limit: Optional[int] = None
+    limit: int | None = None
     if groups.get("limit"):
         try:
             limit = int(groups["limit"])
@@ -43,8 +45,7 @@ def handle_roulette_limit(ctx: RuleContext) -> RuleResult:
             limit = None
     cooldown = CooldownInfo(
         kind=CooldownKind.ROULETTE,
-        remaining=parse_duration_minutes(
-            minutes=groups.get("minutes")),
+        remaining=parse_duration_minutes(minutes=groups.get("minutes")),
         username=_username(groups),
         metadata={"uses_per_hour": limit, "tag": "($vote)"},
     )
@@ -68,9 +69,7 @@ def handle_rt_cooldown(ctx: RuleContext) -> RuleResult:
         return RuleResult(matched=False)
     cooldown = CooldownInfo(
         kind=CooldownKind.RT,
-        remaining=parse_duration_minutes(
-            minutes=groups.get("minutes"),
-            hours=groups.get("hours")),
+        remaining=parse_duration_minutes(minutes=groups.get("minutes"), hours=groups.get("hours")),
         metadata={"tag": "($rtu)"},
     )
     return RuleResult(matched=True, cooldowns=(cooldown,))
@@ -134,9 +133,7 @@ def handle_react_cooldown(ctx: RuleContext) -> RuleResult:
         return RuleResult(matched=False)
     cooldown = CooldownInfo(
         kind=CooldownKind.KAKERA_REACT,
-        remaining=parse_duration_minutes(
-            minutes=groups.get("minutes"),
-            hours=groups.get("hours")),
+        remaining=parse_duration_minutes(minutes=groups.get("minutes"), hours=groups.get("hours")),
         username=_username(groups),
         metadata={"tag": "($ku)"},
     )
@@ -165,19 +162,22 @@ def handle_claim_timer(ctx: RuleContext) -> RuleResult:
         return RuleResult(matched=False)
 
     cooldowns = []
-    can_claim: Optional[bool] = None
-    claim_reset: Optional[object] = None
+    can_claim: bool | None = None
+    claim_reset: object | None = None
     if claim:
         can_claim = "can't" not in (claim.get("state") or "")
         remaining = parse_duration_minutes(
-            minutes=claim.get("claim_minutes"),
-            hours=claim.get("claim_hours"))
+            minutes=claim.get("claim_minutes"), hours=claim.get("claim_hours")
+        )
         claim_reset = remaining
-        cooldowns.append(CooldownInfo(
-            kind=CooldownKind.CLAIM,
-            remaining=remaining,
-            username=_username(claim),
-            metadata={"available": can_claim}))
+        cooldowns.append(
+            CooldownInfo(
+                kind=CooldownKind.CLAIM,
+                remaining=remaining,
+                username=_username(claim),
+                metadata={"available": can_claim},
+            )
+        )
 
     rolls_reset = None
     rolls_left = None
@@ -191,22 +191,27 @@ def handle_claim_timer(ctx: RuleContext) -> RuleResult:
             mk_rolls = int(rolls.get("mk_rolls", 0))
         except (TypeError, ValueError):
             mk_rolls = None
-        rolls_reset = parse_duration_minutes(
-            minutes=rolls.get("reset_minutes"))
-        cooldowns.append(CooldownInfo(
-            kind=CooldownKind.ROLLS_RESET, remaining=rolls_reset,
-            metadata={"rolls_left": rolls_left, "mk_rolls": mk_rolls}))
+        rolls_reset = parse_duration_minutes(minutes=rolls.get("reset_minutes"))
+        cooldowns.append(
+            CooldownInfo(
+                kind=CooldownKind.ROLLS_RESET,
+                remaining=rolls_reset,
+                metadata={"rolls_left": rolls_left, "mk_rolls": mk_rolls},
+            )
+        )
 
-    can_react: Optional[bool] = None
-    react_power: Optional[int] = None
+    can_react: bool | None = None
+    react_power: int | None = None
     if react_state:
         state_text = react_state.get("react") or ""
         can_react = "can't" not in state_text
         if not can_react:
-            cooldowns.append(CooldownInfo(
-                kind=CooldownKind.KAKERA_REACT,
-                remaining=parse_duration_minutes(
-                    minutes=react_state.get("react_minutes"))))
+            cooldowns.append(
+                CooldownInfo(
+                    kind=CooldownKind.KAKERA_REACT,
+                    remaining=parse_duration_minutes(minutes=react_state.get("react_minutes")),
+                )
+            )
         try:
             react_power = int(react_state.get("power", 0))
         except (TypeError, ValueError):
@@ -221,10 +226,12 @@ def handle_claim_timer(ctx: RuleContext) -> RuleResult:
         can_react=can_react,
         react_power_pct=react_power,
     )
-    return RuleResult(matched=True, cooldowns=tuple(cooldowns),
-                      timer=timer,
-                      usernames=(_username(claim),) if _username(claim)
-                      else ())
+    return RuleResult(
+        matched=True,
+        cooldowns=tuple(cooldowns),
+        timer=timer,
+        usernames=(_username(claim),) if _username(claim) else (),
+    )
 
 
 CLAIM_TIMER_RULE = Rule(
