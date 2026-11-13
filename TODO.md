@@ -1,4 +1,4 @@
-# LibzentSuite — TODO + Ideas
+# LibzentSuite — TODO
 
 **Reorganized 2026-11-13** to reflect the post-dashboard-removal,
 post-Mudae-removal codebase. Everything here describes what the
@@ -109,23 +109,27 @@ Plugins remain independent from the interface layer.
 [ ] Expose `cache_stats()` through ControlAPI — add a `system_cache_stats()`
     method that aggregates per-account `client.cache_stats()` snapshots
     for the future dashboard's System page.
-[ ] Add memory caps + cache persistence to the Client constructor in
-    `adapters/discord/client.py::_build_client()`:
-    `max_member_cache=500, max_total_member_cache=5000,
-    persistence_path=f"state/{account}-cache.bin",
-    gc_freeze=True, dispatch_backlog_warning=500`.
+[x] Add memory caps + cache persistence to the Client constructor in
+    `adapters/discord/client.py` — DONE 2026-11-13 (commit 9f2321b):
+    `_fork_memory_options()` now feeds both the Bot and plain-Client
+    paths: `max_member_cache=500, max_total_member_cache=5000,
+    max_thread_cache=200, max_total_thread_cache=1000,
+    gc_freeze=True, dispatch_backlog_warning=500,
+    persistence_path=state/<account>-cache.bin, persistence_max_age=86400`.
+    Persistence is keyed to the account name (omitted when nameless);
+    write/replay failures never break a connect.
 
 ### Command system (ext.commands deep adoption)
 
-[ ] Move the authorization gate to `bot.add_check()` in
-    `adapters/discord/client.py` — currently `_dispatch_self_command()`
-    manually checks `allowed_invoker_async(ctx.author.id)` AFTER the
-    library has already parsed arguments. Moving it to a global check
-    (`bot.add_check(access_gate)`) means unauthorized commands are
-    rejected before any parsing work. `on_command_error` already
-    handles `CommandNotFound` silently — extend to catch `CheckFailure`.
-    AccessManager stays as the domain owner (per-account allowlists,
-    DB persistence); only the invocation point moves.
+[x] Move the authorization gate to `bot.add_check()` in
+    `adapters/discord/client.py` — DONE 2026-11-13 (commit 06cec37):
+    the gate is now `_bot_invoker_gate`, installed once per client in
+    `_install_command_layer` via `bot.add_check()`; the library evaluates
+    it in `Command.prepare` → `can_run` BEFORE argument parsing.
+    Unauthorized invocations raise `CheckFailure`, which
+    `on_command_error` drops silently alongside `CommandNotFound`.
+    AccessManager stays the domain owner; reconnects re-install per
+    fresh client (no double registration).
     NOTE: do NOT adopt `commands.cooldown()` — our cooldowns are
     per-account, DB-persisted, fleet-aware domain state.
 
