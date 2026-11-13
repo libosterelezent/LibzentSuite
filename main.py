@@ -81,7 +81,6 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
         print(f"error: cannot boot: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
     api = framework.api
-    dashboard = None
     exit_code = 0
     try:
         if args.start_all:
@@ -142,13 +141,8 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
                     with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
                         loop.remove_signal_handler(sig)
     finally:
-        # ALWAYS runs (start-all failure, dashboard bind error, Ctrl-C...):
-        # a leaked database connection/worker thread can hang process exit
-        if dashboard is not None:
-            try:
-                dashboard.stop()
-            except Exception as exc:
-                print(f"warning: dashboard stop failed: {exc}", file=sys.stderr)
+        # ALWAYS runs (start-all failure, Ctrl-C...): a leaked database
+        # connection/worker thread can hang process exit
         await framework.shutdown()
     return exit_code
 
@@ -219,7 +213,7 @@ def main() -> int:
     parser.add_argument(
         "--headless",
         action="store_true",
-        help="run forever with no terminal (use with --dashboard)",
+        help="run forever with no terminal (daemon mode; SIGTERM for graceful stop)",
     )
 
     parser.add_argument(

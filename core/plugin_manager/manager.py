@@ -170,11 +170,8 @@ class PluginManager:
         self._ui_registry = ui_registry  # None when no dashboard UI system is present
         # the registry rebinds boot-time bound-method callbacks onto LIVE
         # plugin instances at dispatch; this manager is the resolver
-        #: plugin ids whose UI registration is BOOT-owned (built from a
-        #: throwaway instance at discovery): replaceable by the first LIVE
-        #: per-account instance that activates (takeover — see
-        #: :meth:`_init_dashboard_uis`; after takeover the dispatch
-        #: resolver still pins the RIGHT instance per account)
+        #: plugin ids whose UI registration was BOOT-owned (legacy —
+        #: the dashboard UI system is removed; kept for interface compat)
         #: per-account cap on in-flight dispatch tasks (flood + slow
         #: plugins must never grow the live-task set without bound —
         #: the bus's own 20k bound is recreated one layer up otherwise)
@@ -435,7 +432,6 @@ class PluginManager:
         # unregister the stale UI; the boot pass below re-registers it
         if self._ui_registry is not None:
             self._ui_registry.detach(name)
-        self.init_boot_dashboard_uis()
         # RESTORE with live instances; re-activate where it was running
         restored = 0
         reactivated = 0
@@ -759,13 +755,6 @@ class PluginManager:
                 timeout,
                 " (the late activation will be fenced)" if fence else "",
             )
-
-    def init_boot_dashboard_uis(self) -> int:
-        """Initialize plugin dashboard UIs (no-op when no UI registry)."""
-        if self._ui_registry is None:
-            return 0
-        return 0  # dashboard UI system removed
-
 
     def active_instance_for(self, plugin_name: str, account=None):
         """VALIDATED live instance for a plugin, optionally per account.
