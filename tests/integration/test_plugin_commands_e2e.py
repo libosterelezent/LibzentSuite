@@ -60,7 +60,7 @@ class E2EServices:
     @property
     def credentials(self) -> Credentials:
         return Credentials.from_values({
-            "OWNER_USER_IDS": str(OWNER_ID), "MUDAE_BOT_ID": "999"})
+            "OWNER_USER_IDS": str(OWNER_ID), "PRIMARY_BOT_ID": "999"})
 
     async def send_message(self, channel_id: int, content: str, *,
                            priority: Priority = Priority.LOW) -> None:

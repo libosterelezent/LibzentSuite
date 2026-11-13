@@ -22,7 +22,7 @@ from core.event_bus import MessageReceived
 from database.db import Database
 
 OWNER_ID = 1001
-MUDAE_ID = 999_999
+PRIMARY_BOT_ID = 999_999
 ALPHA_ID = 2001
 GUILD_CHANNEL = 500
 
@@ -64,7 +64,7 @@ class Stack:
     def __init__(self, db_path: str | None = None, extra_accounts: list = (),
                  plugin_dir: Path = FIXTURE_PLUGINS) -> None:
         self.world = SimWorld(
-            responder_id=MUDAE_ID,
+            responder_id=PRIMARY_BOT_ID,
             responses={"$slud-s": [
                 "Soulmates\n---------\nAlice\nBob\nCharlie",
                 "Dana\nEve\nFinn",
@@ -72,14 +72,14 @@ class Stack:
             reply_delay=0.01,
         )
         self.world.add_user(OWNER_ID, "owner")
-        self.world.add_user(MUDAE_ID, "mudae")
+        self.world.add_user(PRIMARY_BOT_ID, "bot")
         self.world.add_user(ALPHA_ID, "alpha")
         self.world.add_user(2002, "beta")
         self.world.add_channel(GUILD_CHANNEL, "grind-channel")
         self.user_ids = {"alpha": ALPHA_ID, "beta": 2002}
         self.config_dir = make_config_dir()
         self.credentials = Credentials.from_values({
-            "MUDAE_BOT_ID": str(MUDAE_ID),
+            "PRIMARY_BOT_ID": str(PRIMARY_BOT_ID),
             "OWNER_USER_IDS": str(OWNER_ID),
             "DISCORD_TOKEN_ALPHA": "sim-alpha",
             "DISCORD_TOKEN_BETA": "sim-beta",
@@ -275,13 +275,13 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
             await api.accounts_add({"name": "alpha"})
             await api.accounts_start()
             try:
-                # resolve the Mudae DM twice in this boot: ONE client call
+                # resolve the primary bot DM twice in this boot: ONE client call
                 services = stack.framework.accounts.services_for("alpha", PROBE)
-                cid1 = await services.open_dm(MUDAE_ID)
-                cid2 = await services.open_dm(MUDAE_ID)
+                cid1 = await services.open_dm(PRIMARY_BOT_ID)
+                cid2 = await services.open_dm(PRIMARY_BOT_ID)
                 self.assertEqual(cid1, cid2)
                 client = stack.framework.accounts.get("alpha").runtime.client
-                self.assertEqual(client.open_dm_calls, [MUDAE_ID])
+                self.assertEqual(client.open_dm_calls, [PRIMARY_BOT_ID])
             finally:
                 await stack.stop()
 
@@ -294,7 +294,7 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
             await api2.accounts_start()
             try:
                 services2 = stack2.framework.accounts.services_for("alpha", PROBE)
-                cid3 = await services2.open_dm(MUDAE_ID)
+                cid3 = await services2.open_dm(PRIMARY_BOT_ID)
                 self.assertEqual(cid3, cid1)
                 client2 = stack2.framework.accounts.get("alpha").runtime.client
                 self.assertEqual(client2.open_dm_calls, [])  # DB-served

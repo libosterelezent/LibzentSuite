@@ -2,7 +2,7 @@
 
 Covers:
   (e) DM delivery is pair-scoped: account B's on_message never fires for
-      DM pages between A and Mudae (cross-pair DM leak);
+      DM pages between A and the_bot (cross-pair DM leak);
   (f) add_reaction/click_button consume the one-shot server limit exactly
       like send_message (an armed ServerRateLimit raises instead of being
       silently spent by an unrelated later message);
@@ -27,7 +27,7 @@ from adapters.simulator.world import (
     SYNTHETIC_ALPHA_ID,
     SYNTHETIC_BETA_ID,
     SYNTHETIC_GUILD_CHANNEL,
-    SYNTHETIC_MUDAE_ID,
+    SYNTHETIC_BOT_ID,
     SYNTHETIC_OWNER_ID,
     SimWorld,
 )
@@ -39,7 +39,7 @@ def _world(responder_id=None) -> SimWorld:
     world.add_user(SYNTHETIC_OWNER_ID, "owner")
     world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
     world.add_user(SYNTHETIC_BETA_ID, "beta")
-    world.add_user(SYNTHETIC_MUDAE_ID, "mudae")
+    world.add_user(SYNTHETIC_BOT_ID, "bot")
     world.add_channel(SYNTHETIC_GUILD_CHANNEL, "guild-channel")
     return world
 
@@ -63,7 +63,7 @@ class DmPairScoping(unittest.IsolatedAsyncioTestCase):
     """(e) only DM-pair members receive DM deliveries."""
 
     async def test_foreign_account_does_not_receive_dm_pages(self):
-        world = _world(responder_id=SYNTHETIC_MUDAE_ID)
+        world = _world(responder_id=SYNTHETIC_BOT_ID)
         alpha = await _connected(world, SYNTHETIC_ALPHA_ID)
         beta = await _connected(world, SYNTHETIC_BETA_ID)
         alpha_seen: list = []
@@ -71,8 +71,8 @@ class DmPairScoping(unittest.IsolatedAsyncioTestCase):
         alpha.on_message = alpha_seen.append
         beta.on_message = beta_seen.append
 
-        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
-        world.deliver(dm, SYNTHETIC_MUDAE_ID, "page-one", dm=True)
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
+        world.deliver(dm, SYNTHETIC_BOT_ID, "page-one", dm=True)
 
         self.assertEqual([m.content for m in alpha_seen], ["page-one"])
         self.assertEqual(beta_seen, [])  # cross-pair DM leak closed
@@ -86,7 +86,7 @@ class DmPairScoping(unittest.IsolatedAsyncioTestCase):
         # the message-path leak was fixed earlier; reactions/edits/deletes
         # used to fan out to EVERY subscriber — impossible live (a foreign
         # account's gateway never sees the pair's channel)
-        world = _world(responder_id=SYNTHETIC_MUDAE_ID)
+        world = _world(responder_id=SYNTHETIC_BOT_ID)
         alpha = await _connected(world, SYNTHETIC_ALPHA_ID)
         beta = await _connected(world, SYNTHETIC_BETA_ID)
         beta_rx: list = []
@@ -96,9 +96,9 @@ class DmPairScoping(unittest.IsolatedAsyncioTestCase):
         beta.on_message_delete = lambda *a: beta_rx.append(("delete", a))
         alpha.on_reaction = lambda *a, **k: alpha_rx.append(("reaction", a))
 
-        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
-        msg = world.deliver(dm, SYNTHETIC_MUDAE_ID, "page", dm=True)
-        world.react(SYNTHETIC_MUDAE_ID, msg.id, "❤")  # reactor: pair member
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
+        msg = world.deliver(dm, SYNTHETIC_BOT_ID, "page", dm=True)
+        world.react(SYNTHETIC_BOT_ID, msg.id, "❤")  # reactor: pair member
         # (alpha reacting would be self-filtered by the client)
         world.edit_message(msg.id, "edited page")
         world.delete_message(msg.id)
@@ -109,15 +109,15 @@ class DmPairScoping(unittest.IsolatedAsyncioTestCase):
     async def test_dm_pair_other_member_still_receives(self):
         world = _world()
         alpha = await _connected(world, SYNTHETIC_ALPHA_ID)
-        mudae = await _connected(world, SYNTHETIC_MUDAE_ID)
+        bot_client = await _connected(world, SYNTHETIC_BOT_ID)
         alpha_seen: list = []
-        mudae_seen: list = []
+        bot_seen: list = []
         alpha.on_message = alpha_seen.append
-        mudae.on_message = mudae_seen.append
-        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
-        world.deliver(dm, SYNTHETIC_MUDAE_ID, "page", dm=True)
+        bot_client.on_message = bot_seen.append
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
+        world.deliver(dm, SYNTHETIC_BOT_ID, "page", dm=True)
         self.assertEqual([m.content for m in alpha_seen], ["page"])
-        self.assertEqual(mudae_seen, [])  # own message: self-filtered
+        self.assertEqual(bot_seen, [])  # own message: self-filtered
 
 
 class CapabilityServerLimits(unittest.IsolatedAsyncioTestCase):
@@ -185,19 +185,19 @@ class ResponderFidelity(unittest.IsolatedAsyncioTestCase):
     """(g) bot flag + created_at on the sim's rich boundary."""
 
     async def test_mudae_delivery_is_bot_with_created_at(self):
-        world = _world(responder_id=SYNTHETIC_MUDAE_ID)
+        world = _world(responder_id=SYNTHETIC_BOT_ID)
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
         seen: list = []
         client.on_message = seen.append
         world.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_MUDAE_ID, "$mu",
-            author_name="Mudae")
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_BOT_ID, "$mu",
+            author_name="the_bot")
         message = seen[0]
         self.assertTrue(message.author.bot)
         self.assertIsNotNone(message.created_at)
         self.assertIsNotNone(message.created_at.tzinfo)  # tz-aware like live
         self.assertEqual(message.created_at.utcoffset().total_seconds(), 0)
-        self.assertEqual(message.author.display_name, "Mudae")
+        self.assertEqual(message.author.display_name, "the_bot")
         # timestamps are faithful to the world clock (UTC epoch; tiny
         # float round-trip slack from datetime <-> epoch)
         self.assertAlmostEqual(
@@ -205,7 +205,7 @@ class ResponderFidelity(unittest.IsolatedAsyncioTestCase):
             world.journal[-1].ts, places=6)
 
     async def test_user_authors_stay_non_bot(self):
-        world = _world(responder_id=SYNTHETIC_MUDAE_ID)
+        world = _world(responder_id=SYNTHETIC_BOT_ID)
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
         seen: list = []
         client.on_message = seen.append
@@ -217,18 +217,18 @@ class ResponderFidelity(unittest.IsolatedAsyncioTestCase):
 
     async def test_dm_pages_from_responder_carry_bot_flag(self):
         world = SimWorld(
-            responder_id=SYNTHETIC_MUDAE_ID,
+            responder_id=SYNTHETIC_BOT_ID,
             responses={"$slud-s": ["page-one"]},
             reply_delay=0.01,
         )
-        world.add_user(SYNTHETIC_MUDAE_ID, "mudae")
+        world.add_user(SYNTHETIC_BOT_ID, "bot")
         world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
         world.add_channel(SYNTHETIC_GUILD_CHANNEL, "guild-channel")
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
         seen: list = []
         client.on_message = seen.append
         world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "$slud-s")
-        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
         await world.wait_for_quiet(dm, quiet=0.15, limit=2.0)
         pages = [m for m in seen if m.dm]
         self.assertEqual(len(pages), 1)
@@ -321,7 +321,7 @@ class ModelReferenceFidelity(unittest.TestCase):
 
     def _lib_dm_reply(self):
         cached = NS(
-            id=999, content="original", author=NS(id=999999, name="Mudae"),
+            id=999, content="original", author=NS(id=999999, name="the_bot"),
             channel=NS(id=9001, name=None, type=NS(name="private"),
                        recipient=NS(id=999999), guild=None),
             guild=None, embeds=[], components=[], attachments=[],
@@ -368,7 +368,7 @@ class ModelReferenceFidelity(unittest.TestCase):
                components=[], created_at=None),
         ]
         lib = NS(
-            id=1000, content="", author=NS(id=999999, name="Mudae"),
+            id=1000, content="", author=NS(id=999999, name="the_bot"),
             channel=NS(id=500, name="grind", type=NS(name="text"),
                        guild=NS(id=42)),
             guild=NS(id=42), embeds=[], components=[], attachments=[],

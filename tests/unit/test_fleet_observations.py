@@ -26,7 +26,7 @@ from core.fleet import (
 )
 from database.db import Database
 
-ROLL = TaskDefinition(id="roll", plugin="mudae_roll",
+ROLL = TaskDefinition(id="roll", plugin="game_roll",
                       channel_scope=["1234567890123456789"])
 
 

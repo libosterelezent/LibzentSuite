@@ -36,14 +36,14 @@ class PluginDataStoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_schema_self_initializes_and_reopens(self):
         """Separate flow: no migrator — connect() creates, a SECOND
         store on the same file reopens with the data intact."""
-        doc = await self.store.put("bravo", "mudae_roll", "111", "222",
+        doc = await self.store.put("bravo", "game_roll", "111", "222",
                                    {"count": 3})
         self.assertEqual(doc["version"], 1)
         await self.store.close()
         again = PluginDataStore(self.path)
         await again.connect()
         try:
-            kept = await again.get("bravo", "mudae_roll",
+            kept = await again.get("bravo", "game_roll",
                                    guild_id="111", channel_id="222")
             self.assertEqual(kept["data"], {"count": 3})
             self.assertEqual(kept["version"], 1)

@@ -104,7 +104,7 @@ class StubAPI:
         return {"floor": seconds}
 
     async def admin_overview(self):
-        return {"admins": [1, 2], "mudae_bot_id": 123,
+        return {"admins": [1, 2], "primary_bot_id": 123,
                 "accounts": {"a1": {"is_admin": False, "prefix_mode": "mention",
                                     "permissions": {"help": True}}}}
 
@@ -116,8 +116,8 @@ class StubAPI:
         self.calls.append(("admin_remove_id", user_id))
         return {}
 
-    async def admin_mudae_id_set(self, user_id, surface="api"):
-        self.calls.append(("admin_mudae_id_set", user_id))
+    async def admin_primary_bot_id_set(self, user_id, surface="api"):
+        self.calls.append(("admin_primary_bot_id_set", user_id))
         return {}
 
     async def admin_prefix_set(self, account, mode, symbol, surface="api"):

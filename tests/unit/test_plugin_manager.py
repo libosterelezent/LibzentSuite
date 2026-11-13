@@ -383,7 +383,7 @@ class TestLoaderHardening(unittest.TestCase):
             self.assertIn("import-time death", str(ctx.exception))
             # no half-executed module residue under any synthetic prefix
             residue = [m for m in sys.modules
-                       if m.startswith("_mudae_plugroot") and "kaboom" in m]
+                       if m.startswith("_plugin_root") and "kaboom" in m]
             self.assertEqual(residue, [])
 
     def test_rescan_purges_previous_synthetic_modules(self) -> None:
@@ -391,10 +391,10 @@ class TestLoaderHardening(unittest.TestCase):
         loader.discover()
         stale_parent = loader._parent_names[0]
         stale_cls = loader.record("spy").cls
-        baseline = len([m for m in sys.modules if m.startswith("_mudae_plugroot")])
+        baseline = len([m for m in sys.modules if m.startswith("_plugin_root")])
         loader.discover()
         loader.discover()
-        current = [m for m in sys.modules if m.startswith("_mudae_plugroot")]
+        current = [m for m in sys.modules if m.startswith("_plugin_root")]
         self.assertLessEqual(len(current), baseline)  # bounded, not accumulating
         self.assertNotIn(stale_parent, sys.modules)
         self.assertNotIn(stale_cls.__module__, sys.modules)

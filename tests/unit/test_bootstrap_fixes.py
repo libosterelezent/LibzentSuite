@@ -115,11 +115,11 @@ class TestFromFileSymlink(unittest.TestCase):
             self.assertEqual(Credentials.from_file(real).get("A"), "1")
 
 
-class TestMudaeBotIdTruncation(unittest.TestCase):
+class TestPrimaryBotIdTruncation(unittest.TestCase):
     def test_malformed_value_truncated_in_error(self):
-        creds = Credentials({"MUDAE_BOT_ID": "x" * 100})
+        creds = Credentials({"PRIMARY_BOT_ID": "x" * 100})
         with self.assertRaises(CredentialsError) as ctx:
-            _ = creds.mudae_bot_id
+            _ = creds.primary_bot_id
         self.assertIn("...", str(ctx.exception))
         self.assertNotIn("x" * 41, str(ctx.exception))
 

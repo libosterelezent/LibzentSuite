@@ -1,5 +1,5 @@
 """AccessManager + admin-gate tests: per-account command permissions,
-prefix settings, admin accounts, mudae id, and the env migration."""
+prefix settings, admin accounts, the_bot id, and the env migration."""
 from __future__ import annotations
 
 import unittest
@@ -30,11 +30,11 @@ class FakeKv:
 
 
 class FakeCredentials:
-    """Credentials double for the migration + mudae fallback paths."""
+    """Credentials double for the migration + primary-bot fallback paths."""
 
-    def __init__(self, owner_ids="", mudae_id=None):
+    def __init__(self, owner_ids="", bot_id=None):
         self._owner = owner_ids
-        self._mudae = mudae_id
+        self._bot_id = bot_id
 
     @property
     def owner_user_ids(self):
@@ -43,10 +43,10 @@ class FakeCredentials:
         return frozenset(int(x) for x in self._owner.split(",") if x.strip())
 
     @property
-    def mudae_bot_id(self):
-        if self._mudae is None:
-            raise KeyError("MUDAE_BOT_ID")
-        return int(self._mudae)
+    def primary_bot_id(self):
+        if self._bot_id is None:
+            raise KeyError("PRIMARY_BOT_ID")
+        return int(self._bot_id)
 
 
 def make(kv=None, creds=None) -> AccessManager:
@@ -199,26 +199,26 @@ class TestAdminFlag(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await am.is_admin_id(1))
 
 
-# -------------------------------------------------------------- mudae id
-class TestMudaeId(unittest.IsolatedAsyncioTestCase):
+# -------------------------------------------------------------- primary bot id
+class TestPrimaryBotId(unittest.IsolatedAsyncioTestCase):
     async def test_none_when_unset_no_env(self):
         am = make()
-        self.assertIsNone(await am.mudae_bot_id())
+        self.assertIsNone(await am.primary_bot_id())
 
     async def test_db_value_wins(self):
-        am = make(creds=FakeCredentials(mudae_id=111))
-        await am.set_mudae_bot_id(222)
-        self.assertEqual(await am.mudae_bot_id(), 222)
+        am = make(creds=FakeCredentials(bot_id=111))
+        await am.set_primary_bot_id(222)
+        self.assertEqual(await am.primary_bot_id(), 222)
 
     async def test_env_fallback_when_db_unset(self):
-        am = make(creds=FakeCredentials(mudae_id=111))
-        self.assertEqual(await am.mudae_bot_id(), 111)
+        am = make(creds=FakeCredentials(bot_id=111))
+        self.assertEqual(await am.primary_bot_id(), 111)
 
     async def test_clear_reverts_to_env(self):
-        am = make(creds=FakeCredentials(mudae_id=111))
-        await am.set_mudae_bot_id(222)
-        await am.set_mudae_bot_id(None)
-        self.assertEqual(await am.mudae_bot_id(), 111)
+        am = make(creds=FakeCredentials(bot_id=111))
+        await am.set_primary_bot_id(222)
+        await am.set_primary_bot_id(None)
+        self.assertEqual(await am.primary_bot_id(), 111)
 
 
 # ------------------------------------------------------------- overview

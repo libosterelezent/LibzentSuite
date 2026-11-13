@@ -234,7 +234,7 @@ class ChannelScopeTests(unittest.TestCase):
 
 class TaskDefinitionTests(unittest.TestCase):
     def test_minimal_definition(self):
-        d = TaskDefinition(id="roll", plugin="mudae_roll",
+        d = TaskDefinition(id="roll", plugin="game_roll",
                            channel_scope=["123"])
         self.assertEqual(d.channel_scope, ("123",))
         self.assertEqual(d.max_attempts, 1)

@@ -27,7 +27,7 @@ from adapters.simulator.scenarios import (
 from adapters.simulator.world import (
     SYNTHETIC_ALPHA_ID,
     SYNTHETIC_GUILD_CHANNEL,
-    SYNTHETIC_MUDAE_ID,
+    SYNTHETIC_BOT_ID,
     SYNTHETIC_OWNER_ID,
     SimWorld,
 )
@@ -146,10 +146,10 @@ class TestWorldSetups(unittest.TestCase):
             world = SimWorld()
             SCENARIOS[name].world_setup(world)
             self.assertIn(SYNTHETIC_OWNER_ID, world.users, name)
-            self.assertIn(SYNTHETIC_MUDAE_ID, world.users, name)
+            self.assertIn(SYNTHETIC_BOT_ID, world.users, name)
             self.assertIn(SYNTHETIC_ALPHA_ID, world.users, name)
             self.assertTrue(world.channel_exists(SYNTHETIC_GUILD_CHANNEL), name)
-            self.assertEqual(world.responder_id, SYNTHETIC_MUDAE_ID, name)
+            self.assertEqual(world.responder_id, SYNTHETIC_BOT_ID, name)
             self.assertIn(EXPORT_COMMAND, world.responses, name)
             self.assertTrue(world.responses[EXPORT_COMMAND], name)
 
@@ -261,8 +261,8 @@ class TestChecksPure(unittest.TestCase):
         export = world.deliver(
             SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, EXPORT_COMMAND
         )
-        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
-        world.deliver(dm, SYNTHETIC_MUDAE_ID, "Soulmates\n...", dm=True)
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
+        world.deliver(dm, SYNTHETIC_BOT_ID, "Soulmates\n...", dm=True)
         world.channel_gone(SYNTHETIC_GUILD_CHANNEL)
         world.gone_channels[SYNTHETIC_GUILD_CHANNEL] = export.ts + 0.1
         self.assertEqual(scenario.checks([], world), [])
@@ -273,8 +273,8 @@ class TestChecksPure(unittest.TestCase):
         leaked.deliver(
             SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, EXPORT_COMMAND
         )
-        dm = leaked.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
-        leaked.deliver(dm, SYNTHETIC_MUDAE_ID, "page", dm=True)
+        dm = leaked.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
+        leaked.deliver(dm, SYNTHETIC_BOT_ID, "page", dm=True)
         leaked.channel_gone(SYNTHETIC_GUILD_CHANNEL)
         leaked.deliver(dm, SYNTHETIC_ALPHA_ID, IMPORT_PREFIX + "leak", dm=True)
         failures = scenario.checks([], leaked)

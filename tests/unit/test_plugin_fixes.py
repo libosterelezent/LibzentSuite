@@ -70,7 +70,7 @@ class FakeServices:
     def credentials(self) -> Credentials:
         return Credentials.from_values({
             "OWNER_USER_IDS": ",".join(str(o) for o in self._owners),
-            "MUDAE_BOT_ID": "999"})
+            "PRIMARY_BOT_ID": "999"})
 
     async def send_message(self, channel_id: int, content: str, *,
                            priority: Any = None) -> None:
@@ -785,14 +785,14 @@ class LoaderFailurePurgeTests(unittest.TestCase):
                 "raise RuntimeError('package import-time death')\n")
             loader = PluginLoader(root)
             before = {m for m in sys.modules
-                      if m.startswith("_mudae_plugroot")}
+                      if m.startswith("_plugin_root")}
             with self.assertRaises(Exception):
                 loader.discover()
             # the synthetic parent AND every module this discover pulled
             # in are gone (OTHER loaders' live modules are not ours to
             # judge — scope the assertion to the delta)
             delta = {m for m in sys.modules
-                     if m.startswith("_mudae_plugroot")} - before
+                     if m.startswith("_plugin_root")} - before
             self.assertEqual(delta, set(), f"leaked modules: {delta}")
             # and the loader is retry-able: healing the tree works
             (bad / "__init__.py").write_text(

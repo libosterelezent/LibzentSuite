@@ -8,7 +8,7 @@ Covers the contract end to end WITHOUT the Discord library:
     the send), usage errors (ValueError/SettingsValidationError) rendered
     back as the usage line, crash isolation, owner-gate behavior,
   * framework verbs — pg (hub stats), say, the dynamic categorized help
-    (Mudae layout, built from the registry, never hand-written),
+    (the_bot layout, built from the registry, never hand-written),
   * the probe fixture plugin's declared handler against fakes — the
     plugin-declared surface end to end (discovery binds it, the executor
     runs it, the reply flows through the fake services),
@@ -141,7 +141,7 @@ class FakeServices:
     @property
     def credentials(self) -> Credentials:
         return Credentials.from_values({
-            "OWNER_USER_IDS": str(OWNER_ID), "MUDAE_BOT_ID": "999"})
+            "OWNER_USER_IDS": str(OWNER_ID), "PRIMARY_BOT_ID": "999"})
 
     @property
     def settings(self) -> Dict[str, Any]:

@@ -1,9 +1,9 @@
 """Pure text transforms for the soulcopy plugin (no I/O -> fully unit-testable).
 
 Semantics ported verbatim from the audited original (Soulcopy/autocopy.py):
-  * each Mudae DM page: if the first line contains 'Soulmates', drop the first
+  * each the_bot DM page: if the first line contains 'Soulmates', drop the first
     two lines (header + separator),
-  * all remaining lines are collapsed with '$' as separator (Mudae's list mode),
+  * all remaining lines are collapsed with '$' as separator (the_bot's list mode),
   * the collapsed stream is re-split into chunks that each fit
     len(prefix) + content <= max_chunk_length,
   * improvement over the original: a single entry longer than the limit is
@@ -26,7 +26,7 @@ def strip_page_header(page: str) -> List[str]:
 
 
 def collapse_pages(pages: Iterable[str]) -> str:
-    """All pages -> one '$'-joined stream (Mudae list encoding).
+    """All pages -> one '$'-joined stream (primary bot list encoding).
 
     Returns '' when every page is empty/header-only.
     """
@@ -39,7 +39,7 @@ def collapse_pages(pages: Iterable[str]) -> str:
 def _u16len(s: str) -> int:
     """Length in UTF-16 code units — Discord's message-size unit.
 
-    Astral-plane characters (emoji — common in Mudae names) count 2, so a
+    Astral-plane characters (emoji — common in the_bot names) count 2, so a
     codepoint-based budget can build chunks the API rejects with 400.
     """
     return len(s.encode("utf-16-le")) // 2

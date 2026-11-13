@@ -44,7 +44,7 @@ def make_services(*, bus=None, scheduler=None, client=None, settings_dict=None,
         "alpha", "soulcopy",
         bus=bus or EventBus(),
         scheduler=scheduler or FakeScheduler(),
-        credentials=Credentials.from_values({"MUDAE_BOT_ID": "123"}),
+        credentials=Credentials.from_values({"PRIMARY_BOT_ID": "123"}),
         cache=cache,
         settings_dict=settings_dict if settings_dict is not None else {"k": 1},
         ack_registry=ack_registry,
@@ -370,7 +370,7 @@ class CooldownStateApiTests(unittest.IsolatedAsyncioTestCase):
             "alpha", "soulcopy",
             bus=EventBus(),
             scheduler=FakeScheduler(),
-            credentials=Credentials.from_values({"MUDAE_BOT_ID": "123"}),
+            credentials=Credentials.from_values({"PRIMARY_BOT_ID": "123"}),
             cache=cache,
             settings_dict={},
             cooldowns=cooldowns,
@@ -482,7 +482,7 @@ class PassthroughTests(unittest.IsolatedAsyncioTestCase):
         services = make_services(settings_dict=settings_dict)
         self.assertEqual(services.account, "alpha")
         self.assertEqual(services.plugin, "soulcopy")
-        self.assertEqual(services.credentials.mudae_bot_id, 123)
+        self.assertEqual(services.credentials.primary_bot_id, 123)
         self.assertIs(services.settings, settings_dict)  # live reference kept
         settings_dict["live"] = False
         self.assertFalse(services.settings["live"])

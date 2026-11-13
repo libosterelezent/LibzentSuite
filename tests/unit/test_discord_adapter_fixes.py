@@ -97,7 +97,7 @@ class RichEventPolarityTests(unittest.IsolatedAsyncioTestCase):
     def _editable(mid: int = 5, author_id: int = 999999) -> NS:
         return NS(
             id=mid, content="edited payload",
-            author=NS(id=author_id, name="Mudae"),
+            author=NS(id=author_id, name="the_bot"),
             channel=NS(id=500, name="grind", type=NS(name="text"),
                        guild=NS(id=42)),
             guild=NS(id=42), embeds=[], components=[], attachments=[],

@@ -9,13 +9,13 @@ directory load it.
 Flow (behavior ported from the audited original onto the task pipeline):
   1. an OWNER sends the trigger word (default 'slcopy') in any channel,
   2. the plugin requests the export by sending '$slud-s' in the TRIGGER
-     CHANNEL and collects the Mudae DM replies until dm_read_timeout passes
+     CHANNEL and collects the the_bot DM replies until dm_read_timeout passes
      with no new page,
   3. pages are collapsed + chunked (see textutils) and sent back to the
      triggering channel with inter_chunk_delay between chunks — every send
      goes through ctx.services (task scheduler -> rate pacing -> audit).
 
-Every tunable is a declared Setting; the Mudae id and the allowed owner ids
+Every tunable is a declared Setting; the the_bot id and the allowed owner ids
 come from credentials (.env) — nothing is hardcoded.
 
 Flow safety (unchanged contract):
@@ -48,11 +48,11 @@ from .textutils import DEFAULT_PREFIX, build_soulcopy_chunks
 
 
 class SoulcopyPlugin(PluginBase):
-    """Export Mudae's soulmate list as chunks ready for '$soulcopy' import."""
+    """Export primary bot's soulmate list as chunks ready for '$soulcopy' import."""
 
     name = "soulcopy"
     version = "2.0.0"
-    description = "Export your Mudae soulmate list and re-import it elsewhere."
+    description = "Export your the_bot soulmate list and re-import it elsewhere."
 
     def __init__(self) -> None:
         # K16 (S4-TC1): one copy flow per (account, plugin) instance at a
@@ -67,7 +67,7 @@ class SoulcopyPlugin(PluginBase):
                 min_value=0.0, max_value=120.0),
         Setting("max_chunk_length", "int", 2000, "Hard Discord message limit.",
                 min_value=50, max_value=2000),
-        Setting("export_command", "str", "$slud-s", "Mudae command that DMs the soulmate list."),
+        Setting("export_command", "str", "$slud-s", "the_bot command that DMs the soulmate list."),
         Setting("import_prefix", "str", DEFAULT_PREFIX, "Prefix used for the produced chunks."),
     )
 
@@ -104,7 +104,7 @@ class SoulcopyPlugin(PluginBase):
         except (ValueError, CredentialsError, SchedulerError) as exc:
             # same clean-abort contract for the non-FlowBlocked failures the
             # flow can actually hit: bad config (prefix > budget), missing
-            # MUDAE_BOT_ID, cancelled/timed-out sends during a stop/estop
+            # PRIMARY_BOT_ID, cancelled/timed-out sends during a stop/estop
             ctx.logger.warning("flow aborted for %s: %s", ctx.account, exc)
         finally:
             self._in_flight = False  # release the K16 single-flow latch
@@ -119,19 +119,19 @@ class SoulcopyPlugin(PluginBase):
         # cache-aware: validate BEFORE acting so a gone channel aborts the
         # flow before a single message leaves the account
         ctx.services.validate_channel(trigger_channel)
-        mudae_id = ctx.services.credentials.mudae_bot_id
-        dm_channel = await ctx.services.open_dm(mudae_id)
+        bot_id = ctx.services.credentials.primary_bot_id
+        dm_channel = await ctx.services.open_dm(bot_id)
 
         async def _request_export() -> None:
             await ctx.services.send_message(
                 trigger_channel, ctx.settings["export_command"], priority=Priority.NORMAL
             )
 
-        # ask Mudae for the list (in the trigger channel), reading the DM
+        # ask primary bot for the list (in the trigger channel), reading the DM
         # replies as they arrive — same gather structure as the original
-        ctx.logger.info("requesting soulmate export from Mudae")
+        ctx.logger.info("requesting soulmate export from the_bot")
         collect = asyncio.ensure_future(
-            self._collect_pages(ctx, mudae_id, dm_channel)
+            self._collect_pages(ctx, bot_id, dm_channel)
         )
         try:
             pages, _ = await asyncio.gather(collect, _request_export())
@@ -159,10 +159,10 @@ class SoulcopyPlugin(PluginBase):
         target = ctx.services.describe_channel(trigger_channel)
         ctx.logger.info("sent %d chunk(s) back to %s", len(chunks), target)
 
-    async def _collect_pages(self, ctx: PluginContext, mudae_id: int, dm_channel: int):
-        """Collect Mudae DM pages until the idle timeout expires."""
+    async def _collect_pages(self, ctx: PluginContext, bot_id: int, dm_channel: int):
+        """Collect primary bot DM pages until the idle timeout expires."""
         return await ctx.services.collect_messages(
-            check=lambda e: e.author_id == mudae_id and e.channel_id == dm_channel,
+            check=lambda e: e.author_id == bot_id and e.channel_id == dm_channel,
             idle_timeout=ctx.settings["dm_read_timeout"],
         )
 

@@ -9,7 +9,7 @@ from adapters.simulator.world import (
     SYNTHETIC_ALPHA_ID,
     SYNTHETIC_BETA_ID,
     SYNTHETIC_GUILD_CHANNEL,
-    SYNTHETIC_MUDAE_ID,
+    SYNTHETIC_BOT_ID,
     SYNTHETIC_OWNER_ID,
     SimWorld,
 )
@@ -27,12 +27,12 @@ class _Recorder:
 
 
 def _basic_world() -> SimWorld:
-    """Owner + two account users + mudae + one guild channel."""
+    """Owner + two account users + primary-bot + one guild channel."""
     world = SimWorld()
     world.add_user(SYNTHETIC_OWNER_ID, "owner")
     world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
     world.add_user(SYNTHETIC_BETA_ID, "beta")
-    world.add_user(SYNTHETIC_MUDAE_ID, "mudae")
+    world.add_user(SYNTHETIC_BOT_ID, "bot")
     world.add_channel(SYNTHETIC_GUILD_CHANNEL, "guild-channel")
     return world
 
@@ -51,17 +51,17 @@ class TestTopology(unittest.TestCase):
 
     def test_dm_ids_deterministic_and_symmetric(self) -> None:
         world = _basic_world()
-        first = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
-        again = world.dm_channel_for(SYNTHETIC_MUDAE_ID, SYNTHETIC_ALPHA_ID)
+        first = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
+        again = world.dm_channel_for(SYNTHETIC_BOT_ID, SYNTHETIC_ALPHA_ID)
         self.assertEqual(first, again)  # symmetric pair -> one channel
-        other = world.dm_channel_for(SYNTHETIC_BETA_ID, SYNTHETIC_MUDAE_ID)
+        other = world.dm_channel_for(SYNTHETIC_BETA_ID, SYNTHETIC_BOT_ID)
         self.assertNotEqual(first, other)  # distinct pairs never merge
         self.assertTrue(world.dm_channels[first])  # flagged as a DM channel
 
     def test_dm_id_collision_falls_back(self) -> None:
         """A pre-squatted hash id must not merge two conversations."""
         world = SimWorld()
-        pair = (SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)  # alpha < mudae
+        pair = (SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)  # alpha < bot_client
         squatted = 1_000_000 + pair[0] * 7919 + pair[1]
         world.add_channel(squatted, "occupied")
         resolved = world.dm_channel_for(pair[0], pair[1])
@@ -140,11 +140,11 @@ class TestSubscriberIsolation(unittest.TestCase):
 
     def test_cancel_pending_replies_stops_inflight_pages(self) -> None:
         world = SimWorld(
-            responder_id=SYNTHETIC_MUDAE_ID,
+            responder_id=SYNTHETIC_BOT_ID,
             responses={"$slud-s": ["page-one", "page-two"]},
             reply_delay=30.0,
         )
-        world.add_user(SYNTHETIC_MUDAE_ID, "mudae")
+        world.add_user(SYNTHETIC_BOT_ID, "bot")
         world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
         world.add_channel(SYNTHETIC_GUILD_CHANNEL, "guild-channel")
 
@@ -158,7 +158,7 @@ class TestSubscriberIsolation(unittest.TestCase):
             await asyncio.sleep(0.05)
 
         asyncio.run(_drive())
-        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
         self.assertEqual(world.messages_of(dm), [])  # pages never landed
 
 
@@ -167,26 +167,26 @@ class TestSubscriberIsolationAsync(unittest.IsolatedAsyncioTestCase):
 
     async def test_failing_subscriber_does_not_kill_the_responder(self) -> None:
         world = SimWorld(
-            responder_id=SYNTHETIC_MUDAE_ID,
+            responder_id=SYNTHETIC_BOT_ID,
             responses={"$slud-s": ["page-one"]},
             reply_delay=0.01,
         )
-        world.add_user(SYNTHETIC_MUDAE_ID, "mudae")
+        world.add_user(SYNTHETIC_BOT_ID, "bot")
         world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
         world.add_channel(SYNTHETIC_GUILD_CHANNEL, "guild-channel")
         world.subscribers.append(_Boom())
         world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "$slud-s")
-        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
         await world.wait_for_quiet(dm, quiet=0.2, limit=2.0)
         self.assertEqual(world.messages_of(dm), ["page-one"])
 
     async def test_subscriber_raising_on_every_event_loses_nothing(self) -> None:
         world = SimWorld(
-            responder_id=SYNTHETIC_MUDAE_ID,
+            responder_id=SYNTHETIC_BOT_ID,
             responses={"$slud-s": ["page-one", "page-two"]},
             reply_delay=0.01,
         )
-        world.add_user(SYNTHETIC_MUDAE_ID, "mudae")
+        world.add_user(SYNTHETIC_BOT_ID, "bot")
         world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
         world.add_channel(SYNTHETIC_GUILD_CHANNEL, "guild-channel")
         good = _Recorder()
@@ -195,7 +195,7 @@ class TestSubscriberIsolationAsync(unittest.IsolatedAsyncioTestCase):
         trigger = world.deliver(
             SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "$slud-s"
         )
-        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
         await world.wait_for_quiet(dm, quiet=0.2, limit=3.0)
         contents = [m.content for m in good.received]
         self.assertEqual(
@@ -205,11 +205,11 @@ class TestSubscriberIsolationAsync(unittest.IsolatedAsyncioTestCase):
 
     async def test_async_blocking_subscriber_does_not_stall_delivery(self) -> None:
         world = SimWorld(
-            responder_id=SYNTHETIC_MUDAE_ID,
+            responder_id=SYNTHETIC_BOT_ID,
             responses={"$slud-s": ["page-one"]},
             reply_delay=0.01,
         )
-        world.add_user(SYNTHETIC_MUDAE_ID, "mudae")
+        world.add_user(SYNTHETIC_BOT_ID, "bot")
         world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
         world.add_channel(SYNTHETIC_GUILD_CHANNEL, "guild-channel")
         blocker = _AsyncBlocker()
@@ -217,7 +217,7 @@ class TestSubscriberIsolationAsync(unittest.IsolatedAsyncioTestCase):
         world.subscribers.append(blocker)
         world.subscribers.append(good)
         world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "$slud-s")
-        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
         # the parked sleep(999) must not hold up later events: the page
         # still lands within the (sub-second) quiet window
         await world.wait_for_quiet(dm, quiet=0.15, limit=2.0)
@@ -234,32 +234,32 @@ class TestCancelPendingReplies(unittest.IsolatedAsyncioTestCase):
         """Cancel arriving the instant the reply task finished must be a
         quiet no-op (no error, no lost evidence)."""
         world = SimWorld(
-            responder_id=SYNTHETIC_MUDAE_ID,
+            responder_id=SYNTHETIC_BOT_ID,
             responses={"$slud-s": ["page-one"]},
             reply_delay=0.0,
         )
-        world.add_user(SYNTHETIC_MUDAE_ID, "mudae")
+        world.add_user(SYNTHETIC_BOT_ID, "bot")
         world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
         world.add_channel(SYNTHETIC_GUILD_CHANNEL, "guild-channel")
         world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "$slud-s")
         for _ in range(4):  # let the task run to completion, uncancelled
             await asyncio.sleep(0)
         world.cancel_pending_replies()  # races the done callback
-        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
         self.assertEqual(world.messages_of(dm), ["page-one"])
 
     async def test_second_flow_after_cancel_reuses_nothing_stale(self) -> None:
         """After one cancelled flow, a NEW flow on the same world gets
         fresh responder tasks and still delivers."""
         world = SimWorld(
-            responder_id=SYNTHETIC_MUDAE_ID,
+            responder_id=SYNTHETIC_BOT_ID,
             responses={"$slud-s": ["page-one"]},
             reply_delay=0.01,
         )
-        world.add_user(SYNTHETIC_MUDAE_ID, "mudae")
+        world.add_user(SYNTHETIC_BOT_ID, "bot")
         world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
         world.add_channel(SYNTHETIC_GUILD_CHANNEL, "guild-channel")
-        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
 
         world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "$slud-s")
         await asyncio.sleep(0.02)
@@ -278,11 +278,11 @@ class TestScriptedResponder(unittest.IsolatedAsyncioTestCase):
 
     async def test_pages_delivered_to_requesters_dm_with_delay(self) -> None:
         world = SimWorld(
-            responder_id=SYNTHETIC_MUDAE_ID,
+            responder_id=SYNTHETIC_BOT_ID,
             responses={"$slud-s": ["page-one", "page-two"]},
             reply_delay=0.08,
         )
-        world.add_user(SYNTHETIC_MUDAE_ID, "mudae")
+        world.add_user(SYNTHETIC_BOT_ID, "bot")
         world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
         world.add_user(SYNTHETIC_BETA_ID, "beta")
         world.add_channel(SYNTHETIC_GUILD_CHANNEL, "guild-channel")
@@ -290,13 +290,13 @@ class TestScriptedResponder(unittest.IsolatedAsyncioTestCase):
         world.deliver(
             SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "$slud-s"
         )
-        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
         await world.wait_for_quiet(dm, quiet=0.25, limit=5.0)
 
         self.assertEqual(
             world.messages_of(dm), ["page-one", "page-two"]
         )  # right channel (alpha's DM), right order
-        beta_dm = world.dm_channel_for(SYNTHETIC_BETA_ID, SYNTHETIC_MUDAE_ID)
+        beta_dm = world.dm_channel_for(SYNTHETIC_BETA_ID, SYNTHETIC_BOT_ID)
         self.assertEqual(world.messages_of(beta_dm), [])  # nobody else's DM
 
         # per-page delay honored: the two pages are >= ~1 delay apart
@@ -306,8 +306,8 @@ class TestScriptedResponder(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(gap, 0.05)
 
     async def test_responder_ignores_unregistered_and_own_commands(self) -> None:
-        world = SimWorld(responder_id=SYNTHETIC_MUDAE_ID, reply_delay=0.01)
-        world.add_user(SYNTHETIC_MUDAE_ID, "mudae")
+        world = SimWorld(responder_id=SYNTHETIC_BOT_ID, reply_delay=0.01)
+        world.add_user(SYNTHETIC_BOT_ID, "bot")
         world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
         world.add_channel(SYNTHETIC_GUILD_CHANNEL, "guild-channel")
         world.add_response("$slud-s", ["page"])
@@ -317,12 +317,12 @@ class TestScriptedResponder(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(world.journal[-1].content, "smalltalk")  # no reply
 
         # the responder echoing its own command must not loop
-        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_MUDAE_ID, "$slud-s")
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_BOT_ID, "$slud-s")
         await asyncio.sleep(0.05)
         replies = [
             m
             for m in world.journal
-            if m.dm and m.author_id == SYNTHETIC_MUDAE_ID
+            if m.dm and m.author_id == SYNTHETIC_BOT_ID
         ]
         self.assertEqual(replies, [])
 
@@ -527,7 +527,7 @@ class TestChannelGone(unittest.IsolatedAsyncioTestCase):
         pair mapping, so the pair is unsendable forever (live Discord
         resurrects DM channels; the sim deliberately does not)."""
         world = _basic_world()
-        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
+        dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
         with self.assertLogs("libzent.simulator", level="WARNING") as logs:
             self.assertTrue(world.channel_gone(dm))
         self.assertTrue(
@@ -536,7 +536,7 @@ class TestChannelGone(unittest.IsolatedAsyncioTestCase):
         )
         # the pair mapping is retained: same id, forever gone
         self.assertEqual(
-            world.dm_channel_for(SYNTHETIC_MUDAE_ID, SYNTHETIC_ALPHA_ID), dm
+            world.dm_channel_for(SYNTHETIC_BOT_ID, SYNTHETIC_ALPHA_ID), dm
         )
         self.assertFalse(world.channel_exists(dm))
         self.assertNotIn(dm, world.channels)

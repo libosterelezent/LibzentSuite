@@ -359,9 +359,9 @@ class TestCredentials(_TmpCase):
 
     def test_env_bom_and_inline_comments(self) -> None:
         env = Credentials.parse_env(
-            '\ufeffMUDAE_BOT_ID=123 # the bot\nTOKEN=ab#cd\nQ="x # y"\n')
-        self.assertEqual(env, {"MUDAE_BOT_ID": "123", "TOKEN": "ab#cd", "Q": "x # y"})
-        self.assertEqual(Credentials(env).mudae_bot_id, 123)
+            '\ufeffPRIMARY_BOT_ID=123 # the bot\nTOKEN=ab#cd\nQ="x # y"\n')
+        self.assertEqual(env, {"PRIMARY_BOT_ID": "123", "TOKEN": "ab#cd", "Q": "x # y"})
+        self.assertEqual(Credentials(env).primary_bot_id, 123)
 
     def test_owner_ids_parsed_once(self) -> None:
         creds = Credentials({"OWNER_USER_IDS": "1, 2;3"})
@@ -397,7 +397,7 @@ class TestBootstrapRobustness(_TmpCase):
 
     async def test_failed_build_releases_everything(self) -> None:
         db = Database(self.dir / "b.db")
-        creds = Credentials.from_values({"MUDAE_BOT_ID": "1"})
+        creds = Credentials.from_values({"PRIMARY_BOT_ID": "1"})
 
         # a mid-build failure AFTER some cleanups registered (a malformed
         # rate_limits spec used to be the trigger, but it is now — by
@@ -418,7 +418,7 @@ class TestBootstrapRobustness(_TmpCase):
 
     async def test_malformed_policy_spec_no_longer_bricks_boot(self) -> None:
         db = Database(self.dir / "m.db")
-        creds = Credentials.from_values({"MUDAE_BOT_ID": "1"})
+        creds = Credentials.from_values({"PRIMARY_BOT_ID": "1"})
         cfg = self.dir / "cfg-mal"
         cfg.mkdir()
         (cfg / "rate_limits.json").write_text(json.dumps(
@@ -432,7 +432,7 @@ class TestBootstrapRobustness(_TmpCase):
 
     async def test_shutdown_survives_failing_step_and_closes_db(self) -> None:
         db = Database(self.dir / "s.db")
-        creds = Credentials.from_values({"MUDAE_BOT_ID": "1"})
+        creds = Credentials.from_values({"PRIMARY_BOT_ID": "1"})
         fw = await build(config_dir=str(self._config()),
                          plugin_dir=str(FIXTURE_PLUGINS),
                          client_factory=lambda n, t: None, credentials=creds,
@@ -448,7 +448,7 @@ class TestBootstrapRobustness(_TmpCase):
 
     async def test_boot_logs_are_persisted(self) -> None:
         db = Database(self.dir / "l.db")
-        creds = Credentials.from_values({"MUDAE_BOT_ID": "1"})
+        creds = Credentials.from_values({"PRIMARY_BOT_ID": "1"})
         fw = await build(config_dir=str(self._config()),
                          plugin_dir=str(FIXTURE_PLUGINS),
                          client_factory=lambda n, t: None, credentials=creds,
