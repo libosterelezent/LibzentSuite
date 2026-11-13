@@ -1,5 +1,13 @@
 """FleetService — the ONE orchestration service (PHASE 9, rollout B).
 
+DEPRECATED (2026-11-13): superseded by the Workspace unification
+(`roadmap.md`, phases W0–W5). The correctness core — the transition
+tables, generation fences, single-lock persist-first discipline and
+the policy check order — carries into `core/workspace/` renamed, not
+redesigned; observations/relay and the FleetTaskHandler capability
+are redesigned as the chain layer. This module keeps working and
+stays tested until W5 deletes it — build nothing new against it.
+
 Every fleet operation — from the dashboard, the CLI, or tests — flows
 through this service (rollout B's acceptance criterion). The service is
 the ONLY writer of the fleet projection: it validates through the Phase

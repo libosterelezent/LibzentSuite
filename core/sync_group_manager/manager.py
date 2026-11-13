@@ -1,5 +1,12 @@
 """SyncGroupManager — the application-level owner of sync group membership.
 
+DEPRECATED (2026-11-13): superseded by the Workspace unification
+(`roadmap.md`, phases W0–W5). This module keeps working and stays
+tested until W3 replaces its surface and W5 deletes it — build
+nothing new against it. The persist-first/single-lock membership
+discipline and the shared-clock limiter mapping carry over into
+`core/workspace/service.py` unchanged in spirit.
+
 Division of labour (the managers cooperate, none absorbs another):
 
   * SyncGroupManager (this)  — persistent group rows + which account is in
