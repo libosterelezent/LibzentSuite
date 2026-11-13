@@ -296,7 +296,10 @@ def bench_dumps(repeat: int) -> BenchResult:
     for _ in range(repeat):
         times.append(timed(lambda: [json.dumps(payload) for _ in range(N_DUMPS)]))
     return BenchResult(
-        "dashboard-dumps", N_DUMPS, times, note=f"(payload ~{len(json.dumps(payload)) // 1024} KB JSON)"
+        "dashboard-dumps",
+        N_DUMPS,
+        times,
+        note=f"(payload ~{len(json.dumps(payload)) // 1024} KB JSON)",
     )
 
 

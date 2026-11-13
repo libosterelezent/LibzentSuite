@@ -299,7 +299,9 @@ def _checks_channel_gone(audit: list[dict], world: SimWorld) -> list[str]:
     # what must stay a pure post-mortem check
     dm_channel = world.peek_dm_channel(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
     if not (dm_channel is not None and world.messages_of(dm_channel)):
-        failures.append("no the primary bot DM pages arrived - the flow never started (test is void)")
+        failures.append(
+            "no the primary bot DM pages arrived - the flow never started (test is void)"
+        )
     chunks = _delivered_chunks(world)
     if chunks:
         failures.append(

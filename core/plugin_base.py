@@ -60,7 +60,6 @@ if TYPE_CHECKING:  # runtime duck-typing avoids import cycles / hard deps
     from .settings_manager import Setting
 
 
-
 class PluginBase(abc.ABC):  # noqa: B024 -- contract marker; every hook is optional by design
     """Contract every plugin module must fulfil.
 
@@ -91,10 +90,7 @@ class PluginBase(abc.ABC):  # noqa: B024 -- contract marker; every hook is optio
     #: recover) and its task declarations.
     fleet_handler: ClassVar[Any | None] = None
 
-
-
     # ------------------------------------------------------ dashboard UI (C)
-
 
     # ------------------------------------------------------------- lifecycle
     async def on_load(self, ctx: PluginContext) -> None:  # noqa: B027  # optional lifecycle hook
@@ -526,7 +522,7 @@ __all__ = [
     "CommandContext",
     "CommandSettingsApi",
     "CommandSpec",
-        "PluginBase",
+    "PluginBase",
     "PluginContext",
     "PluginServices",
-        ]
+]

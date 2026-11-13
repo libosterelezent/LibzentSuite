@@ -173,9 +173,7 @@ class ParserManager:
                 self._instances[name] = instance
             return instance
 
-    def parse(
-        self, message: Any, *, account_username: str | None = None, parser: str = ""
-    ) -> Any:
+    def parse(self, message: Any, *, account_username: str | None = None, parser: str = "") -> Any:
         """Dispatch one message to a backend (its contract result)."""
         backend = self.backend(parser)
         return backend.parse(message, account_username=account_username)
@@ -208,8 +206,6 @@ class ParserManager:
 PARSER_MANAGER = ParserManager()
 
 
-def parse(
-    message: Any, *, account_username: str | None = None, parser: str = ""
-) -> Any:
+def parse(message: Any, *, account_username: str | None = None, parser: str = "") -> Any:
     """Module-level convenience over :data:`PARSER_MANAGER`."""
     return PARSER_MANAGER.parse(message, account_username=account_username, parser=parser)

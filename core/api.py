@@ -1730,7 +1730,9 @@ class ControlAPI:
         if user_id is not None and not str(user_id).strip().lstrip("-").isdigit():
             raise ValueError("primary bot id must be an integer (or null)")
         await access.set_primary_bot_id(int(user_id) if user_id is not None else None)
-        self._audit_mgmt("system", "mgmt:admin.primary_bot_id_set", surface, extra=f"value={user_id}")
+        self._audit_mgmt(
+            "system", "mgmt:admin.primary_bot_id_set", surface, extra=f"value={user_id}"
+        )
         return {"primary_bot_id": await access.primary_bot_id()}
 
     async def admin_forget_account(self, account: str, surface: str = "api") -> dict[str, Any]:

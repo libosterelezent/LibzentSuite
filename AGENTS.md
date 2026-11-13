@@ -66,7 +66,7 @@ Use `@dataclass` when a class primarily represents structured data with named fi
 
 ## 5. Documentation and knowledgebase policy
 
-The root `AGENTS.md`, `ARCHITECTURE.md`, and `INTEGRATION.md` are the places for agent guidance and binding engineering/architecture contracts. **Do not put coding rules, agent instructions, linting policy, or behavioral mandates inside `knowledgebase/`.**
+The root `AGENTS.md`, `ARCHITECTURE.md`, and `INTEGRATION.md` are the places for agent guidance and binding engineering/architecture contracts. **Do not put coding rules, agent instructions, linting policy, or behavioral mandates inside `knowledgebase/` or `docs/`.**
 
 `knowledgebase/` exists to preserve project knowledge and technical reference material, not to govern agents.
 
@@ -76,6 +76,15 @@ The root `AGENTS.md`, `ARCHITECTURE.md`, and `INTEGRATION.md` are the places for
 - When adding or materially changing a public class, function, method, data model, or subsystem, document its purpose and relevant contract in the code docstring and add/update a knowledgebase reference using the append-only approach. Include applicable inputs, outputs, exceptions, side effects, lifecycle/ownership, persistence, invariants, and callers. Keep the source docstring close to the code; use the knowledgebase for navigable cross-module understanding and deeper reference.
 - Do not put secrets, tokens, personal data, or live account credentials in docs, fixtures, examples, logs, or knowledgebase entries. Use synthetic identifiers and redacted examples.
 - If the project later restores generated knowledgebase areas, follow their generator's ownership: never hand-edit generated/read-only output. Regenerate only through the documented generator after source changes and review the generated diff. Do not claim the knowledgebase currently has tooling or protections unless verified.
+
+`docs/` exists to describe the projects structure in a user-friendly way and how to use its available commands and the entire LibzentSuite.
+
+- Treat existing docs as a copy of what is available in the codebase and its functionalities rather then considering it as the source of truth.
+- The docs folder exists just to keep the functionalities, commmands and their uses in a user readable format entirely separate to the knowledgebase folder.
+- If there is any new addition or removal of feature or command and functionality note down it in the related files inside docs folder if available and always keep the docs updated of any changes in commands or functionalities to avoid keeping stale dumps.
+- Docs mostly covers the `Plugin` and `API` related endpoints or settings available to them, to streamline the process for users that want to create plugins they should read it and get to know the available functions they could use to make them.
+- The docs must provide the full knowledge of running and working with this app both from dashboard and cli interface, with clear detailed instructions from installations to the running suite and important envs or data that user need to fill in before running it.
+- Note the runtime enviornment and lack of tests in other devices explicitly as the project was entirely made in linux hence wasn't tested in other platforms (this line subjected to be changed when required tests and full suite runs green in other devices aswell and will be updated in docs).
 
 ## 6. Public contracts, architecture, and UI
 
