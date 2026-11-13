@@ -1,13 +1,13 @@
 """``ParserManager`` — the framework's message-parser registry.
 
 One place that owns every parser backend, so plugins never import a
-specific engine and future parser libraries (other bots' output,
+specific engine and future parser libraries (any bot's output,
 generic formats...) plug in WITHOUT touching plugin or framework code::
 
     from parsers import PARSER_MANAGER
 
-    result = PARSER_MANAGER.parse_event(event)  # default: mudae
-    if result.family is MessageFamily.CHARACTER:
+    result = PARSER_MANAGER.parse_event(event, parser="my_game")
+    if result.family == "character_claim":
         ...
 
 Design:
@@ -17,27 +17,28 @@ Design:
     decoupled (per the parsers/ design contract);
   * LAZY backends — a registered factory builds on first use and the
     instance is cached (zero cost until a plugin actually parses);
-  * each backend OWNS its configuration (MudaeParser's settings
-    manager persists under ``state/parser_settings.json``); the
+  * each backend OWNS its configuration and persistence; the
     ParserManager never touches backend internals;
   * SYNC + PURE — parse is a pure function of the message payload;
     no client access, no awaits, safe from any plugin handler.
 
-Registering a future parser library::
+The registry ships EMPTY — parser packs (game-specific or generic)
+register themselves through :meth:`ParserManager.register_parser`.
+
+Registering a parser pack::
 
     from parsers import ParserManager, ParserBackend
 
     manager.register_parser(
-        name="pokeslot",
-        factory=lambda: MyPokeslotParser(),
-        description="Pokeslot slot-machine messages",
-        families=("slot_result", "pokemon_caught"),
+        name="my_game",
+        factory=lambda: MyGameParser(),
+        description="My game bot's messages",
+        families=("character_claim", "cooldown", ...),
     )
 
 The backend contract is one callable:
 ``parse(message, *, account_username=None) -> typed result`` (any
-result type with a ``family``-like discriminator; MudaeParser's
-``ParseResult`` is the reference implementation).
+result type with a ``family``-like discriminator).
 """
 
 from __future__ import annotations
@@ -50,7 +51,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 __all__ = [
-    "DEFAULT_PARSER",
     "PARSER_MANAGER",
     "ParserBackend",
     "ParserManager",
@@ -58,11 +58,13 @@ __all__ = [
     "parse",
 ]
 
-DEFAULT_PARSER = "mudae"
-
 
 class UnknownParserError(KeyError):
     """No parser backend registered under the requested name."""
+
+
+class InvalidMessageError(ValueError):
+    """The event/message carries no parsable payload."""
 
 
 @dataclass(frozen=True)
@@ -74,8 +76,7 @@ class ParserBackend:
     factory: Callable[[], Any]
     description: str = ""
     #: the families/categories the backend can produce (loose strings —
-    #: each backend defines its own vocabulary; MudaeParser uses
-    #: MessageFamily values)
+    #: each backend defines its own vocabulary)
     families: tuple[str, ...] = ()
     version: str = ""
 
@@ -123,8 +124,7 @@ class ParserManager:
             self._instances.pop(name, None)
 
     def unregister_parser(self, name: str) -> bool:
-        """Drop a backend (True when it existed). Built-ins can be
-        re-registered from :func:`register_builtin_parsers`."""
+        """Drop a backend (True when it existed)."""
         with self._lock:
             existed = self._backends.pop(name, None) is not None
             self._instances.pop(name, None)
@@ -149,9 +149,19 @@ class ParserManager:
             }
 
     # ------------------------------------------------------------- access
-    def backend(self, name: str = DEFAULT_PARSER) -> Any:
-        """The backend INSTANCE (lazily built once, then cached)."""
+    def backend(self, name: str = "") -> Any:
+        """The backend INSTANCE (lazily built once, then cached).
+
+        With no name, the FIRST registered backend is used (there is
+        no privileged default — the registry ships empty)."""
         with self._lock:
+            if not name:
+                if not self._backends:
+                    raise UnknownParserError(
+                        "no parser backends registered (register one via "
+                        "ParserManager.register_parser)"
+                    )
+                name = next(iter(self._backends))
             backend = self._backends.get(name)
             if backend is None:
                 raise UnknownParserError(
@@ -164,14 +174,14 @@ class ParserManager:
             return instance
 
     def parse(
-        self, message: Any, *, account_username: str | None = None, parser: str = DEFAULT_PARSER
+        self, message: Any, *, account_username: str | None = None, parser: str = ""
     ) -> Any:
         """Dispatch one message to a backend (its contract result)."""
         backend = self.backend(parser)
         return backend.parse(message, account_username=account_username)
 
     def parse_event(
-        self, event: Any, *, account_username: str | None = None, parser: str = DEFAULT_PARSER
+        self, event: Any, *, account_username: str | None = None, parser: str = ""
     ) -> Any:
         """Parse a framework ``MessageReceived``/``MessageEdited`` bus
         event: unwraps the rich ``event.message`` DTO (adapters.model.
@@ -182,8 +192,6 @@ class ParserManager:
             if isinstance(event, str) or hasattr(event, "content") or hasattr(event, "embeds"):
                 message = event  # a message object passed directly
             else:
-                from .mudae.exceptions import InvalidMessageError
-
                 raise InvalidMessageError(
                     "event carries no parsable message payload (event.message is None)"
                 )
@@ -196,50 +204,12 @@ class ParserManager:
             self._instances.clear()
 
 
-# ----------------------------------------------------------- built-ins
-def register_builtin_parsers(manager: ParserManager) -> None:
-    """Register the parsers shipped in this repository.
-
-    The mudae backend uses the DEFAULT persistence (state/parser_
-    settings.json) so dashboard-side settings edits survive restarts
-    and apply process-wide on the next parse (the settings manager
-    publishes immutable snapshots; MudaeParser re-reads its snapshot
-    per parse)."""
-
-    def build_mudae() -> Any:
-        from .mudae import MudaeParser, MudaeParserSettingsManager
-
-        return MudaeParser(MudaeParserSettingsManager())
-
-    manager.register_parser(
-        name="mudae",
-        factory=build_mudae,
-        description="Mudae bot messages: characters, kakera, keys, "
-        "spheres, cooldowns, timers, claims, trades, loot",
-        families=(
-            "character",
-            "kakera",
-            "keys",
-            "cooldown",
-            "timer",
-            "claim",
-            "trade",
-            "kakeraloot",
-            "wishlist",
-            "marriage",
-            "username",
-        ),
-        version="1.0",
-    )
-
-
 #: process-wide singleton (one registry per process, like COMMAND_HUB)
 PARSER_MANAGER = ParserManager()
-register_builtin_parsers(PARSER_MANAGER)
 
 
 def parse(
-    message: Any, *, account_username: str | None = None, parser: str = DEFAULT_PARSER
+    message: Any, *, account_username: str | None = None, parser: str = ""
 ) -> Any:
     """Module-level convenience over :data:`PARSER_MANAGER`."""
     return PARSER_MANAGER.parse(message, account_username=account_username, parser=parser)

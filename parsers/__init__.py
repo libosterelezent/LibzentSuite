@@ -1,57 +1,62 @@
-"""Parsers: Mudae message parsing (framework-agnostic, plugin-consumed).
+"""Parsers: pluggable message-parser registry (framework-agnostic).
 
-Pure-Python parsers that turn bot messages into typed objects — for
-Mudae: waifu/husbando claims, values (kakera, keys, spheres...), and
-the other structured payloads. Parsers take message DATA
-(content/embeds/components as delivered by the event boundary), never a
-live client, so they stay unit-testable offline and usable from any
-plugin on any account.
+Pure-Python parsers turn bot messages into typed objects. Parsers take
+message DATA (content/embeds/components as delivered by the event
+boundary), never a live client, so they stay unit-testable offline and
+usable from any plugin on any account.
 
 Design rules (mirroring the plugin contract, core/plugin_base.py):
   * zero I/O — no sends, no awaits, no client access; parsing is a pure
     function of the message payload,
-  * typed results with explicit "not a Mudae message" outcomes (a
-    parser must never guess on foreign messages),
+  * typed results with explicit "not a match" outcomes (a parser must
+    never guess on foreign messages),
   * consumed by plugins through their normal event flow — the framework
     routes every MessageReceived to plugins; parsers are the shared
-    translation layer plugins call to interpret Mudae's output.
+    translation layer plugins call to interpret bot output.
 
-Plugin usage (the one-liner)::
+The registry ships EMPTY — game/parser packs register themselves at
+import time (or explicitly). See ``ParserManager.register_parser``.
 
-    from parsers import PARSER_MANAGER, MessageFamily
+Plugin usage::
 
-    result = PARSER_MANAGER.parse_event(event)
-    if result.family is MessageFamily.CHARACTER:
-        ...result.character.kakera_value...
+    from parsers import PARSER_MANAGER
 
-Packages:
-  * ``parsers.mudae`` — the MudaeParser engine (modular rules,
-    configurable regex patterns and literal message strings, validated
-    settings lifecycle; see knowledgebase/MUDAE_PARSER.md);
-  * ``parsers.manager`` — ``ParserManager``/``PARSER_MANAGER``: the
-    process-wide registry dispatching to parser backends. Ships with
-    ``mudae`` registered; future parser libraries register through
-    ``ParserManager.register_parser`` without touching framework code.
+    result = PARSER_MANAGER.parse_event(event, parser="my_parser")
+    if result.family == "character_claim":
+        ...
+
+Registering a parser pack::
+
+    from parsers import ParserManager, ParserBackend
+
+    manager.register_parser(
+        name="my_game",
+        factory=lambda: MyGameParser(),
+        description="My game's bot messages",
+        families=("character_claim", "cooldown", ...),
+    )
+
+The backend contract is one callable:
+``parse(message, *, account_username=None) -> typed result`` (any
+result type with a ``family``-like discriminator).
 """
 
 from __future__ import annotations
 
 from .manager import (
-    DEFAULT_PARSER,
     PARSER_MANAGER,
+    InvalidMessageError,
     ParserBackend,
     ParserManager,
     UnknownParserError,
     parse,
-    register_builtin_parsers,
 )
 
 __all__ = [
-    "DEFAULT_PARSER",
     "PARSER_MANAGER",
+    "InvalidMessageError",
     "ParserBackend",
     "ParserManager",
     "UnknownParserError",
     "parse",
-    "register_builtin_parsers",
 ]
