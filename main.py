@@ -6,7 +6,6 @@ Usage:
   python main.py --sim [name]           run a simulation scenario locally, no network
   python main.py --sim-list             list available scenarios
   python main.py --start-all            boot every enabled account, then REPL
-  python main.py --dashboard --port N   also serve the browser dashboard (+WS)
   python main.py --headless             run forever with no terminal (daemon mode)
 """
 
@@ -92,40 +91,6 @@ async def run_app(args: argparse.Namespace, argv: list[str]) -> int:
                 print(f"live mode unavailable: {exc}", file=sys.stderr)
                 return 2  # the finally below still shuts the stack down
 
-        if args.dashboard:
-            from interfaces.dashboard import DashboardServer
-
-            if api.dashboard_token is None:
-                # FINAL-PHASE (F7): the dashboard would run WITHOUT auth
-                # (loopback + credential routes stay locked, but start/
-                # stop/estop are drivable by any local process).
-                print(
-                    "WARNING: dashboard starting WITHOUT auth on "
-                    "127.0.0.1 — set DASHBOARD_TOKEN in .env; "
-                    "credential management stays locked",
-                    flush=True,
-                )
-            try:
-                dashboard = DashboardServer(
-                    api,
-                    token=api.dashboard_token,
-                    port=args.port,
-                    bus=framework.bus,
-                    exit_signal=True,
-                )
-                dashboard.start().attach_logs(api.logs_service())
-                if api.audit_recorder() is not None:
-                    dashboard.attach_audit(api.audit_recorder())
-            except (OSError, OverflowError, ValueError) as exc:
-                # bind failures: port in use / out of range (0-65535) —
-                # a clean line + exit 2, never a raw bind traceback
-                print(
-                    f"error: cannot start dashboard on port {args.port}: "
-                    f"{type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                )
-                return 2
-            print(f"dashboard: {dashboard.url}")
 
         if argv:  # one-shot command mode
             from interfaces.cli import run_once
@@ -251,15 +216,13 @@ def main() -> int:
     parser.add_argument(
         "--start-all", action="store_true", help="start every enabled account on boot"
     )
-    parser.add_argument(
-        "--dashboard", action="store_true", help="serve the GUI dashboard (browser + WS)"
-    )
+
     parser.add_argument(
         "--headless",
         action="store_true",
         help="run forever with no terminal (use with --dashboard)",
     )
-    parser.add_argument("--port", type=int, default=8070, help="dashboard port (default 8070)")
+
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -307,10 +270,8 @@ def main() -> int:
             "--plugins",
             "--env",
             "--start-all",
-            "--dashboard",
-            "--headless",
-            "--port",
-            "--db",
+                        "--headless",
+                        "--db",
             "--debug",
         }
         # parse_known_args already consumed the main parser's flags; every
