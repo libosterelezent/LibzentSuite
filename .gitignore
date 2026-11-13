@@ -23,9 +23,8 @@ venv/
 .coverage
 htmlcov/
 docs/_build/
-# the knowledgebase is committed; only its generated machine data is local
+# the knowledgebase is stored locally to avoid irrelevant repo size expansion.
 knowledgebase/
-knowledgebase_*.db
 
 # python build artifacts (uv build / pip install -e .)
 /dist/

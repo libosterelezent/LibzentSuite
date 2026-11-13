@@ -48,6 +48,7 @@ dev = [
 # Engineering standards: AGENTS.md §8 — Ruff owns linting, import sorting,
 # and formatting for this repository (one canonical config; no competing
 # Black/isort/pyflakes setups).
+exclude = ["knowledgebase", "tests"]
 target-version = "py310"
 line-length = 100
 

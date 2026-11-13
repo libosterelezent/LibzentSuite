@@ -1,5 +1,5 @@
 ---
-name: Test-Driven Development
+name: test-driven-development
 description: Regression-test-first repair workflow for LibzentSuite defects. Use when fixing a bug or changing behavior that a test can express — write the failing test that demonstrates the defect, watch it fail for the intended reason, then fix.
 ---
 

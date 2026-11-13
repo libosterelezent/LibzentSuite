@@ -1,5 +1,5 @@
 ---
-name: CI Failure Investigation
+name: ci-failure-investigation
 description: Investigate and repair failing GitHub Actions runs for LibzentSuite — inspect the real run, job, step, and logs before touching files; classify the cause (app defect, stale fixture/expectation, workflow config, environment); fix the root cause and re-verify the actual run. Use on any red X, timeout, or stuck Actions run.
 ---
 

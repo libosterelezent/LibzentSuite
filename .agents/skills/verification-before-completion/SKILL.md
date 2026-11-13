@@ -1,5 +1,5 @@
 ---
-name: Verification Before Completion
+name: verification-before-completion
 description: Fresh-evidence gate for every claimed result — run commands, capture exit codes, verify process and job status. Use before reporting tests green, CI fixed, work committed, or any task complete. A summary line is not a finished process.
 ---
 

@@ -20,7 +20,7 @@ If a current test encodes behavior that conflicts with an approved requirement, 
 
 ### Ground rules
 
-- Python runtime: Python 3.10 or newer. Production runtime dependencies are those declared in `requirements.txt`; `discord.py-self` is a live-mode dependency imported lazily.
+- Python runtime: Python 3.10 or newer. Production runtime dependencies are those declared in `requirements.txt`; `discord.py-self` is a live-mode dependency.
 - Paths in this document are relative to the repository root.
 - Public functions/classes need docstrings describing purpose and important errors/side effects.
 - Validate untrusted input at boundaries. Domain/API errors should be human-readable; malformed input must not crash the process with an uncaught exception.

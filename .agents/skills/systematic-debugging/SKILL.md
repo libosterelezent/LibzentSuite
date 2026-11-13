@@ -1,5 +1,5 @@
 ---
-name: Systematic Debugging
+name: systematic-debugging
 description: Reproduce-then-fix workflow for any bug, test failure, hang, or unexpected behavior in LibzentSuite. Use BEFORE editing code whenever an error, failed assertion, wrong outcome, or stall appears. Enforces a tested root-cause hypothesis over symptom patching.
 ---
 
