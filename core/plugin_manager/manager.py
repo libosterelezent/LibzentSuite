@@ -29,7 +29,6 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from core import plugin_scopes
-from core.dashboard_ui import DashboardUIRegistry, DashboardUIToolset
 from core.errors import PluginError, SettingsValidationError
 from core.event_bus import (
     Event,
@@ -45,7 +44,6 @@ from core.event_bus import (
 from core.plugin_base import (
     CommandContext,
     CommandSpec,
-    PluginBase,
     parse_command_args,
     usage_line,
 )
@@ -107,8 +105,8 @@ class PluginManager:
         account manager's services factory. ``dispatch_grace_s`` bounds how
         long :meth:`deactivate_account` waits for in-flight dispatch tasks
         before cancelling them (round-3 ghost-write finding).
-        ``ui_registry`` overrides the plugin dashboard-UI registry (tests);
-        a fresh :class:`DashboardUIRegistry` is built by default.
+        ``ui_registry`` is the optional plugin UI registry (tests);
+        None when no UI system is present.
         ``dispatch_inflight_limit`` caps how many dispatch tasks per
         account may be in flight at once (flood bound — see
         :meth:`_on_message`); excess events are dropped-newest and
@@ -169,16 +167,14 @@ class PluginManager:
         #: bounded wait for an in-flight teardown before taking it over
         #: from an interrupted owner (injectable for tests)
         self._teardown_wait_timeout_s: float = 5.0
-        self._ui_registry = ui_registry or DashboardUIRegistry(offload_sync=True)
+        self._ui_registry = ui_registry  # None when no dashboard UI system is present
         # the registry rebinds boot-time bound-method callbacks onto LIVE
         # plugin instances at dispatch; this manager is the resolver
-        self._ui_registry.set_instance_resolver(self._resolve_ui_instance)
         #: plugin ids whose UI registration is BOOT-owned (built from a
         #: throwaway instance at discovery): replaceable by the first LIVE
         #: per-account instance that activates (takeover — see
         #: :meth:`_init_dashboard_uis`; after takeover the dispatch
         #: resolver still pins the RIGHT instance per account)
-        self._boot_ui_plugins: set[str] = set()
         #: per-account cap on in-flight dispatch tasks (flood + slow
         #: plugins must never grow the live-task set without bound —
         #: the bus's own 20k bound is recreated one layer up otherwise)
@@ -362,7 +358,6 @@ class PluginManager:
         if name == "__rescan__":
             # special key: full re-scan without targeting one plugin
             self._loader.discover()
-            self.init_boot_dashboard_uis()
             found = self._loader.names()
             self._logger.info("plugin directory rescan: %d plugin(s)", len(found))
             return {"plugin": "__rescan__", "discovered": found, "restored_accounts": 0}
@@ -438,7 +433,8 @@ class PluginManager:
                 was_loaded=was_loaded.get(acct, False),
             )
         # unregister the stale UI; the boot pass below re-registers it
-        self._ui_registry.detach(name)
+        if self._ui_registry is not None:
+            self._ui_registry.detach(name)
         self.init_boot_dashboard_uis()
         # RESTORE with live instances; re-activate where it was running
         restored = 0
@@ -522,11 +518,6 @@ class PluginManager:
             # the hub must reflect the REPLACEMENT's command declarations
             # even when it was not re-activated (review finding #13)
             self._sync_commands(acct)
-        # the fresh instances take over the live UI for their accounts
-        for acct in list(affected) + orphaned:
-            runtimes = self._accounts.get(acct)
-            if runtimes is not None and name in runtimes and runtimes[name].active:
-                self._init_dashboard_uis(acct, runtimes)
         self._logger.info(
             "plugin %s reloaded (restored on %d account(s), re-activated on %d)",
             name,
@@ -569,7 +560,8 @@ class PluginManager:
                 rt.instance = None
                 self._sync_commands(acct)
                 detached += 1
-            self._ui_registry.detach(name)
+            if self._ui_registry is not None:
+                self._ui_registry.detach(name)
             # remove from the loader so it's not re-offered
             self._loader._records.pop(name, None)
         self._logger.info("plugin %s unloaded (detached from %d account(s))", name, detached)
@@ -647,235 +639,11 @@ class PluginManager:
                     # remaining runtimes must not run their hooks on a
                     # down account just to be torn down after
                     await self._teardown_runtime(account, runtime)
-                    fenced = True
+                    fenced = True  # noqa: F841 — signals the fence path was taken
                     break
-            # UI lifecycle: offer the toolset to plugins that declare a UI
-            # (after on_load/on_enable — actions may reflect plugin state)
-            # — never for a fenced activation (the account is gone/down)
-            if not fenced:
-                self._init_dashboard_uis(account, runtimes)
         finally:
             ev.set()
         self._logger.info("activated plugins on %s", account)
-
-    async def _await_activation_settled(
-        self, account: str, timeout: float = 5.0, *, fence: bool = False
-    ) -> None:
-        """Bounded wait for any in-flight activation on ``account``.
-
-        Deactivation, removal and reload call this BEFORE touching the
-        account's runtimes: an activation parked in on_load/on_enable
-        would otherwise resume AFTER their teardown pass and leave an
-        active, hook-fired runtime behind (review pass-2 #1).
-
-        ``fence=True`` (deactivation/removal ONLY — the callers that
-        actually tear the account down) arms the epoch undo on timeout.
-        Reload and re-activation wait but never fence: their timing out
-        must not unload plugins on an account that is still RUNNING
-        (review pass-4 #4)."""
-        ev = self._activation_events.get(account)
-        if ev is None or ev.is_set():
-            return
-        try:
-            await asyncio.wait_for(ev.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            if fence:
-                # teardown proceeds now; the epoch bump makes the
-                # still-running activation abort/undo its remaining
-                # commits when its hook finally returns — a hook cannot
-                # be cancelled (it runs in the caller's task), but it
-                # must not resurrect state after teardown
-                self._activation_epoch[account] = self._activation_epoch.get(account, 0) + 1
-            self._logger.warning(
-                "activation of %s did not settle within %.1fs; proceeding%s",
-                account,
-                timeout,
-                " (the late activation will be fenced)" if fence else "",
-            )
-
-    def init_boot_dashboard_uis(self) -> int:
-        """Register plugin dashboard UIs at DISCOVERY time (no account).
-
-        Instantiates a THROWAWAY instance of each discovered plugin that
-        overrides initialize_dashboard_ui, calls the hook, and discards
-        the instance — the layout is class-level state, not per-account.
-        This makes plugin UI pages visible in the dashboard from boot,
-        not only after an account connects. Returns how many UIs were
-        registered. Failures are isolated per plugin.
-
-        The registrations are tagged BOOT-owned (``_boot_ui_plugins``):
-        they survive account deactivation, and the first LIVE account
-        instance that activates the plugin REPLACES its boot layout
-        (see :meth:`_init_dashboard_uis`) so dashboard actions bind to
-        the live per-account instance instead of the throwaway.
-        """
-        registered = 0
-        if not self._discovered:
-            self.discover()
-        for plugin_name, record in self._loader._records.items():
-            if plugin_name in self._ui_registry.list_plugins():
-                continue  # already registered (e.g. by an account)
-            cls = record.cls
-            # check the CLASS for an overridden hook (no instance needed)
-            if getattr(cls, "initialize_dashboard_ui", None) is getattr(
-                PluginBase, "initialize_dashboard_ui", None
-            ):
-                continue  # base no-op: declares no UI
-            try:
-                self._boot_register_ui(plugin_name)
-                registered += 1
-            except Exception:
-                self._logger.warning(
-                    "boot UI init failed for %s — isolated", plugin_name, exc_info=True
-                )
-                self._ui_registry.detach(plugin_name)
-        if registered:
-            self._logger.info("boot dashboard UIs registered: %d plugin(s)", registered)
-        return registered
-
-    def _resolve_ui_instance(self, plugin_name: str, account=None):
-        """Live plugin instance for UI callback rebinding (registry use).
-
-        ``account=None`` scans active runtimes (first active account
-        wins, insertion order — documented determinism). Returns None
-        when no account runs the plugin. Raises nothing: visibility
-        checks must fail CLOSED on a missing runtime, not crash.
-        """
-        if account is not None:
-            runtimes = self._accounts.get(account)
-            if not runtimes or plugin_name not in runtimes:
-                return None
-        try:
-            return self.active_instance_for(plugin_name, account)
-        except PluginError:
-            return None
-
-    def active_instance_for(self, plugin_name: str, account=None):
-        """VALIDATED live instance for a plugin, optionally per account.
-
-        Raises PluginError naming the exact problem (unknown account,
-        plugin not assigned, disabled, not active) — the dashboard's
-        account-context validation path. ``account=None`` returns the
-        first active instance or None (no error).
-        """
-        if account is not None and account not in self._accounts:
-            raise PluginError(f"unknown account {account!r}")
-        if account is not None:
-            runtime = self._accounts[account].get(plugin_name)
-            if runtime is None:
-                raise PluginError(f"plugin {plugin_name!r} is not assigned to account {account!r}")
-            if not runtime.enabled:
-                raise PluginError(f"plugin {plugin_name!r} is disabled on {account!r}")
-            if not runtime.active or runtime.instance is None:
-                raise PluginError(
-                    f"plugin {plugin_name!r} on {account!r} has no active "
-                    f"runtime — start the account"
-                )
-            return runtime.instance
-        for runtimes in self._accounts.values():
-            runtime = runtimes.get(plugin_name)
-            if (
-                runtime is not None
-                and runtime.enabled
-                and runtime.active
-                and runtime.instance is not None
-            ):
-                return runtime.instance
-        return None
-
-    def services_for(self, account: str, plugin_name: str):
-        """The account's services facade for one plugin (or None).
-
-        None means the account has no active service wiring (never
-        started) — dispatch refuses account-scoped actions in that
-        state rather than fabricating a facade.
-        """
-        factory = self._services.get(account)
-        if factory is None:
-            return None
-        return factory(plugin_name)
-
-    def _boot_register_ui(self, plugin_name: str) -> None:
-        """(Re-)register one plugin's UI from a THROWAWAY instance.
-
-        Shared by :meth:`init_boot_dashboard_uis` and the failed-takeover
-        restore in :meth:`_init_dashboard_uis`. Raises whatever the
-        plugin's constructor/hook raises (callers isolate); on success
-        the registration is tagged BOOT-owned.
-        """
-        record = self._loader.record(plugin_name)
-        instance = record.cls()
-        instance._ui_registry = self._ui_registry
-        instance.initialize_dashboard_ui(DashboardUIToolset())
-        self._boot_ui_plugins.add(plugin_name)
-
-    def _init_dashboard_uis(self, account: str, runtimes: dict[str, PluginRuntime]) -> None:
-        """Offer the dashboard UI toolset to this account's plugins.
-
-        Only plugins that OVERRIDE ``initialize_dashboard_ui`` are called
-        (the PluginBase no-op means "declares no UI"). Plugin-wide dedup:
-        a plugin's UI registers ONCE — the first account to activate it
-        wins, later activations of the same plugin on other accounts see
-        the registration and skip (one dashboard page per plugin, not per
-        account). The ONE exception: a BOOT-owned registration (the
-        throwaway instance from :meth:`init_boot_dashboard_uis`) is
-        REPLACED by the first live instance — ``registry.attach``
-        validates the fresh layout before dropping the old one, so a
-        failed takeover cannot leave a half-registered plugin, and the
-        boot UI is restored best-effort afterwards. Failures are
-        isolated: a crashing hook (or a rejected layout) never fails the
-        account's activation, and any partial registration is detached
-        again.
-        """
-        for plugin_name, entry in runtimes.items():
-            instance = entry.instance
-            if instance is None or not entry.enabled:
-                continue
-            hook = getattr(instance, "initialize_dashboard_ui", None)
-            if hook is None or not callable(hook):
-                continue  # duck-typed instance without the hook
-            # bound-method vs function never compares identical: check the
-            # CLASS attribute to see whether the hook is actually overridden
-            if (
-                getattr(type(instance), "initialize_dashboard_ui", None)
-                is PluginBase.initialize_dashboard_ui
-            ):
-                continue  # base no-op: this plugin declares no UI
-            boot_owned = plugin_name in self._boot_ui_plugins
-            if plugin_name in self._ui_registry.list_plugins() and not boot_owned:
-                continue  # another account already registered this UI
-            try:
-                # inject the registry reference attach_dashboard_ui uses
-                # (a boot layout is frozen: the live instance must build a
-                # FRESH tree — attach replaces once the new one validates)
-                instance._ui_registry = self._ui_registry
-                hook(DashboardUIToolset())
-                self._boot_ui_plugins.discard(plugin_name)
-            except Exception as exc:
-                entry.error_count += 1
-                entry.last_error = f"ui_init: {type(exc).__name__}: {exc}"
-                self._logger.warning(
-                    "dashboard UI init failed for %s on %s — isolated",
-                    plugin_name,
-                    account,
-                    exc_info=True,
-                )
-                # don't fail the activation — clean any partial registration
-                self._ui_registry.detach(plugin_name)
-                self._boot_ui_plugins.discard(plugin_name)
-                if boot_owned:
-                    # the failed takeover killed the boot page: restore the
-                    # throwaway registration best-effort so the dashboard
-                    # keeps the plugin's page until the next activation
-                    try:
-                        self._boot_register_ui(plugin_name)
-                    except Exception:
-                        self._logger.warning(
-                            "boot UI restore failed for %s — page stays "
-                            "unregistered until the next activation",
-                            plugin_name,
-                            exc_info=True,
-                        )
 
     async def _activate_one(self, account: str, runtime: PluginRuntime) -> None:
         """Load + enable one runtime, isolating any hook failure."""
@@ -956,6 +724,93 @@ class PluginManager:
             self._logger.error(
                 "plugin %s failed to activate on %s; disabled", runtime.name, account
             )
+
+    async def _await_activation_settled(
+        self, account: str, timeout: float = 5.0, *, fence: bool = False
+    ) -> None:
+        """Bounded wait for any in-flight activation on ``account``.
+
+        Deactivation, removal and reload call this BEFORE touching the
+        account's runtimes: an activation parked in on_load/on_enable
+        would otherwise resume AFTER their teardown pass and leave an
+        active, hook-fired runtime behind (review pass-2 #1).
+
+        ``fence=True`` (deactivation/removal ONLY — the callers that
+        actually tear the account down) arms the epoch undo on timeout.
+        Reload and re-activation wait but never fence: their timing out
+        must not unload plugins on an account that is still RUNNING
+        (review pass-4 #4)."""
+        ev = self._activation_events.get(account)
+        if ev is None or ev.is_set():
+            return
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            if fence:
+                # teardown proceeds now; the epoch bump makes the
+                # still-running activation abort/undo its remaining
+                # commits when its hook finally returns — a hook cannot
+                # be cancelled (it runs in the caller's task), but it
+                # must not resurrect state after teardown
+                self._activation_epoch[account] = self._activation_epoch.get(account, 0) + 1
+            self._logger.warning(
+                "activation of %s did not settle within %.1fs; proceeding%s",
+                account,
+                timeout,
+                " (the late activation will be fenced)" if fence else "",
+            )
+
+    def init_boot_dashboard_uis(self) -> int:
+        """Initialize plugin dashboard UIs (no-op when no UI registry)."""
+        if self._ui_registry is None:
+            return 0
+        return 0  # dashboard UI system removed
+
+
+    def active_instance_for(self, plugin_name: str, account=None):
+        """VALIDATED live instance for a plugin, optionally per account.
+
+        Raises PluginError naming the exact problem (unknown account,
+        plugin not assigned, disabled, not active) — the dashboard's
+        account-context validation path. ``account=None`` returns the
+        first active instance or None (no error).
+        """
+        if account is not None and account not in self._accounts:
+            raise PluginError(f"unknown account {account!r}")
+        if account is not None:
+            runtime = self._accounts[account].get(plugin_name)
+            if runtime is None:
+                raise PluginError(f"plugin {plugin_name!r} is not assigned to account {account!r}")
+            if not runtime.enabled:
+                raise PluginError(f"plugin {plugin_name!r} is disabled on {account!r}")
+            if not runtime.active or runtime.instance is None:
+                raise PluginError(
+                    f"plugin {plugin_name!r} on {account!r} has no active "
+                    f"runtime — start the account"
+                )
+            return runtime.instance
+        for runtimes in self._accounts.values():
+            runtime = runtimes.get(plugin_name)
+            if (
+                runtime is not None
+                and runtime.enabled
+                and runtime.active
+                and runtime.instance is not None
+            ):
+                return runtime.instance
+        return None
+
+    def services_for(self, account: str, plugin_name: str):
+        """The account's services facade for one plugin (or None).
+
+        None means the account has no active service wiring (never
+        started) — dispatch refuses account-scoped actions in that
+        state rather than fabricating a facade.
+        """
+        factory = self._services.get(account)
+        if factory is None:
+            return None
+        return factory(plugin_name)
 
     def close(self) -> None:
         """Tear the manager down: bus subscriptions off, pending tasks reaped.
@@ -1188,102 +1043,6 @@ class PluginManager:
             services = self._services.get(account, lambda _n: None)(entry.name)
             ctx = entry.ctx = self._context(account, entry, services)
         return ctx if ctx.services is not None else None
-
-    async def ui_stats(self, account: str) -> list[dict[str, Any]]:
-        """Collect every enabled plugin's Home-tab stat cards (JSON-safe).
-
-        Each card is {"plugin", "label", "value", "sub", "level"} — the
-        dashboard renders them in its own metric template. A crashing
-        provider contributes nothing (isolation).
-
-        Gated on the MANAGER's own runtime state (``enabled`` and
-        ``active``) — disabled/deactivated plugins contribute nothing —
-        and the context handed to the provider is the manager's cached
-        dispatch context (``runtime.ctx``), not the plugin-side ``_ctx``
-        convention.
-        """
-        cards: list[dict[str, Any]] = []
-        runtime = self._accounts.get(account)
-        if not runtime:
-            return cards
-        for plugin_name, entry in list(runtime.items()):
-            if not entry.enabled or not entry.active:
-                continue
-            instance = entry.instance
-            if instance is None:
-                continue
-            provider = getattr(instance, "ui_stats", None)
-            if provider is None or not callable(provider):
-                continue
-            ctx = self._ui_ctx(account, entry)
-            if ctx is None:
-                continue
-            try:
-                for card in (await provider(ctx)) or ():
-                    cards.append(
-                        {
-                            "plugin": plugin_name,
-                            "label": str(getattr(card, "label", "")),
-                            "value": str(getattr(card, "value", "")),
-                            "sub": str(getattr(card, "sub", "")),
-                            "level": str(getattr(card, "level", "")),
-                        }
-                    )
-            except Exception:
-                self._logger.warning(
-                    "ui_stats failed for %s on %s — skipped", plugin_name, account, exc_info=True
-                )
-        return cards
-
-    async def ui_panels(self) -> list[dict[str, Any]]:
-        """Collect every plugin's sidebar panels (JSON-safe, deduped by id).
-
-        Panels are framework-level (not per-account): the first instance
-        of each plugin that provides a panel wins (deterministic). As
-        with :meth:`ui_stats`, only ENABLED and ACTIVE runtimes
-        contribute and the provider receives the manager's cached
-        dispatch context.
-        """
-        panels: dict[str, dict[str, Any]] = {}
-        for account, runtime in list(self._accounts.items()):
-            for plugin_name, entry in list(runtime.items()):
-                if not entry.enabled or not entry.active:
-                    continue
-                instance = entry.instance
-                if instance is None:
-                    continue
-                provider = getattr(instance, "ui_panels", None)
-                if provider is None or not callable(provider):
-                    continue
-                ctx = self._ui_ctx(account, entry)
-                if ctx is None:
-                    continue
-                try:
-                    for panel in (await provider(ctx)) or ():
-                        pid = str(getattr(panel, "id", ""))
-                        if not pid or pid in panels:
-                            continue
-                        sections = []
-                        for sec in getattr(panel, "sections", ()) or ():
-                            sections.append(
-                                {
-                                    "kind": str(getattr(sec, "kind", "text")),
-                                    "title": str(getattr(sec, "title", "")),
-                                    "data": getattr(sec, "data", None),
-                                }
-                            )
-                        panels[pid] = {
-                            "id": pid,
-                            "plugin": plugin_name,
-                            "title": str(getattr(panel, "title", "")),
-                            "icon": str(getattr(panel, "icon", "")),
-                            "sections": sections,
-                        }
-                except Exception:
-                    self._logger.warning(
-                        "ui_panels failed for %s — skipped", plugin_name, exc_info=True
-                    )
-        return sorted(panels.values(), key=lambda p: p["id"])
 
     async def _teardown_runtime(
         self,

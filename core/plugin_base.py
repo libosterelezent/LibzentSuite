@@ -49,7 +49,6 @@ from typing import (
     runtime_checkable,
 )
 
-from .dashboard_ui.errors import UIError
 from .priority import Priority
 
 if TYPE_CHECKING:  # runtime duck-typing avoids import cycles / hard deps
@@ -57,52 +56,9 @@ if TYPE_CHECKING:  # runtime duck-typing avoids import cycles / hard deps
     from collections.abc import Callable, Sequence
 
     from .credentials import Credentials
-    from .dashboard_ui.builders import DashboardUIToolset, Layout
     from .event_bus import Event, MessageReceived
     from .settings_manager import Setting
 
-
-@dataclass(frozen=True)
-class StatCard:
-    """One metric card on the Home tab (plugin-contributed).
-
-    The dashboard renders these in its own metric-card template —
-    plugins provide structured values, never HTML.
-    """
-
-    label: str
-    value: str
-    sub: str = ""
-    level: str = ""  # "" | "ok" | "warn" | "err" (color)
-
-
-@dataclass(frozen=True)
-class PanelSection:
-    """One section of a plugin sidebar panel (structured data only).
-
-    kind: "metrics"  -> data = [{"label","value","sub","level"}]
-          "table"    -> data = {"columns": [...], "rows": [[...], ...]}
-          "list"     -> data = [{"label","value"}] (key-value list)
-          "text"     -> data = str (rendered as a paragraph, escaped)
-    """
-
-    kind: str
-    title: str = ""
-    data: Any = None
-
-
-@dataclass(frozen=True)
-class UIPanel:
-    """A plugin's sidebar panel — appears as a nav entry + content area.
-
-    The dashboard renders each panel with its own templates; plugin
-    values are esc()'d at render time (structured data, never raw HTML).
-    """
-
-    id: str  # unique: "plugin_name:panel_id"
-    title: str
-    icon: str = ""  # SVG path data (24x24 viewBox); empty = default
-    sections: tuple[PanelSection, ...] = ()
 
 
 class PluginBase(abc.ABC):  # noqa: B024 -- contract marker; every hook is optional by design
@@ -135,58 +91,10 @@ class PluginBase(abc.ABC):  # noqa: B024 -- contract marker; every hook is optio
     #: recover) and its task declarations.
     fleet_handler: ClassVar[Any | None] = None
 
-    # ---------------------------------------------------------- UI extension
-    async def ui_stats(self, ctx: PluginContext) -> Sequence[StatCard]:
-        """Stat cards this plugin contributes to the Home tab.
 
-        Called when the dashboard fetches /api/ui/stats. Return a list
-        of StatCard(label, value, sub, level) — the dashboard renders
-        them in its own metric template (structured data, never HTML).
-        """
-        return ()
-
-    async def ui_panels(self, ctx: PluginContext) -> Sequence[UIPanel]:
-        """Sidebar panels this plugin contributes.
-
-        Called when the dashboard fetches /api/ui/panels. Each UIPanel
-        becomes a nav entry + content area rendered from its structured
-        sections (metrics/table/list/text) — never raw HTML.
-        """
-        return ()
 
     # ------------------------------------------------------ dashboard UI (C)
-    def initialize_dashboard_ui(self, ui: DashboardUIToolset) -> None:
-        """Optional hook for declaring this plugin's dashboard interface.
 
-        Called during plugin activation with a DashboardUIToolset. Build a
-        Layout using the toolset's builder classes, then call
-        self.attach_dashboard_ui(layout) to register it. The hook is SYNC:
-        attachment is pure in-memory registration (validate + freeze +
-        index), so no event-loop gymnastics are needed here. Overriding is
-        optional — plugins without the hook are completely unaffected.
-
-        Plugin-wide: a plugin's UI registers ONCE, no matter how many
-        accounts run the plugin (the first activation wins; later ones
-        skip). UI initialization failure never fails the activation.
-        """
-        return None
-
-    def attach_dashboard_ui(self, layout: Layout) -> None:
-        """Attach a completed UI layout to the framework.
-
-        The layout is validated, frozen, and registered. Call this from
-        initialize_dashboard_ui(). Raises UIError on an invalid tree, a
-        duplicate-ID tree, or when no registry is wired (the plugin
-        manager injects it during the managed activation lifecycle).
-        """
-        # the registry is injected by the plugin manager as self._ui_registry
-        registry = getattr(self, "_ui_registry", None)
-        if registry is None:
-            raise UIError(
-                "no UI registry wired — attach_dashboard_ui requires a managed plugin lifecycle"
-            )
-        # the plugin name is the class-declared slug (self.name)
-        registry.attach(self.name, layout)
 
     # ------------------------------------------------------------- lifecycle
     async def on_load(self, ctx: PluginContext) -> None:  # noqa: B027  # optional lifecycle hook
@@ -618,10 +526,7 @@ __all__ = [
     "CommandContext",
     "CommandSettingsApi",
     "CommandSpec",
-    "PanelSection",
-    "PluginBase",
+        "PluginBase",
     "PluginContext",
     "PluginServices",
-    "StatCard",
-    "UIPanel",
-]
+        ]

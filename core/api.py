@@ -65,8 +65,6 @@ import time as _time
 from typing import TYPE_CHECKING, Any
 
 from . import plugin_scopes
-from .dashboard_ui.context import ActionContext, CheckContext
-from .dashboard_ui.errors import UIError
 from .errors import DatabaseError, PluginError, SyncGroupError
 from .rate_limit_manager import (
     KV_FLOOR_KEY,
@@ -1584,53 +1582,8 @@ class ControlAPI:
             LOG.debug("group memory refresh failed for %r", account, exc_info=True)
 
     # ------------------------------------------------------- UI extension
-    async def ui_stats(self, account: str) -> list[dict[str, Any]]:
-        """Per-account Home-tab stat cards from every enabled plugin."""
-        return await _resolved(self._plugins.ui_stats(account))
-
-    async def ui_panels(self) -> list[dict[str, Any]]:
-        """Plugin-contributed sidebar panels (framework-level)."""
-        return await _resolved(self._plugins.ui_panels())
 
     # ------------------------------------------- dashboard UI extension (D)
-    async def dashboard_ui_navigation(self) -> list[dict[str, Any]]:
-        """Plugin pages for the sidebar, VISIBILITY-CHECKED.
-
-        Same fail-closed contract as page retrieval: a page whose check
-        (or an ancestor's) denies is excluded from the sidebar, not just
-        from direct reads. Checks run with account=None here (the nav
-        exists before any account is selected); page checks that depend
-        on an account should allow None to stay reachable, and gate the
-        account-dependent parts with component checks instead.
-        """
-        registry = self._plugins.ui_registry
-        nav: list[dict[str, Any]] = []
-        for plugin_name in registry.list_plugins():
-            layout = registry.get_layout(plugin_name)
-            if not layout:
-                continue
-            for page in layout.get("children") or []:
-                if page.get("type") != "page":
-                    continue
-                page_id = page.get("id", "")
-                if not await registry.check_visibility(
-                    plugin_name,
-                    page_id,
-                    CheckContext(plugin=plugin_name, component_id=page_id, component_type="page"),
-                ):
-                    continue
-                nav.append(
-                    {
-                        "plugin": plugin_name,
-                        "page_id": page_id,
-                        "title": page.get("title", plugin_name),
-                        "icon": page.get("icon", ""),
-                        "order": page.get("order", 0),
-                        "account_scoped": page.get("account_scoped", False),
-                    }
-                )
-        return sorted(nav, key=lambda n: (n.get("order", 0), n["plugin"]))
-
     async def dashboard_ui_page(
         self, plugin: str, page_id: str, account: str | None = None
     ) -> dict[str, Any] | None:
@@ -1654,84 +1607,6 @@ class ControlAPI:
                 return await registry.visible_tree(plugin, page, account=account)
         return None
 
-    async def _ui_account_context(self, plugin: str, account: str | None):
-        """Validate a browser-supplied account for UI dispatch.
-
-        Returns (account, services) — services is None only for
-        account-less (plugin-wide) dispatch. The account is validated
-        against the plugin manager (known, assigned, enabled, active);
-        the services facade comes from the account's own wiring. Never
-        guessed, never fabricated.
-        """
-        if account is None:
-            return None, None
-        from core.errors import PluginError
-
-        try:
-            self._plugins.active_instance_for(plugin, account)
-        except PluginError as exc:
-            raise UIError(f"invalid account context for plugin {plugin!r}: {exc}") from exc
-        services = self._plugins.services_for(account, plugin)
-        if services is None:
-            raise UIError(
-                f"account {account!r} has no active services wiring — "
-                f"start the account before account-scoped UI actions"
-            )
-        return account, services
-
-    async def dashboard_ui_action(
-        self,
-        plugin: str,
-        component_id: str,
-        payload: dict[str, Any],
-        surface: str = "api",
-        account: str | None = None,
-    ) -> dict[str, Any]:
-        """Dispatch a registered component action (visibility-checked).
-
-        Raises UIError (a ValueError -> honest 400 at the interface) for
-        unknown plugin/component, hidden components, missing actions and
-        callback failures. ``surface`` names the calling interface in the
-        audit vocabulary (api/dashboard) — reserved for mgmt audit wiring.
-        """
-        registry = self._plugins.ui_registry
-        account, services = await self._ui_account_context(plugin, account)
-        context = ActionContext(
-            plugin=plugin, component_id=component_id, account=account, services=services
-        )
-        result = await registry.dispatch_action(plugin, component_id, payload, context)
-        return {
-            "success": result.success,
-            "message": result.message,
-            "data": result.data,
-            "field_errors": result.field_errors,
-            "refresh": result.refresh,
-            "modal": result.modal,
-        }
-
-    async def dashboard_ui_data(
-        self, plugin: str, component_id: str, account: str | None = None
-    ) -> Any:
-        """Fetch a data-provider result (visibility-checked, JSON-safe).
-
-        Raises UIError when the plugin/component is unknown, hidden, or
-        declares no provider (the interface distinguishes that from a
-        payload fault: it maps to 404, not 400). ``account`` is the
-        validated dashboard selection for account-scoped pages."""
-        registry = self._plugins.ui_registry
-        account, _services = await self._ui_account_context(plugin, account)
-        # the outer context carries the validated account; the registry
-        # pins a precise per-component CheckContext per provider call
-        context = CheckContext(
-            plugin=plugin,
-            component_id=component_id,
-            component_type="",
-            account=account,
-            services=_services,
-        )
-        return await registry.get_data(plugin, component_id, context)
-
-    # ------------------------------------------------------ admin access
     async def admin_overview(self) -> dict[str, Any]:
         """The admin panel's full view: admin ids, primary bot id, and every
         account's access row.
