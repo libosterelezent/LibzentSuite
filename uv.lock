@@ -582,27 +582,28 @@ wheels = [
 
 [[package]]
 name = "discord-protos"
-version = "0.0.2"
+version = "1.2.417"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "mypy-protobuf" },
     { name = "protobuf" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3a/7c/4b9eaf1f85caa5ff93caa948ee47a2fc5be2d2bbd4b60d3f989da84c8140/discord-protos-0.0.2.tar.gz", hash = "sha256:23953a05f32beedb40b708ec4b457530a6196a49c8d75d337ae9282a2a41c997", size = 13394, upload-time = "2023-03-16T01:32:14.287Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6b/0f/cff3443987051e2613f87312424b7ed5f5a089be5d5896a7ac6218b26c65/discord_protos-1.2.417.tar.gz", hash = "sha256:ae29dd3ac134e380dbf6cb06d03bd8026154d1208454185ba98be07cd9067fe4", size = 228614, upload-time = "2026-11-13T14:13:32.8Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/27/a4fa9f02c605108c9660d3f3dc2096b964e8c07bd0293001edcc281fccdf/discord_protos-1.2.417-py3-none-any.whl", hash = "sha256:bc02a1ca4c6835c230bcbab54dac86f614d373787ad03e1070d5da4451078ee0", size = 258370, upload-time = "2026-11-13T14:13:30.964Z" },
+]
 
 [[package]]
 name = "discord-py-self"
-version = "2.1.0"
-source = { registry = "https://pypi.org/simple" }
+version = "2.3.2"
+source = { git = "https://github.com/Demonic1594/better.py-self.git#70e8d42ae2f698f83de8f0663ed53cddcb761074" }
 dependencies = [
     { name = "aiohttp" },
     { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
     { name = "curl-cffi" },
     { name = "discord-protos" },
     { name = "tzlocal" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/c7/37/0a319b6465183a01d245ecdae99d59503bad41ed1176cd7e6943306a5949/discord_py_self-2.1.0.tar.gz", hash = "sha256:9bc6d87711e9345784f2ed23cabbe63eba9673008e5b460aa25e3546570bcd07", size = 1159618, upload-time = "2026-01-18T23:37:06.224Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/32/f1/58be56fe81619543e72503aa77727e07fa14623bd8760876e7f107a4e276/discord_py_self-2.1.0-py3-none-any.whl", hash = "sha256:42abda55168f1c1a2b585a16906d3aefd390d98238d6fc0e5fa586009f54204b", size = 1283993, upload-time = "2026-01-18T23:37:04.602Z" },
+    { name = "yarl" },
 ]
 
 [[package]]
@@ -885,7 +886,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "cryptography", specifier = ">=42" },
-    { name = "discord-py-self", specifier = ">=2.1.0" },
+    { name = "discord-py-self", git = "https://github.com/Demonic1594/better.py-self.git" },
 ]
 
 [package.metadata.requires-dev]
@@ -1318,6 +1319,19 @@ wheels = [
 ]
 
 [[package]]
+name = "mypy-protobuf"
+version = "5.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "protobuf" },
+    { name = "types-protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/87/07/7ffb897eee5c01e816e037f51a6720bf1a0a8c17cca1a2382ae554f43044/mypy_protobuf-5.1.0.tar.gz", hash = "sha256:8493758852a9cdc075a11dbe96c6e37ea2feba5fd5f33ef7442b9a275322a94c", size = 37529, upload-time = "2026-04-28T15:56:40.356Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e8/ec/5ffcf8f5f53757e01afdece10c664e694ac60d2f17c2036811b85b842a5b/mypy_protobuf-5.1.0-py3-none-any.whl", hash = "sha256:d7031f563f806b8bcd448a3e86768bf0994c0af5b0017b344a4fbbba4191f43c", size = 26313, upload-time = "2026-04-28T15:56:39.096Z" },
+]
+
+[[package]]
 name = "pathspec"
 version = "1.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1607,6 +1621,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/1c/b8/63a75cfb27a17c38550e44025d3a6e7be64516fd8608a3b75703bf37d81b/tomli-2.5.0-cp315-cp315t-win_amd64.whl", hash = "sha256:f3fcbc57b1791fa6cbe5d8434179d51de12be1a4811469529f47f6e7487a2571", size = 117281, upload-time = "2026-10-07T12:23:34.648Z" },
     { url = "https://files.pythonhosted.org/packages/72/01/e8c1debb2173973372934c68fc8e46170ab60ef23ed4592dff4dec6e8993/tomli-2.5.0-cp315-cp315t-win_arm64.whl", hash = "sha256:d2ba24db8a9376921b5e87b4762b9adb0f3f1deaea68f2b8b0bb2c11efb9c3e7", size = 115069, upload-time = "2026-10-07T12:23:35.77Z" },
     { url = "https://files.pythonhosted.org/packages/60/3f/3e3f8fd0919249b0200c80fbc4f9a1e70be19f9883da71dfb7f8b9ab8aca/tomli-2.5.0-py3-none-any.whl", hash = "sha256:32a7b79ac57a2e83670ce329ccf675798bc5a2094783a63676866b70503f2e2b", size = 14765, upload-time = "2026-10-07T12:23:36.875Z" },
+]
+
+[[package]]
+name = "types-protobuf"
+version = "7.35.1.20260906"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e1/6c/e3e5b3e10bc328126a39637c138f9ebfd734bf14342b9f3540039b4ab995/types_protobuf-7.35.1.20260906.tar.gz", hash = "sha256:efd1a3862d4c967dad5512ef8d56b1530ac84f182c41735b94004756518c4998", size = 69895, upload-time = "2026-09-06T06:35:28.308Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/44/4e/f63e826c68f77ef875506d72f225918800346545ee99847bc28f3394f18d/types_protobuf-7.35.1.20260906-py3-none-any.whl", hash = "sha256:5155e48569e0dabff303fdf578db96cd31ea9a4a63b18018a4ceac6b0ae17462", size = 86419, upload-time = "2026-09-06T06:35:27.247Z" },
 ]
 
 [[package]]

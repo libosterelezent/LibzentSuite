@@ -100,6 +100,23 @@ Plugins remain independent from the interface layer.
 [ ] Add bounded probe-down recovery (decay backoff ≤10% after 2 min clean,
     never below the base interval) — matches the fork's lane governor recipe
 [ ] Expose `cache_stats()` through ControlAPI for the future dashboard
+[ ] Add memory caps + cache persistence to the Client constructor
+    (`max_member_cache`, `max_total_member_cache`, `persistence_path`,
+    `gc_freeze=True`, `dispatch_backlog_warning`)
+[ ] Move the authorization gate to `bot.add_check()` — the library's
+    native check system runs BEFORE argument parsing (more efficient than
+    our manual check inside `_dispatch_self_command`). AccessManager
+    stays as the domain owner (per-account allowlists, DB persistence);
+    only the gate invocation point moves into the library's dispatch.
+    NOTE: do NOT adopt `commands.cooldown()` — our cooldowns are
+    per-account, DB-persisted, fleet-aware domain state that the
+    library's in-memory per-command cooldown cannot express.
+[ ] Adopt library argument converters (typed params, `Greedy`, `Range`,
+    `clean_content`) in ArgSpec to replace manual `_parse_invocation`
+    tokenization and custom type coercion (~100 lines simplification)
+[ ] Simplify the `_invoke` pass-through — with `bot.add_check()` handling
+    authorization, the thin command wrapper becomes a straight dispatch
+    to the hub + paced reply (no auth check, no manual parsing)
 
 ### v2 Architecture (design-only, no backend)
 
