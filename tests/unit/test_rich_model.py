@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 import sys
 import unittest
 from datetime import datetime, timezone
@@ -1080,9 +1081,24 @@ class TestClientConstructorRound3(unittest.IsolatedAsyncioTestCase):
         with self._patch_discord(LibClient):
             client = RealDiscordClient("tok")
             await client.connect()
-        self.assertEqual(captured, {"max_ratelimit_timeout": MAX_RATELIMIT_TIMEOUT_S})
+        # better.py-self memory/persistence options ride along with the
+        # pinned timeout (caps, gc freeze, backlog warning; persistence
+        # itself is keyed to the account name and omitted without one)
+        self.assertEqual(
+            captured,
+            {
+                "max_ratelimit_timeout": MAX_RATELIMIT_TIMEOUT_S,
+                "max_member_cache": 500,
+                "max_total_member_cache": 5000,
+                "max_thread_cache": 200,
+                "max_total_thread_cache": 1000,
+                "gc_freeze": True,
+                "dispatch_backlog_warning": 500,
+            },
+        )
         self.assertEqual(captured["max_ratelimit_timeout"], 30.0)
         self.assertNotIn("intents", captured)  # dead fallback dropped
+        self.assertNotIn("persistence_path", captured)  # no account name
 
     async def test_layout_without_kwarg_still_connects(self) -> None:
         from adapters.discord.client import RealDiscordClient
@@ -1097,6 +1113,37 @@ class TestClientConstructorRound3(unittest.IsolatedAsyncioTestCase):
             client = RealDiscordClient("tok")
             await client.connect()  # degraded (uncapped), never broken
         self.assertTrue(client.connected)
+
+    async def test_fork_persistence_keyed_to_account(self) -> None:
+        """With an account name, the fork's cache persistence points at
+        state/<account>-cache.bin (owner-only snapshot for fast warm
+        restarts) and the directory is ensured for the atomic writer."""
+        import tempfile
+        from pathlib import Path
+
+        from adapters.discord.client import RealDiscordClient
+
+        captured: dict = {}
+
+        class LibClient(TestLiveClientBoundary._ReadyLibClient):
+            def __init__(self, **kwargs) -> None:
+                captured.update(kwargs)
+                super().__init__(**kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            sys.modules, {"discord": NS(Client=LibClient)}
+        ):
+            cwd = Path.cwd()
+            os.chdir(tmp)
+            try:
+                client = RealDiscordClient("tok")
+                client.account = "bravo"
+                await client.connect()
+                self.assertTrue(Path(tmp, "state").is_dir())
+            finally:
+                os.chdir(cwd)
+        self.assertEqual(captured["persistence_path"], Path("state/bravo-cache.bin"))
+        self.assertEqual(captured["persistence_max_age"], 86400.0)
 
 
 class _RawEventLibClient(_HangingLibClient):

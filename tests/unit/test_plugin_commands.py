@@ -751,17 +751,32 @@ class AdapterLayerTests(unittest.IsolatedAsyncioTestCase):
                      author=NS(id=OWNER_ID))
             await client._dispatch_self_command(ctx, "pg")
             self.assertEqual(invoked, [("alpha", "pg")])
-            # a stranger typer: silently ignored before the hub
-            await client._dispatch_self_command(
-                NS(message=NS(content="sm!pg"), channel=ctx.channel,
-                   author=NS(id=999)), "pg")
-            self.assertEqual(len(invoked), 1)  # only the owner's invocation
-            # author-less context: fail closed
-            await client._dispatch_self_command(
-                NS(message=NS(content="sm!pg"), channel=ctx.channel), "pg")
-            self.assertEqual(len(invoked), 1)
         finally:
             commands_mod.COMMAND_HUB.invoke = original
+
+    async def test_invoker_gate_runs_before_hub_and_parsing(self) -> None:
+        """The authorization gate is a Bot-level check: the library
+        evaluates it (can_run) BEFORE argument parsing and BEFORE the
+        callback, so a stranger's invocation never reaches the hub and
+        never spends parsing work. (Regression: the gate used to live
+        inside _dispatch_self_command — after the library had already
+        parsed the arguments.)"""
+        client = self._client(owner_ids=frozenset({OWNER_ID}))
+        bot = self._bot(client)
+        bot.add_check(client._bot_invoker_gate)
+        # a stranger typer: the library's check evaluation rejects them
+        self.assertFalse(await bot.can_run(NS(author=NS(id=999))))
+        # an owner typer passes the same evaluation
+        self.assertTrue(await bot.can_run(NS(author=NS(id=OWNER_ID))))
+        # author-less context: fail closed
+        self.assertFalse(await bot.can_run(NS()))
+        # the gate itself (same predicate, direct form)
+        self.assertFalse(await client._bot_invoker_gate(NS(author=NS(id=999))))
+        self.assertTrue(await client._bot_invoker_gate(NS(author=NS(id=OWNER_ID))))
+        self.assertFalse(await client._bot_invoker_gate(NS()))
+        # empty owner set: fail closed
+        closed = self._client(owner_ids=frozenset())
+        self.assertFalse(await closed._bot_invoker_gate(NS(author=NS(id=OWNER_ID))))
 
     async def test_mention_prefix_mode_resolves_to_when_mentioned(self) -> None:
         """prefix_mode=mention (the admin-panel default): the Bot prefix
