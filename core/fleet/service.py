@@ -22,13 +22,17 @@ import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    import builtins
 
 from database.models import (
     FleetAssignmentRecord,
     FleetCooldownRecord,
     FleetGroupState,
     FleetMemberRecord,
+    FleetTransitionRecord,
 )
 
 from .models import (
@@ -58,6 +62,70 @@ MembershipLeave = Callable[[str], Awaitable[None]]
 Publish = Callable[[FleetEvent], Any]
 
 
+class FleetRepo(Protocol):
+    """The fleet persistence surface this service consumes (satisfied
+    structurally by ``database.repositories.FleetRepository``; the
+    database stays authoritative — every command commits before it
+    publishes)."""
+
+    async def ensure_group(self, group_name: str) -> FleetGroupState: ...
+    async def group_state(self, group_name: str) -> FleetGroupState | None: ...
+    async def set_group(
+        self, group_name: str, *, paused: bool, bump_generation: bool = True
+    ) -> FleetGroupState: ...
+    async def bump_generation(self, group_name: str) -> FleetGroupState: ...
+    async def group_states(self) -> builtins.list[FleetGroupState]: ...
+    async def upsert_member(self, member: FleetMemberRecord) -> None: ...
+    async def member(self, account: str) -> FleetMemberRecord | None: ...
+    async def members(self, group_name: str | None = None) -> builtins.list[FleetMemberRecord]: ...
+    async def delete_member(self, account: str) -> None: ...
+    async def insert_assignment(self, rec: FleetAssignmentRecord) -> None: ...
+    async def assignment(self, assignment_id: str) -> FleetAssignmentRecord | None: ...
+    async def assignments(
+        self,
+        *,
+        group_name: str | None = None,
+        status: str | None = None,
+        account: str | None = None,
+    ) -> builtins.list[FleetAssignmentRecord]: ...
+    async def update_assignment(self, assignment_id: str, **fields: Any) -> None: ...
+    async def insert_cooldown(
+        self,
+        scope_type: str,
+        scope_id: str,
+        reason: str,
+        started_at: float,
+        expires_at: float,
+        source: str,
+    ) -> int: ...
+    async def cooldown(self, cooldown_id: int) -> FleetCooldownRecord | None: ...
+    async def cooldowns(
+        self,
+        *,
+        scope_type: str | None = None,
+        scope_id: str | None = None,
+        active_only: bool = False,
+        now: float | None = None,
+    ) -> builtins.list[FleetCooldownRecord]: ...
+    async def clear_cooldown(self, cooldown_id: int, cleared_at: float) -> None: ...
+    async def append_transition(
+        self,
+        kind: str,
+        group_name: str,
+        generation: int,
+        reason: str,
+        correlation_id: str,
+        occurred_at: float,
+        *,
+        task_id: str | None = None,
+        assignment_id: str | None = None,
+        account: str | None = None,
+    ) -> None: ...
+    async def transitions(
+        self, *, group_name: str | None = None, limit: int = 200
+    ) -> builtins.list[FleetTransitionRecord]: ...
+
+
 class FleetService:
     """Fleet state, eligibility, assignments, cooldowns — one service.
 
@@ -68,7 +136,7 @@ class FleetService:
 
     def __init__(
         self,
-        fleet_repo: Any,
+        fleet_repo: FleetRepo,
         *,
         group_exists: GroupExists | None = None,
         membership_join: MembershipJoin | None = None,
@@ -88,18 +156,18 @@ class FleetService:
         #: in agreement without a per-entity lock zoo (spec §1: do not
         #: create a manager per noun)
         self._lock = asyncio.Lock()
-        self._groups: dict = {}  # name -> FleetGroupState
-        self._members: dict = {}  # account -> FleetMemberRecord
-        self._assignments: dict = {}  # id -> FleetAssignmentRecord
+        self._groups: dict[str, FleetGroupState] = {}
+        self._members: dict[str, FleetMemberRecord] = {}
+        self._assignments: dict[str, FleetAssignmentRecord] = {}
 
     # ---------------------------------------------------------------- boot
 
-    async def load(self) -> dict:
+    async def load(self) -> dict[str, int]:
         """Projection boot: read back the authoritative rows."""
         async with self._lock:
             return await self._reload()
 
-    async def _reload(self) -> dict:
+    async def _reload(self) -> dict[str, int]:
         self._groups = {g.group_name: g for g in await self._repo.group_states()}
         self._members = {m.account: m for m in await self._repo.members()}
         self._assignments = {a.id: a for a in await self._repo.assignments()}
@@ -127,6 +195,23 @@ class FleetService:
         rec = self._assignments.get(assignment_id)
         if rec is None:
             raise ValueError(f"unknown fleet assignment {assignment_id!r}")
+        return rec
+
+    async def _read_back_assignment(self, assignment_id: str) -> FleetAssignmentRecord:
+        """Re-read a just-written assignment row. A vanish here means the
+        row disappeared between our commit and the read-back (concurrent
+        delete on the database) — an integrity failure to surface, never
+        a None to smuggle into the projection."""
+        rec = await self._repo.assignment(assignment_id)
+        if rec is None:
+            raise ValueError(f"fleet assignment {assignment_id!r} vanished mid-command")
+        return rec
+
+    async def _read_back_cooldown(self, cooldown_id: int) -> FleetCooldownRecord:
+        """Same integrity guard for cooldown rows."""
+        rec = await self._repo.cooldown(cooldown_id)
+        if rec is None:
+            raise ValueError(f"fleet cooldown {cooldown_id!r} vanished mid-command")
         return rec
 
     async def _record(
@@ -429,7 +514,7 @@ class FleetService:
                 generation=generation,
                 error=None,
             )
-            rec = await self._repo.assignment(rec.id)
+            rec = await self._read_back_assignment(rec.id)
             self._assignments[rec.id] = rec
             await self._record(
                 "TaskAssigned",
@@ -450,7 +535,7 @@ class FleetService:
             rec = self._require_assignment(assignment_id)
             validate_assignment_transition(rec.status, AssignmentStatus.QUEUED)
             await self._repo.update_assignment(rec.id, status=AssignmentStatus.QUEUED, account=None)
-            rec = await self._repo.assignment(rec.id)
+            rec = await self._read_back_assignment(rec.id)
             self._assignments[rec.id] = rec
             await self._record(
                 "TaskWithdrawn",
@@ -470,13 +555,13 @@ class FleetService:
         reason: str,
         *,
         retry_allowed: bool = False,
-        extra_fields: dict | None = None,
+        extra_fields: dict[str, Any] | None = None,
     ) -> FleetAssignmentRecord:
         """The shared transition path: validate -> persist -> record."""
         async with self._lock:
             rec = self._require_assignment(assignment_id)
             validate_assignment_transition(rec.status, new_status, retry_allowed=retry_allowed)
-            fields = {"status": new_status}
+            fields: dict[str, Any] = {"status": new_status}
             if new_status == AssignmentStatus.RUNNING:
                 fields["started_at"] = self._now()
             if new_status == AssignmentStatus.QUEUED:
@@ -494,7 +579,7 @@ class FleetService:
             if extra_fields:
                 fields.update(extra_fields)
             await self._repo.update_assignment(rec.id, **fields)
-            rec = await self._repo.assignment(rec.id)
+            rec = await self._read_back_assignment(rec.id)
             self._assignments[rec.id] = rec
             await self._record(
                 kind,
@@ -595,7 +680,7 @@ class FleetService:
             )
             await self._repo.insert_assignment(destination)
             self._assignments[destination.id] = destination
-            self._assignments[source.id] = await self._repo.assignment(source.id)
+            self._assignments[source.id] = await self._read_back_assignment(source.id)
             await self._record(
                 "AssignmentHandoff",
                 source.group_name,
@@ -645,7 +730,7 @@ class FleetService:
                 self._group_for_scope(scope_type, scope_id),
                 f"{scope_type} cooldown: {reason}",
             )
-            return await self._repo.cooldown(row_id)
+            return await self._read_back_cooldown(row_id)
 
     async def clear_cooldown(self, cooldown_id: int) -> FleetCooldownRecord:
         """Clear a MANUAL cooldown only (§6): observed/server windows are
@@ -666,7 +751,7 @@ class FleetService:
                 self._group_for_scope(rec.scope_type, rec.scope_id),
                 f"manual cooldown cleared: {rec.reason}",
             )
-            return await self._repo.cooldown(cooldown_id)
+            return await self._read_back_cooldown(cooldown_id)
 
     async def cooldowns(
         self,
@@ -742,5 +827,7 @@ class FleetService:
             rows = [r for r in rows if r.account == account]
         return sorted(rows, key=lambda r: r.created_at)
 
-    async def transitions(self, *, group_name: str | None = None, limit: int = 200):
+    async def transitions(
+        self, *, group_name: str | None = None, limit: int = 200
+    ) -> list[FleetTransitionRecord]:
         return await self._repo.transitions(group_name=group_name, limit=limit)
