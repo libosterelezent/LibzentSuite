@@ -314,10 +314,10 @@ def _fat_message():
     guild = _NS(id=777888999, name="bench guild", member_count=500)
     embeds = [
         _NS(
-            title="Mudae character",
+            title="Bot character",
             description="claims: 1",
             url="https://example.invalid/x",
-            author=_NS(name="mudae", url="https://example.invalid/a"),
+            author=_NS(name="primary_bot", url="https://example.invalid/a"),
             footer=_NS(text=f"footer text {i}", icon_url="https://e.invalid/f.png"),
             fields=[_NS(name=f"field{k}", value=f"value {k}" * 4, inline=True) for k in range(6)],
             color=0x7289DA,
