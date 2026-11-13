@@ -15,15 +15,27 @@ import contextlib
 import inspect
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 from ._asyncutil import cancellation_attributable, outer_cancel_pending
 
 LOG = logging.getLogger("libzent.events")
 
+#: a subscription handler for the event type it was registered against
+#: (the generic parameter on subscribe() lets handlers declare the NARROW
+#: event type they actually consume — Callable[[Event], Any] would force
+#: every handler to accept all events, against contravariance)
 Handler = Callable[["Event"], Any]
+
+#: internal storage form for a registered handler. A registry cell holds
+#: handlers declared against DIFFERENT narrow event types, so the stored
+#: parameter is Any (bivariant at the boundary): subscribe(E, handler)
+#: guarantees the handler accepts E, and only E instances dispatch to
+#: that cell — sound at runtime, where a Callable[[Event], ...] would
+#: wrongly reject every narrow handler (contravariance).
+StoredHandler = Callable[[Any], Any]
 
 
 @dataclass
@@ -36,6 +48,11 @@ class Event:
     @property
     def name(self) -> str:
         return type(self).__name__
+
+
+#: subscription target type (see EventBus.subscribe — the bound keeps
+#: handlers declarable with the NARROW event type they consume)
+E = TypeVar("E", bound=Event)
 
 
 # ---------------------------------------------------------------- accounts
@@ -243,7 +260,7 @@ class FleetStateChanged(Event):
     generation: int = 0
 
 
-class _HandlerList(list):
+class _HandlerList(list["StoredHandler"]):
     """Handler list with a mutation version + cached dispatch snapshot.
 
     FINAL-PHASE (G6-A′): publish() used to copy ``list(handlers)`` per
@@ -256,21 +273,21 @@ class _HandlerList(list):
 
     __slots__ = ("snap", "snapver", "ver")
 
-    def __init__(self, iterable=()):
+    def __init__(self, iterable: Iterable[StoredHandler] = ()) -> None:
         super().__init__(iterable)
         self.ver = 0
-        self.snap: list[Handler] = []
+        self.snap: list[StoredHandler] = []
         self.snapver = -1
 
-    def append(self, handler) -> None:
+    def append(self, handler: StoredHandler) -> None:
         self.ver += 1
         super().append(handler)
 
-    def remove(self, handler) -> None:  # raises ValueError like list
+    def remove(self, handler: StoredHandler) -> None:  # raises ValueError like list
         self.ver += 1
         super().remove(handler)
 
-    def snapshot(self) -> list[Handler]:
+    def snapshot(self) -> list[StoredHandler]:
         if self.snapver != self.ver:
             self.snap = list(self)
             self.snapver = self.ver
@@ -332,14 +349,14 @@ class EventBus:
     SLICE_BUDGET_S = 0.004
 
     def __init__(self, *, is_control_plane: Callable[[Event], bool] | None = None) -> None:
-        self._subs: dict[type[Event], list[Handler]] = {}
+        self._subs: dict[type[Event], _HandlerList] = {}
         # FINAL-PHASE (G6-A′): dispatch-list cache per concrete event type
         # (invalidated wholesale on any subscribe/unsubscribe — rare,
         # boot/attach-time events). Removes the per-event items-snapshot +
         # isinstance chain (measured 1.19µs/event at the production
         # 10-type shape). Ordering identical: dict insertion order of
         # matching types, list order within a type.
-        self._type_cache: dict[type[Event], tuple] = {}
+        self._type_cache: dict[type[Event], tuple[_HandlerList, ...]] = {}
         self._queue: collections.deque[Event] = collections.deque()
         self._control_queue: collections.deque[Event] = collections.deque()
         self._is_control: Callable[[Event], bool] = (
@@ -354,9 +371,11 @@ class EventBus:
         self._dispatched = 0
         self._drop_log_gate = 0.0
 
-    def subscribe(self, event_type: type[Event], handler: Handler) -> Callable[[], None]:
+    def subscribe(self, event_type: type[E], handler: Callable[[E], Any]) -> Callable[[], None]:
         """Register handler for event_type (and its subclasses).
 
+        The handler's declared parameter type may be the NARROW event
+        type (or any supertype up to Event itself — contravariance).
         Returns an unsubscribe callable (idempotent).
         """
         cell = self._subs.get(event_type)
