@@ -1,4 +1,4 @@
-# LibzentSuite — TODO
+# LibzentSuite — Roadmap
 
 **Reorganized 2026-11-13** to reflect the post-dashboard-removal,
 post-Mudae-removal codebase. Everything here describes what the
@@ -203,13 +203,6 @@ Plugins remain independent from the interface layer.
     override `ctx.send` in `_register_self_command` to route through our
     paced pipeline (scheduler → limiter → adapter), preserving the
     safety floor while using the library's API surface.
-
-### v2 Architecture (design-only, no backend)
-
-[ ] Workspaces: organizational boundary above accounts
-[ ] Collections: flexible user-defined account groupings
-[ ] Execution Plans / Schedules: higher-level orchestration above tasks
-[ ] Workspace-scoped configuration (Global → Workspace → Account)
 
 ---
 
