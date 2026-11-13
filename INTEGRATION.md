@@ -78,8 +78,8 @@ The framework core remains game-agnostic. Game-specific command strings, locales
 | `core/account_manager/` | account lifecycle, runtime client/cache, sender hook | persistent sync-group ownership or rate-policy calculation |
 | `core/plugin_base.py`, `core/plugin_manager/` | plugin contract, discovery, per-account attach/dispatch/state | dashboard state, direct DB access from plugins, pacing bypasses |
 | `core/settings_manager.py` | schema validation and settings resolution | UI rendering or component state |
-| `core/sync_group_manager/` | persistent sync-group rows and account membership | fleet task ownership or rate-limit execution timing |
-| `core/fleet/` | fleet membership projection, policy, task/member transitions, handoff, cooldown decisions, reconciliation | Discord API requests and execution pacing |
+| `core/sync_group_manager/` | persistent sync-group rows and account membership *(deprecated 2026-11-13 — superseded by the Workspace unification, `roadmap.md`; removed in W5)* | fleet task ownership or rate-limit execution timing |
+| `core/fleet/` | fleet membership projection, policy, task/member transitions, handoff, cooldown decisions, reconciliation *(deprecated 2026-11-13 — superseded by the Workspace unification, `roadmap.md`; removed in W5)* | Discord API requests and execution pacing |
 | `core/task_scheduler/` | task queue, execution lanes, retries, cancellation, history lifecycle | choosing which fleet member is eligible or bypassing pacing |
 | `core/rate_limit_manager/` | action pacing, shared clocks, cooldowns/server 429s, warnings | choosing task ownership or interpreting game messages |
 | `core/event_bus.py` | in-process typed event delivery | durable state truth or authorization of commands |

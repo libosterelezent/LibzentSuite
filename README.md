@@ -114,7 +114,15 @@ python3 main.py accounts list          # one-shot command mode
 
 ## The dashboard
 
-`http://127.0.0.1:8070` (requires `DASHBOARD_TOKEN`). One page per concern:
+> **REMOVED (2026-11-13)** — the custom dashboard (HTTP server,
+> WebSocket, SPA) was deleted in the interface pivot. It is being
+> replaced by a FastAPI core API + Flet UI (see `roadmap.md`, Active
+> Queue). The page table below is retained as historical context for
+> what the replacement should cover; the CLI is currently the only
+> interface.
+
+Historical page layout (`http://127.0.0.1:8070`, required
+`DASHBOARD_TOKEN`):
 
 | Page | What you do there |
 |---|---|
@@ -130,10 +138,13 @@ python3 main.py accounts list          # one-shot command mode
 Plugin profiles are named SETTINGS presets (bundles applied to a plugin's
 settings, with an optional channel scope) — not the removed permission-bundle
 model. Sync groups (Accounts tab) pace accounts together; the Fleet Hub is the
-separate orchestration layer on top.
+separate orchestration layer on top. *(Both superseded 2026-11-13 by the
+Workspace unification — `roadmap.md` — which merges grouping and
+orchestration into one concept; the CLI keeps working against the current
+layer until W3 swaps the surface.)*
 
-Nearly everything works from both (`python3 main.py …` or the dashboard —
-same API underneath, so pick whichever you like). Dashboard-only today:
+Nearly everything worked from both (`python3 main.py …` or the dashboard —
+same API underneath). Dashboard-only back then:
 admin-panel management, plugin-profile editing, per-account channel
 lists and bulk plugin-set; the CLI covers
 accounts/credentials/plugins/profile-bindings/ratelimit/cooldowns/

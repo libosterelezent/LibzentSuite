@@ -29,7 +29,10 @@ modifications.
 2.  Accounts are first-class resources with their own status, tasks,
     plugin state, activity, and supported configuration.
 3.  Collections organize accounts; sync groups coordinate account
-    execution. They are distinct concepts.
+    execution. They are distinct concepts. *(Superseded 2026-11-13:
+    the Workspace unification — `roadmap.md` — merges grouping and
+    orchestration into one Workspace concept; this boundary holds
+    only until W5 lands.)*
 4.  Configuration uses global defaults with workspace- and account-level
     overrides.
 5.  Operational state is observable and distinguishes configured intent
