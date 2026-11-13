@@ -30,7 +30,6 @@ from core.plugin_base import (
 )
 
 if TYPE_CHECKING:
-    from core.dashboard_ui.builders import DashboardUIToolset
     from core.event_bus import Event
 
 LOG = logging.getLogger("libzent.ping")
@@ -48,7 +47,7 @@ class PingPlugin(PluginBase):
 
     def __init__(self) -> None:
         self._ctx: PluginContext | None = None
-        #: (channel_id, text) pairs sent this activation — ui_stats feed
+        #: (channel_id, text) pairs sent this activation
         self._sent: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------ lifecycle
@@ -119,49 +118,6 @@ class PingPlugin(PluginBase):
     )
 
     # ------------------------------------------------------ dashboard UI
-    async def ui_stats(self, ctx: PluginContext):
-        from core.plugin_base import StatCard
-
-        return (
-            StatCard(
-                label="ping sends",
-                value=str(len(self._sent)),
-                sub="this activation",
-                level="ok" if self._sent else "",
-            ),
-        )
-
-    def initialize_dashboard_ui(self, ui: DashboardUIToolset) -> None:
-        """A small page: channel + text form, one Send button."""
-        page = (
-            ui.Page(component_id="ping")
-            .set_title("Ping")
-            .set_icon("M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0V8zM12 18v4")
-            .set_description("Send a provided message to a chosen channel (paced + audited).")
-            .add_section(
-                ui.Section(component_id="ping-sec").add_component(
-                    ui.Form(component_id="ping-form")
-                    .set_description(
-                        "The message rides the SAME paced pipeline as all plugin traffic."
-                    )
-                    .set_submit_action(self._ui_ping)
-                    .set_submit_label("Send")
-                    .set_close_on_submit(False)
-                    .add_fields(
-                        ui.TextInput(component_id="ping-channel")
-                        .set_label("Channel ID")
-                        .set_placeholder("123456789"),
-                        ui.Textarea(component_id="ping-text")
-                        .set_label("Message")
-                        .set_placeholder("text to send"),
-                    )
-                )
-            )
-        )
-        layout = ui.Layout()
-        layout.add_page(page)
-        self.attach_dashboard_ui(layout)
-
     async def _ui_ping(self, ctx: Any, payload: dict[str, Any]) -> dict[str, Any]:
         """Dashboard action: same path as the self-command."""
         channel = payload.get("ping-channel")

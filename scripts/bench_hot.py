@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import statistics
 import sys
@@ -62,7 +63,6 @@ from core.rate_limit_manager.engine import (  # noqa: E402
     ManualClock,
     RateLimitManager,
 )
-from interfaces.dashboard.server import _dumps  # noqa: E402
 
 N_EVENTS = 1_000
 N_SUBSCRIBERS = 10
@@ -291,12 +291,12 @@ def _big_stats_payload() -> dict:
 def bench_dumps(repeat: int) -> BenchResult:
     payload = _big_stats_payload()
     # sanity: the payload must serialize (NaN/inf would crash _dumps)
-    assert isinstance(_dumps(payload), str)
+    assert isinstance(json.dumps(payload), str)
     times = []
     for _ in range(repeat):
-        times.append(timed(lambda: [_dumps(payload) for _ in range(N_DUMPS)]))
+        times.append(timed(lambda: [json.dumps(payload) for _ in range(N_DUMPS)]))
     return BenchResult(
-        "dashboard-dumps", N_DUMPS, times, note=f"(payload ~{len(_dumps(payload)) // 1024} KB JSON)"
+        "dashboard-dumps", N_DUMPS, times, note=f"(payload ~{len(json.dumps(payload)) // 1024} KB JSON)"
     )
 
 
