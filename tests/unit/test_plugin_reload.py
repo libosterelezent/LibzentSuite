@@ -37,7 +37,6 @@ class TestReloadPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["restored_accounts"], 1)
         self.assertIn("probe", mgr._accounts["alpha"])
         # UI re-registered
-        self.assertIn("probe", mgr.ui_registry.list_plugins())
 
     async def test_reload_unknown_plugin_raises(self):
         mgr = make_manager()
@@ -99,7 +98,6 @@ class TestReloadPlugin(unittest.IsolatedAsyncioTestCase):
             bad.write_text(good)
         rt = mgr._accounts["alpha"]["probe"]
         self.assertTrue(rt.active, "failed rescan must not deactivate")
-        self.assertIn("probe", mgr.ui_registry.list_plugins())
 
 
 class TestUnloadPlugin(unittest.IsolatedAsyncioTestCase):
@@ -121,7 +119,6 @@ class TestUnloadPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(rt_a.instance)
         self.assertFalse(rt_b.loaded)
         # UI unregistered
-        self.assertNotIn("probe", mgr.ui_registry.list_plugins())
 
     async def test_unload_fires_teardown_hooks(self):
         mgr = make_manager()

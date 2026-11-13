@@ -16,23 +16,15 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from core.dashboard_ui import ActionResult
 from core.event_bus import Event
 from core.plugin_base import (
     ArgSpec,
-    PanelSection,
-    StatCard,
-    UIPanel,
     CommandContext,
     CommandSpec,
     PluginBase,
     PluginContext,
 )
 from core.settings_manager import Setting
-
-if TYPE_CHECKING:
-    from core.dashboard_ui.builders import DashboardUIToolset
-
 
 class ProbePlugin(PluginBase):
     """Minimal well-formed plugin (settings + declared commands)."""
@@ -73,73 +65,6 @@ class ProbePlugin(PluginBase):
         return  # no-op: the fixture never reacts to traffic
 
     # ------------------------------------------------------- UI extension
-    async def ui_stats(self, ctx: "PluginContext"):
-        return (
-            StatCard(label="fixture load", value="ok", sub="probe alive",
-                     level="ok"),
-            StatCard(label="trigger", value=str(ctx.settings.get("trigger", "?"))),
-        )
-
-    async def ui_panels(self, ctx: "PluginContext") :
-        return (
-            UIPanel(
-                id="probe:overview",
-                title="Probe Overview",
-                icon="",
-                sections=(
-                    PanelSection(kind="metrics", title="Live", data=[
-                        {"label": "account", "value": ctx.account},
-                        {"label": "trigger", "value": str(ctx.settings.get("trigger", "?"))},
-                    ]),
-                    PanelSection(kind="list", title="Settings", data=[
-                        {"label": "factor", "value": str(ctx.settings.get("factor", "?"))},
-                    ]),
-                    PanelSection(kind="text", title="About", data=(
-                        "This panel is contributed by the probe fixture "
-                        "through the safe UI extension API (structured "
-                        "data, never HTML)."),
-                    ),
-                ),
-            ),
-        )
-
-    # ------------------------------------------------ dashboard UI (Stage D)
-    def initialize_dashboard_ui(self, ui: "DashboardUIToolset") -> None:
-        """Builder-based fixture page: the complete path the generic
-        renderer exercises — builder → layout → attach → navigation →
-        page render → button click → action dispatch → result feedback."""
-        page = (ui.Page()
-                .set_id("probe-ui")
-                .set_title("Probe UI")
-                .set_description("Fixture dashboard"))
-
-        section = ui.Section().set_title("Controls")
-        card = ui.Card().set_title("Actions")
-
-        btn = (ui.Button()
-               .set_label("Run Probe")
-               .set_action(self._probe_action)
-               .set_variant("primary"))
-        card.add_component(btn)
-
-        status = (ui.Metric()
-                  .set_label("Status")
-                  .set_value("ready")
-                  .set_level("ok"))
-        card.add_component(status)
-
-        check = (ui.Checkbox()
-                 .set_label("Verbose")
-                 .set_value(False)
-                 .set_action(self._set_verbose))
-        card.add_component(check)
-
-        section.add_component(card)
-        page.add_section(section)
-        layout = ui.Layout()
-        layout.add_page(page)
-        self.attach_dashboard_ui(layout)
-
     async def _probe_action(self, context, payload):
         return ActionResult(success=True, message="probe executed",
                             data={"ts": time.time()})

@@ -244,126 +244,9 @@ class PersistQueueBoundedStop(_TmpCase):
         self.assertFalse(q.active)
 
 
-# ---------------------------------------------------------------- dashboard
-class DashboardHardening(unittest.IsolatedAsyncioTestCase):
-    """HTTP-level regressions against a real server instance."""
 
-    def _make_server(self, **kwargs):
-        import interfaces.dashboard.server as srv
+# ------------------------------------------------------- (dashboard hardening tests removed with the dashboard interface)
 
-        class FakeAPI:
-            async def status(self):
-                return {"ok": True, "accounts": []}
-
-            def audit_recorder(self):
-                return None
-
-            def logs_service(self):
-                return None
-
-        server = srv.DashboardServer(FakeAPI(), port=0, **kwargs)
-        server.start()
-        self.addCleanup(server.stop)
-        return server
-
-    async def _request(self, server, method, path, body=None, headers=None):
-        return await asyncio.to_thread(
-            self._request_sync, server, method, path, body, headers)
-
-    @staticmethod
-    def _request_sync(server, method, path, body, headers):
-        import http.client
-
-        conn = http.client.HTTPConnection("127.0.0.1", server.bound_port, timeout=5)
-        payload = json.dumps(body) if body is not None else None
-        conn.request(method, path, body=payload, headers=headers or {})
-        resp = conn.getresponse()
-        data = resp.read()
-        conn.close()
-        return resp.status, data
-
-    async def test_negative_content_length_is_a_400(self) -> None:
-        import http.client
-
-        server = self._make_server(token="s3cret")
-        conn = http.client.HTTPConnection("127.0.0.1", server.bound_port, timeout=5)
-        conn.putrequest("POST", "/api/ratelimit/set")
-        conn.putheader("X-Dashboard-Token", "s3cret")
-        conn.putheader("Content-Length", "-5")
-        conn.endheaders()
-        resp = conn.getresponse()
-        self.assertEqual(resp.status, 400)
-        self.assertEqual(resp.getheader("Connection", "").lower(), "close")
-        conn.close()
-
-    async def test_cross_origin_post_refused(self) -> None:
-        server = self._make_server()
-        status, _ = await self._request(
-            server, "POST", "/api/ratelimit/set", body={"a": 1},
-            headers={"Origin": "http://evil.example", "Content-Type": "text/plain"},
-        )
-        self.assertEqual(status, 403)
-
-    async def test_dns_rebinding_host_refused(self) -> None:
-        server = self._make_server()
-        status, _ = await self._request(
-            server, "GET", "/api/status", headers={"Host": "evil.example:1234"},
-        )
-        self.assertEqual(status, 403)
-
-    async def test_bool_number_field_rejected(self) -> None:
-        server = self._make_server(token="s3cret")
-        status, data = await self._request(
-            server, "POST", "/api/ratelimit/set",
-            body={"level": "account", "owner": "alpha", "action": "message",
-                  "interval": True},
-            headers={"X-Dashboard-Token": "s3cret"},
-        )
-        self.assertEqual(status, 400)
-        self.assertIn(b"number", data)
-
-    async def test_same_origin_request_allowed(self) -> None:
-        server = self._make_server()
-        status, _ = await self._request(server, "GET", "/api/status")
-        self.assertEqual(status, 200)
-
-    async def test_keepalive_survives_unread_body_reject(self) -> None:
-        """HTTP/1.1 keep-alive: a 401 answered BEFORE the POST body was read
-        must announce Connection: close — otherwise the leftover body is
-        parsed as the next request line and corrupts the reused stream."""
-        import http.client
-
-        server = self._make_server(token="s3cret")
-
-        def first_exchange() -> None:
-            conn = http.client.HTTPConnection("127.0.0.1", server.bound_port, timeout=5)
-            conn.request(
-                "POST", "/api/ratelimit/set", body='{"a": 1}',
-                headers={"Content-Type": "application/json"},  # NO token -> 401
-            )
-            resp = conn.getresponse()
-            self.assertEqual(resp.status, 401)
-            # the poisoned-stream contract: server announces the close
-            self.assertEqual(resp.getheader("Connection", "").lower(), "close")
-            resp.read()
-            conn.close()
-
-        def second_exchange() -> None:
-            conn = http.client.HTTPConnection("127.0.0.1", server.bound_port, timeout=5)
-            conn.request("GET", "/api/status", headers={"X-Dashboard-Token": "s3cret"})
-            resp = conn.getresponse()
-            data = resp.read()
-            self.assertEqual(resp.status, 200)
-            self.assertTrue(json.loads(data)["ok"])
-            conn.close()
-
-        # to_thread: the dashboard routes itself ON the main loop — blocking
-        # it with a sync request would starve the very coroutine we await
-        await asyncio.to_thread(first_exchange)
-        await asyncio.to_thread(second_exchange)
-
-
-# ---------------------------------------------------------------------- CLI
 class CliEmptyName(unittest.IsolatedAsyncioTestCase):
     async def test_empty_name_token_is_usage_error(self) -> None:
         from interfaces.cli.commands import UsageError, run_command
@@ -372,27 +255,6 @@ class CliEmptyName(unittest.IsolatedAsyncioTestCase):
             await run_command(SimpleNamespace(), 'accounts stop ""')
 
 
-class GhostRegisterGuard(unittest.IsolatedAsyncioTestCase):
-    async def test_register_skips_dead_and_post_stop_clients(self) -> None:
-        import interfaces.dashboard.server as srv
 
-        class FakeAPI:
-            async def status(self):
-                return {}
-
-            def audit_recorder(self):
-                return None
-
-            def logs_service(self):
-                return None
-
-        server = srv.DashboardServer(FakeAPI(), port=0)
-        server.start()
-        self.addCleanup(server.stop)
-        dead = SimpleNamespace(alive=False)
-        await server._register(dead)  # noqa: SLF001 — direct guard test
-        self.assertEqual(server._clients, [])  # noqa: SLF001
-
-
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     unittest.main()

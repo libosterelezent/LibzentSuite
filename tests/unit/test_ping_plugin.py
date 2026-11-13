@@ -117,11 +117,3 @@ class PingPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.services.sent,
                          [(555, "from dashboard")])
 
-    async def test_ui_stats_count(self) -> None:
-        await self.plugin._ping(self.ctx, 1, "x")
-        cards = await self.plugin.ui_stats(self.ctx)
-        self.assertEqual(cards[0].value, "1")
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -48,7 +48,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from core.bootstrap import build
 from core.errors import AccountError
-from interfaces.dashboard.server import DashboardServer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 #: fixture plugins — the framework bundles none; probe/spy/echo carry the
@@ -456,123 +455,6 @@ class TestValidationErrors(AccountPluginsE2EBase):
 
 
 # ------------------------------------------------- C (dashboard over stack)
-class TestDashboardPluginRoutes(AccountPluginsE2EBase):
-    """A REAL DashboardServer over the REAL ControlAPI + real DB."""
-
-    async def asyncSetUp(self) -> None:
-        self.fw, self.attach_calls = await self.boot()
-        self.api = self.fw.api
-        await self.api.accounts_add(
-            {"name": "alpha", "plugins": [PROBE, SPY]})
-        await self.api.accounts_add({"name": "beta", "plugins": []})
-        self.server = DashboardServer(
-            self.api, token=DASH_TOKEN, port=0).start()
-        self.base = f"http://127.0.0.1:{self.server.bound_port}"
-
-    async def asyncTearDown(self) -> None:
-        self.server.stop()
-        await self.fw.shutdown()
-
-    def url(self, path: str) -> str:
-        return f"{self.base}{path}"
-
-    async def test_plugin_routes_roundtrip_against_real_api(self) -> None:
-        # GET list (query-string account)
-        status, body = await asyncio.to_thread(
-            http_get, self.url(f"/api/accounts/plugins?account=alpha"))
-        self.assertEqual(status, 200)
-        self.assertEqual(get_json(body)["data"], [PROBE, SPY])
-
-        # assign: beta gains probe NOW (through the whole stack)
-        status, body = await asyncio.to_thread(
-            http_post, self.url("/api/accounts/plugins/assign"),
-            {"account": "beta", "plugin": PROBE})
-        self.assertEqual(status, 200)
-        self.assertTrue(get_json(body)["ok"])
-        self.assertEqual(await self.attached(self.api, "beta"), {PROBE})
-
-        # unassign: existed=True the first time...
-        status, body = await asyncio.to_thread(
-            http_post, self.url("/api/accounts/plugins/unassign"),
-            {"account": "beta", "plugin": PROBE})
-        self.assertEqual(status, 200)
-        self.assertTrue(get_json(body)["data"]["existed"])
-        # ...existed=False (still 200) when the relationship is absent
-        status, body = await asyncio.to_thread(
-            http_post, self.url("/api/accounts/plugins/unassign"),
-            {"account": "beta", "plugin": PROBE})
-        self.assertEqual(status, 200)
-        self.assertFalse(get_json(body)["data"]["existed"])
-        self.assertEqual(await self.attached(self.api, "beta"), set())
-
-        # set: whole-set replacement (all-or-nothing)
-        status, body = await asyncio.to_thread(
-            http_post, self.url("/api/accounts/plugins/set"),
-            {"account": "alpha", "plugins": [SPY]})
-        self.assertEqual(status, 200)
-        self.assertEqual(get_json(body)["data"]["plugins"], [SPY])
-        self.assertEqual(await self.attached(self.api, "alpha"), {SPY})
-
-    async def test_plugin_routes_400_on_unknown_names(self) -> None:
-        # unknown plugin -> honest 400 listing the known plugins
-        status, body = await asyncio.to_thread(
-            http_post, self.url("/api/accounts/plugins/assign"),
-            {"account": "alpha", "plugin": "nosuchplugin"})
-        self.assertEqual(status, 400)
-        error = get_json(body)["error"]
-        self.assertIn("known plugins", error)
-        self.assertIn(SPY, error)
-
-        # unknown account -> honest 400 (AccountError family)
-        status, body = await asyncio.to_thread(
-            http_post, self.url("/api/accounts/plugins/assign"),
-            {"account": "ghost", "plugin": PROBE})
-        self.assertEqual(status, 400)
-        self.assertIn("ghost", get_json(body)["error"])
-
-        # set with ONE unknown name rejects the WHOLE call (all-or-nothing)
-        status, body = await asyncio.to_thread(
-            http_post, self.url("/api/accounts/plugins/set"),
-            {"account": "alpha", "plugins": [PROBE, "nosuchplugin"]})
-        self.assertEqual(status, 400)
-        self.assertEqual(await self.assigned(self.api, "alpha"),
-                         [PROBE, SPY])  # untouched
-
-        # missing required field -> 400 naming the field
-        status, body = await asyncio.to_thread(
-            http_post, self.url("/api/accounts/plugins/assign"),
-            {"account": "alpha"})
-        self.assertEqual(status, 400)
-        self.assertIn("'plugin'", get_json(body)["error"])
-
-    async def test_status_rows_carry_assigned_plugins(self) -> None:
-        status, body = await asyncio.to_thread(
-            http_get, self.url("/api/status"))
-        self.assertEqual(status, 200)
-        rows = {a["name"]: a for a in get_json(body)["data"]["accounts"]}
-        self.assertEqual(rows["alpha"]["assigned_plugins"], [PROBE, SPY])
-        self.assertEqual(rows["beta"]["assigned_plugins"], [])
-
-    async def test_add_account_plugins_ok_profiles_rejected(self) -> None:
-        # plugins payload accepted end-to-end (row + attachment)
-        status, body = await asyncio.to_thread(
-            http_post, self.url("/api/accounts/add"),
-            {"name": "gamma", "plugins": [PROBE]})
-        self.assertEqual(status, 200)
-        self.assertTrue(get_json(body)["ok"])
-        self.assertEqual(await self.attached(self.api, "gamma"), {PROBE})
-        self.assertEqual(await self.assigned(self.api, "gamma"), [PROBE])
-
-        # profiles payload rejected with 400 (unknown key — the profile
-        # era's payload shape is gone, not silently ignored)
-        status, body = await asyncio.to_thread(
-            http_post, self.url("/api/accounts/add"),
-            {"name": "delta", "profiles": ["copier"]})
-        self.assertEqual(status, 400)
-        self.assertIn("profiles", get_json(body)["error"])
-        self.assertNotIn(
-            "delta", [r["name"] for r in await self.api.accounts_list()])
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,7 +23,6 @@ from core.sync_group_manager import SyncGroupManager
 from database.db import Database
 
 from interfaces.cli.commands import UsageError, run_command
-from interfaces.dashboard.server import DashboardServer
 
 LOG = logging.getLogger("test.sync_groups_surfaces")
 
@@ -336,118 +335,6 @@ class FakeDashApi(FakeCliApi):
         return {"accounts": [], "ratelimit": {}, "tasks": {}, "warnings": [],
                 "uptime_s": 1.0}
 
-
-class DashboardGroupsRoutesTests(unittest.IsolatedAsyncioTestCase):
-    """The /api/groups/* routes reach ControlAPI and render its payload."""
-
-    async def asyncSetUp(self) -> None:
-        self.fake = FakeDashApi()
-        self.server = DashboardServer(self.fake, token=None, port=0)
-        self.server.start()
-        self.addAsyncCleanup(self.server.stop)
-        self.base = f"http://127.0.0.1:{self.server.bound_port}"
-
-    async def _get(self, path: str) -> Tuple[int, Dict[str, Any]]:
-        import json
-        import urllib.error
-        import urllib.request
-
-        def _fetch():
-            try:
-                with urllib.request.urlopen(self.base + path, timeout=5) as resp:
-                    return resp.status, json.load(resp)
-            except urllib.error.HTTPError as exc:
-                return exc.code, json.load(exc)
-
-        return await asyncio.to_thread(_fetch)
-
-    async def _post(self, path: str, body: Dict[str, Any]
-                    ) -> Tuple[int, Dict[str, Any]]:
-        import json as _json
-        import urllib.error
-        import urllib.request
-
-        def _fetch():
-            data = _json.dumps(body).encode()
-            request = urllib.request.Request(
-                self.base + path, data=data,
-                headers={"Content-Type": "application/json"})
-            try:
-                with urllib.request.urlopen(request, timeout=5) as resp:
-                    return resp.status, _json.load(resp)
-            except urllib.error.HTTPError as exc:
-                return exc.code, _json.load(exc)
-
-        return await asyncio.to_thread(_fetch)
-
-    async def test_list_and_info_routes(self) -> None:
-        status, payload = await self._get("/api/groups")
-        self.assertEqual(status, 200)
-        self.assertTrue(payload["ok"])
-        self.assertEqual(payload["data"][0]["name"], "grinders")
-        status, payload = await self._get("/api/groups/info?group=grinders")
-        self.assertEqual(status, 200)
-        self.assertEqual(payload["data"]["pacing_key"], "group:grinders")
-        self.assertEqual(self.fake.calls[-1], ("groups_snapshot",
-                                               ("grinders",), {}))
-
-    async def test_create_route_validates(self) -> None:
-        status, payload = await self._post(
-            "/api/groups/create", {"name": "x", "description": "d",
-                                   "enabled": False})
-        self.assertEqual(status, 200)
-        name, args, kwargs = self.fake.calls[-1]
-        self.assertEqual(name, "groups_create")
-        self.assertEqual(args[0],
-                         {"name": "x", "description": "d", "enabled": False})
-        self.assertEqual(kwargs.get("surface"), "dashboard")
-        status, payload = await self._post(
-            "/api/groups/create", {"name": "x", "enabled": "oui"})
-        self.assertEqual(status, 400)
-        status, payload = await self._post("/api/groups/create", {})
-        self.assertEqual(status, 400)
-
-    async def test_update_route_requires_one_field(self) -> None:
-        status, _ = await self._post(
-            "/api/groups/update", {"group": "g", "name": "h"})
-        self.assertEqual(status, 200)
-        status, payload = await self._post(
-            "/api/groups/update", {"group": "g"})
-        self.assertEqual(status, 400)
-        self.assertIn("at least one", payload["error"])
-
-    async def test_delete_route_parses_detach_flag(self) -> None:
-        status, _ = await self._post(
-            "/api/groups/delete", {"group": "g", "detach_members": True})
-        self.assertEqual(status, 200)
-        self.assertTrue(self.fake.calls[-1][2]["detach_members"])
-        status, _ = await self._post("/api/groups/delete", {"group": "g"})
-        self.assertFalse(self.fake.calls[-1][2]["detach_members"])
-
-    async def test_membership_routes(self) -> None:
-        for path, body, expected in (
-            ("/api/groups/add-member", {"group": "g", "account": "a"},
-             "groups_add_account"),
-            ("/api/groups/remove-member", {"group": "g", "account": "a"},
-             "groups_remove_account"),
-            ("/api/groups/set-account", {"account": "a", "group": "g"},
-             "groups_set_account"),
-            ("/api/groups/clear-account", {"account": "a"},
-             "groups_clear_account"),
-        ):
-            status, payload = await self._post(path, body)
-            self.assertEqual(status, 200, path)
-            self.assertTrue(payload["ok"])
-            self.assertEqual(self.fake.calls[-1][0], expected)
-
-    async def test_domain_errors_render_as_400(self) -> None:
-        async def boom(group, **kwargs):
-            raise SyncGroupError("unknown sync group 'nope'")
-
-        self.fake.groups_snapshot = boom
-        status, payload = await self._get("/api/groups/info?group=nope")
-        self.assertEqual(status, 400)
-        self.assertIn("unknown sync group", payload["error"])
 
 
 if __name__ == "__main__":
