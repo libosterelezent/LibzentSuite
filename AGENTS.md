@@ -219,3 +219,54 @@ Choose names that are **creative, expressive, memorable, and informative**. Clas
 - **Creative, not confusing:** Memorable names are encouraged when they improve understanding, but avoid forced cleverness, unexplained metaphors, misleading names, and unnecessary abbreviations.
 
 Every name should help another developer understand the code without having to reverse-engineer its intent.
+
+## 12. COMMIT DISCIPLINE
+
+Onwards commit discipline will be reside in agents.md and there won't be a separate file for it.
+
+Before committing:
+
+- Work happens on a **feature branch** — verify it is active before the
+  first edit (`git branch --show-current`). Never commit on `dev`/`main`.
+- **Stop running services** that host the changed code (dashboard,
+  bots) so the committed state is the tested state.
+- Run the relevant test suites and record the outcome. **A red suite
+  blocks the commit series** — fix first, then commit.
+- Review the full diff (`git diff` + `git status --porcelain`). Never
+  commit a file you cannot describe.
+
+Commit granularity — one logical unit per commit:
+
+- **One file = one commit** when the file carries its own concern
+  (13 files → 13 commits, each describing that
+  file's changes).
+- A cohesive new feature may group its own package files into ONE
+  PR, with its tests and docs as separate follow-up in pr-commits.
+- Commit in **dependency order**: foundation → feature → tests → docs.
+
+Commit messages:
+
+- Format: `type(scope): what changed — and the user-visible why`
+  (`feat parsers:`, `fix dashboard:`, `test`, `docs`, `chore` — repo
+  convention).
+- The message describes **the changes in the committed files
+  specifically** — not a vague round summary.
+- Every behavioral fix names its trigger (user report, audit finding,
+  ticket) in the body when useful.
+
+Scope & safety:
+
+- **Never** `git push`, `reset`, `clean`, or switch branches unless
+  explicitly authorized in the same breath as the work.
+- **Never** discard unrelated user changes. Unrelated modified files
+  stay uncommitted (or are committed separately with an accurate
+  message if the user asked for "all changes").
+- Commit only after the final diff review. The working tree ends
+  **clean** — everything relevant committed, nothing extra.
+- Push to remote only when there are five or more commits have been committed.
+- **Never** push committed series to the remote without owner's explicit approval.
+
+After the series:
+
+- Show `git log --oneline` for the new commits + final `git status`.
+- State what was intentionally left uncommitted and why.
