@@ -1254,13 +1254,13 @@ class DashboardServer:
                         require_str(body, "account", path), surface="dashboard"
                     ),
                 }
-            if (method, path) == ("GET", "/api/admin/mudae-id"):
-                return 200, {"ok": True, "data": await api.admin_mudae_id()}
-            if (method, path) == ("POST", "/api/admin/mudae-id/set"):
-                raw = body.get("mudae_bot_id")
+            if (method, path) == ("GET", "/api/admin/primary-bot-id"):
+                return 200, {"ok": True, "data": await api.admin_primary_bot_id()}
+            if (method, path) == ("POST", "/api/admin/primary-bot-id/set"):
+                raw = body.get("primary_bot_id")
                 return 200, {
                     "ok": True,
-                    "data": await api.admin_mudae_id_set(raw, surface="dashboard"),
+                    "data": await api.admin_primary_bot_id_set(raw, surface="dashboard"),
                 }
 
             if (method, path) == ("GET", "/api/accounts/plugins"):

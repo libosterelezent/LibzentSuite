@@ -6,7 +6,7 @@
                        prefix mode/symbol, admin flag, forget stale rows)
      Credentials     — /api/credentials/status readout
    Mutations: /api/admin/ids/add|remove, /api/admin/perms/add|remove,
-   /api/admin/prefix/set, /api/admin/account-flag, /api/admin/mudae-id/set,
+   /api/admin/prefix/set, /api/admin/account-flag, /api/admin/primary-bot-id/set,
    /api/admin/forget-account (danger confirm). Fail-closed everywhere: an
    empty id list means NOBODY may command that account.
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -78,7 +78,7 @@ routerAdd("/admin", "Admin", async (container) => {
   }
 
   /* ── mudae bot id ───────────────────────────────────────────────────── */
-  const mudaeHost = section("Mudae bot id", "detects Mudae responses");
+  const mudaeHost = section("Primary bot id", "detects Mudae responses");
   function renderMudae() {
     mudaeHost.textContent = "";
     const current = (state.overview && state.overview.mudae_bot_id) ?? "";
@@ -89,7 +89,7 @@ routerAdd("/admin", "Admin", async (container) => {
       const raw = input.value.trim();
       if (raw !== "" && !/^\d+$/.test(raw)) { toast("Mudae id must be numeric.", "err"); return; }
       const body = raw === "" ? {mudae_bot_id: null} : {mudae_bot_id: parseInt(raw, 10)};
-      try { await busyRun(save, () => post("/api/admin/mudae-id/set", body)); await load(); }
+      try { await busyRun(save, () => post("/api/admin/primary-bot-id/set", body)); await load(); }
       catch (e) { toast(e.message, "err"); }
     };
     mudaeHost.append(el("div", {class: "toolbar"}, input, save),
