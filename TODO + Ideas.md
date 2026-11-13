@@ -94,29 +94,111 @@ Plugins remain independent from the interface layer.
 
 [ ] Bridge `on_http_throttle` to `RateLimitManager.report_server_limit()`
     — the REAL throttle signal for user accounts (library absorbs 429s
-    internally; we currently only see the ones it doesn't)
+    internally; we currently only see the ones it doesn't). Wire: hook the
+    event in `adapters/discord/client.py` → publish `RateLimitTriggered`
+    on the EventBus → limiter calls `report_server_limit()`.
 [ ] Add per-route latency EWMA congestion watch (`http_route_latencies()`)
-    — queuing inflation, not 429s, is how the send ceiling manifests
+    — queuing inflation, not 429s, is how the send ceiling manifests.
+    Add an EWMA monitor to `core/rate_limit_manager/engine.py` that
+    reads `client.http_route_latencies()` and warns when the send route
+    exceeds a threshold.
 [ ] Add bounded probe-down recovery (decay backoff ≤10% after 2 min clean,
     never below the base interval) — matches the fork's lane governor recipe
-[ ] Expose `cache_stats()` through ControlAPI for the future dashboard
-[ ] Add memory caps + cache persistence to the Client constructor
-    (`max_member_cache`, `max_total_member_cache`, `persistence_path`,
-    `gc_freeze=True`, `dispatch_backlog_warning`)
-[ ] Move the authorization gate to `bot.add_check()` — the library's
-    native check system runs BEFORE argument parsing (more efficient than
-    our manual check inside `_dispatch_self_command`). AccessManager
-    stays as the domain owner (per-account allowlists, DB persistence);
-    only the gate invocation point moves into the library's dispatch.
+    (`examples/lane_governor.py`). Apply to `RateLimitManager`'s
+    cooldown recovery path.
+[ ] Expose `cache_stats()` through ControlAPI — add a `system_cache_stats()`
+    method that aggregates per-account `client.cache_stats()` snapshots
+    for the future dashboard's System page.
+[ ] Add memory caps + cache persistence to the Client constructor in
+    `adapters/discord/client.py::_build_client()`:
+    `max_member_cache=500, max_total_member_cache=5000,
+    persistence_path=f"state/{account}-cache.bin",
+    gc_freeze=True, dispatch_backlog_warning=500`.
+
+### Command system (ext.commands deep adoption)
+
+[ ] Move the authorization gate to `bot.add_check()` in
+    `adapters/discord/client.py` — currently `_dispatch_self_command()`
+    manually checks `allowed_invoker_async(ctx.author.id)` AFTER the
+    library has already parsed arguments. Moving it to a global check
+    (`bot.add_check(access_gate)`) means unauthorized commands are
+    rejected before any parsing work. `on_command_error` already
+    handles `CommandNotFound` silently — extend to catch `CheckFailure`.
+    AccessManager stays as the domain owner (per-account allowlists,
+    DB persistence); only the invocation point moves.
     NOTE: do NOT adopt `commands.cooldown()` — our cooldowns are
-    per-account, DB-persisted, fleet-aware domain state that the
-    library's in-memory per-command cooldown cannot express.
-[ ] Adopt library argument converters (typed params, `Greedy`, `Range`,
-    `clean_content`) in ArgSpec to replace manual `_parse_invocation`
-    tokenization and custom type coercion (~100 lines simplification)
-[ ] Simplify the `_invoke` pass-through — with `bot.add_check()` handling
-    authorization, the thin command wrapper becomes a straight dispatch
-    to the hub + paced reply (no auth check, no manual parsing)
+    per-account, DB-persisted, fleet-aware domain state.
+
+[ ] Replace `_parse_invocation()` with library-native argument parsing.
+    Current: `adapters/discord/client.py:1100` manually tokenizes
+    `"sm!rollstart 123"` into `(["123"], "123")` using regex + manual
+    prefix stripping. The library's parameter parsing already does this
+    via type annotations on the command callback:
+    ```python
+    async def _invoke(ctx, target: discord.User, count: int = 1):
+        # ctx.args/ctx.kwargs already parsed and typed
+    ```
+    This eliminates `_parse_invocation` (~60 lines) and the manual
+    `ArgSpec` type-coercion path in `core/plugin_base.py::_convert_arg`.
+
+[ ] Adopt library converters in `ArgSpec` — add a `converter` field
+    (`discord.Member | discord.User | discord.TextChannel | str | int`)
+    that maps to the library's converter system. When a plugin declares
+    `ArgSpec("target", discord.User, ...)`, the library resolves the
+    argument from ID/mention/name automatically. Available converters:
+    `MemberConverter, UserConverter, TextChannelConverter, RoleConverter,
+    EmojiConverter, GuildConverter, MessageConverter` + `Greedy[T]`,
+    `Range[int, min, max]`, `clean_content`.
+
+[ ] Simplify `_invoke` pass-through — with `bot.add_check()` handling
+    authorization and library parsing handling arguments, the thin
+    command wrapper in `_register_self_command()` becomes:
+    ```python
+    async def _invoke(ctx):
+        reply = await adapter._paced_reply(ctx, ctx.command.name)
+    ```
+    No auth check, no manual parsing, no `_dispatch_self_command`.
+
+[ ] Framework verbs as Cogs — `core/plugin_manager/commands.py`
+    (922 lines) manually bridges `CommandSpec` → `bot.command(name=...)`
+    via `_register_self_command()` + `_rebuild_self_commands()` diff
+    tracking. Cogs replace this:
+    ```python
+    class FrameworkVerbs(commands.Cog):
+        @commands.command(name="status")
+        async def status_cmd(self, ctx):
+            reply = await self.api.status()
+            await ctx.send(format_status(reply))
+
+        @commands.command(name="estop")
+        async def estop_cmd(self, ctx):
+            await self.api.emergency_stop_all(surface="chat")
+            await ctx.send("emergency stop engaged")
+    ```
+    Benefits: `add_cog()/remove_cog()` for hot-reload (replaces our
+    diff tracking), `cog_command_error()` for per-module error handling,
+    built-in help via `help_command`, cleaner code organization.
+    Plugin `COMMANDS` declarations still go through the hub for
+    per-account assignment/enable gating — cogs are for the framework
+    verbs only (status, accounts, plugins, ratelimit, lane, tasks,
+    estop, simulation, adminlist, adminperms, adminprefix).
+
+[ ] `before_invoke` for audit logging — currently audit rows are written
+    inside `_dispatch_self_command` after manual parsing. Move to:
+    ```python
+    @bot.before_invoke
+    async def audit_invocation(ctx):
+        adapter._audit_chat_command(ctx.command.qualified_name, ctx.author.id)
+    ```
+    Runs after checks pass, before the command callback — clean separation
+    of authorization (check), audit (hook), and execution (callback).
+
+[ ] Leverage `Context` methods — our code manually calls
+    `services.send_message(channel_id, text)` for replies. The library's
+    `ctx.send()` already routes through the client's send path. Bridge:
+    override `ctx.send` in `_register_self_command` to route through our
+    paced pipeline (scheduler → limiter → adapter), preserving the
+    safety floor while using the library's API surface.
 
 ### v2 Architecture (design-only, no backend)
 
