@@ -333,6 +333,15 @@ visible for traceability; do not build against them.
     NOTE: do NOT adopt `commands.cooldown()` — our cooldowns are
     per-account, DB-persisted, fleet-aware domain state.
 
+[x] Dynamic command prefixes via the fork's callable contract — DONE
+    2026-11-14: `command_prefix=` now receives a callable (the fork
+    invokes and awaits it per message with `(bot, message)`); the
+    callable reads the AccessManager's warmed prefix cache, so an
+    `adminprefix` mutation lands on the LIVE account's next message —
+    no rebuild. Build-time snapshot stays as the unwired-stack
+    fallback; precedence (symbol > both > env-symbol-over-mention) is
+    pinned by tests.
+
 [ ] Replace `_parse_invocation()` with library-native argument parsing.
     Current: `adapters/discord/client.py` manually tokenizes
     `"sm!rollstart 123"` into `(["123"], "123")` using regex + manual
