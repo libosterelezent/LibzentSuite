@@ -289,3 +289,22 @@ class PluginDataStore:
         )
         await conn.commit()
         return cur.rowcount > 0
+
+    async def drop_account(self, account: str) -> int:
+        """Delete EVERY document keyed under one account.
+
+        The cross-store deletion boundary (WORKSPACE_DESIGN §13.3,
+        decision 18): account removal invokes this idempotently inside
+        its durable deletion-job workflow — a re-created same-named
+        account must never inherit the old one's documents (the gap
+        found 2026-11-13). Returns rows removed; 0 is the normal
+        second call (idempotent by construction)."""
+        if not account or not str(account).strip():
+            raise PluginError("drop_account needs a non-empty account name")
+        conn = self._require_conn()
+        cur = await conn.execute(
+            "DELETE FROM plugin_data WHERE account=?",
+            (str(account).strip(),),
+        )
+        await conn.commit()
+        return int(cur.rowcount or 0)
