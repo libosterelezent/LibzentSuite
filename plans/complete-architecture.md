@@ -1,3 +1,9 @@
+> **SUPERSEDED 2026-11-14**: the workspace unification landed
+> (roadmap.md). Sync groups and the fleet module are DELETED;
+> `workspaces_*` + the chain runtime (`core/workspace/`) are the
+> orchestration surface. This inventory describes the pre-unification
+> tree and is retained as historical reference.
+
 # LibzentSuite — Complete Architecture & Capability Inventory
 
 **Compiled:** 2026-11-13 · **HEAD:** post-Mudae-removal working tree · **Tests:** 2,177+ (107 files, 2,268 test functions) · **CI:** ruff+format gates, mypy advisory, uv.lock exact-install, 40-min timeout

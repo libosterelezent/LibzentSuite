@@ -34,11 +34,11 @@ Plugins remain independent from the interface layer.
 **What exists and is tested (1,673 tests green, CI green):**
 - Core framework: bootstrap → ControlAPI → managers → repositories → adapters
 - Multi-account Discord orchestration (better.py-self fork, lazily imported)
+- Workspace unification: `core/workspace/` (service, chains, signals, guard, reconciler)
 - Plugin system: discovery, lifecycle hooks, settings, self-commands, per-account instances
 - Plugin profiles: named settings presets, account-to-preset bindings
 - AccountPluginData: per-channel operational data (own SQLite store, optimistic versioning)
-- Sync groups: persistent membership + shared pacing clock — **deprecated, superseded by Workspaces (W5 removes it)**
-- Fleet orchestration: task lifecycle, handoff, cooldowns, reconciler, dispatch guard — **deprecated, superseded by Workspaces (W5 removes it)**
+- Workspace orchestration: membership, chains (A acts → B follows), presets, channels, durable signals — **the unified layer (replaced sync groups + fleet 2026-11-14)**
 - Rate limiting: 1.5 s safety floor, learned defaults, server-cooldown handling, send lane
 - Credential service: Fernet-encrypted at rest, key outside DB, write-only in UI
 - Parser registry: generic, empty, game-packs plug in via `register_parser()`
@@ -243,11 +243,12 @@ settings layer, the plugin-eligibility gate.
 [ ] **Workspace W3 (remainder)** — DONE so far: the service (one
     writer), the workspaces_* ControlAPI surface + CLI verbs, the
     bootstrap/simulator rewiring (fleet assembly retired from boot).
-    REMAINING: W4 done 2026-11-14 (signals outbox, ChainRuntime,
-    guard + reconciler, full boot/sim wiring — the A-acts-B-follows
-    semantics proven by 15 runtime tests + 8 outbox tests; the
-    dedicated simulator scenario rides with W5's sweep). W5 (delete
-    the old modules + the v11 table drop + docs sweep) is last.
+    DONE 2026-11-14: W4 (signals outbox, ChainRuntime, guard +
+    reconciler, full boot/sim wiring — A-acts-B-follows proven by the
+    runtime suite) and W5 (core/fleet + core/sync_group_manager
+    deleted with their repositories; migration v11 drops the v9
+    tables + accounts.sync_group; the migration runner is race-proof
+    at the root). THE WORKSPACE UNIFICATION IS COMPLETE.
 [ ] **FastAPI core API** — replace the deleted dashboard's REST surface
     with FastAPI routers calling the existing ControlAPI. Pydantic
     request/response models. Native WebSocket for live events.
@@ -395,4 +396,4 @@ visible for traceability; do not build against them.
 | ProfileManager (permission bundles) | 2026-10-22 | Direct account→plugin assignment (`account_plugins` table) |
 | Mudae parser pack | 2026-11-13 | Generic parser registry (`parsers/manager.py`, ships empty) |
 | Dashboard (custom HTTP/WS/SPA) | 2026-11-13 | FastAPI + Flet (planned) |
-| Sync groups + fleet (in code, deprecated) | planned (W5) | Workspace unification (this roadmap) |
+| Sync groups + fleet | 2026-11-14 (W5) | Workspace unification (`core/workspace/`, this roadmap) |
