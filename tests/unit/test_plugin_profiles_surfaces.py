@@ -65,7 +65,7 @@ class _StubAccount:
     """Account-shaped stub: assigned plugins, binding mirror, runtime."""
 
     def __init__(self, name: str, client: Any = None) -> None:
-        self.record = SimpleNamespace(name=name, sync_group=None)
+        self.record = SimpleNamespace(name=name, workspace=None)
         self.assigned_plugins: List[str] = []
         self.plugin_profiles: Dict[str, Optional[str]] = {}
         self.runtime = SimpleNamespace(client=client)

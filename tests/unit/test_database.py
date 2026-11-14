@@ -177,14 +177,14 @@ class TestMigrations(AsyncDatabaseTestCase):
 
 class TestAccounts(AsyncDatabaseTestCase):
     async def test_add_get_list_roundtrip(self) -> None:
-        await self.db.accounts.add("alpha", token_ref="DISCORD_TOKEN_ALPHA", sync_group="g1")
+        await self.db.accounts.add("alpha", token_ref="DISCORD_TOKEN_ALPHA", workspace="g1")
         await self.db.accounts.add("beta")
         names = [r.name for r in await self.db.accounts.list()]
         self.assertEqual(names, ["alpha", "beta"])
         rec = await self.db.accounts.get("alpha")
         self.assertIsInstance(rec, AccountRecord)
         self.assertEqual(rec.token_ref, "DISCORD_TOKEN_ALPHA")
-        self.assertEqual(rec.sync_group, "g1")
+        self.assertEqual(rec.workspace, "g1")
         self.assertTrue(rec.enabled)
         self.assertIsNone(await self.db.accounts.get("nope"))
 

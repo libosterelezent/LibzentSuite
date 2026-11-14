@@ -42,7 +42,7 @@ class FakeAccountsRepo:
         if self.fail_on == what:
             raise RuntimeError(f"injected repository failure: {what}")
 
-    async def add(self, name, *, token_ref=None, enabled=True, sync_group=None):
+    async def add(self, name, *, token_ref=None, enabled=True, workspace=None):
         self._maybe_fail("add")
         # parity with the real AccountsRepository (database/repositories/
         # accounts.py): empty/whitespace and duplicate names are
@@ -53,7 +53,7 @@ class FakeAccountsRepo:
             raise DatabaseError(f"account {name!r} already exists")
         record = AccountRecord(
             id=self.next_id, name=name, token_ref=token_ref,
-            enabled=enabled, sync_group=sync_group,
+            enabled=enabled, workspace=workspace,
         )
         self.next_id += 1
         self.records[name] = record

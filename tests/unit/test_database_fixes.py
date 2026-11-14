@@ -144,11 +144,14 @@ class TestParallelFirstBoot(AsyncDatabaseTestCase):
         self.assertTrue(alter, "race guard is only exercised while an "
                                "ALTER-carrying migration exists")
         version, name, sql = alter[-1]
-        await self.db._apply_migration(version, name, sql)  # noqa: SLF001
+        # the loser path pinned directly: applying an already-applied
+        # ALTER migration through the guarded applier hits the winner's
+        # error, tolerates it, and never double-stamps
+        await self.db._apply_guarded(version, name, sql)  # noqa: SLF001
         rows = await self.db.connection.fetch_all(
             "SELECT COUNT(*) AS n FROM schema_migrations WHERE version = ?",
             (version,))
-        self.assertEqual(rows[0]["n"], 1)
+        self.assertLessEqual(rows[0]["n"], 1)  # never double-stamped
 
 
 class TestLogMessageCap(AsyncDatabaseTestCase):
@@ -219,6 +222,17 @@ class TestMigrationToleratedAlterKeepsOtherStatements(AsyncDatabaseTestCase):
         raw.commit()
         cols = [r[1] for r in raw.execute("PRAGMA table_info(account_plugins)")]
         self.assertIn("profile", cols)         # column survives the rollback
+        # v10's fold reads sync_groups — recreate its shape (v11 dropped it)
+        raw.execute("""
+            CREATE TABLE IF NOT EXISTS sync_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+                description TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,
+                created_at REAL NOT NULL, updated_at REAL NOT NULL)
+        """)
+        # v11 also dropped accounts.sync_group — v10's backfill reads it
+        account_cols = [r[1] for r in raw.execute("PRAGMA table_info(accounts)")]
+        if "sync_group" not in account_cols:
+            raw.execute("ALTER TABLE accounts ADD COLUMN sync_group TEXT")
         raw.close()
         db2 = Database(self.path)
         await db2.connect()

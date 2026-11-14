@@ -24,7 +24,7 @@ from tests.unit.helpers import (
     make_task,
 )
 
-STATUS_KEYS = {"id", "name", "status", "user_id", "enabled", "sync_group",
+STATUS_KEYS = {"id", "name", "status", "user_id", "enabled", "workspace",
                "workspace",
                "assigned_plugins", "plugin_profiles",
                "latency_ms", "uptime_s", "last_error", "credential",
@@ -71,7 +71,7 @@ async def _poll_until(predicate, timeout: float = 2.0,
 class RegistryTests(unittest.IsolatedAsyncioTestCase):
     async def test_add_account_happy_path(self) -> None:
         h = make_manager()
-        out = await h.manager.add_account("alpha", sync_group="g1")
+        out = await h.manager.add_account("alpha", workspace="g1")
         self.assertEqual(out["name"], "alpha")
         self.assertEqual(out["status"], "created")
         self.assertEqual(set(out), STATUS_KEYS)

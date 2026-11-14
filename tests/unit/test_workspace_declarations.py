@@ -88,7 +88,7 @@ class ChainDeclarationLoaderTests(unittest.TestCase):
     def test_plugin_base_declares_the_surface(self) -> None:
         self.assertEqual(PluginBase.EMITS, ())
         self.assertEqual(PluginBase.FOLLOWS, ())
-        self.assertIsInstance(PluginBase.fleet_handler, type(None))
+        self.assertFalse(hasattr(PluginBase, "fleet_handler"))  # W5 removed
 
 
 if __name__ == "__main__":

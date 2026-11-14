@@ -29,7 +29,7 @@ ACCOUNT_ROWS = [
 
 class _StubAccount:
     def __init__(self) -> None:
-        self.record = NS(sync_group=None, workspace=None)
+        self.record = NS(workspace=None)
 
 
 class _StubAccountsManager:

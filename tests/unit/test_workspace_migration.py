@@ -270,7 +270,7 @@ class MigrationV10Tests(unittest.IsolatedAsyncioTestCase):
 
     async def test_migration_is_idempotent_and_restart_safe(self) -> None:
         applied = await self._migrate()
-        self.assertEqual(applied, 1)  # exactly v10 on the v9 fixture
+        self.assertEqual(applied, 2)  # v10 (the fold) + v11 (the drops)
         again = await self._migrate()  # re-run: nothing new applies
         self.assertEqual(again, 0)
 

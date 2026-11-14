@@ -42,17 +42,26 @@ class CarriedVocabularyTests(unittest.TestCase):
     values, sets and fences must match the fleet module one-to-one
     (the W5 test migration depends on this equivalence)."""
 
-    def test_member_eligibility_states_match_fleet(self) -> None:
-        from core.fleet.models import MemberEligibility as FleetEligibility
+    def test_member_eligibility_states_pinned(self) -> None:
+        # carried from fleet verbatim (W5 deleted the module; the
+        # VALUES are the contract now)
+        self.assertEqual(
+            MemberEligibility.ALL,
+            frozenset({"eligible", "waiting", "paused", "cooling", "retired"}),
+        )
+        self.assertEqual(
+            MemberEligibility.LIVE,
+            frozenset({"eligible", "waiting", "paused", "cooling"}),
+        )
 
-        self.assertEqual(MemberEligibility.ALL, FleetEligibility.ALL)
-        self.assertEqual(MemberEligibility.LIVE, FleetEligibility.LIVE)
-
-    def test_task_status_states_match_fleet_assignment(self) -> None:
-        from core.fleet.models import AssignmentStatus
-
-        self.assertEqual(TaskStatus.ALL, AssignmentStatus.ALL)
-        self.assertEqual(TaskStatus.ALWAYS_TERMINAL, AssignmentStatus.ALWAYS_TERMINAL)
+    def test_task_status_states_pinned(self) -> None:
+        self.assertEqual(
+            TaskStatus.ALL,
+            frozenset({"queued", "assigned", "running", "completed",
+                       "suspended", "failed", "cancelled"}),
+        )
+        self.assertEqual(TaskStatus.ALWAYS_TERMINAL,
+                         frozenset({"completed", "cancelled"}))
 
     def test_execution_mode_renames_group_managed(self) -> None:
         # v10 migrates fleet "group_managed" -> workspace "managed"

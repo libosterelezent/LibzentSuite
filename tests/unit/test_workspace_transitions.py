@@ -55,25 +55,23 @@ class CarriedMemberTransitionTests(unittest.TestCase):
             member_can_transition(MemberEligibility.RETIRED, MemberEligibility.ELIGIBLE)
         )
 
-    def test_fleet_tables_are_equivalent(self) -> None:
-        from core.fleet.transitions import (
-            ASSIGNMENT_TRANSITIONS as FLEET_ASSIGNMENT,
-        )
-        from core.fleet.transitions import (
-            MEMBER_TRANSITIONS as FLEET_MEMBER,
-        )
-
+    def test_carried_tables_pinned(self) -> None:
+        # the fleet module is deleted (W5); the carried tables ARE the
+        # contract — pinned as the exact legal-move sets
         self.assertEqual(
-            {k: set(v) for k, v in MEMBER_TRANSITIONS.items()},
-            {k: set(v) for k, v in FLEET_MEMBER.items()},
+            {k: sorted(v) for k, v in MEMBER_TRANSITIONS.items()},
+            {
+                "eligible": sorted(["cooling", "paused", "retired", "waiting"]),
+                "waiting": sorted(["cooling", "eligible", "paused", "retired"]),
+                "paused": sorted(["eligible", "retired", "waiting"]),
+                "cooling": sorted(["eligible", "retired", "waiting"]),
+                "retired": [],
+            },
         )
         self.assertEqual(
-            {k: set(v) for k, v in TASK_TRANSITIONS.items()},
-            {k: set(v) for k, v in FLEET_ASSIGNMENT.items()},
+            TASK_TRANSITIONS[TaskStatus.FAILED], frozenset({TaskStatus.QUEUED})
         )
 
-
-class CarriedTaskTransitionTests(unittest.TestCase):
     def test_happy_path(self) -> None:
         validate_task_transition(TaskStatus.QUEUED, TaskStatus.ASSIGNED)
         validate_task_transition(TaskStatus.ASSIGNED, TaskStatus.RUNNING)

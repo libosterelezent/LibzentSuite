@@ -388,8 +388,8 @@ class TestGroupRateScope(unittest.IsolatedAsyncioTestCase):
     async def test_group_members_serialize(self) -> None:
         stack = await Stack().boot()
         api = stack.framework.api
-        await api.accounts_add({"name": "alpha", "sync_group": "grinders"})
-        await api.accounts_add({"name": "beta", "sync_group": "grinders"})
+        await api.accounts_add({"name": "alpha", "workspace": "grinders"})
+        await api.accounts_add({"name": "beta", "workspace": "grinders"})
         self.assertEqual(
             (await api.ratelimit_stats())["groups"],
             {"alpha": "grinders", "beta": "grinders"},
