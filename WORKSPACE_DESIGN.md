@@ -1,10 +1,12 @@
 # WORKSPACE_DESIGN.md — the Workspace unification spec (W0)
 
-Status: **W0 SPEC (rev 2) — awaiting owner approval before W1 starts.**
-Decision record locked by the owner 2026-11-13, refined 2026-11-14
-(channel/preset data-model layering; decision 8 revised, 9–10 added).
-Companions: `roadmap.md` (phases W0–W5),
-`knowledgebase/WORKSPACE_SUPERSESSION.md` (append-only record).
+Status: **W0 SPEC (rev 3) — all 18 decisions locked; W1 may start on
+owner go.** Locked 2026-11-13 (1–8), refined 2026-11-14 (8 revised,
+9–10), amended 2026-11-14 from the rev 3 review round (11–18 + four
+owner calls: pointer-canonical membership, preset-keys-only apply,
+single-source provenance, archive on workspace delete). Review input
+preserved verbatim: `plans/WORKSPACE_DESIGN_W0_REV3_AMENDMENTS.md`.
+Companions: `roadmap.md`, `knowledgebase/WORKSPACE_SUPERSESSION.md`.
 
 ---
 
@@ -24,22 +26,30 @@ workspace owns membership, orchestration state, and coordinated
 chains: *account A does something, follow-up account B cleans it up —
 if settings/plugins allow it.*
 
-## 2. Decision record (owner; 1–8 locked 2026-11-13, refined 2026-11-14)
+## 2. Decision record (owner; 1–8: 2026-11-13, 9–10: 2026-11-14, 11–18: 2026-11-14 rev 3)
 
-| # | Decision | Choice |
+| # | Decision | Locked choice |
 |---|---|---|
 | 1 | Follow-up trigger | Hybrid: task-terminal bus events (mechanical default) + plugin-emitted signals (semantic) |
 | 2 | Chain definition | Both layers: plugins declare EMITS / FOLLOW-capabilities; workspaces bind them into named chains |
-| 3 | Inter-step pacing | Shared clock only — workspace membership serializes fully (today's sync-group semantics) |
-| 4 | Membership cardinality | At-most-one workspace per account (single pointer column) |
-| 5 | Migration | Big-bang: one schema version (v10) folds groups+fleet; old tables drop in it |
+| 3 | Inter-step pacing | Shared clock only — members coordinate rate-limit stamps; the four execution contracts are separated (§11, decision 17) |
+| 4 | Membership cardinality | At-most-one workspace per account |
+| 5 | Migration | Big-bang: schema v10 folds groups+fleet; old tables drop in it |
 | 6 | Fleet survivors | Transitions tables, generation fences, reconciler, policy check order carry over renamed; observations/relay + FleetTaskHandler become the chain layer |
 | 7 | API surface | Clean replace: `workspaces_*` replaces `groups_*` + `fleet_*`, no aliases |
-| 8 | Workspace config layer | **REVISED 2026-11-14 (was: live workspace > account > plugin settings inheritance).** Copy-only workspace layer: the workspace owns channel default *suggestions* and preset *templates*, applied by explicit copy onto accounts. Live plugin settings are strictly account-bound — no workspace (or global) settings inheritance |
-| 9 | Preset semantics | Copy-on-apply + provenance: applying a preset copies values into the account's own configuration with `source_preset_id`/`source_version`/`applied_at`; updates are explicit (never silent overwrites); detach preserves the account's values. Replaces today's live-bound profiles (`account_plugins.profile` resolution layer) |
-| 10 | Preset portability | Plugin-bound by default (schema validation is per-plugin); cross-plugin reuse only via explicit export/import, re-validated against the destination plugin's schema |
+| 8 | Workspace config layer | REVISED 2026-11-14: copy-only — channel default suggestions + preset templates applied by explicit copy. Live plugin settings strictly account-bound; no workspace/global settings inheritance |
+| 9 | Preset semantics | Copy-on-apply + provenance: apply copies values into the account's own config; updates explicit; detach preserves values. Live-bound profiles end at v10 |
+| 10 | Preset portability | Plugin-bound by default; cross-plugin reuse only via explicit export/import re-validated against the destination schema |
+| 11 | Membership source of truth | **`accounts.workspace` is the sole authoritative pointer.** `workspace_members` is a derived projection updated in the same transaction, never independently writable, reconciler-checked |
+| 12 | Signal delivery | Chain-triggering signals are **durably accepted before acknowledgement** (signal row or outbox persisted first), delivered **at least once**; consumers deduplicate by stable signal identity and are idempotent |
+| 13 | Chain target selection | Explicit per-step routing policy; v1 supports `specific_account` and deterministic `first_eligible`. Fan-out (`all_eligible`) deferred until partial-success/retry/cancel semantics exist |
+| 14 | Chain definition changes | Each run executes against an **immutable validated definition snapshot** captured at run creation; edits affect future runs only |
+| 15 | Preset versions | Preset versions are **immutable**. Updating creates a new version under the same preset identity; applied configs retain `source_preset_id` + `source_version` + copied values |
+| 16 | Preset apply concurrency | Apply/update is **atomic and revision-checked**: a stale preview cannot overwrite intervening account edits — conflict, refresh, re-confirm |
+| 17 | Clock vs execution | Shared clock ≠ execution mutex. Rate coordination, task concurrency, chain ordering, and mutation serialization are four separate contracts (§11) |
+| 18 | Account deletion | Cross-store cleanup is a **durable, retryable workflow with observable completion** — not a single-transaction assumption across stores |
 
-## 3. Architecture rules (owner, 2026-11-14)
+## 3. Architecture rules
 
 1. Channel assignments are account-owned; workspace channels are
    organizational defaults, not shared runtime assignments.
@@ -55,16 +65,18 @@ if settings/plugins allow it.*
 7. Workspaces coordinate operations; they never automatically merge
    account configuration or plugin data.
 
-## 4. Data model — the layer separation
+Membership changes never delete or silently rewrite account-owned
+configuration (§5 note): leaving a workspace keeps plugin settings,
+plugin data, channel assignments, and plugin channel bindings.
 
-Four distinct concepts, never conflated:
+## 4. Data model — the layer separation
 
 | Layer | Answers | Owned by |
 |---|---|---|
-| **Channel assignment/binding** | WHERE an account or plugin operates | account / account-plugin |
-| **Preset (template)** | WHAT starting configuration an operation uses | global / workspace / account (plugin-bound) |
-| **Plugin configuration** | WHAT the account has chosen | account-plugin (strictly) |
-| **Plugin data** | WHAT the plugin produced/maintains | account-plugin (→ guild → channel, opt-in) |
+| Channel assignment/binding | WHERE an account or plugin operates | account / account-plugin |
+| Preset (template) | WHAT starting configuration | global / workspace / account (plugin-bound) |
+| Plugin configuration | WHAT the account chose | account-plugin (strictly) |
+| Plugin data | WHAT the plugin maintains | account-plugin (→ guild → channel, opt-in) |
 
 ## 5. Channel model
 
@@ -72,110 +84,137 @@ Three levels, ownership flowing downward by **copy**, never live:
 
 | Scope | Responsibility |
 |---|---|
-| Global | Default channel policies and available channel-selection rules |
-| Workspace | Organize channels into workspace groups; MAY provide suggested defaults |
-| Account | Owns the actual channel assignments used for execution |
+| Global | channel policies; available channel-selection rules |
+| Workspace | organizes channels into groups; MAY suggest defaults |
+| Account | owns the actual assignments used for execution |
 
 Applying a workspace's suggested set **creates account-level
-assignments** (a copy) — it must never create a live shared channel
-binding. Account A and Account B in the same workspace operate in
-entirely different guilds/channels by default.
+assignments** (a copy) — never a live shared binding.
 
 ### 5.1 Storage: three explicit tables
 
 ```
-account_channels            (registry)  account, channel_id, guild_id, name
-account_channel_assignments             account, channel_id, added_at
-account_plugin_channels     (bindings)  account, plugin, channel_id
+account_channels            (registry)     PK (account, guild_id, channel_id)
+account_channel_assignments                PK (account, channel_id)
+account_plugin_channels     (bindings)     PK (account, plugin, channel_id)
 ```
 
-- **Registry** — channels known/available to the account (mirrors
-  what the cache sees; persisted so configuration survives restarts).
-- **Assignments** — the account-level selection used for operations.
-- **Bindings** — the channels ONE plugin uses on ONE account. A
-  plugin initializes its bindings from the account's assignments at
-  assign time (copy), then diverges freely. A plugin never silently
-  inherits later account-assignment changes.
+Assignments and bindings **reference registry entries**; removing a
+registry entry is refused while dependent assignments/bindings
+exist (explicit removal of dependents required — documented
+conflict, never cascade-silent). A plugin initializes its bindings
+from the account's assignments at assign time (copy), then diverges
+freely; later account-assignment changes never propagate into
+bindings.
 
-Migrates FROM: the reserved `"channels"` key inside profile settings
-(`core/plugin_scopes.py` convention) — extracted into real rows.
+### 5.2 Channel validity and lifecycle
+
+The registry records **identity**, not current usability. Each
+registry row carries: descriptive metadata (cache-sourced), a
+**validation state** — `unknown | available | inaccessible | deleted
+| stale` — a last-observed/validated timestamp, and a validation
+reason. Cache refreshes may update metadata and validation state but
+**must not silently change user-selected assignments or bindings**;
+one missing cache observation never means permanent deletion.
+
+**Pre-execution contract:** a channel-bound operation resolves its
+binding AND verifies usability from runtime state. A missing, stale,
+deleted, or inaccessible channel is *not* resolved: it produces a
+structured visible SKIPPED (stable reason code) or a classified
+failure per the step's policy — never a blind send.
 
 ## 6. Preset model
 
-### 6.1 Three template scopes (all plugin-bound)
-
-| Scope | Purpose | Owner |
-|---|---|---|
-| Global | Reusable baseline templates | application |
-| Workspace | Templates matching a workspace's conventions | workspace |
-| Account | The account's own reusable templates | account |
-
-### 6.2 Lifecycle
+### 6.1 Ownership schema
 
 ```
-create → validate → apply → customize → update (explicit) → detach
+presets: preset_id (stable identity)
+         scope (global|workspace|account)   owner_id (NULL only for global)
+         plugin_id (required binding)
+         name        — uniqueness: (scope, owner_id, plugin_id, normalized_name)
+         version (immutable, monotonic)     schema_version (destination plugin)
+         settings_json                       created_at + descriptive metadata
 ```
 
-- **validate** — against the target plugin's Setting schema AND
-  schema version (ControlAPI layer, never the repository — existing
-  rule).
-- **apply** — copies values into the account's plugin configuration
-  (the `plugin_settings` layer); records provenance on the
-  account-plugin pair: `source_preset_id`, `source_version`,
-  `applied_at`.
-- **customize** — subsequent edits touch the account's values only.
-- **update** — applying a newer preset version is an explicit
-  operation with a diff preview; never an automatic overwrite; local
-  customizations are surfaced before confirming.
-- **detach** — drops the provenance link; the account keeps its
-  current values; the source preset may change or be deleted freely.
+Scope-owner consistency enforced at write; `schema_version` is the
+destination plugin's settings-schema version the preset was
+validated against.
 
-### 6.3 Resolution chain (SIMPLIFIED from today)
+### 6.2 Immutable versions
+
+A published version never changes. Editing creates a NEW version
+under the same `preset_id`. Applying records `source_preset_id` +
+`source_version`, identifying the exact version applied. Retiring or
+deleting a preset definition never deletes already-applied account
+configurations — provenance stays readable.
+
+### 6.3 Lifecycle
 
 ```
-today:    defaults ← global ← bound profile ← account overrides   (live)
-v10:      defaults ← global ← account values                      (copy)
+create → validate → apply → customize → update (explicit, diffed) → detach
 ```
 
-The profile layer disappears from live resolution — presets seed the
-account layer at apply time. One fewer layer, no cross-account
-surprise propagation, and `set_setting`'s live in-place update
-behavior is unchanged.
+- **validate** — the selected immutable version against the
+  destination plugin's Setting schema and `schema_version`
+  (ControlAPI layer, never the repository).
+- **apply** — LOCKED SEMANTICS: **writes exactly the keys the preset
+  defines (add/overwrite); keys the preset does not mention stay
+  untouched.** The diff preview shows old→new for the preset's keys
+  only.
+- **customize** — subsequent edits touch account values only.
+- **update** — applying a newer version is explicit: preview diff →
+  confirm → atomic write. See 6.4.
+- **detach** — drops the provenance link, keeps values; the source
+  preset may change or be deleted freely.
 
-### 6.4 Cross-plugin reuse
+### 6.4 Atomic apply / stale-preview protection
 
-Preset records carry their plugin binding (`UNIQUE(plugin, name)`
-today — kept). **Export/import** is the only cross-plugin path:
-export renders the template's validated values; import re-validates
-against the destination plugin's schema and creates a NEW preset
-bound to that plugin. No silent schema-compatibility guessing.
+1. validate the immutable version against the destination schema;
+2. read the target account-plugin configuration **revision**;
+3. compute the proposed diff (preset's keys only);
+4. require confirmation for the displayed diff;
+5. atomically write settings + provenance **only if the revision is
+   unchanged**;
+6. on conflict: return the stale-diff error; the caller re-previews.
+
+### 6.5 Provenance cardinality (v1)
+
+**Single active preset source per account-plugin pair.** Provenance
+columns live on the pair (`source_preset_id`, `source_version`,
+`applied_at`). Applying a different preset replaces the provenance.
+Field-level/composed provenance is explicitly out of v1.
+
+### 6.6 Scope lifecycles
+
+- **Workspace deleted** → its preset templates are **archived**
+  (readable, no longer selectable); applied configurations and
+  provenance untouched either way.
+- **Account deleted** → account-owned presets are deleted with the
+  account (§13.3 workflow); export beforehand is the operator's
+  explicit choice.
+
+### 6.7 Resolution chain (simplified)
+
+```
+today: defaults ← global ← bound profile ← account overrides   (live)
+v10:   defaults ← global ← account values                      (copy)
+```
 
 ## 7. Ownership lattice
 
 | Resource | Global | Workspace | Account | Account + Plugin |
 |---|---|---|---|---|
-| Channel defaults | define | optional suggestions (copy) | own assignments | own bindings |
+| Channel defaults | define | suggestions (copy) | own assignments | own bindings |
 | Data presets | own templates | own templates | own templates | plugin-specific templates |
-| Plugin settings | catalog/policies only | **no shared settings** | — | own settings |
-| Plugin runtime data | no shared account data | no shared account data | — | own data |
-| Plugin credentials | no shared credentials | no shared credentials | — | own credentials |
+| Plugin settings | catalog/policies only | no shared settings | — | own settings |
+| Plugin runtime data | none shared | none shared | — | own data |
+| Plugin credentials | none shared | none shared | — | own credentials |
 
-**Ownership key** (conceptual): `workspace → account → plugin
-(→ guild → channel, only where a plugin genuinely needs that scope)`.
-Implementation reading, fixed by decision 4: account identity stays
-globally unique (at-most-one workspace), so rows key by account name
-as today — the workspace prefix expresses membership context and the
-**deletion boundary**, not a re-scoping of account identity. The
-guild/channel levels remain opt-in (the `"0"` sentinel convention
-carries over).
-
-**Deletion boundary (account removal):** everything keyed under the
-account dies, across BOTH stores — assignments, settings, states,
-kv rows, cooldowns, channel registry/assignments/bindings, presets
-the account owns, **and plugin-data documents** (the store gains a
-`drop_account`; today it has none — the inheritance gap found
-2026-11-13). Orphaned `plugin_settings`/`plugin_states` rows after
-removal are likewise gone under this rule.
+Conceptual key: `workspace → account → plugin (→ guild → channel,
+opt-in)`. Implementation: account identity stays globally unique
+(decision 4), rows key by account as today; the workspace prefix is
+membership context + the **deletion boundary**. The guild/channel
+levels stay opt-in (`"0"` sentinels carry over).
 
 ## 8. Entity model
 
@@ -183,128 +222,158 @@ removal are likewise gone under this rule.
 ┌──────────────────────────────┐
 │ workspaces                   │
 │──────────────────────────────│
-│ name (UNIQUE)   description  │
-│ enabled         paused       │
-│ generation      created_at   │
-│                updated_at    │
+│ name (UNIQUE)  description   │
+│ enabled  paused  generation  │
+│ created_at  updated_at       │
 └──────┬───────────────────────┘
-       │ 1..*        (at-most-one per account — decision 4)
+       │ at-most-one per account; accounts.workspace = THE pointer (11)
        ▼
-┌──────────────────────────────┐     ┌──────────────────────────────┐
-│ workspace_members            │     │ accounts                     │
-│──────────────────────────────│     │──────────────────────────────│
-│ account (UNIQUE)             │────►│ name (PK)   workspace        │
-│ workspace   mode             │     │ enabled …                    │
-│ eligibility  joined_at       │     └──────┬───────────────────────┘
-└──────────────────────────────┘            │
-       ┌────────────────────┬──────────────┼─────────────────────┐
-       ▼                    ▼              ▼                     ▼
-┌─────────────────┐ ┌───────────────┐ ┌──────────────────┐ ┌──────────────┐
-│ account_channels│ │ account_      │ │ account_plugins  │ │ presets      │
-│ (registry)      │ │ channel_      │ │──────────────────│ │──────────────│
-│ account,chan,gld│ │ assignments   │ │ account, plugin  │ │ scope(global/│
-└─────────────────┘ └───────────────┘ │ source_preset_id │ │ workspace/   │
-       ┌─────────────────┐            │ source_version   │ │ account),    │
-       │ account_plugin_ │            │ applied_at       │ │ plugin, name │
-       │ channels        │◄───────────┤ (assignment +    │ │ version,     │
-       │ (bindings)      │            │  provenance)     │ │ settings_json│
-       └─────────────────┘            └──────────────────┘ └──────────────┘
+┌──────────────────────────────┐      ┌──────────────────────────────┐
+│ accounts                     │      │ workspace_members            │
+│──────────────────────────────│      │ (PROJECTION — same-tx        │
+│ name (PK)   workspace  ←─────┼──────┤  update only; reconciler-    │
+│ enabled …                    │      │  checked; never written      │
+└──────┬───────────────────────┘      │  directly) (11)              │
+       │                             │ mode, eligibility, joined_at │
+       │                             └──────────────────────────────┘
+       ├────────────────┬─────────────┬──────────────────┐
+       ▼                ▼             ▼                  ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────────┐ ┌───────────────┐
+│account_      │ │account_      │ │ account_plugins  │ │ presets (+    │
+│channels      │ │channel_      │ │──────────────────│ │ versions,     │
+│(registry+    │ │assignments   │ │ account, plugin  │ │ §6.1 schema)  │
+│ validity §5.2│ │              │ │ source_preset_id │ └───────────────┘
+└──────┬───────┘ └──────────────┘ │ source_version   │ ┌───────────────┐
+       ▼                          │ applied_at  (6.5)│ │ preset_       │
+┌──────────────┐                  └──────────────────┘ │ versions      │
+│account_plugin│                                       │ (immutable,   │
+│_channels     │                                       │  §6.2)        │
+│(bindings)    │                                       └───────────────┘
+└──────────────┘
 
 ┌──────────────────────────────┐   ┌──────────────────────────────┐
-│ workspace_chains             │   │ workspace_tasks              │
+│ workspace_chains             │   │ chain_runs                   │
 │──────────────────────────────│   │──────────────────────────────│
-│ id, workspace, name (UNIQUE) │──►│ chain_id, step, status       │
-│ enabled, definition_json     │   │ account, task_id, generation │
-└──────────────────────────────┘   │ error, timestamps            │
-┌──────────────────────────────┐   └──────────────────────────────┘
-│ workspace_cooldowns          │   ┌──────────────────────────────┐
-│ scope(workspace|member)      │   │ workspace_transitions        │
-│ reason, window, source       │   │ (history, unchanged shape)   │
-└──────────────────────────────┘   └──────────────────────────────┘
+│ id, workspace, name (UNIQUE) │──►│ chain_id, definition_snapshot│
+│ schema_ver, revision         │   │  (immutable, 14), status     │
+│ enabled, definition_json     │   │ created/finished timestamps  │
+└──────────────────────────────┘   └──────┬───────────────────────┘
+┌──────────────────────────────┐          ▼
+│ workspace_tasks              │   ┌──────────────────────────────┐
+│──────────────────────────────│   │ step_executions              │
+│ chain_run_id, step, status   │   │──────────────────────────────│
+│ target_account (persisted 13)│   │ run, step, attempt, outcome, │
+│ account, task_id, generation │   │ classified error, timestamps │
+│ error, timestamps            │   └──────────────────────────────┘
+└──────────────────────────────┘
+┌──────────────────────────────┐   ┌──────────────────────────────┐
+│ signals (outbox, §9.2)       │   │ deletion_jobs (§13.3)        │
+│──────────────────────────────│   │──────────────────────────────│
+│ signal_id (stable), account, │   │ account, state, attempts,    │
+│ plugin, name, payload,       │   │ last_error, observable       │
+│ correlation, created_at,     │   │ completion state             │
+│ delivery state, ack, retries │   └──────────────────────────────┘
+└──────────────────────────────┘   + workspace_cooldowns, workspace_
+                                     transitions (rev 2 shapes)
 ```
-
-Carried vocabulary (from `core/fleet/models.py`, renamed):
-`MemberEligibility`, `ExecutionMode`, `AssignmentStatus` (+ step
-states), `CooldownScopeType` (workspace/member), `CooldownSource`.
 
 ## 9. Trigger catalog (decision 1: hybrid)
 
-### 9.1 Mechanical triggers — task-terminal events (exist today)
+### 9.1 Mechanical triggers — task-terminal events
 
-| Event | Fields today | Gap |
-|---|---|---|
-| `TaskCompleted` | account, task_id, duration_s, summary | **no `plugin`** |
-| `TaskFailed` | account, task_id, error, error_kind | **no `plugin`** |
-| `TaskCancelled` | account, task_id | (not a chain trigger by default) |
+`TaskCompleted` / `TaskFailed` carry account + task_id today but no
+`plugin`; the additive `plugin: str = ""` extension lands as W4's
+first commit (scheduler holds it at emit time).
 
-**W4 prerequisite:** the scheduler already holds `task.plugin` at
-emit time (`scheduler.py:1618`) — extend `TaskCompleted`/`TaskFailed`
-with an additive `plugin: str = ""` field.
-
-### 9.2 Semantic triggers — plugin-emitted signals (new)
+### 9.2 Semantic triggers — durable signal delivery (decision 12)
 
 ```python
 async def emit_signal(self, name: str, payload: dict | None = None) -> None
 ```
 
-- Fire-and-forget as a `WorkspaceSignal(account, plugin, name,
-  payload)` event (control-plane class — never dropped under queue
-  pressure).
-- Names are plugin-namespaced at consumption (`<plugin>:<name>`) —
-  no cross-plugin spoofing.
+**Contract (at-least-once, idempotent):**
+
+- `emit_signal` persists a signal row (outbox) FIRST — signal_id,
+  originating account + plugin, name, validated payload, creation
+  timestamp, optional correlation id (originating task or chain
+  run) — and only then acknowledges. Queue pressure may delay
+  delivery; it can never discard an accepted signal.
+- Names are plugin-namespaced at consumption (`<plugin>:<name>`).
+- Delivery tracks attempt + acknowledgement state with retry and
+  terminal dead-letter classification; invalid payloads are rejected
+  at emission or recorded as classified terminal errors.
+- Consumers (the chain runtime) deduplicate by `signal_id` and make
+  run creation/advancement idempotent.
 - Signals AUTHORIZE NOTHING (fleet's §3 rule carries over).
+- Retention: delivered signals and terminal failures are cleaned on
+  a schedule (retention window configured, default bounded).
 
-## 10. Chain-binding model (decision 2: both layers)
+## 10. Chain model
 
-### 10.1 Plugin declarations (static, on PluginBase)
+### 10.1 Plugin declarations (static)
 
 ```python
-class MyPlugin(PluginBase):
-    EMITS: ClassVar[tuple[str, ...]] = ("claim_done", "queue_drained")
-    FOLLOWS: ClassVar[tuple[FollowSpec, ...]] = (
-        FollowSpec(signal="grinder:claim_done", handler="on_claim_done"),
-        FollowSpec(task_action="message", handler="on_sender_message"),
-    )
+EMITS: ClassVar[tuple[str, ...]] = ("claim_done",)
+FOLLOWS: ClassVar[tuple[FollowSpec, ...]] = (
+    FollowSpec(signal="grinder:claim_done", handler="on_claim_done"),
+    FollowSpec(task_action="message", handler="on_sender_message"),
+)
 ```
 
-Validated at load time: hook names must exist; unknown signal
-namespaces are load-warnings, not errors.
+Load-time validation: hooks must exist; unknown signal namespaces
+warn, not error.
 
-### 10.2 Workspace bindings (persisted, `workspace_chains`)
+### 10.2 Step routing (decision 13)
 
-```json
-{ "name": "claim-cleanup",
-  "steps": [
-    {"position": 1, "plugin": "grinder", "action": "message",
-     "on": {"event": "task_completed", "action": "message"}},
-    {"position": 2, "plugin": "cleaner", "follows": "grinder:claim_done",
-     "emit": true, "gate": {"setting": "auto_clean", "equals": true}}
-  ] }
-```
+Each step carries `routing`:
 
-- A step routes to ANY eligible member running the step's plugin.
-- `gate` is the per-step settings condition (resolution per §6.3).
-- Bindings referencing plugins a member lacks are visible skips.
+- `specific_account: <member>` — the configured member is the
+  target;
+- `first_eligible` — exactly one member by deterministic order:
+  **membership seniority (joined_at ASC), account name ASC
+  tie-break**, evaluated against the §12 gate. The selection is
+  **persisted before execution**; retries and recovery reuse the
+  same target, never re-select.
+- No eligible target → visible SKIPPED with a stable reason code and
+  the eligibility diagnostics of each considered member.
+- Fan-out (`all_eligible`) is out of v1.
 
-### 10.3 Step execution semantics
+### 10.3 Definition versioning (decision 14)
 
-```
-PENDING → READY → RUNNING → DONE
-                ↘ SKIPPED (plugin absent | gate denies | no eligible member)
-                ↘ FAILED (attempts exhausted; retry policy per chain)
-```
+Chain definitions carry a schema version + monotonically increasing
+revision, validated on save. A run captures an immutable snapshot at
+creation; edits affect future runs only. Active runs keep executing
+their captured definition.
 
-SKIPPED is recorded with a reason; `on_skip: "continue" | "abort"`
-is per-chain.
+### 10.4 Execution identity + recovery
 
-## 11. Pacing (decision 3: shared clock only)
+Durable identities: chain run, step execution, attempt, originating
+signal/task. `step_executions` persists attempt count, timestamps,
+target account, outcome, classified error.
 
-`RateLimitManager.set_account_group` semantics carry verbatim under
-a workspace rename: membership registers on the `workspace:<name>`
-shared clock; the last member leaving drops the stamps. Chained
-steps pace on the same clock. No step-gap knob in v1.
+Restart reconciliation (explicit policy, no blind replay): `RUNNING`
+steps reconcile against the task system's truth — a task that
+completed advances the run; a task that vanished without a terminal
+event re-queues ONLY if the step declares replay-safe handling (the
+execution context carries an idempotency key plugins may use);
+otherwise the step fails with a classified recovery error.
+Retryable vs terminal errors, max attempts, backoff, cancellation,
+prerequisite-skip, and `on_skip: continue|abort` are per-chain
+configuration; partial completion is a first-class terminal state
+(runs record which steps completed/skipped/failed).
 
-## 12. Eligibility gate (W1 policy — fleet's check order, extended)
+## 11. Execution contracts (decision 17 — clock ≠ mutex)
+
+| Contract | v1 rule | Enforced by |
+|---|---|---|
+| Rate coordination | members share the `workspace:<name>` clock/stamps; last-leaver drops them | RateLimitManager (carried semantics) |
+| Task concurrency | **unrelated tasks on different accounts run concurrently**; within one account the existing per-account lane (concurrency 1) serializes | TaskScheduler lanes (unchanged) |
+| Chain ordering | steps within a run are sequential; **independent runs may overlap** | chain runtime |
+| Mutation serialization | workspace membership/pause/generation ops under the workspace lock; per-account mutations under the account lane; preset apply is revision-checked (6.4) | service locks + revisions |
+
+The shared clock paces; it never blocks execution itself.
+
+## 12. Eligibility gate (fleet's check order, extended)
 
 1. framework safety (estop / scheduler halted)
 2. workspace enabled ∧ not paused (generation current)
@@ -312,40 +381,57 @@ steps pace on the same clock. No step-gap knob in v1.
 4. workspace cooldowns permit (most-restrictive wins)
 5. task assignment valid (generation match — the fence)
 6. prerequisites met (chain position ordering)
-7. **NEW: step's plugin assigned ∧ enabled ∧ chain gate passes —
-   including a channel binding that resolves (§5.1) for the
-   step's target**
+7. **NEW: plugin assigned ∧ enabled ∧ chain gate passes ∧ a channel
+   binding resolves AND is usable (§5.2)**
 
-Check 7 is the "if settings/plugins allows it" of the goal, plus
-the WHERE: a step with no usable channel binding on the target
-account is a visible SKIPPED, not a dead send.
+## 13. Migration (decision 5: v10) and deletion
 
-## 13. Migration mapping (decision 5: big-bang, schema v10)
+### 13.1 Profile materialization — exact algorithm
 
-Current schema: **v9**.
+For each bound account-plugin pair:
+1. resolve effective settings under **exact v9 rules**
+   (defaults ← global ← profile ← account);
+2. preserve account overrides per existing precedence;
+3. extract the reserved `channels` key into `account_plugin_channels`
+   bindings;
+4. write account-owned settings + provenance
+   (`source_preset_id`, `source_version`, `applied_at=migration`);
+5. **verify post-migration effective settings equal pre-migration
+   effective settings**;
+6. remove the old live profile reference only after verification
+   succeeds.
 
-| v9 table | → v10 |
-|---|---|
-| `sync_groups` | `workspaces` (name-keyed; generation/paused folded from `fleet_groups`) |
-| `accounts.sync_group` | `accounts.workspace` (renamed pointer) |
-| `fleet_groups` | folded INTO `workspaces`; dropped |
-| `fleet_members` | `workspace_members` (account UNIQUE — decision 4) |
-| `fleet_assignments` | `workspace_tasks` |
-| `fleet_cooldowns` | `workspace_cooldowns` (scope rename) |
-| `fleet_transitions` | `workspace_transitions` |
-| `plugin_profiles` | `presets` (scope=global; **+ version column** for update detection) |
-| `account_plugins.profile` (live binding) | **materialized**: for every bound pair, each profile key not overridden by the account layer is copied INTO `plugin_settings`; provenance set (`source_preset_id`, `source_version=1`, `applied_at=migration`); the `profile` column drops. Effective settings are preserved byte-for-byte |
-| reserved `"channels"` key in profile settings | extracted into `account_plugin_channels` bindings |
-| — (new) | `account_channels`, `account_channel_assignments`, `account_plugin_channels`, workspace-scope `presets` |
-| — (cross-store) | `PluginDataStore.drop_account(account)` added; account removal calls it |
+Unknown/obsolete/invalid values are preserved verbatim or fail the
+migration explicitly — never silently discarded.
 
-Migration test (W2 exit): a populated v9 fixture DB lands in the
-workspace shape with memberships, generations, cooldowns, effective
-settings (post-materialization) and channel bindings intact.
+### 13.2 Guarantees + tests
+
+Single-SQLite mutations run in one transaction (plugin-data is a
+separate store — see 13.3). Migration is version-gated and
+restart-safe. Test matrix: no profile; profile without account
+overrides; overlapping profile/account keys; reserved `channels`;
+multiple accounts sharing a profile; unknown/obsolete keys; repeated
+invocation; rollback halfway. Invariant: **v10 effective values ==
+v9 effective values before the profile layer is removed.**
+
+### 13.3 Cross-store account deletion (decision 18)
+
+One transaction cannot atomically span the two stores, so deletion
+is a **durable workflow** (`deletion_jobs`):
+1. mark deletion pending (durable job row); prevent new account
+   work; invalidate generations;
+2. remove account-owned records in the primary store (in one
+   transaction);
+3. invoke idempotent `PluginDataStore.drop_account(account)`;
+4. retry failures with backoff; cleanup status observable;
+5. mark complete only after both stores confirm; after bounded
+   retries, residual data is **quarantined** (flagged, retained,
+   warning surfaced) — never silently abandoned.
+
+The workflow survives process termination (resumed at boot by the
+reconciler).
 
 ## 14. API surface (decision 7: clean replace)
-
-**ControlAPI** (replaces 9 `groups_*` + 3 `fleet_*`):
 
 ```
 workspaces_list/get/create/update/delete
@@ -353,59 +439,72 @@ workspaces_add_account / remove_account / set_account
 workspaces_chains_list / chain_get / chain_set
 workspaces_tasks / workspaces_op(op)
 
-# channel + preset surface (new; accounts_* family)
 accounts_channels_list / channel_add / channel_remove / channel_set
 accounts_plugin_channels_get / set
 presets_list / get / create / update / delete / apply / detach
 presets_export / import
 ```
 
-**CLI**: `workspaces …` replaces `groups`/`fleet`; `accounts …
-channels …`, `presets …` verb groups added.
-**Simulator**: `control_mention` re-targets workspace verbs; fleet
-scenarios carry over renamed.
+**Mutation contract (every write op):** canonical identifiers/scope;
+validation + authorization; atomicity; idempotency; result shape;
+conflicts/failures; revision preconditions. Specifically:
+- channel ops: adding/removing ONE channel is distinct from
+  replacing the account's full set (separate verbs);
+- plugin bindings: set-one vs replace-all are separate verbs;
+- preset apply/update returns applied version, diff/result, and the
+  resulting configuration revision;
+- membership ops return resulting membership AND generation;
+- chain save returns the validated definition revision.
 
-## 15. UI navigation (future Flet surface — reference model)
+CLI mirrors the same verbs; `groups`/`fleet` verb groups retire.
+
+## 15. UI navigation (future Flet surface — reference)
 
 | Area | Manages |
 |---|---|
-| Global → Channels | channel policies and defaults |
-| Workspace → Channels | workspace channel organization + suggested defaults |
-| Account → Channels | the account's actual channel assignments |
-| Account → Data Presets | account-owned reusable presets |
-| Account → Plugins | installed/enabled plugins, independent configurations |
-| Account → Plugins → Plugin | settings, channel bindings, presets, data for that pair |
-| Extensions → Preset Catalog | discoverable templates + plugin-provided preset definitions |
+| Global → Channels | policies + defaults |
+| Workspace → Channels | organization + suggested defaults |
+| Account → Channels | the account's assignments (+ validity states) |
+| Account → Data Presets | account-owned presets |
+| Account → Plugins | enabled plugins, independent configurations |
+| Account → Plugins → Plugin | settings, bindings, presets, data |
+| Extensions → Preset Catalog | discoverable templates |
 
-A workspace-level view may AGGREGATE channel assignments and plugin
-setup across accounts, but editing always resolves to an explicit
-account context.
+Workspace views AGGREGATE; editing resolves to an explicit account
+context.
 
 ## 16. Carry-over vs new surface
 
-| Carries over (renamed, tests carry) | New (built + tested fresh) |
+| Carries over (renamed) | New |
 |---|---|
-| transitions tables + validators | chain runtime (W4) |
-| generation fences | `WorkspaceSignal` + `emit_signal` API |
-| reconciler 30 s idempotent passes | channel registry/assignments/bindings |
-| policy check order (§12) | preset lifecycle: apply/update/detach + provenance |
-| single-lock persist-first writer discipline | preset export/import |
-| shared-clock engine semantics | live-binding materialization migration |
-| cooldown records (scope-renamed) | `PluginDataStore.drop_account` + removal cascade fix |
-| task-terminal `plugin` field extension | workspace-scope presets |
+| transitions + validators | chain runtime + routing + snapshots |
+| generation fences | signals outbox + durable delivery |
+| reconciler passes (+ deletion-job resume) | channel validity lifecycle |
+| policy check order | preset versions + atomic apply |
+| single-lock writer discipline | membership projection invariant |
+| shared-clock semantics | mutation-contract surface |
+| cooldown records | deletion workflow + quarantine |
 
-## 17. Resolved during W0 (recorded for W1)
+## 17. W0 exit criteria — RESOLVED (rev 3)
 
-- Decision 8 revised + 9/10 added 2026-11-14 (this rev): copy-only
-  workspace layer; copy-on-apply presets; plugin-bound presets with
-  export/import. Today's live-bound profiles END at v10.
-- `TaskCompleted`/`TaskFailed` lack `plugin` — additive field lands
-  in W4's first commit.
-- Multi-workspace membership stays out (decision 4).
-- Workspace rate-policy LEVEL: out of scope v1 (pacing is
-  membership-driven, decision 3).
-- `capability.py` (`FleetTaskHandler`) deleted in W5 with its 33
-  tests; EMITS/FOLLOWS coverage replaces them.
-- Account removal deletion boundary (§7) absorbs both 2026-11-13
-  cascade gaps (plugin-data inheritance; orphaned
-  plugin_settings/plugin_states).
+- [x] One authoritative membership representation — pointer (11)
+- [x] Transactional membership move/add/remove — §3 note + §8; tests in §B of the review input adopted as W3 race tests
+- [x] Durable signal delivery + idempotent consumption — §9.2 (12)
+- [x] Deterministic per-step routing — §10.2 (13)
+- [x] Chain definition snapshot/version behavior — §10.3 (14)
+- [x] Shared clock separated from concurrency — §11 (17)
+- [x] Preset identity, uniqueness, immutable versions — §6.1-6.2 (15)
+- [x] Atomic preset apply with stale-revision protection — §6.4 (16)
+- [x] Channel validity + stale-binding behavior — §5.2
+- [x] v9→v10 effective-settings preservation algorithm + failure tests — §13.1-13.2
+- [x] Cross-store deletion workflow + recovery — §13.3 (18)
+- [x] Mutation API contracts — §14
+
+## 18. Scope guard (rev 3 §K, retained)
+
+Nothing in this spec authorizes: changes to the locked
+account/plugin ownership model; multi-workspace membership;
+automatic cross-account settings propagation; automatic preset
+updates; cross-plugin compatibility guessing; or chain fan-out in
+v1. Implementation starts only on explicit owner approval — which
+this document now awaits as its single remaining gate.

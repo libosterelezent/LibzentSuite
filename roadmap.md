@@ -79,6 +79,14 @@ Workspace → Multiple Accounts → Plugin assignment → Orchestration
 | 8 | Workspace config layer | **REVISED 2026-11-14** — copy-only workspace layer: channel default suggestions + preset templates, applied by explicit copy onto accounts. Live plugin settings are strictly account-bound — no workspace/global settings inheritance (replaces the original live workspace > account > plugin precedence) |
 | 9 | Preset semantics | **Copy-on-apply + provenance** (2026-11-14) — apply copies values into the account's own config with source_preset_id/source_version/applied_at; updates explicit; detach preserves values. Today's live-bound profiles end at v10 |
 | 10 | Preset portability | **Plugin-bound by default** (2026-11-14) — cross-plugin reuse only via explicit export/import re-validated against the destination plugin's schema |
+| 11 | Membership source of truth | **`accounts.workspace` is the sole authoritative pointer** (2026-11-14 rev 3) — workspace_members is a same-transaction derived projection, never independently writable, reconciler-checked |
+| 12 | Signal delivery | **Durable before ack, at-least-once** (rev 3) — signal/outbox row persisted first; consumers deduplicate by signal_id and are idempotent |
+| 13 | Chain target selection | **Explicit per-step routing** (rev 3) — `specific_account` + deterministic `first_eligible` (joined_at ASC, name ASC tie-break, target persisted before execution); fan-out deferred |
+| 14 | Chain definition changes | **Immutable run snapshots** (rev 3) — each run executes a validated definition snapshot captured at creation; edits affect future runs only |
+| 15 | Preset versions | **Immutable versions** (rev 3) — updating creates a new version; applied configs keep source_preset_id + source_version |
+| 16 | Preset apply concurrency | **Atomic + revision-checked** (rev 3) — stale previews conflict, never overwrite intervening edits |
+| 17 | Clock vs execution | **Four separate contracts** (rev 3) — rate coordination / task concurrency / chain ordering / mutation serialization; a shared clock is not an execution mutex |
+| 18 | Account deletion | **Durable retryable cross-store workflow** (rev 3) — deletion_jobs with observable completion, bounded retries, residual data quarantined (flagged + warned, never silently abandoned) |
 
 ## Entity mapping (what folds where)
 
