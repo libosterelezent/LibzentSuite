@@ -793,6 +793,7 @@ async def _assemble(
             credentials,
             command_prefix=getattr(credentials, "self_command_prefix", ""),
             access_manager=access,
+            audit_recorder=audit,
         )
 
     accounts = AccountManager(

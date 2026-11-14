@@ -282,6 +282,7 @@ class RealDiscordClient:
         prefix_symbol: str = "",
         prefix_provider: Any = None,
         access_checker: Any | None = None,
+        audit_recorder: Any = None,  # core.audit.AuditRecorder (C1)
     ) -> None:
         self._token = token
         self._discord: Any = None  # the discord module (set in connect)
@@ -319,6 +320,9 @@ class RealDiscordClient:
         #: can_invoke (per-account list + admin bypass, fail-closed).
         #: When wired it REPLACES the env owner-ids gate entirely.
         self._access_checker = access_checker
+        #: the C1 command-audit seam — before_invoke records one row
+        #: per authorized invocation (None on unwired stacks)
+        self._audit = audit_recorder
         self._identify_gate = identify_gate  # shared per process (factory-owned)
         #: best-effort account label for domain error messages (set by factory)
         self._account = ""
@@ -1092,6 +1096,21 @@ class RealDiscordClient:
 
         # global check: evaluated once per invocation, before parsing
         bot.add_check(self._bot_invoker_gate)
+
+        # C1: the audit hook — after checks pass, before the callback
+        # (the authorization / audit / execution separation at the
+        # library's own seam). Runs for EVERY command: the hub's verbs
+        # and (from C2 on) plugin cogs alike — one AuditRecorder row
+        # per authorized invocation (command | invoker in the note).
+        @bot.before_invoke
+        async def _audit_command_invocation(ctx) -> None:
+            if self._audit is not None:
+                self._audit.record(
+                    account=self._account or "",
+                    direction="chat",
+                    action=str(getattr(getattr(ctx, "command", None), "qualified_name", "?")),
+                    note=f"invoker={getattr(getattr(ctx, 'author', None), 'id', None)}",
+                )
 
         @bot.event
         async def on_command_error(ctx, error):
@@ -1869,6 +1888,7 @@ class RealClientFactory:
         identify_interval: float = 5.0,
         command_prefix: str = "",
         access_manager: Any = None,
+        audit_recorder: Any = None,
     ) -> None:
         self._credentials = credentials  # kept for metadata only (bot id, owner ids)
         self._logger = logger or LOG
@@ -1881,6 +1901,7 @@ class RealClientFactory:
         #: AccessManager (admin panel store) — per-account prefix +
         #: command-permission wiring; None = legacy env-only stack
         self._access_manager = access_manager
+        self._audit_recorder = audit_recorder
         #: distinct accounts this factory has EVER built a client for —
         #: reconnects rebuild already-counted accounts, so the gate's
         #: ``expected`` never ratchets down through reconnect cycles
@@ -1942,6 +1963,7 @@ class RealClientFactory:
             prefix_mode=prefix_mode,
             prefix_symbol=prefix_symbol,
             access_checker=checker,
+            audit_recorder=self._audit_recorder,
         )
         client.account = name  # enrich AccessDenied reasons, best effort
         return client
