@@ -156,26 +156,37 @@ bootstrap fleet/group closures     →     (deleted — membership written
     declarations incl. loader discovery); full suite 1,749 green;
     whole-tree mypy 456 with ZERO new errors
 
-### W2 — Persistence + big-bang migration
-[ ] Schema v10 per WORKSPACE_DESIGN §13: `workspaces`,
-    `workspace_members`, `workspace_tasks`, `workspace_chains`,
-    `workspace_transitions`, `presets` (3 scopes + version),
-    `account_channels`, `account_channel_assignments`,
-    `account_plugin_channels`; `accounts.sync_group` →
-    `accounts.workspace`; fold + drop the fleet/sync tables
-[ ] Live-binding materialization: every `account_plugins.profile`
-    binding copies its effective keys into `plugin_settings` with
-    provenance; the profile column drops; the reserved `"channels"`
-    key extracts into `account_plugin_channels`
-[ ] `PluginDataStore.drop_account(account)` — the cross-store
-    deletion boundary for account removal (fixes the inheritance
-    gap found 2026-11-13)
-[ ] Typed repositories following the Protocol patterns (see
-    `core/sync_group_manager/manager.py` + `core/fleet/service.py`
-    for the established shape)
-[ ] Migration test proves a populated v9 DB lands correctly in the
-    workspace shape — memberships, generations, cooldowns,
-    post-materialization effective settings, channel bindings
+### W2 — Persistence + big-bang migration — [x] DONE 2026-11-14 (W2 commits)
+[x] Schema v10 — DONE: the additive fold (WORKSPACE_DESIGN §13; the
+    physical DROP of v9 tables is v11, landing when W3 unwires the
+    readers, so every intermediate commit boots green): workspaces
+    (identity + folded generation/paused), accounts.workspace pointer
+    (backfilled), workspace_members projection (fleet mode/eligibility
+    LEFT-JOINed, group_managed→managed), presets (row PK +
+    UNIQUE(preset_id, version) — identity ≠ row id so immutable
+    versions fit; plugin_profiles folded with ids preserved for
+    provenance), provenance columns on account_plugins, the
+    live-binding materialization (SQLite boolean-typing handled via
+    json_each's type column — the §13.2 effective-values invariant
+    is TESTED), channels extraction into account_plugin_channels
+    (both config sources), workspace_tasks/cooldowns/transitions
+    folds (scope renames), chains/runs/step-executions/signals/
+    deletion_jobs tables (W4-ready)
+[x] Typed repositories — DONE: WorkspaceRepository (state/member
+    projection/tasks/cooldowns/history/deletion jobs; members
+    version-bumped, projection-write-only), PresetsRepository
+    (identity-scoped create, IMMUTABLE publish_version, version()
+    provenance reads, archive), AccountChannelsRepository (registry
+    observe-never-touches-selections, add-one/replace-set verb
+    split, dependency-refused deletes with named conflicts,
+    drop_account boundary). Wired on Database alongside their v9
+    predecessors
+[x] `PluginDataStore.drop_account` — DONE: idempotent, per-account,
+    refuses empty names; the cross-store deletion boundary
+[x] Migration test — DONE: populated v9 fixture (every fold source,
+    overlapping overrides, shared profiles, channels in both layers)
+    → v10 with the effective-values invariant asserted; fresh-DB and
+    idempotence paths covered (9 tests + 11 repo tests)
 
 ### W3 — WorkspaceService (the one writer)
 [ ] `core/workspace/service.py`: membership + orchestration under the
@@ -228,9 +239,10 @@ settings layer, the plugin-eligibility gate.
 
 ## Active Queue
 
-[ ] **Workspace W1 review** — the pure domain core is DONE (76
-    tests, 5 modules, mypy strict clean); W2 (persistence + the
-    big-bang v10 migration) is next
+[ ] **Workspace W3** — WorkspaceService (the one writer) + the
+    `workspaces_*` ControlAPI/CLI surface replacing `groups_*`/
+    `fleet_*`, then v11 drops the unwired v9 tables — the next
+    implementation phase
 [ ] **FastAPI core API** — replace the deleted dashboard's REST surface
     with FastAPI routers calling the existing ControlAPI. Pydantic
     request/response models. Native WebSocket for live events.
