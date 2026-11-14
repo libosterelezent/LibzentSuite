@@ -61,8 +61,8 @@ from .plugin_manager import PluginManager
 from .plugin_state import PluginStateService
 from .rate_limit_manager import RateLimitManager
 from .settings_manager import SettingsManager
-from .sync_group_manager import SyncGroupManager
 from .task_scheduler import TaskScheduler
+from .workspace.service import WorkspaceService
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -209,11 +209,9 @@ class Framework:
         credential_service: Any = None,
         cooldowns: Any = None,
         plugin_state: Any = None,
-        sync_groups: Any = None,
-        fleet: Any = None,
+        workspaces: Any = None,
         plugin_data: Any = None,
         cooldown_resync_stop: Callable[[], Any] | None = None,
-        fleet_reconciler_stop: Callable[[], Any] | None = None,
         claims_stderr: bool = False,
     ) -> None:
         self.api = api
@@ -232,15 +230,13 @@ class Framework:
         self.credential_service = credential_service
         self.cooldowns = cooldowns
         self.plugin_state = plugin_state
-        self.sync_groups = sync_groups
-        #: PHASE 9 fleet orchestration (service + policy gate)
-        self.fleet = fleet
+        #: W3 workspace orchestration (the one writer)
+        self.workspaces = workspaces
         #: PHASE 10 AccountPluginData store (B3)
         self.plugin_data = plugin_data
         #: stops the periodic cooldown-resync task (set by _assemble)
         self._cooldown_resync_stop = cooldown_resync_stop
-        #: stops the periodic fleet-reconciler task (set by _assemble)
-        self._fleet_reconciler_stop = fleet_reconciler_stop
+
         # this framework holds one CLAIM on the process-global stderr
         # pipeline — shutdown releases it (the last release stops)
         self._claims_stderr = claims_stderr
@@ -269,8 +265,6 @@ class Framework:
             ("scheduler", lambda: self.scheduler.stop(drain=True)),
             ("cooldown resync", self._stop_cooldown_resync),
             # stop the reconciler's periodic pass BEFORE the drains so its
-            # tail fleet events still reach subscribers mid-teardown
-            ("fleet reconciler", self._stop_fleet_reconciler),
             ("bus drain", self.bus.drain),
             ("accounts", self.accounts.stop_all),
             # SECOND drain: stop_all emits AccountDisconnected (and plugin
@@ -338,20 +332,6 @@ class Framework:
             raise
         except Exception as exc:
             ROOT_LOGGER.warning("cooldown resync shutdown failed: %s: %s", type(exc).__name__, exc)
-
-    async def _stop_fleet_reconciler(self) -> None:
-        stop = self._fleet_reconciler_stop
-        if stop is None:
-            return
-        self._fleet_reconciler_stop = None  # idempotent
-        try:
-            outcome = stop()
-            if inspect.iscoroutine(outcome):
-                await outcome
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            ROOT_LOGGER.warning("fleet reconciler shutdown failed: %s: %s", type(exc).__name__, exc)
 
     async def _close_plugin_data(self) -> None:
         if self.plugin_data is not None:
@@ -577,17 +557,22 @@ async def _assemble(
     # is the sole source of truth — the config file never re-adds it.
     await _seed_config_defaults(limiter, config, database)
 
-    # Sync groups: persistent membership owner, sits BETWEEN the accounts
-    # and the limiter (AccountManager -> SyncGroupManager -> RateLimitManager).
-    # Runtime pacing itself stays in the limiter; this manager only keeps
-    # the engine's account->group metadata in sync with persistence.
-    sync_groups = SyncGroupManager(
-        database.sync_groups,
-        ServiceLogger(logs, "sync-groups"),
-        accounts_repo=database.accounts,
+    # W3: the workspace service replaces SyncGroupManager + FleetService
+    # (one writer, no seam closures — WORKSPACE_DESIGN). The v9 modules
+    # stay importable and tested until W5 deletes them.
+    workspaces = WorkspaceService(
+        database.workspaces,
+        accounts=database.accounts,
+        channels_repo=database.account_channels,
+        presets_repo=database.presets,
+        provenance=database.account_plugins,
+        plugin_data=plugin_data_store,
+        settings_writer=database.plugins,
         limiter=limiter,
+        publisher=lambda ev: ROOT_LOGGER.debug("workspace event: %s %s", ev.kind, ev.workspace),
     )
-    await sync_groups.load()
+    await workspaces.load()
+    await workspaces.sync_runtime()
 
     settings = SettingsManager(
         bus,
@@ -684,7 +669,7 @@ async def _assemble(
         plugin_state=plugin_state,
         plugin_data=plugin_data_store,  # PHASE 10: data_* plugin API
         lifecycle=LifecycleGovernor(),  # PHASE-4 (S4): anti-thrash defaults
-        sync_groups=sync_groups,
+        sync_groups=None,  # W3: workspace membership rides WorkspaceService
         account_plugins=database.account_plugins,  # capability source
     )
     cleanups.append(("accounts", accounts.stop_all))
@@ -775,92 +760,6 @@ async def _assemble(
 
     scheduler.start()
 
-    # PHASE 9 (rollout C, spec §4): the fleet gate — one policy check
-    # before the scheduler dispatches, revalidated after the limiter
-    # grant. A paused group cannot start new work; policy changes never
-    # bypass pacing (the limiter still gates every dispatch AFTER the
-    # guard). Membership itself stays with SyncGroupManager — the fleet
-    # service layers mode/eligibility/assignments on top through seams.
-    from core.event_bus import AccountConnected, AccountDisconnected, FleetStateChanged
-    from core.fleet import (
-        OBS_ACCOUNT_CONNECTED,
-        OBS_ACCOUNT_DISCONNECTED,
-        FleetObservations,
-        FleetPolicy,
-        FleetService,
-        Observation,
-    )
-
-    async def _fleet_group_exists(name: str) -> bool:
-        return await sync_groups.get_group_by_name(name) is not None
-
-    async def _fleet_join(account: str, group: str) -> None:
-        await sync_groups.sync_membership(account, group)
-
-    async def _fleet_leave(account: str) -> None:
-        await sync_groups.sync_membership(account, None)
-
-    fleet = FleetService(
-        database.fleet,
-        group_exists=_fleet_group_exists,
-        membership_join=_fleet_join,
-        membership_leave=_fleet_leave,
-        # PHASE 9 §3: persisted first (service), then published — the
-        # dashboard forwards these to WS clients as "fleet" frames so
-        # the Fleet Hub converges without polling
-        publisher=lambda ev: bus.publish_nowait(
-            FleetStateChanged(
-                account=ev.account_id or "",
-                kind=ev.kind,
-                group=ev.group_id,
-                reason=ev.reason,
-                generation=ev.generation,
-            )
-        ),
-    )
-    await fleet.load()
-    scheduler.set_dispatch_guard(FleetPolicy(fleet).scheduler_guard())
-
-    # rollout D: the observation intake — bus connectivity events flow
-    # in as generic observations (account-scoped, deduped); parser-side
-    # observations arrive through plugin handlers calling the intake
-    fleet_observations = FleetObservations(fleet)
-
-    async def _on_account_event(event) -> None:
-        kind = (
-            OBS_ACCOUNT_CONNECTED
-            if isinstance(event, AccountConnected)
-            else OBS_ACCOUNT_DISCONNECTED
-        )
-        await fleet_observations.observe(
-            Observation(
-                source_account=str(event.account or ""),
-                observation_type=kind,
-                message_id=f"{kind}@{event.ts}",
-                observed_at=float(event.ts),
-                reason=str(getattr(event, "reason", "") or kind),
-            )
-        )
-
-    bus.subscribe(AccountConnected, _on_account_event)
-    bus.subscribe(AccountDisconnected, _on_account_event)
-
-    # rollout G (§9): the reconciler — boot pass + 30s loop; repairs
-    # crash leftovers and drift through the service's transition checks
-    from core.fleet import FleetReconciler
-
-    async def _fleet_account_exists(name: str) -> bool:
-        return await database.accounts.get(name) is not None
-
-    fleet_reconciler = FleetReconciler(
-        fleet,
-        account_exists=_fleet_account_exists,
-        group_exists=_fleet_group_exists,
-    )
-    await fleet_reconciler.reconcile()
-    fleet_reconciler.start()
-    cleanups.append(("fleet reconciler", fleet_reconciler.stop))
-
     if simulation_runner is None:
         try:
             from adapters.simulator import SimulationRunner
@@ -883,8 +782,7 @@ async def _assemble(
         database=database,
         credentials_svc=credential_service,
         cooldowns=cooldowns,
-        sync_groups=sync_groups,
-        fleet=fleet,
+        workspaces=workspaces,
         plugin_data=plugin_data_store,
         started_at=_time.time(),
     )
@@ -911,13 +809,11 @@ async def _assemble(
         database=database,
         credentials=credentials,
         config=config,
-        fleet=fleet,
+        workspaces=workspaces,
         plugin_data=plugin_data_store,
         credential_service=credential_service,
         cooldowns=cooldowns,
         plugin_state=plugin_state,
-        sync_groups=sync_groups,
         cooldown_resync_stop=_stop_cooldown_resync_task,
-        fleet_reconciler_stop=fleet_reconciler.stop,
         claims_stderr=stderr_claimed,
     )

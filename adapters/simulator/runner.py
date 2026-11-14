@@ -199,8 +199,8 @@ def _load_stack_modules() -> SimpleNamespace:
         from core.plugin_manager import PluginManager
         from core.plugin_state import PluginStateService
         from core.rate_limit_manager import MIN_ACTION_INTERVAL, RateLimitManager
-        from core.sync_group_manager import SyncGroupManager
         from core.task_scheduler import TaskScheduler
+        from core.workspace.service import WorkspaceService
         from database.db import Database
     except (ImportError, AttributeError) as exc:
         # AttributeError covers half-landed namespace packages (a directory
@@ -216,7 +216,7 @@ def _load_stack_modules() -> SimpleNamespace:
         PluginManager=PluginManager,
         PluginStateService=PluginStateService,
         RateLimitManager=RateLimitManager,
-        SyncGroupManager=SyncGroupManager,
+        WorkspaceService=WorkspaceService,
         TaskScheduler=TaskScheduler,
         Database=Database,
         floor=float(MIN_ACTION_INTERVAL),
@@ -360,15 +360,19 @@ class SimulationRunner:
                 lane_prefixrate=_SIM_LANE_PREFIXRATE,
             )
             await limiter.load_persisted()
-            # sync groups: membership owner between accounts and the
-            # limiter, exactly as the production bootstrap wires it
-            sync_groups = mods.SyncGroupManager(
-                db.sync_groups,
-                log_sync_groups,
-                accounts_repo=db.accounts,
+            # W3: the workspace service replaces sync groups + fleet in
+            # the production bootstrap; the sim stack mirrors it (the
+            # scenarios' control_mention path rides the API surface)
+            workspaces = mods.WorkspaceService(
+                db.workspaces,
+                accounts=db.accounts,
+                channels_repo=db.account_channels,
+                presets_repo=db.presets,
+                provenance=db.account_plugins,
                 limiter=limiter,
             )
-            await sync_groups.load()
+            await workspaces.load()
+            await workspaces.sync_runtime()
             audit = mods.AuditRecorder(db.audit)
             # QUEUED PERSISTENCE (production parity): drain workers for the
             # log/audit rows BEFORE any traffic; stopped in teardown BEFORE
@@ -469,7 +473,7 @@ class SimulationRunner:
                 credential_service=credential_service,
                 cooldowns=cooldowns,
                 plugin_state=plugin_state,
-                sync_groups=sync_groups,
+                sync_groups=None,  # W3: workspace membership rides WorkspaceService
             )
             await accounts.load()
             box["send"] = accounts.send_hook  # fill the seam BEFORE start()
@@ -487,7 +491,7 @@ class SimulationRunner:
                 logs=logger,
                 audit=audit,
                 credentials=credentials,
-                sync_groups=sync_groups,
+                workspaces=workspaces,
             )
             from core.remote_control import RemoteControl
 
