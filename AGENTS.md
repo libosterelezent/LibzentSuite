@@ -11,7 +11,7 @@ These instructions apply to the whole repository. They describe how to make chan
 5. **Preserve safety and data semantics.** Do not bypass validation, authorization, persistence, task scheduling, rate limiting, audit logging, generation/version checks, or server-provided limits in order to simplify a feature or its UI.
 6. **Prefer verified behavior to assumptions.** Distinguish confirmed facts, intended behavior, and hypotheses. When requirements conflict materially, surface the conflict instead of silently inventing a product decision. Resolve minor technical details independently when they do not change product behavior or public contracts.
 7. **Respect the task boundary, not an arbitrary file list.** A cross-cutting fix may need coordinated updates to source, tests, contracts, and documentation. Change the smallest set of related files needed; preserve unrelated work and never rewrite unrelated user changes.
-8. **Keep docs always updated and synced.** Reflect the changes that happens in project, evaluate the type of change and respectively update the most relative file/folder the change is subjected to, be either README.md, ROADMAP.md files and `docs/`, `knowledgebase/` folders.
+8. **Keep docs always updated and synced.** Reflect the changes that happens in project, evaluate the type of change and respectively update the most relative file/folder the change is subjected to, be either README.md, ROADMAP.md files and `docs/`, `knowledgebase/` folders, once any roadmap item is marked completed migrate it into knowledgebase and docs as a historical record.
 
 ## 2. Readability and maintainability
 
