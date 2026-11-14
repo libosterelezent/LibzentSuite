@@ -97,15 +97,17 @@ bootstrap fleet/group closures     →     (deleted — membership written
 
 ## Phases
 
-### W0 — Spec + contracts *(root docs only)* — [ ] NEXT
-[ ] `WORKSPACE_DESIGN.md` (repo root — `docs/` is user-facing
-    reference only, never plans, per AGENTS.md §5): entity model +
-    ERD, the decision record, trigger catalog (which task-terminal
-    events, which plugin signals), chain-binding model, settings
-    precedence rules, migration mapping
-[ ] Knowledgebase append-only addendum: groups/fleet supersession
-    notice with the decision record (already drafted locally)
-[ ] Owner review and approval of the spec before any code moves
+### W0 — Spec + contracts *(root docs only)*
+[x] `WORKSPACE_DESIGN.md` (repo root) — DONE 2026-11-14: entity model +
+    ERD, the decision record, trigger catalog (with the
+    TaskCompleted/TaskFailed `plugin`-field gap named for W4), chain
+    + step-state model (SKIPPED is visible, never silent), settings
+    precedence chain, v10 migration mapping, `workspaces_*` surface,
+    carry-over vs new-surface table, W1-resolved items
+[x] Knowledgebase append-only addendum — DONE 2026-11-13:
+    `knowledgebase/WORKSPACE_SUPERSESSION.md` (local, gitignored area)
+[ ] Owner review and approval of the spec before any code moves —
+    **the remaining W0 gate: WORKSPACE_DESIGN.md awaits review**
 
 ### W1 — Domain core *(pure, no I/O)*
 [ ] `core/workspace/models.py` — WorkspaceRecord, WorkspaceMember
@@ -178,8 +180,8 @@ settings layer, the plugin-eligibility gate.
 
 ## Active Queue
 
-[ ] **Workspace W0** — write `WORKSPACE_DESIGN.md` (the spec phase
-    above) — the next action in this repository
+[ ] **Workspace W0 review** — `WORKSPACE_DESIGN.md` is written and
+    awaiting owner approval (the last W0 item); W1 starts on approval
 
 [ ] **FastAPI core API** — replace the deleted dashboard's REST surface
     with FastAPI routers calling the existing ControlAPI. Pydantic
