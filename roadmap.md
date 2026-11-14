@@ -116,8 +116,9 @@ bootstrap fleet/group closures     →     (deleted — membership written
     carry-over vs new-surface table, W1-resolved items
 [x] Knowledgebase append-only addendum — DONE 2026-11-13:
     `knowledgebase/WORKSPACE_SUPERSESSION.md` (local, gitignored area)
-[ ] Owner review and approval of the spec before any code moves —
-    **the remaining W0 gate: WORKSPACE_DESIGN.md awaits review**
+[x] Owner review and approval of the spec before any code moves —
+    DONE 2026-11-14: the owner's go ("proceed with the roadmap and
+    start the implementation process") opened W1
 
 ### W1 — Domain core *(pure, no I/O)* — [x] DONE 2026-11-14 (see W1 commits)
 [x] `core/workspace/models.py` — DONE: eligibility/task vocabulary
