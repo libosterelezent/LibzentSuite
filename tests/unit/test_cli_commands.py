@@ -918,7 +918,7 @@ class TestHelpCommand(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             set(HELP),
             {"help", "status", "accounts", "credentials", "cooldowns",
-             "plugins", "groups", "ratelimit", "tasks",
+             "plugins", "workspaces", "ratelimit", "tasks",
              "simulation", "logs", "audit", "estop", "quit"},
         )
         for name, (sig, desc) in HELP.items():

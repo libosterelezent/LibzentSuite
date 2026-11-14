@@ -358,29 +358,29 @@ class TestRestartRestoresAssignments(AccountPluginsE2EBase):
 # -------------------------------------------------- 8 (sync group isolation)
 class TestSyncGroupIsolation(AccountPluginsE2EBase):
 
-    async def test_8_groups_and_assignments_are_independent(self) -> None:
+    async def test_8_workspace_membership_and_assignments_are_independent(self) -> None:
         fw, attach_calls = await self.boot()
         api = fw.api
         await api.accounts_add(
             {"name": "alpha", "plugins": [PROBE, SPY]})
 
-        # group move does not change assignments
-        await api.groups_create({"name": "grinders"})
-        await api.groups_set_account("alpha", "grinders")
+        # a workspace move does not change assignments
+        await api.workspaces_create({"name": "grinders"})
+        await api.workspaces_add_account("alpha", "grinders")
         row = await self.account_row(api, "alpha")
-        self.assertEqual(row["sync_group"], "grinders")
+        self.assertEqual(row["workspace"], "grinders")
         self.assertEqual(row["assigned_plugins"], [PROBE, SPY])
         self.assertEqual(await self.attached(api, "alpha"),
                          {PROBE, SPY})
 
-        # assignment change does not change the group
+        # assignment change does not change the membership
         await api.accounts_plugins_set("alpha", [PROBE])
         row = await self.account_row(api, "alpha")
-        self.assertEqual(row["sync_group"], "grinders")
+        self.assertEqual(row["workspace"], "grinders")
         self.assertEqual(row["assigned_plugins"], [PROBE])
-        snapshot = await api.groups_snapshot("grinders")
-        self.assertEqual([m["name"] for m in snapshot["members"]], ["alpha"])
-        self.assertEqual(snapshot["member_count"], 1)
+        got = await api.workspaces_get("grinders")
+        self.assertEqual(sorted(got["members"]), ["alpha"])
+        self.assertEqual(got["member_count"], 1)
 
 
 # ------------------------------------------------------ 9 (plugin settings)
