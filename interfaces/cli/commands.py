@@ -65,8 +65,6 @@ __all__ = [
     "format_cooldowns",
     "format_credential_status",
     "format_effective",
-    "format_group_snapshot",
-    "format_groups",
     "format_history",
     "format_import_report",
     "format_logs",
@@ -124,12 +122,12 @@ HELP: dict[str, tuple[str, str]] = {
         "plugin management ('clear' resets one setting to its lower"
         " layer/default, unmasking profile + plugin defaults)",
     ),
-    "groups": (
-        "list|show <group>|create <name> [description]"
-        "|update <group> <field> <value>|delete <group> [--detach-members]"
-        "|add-member <group> <account>|remove-member <group> <account>"
-        "|set-account <account> <group>|clear-account <account>",
-        "sync groups (shared pacing membership; update fields: name, description, enabled)",
+    "workspaces": (
+        "list|show <workspace>|create <name> [description]"
+        "|delete <workspace> [--detach-members]"
+        "|add-member <workspace> <account>|remove-member <account>"
+        "|pause <workspace>|resume <workspace>|tasks [workspace [status]]",
+        "workspaces (membership + orchestration; the shared pacing clock rides membership)",
     ),
     "ratelimit": (
         "show|stats|set <action> <interval> [jitter_min jitter_max] [level owner]"
@@ -232,8 +230,8 @@ async def run_command(api: Any, line: str) -> str | None:
         return await _cooldowns_group(api, args)
     if cmd == "plugins":
         return await _plugins_group(api, args)
-    if cmd == "groups":
-        return await _groups_group(api, args)
+    if cmd == "workspaces":
+        return await _workspaces_group(api, args)
     if cmd == "ratelimit":
         return await _ratelimit_group(api, args)
     if cmd == "tasks":
@@ -299,16 +297,16 @@ _PLUGINS_USAGE = {
     "set": "plugins set <account> <plugin> <key> <value>",
     "clear": "plugins clear <account> <plugin> <key>",
 }
-_GROUPS_USAGE = {
-    "list": "groups list",
-    "show": "groups show <group>",
-    "create": "groups create <name> [description]",
-    "update": "groups update <group> <field> <value>",
-    "delete": "groups delete <group> [--detach-members]",
-    "add-member": "groups add-member <group> <account>",
-    "remove-member": "groups remove-member <group> <account>",
-    "set-account": "groups set-account <account> <group>",
-    "clear-account": "groups clear-account <account>",
+_WORKSPACES_USAGE = {
+    "list": "workspaces list",
+    "show": "workspaces show <workspace>",
+    "create": "workspaces create <name> [description]",
+    "delete": "workspaces delete <workspace> [--detach-members]",
+    "add-member": "workspaces add-member <workspace> <account>",
+    "remove-member": "workspaces remove-member <account>",
+    "pause": "workspaces pause <workspace>",
+    "resume": "workspaces resume <workspace>",
+    "tasks": "workspaces tasks [workspace [status]]",
 }
 _RATELIMIT_USAGE = {
     "show": "ratelimit show",
@@ -357,7 +355,7 @@ def _usage_for(ctx: str) -> str:
     table = {
         "accounts": _ACCOUNTS_USAGE,
         "plugins": _PLUGINS_USAGE,
-        "groups": _GROUPS_USAGE,
+        "workspaces": _WORKSPACES_USAGE,
         "ratelimit": _RATELIMIT_USAGE,
         "tasks": _TASKS_USAGE,
         "credentials": _CREDENTIALS_USAGE,
@@ -575,67 +573,72 @@ async def _plugins_group(api: Any, args: list[str]) -> str:
     raise UsageError(f"plugins: unknown subcommand {sub!r}")  # pragma: no cover
 
 
-async def _groups_group(api: Any, args: list[str]) -> str:
-    """groups list|show|create|update|delete|add-member|remove-member|
-    set-account|clear-account (thin wrappers over ControlAPI)."""
-    sub, rest = _sub(_GROUPS_USAGE, args, "groups")
-    ctx = f"groups {sub}"
+async def _workspaces_group(api: Any, args: list[str]) -> str:
+    """workspaces list|show|create|delete|add-member|remove-member|
+    pause|resume|tasks (thin wrappers over ControlAPI)."""
+    sub, rest = _sub(_WORKSPACES_USAGE, args, "workspaces")
+    ctx = f"workspaces {sub}"
     if sub == "list":
         _exact(rest, 0, ctx)
-        return format_groups(await api.groups_list())
+        rows = await api.workspaces_list()
+        if not rows:
+            return "no workspaces"
+        return "\n".join(
+            f"{row['name']:<24} members={row.get('member_count', 0)}"
+            f" paused={'yes' if row.get('paused') else 'no'}"
+            f" gen={row.get('generation', 1)}"
+            for row in rows
+        )
     if sub == "show":
-        return format_group_snapshot(await api.groups_snapshot(_exact(rest, 1, ctx)))
+        workspace = _exact(rest, 1, ctx)
+        return _result(await api.workspaces_get(workspace), verb="workspace")
     if sub == "create":
         if not rest:
-            raise UsageError(f"groups create: needs a name — usage: {_GROUPS_USAGE['create']}")
+            raise UsageError(
+                f"workspaces create: needs a name — usage: {_WORKSPACES_USAGE['create']}"
+            )
         payload: dict[str, Any] = {"name": rest[0]}
         if rest[1:]:
             payload["description"] = " ".join(rest[1:])
-        return _result(await api.groups_create(payload, surface="cli"), verb="created")
-    if sub == "update":
-        group, field, value = _exact(rest, 3, ctx)
-        if field not in ("name", "description", "enabled"):
-            raise UsageError(
-                f"groups update: unknown field {field!r} — expected name|description|enabled"
-            )
-        payload = {"enabled": _on_off(value, ctx)} if field == "enabled" else {field: value}
-        return _result(
-            await api.groups_update(group, payload, surface="cli"),
-            verb="updated",
-        )
+        return _result(await api.workspaces_create(payload, surface="cli"), verb="created")
     if sub == "delete":
         detach = "--detach-members" in rest
         rest = [token for token in rest if token != "--detach-members"]
-        group = _exact(rest, 1, ctx)
+        workspace = _exact(rest, 1, ctx)
         return _result(
-            await api.groups_delete(group, detach_members=detach, surface="cli"),
+            await api.workspaces_delete(workspace, detach_members=detach, surface="cli"),
             verb="deleted",
         )
     if sub == "add-member":
-        group, account = _exact(rest, 2, ctx)
+        workspace, account = _exact(rest, 2, ctx)
         return _result(
-            await api.groups_add_account(group, account, surface="cli"),
+            await api.workspaces_add_account(account, workspace, surface="cli"),
             verb="member added",
         )
     if sub == "remove-member":
-        group, account = _exact(rest, 2, ctx)
-        return _result(
-            await api.groups_remove_account(group, account, surface="cli"),
-            verb="member removed",
-        )
-    if sub == "set-account":
-        account, group = _exact(rest, 2, ctx)
-        return _result(
-            await api.groups_set_account(account, group, surface="cli"),
-            verb="group set",
-        )
-    if sub == "clear-account":
         account = _exact(rest, 1, ctx)
         return _result(
-            await api.groups_clear_account(account, surface="cli"),
-            verb="group cleared",
+            await api.workspaces_remove_account(account, surface="cli"),
+            verb="member removed",
         )
-    raise UsageError(f"groups: unknown subcommand {sub!r}")  # pragma: no cover
+    if sub == "pause":
+        workspace = _exact(rest, 1, ctx)
+        return _result(await api.workspaces_pause(workspace, surface="cli"), verb="paused")
+    if sub == "resume":
+        workspace = _exact(rest, 1, ctx)
+        return _result(await api.workspaces_resume(workspace, surface="cli"), verb="resumed")
+    if sub == "tasks":
+        workspace = rest[0] if rest else None
+        status = rest[1] if len(rest) > 1 else None
+        rows = await api.workspaces_tasks(workspace=workspace, status=status)
+        if not rows:
+            return "no workspace tasks"
+        return "\n".join(
+            f"{row['id']:<14} {row['workspace']:<16} {row['status']:<10}"
+            f" task={row['task_id']} account={row.get('account') or '-'}"
+            for row in rows
+        )
+    raise UsageError(f"unknown workspaces sub-command {sub!r}")  # pragma: no cover
 
 
 async def _ratelimit_group(api: Any, args: list[str]) -> str:
@@ -946,46 +949,6 @@ def format_plugin_state(states: list[dict]) -> str:
         lines.append(f"  {flag} {state.get('name', '?')}{suffix}")
         for key, value in sorted((state.get("settings") or {}).items()):
             lines.append(f"      {key} = {value!r}")
-    return "\n".join(lines)
-
-
-def format_groups(groups: list[dict]) -> str:
-    """Sync groups payload (api.groups_list) -> name, members, description."""
-    if not groups:
-        return "  (no sync groups — 'groups create <name>')"
-    lines: list[str] = []
-    for group in groups:
-        count = group.get("member_count", 0)
-        flag = "" if group.get("enabled", True) else " [disabled]"
-        desc = group.get("description") or ""
-        lines.append(
-            f"  {_col(str(group.get('name', '?')), 18)}{count} member(s){flag}"
-            + (f" — {desc}" if desc else "")
-        )
-    return "\n".join(lines)
-
-
-def format_group_snapshot(snapshot: dict) -> str:
-    """Group snapshot (api.groups_snapshot) -> the full group page."""
-    lines = [
-        f"Group: {snapshot.get('name', '?')}  (id={snapshot.get('id', '?')})",
-        f"  Members: {snapshot.get('member_count', 0)}"
-        f"  pacing key: {snapshot.get('pacing_key', '-')}",
-    ]
-    desc = snapshot.get("description") or ""
-    if desc:
-        lines.append(f"  Description: {desc}")
-    lines.append("  Enabled: " + ("yes" if snapshot.get("enabled", True) else "no"))
-    members = snapshot.get("members") or []
-    if members:
-        for member in members:
-            if isinstance(member, dict):
-                status = member.get("status") or "-"
-                lines.append(f"    {_col(str(member.get('name', '?')), 18)}{status}")
-            else:
-                lines.append(f"    {member}")
-    else:
-        lines.append("    (none — accounts join with 'groups add-member')")
     return "\n".join(lines)
 
 

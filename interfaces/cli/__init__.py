@@ -16,8 +16,6 @@ from .commands import (
     format_cooldowns,
     format_credential_status,
     format_effective,
-    format_group_snapshot,
-    format_groups,
     format_history,
     format_import_report,
     format_logs,
