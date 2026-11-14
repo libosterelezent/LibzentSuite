@@ -14,7 +14,9 @@ multi-name form (``rollstart <p1> <p2> <p3>``-shaped).
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any
+
+from discord.ext import commands as _ext_commands
 
 from core.event_bus import Event
 from core.plugin_base import (
@@ -25,6 +27,7 @@ from core.plugin_base import (
     PluginContext,
 )
 from core.settings_manager import Setting
+
 
 class ProbePlugin(PluginBase):
     """Minimal well-formed plugin (settings + declared commands)."""
@@ -43,7 +46,7 @@ class ProbePlugin(PluginBase):
     def __init__(self) -> None:
         #: the live PluginContext of the current activation — command
         #: handlers reuse it (stashed on load like any stateful plugin)
-        self._ctx: Optional[PluginContext] = None
+        self._ctx: PluginContext | None = None
 
     # ------------------------------------------------------------ lifecycle
     async def on_load(self, ctx: PluginContext) -> None:
@@ -75,23 +78,23 @@ class ProbePlugin(PluginBase):
 
     # -------------------------------------------------------- self-commands
     async def _cmd_probeinfo(self, ctx: CommandContext,
-                             args: List[str]) -> str:
+                             args: list[str]) -> str:
         """One-line status reply through the paced pipeline."""
         return "probe ok"
 
     async def _cmd_probeset(self, ctx: CommandContext,
-                            args: List[str]) -> str:
+                            args: list[str]) -> str:
         """Positional-grammar demo: everything arrives typed+validated
         in ``ctx.parsed`` — the handler never parses strings itself."""
-        p: Dict[str, Any] = ctx.parsed
+        p: dict[str, Any] = ctx.parsed
         return (f"probe set: name={p.get('name')} mode={p.get('mode')} "
                 f"count={p.get('count')} note={p.get('note')!r}")
 
     async def _cmd_probestart(self, ctx: CommandContext,
-                              args: List[str]) -> str:
+                              args: list[str]) -> str:
         """Greedy-args demo: consumes every remaining token as a list
         (multi-target commands) with per-item verdicts, original-style."""
-        names: List[str] = ctx.parsed.get("names") or []
+        names: list[str] = ctx.parsed.get("names") or []
         started = [n for n in names if not n.startswith("x")]
         skipped = [n for n in names if n.startswith("x")]
         parts = [f"started: {', '.join(started)}" if started else "",
@@ -100,6 +103,29 @@ class ProbePlugin(PluginBase):
 
     #: declared LAST: the handler names above already exist in the class
     #: namespace (a class body is sequential)
+    #: C2 (migration window): the CONVERGED declaration alongside the
+    #: legacy COMMANDS — the cog host builds this per (account, plugin)
+    #: with the toolbox injected; typed params replace ArgSpec grammar
+    class _ProbeCog(_ext_commands.Cog):
+        """The probe command face in converged form (typed params)."""
+
+        def __init__(self, *, services):
+            self.services = services
+
+        @_ext_commands.command(name="probeset_cog")
+        async def probeset_cog(self, ctx, name: str, mode: str, count: int,
+                               note: str = "") -> None:
+            await ctx.send(
+                f"set {name}:{mode}:{count}:{note or '-'}"
+                f" on {self.services.account}"
+            )
+
+        @_ext_commands.command(name="probestart_cog")
+        async def probestart_cog(self, ctx, names: str) -> None:
+            await ctx.send(f"start {names} on {self.services.account}")
+
+    COG = _ProbeCog
+
     COMMANDS = (
         CommandSpec(
             name="probeinfo",
