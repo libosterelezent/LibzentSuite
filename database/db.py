@@ -27,6 +27,7 @@ import time
 from typing import TYPE_CHECKING
 
 from .connection import DatabaseConnection, DatabaseError
+from .repositories.account_channels import AccountChannelsRepository
 from .repositories.account_plugins import AccountPluginsRepository
 from .repositories.accounts import AccountsRepository
 from .repositories.cache import CacheRepository
@@ -37,10 +38,12 @@ from .repositories.kv import KvRepository
 from .repositories.logs import AuditRepository, LogRepository
 from .repositories.plugin_profiles import PluginProfilesRepository
 from .repositories.plugins import PluginRepository
+from .repositories.presets import PresetsRepository
 from .repositories.rate_policies import RatePolicyRepository
 from .repositories.settings import AccountSettingsRepository
 from .repositories.sync_groups import SyncGroupsRepository
 from .repositories.tasks import TaskHistoryRepository
+from .repositories.workspaces import WorkspaceRepository
 from .schema import MIGRATIONS, latest_version
 
 LOG = logging.getLogger("libzent.database")
@@ -80,6 +83,12 @@ class Database:
         self.credentials = CredentialsRepository(self)
         self.cooldowns = CooldownRepository(self)
         self.fleet = FleetRepository(self)
+        # workspace unification (W2): the new projection + template +
+        # channel layers, wired alongside their v9 predecessors until
+        # W3 swaps the surfaces and v11 drops the old tables
+        self.workspaces = WorkspaceRepository(self)
+        self.presets = PresetsRepository(self)
+        self.account_channels = AccountChannelsRepository(self)
 
     @property
     def path(self) -> str:
