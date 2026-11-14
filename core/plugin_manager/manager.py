@@ -190,6 +190,11 @@ class PluginManager:
         # source (last-wins across test-built managers — see commands.py).
         # The attribute form lets tests substitute a private hub.
         self.command_hub = COMMAND_HUB
+        #: C2: the cog host — when wired, attach/detach drives
+        #: add_cog/remove_cog per (account, plugin); COG-declaring
+        #: plugins ride it, COMMANDS plugins keep the hub path until
+        #: the flip
+        self.cog_host = None
         COMMAND_HUB.bind(self)
 
     # ------------------------------------------------------------- discovery
@@ -562,6 +567,29 @@ class PluginManager:
             self._loader._records.pop(name, None)
         self._logger.info("plugin %s unloaded (detached from %d account(s))", name, detached)
         return {"plugin": name, "detached_accounts": detached}
+
+    async def host_cog(self, account: str, plugin: str, bot: Any) -> Any:
+        """C2: host the plugin's COG on the account's Bot (the host
+        builds the instance with the toolbox injected). Returns the
+        cog, or None when the plugin declares no COG / no host is
+        wired. Assignment ∧ enabled gating rides attach/detach: the
+        CALLER only invokes this on the attach path."""
+        host = getattr(self, "cog_host", None)
+        cog_class = None
+        runtimes = self._accounts.get(account, {})
+        runtime = runtimes.get(plugin)
+        if runtime is not None:
+            cog_class = getattr(runtime.instance, "COG", None)
+        if host is None or cog_class is None or bot is None:
+            return None
+        return await host.attach(bot, account, plugin, cog_class)
+
+    async def unhost_cog(self, account: str, plugin: str) -> bool:
+        """C2: the detach-side remove_cog (idempotent)."""
+        host = getattr(self, "cog_host", None)
+        if host is None:
+            return False
+        return await host.detach(account, plugin)
 
     def detach_account(self, account: str) -> None:
         """Drop the account's instances WITHOUT firing unload hooks.
