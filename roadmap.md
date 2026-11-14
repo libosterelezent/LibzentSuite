@@ -189,46 +189,25 @@ bootstrap fleet/group closures     →     (deleted — membership written
     → v10 with the effective-values invariant asserted; fresh-DB and
     idempotence paths covered (9 tests + 11 repo tests)
 
-### W3 — WorkspaceService (the one writer)
-[ ] `core/workspace/service.py`: membership + orchestration under the
-    single-lock persist-first discipline (FleetService's proven
-    shape, minus the seam closures)
-[ ] Channel + preset operations: account channel add/remove/set,
-    plugin bindings (initialize-by-copy from account assignments),
-    preset create/validate/apply/update(explicit diff)/detach/
-    export/import — every apply is a copy with provenance
-    (architecture rules 1-6, WORKSPACE_DESIGN §5-6)
-[ ] Settings resolution: the simplified chain (defaults ← global ←
-    account — the profile layer ends, decision 9) with the
-    precedence-collision test matrix
-[ ] Account-removal cascade: the full deletion boundary across BOTH
-    stores (WORKSPACE_DESIGN §7 — plugin-data documents included)
-[ ] Pacing: membership drives the limiter mapping
-    (`workspace:<name>` shared clock — engine key rename rides the
-    clean replace)
-[ ] ControlAPI surface per WORKSPACE_DESIGN §14 (workspaces_* +
-    channels + presets; groups_*/fleet_* removed) + CLI verbs
-[ ] Service transition/race tests green (the A→X racing A→Y
-    lock discipline)
+### W3 — WorkspaceService (the one writer) — [x] DONE 2026-11-14
+[x] All items DONE — the service, the channel/preset operations, the
+    simplified settings chain, the cross-store removal cascade, the
+    pacing mapping, the ControlAPI/CLI surface, the race tests.
+    Detail: the commit series starting `1915594`; the surface swap
+    commits `65fcd7b`..`5f9fed7`.
 
-### W4 — Orchestrator (the chain engine — the headline feature)
-[ ] Trigger intake: subscribes to task-terminal bus events +
-    new `services.emit_signal(...)` plugin API
-[ ] Chain runtime: trigger → resolve next step → eligibility gate
-    (W1 policy) → dispatch to a member account
-[ ] Workspace-level chain bindings over plugin declarations
-[ ] Reconciler carried over: 30 s idempotent passes over chain runs
-    (zombie fencing via generation bumps — unchanged)
-[ ] Simulator scenarios prove: A acts → B follows; B's plugin not
-    assigned → step SKIPPED (visible, not silent); settings gate
-    denies → SKIPPED with reason; failure/retry semantics
+### W4 — Orchestrator (the chain engine — the headline feature) — [x] DONE 2026-11-14
+[x] All items DONE — the durable signal outbox, the ChainRuntime
+    (immutable snapshots, visible skips, deterministic routing,
+    A-acts-B-follows), the guard + reconciler, the full boot/sim
+    wiring. Detail: commits `7b19cc6`..`6cc33e6`; the runtime suite
+    (15 tests) + outbox suite (8) prove the exit criteria.
 
-### W5 — Retire the old modules
-[ ] Delete `core/sync_group_manager/` and `core/fleet/`, their
-    repositories, remaining references
-[ ] Docs sweep: user-facing `docs/` updated to the workspace
-    surface; knowledgebase addenda; this roadmap
-[ ] Full suite green with both old modules gone
+### W5 — Retire the old modules — [x] DONE 2026-11-14
+[x] All items DONE — modules + repositories deleted, v11 drops the
+    v9 tables/column, docs swept, 1,636 green. Detail: commits
+    `531e4b2`..`cb70a63`; the migration runner race-proofed at the
+    root in the same series.
 
 **Carry-over guarantee:** transitions tables, generation fences,
 reconciler passes, and the policy check order move
@@ -404,8 +383,9 @@ visible for traceability; do not build against them.
       the definition of testability. NO feature is prohibited for
       being outside the simulator.
 
-    Phasing (before FastAPI): (1) the PluginCog host + paced ctx.send
-    bridge + before_invoke audit; (2) plugin commands migrate — the
+    Phasing (before FastAPI): (1) the PluginCog host + framework intake
+    cog + the to_rich toolbox + before_invoke audit; (2) plugin commands
+    migrate — the
     fixture plugins first (probe/soulcopy), then the declaration
     surface flips (COMMANDS removed, loader validates cog classes);
     (3) framework verbs migrate and `SelfCommandHub`'s bridge +
