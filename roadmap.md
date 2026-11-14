@@ -104,8 +104,9 @@ The seams (owner-refined):
   definition of testability — no feature is prohibited for being
   outside it.
 
-Phasing: **C1** PluginCog host + framework intake cog + `to_rich`
-toolbox + `before_invoke` audit → **C2** plugin commands migrate
+Phasing: **C1 DONE 2026-11-14** (host + toolbox + before_invoke audit
++ intake cog; commits 415eab3..5f51cbc) → **C2 (in progress)** plugin
+commands migrate
 (fixtures first, then the declaration flip: COMMANDS removed, loader
 validates cog classes) → **C3** framework verbs migrate; the hub
 bridge + `COMMAND_HUB` registration retire → **C4** the hub keeps only
