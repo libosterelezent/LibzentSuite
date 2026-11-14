@@ -101,18 +101,18 @@ class ApplyTests(unittest.TestCase):
             apply_diff(
                 PRESET.settings,
                 {"trigger": "$edited-by-user"},
-                preview_revision=4,
-                current_revision=5,
+                preview_revision="r4",
+                current_revision="r5",
                 preset=PRESET,
                 applied_at=123.0,
             )
-        self.assertIn("from revision 4", str(ctx.exception))
-        self.assertIn("to 5", str(ctx.exception))
+        self.assertIn("r4", str(ctx.exception))
+        self.assertIn("r5", str(ctx.exception))
 
     def test_preview_guard_alone(self) -> None:
-        preview_revision_ok(4, 4)  # no raise
+        preview_revision_ok("r4", "r4")  # no raise
         with self.assertRaises(StalePreview):
-            preview_revision_ok(4, 6)
+            preview_revision_ok("r4", "r6")
 
 
 class DetachTests(unittest.TestCase):
