@@ -249,13 +249,18 @@ settings layer, the plugin-eligibility gate.
     deleted with their repositories; migration v11 drops the v9
     tables + accounts.sync_group; the migration runner is race-proof
     at the root). THE WORKSPACE UNIFICATION IS COMPLETE.
-[ ] **FastAPI core API** — replace the deleted dashboard's REST surface
+[ ] **Command convergence (C1–C4)** — THE next phase (owner-locked
+    2026-11-14, before FastAPI): plugins become cogs for their command
+    face; the facade pieces retire (see "Command system" section for
+    the full design + the four bridged invariants). One command model
+    for plugins, framework verbs, and the future interface to document.
+
+[ ] **FastAPI core API** — replaces the deleted dashboard's REST surface
     with FastAPI routers calling the existing ControlAPI. Pydantic
     request/response models. Native WebSocket for live events.
     Study: `plans/pivot-audit-fastapi-flet.md` (phase 2).
-    NOTE: model the workspace surface (`workspaces_*`), not
-    `groups_*`/`fleet_*` — build against the target, not the
-    deprecated layer.
+    NOTE: model the workspace surface (`workspaces_*`), and document
+    the CONVERGED command model (cogs), not the retiring facade.
 
 [ ] **Flet UI** — replace the deleted SPA with a Python-native UI.
     Pages per module (accounts, workspaces, extensions, control
@@ -286,6 +291,102 @@ visible for traceability; do not build against them.
     through the future FastAPI dashboard — the opt-in GLOBAL view over
     AccountPluginData (the store + LOCAL view shipped; only the
     aggregation surface is missing)
+
+### Rate limiting (better.py-self integration)
+
+[ ] Bridge `on_http_throttle` to `RateLimitManager.report_server_limit()`
+    — the REAL throttle signal for user accounts (library absorbs 429s
+    internally; we currently only see the ones it doesn't). Wire: hook the
+    event in `adapters/discord/client.py` → publish `RateLimitTriggered`
+    on the EventBus → limiter calls `report_server_limit()`.
+[ ] Add per-route latency EWMA congestion watch (`http_route_latencies()`)
+    — queuing inflation, not 429s, is how the send ceiling manifests.
+    Add an EWMA monitor to `core/rate_limit_manager/engine.py` that
+    reads `client.http_route_latencies()` and warns when the send route
+    exceeds a threshold.
+[ ] Add bounded probe-down recovery (decay backoff ≤10% after 2 min clean,
+    never below the base interval) — matches the fork's lane governor recipe
+    (`examples/lane_governor.py`). Apply to `RateLimitManager`'s
+    cooldown recovery path.
+[ ] Expose `cache_stats()` through ControlAPI — add a `system_cache_stats()`
+    method that aggregates per-account `client.cache_stats()` snapshots
+    for the future dashboard's System page.
+[x] Add memory caps + cache persistence to the Client constructor in
+    `adapters/discord/client.py` — DONE 2026-11-13 (commit 9f2321b):
+    `_fork_memory_options()` now feeds both the Bot and plain-Client
+    paths: `max_member_cache=500, max_total_member_cache=5000,
+    max_thread_cache=200, max_total_thread_cache=1000,
+    gc_freeze=True, dispatch_backlog_warning=500,
+    persistence_path=state/<account>-cache.bin, persistence_max_age=86400`.
+    Persistence is keyed to the account name (omitted when nameless);
+    write/replay failures never break a connect.
+[x] Switch to better.py-self — DONE 2026-11-13 (commit 8637d0a):
+    dependency switched, drop-in verified, 1,671 tests green. The
+    remaining fork-adoption items are the [ ] entries in this section.
+
+### Command system (ext.commands deep adoption)
+
+[x] Move the authorization gate to `bot.add_check()` in
+    `adapters/discord/client.py` — DONE 2026-11-13 (commit 06cec37):
+    the gate is now `_bot_invoker_gate`, installed once per client in
+    `_install_command_layer` via `bot.add_check()`; the library evaluates
+    it in `Command.prepare` → `can_run` BEFORE argument parsing.
+    Unauthorized invocations raise `CheckFailure`, which
+    `on_command_error` drops silently alongside `CommandNotFound`.
+    AccessManager stays the domain owner; reconnects re-install per
+    fresh client (no double registration).
+    NOTE: do NOT adopt `commands.cooldown()` — our cooldowns are
+    per-account, DB-persisted, fleet-aware domain state.
+
+[x] Dynamic command prefixes via the fork's callable contract — DONE
+    2026-11-14: `command_prefix=` now receives a callable (the fork
+    invokes and awaits it per message with `(bot, message)`); the
+    callable reads the AccessManager's warmed prefix cache, so an
+    `adminprefix` mutation lands on the LIVE account's next message —
+    no rebuild. Build-time snapshot stays as the unwired-stack
+    fallback; precedence (symbol > both > env-symbol-over-mention) is
+    pinned by tests.
+
+[ ] **THE CONVERGENCE — plugins ARE cogs for commands** (owner-locked
+    2026-11-14: cogs only · full convergence · before FastAPI). The
+    parallel facade retires: `COMMANDS`/`CommandSpec`/`ArgSpec`, the
+    manual tokenization (`_parse_invocation`, `_convert_arg`), the
+    custom `render_help`, and the 922-line `SelfCommandHub` bridge
+    with its `_rebuild_self_commands` diff tracking. Plugins declare a
+    real library Cog for their command face — typed params via
+    annotations (`target: discord.Member` resolves mention/ID/name
+    through the client cache before the handler runs), command groups
+    (`sm!roll set/list` trees), native help, `cog_command_error`,
+    `cog_before_invoke` for audit. Framework verbs (status, pg, say,
+    estop, adminlist/adminperms/adminprefix, workspaces…) become cogs
+    in the same slice — ONE command model, no bridge.
+
+    The four seams that stay ours (locked invariants, bridged — not
+    replaced — by the cog host):
+    - **Pacing**: `ctx.send` overridden → scheduler → limiter →
+      adapter; every cog reply rides the pipeline.
+    - **Events**: `@Cog.listener` is NEVER wired — raw library events
+      bypass DTO conversion, inbound audit, and the self-echo filter.
+      Commands adopt the library; events stay on our bus.
+    - **Cooldowns**: `commands.cooldown()` stays EXCLUDED (per-account
+      DB-persisted domain state).
+    - **Capability gating**: the framework constructs one cog instance
+      per (account, plugin) with the services facade injected;
+      assignment ∧ enabled gates become `add_cog`/`remove_cog` — the
+      library's own hot-reload is the rebuild mechanism.
+
+    Phasing (before FastAPI): (1) the PluginCog host + paced ctx.send
+    bridge + before_invoke audit; (2) plugin commands migrate — the
+    fixture plugins first (probe/soulcopy), then the declaration
+    surface flips (COMMANDS removed, loader validates cog classes);
+    (3) framework verbs migrate and `SelfCommandHub`'s bridge +
+    `COMMAND_HUB` registration path retire; (4) the hub keeps only
+    what is genuinely hub-shaped (access wiring, the framework-verb
+    definitions themselves, `api_provider`).
+
+[ ] `before_invoke` for audit logging — rides the convergence: runs
+    after checks pass, before the callback (authorization / audit /
+    execution separation at the library's own seam).
 
 ### Rate limiting (better.py-self integration)
 
