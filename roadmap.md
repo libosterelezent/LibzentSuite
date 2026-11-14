@@ -361,9 +361,18 @@ visible for traceability; do not build against them.
     estop, adminlist/adminperms/adminprefix, workspaces…) become cogs
     in the same slice — ONE command model, no bridge.
 
-    The seams (owner-refined 2026-11-14 — listeners are FIRST-CLASS):
-    - **Pacing**: `ctx.send` overridden → scheduler → limiter →
-      adapter; every cog reply rides the pipeline.
+    The seams (owner-refined 2026-11-14 — listeners are FIRST-CLASS;
+    pacing refined the same evening):
+    - **Pacing**: `ctx.send` stays LIBRARY-NATIVE — command replies are
+      invocation-gated (one send per authorized, human-typed command;
+      the access check itself bounds them) and bypassing the
+      scheduler/limiter for them is deliberate, not a hazard. The
+      DISCIPLINE (documented in the plugin guides, not enforced by a
+      bridge): `ctx.send` is for COMMAND RESPONSES ONLY — never in
+      loops, background work, or anything scheduled. Loops ride
+      `ctx.services.send_message` (the paced pipeline) always; a
+      future app-wide task runner executing loops must route through
+      the services facade, never ctx.send.
     - **Events — two first-class paths, one toolbox**: plugin cogs may
       carry `@Cog.listener()` freely (the FULL library event surface —
       typing, presence, members, guilds, everything it dispatches;
