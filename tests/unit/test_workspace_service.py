@@ -30,7 +30,7 @@ class StubSettings:
     async def set_setting(self, account: str, plugin: str, key: str, value) -> None:
         self.values.setdefault((account, plugin), {})[key] = value
 
-    async def settings_map(self, account: str, plugin: str) -> dict:
+    async def settings(self, account: str, plugin: str) -> dict:
         return dict(self.values.get((account, plugin), {}))
 
 
@@ -138,7 +138,7 @@ class MembershipTests(WorkspaceServiceTestBase):
         self.assertIsNone(self.limiter.mapping.get("A"))
         # rules 3-7: settings, channel assignments survive the leave
         self.assertEqual(
-            (await self.settings.settings_map("A", "cleaner"))["trigger"], "$x")
+            (await self.settings.settings("A", "cleaner"))["trigger"], "$x")
         self.assertEqual(len(await self.service.account_channels("A")), 1)
 
     async def test_concurrent_moves_always_agree(self) -> None:
@@ -271,7 +271,7 @@ class PresetTests(WorkspaceServiceTestBase):
             preview_revision=preview["revision"])
 
         self.assertTrue(result["applied"])
-        final = await self.settings.settings_map("A", "cleaner")
+        final = await self.settings.settings("A", "cleaner")
         self.assertEqual(final, {"trigger": "$clean", "auto_clean": True,
                                  "unrelated": "keep"})  # keys-only, rest kept
         row = await self.db.connection.fetch_one(
@@ -293,7 +293,7 @@ class PresetTests(WorkspaceServiceTestBase):
         self.assertIn("stale preview", result["conflict"])
         # the user's edit survived the refused apply
         self.assertEqual(
-            (await self.settings.settings_map("A", "cleaner"))["trigger"], "$user")
+            (await self.settings.settings("A", "cleaner"))["trigger"], "$user")
 
     async def test_detach_keeps_values(self) -> None:
         template = await self._preset()
@@ -307,7 +307,7 @@ class PresetTests(WorkspaceServiceTestBase):
         assert row is not None
         self.assertIsNone(row["source_preset_id"])
         self.assertEqual(  # values stay
-            (await self.settings.settings_map("A", "cleaner"))["trigger"], "$clean")
+            (await self.settings.settings("A", "cleaner"))["trigger"], "$clean")
 
 
 class ForgetAccountTests(WorkspaceServiceTestBase):
