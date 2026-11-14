@@ -361,19 +361,39 @@ visible for traceability; do not build against them.
     estop, adminlist/adminperms/adminprefix, workspaces…) become cogs
     in the same slice — ONE command model, no bridge.
 
-    The four seams that stay ours (locked invariants, bridged — not
-    replaced — by the cog host):
+    The seams (owner-refined 2026-11-14 — listeners are FIRST-CLASS):
     - **Pacing**: `ctx.send` overridden → scheduler → limiter →
       adapter; every cog reply rides the pipeline.
-    - **Events**: `@Cog.listener` is NEVER wired — raw library events
-      bypass DTO conversion, inbound audit, and the self-echo filter.
-      Commands adopt the library; events stay on our bus.
+    - **Events — two first-class paths, one toolbox**: plugin cogs may
+      carry `@Cog.listener()` freely (the FULL library event surface —
+      typing, presence, members, guilds, everything it dispatches;
+      self-echo is standard plugin discipline: `author.id` check).
+      The event bus stays for the routed `handle_event` path (typed,
+      audit-integrated, per-account isolation). The DTO/audit layer is
+      NOT a wall — it is a FEATURE MODULE: a listener that wants the
+      parsed structure calls the same conversion the framework uses
+      (`to_rich(message)` → the frozen DiscordMessage: embeds,
+      components, buttons walked once, no per-plugin parsing) and can
+      fire the inbound audit with it — first-hand event handling with
+      the framework's parsing/audit for free, instead of the built-in
+      event bus. Converter injection rides the cog host (the boundary
+      rule holds: injected at composition, plugins never import
+      adapters).
     - **Cooldowns**: `commands.cooldown()` stays EXCLUDED (per-account
       DB-persisted domain state).
     - **Capability gating**: the framework constructs one cog instance
       per (account, plugin) with the services facade injected;
       assignment ∧ enabled gates become `add_cog`/`remove_cog` — the
       library's own hot-reload is the rebuild mechanism.
+    - **Framework event intake**: the framework's own cog (audit +
+      bus publication) is the single FRAMEWORK listener; plugin
+      listeners run alongside it, not behind it.
+    - **Testing**: listeners are methods — deterministic unit tests
+      invoke them with constructed library fixtures (the fork is a
+      pinned dependency; the standard cog-testing pattern). The
+      scenario runner keeps covering the bus path as one harness, not
+      the definition of testability. NO feature is prohibited for
+      being outside the simulator.
 
     Phasing (before FastAPI): (1) the PluginCog host + paced ctx.send
     bridge + before_invoke audit; (2) plugin commands migrate — the
