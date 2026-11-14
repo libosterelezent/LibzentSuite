@@ -6,20 +6,12 @@ These instructions apply to the whole repository. They describe how to make chan
 
 1. **Understand before changing.** Read the relevant implementation, callers, tests, data models, and current architecture/integration contracts before editing. Trace a behavior end to end when it crosses layers. Do not infer current behavior from stale comments or old plans alone.
 2. **Solve the requested problem completely.** Make the smallest coherent change that fixes the root cause. Include the tests and documentation needed to make the change understandable and verifiable. Do not make unrelated refactors while fixing a defect.
-3. **Preserve architecture boundaries.** `core.api.ControlAPI` is the shared application facade for the CLI and dashboard. Both interfaces must use the same application behavior. Extend the shared facade and its tests when a legitimate feature requires it; do not add a second business-logic path to avoid modifying the API.
+3. **Preserve architecture boundaries.** `core.api.ControlAPI` is the shared application facade for the CLI and dashboard. Both interfaces must use the same application behavior. Extend the shared facade and its tests when a legitimate feature requires it; do not add a second business-logic path to avoid modifying the API. (this api facade will be transformed into a full API with FastAPI.)
 4. **Keep plugins UI-independent.** Plugins use framework-provided services and contracts. They must not depend on dashboard state, CLI implementation details, or internal database connections.
 5. **Preserve safety and data semantics.** Do not bypass validation, authorization, persistence, task scheduling, rate limiting, audit logging, generation/version checks, or server-provided limits in order to simplify a feature or its UI.
 6. **Prefer verified behavior to assumptions.** Distinguish confirmed facts, intended behavior, and hypotheses. When requirements conflict materially, surface the conflict instead of silently inventing a product decision. Resolve minor technical details independently when they do not change product behavior or public contracts.
 7. **Respect the task boundary, not an arbitrary file list.** A cross-cutting fix may need coordinated updates to source, tests, contracts, and documentation. Change the smallest set of related files needed; preserve unrelated work and never rewrite unrelated user changes.
-
-[FAST-EDIT]
-
-When you need to edit, create, write, or save files:
-
-1. Load the fast-edit skill first: skill("fast-edit")
-2. Use fast-edit commands (show/replace/insert/delete/batch/paste/write/generate) instead of the built-in Edit/Write tools.
-3. For batch edits or multi-file writes, prefer fast-batch and fast-write.
-4. For user-pasted content, prefer save-pasted (zero token, zero escaping).   
+8. **Keep docs always updated and synced.** Reflect the changes that happens in project, evaluate the type of change and respectively update the README.md, ROADMAP.md files and `docs/`, `knowledgebase/` folders.
 
 ## 2. Readability and maintainability
 
@@ -229,7 +221,7 @@ Choose names that are **creative, expressive, memorable, and informative**. Clas
 
 Every name should help another developer understand the code without having to reverse-engineer its intent.
 
-## 12. COMMIT DISCIPLINE
+## 12. Commit Discipline
 
 Onwards commit discipline will be reside in agents.md and there won't be a separate file for it.
 
@@ -279,3 +271,18 @@ After the series:
 
 - Show `git log --oneline` for the new commits + final `git status`.
 - State what was intentionally left uncommitted and why.
+
+## 13. Skills & Tools.
+
+notable mentions of skills that worth using for more efficiency and speed.
+other skills related to the project resides in `.agents/`.
+
+[FAST-EDIT]
+
+When you need to edit, create, write, or save files:
+
+1. Load the fast-edit skill first: skill("fast-edit")
+2. Use fast-edit commands (show/replace/insert/delete/batch/paste/write/generate) instead of the built-in Edit/Write tools.
+3. For batch edits or multi-file writes, prefer fast-batch and fast-write.
+4. For user-pasted content, prefer save-pasted (zero token, zero escaping).
+
