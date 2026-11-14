@@ -1963,6 +1963,22 @@ class AccountManager:
             raise AccountError(f"client for account {name!r} did not connect")
         rt.user_id = getattr(client, "user_id", None)
         rt.require_cache().ingest_snapshot(client.cached_snapshot())
+        # C2: live cog hosting — the bot exists now; host every
+        # COG-declaring plugin attached to this account (best-effort:
+        # the hub path keeps serving COMMANDS-only plugins)
+        plugins_mgr = getattr(self, "_plugin_manager", None)
+        cog_host = getattr(plugins_mgr, "cog_host", None) if plugins_mgr else None
+        if cog_host is not None:
+            bot = getattr(client, "_client", None)
+            if bot is not None and hasattr(bot, "add_cog"):
+                runtimes = getattr(plugins_mgr, "_accounts", {}).get(name, {})
+                for plugin_name in list(runtimes):
+                    try:
+                        await plugins_mgr.host_cog(name, plugin_name, bot)
+                    except Exception as exc:
+                        self._logger.debug(
+                            "cog hosting failed for %s/%s: %s", name, plugin_name, exc
+                        )
         await self._record_access_user_id(name, rt.user_id)
 
     async def _record_access_user_id(self, name: str, user_id: Any) -> None:
