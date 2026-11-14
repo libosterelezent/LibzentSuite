@@ -280,6 +280,7 @@ class RealDiscordClient:
         owner_ids: frozenset[int] = frozenset(),
         prefix_mode: str = "mention",
         prefix_symbol: str = "",
+        prefix_provider: Any = None,
         access_checker: Any | None = None,
     ) -> None:
         self._token = token
@@ -305,6 +306,15 @@ class RealDiscordClient:
         #: the mode is mention (or unset) the env/@me default applies.
         self._prefix_mode = prefix_mode or "mention"
         self._prefix_symbol = prefix_symbol or ""
+        #: live per-message prefix source (the fork calls
+        #: command_prefix(bot, message) per message, so a callable here
+        #: makes adminprefix mutations take effect on the LIVE account
+        #: without a rebuild — the provider reads the AccessManager's
+        #: warmed cache, never the DB)
+        self._prefix_provider = prefix_provider
+        #: library prefix helpers captured at build (when_mentioned /
+        #: when_mentioned_or) for the per-message resolution
+        self._prefix_helpers: tuple = ()
         #: async (account, invoker_id) -> bool — the AccessManager's
         #: can_invoke (per-account list + admin bypass, fail-closed).
         #: When wired it REPLACES the env owner-ids gate entirely.
@@ -458,8 +468,10 @@ class RealDiscordClient:
 
     # ------------------------------------------------------------- lifecycle
     def _resolve_prefix(self, _ext_commands: Any):
-        """Resolve THIS account's command prefix from the admin-panel
-        config (mode mention/symbol/both) over the env default."""
+        """Resolve THIS account's command prefix form from the
+        admin-panel config (mode mention/symbol/both) over the env
+        default. Build-time view — see :meth:`_dynamic_prefix` for the
+        per-message form the live Bot consumes."""
         mode = (self._prefix_mode or "mention").lower()
         env_prefix = self._command_prefix
         when_mentioned = _ext_commands.when_mentioned
@@ -471,6 +483,46 @@ class RealDiscordClient:
         if env_prefix == "@me":
             return when_mentioned
         return env_prefix if env_prefix else when_mentioned
+
+    def _current_prefix_config(self) -> tuple[str, str]:
+        """The LATEST prefix config: the wired provider first (the
+        AccessManager's warmed cache — updated on every adminprefix
+        mutation), falling back to the build-time snapshot (unwired
+        stacks and direct-construction tests)."""
+        if self._prefix_provider is not None:
+            try:
+                cfg = self._prefix_provider()
+            except Exception:
+                cfg = None
+            if isinstance(cfg, dict) and cfg.get("prefix_mode"):
+                return str(cfg.get("prefix_mode", "mention")), str(cfg.get("prefix_symbol", ""))
+        return (self._prefix_mode or "mention").lower(), self._prefix_symbol or ""
+
+    def _dynamic_prefix(self, _ext_commands: Any):
+        """THE per-message prefix callable (the fork's contract:
+        ``command_prefix(bot, message)`` is invoked and awaited on
+        EVERY message). Reads the latest config through
+        :meth:`_current_prefix_config` — a cache read, no I/O — so an
+        ``adminprefix`` mutation takes effect on the NEXT message of
+        the live account, with no rebuild."""
+        when_mentioned = _ext_commands.when_mentioned
+        when_mentioned_or = _ext_commands.when_mentioned_or
+        self._prefix_helpers = (when_mentioned, when_mentioned_or)
+        client = self
+
+        def _prefix(bot, message):
+            mode, symbol = client._current_prefix_config()
+            if mode == "symbol" and symbol:
+                return symbol
+            if mode == "both" and symbol:
+                return when_mentioned_or(symbol)(bot, message)
+            # mention (default) or unresolvable custom -> mentionable
+            env_prefix = client._command_prefix
+            if env_prefix and env_prefix != "@me":
+                return env_prefix
+            return when_mentioned(bot, message)
+
+        return _prefix
 
     def _fork_memory_options(self) -> dict[str, Any]:
         """better.py-self constructor options shared by the Bot and plain
@@ -555,7 +607,7 @@ class RealDiscordClient:
         if self._commands_on:
             from discord.ext import commands as _ext_commands
 
-            prefix = self._resolve_prefix(_ext_commands)
+            prefix = self._dynamic_prefix(_ext_commands)
             # ONE contained construction (audit fix): the old blind retry
             # without max_ratelimit_timeout assumed THAT kwarg was the
             # offender — any other TypeError (prefix resolver, layout
@@ -1855,16 +1907,24 @@ class RealClientFactory:
         # maps libzent.adapter.<name> to source "adapter:<name>".
         logger = self._logger.getChild(name) if name else self._logger
         # per-account access configuration (admin panel; defaults when
-        # no manager is wired: mention mode + legacy env owner ids)
+        # no manager is wired: mention mode + legacy env owner ids).
+        # The PROVIDER (not a snapshot) rides into the client: the fork
+        # invokes command_prefix(bot, message) per message, so the
+        # client resolves the prefix through the AccessManager's warmed
+        # cache on EVERY message — an adminprefix mutation lands on the
+        # live account immediately.
         prefix_mode, prefix_symbol = "mention", ""
+        prefix_provider = None
         if self._access_manager is not None:
+            manager, account_name = self._access_manager, name
             try:
-                cfg = self._access_manager.prefix_config_sync(name)
+                cfg = manager.prefix_config_sync(name)
             except AttributeError:
                 cfg = None
             if cfg:
                 prefix_mode = cfg.get("prefix_mode", "mention")
                 prefix_symbol = cfg.get("prefix_symbol", "")
+            prefix_provider = lambda: manager.prefix_config_sync(account_name)  # noqa: E731
         checker = None
         if self._access_manager is not None:
 
@@ -1877,6 +1937,7 @@ class RealClientFactory:
             logger=logger,
             identify_gate=self._identify_gate,
             command_prefix=self._command_prefix,
+            prefix_provider=prefix_provider,
             owner_ids=frozenset(getattr(self._credentials, "owner_user_ids", ()) or ()),
             prefix_mode=prefix_mode,
             prefix_symbol=prefix_symbol,
