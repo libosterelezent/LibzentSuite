@@ -10,6 +10,8 @@ dependencies = [
     "aiosqlite>=0.20",
     "cryptography>=42",
     "discord.py-self @ git+https://github.com/Demonic1594/better.py-self.git",
+    "fastapi>=0.162.5",
+    "httpx>=0.28.1",
 ]
 
 [build-system]
