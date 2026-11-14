@@ -82,7 +82,7 @@ class SettingsWriter(Protocol):
 
     async def set_setting(self, account: str, plugin: str, key: str, value: Any) -> Any: ...
 
-    async def settings_map(self, account: str, plugin: str) -> dict[str, Any]: ...
+    async def settings(self, account: str, plugin: str) -> dict[str, Any]: ...
 
 
 class ProvenanceWriter(Protocol):
@@ -145,6 +145,16 @@ class WorkspaceService:
         """Projection boot: read back the authoritative rows."""
         async with self._lock:
             return await self._reload()
+
+    async def sync_runtime(self) -> int:
+        """Boot pacing restore: every persisted membership registers on
+        its workspace's shared clock (decision 3 — the limiter mapping
+        is runtime state that does not survive restarts)."""
+        restored = 0
+        for member in await self._repo.members():
+            self._register_pacing(member.account, member.workspace)
+            restored += 1
+        return restored
 
     async def _reload(self) -> dict[str, int]:
         states = await self._repo.workspace_states()
@@ -665,7 +675,7 @@ class WorkspaceService:
         """The §6.4 diff + revision fingerprint for confirmation."""
         template = await self._resolve_preset_version(preset_id, version)
         writer = self._require_settings()
-        current = await writer.settings_map(account, plugin)
+        current = await writer.settings(account, plugin)
         diff = compute_apply_diff(template.settings, current)
         return {
             "preset_id": preset_id,
@@ -688,7 +698,7 @@ class WorkspaceService:
         record provenance on the assignment row."""
         template = await self._resolve_preset_version(preset_id, version)
         writer = self._require_settings()
-        current = await writer.settings_map(account, plugin)
+        current = await writer.settings(account, plugin)
         try:
             preview_revision_ok(preview_revision, self._revision_fingerprint(current))
         except StalePreview as exc:
@@ -698,7 +708,7 @@ class WorkspaceService:
         await self._require_provenance().set_provenance(
             account, plugin, template.preset_id, template.version
         )
-        after = await writer.settings_map(account, plugin)
+        after = await writer.settings(account, plugin)
         return {
             "applied": True,
             "preset_id": preset_id,

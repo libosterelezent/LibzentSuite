@@ -313,6 +313,7 @@ class Account:
             "user_id": rt.user_id,
             "enabled": self.record.enabled,
             "sync_group": self.record.sync_group,
+            "workspace": self.record.workspace,
             "assigned_plugins": list(self.assigned_plugins),
             "plugin_profiles": dict(self.plugin_profiles),
             "latency_ms": latency,
@@ -545,7 +546,12 @@ class AccountManager:
                 self._accounts[record.name] = account
                 await self._attach_plugins(record.name)
                 if self._sync_groups is None:  # legacy path (see docstring)
-                    self._sync_group_scope(record.name, record.sync_group)
+                    # workspace pointer first (W3); the v9 sync_group
+                    # column is frozen read-only until v11 drops it
+                    self._sync_group_scope(
+                        record.name,
+                        getattr(record, "workspace", None) or record.sync_group,
+                    )
             except Exception:
                 self._logger.exception("could not restore account %r", record.name)
         if self._sync_groups is not None:
@@ -633,7 +639,7 @@ class AccountManager:
         await self._attach_plugins(name)
         await self._sync_group_apply(name, sync_group)
         self._logger.info(
-            "account %s added (enabled=%s sync_group=%s plugins=%s)",
+            "account %s added (enabled=%s workspace=%s plugins=%s)",
             name,
             enabled,
             sync_group,
@@ -2574,6 +2580,16 @@ class AccountManager:
         if account is None:
             return set()
         return {p for p in (account.assigned_plugins or []) if isinstance(p, str)}
+
+    def refresh_workspace(self, name: str, workspace: str | None) -> None:
+        """Mirror a workspace-membership change into the in-memory
+        record (FINAL-PHASE F3 pattern): status snapshots read
+        record.workspace. The WorkspaceService owns the persisted
+        pointer (and the pacing registration); this keeps the account
+        manager's view honest without a second writer."""
+        account = self._accounts.get(name)
+        if account is not None:
+            account.record.workspace = workspace or None
 
     def _refresh_plugins(self, account: Account) -> None:
         """Refresh Account.plugins from plugin_manager.states (keep last known).
