@@ -6,8 +6,8 @@ The framework ships with **no bundled plugins** — drop a package under
 automatically at boot. A plugin is a self-describing
 :class:`core.plugin_base.PluginBase` subclass: metadata, a settings
 manifest, lifecycle hooks, event handling, and optionally declared
-Discord **self-commands**, **dashboard UI extension** hooks and
-**builder-based dashboard pages**.
+Discord **self-commands** and **workspace chain declarations**
+(``EMITS`` / ``FOLLOWS``).
 
 The complete contract reference is ``knowledgebase/PLUGIN_SYSTEM.md``
 (with ``knowledgebase/PLUGIN_API.md`` as the formal API reference);
@@ -80,7 +80,7 @@ Settings: schema, layers, profiles
 ``settings`` is a tuple of :class:`core.settings_manager.Setting`
 (``name``, ``type`` in ``str|int|float|bool``, validated ``default``,
 optional numeric bounds, description). The same manifest
-auto-generates the CLI ``set`` validation and the dashboard editors —
+auto-generates the CLI ``set`` validation —
 parity by construction.
 
 Resolution layers (highest wins):
@@ -88,10 +88,10 @@ Resolution layers (highest wins):
 1. schema defaults,
 2. the global layer (``config/global_settings.json``),
 3. **the bound plugin profile** (a named settings bundle created in the
-   dashboard Plugins/Profiles tab; may carry a channel
+   presets (applied by copy, with provenance); may carry a channel
    allow/deny scope under the reserved ``channels`` key —
    ``core.plugin_scopes`` owns that structure),
-4. per-account overrides (``plugin_settings`` rows — the dashboard/CLI
+4. per-account overrides (``plugin_settings`` rows — the CLI
    ``set-setting`` surface; ``value: null`` deletes the override).
 
 ``ctx.settings`` is the LIVE resolved dict — changes made at runtime are
@@ -154,143 +154,58 @@ Rules of the grammar:
   ``services`` facade plugin code uses (no raw client), the invoking
   ``channel_id``/``guild_id``/``invoker_id``, and ``settings_api`` — a
   validated surface (``schema``/``effective``/``set``/``clear``/
-  ``binding``/``profiles``) matching the dashboard set-setting path.
+  ``binding``/``profiles``) matching the CLI set-setting path.
 * Who may invoke is decided by the admin panel
   (``AccessManager.can_invoke``: per-account allowlists + admin bypass,
   fail-closed) — never by the plugin.
 * The framework ``help`` verb lists your commands under the plugin's
   name automatically (descriptions truncated at 25 chars, paginated).
 
-UI extension: stat cards and sidebar panels
--------------------------------------------
+Chain declarations: EMITS and FOLLOWS
+-----------------------------------
 
-Two optional hooks extend the dashboard with STRUCTURED data (never
-HTML — the dashboard's own templates escape every value, so plugin
-output is XSS-safe by construction):
-
-.. code-block:: python
-
-       from core.plugin_base import PanelSection, StatCard, UIPanel
-
-       async def ui_stats(self, ctx: PluginContext):
-           return (
-               StatCard(label="items", value="42", sub="tracked",
-                        level="ok"),
-           )
-
-       async def ui_panels(self, ctx: PluginContext):
-           return (
-               UIPanel(
-                   id="myplugin:overview",       # unique "plugin:panel"
-                   title="My Plugin",
-                   sections=(
-                       PanelSection(kind="metrics", title="Live", data=[
-                           {"label": "account", "value": ctx.account},
-                       ]),
-                       PanelSection(kind="table", title="Recent", data={
-                           "columns": ["when", "what"],
-                           "rows": [["12:00", "thing"]],
-                       }),
-                       PanelSection(kind="list", title="Settings", data=[
-                           {"label": "factor",
-                            "value": str(ctx.settings.get("factor"))},
-                       ]),
-                       PanelSection(kind="text", title="About", data=(
-                           "Plain paragraph, escaped at render time."
-                       )),
-                   ),
-               ),
-           )
-
-``ui_stats`` feeds the Home tab of the selected account;
-``ui_panels`` contributes framework-level sidebar entries (first
-instance per plugin wins, deduped by id). A crashing provider
-contributes nothing — isolation is the framework's job.
-
-Dashboard UI: builder-based plugin pages
-----------------------------------------
-
-For full pages (tabs, forms, tables, actions) declare ONE optional
-SYNC hook and build a component tree with the
-:class:`core.dashboard_ui.DashboardUIToolset` builders. The complete
-author's guide is ``knowledgebase/DASHBOARD_UI_API.md``; the working
-reference example is ``tests/fixtures/plugins/config_demo/plugin.py``
-(exercised end-to-end by
-``tests/unit/test_dashboard_ui_acceptance.py``).
+Plugins opt into workspace chains (the coordinated flows where account
+A acts and a follow-up handler runs on account B) with two optional
+ClassVar declarations:
 
 .. code-block:: python
 
-   from core.dashboard_ui import DashboardUIToolset, ActionResult
+   from core.plugin_base import PluginBase
+   from core.workspace import FollowSpec
 
-   def initialize_dashboard_ui(self, ui: DashboardUIToolset) -> None:
-       page = ui.Page().set_id("myplugin").set_title("My Plugin")
-       section = ui.Section().set_title("Controls")
-       card = ui.Card().set_title("Actions")
+   class MyPlugin(PluginBase):
+       name = "myplugin"
 
-       card.add_component(
-           ui.Button(component_id="run")
-           .set_label("Run")
-           .set_variant("primary")
-           .set_action(self._on_run))
-       card.add_component(
-           ui.Metric().set_label("Status").set_value("idle"))
+       #: bare signal names this plugin may emit (namespacing
+       #: "<plugin>:<name>" is added at consumption — one plugin cannot
+       #: spoof another's signal)
+       EMITS = ("claim_done",)
 
-       section.add_component(card)
-       page.add_section(section)
-       self.attach_dashboard_ui(ui.Layout().add_page(page))
+       #: triggers this plugin follows, each naming ONE handler method
+       FOLLOWS = (
+           FollowSpec(signal="grinder:claim_done",
+                      handler="on_claim_done"),
+           FollowSpec(task_action="message",
+                      handler="on_message_done"),
+       )
 
-   async def _on_run(self, context, payload) -> ActionResult:
-       return ActionResult(success=True, message="done",
-                           refresh=["events-table"])
+       async def on_claim_done(self, ctx, payload):
+           # runs on the member the chain routed to; sends ride the
+           # paced pipeline like any plugin code
+           await ctx.services.send_message(payload["channel_id"],
+                                           "cleaned up")
 
-The essentials:
+       async def on_message_done(self, ctx, payload):
+           ...
 
-* **Builders** — fluent setters returning ``self`` (``Layout`` →
-  ``Page`` → ``Tab``/``Section`` → ``Card``/``Row``/``Column`` →
-  ``Text``/``Badge``/``Metric``/``Progress``, the eight input types,
-  ``ListView``/``Table``, ``Button``, ``Form``). Every argument is
-  validated immediately; failed mutations never corrupt the tree.
-* **IDs** — automatic ``uuid4().hex[:12]`` per component, or explicit
-  ``[A-Za-z0-9_-]{1,64}`` (use explicit ids for anything you target:
-  ``refresh`` lists, lookups). Duplicates raise
-  :class:`core.dashboard_ui.DuplicateComponentIdError` at add time and
-  :class:`core.dashboard_ui.TreeValidationError` at attachment.
-* **Actions** — ``set_action(callable)`` IS the registration (direct
-  Python callables, no manual signup). Signature
-  ``(ActionContext, payload) → ActionResult``; sync or async;
-  ``payload`` is ``{}`` for buttons, ``{"value": …}`` for standalone
-  inputs, ``{field_id: value}`` for form submits. ``context.services``
-  is the same paced facade lifecycle hooks use; ``context.account`` is
-  the dashboard's selected account. Callback failures are contained
-  (logged, surfaced as a plain ``UIError``).
-* **Forms** — ``Form.add_field(...)`` (the eight input types only) +
-  ``set_submit_action``; failed validation returns
-  ``ActionResult(success=False, field_errors={field_id: message})``
-  and the form renders each error inline under its input.
-* **Data providers** — ``Table``/``ListView`` +
-  ``set_data_source(callable)`` return JSON-safe rows (lists capped at
-  500, nesting ≤ 8); fetches are lazy and visibility-checked.
-* **Visibility** — ``set_check(callable)`` on ANY component,
-  fail-closed (falsey return OR raised error hides it); ancestor
-  chains compose; applied to the rendered tree AND every server-side
-  request beneath it. Checks express state conditions, not viewer
-  identity (the dashboard has one shared token).
-* **Disabled** — ``set_disabled(bool)`` is UI state, NOT
-  authorization: the server still dispatches a disabled component's
-  action.
-* **Lifecycle & scope** — attach validates + freezes the tree
-  (mutation then raises :class:`core.dashboard_ui.FrozenLayoutError`);
-  updates are explicit (build a fresh tree, re-attach); reload/unload
-  detaches stale registrations; UI-init failures never fail the
-  account activation. ONE UI per plugin (the first account to
-  activate wins) — per-account behavior belongs in callbacks/providers.
-
-Served by ``GET /api/dashboard-ui/navigation``, ``GET
-/api/dashboard-ui/page``, ``POST /api/dashboard-ui/action`` and ``GET
-/api/dashboard-ui/data``; rendered by the dashboard's generic
-component renderer (``static/js/dashboard-ui.js``) — your tree is
-XSS-safe by construction (structured data only, escaped at render).
-
+Emission is durable — ``await ctx.services.emit_signal(name, payload)``
+persists the signal BEFORE it acknowledges, delivery is at-least-once,
+and consumers dedupe by the returned stable ``signal_id``. Workspaces
+bind the declarations into named chains; a step whose plugin is not
+assigned to the routed account is a *visible skip with the reason
+recorded*, never a silent drop. The loader fails a broken declaration
+at discovery (a missing handler, a namespaced EMIT name) — the same
+fail-fast convention as ``COMMANDS``.
 Persistence helpers (no SQL)
 ----------------------------
 
@@ -310,19 +225,8 @@ Running it
    python3 main.py accounts plugin-add alpha myplugin # or later (immediate)
 
 A discovered plugin runs on an account only via a DIRECT assignment
-(``account_plugins`` rows — applied immediately, no restart); bind a
-settings profile per account in the dashboard (Plugins/Profiles tab)
-to ship a reusable settings bundle with a channel scope. Test offline
-with the simulator (``python3 main.py --sim-list``).
+(``account_plugins`` rows — applied immediately, no restart); presets
+(previewed, then applied by copy with provenance) ship reusable
+settings bundles. Test offline with the simulator
+(``python3 main.py --sim-list``).
 
-
-Dashboard UI runtime guarantees
-    The builder-based Dashboard UI API enforces its contract at runtime:
-    bound-method actions re-bind to the live plugin instance (rejected
-    when no account runtime is active), ``require_account=True`` actions
-    receive a validated account + services context, ``set_disabled`` and
-    visibility checks are enforced server-side (forged requests cannot
-    bypass them), form submissions are schema-validated before the
-    submit callback runs, and synchronous callbacks run in a bounded
-    worker lane in the served stack. Full contract:
-    ``knowledgebase/DASHBOARD_UI_API.md`` §15.

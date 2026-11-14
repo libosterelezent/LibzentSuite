@@ -3,15 +3,14 @@
 A multi-account Discord automation framework designed around one principle:
 **your accounts should behave like well-paced humans, not bots.**
 
-A multi-account Discord selfbot orchestration framework: any number of
-accounts share a pacing clock, back off instantly when Discord says so,
-and never make an unnecessary API call — all managed from a local
-dashboard. Game-specific logic lives in pluggable parser packs, not the
-core.
+Any number of accounts share pacing clocks, back off instantly when Discord
+says so, and never make an unnecessary API call — all managed from the CLI
+(a FastAPI core API + Flet UI is the planned next interface). Game-specific
+logic lives in pluggable parser packs, not the core.
 
 > ⚠️ Selfbot usage violates Discord's Terms of Service and can get accounts
 > suspended. The safety systems (learned pacing defaults, human-like
-> jitter, sync-group serialization, always-on server-limit handling)
+> jitter, workspace serialization, always-on server-limit handling)
 > **mitigate** risk — they do not authorize anything. Keep policies
 > conservative and only use accounts you can afford to lose.
 
@@ -22,8 +21,8 @@ core.
 1. [What it does](#what-it-does)
 2. [Install](#install)
 3. [Quick start](#quick-start)
-4. [The dashboard](#the-dashboard)
-5. [Setting up accounts](#setting-up-accounts)
+4. [Setting up accounts](#setting-up-accounts)
+5. [Workspaces](#workspaces)
 6. [Plugins](#plugins)
 7. [Everyday commands](#everyday-commands)
 8. [Safety model](#safety-model)
@@ -34,25 +33,30 @@ core.
 
 ## What it does
 
+- **Workspace orchestration** — accounts stay independent until you put
+  them in a workspace; membership shares one pacing clock AND enables
+  coordinated chains: *account A does something, follow-up account B
+  cleans it up — if settings/plugins allow it* (visible skips with
+  reasons, never silent drops)
 - **Plugin framework** — self-describing plugins (settings manifest,
-  lifecycle, declared self-commands, dashboard UI extension) discovered
-  from a directory; the framework ships with NONE bundled, so `plugins/`
-  may stay empty
-- **Plugin profiles** — reusable per-plugin setting bundles (with channel
-  allow/deny scopes) an account binds per assigned plugin; effective
-  settings merge defaults ← profile ← per-account overrides
+  lifecycle, declared self-commands, optional `EMITS`/`FOLLOWS` chain
+  declarations) discovered from a directory; the framework ships with
+  NONE bundled, so `plugins/` may stay empty
+- **Presets** — reusable per-plugin setting templates, applied by COPY
+  with provenance (the account keeps its own values; updates are
+  explicit, never silent overwrites)
+- **Channels** — a three-level model (registry / account assignments /
+  per-plugin bindings): bindings initialize by copy from the account's
+  selection, then diverge freely
 - **Admin panel** — DB-backed command authorization (per-account Discord
   user-id allowlists, framework admin list, per-account command prefix
-  mention/symbol/both, the primary bot bot id) replacing the `OWNER_USER_IDS` env
-  model, with a one-time migration
-- **Turn-taking across accounts** — shared sync-group clocks make N
-  accounts emit the cadence of ONE careful user; cooldowns persist
-  across restarts
+  mention/symbol/both) replacing the `OWNER_USER_IDS` env model, with a
+  one-time migration
 - **Anti-detection pacing** — learned per-action defaults (measured
   zero-throttle rates) composed with your policies; strictest wins
-- **Everything from one dashboard** — accounts, tokens (encrypted),
-  plugins + profiles, rate policies, live logs, audit trail, 429
-  telemetry, simulation
+- **Everything from the CLI** — accounts, tokens (encrypted), plugins +
+  presets, workspaces + chains, rate policies, live logs, audit trail,
+  simulation
 - **Fully offline-testable** — a complete Discord simulator runs the whole
   stack with zero network
 
@@ -74,9 +78,8 @@ group: `uv sync --frozen` installs the exact locked environment.
 `.env` needs:
 
 ```ini
-MUDAE_BOT_ID=432610292342587392       # the primary bot's public bot id (DB setting wins once set in the Admin tab)
+PRIMARY_BOT_ID=432610292342587392     # the primary bot's public bot id (DB setting wins once set)
 OWNER_USER_IDS=123456789012345678     # YOUR Discord user id — migrated ONE TIME into the DB admin list
-DASHBOARD_TOKEN=pick-a-long-random-string
 ```
 
 Account tokens are **not** in `.env` — they're stored encrypted in the
@@ -90,83 +93,60 @@ python3 main.py --sim-list              # list scenarios
 python3 main.py --sim soulcopy_basic    # full pipeline over the simulator
 
 # go live
-python3 main.py --dashboard --headless --start-all
-# → dashboard at http://127.0.0.1:8070
+python3 main.py                        # interactive REPL
+python3 main.py accounts list          # one-shot command mode
+python3 main.py --start-all            # boot + start every enabled account
 ```
-
-Open the dashboard, paste your `DASHBOARD_TOKEN` into the token box (or
-use `http://127.0.0.1:8070/?token=<DASHBOARD_TOKEN>` — the SPA strips
-it from the URL after seeding), then check the **Admin** tab:
 
 > **One-time migration** — on the first boot the framework seeds the DB
 > admin list from `OWNER_USER_IDS` and then IGNORES the env value for
 > authorization. From that point on, who can command which account is
-> managed in the Admin tab (framework admin ids + per-account
-> permission lists, fail-closed). If neither the env key nor the admin
+> managed through the admin self-commands (`adminlist`, `adminperms`,
+> `adminprefix` — fail-closed). If neither the env key nor the admin
 > list has ids, NOBODY can invoke commands until you add an admin there.
-
-Or without the dashboard:
-
-```bash
-python3 main.py                        # interactive REPL
-python3 main.py accounts list          # one-shot command mode
-```
-
-## The dashboard
-
-> **REMOVED (2026-11-13)** — the custom dashboard (HTTP server,
-> WebSocket, SPA) was deleted in the interface pivot. It is being
-> replaced by a FastAPI core API + Flet UI (see `roadmap.md`, Active
-> Queue). The page table below is retained as historical context for
-> what the replacement should cover; the CLI is currently the only
-> interface.
-
-Historical page layout (`http://127.0.0.1:8070`, required
-`DASHBOARD_TOKEN`):
-
-| Page | What you do there |
-|---|---|
-| **Home** | live fleet status at a glance (running, cooldowns, tasks, sync groups) + the recent activity feed |
-| **Accounts** | add/remove, start/stop, store tokens, direct plugin assignment; each account detail page carries Abilities / Memory (plugin presets + bindings, the Profile gallery, per-channel plugin data) / Pacing / Live stats (plugin `ui_stats` cards) / Operations. Group membership lives on the Fleet page |
-| **Fleet** | the ONE groups surface (`#/groups`): create/edit/delete groups, pacing membership (the shared clock) AND fleet management (eligibility, task assignments, scoped cooldowns, transition history) side by side; mutations ride the FleetService path and converge live over the WebSocket |
-| **Plugins** | per-account enable/disable, settings, the **profile library** (named setting bundles with channel scopes — edit/delete; creation happens from an account's MEMORY flow) |
-| **Activity** | the task queue/history, pacing cooldowns, live log stream + every Discord interaction (audit) |
-| **Policies** | pacing policies, effective rates, safety warnings, the 429 throttle card |
-| **Admin** | framework admin ids, per-account command permissions + prefixes (mention/symbol/both), the primary bot bot id |
-| **Tools** | offline simulations, emergency stop, shutdown, credential import |
-
-Plugin profiles are named SETTINGS presets (bundles applied to a plugin's
-settings, with an optional channel scope) — not the removed permission-bundle
-model. Sync groups (Accounts tab) pace accounts together; the Fleet Hub is the
-separate orchestration layer on top. *(Both superseded 2026-11-13 by the
-Workspace unification — `roadmap.md` — which merges grouping and
-orchestration into one concept; the CLI keeps working against the current
-layer until W3 swaps the surface.)*
-
-Nearly everything worked from both (`python3 main.py …` or the dashboard —
-same API underneath). Dashboard-only back then:
-admin-panel management, plugin-profile editing, per-account channel
-lists and bulk plugin-set; the CLI covers
-accounts/credentials/plugins/profile-bindings/ratelimit/cooldowns/
-tasks/simulation/logs/audit/estop/status/groups.
-
-Debugging a live issue? Add `--debug`: DEBUG-level logs, Discord gateway
-lines (reconnect/close codes), DB worker timings, scheduler pressure.
 
 ## Setting up accounts
 
-1. **Add the account** — dashboard → Accounts → Add (or
-   `python3 main.py accounts add myaccount` — name plus optionally the
-   plugin(s) it should run; assign more later with `accounts plugin-add`).
-   Put it in a **sync group** with `groups set-account myaccount <group>`.
-2. **Store its token** — Accounts → credential (or
-   `python3 main.py accounts credential myaccount <token>`). The token is
-   Fernet-encrypted at rest; the key lives in `state/credentials.key`
-   (back that file up — losing it means re-entering tokens).
-3. **Start it** — the ▶ button (or `accounts start myaccount`)
+1. **Add the account** — `python3 main.py accounts add myaccount`
+   (name plus optionally the plugin(s) it should run; assign more later
+   with `accounts plugin-add`). Put it in a **workspace** with
+   `workspaces add-member <workspace> <account>`.
+2. **Store its token** — `python3 main.py accounts credential
+   myaccount <token>`. The token is Fernet-encrypted at rest; the key
+   lives in `state/credentials.key` (back that file up — losing it
+   means re-entering tokens).
+3. **Start it** — `accounts start myaccount`
 
-Put every account that shares work in the same **sync group** — that's
-what makes them share a pacing clock.
+Put every account that shares work in the same **workspace** — that's
+what makes them share a pacing clock and enables chains between them.
+
+## Workspaces
+
+The workspace is the ONE orchestration concept (it replaced sync groups
++ the fleet module on 2026-11-14):
+
+```bash
+python3 main.py workspaces list                       # every workspace + members
+python3 main.py workspaces create grind-team "the grind"
+python3 main.py workspaces add-member grind-team alpha
+python3 main.py workspaces add-member grind-team bravo
+python3 main.py workspaces pause grind-team           # fences new work (generation bump)
+python3 main.py workspaces tasks grind-team           # the work units
+```
+
+**Chains** — the coordinated flows: a plugin on account A finishes a
+task (or emits a signal), and a follow-up handler runs on account B —
+gated by the eligibility policy (plugin assigned ∧ enabled ∧ the
+step's settings gate ∧ a usable channel binding). A denied step is a
+*visible skip with the reason recorded*, never a silent drop. Plugins
+opt in by declaring `EMITS` (signal names they may emit through
+`await ctx.services.emit_signal(...)`) and `FOLLOWS` (triggers +
+handler methods); workspaces bind the declarations into named chains.
+
+**Signals are durable**: emission persists before it acknowledges,
+delivery is at-least-once with dead-lettering, and consumers dedupe by
+identity. Chain runs execute immutable definition snapshots — editing
+a chain affects future runs only.
 
 ## Plugins
 
@@ -175,15 +155,12 @@ stay empty and everything still boots (the loader simply discovers zero
 plugins). Plugins are self-describing packages: a `PluginBase` subclass
 with metadata, a `Setting` manifest, lifecycle hooks, optional declared
 self-commands (`COMMANDS` with the `ArgSpec` argument grammar) and
-optional dashboard UI extension (`ui_stats` stat cards — rendered on the
-account detail page; `ui_panels` structured panels are a declared surface
-the current SPA does not yet render — and builder pages declared through
-the safe dashboard UI toolset).
+optional chain declarations (`EMITS` / `FOLLOWS`).
+
 **The plugin development guide is
 [`knowledgebase/PLUGIN_SYSTEM.md`](knowledgebase/PLUGIN_SYSTEM.md)**
-(§7a self-commands, §7b UI extension; the formal API reference is
-`knowledgebase/PLUGIN_API.md`), plus `core/plugin_base.py` and
-`docs/plugins/writing_plugins.rst`.
+(the formal API reference is `knowledgebase/PLUGIN_API.md`), plus
+`core/plugin_base.py` and `docs/plugins/writing_plugins.rst`.
 
 ```bash
 python3 main.py plugins list               # nothing until you add one
@@ -193,16 +170,16 @@ python3 main.py accounts plugin-add alpha <plugin>
 ```
 
 The test suite exercises the framework through fixture plugins
-(`tests/fixtures/plugins/probe` for the loader/manager/command registry/
-UI extension; `tests/fixtures/sim_plugins/soulcopy` as the full-stack
-simulation workload) — those are tests-only, never discovered by a
-production boot.
+(`tests/fixtures/plugins/probe` for the loader/manager/command registry;
+`tests/fixtures/sim_plugins/soulcopy` as the full-stack simulation
+workload) — those are tests-only, never discovered by a production
+boot.
 
 ## Everyday commands
 
 From Discord — self-command verbs on any account you're allowed to invoke
 (type them with the account's prefix; default prefix comes from
-`SELF_COMMAND_PREFIX`, per-account from the Admin tab):
+`SELF_COMMAND_PREFIX`, per-account from the admin commands):
 
 ```
 sm!pg                       sm!prefixrate          # this account's send pacing
@@ -218,11 +195,15 @@ From the shell:
 python3 main.py accounts list|start|stop|remove
 python3 main.py accounts plugin-add alpha <plugin>
 python3 main.py plugins list
+python3 main.py workspaces list
 python3 main.py ratelimit effective message alpha
-python3 main.py estop                  # fleet-wide halt
+python3 main.py estop                  # framework-wide halt
 python3 main.py --sim pacing_respected # offline sanity check
 python3 main.py --bench                # performance benchmarks
 ```
+
+Debugging a live issue? Add `--debug`: DEBUG-level logs, Discord gateway
+lines (reconnect/close codes), DB worker timings, scheduler pressure.
 
 ## Safety model
 
@@ -230,30 +211,27 @@ Pacing composes on every outbound action — the strictest wins:
 
 | Layer | What it governs |
 |---|---|
-| **Sync-group clock** | accounts in one group serialize against each other |
+| **Workspace clock** | members of one workspace serialize against each other |
 | **Per-account pacing** | each account's own minimum interval + jitter per action |
-| **Learned defaults** | with no policy stored: message 2.6 s, dm 2.6 s, reaction 2.5 s, component 3.0 s (measured zero-throttle rates — fallback, not policy); any other action defaults to **1.2 s** |
+| **Learned defaults** | with no policy stored: message 2.6 s, dm 2.6 s, reaction 2.5 s, component 3.0 s (measured zero-throttle rates — fallback, not policy) |
 
-Plus: a hard sanity floor nothing can go below, server 429s always earn
-paced retries (with per-account + fleet throttle telemetry on the
-Policies tab), cooldowns the primary bot reports are persisted with absolute
-expiry, DM channels resolve once and are cached forever, and the
-framework itself makes zero self-initiated API calls — every call is a
-plugin action through the pipeline above.
+Plus: a hard sanity floor (1.5 s/action) nothing can go below, server
+429s always earn paced retries (with per-account throttle telemetry),
+cooldowns persist with absolute expiry, DM channels resolve once and
+are cached forever, and the framework itself makes zero self-initiated
+API calls — every call is a plugin action through the pipeline.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `missing_credential` | store the token (Accounts → credential) |
+| `missing_credential` | store the token (`accounts credential <name> <token>`) |
 | `invalid_credential` | token wrong/revoked — re-enter it |
 | Account keeps reconnecting | young accounts get culled by Discord; see `--debug` close codes |
-| Dashboard unreachable | is `DASHBOARD_TOKEN` set? Port free? |
 | "cannot boot" | unwritable `--db` path or malformed config — the message says which |
 | Boot warns about permissions | `chmod 600 state/credentials.key .env` |
 | Key/DB mismatch warning | `state/credentials.key` doesn't match the stored tokens — restore the key or re-enter tokens |
 
----
 ---
 
 # Reference
@@ -265,17 +243,19 @@ change your mental model; everything below is for working ON the framework.*
 
 ```
 core/                  framework managers + shared contracts
-  api.py               ControlAPI — the ONE facade both interfaces call
+  api.py               ControlAPI — the ONE facade the interfaces call
   bootstrap.py         composition root (the boot flow of main.py)
   account_manager/     Account (first-class), lifecycle, send hook, cache,
                        lifecycle governor + waiter registry
+  workspace/           THE orchestration: service (one writer), models,
+                       transitions, policy (7-check gate), chains runtime,
+                       durable signals, dispatch guard, reconciler
   plugin_manager/      discovery, per-account instances, event dispatch
-  plugin_base.py       the plugin contract (PluginBase/Context/Services)
-                       (NOT the capability model — accounts get plugins
-                       directly via account_plugins assignments)
-  settings_manager.py  ONE settings schema consumed by CLI + GUI alike
+  plugin_base.py       the plugin contract (PluginBase/Context/Services,
+                       COMMANDS + EMITS/FOLLOWS declarations)
+  settings_manager.py  ONE settings schema consumed by every surface
   rate_limit_manager/  policies (global/account/plugin/pair), pacing, 429s,
-                       effective-config cache, group clocks
+                       effective-config cache, workspace clocks
   task_scheduler/      queue + priority + cancel + retries + timeouts,
                        pressure observability
   event_bus.py         typed pub/sub: coalesced bounded dispatch
@@ -283,42 +263,39 @@ core/                  framework managers + shared contracts
   audit.py             interaction audit trail (waits/jitter per send)
   credentials.py       ids in .env; credential_service.py — DB-encrypted tokens
   config.py            config dir loading
-database/              SQLite: models, ordered migrations, repositories,
-                       boundary worker telemetry (telemetry.py)
+database/              SQLite: models, ordered migrations, repositories
+                       (workspaces, presets, signals, channels + the rest)
 adapters/              Discord boundary: discord/ (live, lazy import) +
                        simulator/ (complete offline world)
-interfaces/            cli/ (REPL + one-shot) + dashboard/ (SPA + REST + WS)
+interfaces/            cli/ (REPL + one-shot)
 plugins/               your plugins (the framework ships with none — the
                        directory may be empty; test fixtures live under
                        tests/fixtures/)
 benchmark/             the benchmark subsystem (scenarios, profiling modes)
-tests/unit|integration|simulation|stress   ~1800-test offline suite
+tests/unit|integration|simulation|stress   ~1600-test offline suite
 config/                global settings, rate policies, account files
 main.py                entrypoint
 ```
 
-The dashboard serves a sidebar SPA (Home, Accounts, Activity, Fleet,
-Policies, Admin, Tools — plus a Plugins section with builder pages
-contributed by plugins) on `http://127.0.0.1:8070` with live WebSocket
-push; set `DASHBOARD_TOKEN` in `.env` to require auth. The complete
-REST/WS/CLI/self-command reference is `knowledgebase/API_ENDPOINTS.md`.
-
 Dependencies: Python ≥ 3.10; direct runtime constraints live in
 `pyproject.toml`, with the exact pinned resolution in `uv.lock`
 (`requirements.txt` is the generated pip-compat export). Live mode
-additionally needs the user-account client fork `discord.py-self` (included
-in the resolution), imported lazily — simulations/tests never require a live
-network connection.
+additionally needs the user-account client fork `better.py-self`
+(included in the resolution), imported lazily — simulations/tests never
+require a live network connection.
+
+> **Runtime environment note** — the project was built and its whole
+> test suite runs green on Linux; other platforms are untested.
 
 ## Architecture: who calls what
 
 ```
                     ┌─────────────────────┐
-                    │   LibzentSuite    │
+                    │   LibzentSuite      │
                     │  (core framework)   │
 Events ────────────►│ Event routing       │
                     │ Account control     │
-                    │ Task orchestration  │
+                    │ Workspace chains    │
                     │ Lifecycle           │
                     └──────────┬──────────┘
                                │  (events/context only — NEVER API calls
@@ -331,16 +308,16 @@ Events ────────────►│ Event routing       │
                     │ required            │
                     └──────────┬──────────┘
                                │  on-demand (services.send_message /
-                               │  open_dm / fetch_user)
+                               │  open_dm / fetch_user / emit_signal)
                                ▼
                     ┌─────────────────────┐
                     │     RateLimiter     │
                     │ · per-task          │  one account's consecutive calls
-                    │ · per-account/group │  shared clock per sync_group
-                    │ · server-wide lane  │  fleet serialization
+                    │ · per-account/      │  shared clock per workspace
+                    │   workspace         │
                     └──────────┬──────────┘
                                ▼
-                         API functions
+                          API functions
 ```
 
 **LibzentSuite controls the flow; plugins control API usage; the
@@ -365,7 +342,7 @@ Plugin -> PluginServices.send_message()
 | Scope | Key | Governs |
 |---|---|---|
 | **per-task** | `(account, action)` | consecutive API calls of ONE account |
-| **per-account/group** | `(group:<sync_group>, action)` | group members serialize on ONE shared clock: `A → [limit] → B → [limit] → A` |
+| **per-account/workspace** | `(workspace:<name>, action)` | workspace members serialize on ONE shared clock: `A → [limit] → B → [limit] → A` |
 
 Both compose (the strictest wait wins). When no policy is stored for an
 action, the learned default applies (message 2.6 s, dm 2.6 s, reaction
@@ -374,11 +351,10 @@ BEFORE admission and slept after the grant, and every spacing clock is
 stamped at grant + jitter — the expected wire instant — so consecutive
 wire sends stay ≥ the effective interval apart (jitter can never
 compress the gap). Server 429s always earn at least one paced retry
-(and are counted per account + fleet-wide on the Policies tab);
-`FlowBlocked` aborts only that account's flow with a human reason.
-Groups are registered automatically from each account's `sync_group`
-(pure metadata — no API involved). Retries carry no scheduler delay —
-the limiter's cooldown + interval own every wait.
+(counted per account); `FlowBlocked` aborts only that account's flow
+with a human reason. Workspace clocks are registered automatically from
+membership (pure metadata — no API involved). Retries carry no scheduler
+delay — the limiter's cooldown + interval own every wait.
 
 ## Rich event model
 
@@ -389,7 +365,8 @@ reactions, references — plus a runtime-only `raw` escape hatch
 `MessageDeleted`, `ReactionAdded`) are additive. Actions are capabilities
 on `PluginServices` (`send_message`, `send_dm`, `add_reaction`,
 `click_button`) through the paced pipeline; plugins also get
-framework-managed cooldowns and persistent per-plugin state.
+framework-managed cooldowns, persistent per-plugin state, and durable
+signal emission (`emit_signal`).
 
 Plugins subscribe through a **per-account waiter registry**: a waiter for
 account A structurally never runs for B's events.
@@ -399,8 +376,8 @@ account A structurally never runs for B's events.
 Four levels — `global`, `account`, `plugin`, `account_plugin` — each
 `{interval: seconds, jitter: [min, max]}`. Effective pacing is the MAX
 across applicable levels (and the learned per-action default when no
-policy is stored). Policies below the current safety floor are rejected
-(`UnsafePolicyError`); the floor only rises and persists across
+policy is stored). Policies below the current safety floor (1.5 s) are
+rejected (`UnsafePolicyError`); the floor only rises and persists across
 restarts. The composed result is memoized per `(action, account,
 plugin)` under a config generation counter (tuple-keyed, capped,
 invalidated at every mutation). The `prefixrate` self-command sets the
@@ -411,10 +388,8 @@ account's message interval at runtime.
 Tokens: Fernet-encrypted in the DB; master key outside it
 (`state/credentials.key` 0600 or `LZ_MASTER_KEY`). Boot audits permissions
 on db/key/.env, tightens WAL sidecars, and runs a key/DB decrypt canary.
-Dashboard auth is constant-time token compare + loopback-only origin
-checks; WS frames and bodies are size-capped; diagnostic artifacts are
-0600 and value-free (audited — no token material can reach benchmark/
-profile/tracemalloc output).
+Diagnostic artifacts are 0600 and value-free (audited — no token material
+can reach benchmark/profile/tracemalloc output).
 
 ## Simulation & benchmarks
 
@@ -436,31 +411,27 @@ compare; DB worker telemetry.
 
 ## Management surfaces
 
-- CLI: `accounts|credentials|plugins|ratelimit|cooldowns|tasks|simulation|logs|audit|estop|status|groups|help|quit`
-- Dashboard REST: 1:1 with ControlAPI; WebSocket pushes stats/log/audit/task
-  events live, plus `fleet` transition frames for the Fleet Hub (complete
-  reference: `knowledgebase/API_ENDPOINTS.md`)
+- CLI: `accounts|credentials|plugins|workspaces|ratelimit|cooldowns|tasks|simulation|logs|audit|estop|status|help|quit`
 - Self-commands: framework verbs (`pg`, `say`, `help`, `prefixrate`,
   `adminlist`, `adminperms`, `adminprefix`) + every plugin-declared
   `COMMANDS` verb — gated per account by the admin-panel access lists
 - Mention prefix (`mention` prefix mode of the same self-command layer —
   same access gate, replies paced)
 
-All of them hit the same ControlAPI; CLI↔dashboard parity holds for the
-verb groups listed above, but admin-panel management, plugin-profile
-editing, per-account channel lists and bulk plugin-set remain
-dashboard-only.
+All of them hit the same ControlAPI. The FastAPI core API (next phase)
+will expose the same surface over REST + WebSocket.
 
 ## Documentation
 
+- `roadmap.md` — the active plan and decision records
+- `WORKSPACE_DESIGN.md` — the workspace unification spec (18 locked
+  decisions; the architecture's foundation)
 - `knowledgebase/` — deep knowledge base (handwritten guides + generated
   read-only reference; `generated/*.json` is gitignored). Start at
   `knowledgebase/README.md`; the complete surface reference is
-  `knowledgebase/API_ENDPOINTS.md`. Regenerate with
-  `python3 scripts/gen_knowledgebase.py [--check]`.
-- `docs/` — Sphinx site: `pip install --user sphinx myst-parser` then
-  `python3 -m sphinx -W -b html docs docs/_build/html`
+  `knowledgebase/API_ENDPOINTS.md`.
+- `docs/` — Sphinx user-facing reference: `pip install --user sphinx
+  myst-parser` then `python3 -m sphinx -W -b html docs docs/_build/html`
 - `INTEGRATION.md` — inter-module contracts
 - `scripts/bench_db.py`, `scripts/bench_hot.py` — perf harnesses
 - `benchmark/README.md` — the benchmark subsystem
-

@@ -21,6 +21,6 @@ the repository; only ``knowledgebase/generated/`` is gitignored.
 
 Handwritten deep dives (architecture, data flow, lifecycle,
 per-subsystem references, the formal plugin API, configuration, CLI,
-dashboard, endpoint reference, testing, security, glossary, changelog)
+endpoint reference, testing, security, glossary, changelog)
 live in ``knowledgebase/*.md`` — committed with the repository,
 maintained by hand, never overwritten by the generator.

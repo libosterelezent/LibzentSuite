@@ -26,7 +26,7 @@ the user), ``wait_for_message`` / ``collect_messages`` (bus reads;
 account+plugin-scoped families ``cooldown_set`` / ``cooldown_remaining`` /
 ``cooldown_active`` / ``cooldown_clear`` / ``cooldown_list`` and
 ``state_get`` / ``state_set`` / ``state_delete``, plus the
-``credentials`` (owner ids, Mudae id), ``account``, ``plugin`` and
+``credentials`` (owner ids, primary bot id), ``account``, ``plugin`` and
 ``settings`` properties.
 
 Events plugins receive
@@ -61,24 +61,11 @@ becomes a ``<prefix><command>`` on every account the plugin is
 assigned+enabled on; handlers receive a
 :class:`core.plugin_base.CommandContext` (same ``services`` facade,
 validated ``settings_api``, ``invoker_id``) and reply through the paced
-pipeline. The optional ``ui_stats`` / ``ui_panels`` hooks contribute
-Home-tab :class:`core.plugin_base.StatCard` metric cards and sidebar
-:class:`core.plugin_base.UIPanel` panels (structured data only —
-rendered escaped by the dashboard's own templates). Guide:
-:doc:`writing_plugins`.
+pipeline. The optional ``EMITS`` / ``FOLLOWS`` declarations opt the
+plugin into workspace chains (durable signals, follow handlers — see
+:doc:`writing_plugins`).
 
 Deep dive (why/ownership/errors per method): ``knowledgebase/PLUGIN_API.md``.
 Examples: ``knowledgebase/PLUGIN_EXAMPLES.md``. Anti-patterns:
 ``knowledgebase/PLUGIN_ANTIPATTERNS.md``.
 
-
-Dashboard UI runtime guarantees
-    The builder-based Dashboard UI API enforces its contract at runtime:
-    bound-method actions re-bind to the live plugin instance (rejected
-    when no account runtime is active), ``require_account=True`` actions
-    receive a validated account + services context, ``set_disabled`` and
-    visibility checks are enforced server-side (forged requests cannot
-    bypass them), form submissions are schema-validated before the
-    submit callback runs, and synchronous callbacks run in a bounded
-    worker lane in the served stack. Full contract:
-    ``knowledgebase/DASHBOARD_UI_API.md`` §15.

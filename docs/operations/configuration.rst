@@ -12,7 +12,7 @@ of the layers:
      - Where
      - Applies to
    * - ``.env``
-     - ``MUDAE_BOT_ID``, ``OWNER_USER_IDS``, ``DASHBOARD_TOKEN``,
+     - ``PRIMARY_BOT_ID``, ``OWNER_USER_IDS``,
        ``REMOTE_CONTROL`` (+ ``LZ_MASTER_KEY`` via process env only) —
        account tokens live ENCRYPTED in the DB, imported from ``.env``
        only via ``credentials import-env``
@@ -31,7 +31,7 @@ of the layers:
      - live view for running plugins
 
 Rate scopes: per-task ``(account, action)``, per-account/group
- ``(group:<sync_group>, action)`` shared clock, server-wide lane — the
+ ``(workspace:<name>, action)`` shared clock — the
 strictest wait wins. Jitter is drawn before admission and slept after
 the grant, with spacing clocks stamped at the expected wire instant, so
 wire gaps keep the effective interval.

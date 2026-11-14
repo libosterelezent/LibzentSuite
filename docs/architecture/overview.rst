@@ -37,7 +37,7 @@ kv) → SettingsManager → AuditRecorder → TaskScheduler (late-bound sender)
 → PluginManager.discover → AccountManager (restores
 persisted accounts) → sender bound → scheduler start →
 ControlAPI (self-command hub bridged via ``COMMAND_HUB.api_provider``) →
-surface (REPL / one-shot CLI / dashboard / headless).
+surface (REPL / one-shot CLI / headless).
 
 Full digest: ``knowledgebase/ARCHITECTURE.md`` and
 ``knowledgebase/RUNTIME_LIFECYCLE.md`` — if you maintain a local

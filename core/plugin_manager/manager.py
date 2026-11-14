@@ -688,7 +688,7 @@ class PluginManager:
         runtime.settings.clear()
         runtime.settings.update(resolved)
         # cache the context on the runtime (the PHASE-4 dispatch cache):
-        # ui_stats/ui_panels read it too, and it stays None only until
+        # per-account dispatch contexts read it, and it stays None only until
         # the first dispatch otherwise
         ctx = runtime.ctx = self._context(
             account, runtime, services, explicit=self._explicit_keys(account, runtime.name)
