@@ -177,7 +177,62 @@ class WorkspaceRepository(BaseRepository):
         assert state is not None
         return state
 
+    async def rename_workspace(self, name: str, description: str) -> None:
+        """Update the workspace description (identity metadata)."""
+        async with self._tx(f"update workspace {name!r} description") as conn:
+            await conn.execute(
+                "UPDATE workspaces SET description = ?, updated_at = ? WHERE name = ?",
+                (description, time.time(), name),
+            )
+
+    async def delete_workspace(self, name: str) -> bool:
+        """Delete the workspace row (callers ensure members are gone)."""
+        async with self._tx(f"delete workspace {name!r}") as conn:
+            cur = await conn.execute("DELETE FROM workspaces WHERE name = ?", (name,))
+            return bool(cur.rowcount)
+
+    async def update_member_eligibility(self, account: str, eligibility: str) -> None:
+        """Update the projection row's eligibility (validated upstream
+        by core.workspace.transitions)."""
+        async with self._tx(f"update member {account!r} eligibility") as conn:
+            await conn.execute(
+                "UPDATE workspace_members SET eligibility = ?, updated_at = ?,"
+                " version = version + 1 WHERE account = ?",
+                (eligibility, time.time(), account),
+            )
+
     # -------------------------------------------------- member projection
+    async def set_account_workspace(
+        self, account: str, workspace: str | None, *, mode: str = "independent"
+    ) -> None:
+        """THE membership write (decision 11): the accounts.workspace
+        POINTER and the workspace_members PROJECTION update in ONE
+        transaction — never independently writable, never divergent.
+
+        ``workspace=None`` leaves: the pointer clears AND the
+        projection row dies in the same commit. The caller (the
+        service) owns everything AROUND this (generation fencing on
+        leave, task requeue, limiter mapping, transition history)."""
+        now = time.time()
+        async with self._tx(f"membership {account!r} -> {workspace!r}") as conn:
+            await conn.execute(
+                "UPDATE accounts SET workspace = ? WHERE name = ?",
+                (workspace, account),
+            )
+            if workspace is None or not workspace.strip():
+                await conn.execute("DELETE FROM workspace_members WHERE account = ?", (account,))
+            else:
+                await conn.execute(
+                    "INSERT INTO workspace_members (account, workspace, mode,"
+                    " eligibility, joined_at, updated_at, version)"
+                    " VALUES (?, ?, ?, 'eligible', ?, ?, 1)"
+                    " ON CONFLICT(account) DO UPDATE SET"
+                    " workspace = excluded.workspace, mode = excluded.mode,"
+                    " updated_at = excluded.updated_at,"
+                    " version = workspace_members.version + 1",
+                    (account, workspace, mode, now, now),
+                )
+
     async def upsert_member(self, member: WorkspaceMemberRecord) -> None:
         """Insert or update the projection row (same transaction as the
         pointer write — the W3 service's job, never a direct caller)."""
@@ -236,8 +291,11 @@ class WorkspaceRepository(BaseRepository):
                     record.account,
                     record.status,
                     record.priority,
-                    record.chain_run_id,
-                    record.step,
+                    # chain fields are persistence-shaped; the domain model
+                    # gains them when W4's runs exist (getattr keeps both
+                    # record shapes insertable until then)
+                    getattr(record, "chain_run_id", None),
+                    getattr(record, "step", None),
                     record.generation,
                     record.error,
                     record.resume_policy,
@@ -438,7 +496,7 @@ class WorkspaceRepository(BaseRepository):
             await conn.execute(
                 "UPDATE deletion_jobs SET state = ?, attempts = attempts + 1,"
                 " last_error = ?, completed_at ="
-                " CASE WHEN ? IN ('complete', 'quarantined') THEN ? ELSE NULL END"
+                " CASE WHEN ? = 'complete' THEN ? ELSE NULL END"
                 " WHERE account = ?",
                 (state, last_error, state, time.time(), account),
             )

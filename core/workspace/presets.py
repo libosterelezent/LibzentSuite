@@ -35,11 +35,13 @@ __all__ = [
 
 class StalePreview(Exception):
     """Decision 16: the account's configuration changed after the
-    diff was previewed — the apply must refresh and re-confirm."""
+    diff was previewed — the apply must refresh and re-confirm.
+    Revisions are opaque fingerprints (the service hashes the sorted
+    settings content); any intervening write changes them."""
 
-    def __init__(self, preview_revision: int, current_revision: int) -> None:
+    def __init__(self, preview_revision: str, current_revision: str) -> None:
         super().__init__(
-            f"stale preview: configuration moved from revision {preview_revision} "
+            f"stale preview: configuration moved from {preview_revision} "
             f"to {current_revision} — re-preview and re-confirm"
         )
         self.preview_revision = preview_revision
@@ -150,7 +152,7 @@ def compute_apply_diff(
     return {key: (current_settings.get(key), value) for key, value in preset_settings.items()}
 
 
-def preview_revision_ok(preview_revision: int, current_revision: int) -> None:
+def preview_revision_ok(preview_revision: str, current_revision: str) -> None:
     """Decision 16's guard: raise :class:`StalePreview` when the
     account's configuration revision moved after the preview."""
     if current_revision != preview_revision:
@@ -161,8 +163,8 @@ def apply_diff(
     preset_settings: dict[str, Any],
     current_settings: dict[str, Any],
     *,
-    preview_revision: int,
-    current_revision: int,
+    preview_revision: str,
+    current_revision: str,
     preset: PresetRecord,
     applied_at: float,
 ) -> tuple[dict[str, Any], Provenance]:

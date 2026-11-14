@@ -447,10 +447,12 @@ class WorkspaceTask:
     id: str
     workspace: str
     task_id: str
-    account: str
+    account: str | None = None  # NULL while queued (binding released)
     status: str = TaskStatus.QUEUED
+    error: str | None = None
     priority: int = 0
     created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
     started_at: float | None = None
     stopped_at: float | None = None
     resume_policy: str = ""
@@ -458,8 +460,14 @@ class WorkspaceTask:
     generation: int = 1
 
     def __post_init__(self) -> None:
-        for name in ("id", "workspace", "task_id", "account"):
+        for name in ("id", "workspace", "task_id"):
             _require_str(getattr(self, name), f"task {name}")
+        # account is None while QUEUED (binding released) — required
+        # once ASSIGNED, which the transition validators enforce
+        if self.account is not None and not str(self.account).strip():
+            raise InvalidDefinition(
+                f"task account must be a non-empty string or None, got {self.account!r}"
+            )
         if self.status not in TaskStatus.ALL:
             raise InvalidDefinition(
                 f"task status must be one of {sorted(TaskStatus.ALL)}, got {self.status!r}"

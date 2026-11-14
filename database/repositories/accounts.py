@@ -67,6 +67,9 @@ class AccountsRepository(BaseRepository):
             token_ref=row["token_ref"],
             enabled=bool(row["enabled"]),
             sync_group=row["sync_group"],
+            # v10 column — absent on pre-v10 databases (the migration
+            # tests build genuine v4-v9 shapes)
+            workspace=(row["workspace"] if "workspace" in row.keys() else None),
             settings=loads_tolerant(
                 row["settings_json"], {}, f"accounts[{row['name']!r}].settings_json"
             ),

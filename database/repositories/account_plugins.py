@@ -15,6 +15,7 @@ per-account tables (``account_profiles``, ``plugin_settings``, ...).
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 from .base import BaseRepository
@@ -159,3 +160,25 @@ class AccountPluginsRepository(BaseRepository):
         ):
             out.setdefault(row["account"], {})[row["plugin"]] = row["profile"]
         return out
+
+    # ------------------------------------------------ provenance (W3, decision 9)
+    async def set_provenance(self, account: str, plugin: str, preset_id: int, version: int) -> None:
+        """Record the applied preset source on the assignment row
+        (single source per pair in v1 — the locked D.4 call)."""
+        async with self._tx(f"record provenance {account}/{plugin}") as conn:
+            await conn.execute(
+                "UPDATE account_plugins SET source_preset_id = ?,"
+                " source_version = ?, applied_at = ?"
+                " WHERE account = ? AND plugin = ?",
+                (str(preset_id), version, time.time(), account, plugin),
+            )
+
+    async def clear_provenance(self, account: str, plugin: str) -> None:
+        """Detach: drop the provenance link, keep the values."""
+        async with self._tx(f"clear provenance {account}/{plugin}") as conn:
+            await conn.execute(
+                "UPDATE account_plugins SET source_preset_id = NULL,"
+                " source_version = NULL, applied_at = NULL"
+                " WHERE account = ? AND plugin = ?",
+                (account, plugin),
+            )
