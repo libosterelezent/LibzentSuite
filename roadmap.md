@@ -260,12 +260,6 @@ settings layer, the plugin-eligibility gate.
     Study: `plans/pivot-audit-fastapi-flet.md` (phase 3).
     Same note: page model targets workspaces.
 
-[ ] **PHASE C LIVE DEBUG** — bravo re-credentialed and running; alpha
-    still needs a fresh credential. Remaining: admin-command flow
-    B -> A, ordered full walkthrough. (Can run against the current
-    fleet layer; re-verify the admin verbs after W3 swaps the
-    surface.)
-
 ---
 
 ## Open Ideas (unscheduled)
