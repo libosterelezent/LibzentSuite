@@ -640,6 +640,24 @@ async def _assemble(
         deliver=None,  # the chain runtime's intake wires in below
     )
 
+    # C2: the cog host — the converged plugin command face. The
+    # toolbox seams: to_rich is the adapter's converter (imported at
+    # composition — plugins never import adapters), audit publishes the
+    # typed MessageReceived on the bus (the identical row the intake
+    # records), the inbound factory is the event itself.
+    from adapters.model import convert_message
+    from core.event_bus import MessageReceived
+    from core.plugin_manager.cog_host import PluginCogHost
+
+    def _publish_inbound(event: Any) -> None:
+        bus.publish_nowait(event)
+
+    cog_host = PluginCogHost(
+        to_rich=convert_message,
+        audit_publisher=_publish_inbound,
+        inbound_factory=lambda **kw: MessageReceived(**kw),
+    )
+
     workspaces = WorkspaceService(
         database.workspaces,
         accounts=database.accounts,
@@ -769,6 +787,9 @@ async def _assemble(
         cooldowns=cooldowns,
         plugin_state=plugin_state,
     )
+    # C2: the cog host rides the plugin manager (host_cog/unhost_cog
+    # drive add_cog/remove_cog per (account, plugin))
+    plugins.cog_host = cog_host
     # the self-command executor's command gate reads this attribute; it
     # was never set here, so framework verbs fell back to the RETIRED env
     # OWNER_USER_IDS grant instead of the DB admin panel
