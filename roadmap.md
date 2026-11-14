@@ -119,25 +119,42 @@ bootstrap fleet/group closures     →     (deleted — membership written
 [ ] Owner review and approval of the spec before any code moves —
     **the remaining W0 gate: WORKSPACE_DESIGN.md awaits review**
 
-### W1 — Domain core *(pure, no I/O)*
-[ ] `core/workspace/models.py` — WorkspaceRecord, WorkspaceMember
-    (mode + eligibility columns), WorkspaceTask/step states,
-    ChainDefinition, trigger/signal specs (adapted from
-    `core/fleet/models.py`, which is already a PURE module)
-[ ] Channel + preset domain models: ChannelAssignment/
-    ChannelBinding, Preset (3 scopes) + provenance record
-    (source_preset_id, source_version, applied_at), and the pure
-    preset lifecycle functions (validate/apply/update-preview/
-    detach semantics — WORKSPACE_DESIGN.md §6)
-[ ] `core/workspace/transitions.py` — carry fleet's tables over +
-    chain-step states (`PENDING → READY → RUNNING → DONE | FAILED | SKIPPED`)
-[ ] Plugin capability contract replacing `fleet_handler`:
-    declarative `EMITS` / `FOLLOWS` on PluginBase
-[ ] `core/workspace/policy.py` — fleet's check order extended with
-    the new gate: *plugin assigned ∧ enabled on the target account ∧
-    settings gate passes ∧ a channel binding resolves* (WORKSPACE_DESIGN
-    §12 — the WHERE is part of eligibility)
-[ ] Pure unit tests green with zero connections (rollout-A discipline)
+### W1 — Domain core *(pure, no I/O)* — [x] DONE 2026-11-14 (see W1 commits)
+[x] `core/workspace/models.py` — DONE: eligibility/task vocabulary
+    carried renamed (fleet tables map one-to-one — equivalence is
+    TESTED), ExecutionMode group_managed→managed, plus the new
+    surface: StepStatus (+CANCELLED), ChainRunStatus (PARTIAL
+    first-class), ChannelValidity (5 states, only AVAILABLE usable),
+    ChannelDescriptor/ChannelBinding, RoutingPolicy, FollowSpec +
+    validate_plugin_declarations, SignalIdentity (plugin-namespaced
+    at consumption), ChainStep/ChainDefinition/ChainRun/
+    StepExecution, Provenance, PresetScope, WorkspaceEvent envelope.
+    mypy strict clean.
+[x] Channel + preset domain models — DONE: descriptors/bindings
+    above + `core/workspace/presets.py` (PresetRecord with
+    scope-owner consistency + owner-scoped uniqueness key, the
+    SettingSpec Protocol keeping the module pure, validate/apply
+    (preset's keys only — the locked D.3 semantics)/StalePreview
+    (decision 16)/detach)
+[x] `core/workspace/transitions.py` — DONE: member + task tables
+    carried VERBATIM (fleet equivalence asserted by test), new
+    STEP_TRANSITIONS (visible-skip-with-reason enforced at the
+    validator level, RUNNING never silently skips, retry-gated
+    FAILED→READY) + CHAIN_RUN_TRANSITIONS (PARTIAL terminal)
+[x] Plugin capability contract — DONE: `EMITS`/`FOLLOWS` ClassVars
+    on PluginBase (chain-inert defaults), `fleet_handler` marked
+    deprecated (W5 deletes), loader validates declarations at
+    discovery with the COMMANDS fail-fast convention (missing
+    handler = load error; namespaced EMIT = load error)
+[x] `core/workspace/policy.py` — DONE: the 7-check order as a PURE
+    WorkspacePolicy.evaluate(DispatchFacts) — facts bundled by the
+    caller, zero seams, check 7 (plugin ∧ gate ∧ usable channel)
+    produces the "visible skip" reasons; membership boundary and
+    framework-safety-first carried
+[x] Pure unit tests green with zero connections — DONE: 76 tests
+    across 5 modules (models/transitions/policy/presets/
+    declarations incl. loader discovery); full suite 1,749 green;
+    whole-tree mypy 456 with ZERO new errors
 
 ### W2 — Persistence + big-bang migration
 [ ] Schema v10 per WORKSPACE_DESIGN §13: `workspaces`,
@@ -211,9 +228,9 @@ settings layer, the plugin-eligibility gate.
 
 ## Active Queue
 
-[ ] **Workspace W0 review** — `WORKSPACE_DESIGN.md` is written and
-    awaiting owner approval (the last W0 item); W1 starts on approval
-
+[ ] **Workspace W1 review** — the pure domain core is DONE (76
+    tests, 5 modules, mypy strict clean); W2 (persistence + the
+    big-bang v10 migration) is next
 [ ] **FastAPI core API** — replace the deleted dashboard's REST surface
     with FastAPI routers calling the existing ControlAPI. Pydantic
     request/response models. Native WebSocket for live events.
