@@ -352,6 +352,360 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             ON fleet_transitions(group_name, id);
         """,
     ),
+    (
+        10,
+        "workspace unification W2 — the v10 fold (additive)",
+        """
+        -- WORKSPACE UNIFICATION (WORKSPACE_DESIGN.md §13, decisions
+        -- 5/9/11/15). ADDITIVE by construction: every new table is
+        -- created, the data fold runs, and provenance columns are
+        -- appended — while the v9 tables/columns (sync_groups, the
+        -- five fleet tables, accounts.sync_group, account_plugins.
+        -- profile) remain in place until W3 unwires their readers.
+        -- The physical DROP is migration v11 (same series, no
+        -- coexistence across releases) so every intermediate commit
+        -- boots and its full suite stays green.
+
+        -- ------------------------------------------------ workspaces
+        -- Identity + orchestration state in ONE owner: generation and
+        -- paused fold in from fleet_groups (decision 5/6).
+        CREATE TABLE IF NOT EXISTS workspaces (
+            name        TEXT PRIMARY KEY,
+            description TEXT NOT NULL DEFAULT '',
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            paused      INTEGER NOT NULL DEFAULT 0,
+            generation  INTEGER NOT NULL DEFAULT 1,
+            created_at  REAL NOT NULL,
+            updated_at  REAL NOT NULL
+        );
+        INSERT INTO workspaces (name, description, enabled, created_at, updated_at)
+        SELECT name, description, enabled, created_at, updated_at
+        FROM sync_groups;
+        -- fleet-only groups (no sync_groups row): adopted so no
+        -- orchestration state is lost; then the fold of state.
+        INSERT OR IGNORE INTO workspaces (name, description, enabled, created_at, updated_at)
+        SELECT fg.group_name, '', 1, fg.updated_at, fg.updated_at
+        FROM fleet_groups fg;
+        UPDATE workspaces
+        SET generation = (SELECT generation FROM fleet_groups fg
+                          WHERE fg.group_name = workspaces.name),
+            paused = COALESCE((SELECT paused FROM fleet_groups fg
+                               WHERE fg.group_name = workspaces.name), paused),
+            updated_at = COALESCE((SELECT updated_at FROM fleet_groups fg
+                                   WHERE fg.group_name = workspaces.name), updated_at)
+        WHERE name IN (SELECT group_name FROM fleet_groups);
+
+        -- ------------------------------------------- the membership
+        -- pointer (decision 11): accounts.workspace is THE authoritative
+        -- membership column; backfilled from the v9 pointer. The v9
+        -- column stays (read-only) until v11 drops it.
+        ALTER TABLE accounts ADD COLUMN workspace TEXT;
+        UPDATE accounts
+        SET workspace = sync_group
+        WHERE sync_group IS NOT NULL AND sync_group != '';
+
+        -- workspace_members is the PROJECTION (same-transaction
+        -- updates only): folded from the pointer LEFT JOINed with
+        -- fleet_members so mode/eligibility survive (group_managed ->
+        -- managed is the one value rename, decision 6 vocabulary).
+        CREATE TABLE IF NOT EXISTS workspace_members (
+            account     TEXT NOT NULL PRIMARY KEY,
+            workspace   TEXT NOT NULL,
+            mode        TEXT NOT NULL DEFAULT 'independent',
+            eligibility TEXT NOT NULL DEFAULT 'eligible',
+            joined_at   REAL NOT NULL,
+            updated_at  REAL NOT NULL,
+            version     INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO workspace_members (account, workspace, mode, eligibility, joined_at, updated_at)
+        SELECT a.name,
+               a.workspace,
+               COALESCE(CASE fm.mode WHEN 'group_managed' THEN 'managed'
+                                     ELSE fm.mode END, 'independent'),
+               COALESCE(fm.eligibility, 'eligible'),
+               COALESCE(fm.since, a.created_at),
+               COALESCE(fm.since, a.created_at)
+        FROM accounts a
+        LEFT JOIN fleet_members fm ON fm.account = a.name
+        WHERE a.workspace IS NOT NULL AND a.workspace != '';
+        CREATE INDEX IF NOT EXISTS idx_workspace_members_ws
+            ON workspace_members(workspace);
+
+        -- --------------------------------------------- preset system
+        -- (decisions 9/15): plugin_profiles folds to scope=global
+        -- presets CARRYING their old ids (provenance references them).
+        -- owner_id uses the '' sentinel for global (SQLite UNIQUE
+        -- treats NULLs as distinct — '' keeps the scoped-unique
+        -- constraint enforceable). version starts at 1: the immutable
+        -- first version of every folded template.
+        CREATE TABLE IF NOT EXISTS presets (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            preset_id      INTEGER NOT NULL,
+            scope          TEXT NOT NULL DEFAULT 'global',
+            owner_id       TEXT NOT NULL DEFAULT '',
+            plugin         TEXT NOT NULL,
+            name           TEXT NOT NULL,
+            description    TEXT NOT NULL DEFAULT '',
+            version        INTEGER NOT NULL DEFAULT 1,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            settings_json  TEXT NOT NULL DEFAULT '{}',
+            archived       INTEGER NOT NULL DEFAULT 0,
+            created_at     REAL NOT NULL,
+            updated_at     REAL NOT NULL,
+            UNIQUE (preset_id, version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_presets_identity
+            ON presets(scope, owner_id, plugin, name);
+        INSERT INTO presets (preset_id, scope, owner_id, plugin, name,
+                             description, version, schema_version,
+                             settings_json, created_at, updated_at)
+        SELECT id, 'global', '', plugin, name, description, 1, 1,
+               settings_json, created_at, updated_at
+        FROM plugin_profiles;
+
+        -- provenance columns on the assignment row (decision 9/D.4:
+        -- single source per pair in v1).
+        ALTER TABLE account_plugins ADD COLUMN source_preset_id TEXT;
+        ALTER TABLE account_plugins ADD COLUMN source_version INTEGER;
+        ALTER TABLE account_plugins ADD COLUMN applied_at REAL;
+
+        -- LIVE-BINDING MATERIALIZATION (§13.1): every bound pair's
+        -- effective profile contribution becomes account-owned rows —
+        -- keys the account layer already overrides stay untouched
+        -- (precedence preserved byte-for-byte), the reserved
+        -- "channels" key is EXCLUDED from settings materialization
+        -- (it extracts into bindings below, not into settings).
+        -- NOTE: SQLite's JSON layer stores true/false as integers;
+        -- json_each's `type` column is what distinguishes them, so
+        -- booleans materialize as `true`/`false` exactly like the
+        -- Python-encoded account layer writes them (the §13.2
+        -- effective-values invariant depends on this).
+        INSERT INTO plugin_settings (account, plugin, key, value_json)
+        SELECT ap.account, ap.plugin, pk.key,
+               CASE WHEN pk.type = 'true' THEN 'true'
+                    WHEN pk.type = 'false' THEN 'false'
+                    ELSE json_quote(pk.value) END
+        FROM account_plugins ap
+        JOIN plugin_profiles pp
+          ON pp.plugin = ap.plugin AND pp.name = ap.profile
+        JOIN json_each(pp.settings_json) pk
+        WHERE ap.profile IS NOT NULL
+          AND pk.key != 'channels'
+          AND NOT EXISTS (
+              SELECT 1 FROM plugin_settings ps
+              WHERE ps.account = ap.account
+                AND ps.plugin = ap.plugin
+                AND ps.key = pk.key
+          );
+        UPDATE account_plugins
+        SET source_preset_id = CAST(pp.id AS TEXT),
+            source_version = 1,
+            applied_at = CAST(strftime('%s', 'now') AS REAL)
+        FROM plugin_profiles pp
+        WHERE account_plugins.profile IS NOT NULL
+          AND pp.plugin = account_plugins.plugin
+          AND pp.name = account_plugins.profile;
+
+        -- ------------------------------------------------- channels
+        -- (§5.1): registry / assignments / plugin bindings. The
+        -- reserved "channels" set extracts from BOTH config layers it
+        -- could live in (the bound profile and an explicit account
+        -- override) into real binding rows — the plugin's WHERE,
+        -- account-owned forever after (rules 1-2).
+        CREATE TABLE IF NOT EXISTS account_channels (
+            account          TEXT NOT NULL,
+            guild_id         TEXT NOT NULL,
+            channel_id       TEXT NOT NULL,
+            name             TEXT NOT NULL DEFAULT '',
+            validity         TEXT NOT NULL DEFAULT 'unknown',
+            last_seen_at     REAL,
+            validation_reason TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (account, guild_id, channel_id)
+        );
+        CREATE TABLE IF NOT EXISTS account_channel_assignments (
+            account    TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            guild_id   TEXT NOT NULL DEFAULT '',
+            added_at   REAL NOT NULL,
+            PRIMARY KEY (account, channel_id)
+        );
+        CREATE TABLE IF NOT EXISTS account_plugin_channels (
+            account    TEXT NOT NULL,
+            plugin     TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            guild_id   TEXT NOT NULL DEFAULT '',
+            bound_at   REAL NOT NULL,
+            PRIMARY KEY (account, plugin, channel_id)
+        );
+        INSERT OR IGNORE INTO account_plugin_channels
+            (account, plugin, channel_id, guild_id, bound_at)
+        SELECT ap.account, ap.plugin, ch.value, '',
+               CAST(strftime('%s', 'now') AS REAL)
+        FROM account_plugins ap
+        JOIN plugin_profiles pp
+          ON pp.plugin = ap.plugin AND pp.name = ap.profile
+        JOIN json_each(json_extract(pp.settings_json, '$.channels')) ch
+        WHERE ap.profile IS NOT NULL
+          AND json_type(pp.settings_json, '$.channels') = 'array';
+        INSERT OR IGNORE INTO account_plugin_channels
+            (account, plugin, channel_id, guild_id, bound_at)
+        SELECT ps.account, ps.plugin, ch.value, '',
+               CAST(strftime('%s', 'now') AS REAL)
+        FROM plugin_settings ps
+        JOIN json_each(json_extract(ps.value_json, '$')) ch
+        WHERE ps.key = 'channels'
+          AND json_type(ps.value_json, '$') = 'array';
+
+        -- ------------------------------------------ orchestration
+        -- tasks: fleet assignments fold (group_name -> workspace).
+        CREATE TABLE IF NOT EXISTS workspace_tasks (
+            id            TEXT PRIMARY KEY,
+            workspace     TEXT NOT NULL,
+            task_id       TEXT NOT NULL,
+            account       TEXT,
+            status        TEXT NOT NULL DEFAULT 'queued',
+            priority      INTEGER NOT NULL DEFAULT 0,
+            chain_run_id  TEXT,
+            step          INTEGER,
+            generation    INTEGER NOT NULL DEFAULT 1,
+            error         TEXT,
+            resume_policy TEXT NOT NULL DEFAULT '',
+            started_at    REAL,
+            stopped_at    REAL,
+            version       INTEGER NOT NULL DEFAULT 1,
+            created_at    REAL NOT NULL,
+            updated_at    REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_workspace_tasks_ws_status
+            ON workspace_tasks(workspace, status);
+        INSERT INTO workspace_tasks (id, workspace, task_id, account, status,
+                                     priority, generation, error, resume_policy,
+                                     started_at, stopped_at, version,
+                                     created_at, updated_at)
+        SELECT id, group_name, task_id, account, status, priority,
+               generation, error, resume_policy, started_at, stopped_at,
+               version, created_at,
+               COALESCE(stopped_at, started_at, created_at)
+        FROM fleet_assignments;
+
+        -- chains + runs + step executions (W4-ready, decision 14):
+        -- definitions validate on save; runs capture immutable
+        -- snapshots at creation.
+        CREATE TABLE IF NOT EXISTS workspace_chains (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace        TEXT NOT NULL,
+            name             TEXT NOT NULL,
+            schema_version   INTEGER NOT NULL DEFAULT 1,
+            revision         INTEGER NOT NULL DEFAULT 1,
+            enabled          INTEGER NOT NULL DEFAULT 1,
+            definition_json  TEXT NOT NULL DEFAULT '{}',
+            created_at       REAL NOT NULL,
+            updated_at       REAL NOT NULL,
+            UNIQUE (workspace, name)
+        );
+        CREATE TABLE IF NOT EXISTS chain_runs (
+            id               TEXT PRIMARY KEY,
+            chain_id         INTEGER,
+            workspace        TEXT NOT NULL,
+            definition_json  TEXT NOT NULL DEFAULT '{}',
+            status           TEXT NOT NULL DEFAULT 'running',
+            triggered_by     TEXT NOT NULL DEFAULT '',
+            created_at       REAL NOT NULL,
+            finished_at      REAL
+        );
+        CREATE TABLE IF NOT EXISTS step_executions (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id      TEXT NOT NULL,
+            position    INTEGER NOT NULL,
+            attempt     INTEGER NOT NULL DEFAULT 1,
+            target      TEXT NOT NULL DEFAULT '',
+            outcome     TEXT NOT NULL DEFAULT '',
+            error       TEXT NOT NULL DEFAULT '',
+            started_at  REAL NOT NULL,
+            finished_at REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_step_executions_run
+            ON step_executions(run_id, position);
+
+        -- signals outbox (decision 12): durable acceptance BEFORE
+        -- acknowledgement; delivery state hangs off signal_id.
+        CREATE TABLE IF NOT EXISTS signals (
+            signal_id      TEXT PRIMARY KEY,
+            account        TEXT NOT NULL,
+            plugin         TEXT NOT NULL,
+            name           TEXT NOT NULL,
+            payload_json   TEXT NOT NULL DEFAULT '{}',
+            correlation_id TEXT NOT NULL DEFAULT '',
+            created_at     REAL NOT NULL,
+            delivery_state TEXT NOT NULL DEFAULT 'pending',
+            attempts       INTEGER NOT NULL DEFAULT 0,
+            acked_at       REAL,
+            last_error     TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_signals_state ON signals(delivery_state);
+
+        -- cooldowns: scope values rename (group->workspace,
+        -- account->member); records carry untouched.
+        CREATE TABLE IF NOT EXISTS workspace_cooldowns (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_type  TEXT NOT NULL,
+            scope_id    TEXT NOT NULL,
+            reason      TEXT NOT NULL,
+            started_at  REAL NOT NULL,
+            expires_at  REAL NOT NULL,
+            source      TEXT NOT NULL DEFAULT 'manual',
+            cleared_at  REAL,
+            created_at  REAL NOT NULL,
+            updated_at  REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_workspace_cooldowns_scope
+            ON workspace_cooldowns(scope_type, scope_id);
+        INSERT INTO workspace_cooldowns (scope_type, scope_id, reason,
+                                         started_at, expires_at, source,
+                                         cleared_at, created_at, updated_at)
+        SELECT CASE scope_type WHEN 'group' THEN 'workspace'
+                               WHEN 'account' THEN 'member'
+                               ELSE scope_type END,
+               scope_id, reason, started_at, expires_at, source,
+               cleared_at,
+               CAST(strftime('%s', 'now') AS REAL),
+               CAST(strftime('%s', 'now') AS REAL)
+        FROM fleet_cooldowns;
+
+        -- transition history carries (renames only).
+        CREATE TABLE IF NOT EXISTS workspace_transitions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind            TEXT NOT NULL,
+            workspace       TEXT NOT NULL,
+            generation      INTEGER NOT NULL,
+            reason          TEXT NOT NULL,
+            correlation_id  TEXT NOT NULL,
+            occurred_at     REAL NOT NULL,
+            task_id         TEXT,
+            run_id          TEXT,
+            account         TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_workspace_transitions_ws
+            ON workspace_transitions(workspace, id);
+        INSERT INTO workspace_transitions (kind, workspace, generation, reason,
+                                           correlation_id, occurred_at, task_id,
+                                           run_id, account)
+        SELECT kind, group_name, generation, reason, correlation_id,
+               occurred_at, task_id, assignment_id, account
+        FROM fleet_transitions;
+
+        -- cross-store deletion workflow (decision 18): durable,
+        -- retryable, observable — one job row per removed account.
+        CREATE TABLE IF NOT EXISTS deletion_jobs (
+            account      TEXT PRIMARY KEY,
+            state        TEXT NOT NULL DEFAULT 'pending',
+            attempts     INTEGER NOT NULL DEFAULT 0,
+            last_error   TEXT NOT NULL DEFAULT '',
+            created_at   REAL NOT NULL,
+            completed_at REAL
+        );
+        """,
+    ),
 ]
 
 

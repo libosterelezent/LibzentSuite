@@ -458,8 +458,9 @@ class LegacyMigrationTests(unittest.IsolatedAsyncioTestCase):
         applied = await db.connect()
         # migrations 5 (sync-group backfill) + 6 (account_plugins) +
         # 7 (plugin_profiles + binding column) + 8 (drop legacy profile
-        # tables) + 9 (fleet orchestration state)
-        self.assertEqual(applied, 5)
+        # tables) + 9 (fleet orchestration state) + 10 (the workspace
+        # fold — additive, sync_groups stays readable as asserted below)
+        self.assertEqual(applied, 6)
         groups = sorted(
             (g.name, g.enabled) for g in await db.sync_groups.list())
         self.assertEqual(groups, [("Alpha", True), ("Beta", True)])
