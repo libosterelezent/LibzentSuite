@@ -312,7 +312,6 @@ class SimulationRunner:
         log_scheduler = ServiceLogger(logger, "scheduler")
         log_plugins = ServiceLogger(logger, "plugins")
         log_accounts = ServiceLogger(logger, "accounts")
-        log_sync_groups = ServiceLogger(logger, "sync-groups")
         settings = SettingsManager(
             bus,
             log_settings,
@@ -512,7 +511,6 @@ class SimulationRunner:
                 credential_service=credential_service,
                 cooldowns=cooldowns,
                 plugin_state=plugin_state,
-                sync_groups=None,  # W3: workspace membership rides WorkspaceService
             )
             await accounts.load()
             box["send"] = accounts.send_hook  # fill the seam BEFORE start()
@@ -825,7 +823,6 @@ class SimulationRunner:
         credential_service: Any = None,
         cooldowns: Any = None,
         plugin_state: Any = None,
-        sync_groups: Any = None,
     ) -> Any:
         """AccountManager with the pinned positional arguments.
 
@@ -850,7 +847,6 @@ class SimulationRunner:
                 credential_service=credential_service,
                 cooldowns=cooldowns,
                 plugin_state=plugin_state,
-                sync_groups=sync_groups,
                 account_plugins=db.account_plugins,
             )
         except TypeError:

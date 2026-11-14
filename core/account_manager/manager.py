@@ -26,7 +26,7 @@ purposes. The COMPLETE inventory of client touches (each demand-driven):
 There is NO prefetching, NO "just in case" fetching, and NO API-derived
 state beyond what a live send/flow actually consumed. ``details()`` reads
 exclusively from the ingested READY snapshot + repos. Rate-scope metadata
-(``_sync_group_apply`` / ``_sync_group_scope``) is pure plumbing — no API
+(``_workspace_apply`` / ``_workspace_scope``) is pure plumbing — no API
 involved.
 ════════════════════════════════════════════════════════════════════════
 
@@ -312,7 +312,6 @@ class Account:
             "status": rt.status.value,
             "user_id": rt.user_id,
             "enabled": self.record.enabled,
-            "sync_group": self.record.sync_group,
             "workspace": self.record.workspace,
             "assigned_plugins": list(self.assigned_plugins),
             "plugin_profiles": dict(self.plugin_profiles),
@@ -368,7 +367,6 @@ class AccountManager:
         plugin_data: Any = None,
         signals: Any = None,  # core.workspace.signals.SignalOutbox (W4)
         lifecycle: Any = None,
-        sync_groups: Any = None,
         account_plugins: Any = None,
     ) -> None:
         """``limiter`` (optional) enriches details() with effective rate data;
@@ -383,10 +381,6 @@ class AccountManager:
         ``lifecycle`` (optional LifecycleGovernor, PHASE-4) rate-limits
         start/stop thrashing per account and fleet-wide — None disables
         limiting (tests/simulators construct managers without it);
-        ``sync_groups`` (optional SyncGroupManager) owns group membership:
-        when wired, the group-scope plumbing of add/remove/restore is
-        delegated to it (AccountManager -> SyncGroupManager ->
-        RateLimitManager); unwired stacks keep the legacy direct plumbing;
         ``account_plugins`` (optional AccountPluginsRepository,
         ``db.account_plugins``) is the CAPABILITY source of truth: the
         account_plugins table rows decide which plugins an account runs
@@ -456,7 +450,6 @@ class AccountManager:
         # SyncGroupManager (optional): the application-level owner of group
         # membership. When present, every group-scope touch below delegates
         # to it; when absent, the legacy direct limiter plumbing runs.
-        self._sync_groups = sync_groups
         # AccountPluginsRepository (optional): direct account→plugin
         # assignments — THE capability source. None (unwired test stacks)
         # behaves like "no assignments": zero plugins, never unrestricted.
@@ -466,48 +459,27 @@ class AccountManager:
         bus.subscribe(MessageReceived, self._audit_inbound)
 
     # ------------------------------------------------------- rate-scope sync
-    def _sync_group_scope(self, name: str, group: str | None) -> None:
-        """Feed the account's group membership to the limiter (per-account/
-        group rate scope). Pure metadata plumbing — NO Discord API is
-        involved; tolerant of limiters without group support (tests).
-
-        LEGACY path: only used when no SyncGroupManager is wired (unwired
-        test/sim stacks) — the wired path goes through _sync_group_apply.
-        """
+    def _workspace_scope(self, name: str, workspace: str | None) -> None:
+        """Feed the account's workspace membership to the limiter (the
+        shared-clock rate scope). Pure metadata plumbing — NO Discord API
+        involved; tolerant of limiters without the mapping (tests). The
+        WorkspaceService registers pacing on membership moves; this is
+        the boot/add-time path from the persisted pointer."""
         register = getattr(self._limiter, "set_account_group", None)
         if register is None:
             return
         try:
-            register(name, group)
+            register(name, workspace)
         except Exception:
-            self._logger.exception("group scope registration failed for %s", name)
+            self._logger.exception("workspace scope registration failed for %s", name)
 
-    async def _sync_group_apply(
-        self, name: str, group: str | None, *, forget: bool = False
-    ) -> None:
-        """One membership -> runtime sync, through the owning manager.
-
-        With SyncGroupManager wired this is the AccountManager ->
-        SyncGroupManager -> RateLimitManager path (the wired manager also
-        adopts the group row for legacy names). Without it, the legacy
-        direct plumbing keeps unwired stacks behaving exactly as before.
-        Never raises: group plumbing must not break account lifecycle.
-        """
-        if self._sync_groups is not None:
-            try:
-                if forget:
-                    outcome = self._sync_groups.forget_account(name)
-                else:
-                    outcome = self._sync_groups.sync_membership(name, group)
-                if inspect.iscoroutine(outcome):
-                    await outcome
-            except Exception:
-                self._logger.exception("sync-group sync failed for account %s", name)
-            return
-        if forget:
-            self._sync_group_scope(name, None)
-        else:
-            self._sync_group_scope(name, group)
+    async def _workspace_apply(self, name: str, workspace: str | None) -> None:
+        """Boot/add-time membership -> pacing registration from the
+        persisted pointer. The WorkspaceService owns membership MOVES
+        (and registers pacing itself); this path only restores what the
+        pointer says at boot and after add. Never raises: membership
+        plumbing must not break account lifecycle."""
+        self._workspace_scope(name, workspace)
 
     # ------------------------------------------------------------------ boot
     async def load(self) -> None:
@@ -547,22 +519,9 @@ class AccountManager:
                 self._refresh_credential_source(account)
                 self._accounts[record.name] = account
                 await self._attach_plugins(record.name)
-                if self._sync_groups is None:  # legacy path (see docstring)
-                    # workspace pointer first (W3); the v9 sync_group
-                    # column is frozen read-only until v11 drops it
-                    self._sync_group_scope(
-                        record.name,
-                        getattr(record, "workspace", None) or record.sync_group,
-                    )
+                self._workspace_scope(record.name, record.workspace)
             except Exception:
                 self._logger.exception("could not restore account %r", record.name)
-        if self._sync_groups is not None:
-            try:
-                outcome = self._sync_groups.sync_runtime()
-                if inspect.iscoroutine(outcome):
-                    await outcome
-            except Exception:
-                self._logger.exception("sync-group runtime restore failed")
 
     # ------------------------------------------------------------ registry
     async def add_account(
@@ -571,7 +530,7 @@ class AccountManager:
         *,
         token_ref: str | None = None,
         enabled: bool = True,
-        sync_group: str | None = None,
+        workspace: str | None = None,
         plugins: list[str] | None = None,
         profiles: Any = None,
     ) -> dict[str, Any]:
@@ -614,7 +573,7 @@ class AccountManager:
         ):
             raise AccountError("'plugins' must be a list of plugin names")
         record = await self._accounts_repo.add(
-            name, token_ref=token_ref, enabled=bool(enabled), sync_group=sync_group
+            name, token_ref=token_ref, enabled=bool(enabled), workspace=workspace
         )
         account = Account(record=record)
         self._refresh_credential_source(account)
@@ -639,12 +598,12 @@ class AccountManager:
         if fresh is not None:
             account.record = fresh
         await self._attach_plugins(name)
-        await self._sync_group_apply(name, sync_group)
+        await self._workspace_apply(name, workspace)
         self._logger.info(
             "account %s added (enabled=%s workspace=%s plugins=%s)",
             name,
             enabled,
-            sync_group,
+            workspace,
             account.assigned_plugins or "-",
         )
         return account.status_dict()
@@ -798,7 +757,7 @@ class AccountManager:
             except Exception:  # inherit the old one's DM channel ids
                 self._logger.exception("api-cache cascade failed for %s", name)
         self._drop_services(name)
-        await self._sync_group_apply(name, None, forget=True)
+        await self._workspace_apply(name, None)
         if self._credential_service is not None:
             try:
                 await self._credential_service.delete(name)

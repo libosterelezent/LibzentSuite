@@ -258,7 +258,7 @@ class ControlAPI:
     async def accounts_add(self, payload: dict[str, Any], surface: str = "api") -> dict[str, Any]:
         """Register + persist an account; optionally store its credential.
 
-        payload: {name (required), token_ref?, sync_group?, enabled?,
+        payload: {name (required), token_ref?, workspace?, enabled?,
                   plugins?: [names], credential?: str}. Unknown keys are
         rejected (typo trap) — ``profiles`` is no longer accepted: profile
         assignment stopped controlling account capabilities, so the key is
@@ -272,7 +272,7 @@ class ControlAPI:
         """
         if not isinstance(payload, dict) or not payload.get("name"):
             raise ValueError("account payload needs at least {'name': ...}")
-        allowed = {"name", "token_ref", "sync_group", "enabled", "plugins", "credential"}
+        allowed = {"name", "token_ref", "workspace", "enabled", "plugins", "credential"}
         unknown = set(payload) - allowed
         if unknown:
             raise ValueError(f"unknown account payload keys: {sorted(unknown)}")
@@ -297,7 +297,7 @@ class ControlAPI:
                 payload["name"],
                 token_ref=payload.get("token_ref"),
                 enabled=enabled,
-                sync_group=payload.get("sync_group"),
+                workspace=payload.get("workspace"),
                 plugins=plugins or None,
             )
         )

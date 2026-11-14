@@ -252,22 +252,6 @@ class ScenarioFinished(Event):
     duration_s: float = 0.0
 
 
-@dataclass
-class FleetStateChanged(Event):
-    """A fleet orchestration transition landed (PHASE 9, spec §3).
-
-    Published by FleetService's publisher seam AFTER the transition is
-    persisted (write-ahead); WS clients receive it as a ``fleet`` frame
-    and the Fleet Hub converges. Delivery is an optimization — the
-    fleet_transitions table is the durable record.
-    """
-
-    kind: str = ""
-    group: str = ""
-    reason: str = ""
-    generation: int = 0
-
-
 class _HandlerList(list["StoredHandler"]):
     """Handler list with a mutation version + cached dispatch snapshot.
 
@@ -609,7 +593,6 @@ __all__ = [
     "AccountFailed",
     "Event",
     "EventBus",
-    "FleetStateChanged",
     "MessageDeleted",
     "MessageEdited",
     "MessageReceived",

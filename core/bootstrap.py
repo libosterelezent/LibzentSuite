@@ -812,7 +812,6 @@ async def _assemble(
         plugin_state=plugin_state,
         plugin_data=plugin_data_store,  # PHASE 10: data_* plugin API
         lifecycle=LifecycleGovernor(),  # PHASE-4 (S4): anti-thrash defaults
-        sync_groups=None,  # W3: workspace membership rides WorkspaceService
         signals=signals_outbox,
         account_plugins=database.account_plugins,  # capability source
     )
@@ -894,7 +893,7 @@ async def _assemble(
                 payload["name"],
                 token_ref=payload.get("token_ref"),
                 enabled=bool(raw_enabled),
-                sync_group=payload.get("sync_group"),
+                workspace=payload.get("workspace"),
                 plugins=config_plugins,
             )
         except Exception:

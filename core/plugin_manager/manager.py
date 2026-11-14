@@ -1690,8 +1690,8 @@ class PluginManager:
         handler_fn = getattr(rt.instance, handler, None)
         if handler_fn is None or not callable(handler_fn):
             raise PluginError(
-                f"plugin {plugin!r} has no callable handler {handler!r}"
-                f" on account {account!r}")
+                f"plugin {plugin!r} has no callable handler {handler!r} on account {account!r}"
+            )
         services = self._services.get(account, lambda _n: None)(plugin)
         ctx = self._context(account, rt, services)
         return await handler_fn(ctx, payload)

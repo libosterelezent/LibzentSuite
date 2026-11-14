@@ -274,7 +274,7 @@ class TaskScheduler:
         self._retry_backoff = float(retry_backoff)
         self._max_backoff = float(max_backoff)
         self._history_repo = history_repo
-        # PHASE 9 (spec §4) fleet gate: optional duck-typed async
+        # the dispatch guard (workspace era): optional duck-typed async
         # ``(task) -> decision`` with ``.allowed`` + optional
         # ``.retry_at``. Consulted BEFORE dispatch and revalidated after
         # the limiter grant; a disallowed task PARKS (still queued) —
@@ -396,11 +396,11 @@ class TaskScheduler:
         self._started = True
 
     def set_dispatch_guard(self, guard: Callable[[Task], Awaitable[Any]] | None) -> None:
-        """Attach/replace/clear the fleet dispatch gate (PHASE 9 §4).
+        """Attach/replace/clear the dispatch guard (the workspace gate).
 
         Late-binding on purpose: bootstrap wires the policy engine after
         the account manager exists. The guard is duck-typed and never
-        imported from core.fleet — the scheduler stays generic.
+        imported from core.workspace — the scheduler stays generic.
         """
         self._guard = guard
 
@@ -416,13 +416,13 @@ class TaskScheduler:
         except Exception:
             self._log(
                 "warning",
-                "fleet",
+                "workspace",
                 f"dispatch guard error for task={task.id} account={task.account} (fail-open)",
             )
             return None
 
     async def _await_guard(self, task: Task) -> None:
-        """Fleet gate: park the task — still QUEUED — until the guard
+        """Dispatch gate: park the task — still QUEUED — until the guard
         allows dispatch. ``retry_at`` (epoch) bounds each park slice;
         cancels, stops and sweeps preempt the park, and the caller's
         checkpoint finishes the task."""
@@ -655,7 +655,6 @@ class TaskScheduler:
         name: str | None = None,
         timeout: float | None = None,
         retries: int = 0,
-        fleet_assignment: str | None = None,
     ) -> Task:
         """Validate, queue and publish one task; returns the live Task.
 
@@ -705,12 +704,6 @@ class TaskScheduler:
             raise SchedulerError(f"retries must be an int >= 0, got {retries!r}")
         if retries < 0:
             raise SchedulerError(f"retries must be >= 0, got {retries!r}")
-        if fleet_assignment is not None and (
-            not isinstance(fleet_assignment, str) or not fleet_assignment.strip()
-        ):
-            raise SchedulerError(
-                f"fleet_assignment must be a non-empty string or None, got {fleet_assignment!r}"
-            )
 
         task = Task(
             id=next(self._seq),
@@ -729,9 +722,6 @@ class TaskScheduler:
             priority=int(prio),
             timeout_s=timeout_s,
             max_retries=retries,
-            fleet_assignment=(
-                fleet_assignment.strip() if isinstance(fleet_assignment, str) else None
-            ),
         )
         try:
             self._ensure_lane(task.account)  # validates a running loop FIRST:

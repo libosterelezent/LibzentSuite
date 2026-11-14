@@ -750,9 +750,9 @@ class AccountPluginServices:
         if self._signals is None:
             raise RuntimeError(
                 f"signal emission is not configured (plugin {self._plugin!r}"
-                " on this stack) — chain triggers need the outbox")
-        return await self._signals.accept(
-            self._account, self._plugin, name, payload or {})
+                " on this stack) — chain triggers need the outbox"
+            )
+        return await self._signals.accept(self._account, self._plugin, name, payload or {})
 
     def validate_channel(self, channel_id: int) -> None:
         """Raise :class:`core.errors.TargetGone` when the channel is unusable."""

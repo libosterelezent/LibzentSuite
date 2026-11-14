@@ -96,16 +96,6 @@ class PluginBase(abc.ABC):  # noqa: B024 -- contract marker; every hook is optio
     #: signal namespaces warn).
     EMITS: ClassVar[tuple[str, ...]] = ()
     FOLLOWS: ClassVar[tuple[FollowSpec, ...]] = ()
-    #: PHASE 9 (§5) opt-in FLEET capability, DEFAULT OFF: an instance of
-    #: ``core.fleet.FleetTaskHandler`` (see core/fleet/capability.py).
-    #: Plugins without it — ping and every simple plugin — are never
-    #: mounted into fleet management. The framework owns the lifecycle;
-    #: the handler only supplies the flow (prepare/execute/suspend/
-    #: recover) and its task declarations.
-    #: DEPRECATED (2026-11-13): superseded by EMITS/FOLLOWS + the
-    #: workspace chain layer (roadmap W4/W5); deleted with the fleet
-    #: module at W5.
-    fleet_handler: ClassVar[Any | None] = None
 
     # ------------------------------------------------------ dashboard UI (C)
 
