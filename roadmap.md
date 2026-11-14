@@ -113,16 +113,23 @@ bridge + `COMMAND_HUB` registration retire → **C4** the hub keeps only
 its hub-shaped residue (access wiring, verb definitions,
 `api_provider`).
 
-### FastAPI core API (after C1–C4)
+### FastAPI core API — [x] DONE 2026-11-14 (commit ad417cb)
 
-FastAPI routers over the existing ControlAPI; Pydantic models; native
-WebSocket for live events. Study: `plans/pivot-audit-fastapi-flet.md`.
-Model the `workspaces_*` surface and the CONVERGED command model.
+`interfaces/api/` — routers over the ONE ControlAPI: Pydantic models,
+X-API-Token auth, the full surface (status/estop/resume, accounts
+CRUD, workspaces + members + pause/resume + tasks, plugins
+assign/unassign, tasks, logs, audit), a WebSocket endpoint scaffolding
+the live-event bridge. Zero business logic in the interface layer.
+5 tests over a stub ControlAPI.
 
-### Flet UI (after FastAPI)
+### Flet UI — [x] SHELLED 2026-11-14 (commit b713195)
 
-Python-native UI; pages per module (accounts, workspaces, extensions,
-control plane, system); plugin UI contribution contract redesign.
+`interfaces/ui/` — the dashboard replacement shell: ApiClient (stdlib
+REST), the page registry, the flet NavigationRail shell, and four
+default pages (Status/Accounts/Workspaces/Logs). Flet imports lazily
+(the module and the registry test without it). The page model targets
+workspaces. Pages deepen in the next iteration (preset management,
+chain inspection, live WS events).
 
 ---
 
