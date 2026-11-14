@@ -240,10 +240,12 @@ settings layer, the plugin-eligibility gate.
 
 ## Active Queue
 
-[ ] **Workspace W3** — WorkspaceService (the one writer) + the
-    `workspaces_*` ControlAPI/CLI surface replacing `groups_*`/
-    `fleet_*`, then v11 drops the unwired v9 tables — the next
-    implementation phase
+[ ] **Workspace W3 (remainder)** — DONE so far: the service (one
+    writer), the workspaces_* ControlAPI surface + CLI verbs, the
+    bootstrap/simulator rewiring (fleet assembly retired from boot).
+    REMAINING: W4 (chain runtime: signals outbox, run engine, the
+    workspace-shaped policy guard + reconciler) and W5 (delete the
+    old modules + the v11 table drop)
 [ ] **FastAPI core API** — replace the deleted dashboard's REST surface
     with FastAPI routers calling the existing ControlAPI. Pydantic
     request/response models. Native WebSocket for live events.
