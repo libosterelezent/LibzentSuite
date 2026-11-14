@@ -243,9 +243,11 @@ settings layer, the plugin-eligibility gate.
 [ ] **Workspace W3 (remainder)** — DONE so far: the service (one
     writer), the workspaces_* ControlAPI surface + CLI verbs, the
     bootstrap/simulator rewiring (fleet assembly retired from boot).
-    REMAINING: W4 (chain runtime: signals outbox, run engine, the
-    workspace-shaped policy guard + reconciler) and W5 (delete the
-    old modules + the v11 table drop)
+    REMAINING: W4 done 2026-11-14 (signals outbox, ChainRuntime,
+    guard + reconciler, full boot/sim wiring — the A-acts-B-follows
+    semantics proven by 15 runtime tests + 8 outbox tests; the
+    dedicated simulator scenario rides with W5's sweep). W5 (delete
+    the old modules + the v11 table drop + docs sweep) is last.
 [ ] **FastAPI core API** — replace the deleted dashboard's REST surface
     with FastAPI routers calling the existing ControlAPI. Pydantic
     request/response models. Native WebSocket for live events.
