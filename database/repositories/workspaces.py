@@ -500,3 +500,133 @@ class WorkspaceRepository(BaseRepository):
                 " WHERE account = ?",
                 (state, last_error, state, time.time(), account),
             )
+
+    # ------------------------------------------------- chains + runs (W4)
+    async def insert_chain(
+        self,
+        workspace: str,
+        name: str,
+        definition_json: str,
+        *,
+        schema_version: int = 1,
+    ) -> int:
+        """Create a chain definition (revision 1, enabled)."""
+        now = time.time()
+        async with self._tx(f"insert chain {workspace}/{name}") as conn:
+            cur = await conn.execute(
+                "INSERT INTO workspace_chains (workspace, name, schema_version,"
+                " revision, enabled, definition_json, created_at, updated_at)"
+                " VALUES (?, ?, ?, 1, 1, ?, ?, ?)",
+                (workspace, name, schema_version, definition_json, now, now),
+            )
+            return int(cur.lastrowid)
+
+    async def chain(self, chain_id: int) -> dict[str, Any] | None:
+        row = await self._fetch_one("SELECT * FROM workspace_chains WHERE id = ?", (chain_id,))
+        return dict(row) if row is not None else None
+
+    async def chain_by_name(self, workspace: str, name: str) -> dict[str, Any] | None:
+        row = await self._fetch_one(
+            "SELECT * FROM workspace_chains WHERE workspace = ? AND name = ?", (workspace, name)
+        )
+        return dict(row) if row is not None else None
+
+    async def chains(self, workspace: str | None = None) -> list[dict[str, Any]]:
+        if workspace is None:
+            rows = await self._fetch_all("SELECT * FROM workspace_chains ORDER BY workspace, name")
+        else:
+            rows = await self._fetch_all(
+                "SELECT * FROM workspace_chains WHERE workspace = ? ORDER BY name", (workspace,)
+            )
+        return [dict(r) for r in rows]
+
+    async def update_chain_definition(
+        self, chain_id: int, definition_json: str, *, schema_version: int = 1
+    ) -> int:
+        """Decision 14's edit path: revision bumps; runs already created
+        keep their captured snapshots."""
+        async with self._tx(f"update chain {chain_id}") as conn:
+            cur = await conn.execute(
+                "UPDATE workspace_chains SET definition_json = ?,"
+                " schema_version = ?, revision = revision + 1, updated_at = ?"
+                " WHERE id = ?",
+                (definition_json, schema_version, time.time(), chain_id),
+            )
+            row = await self._fetch_one(
+                "SELECT revision FROM workspace_chains WHERE id = ?", (chain_id,)
+            )
+            return int(row["revision"]) if row is not None else 0
+
+    async def set_chain_enabled(self, chain_id: int, enabled: bool) -> None:
+        async with self._tx(f"chain {chain_id} enabled={enabled}") as conn:
+            await conn.execute(
+                "UPDATE workspace_chains SET enabled = ?, updated_at = ? WHERE id = ?",
+                (int(bool(enabled)), time.time(), chain_id),
+            )
+
+    async def insert_chain_run(
+        self,
+        run_id: str,
+        chain_id: int,
+        workspace: str,
+        definition_json: str,
+        *,
+        triggered_by: str = "",
+    ) -> None:
+        """Persist the IMMUTABLE snapshot at run creation (decision 14)."""
+        async with self._tx(f"insert chain run {run_id}") as conn:
+            await conn.execute(
+                "INSERT INTO chain_runs (id, chain_id, workspace,"
+                " definition_json, status, triggered_by, created_at)"
+                " VALUES (?, ?, ?, ?, 'running', ?, ?)",
+                (run_id, chain_id, workspace, definition_json, triggered_by, time.time()),
+            )
+
+    async def chain_run(self, run_id: str) -> dict[str, Any] | None:
+        row = await self._fetch_one("SELECT * FROM chain_runs WHERE id = ?", (run_id,))
+        return dict(row) if row is not None else None
+
+    async def chain_runs(
+        self, workspace: str | None = None, status: str | None = None
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM chain_runs WHERE 1=1"
+        params: list[Any] = []
+        if workspace is not None:
+            sql += " AND workspace = ?"
+            params.append(workspace)
+        if status is not None:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY created_at DESC"
+        rows = await self._fetch_all(sql, tuple(params))
+        return [dict(r) for r in rows]
+
+    async def finish_chain_run(self, run_id: str, status: str) -> None:
+        async with self._tx(f"finish chain run {run_id}") as conn:
+            await conn.execute(
+                "UPDATE chain_runs SET status = ?, finished_at = ? WHERE id = ?",
+                (status, time.time(), run_id),
+            )
+
+    async def insert_step_execution(self, run_id: str, position: int, target: str) -> int:
+        async with self._tx(f"step execution {run_id}/{position}") as conn:
+            cur = await conn.execute(
+                "INSERT INTO step_executions (run_id, position, attempt,"
+                " target, outcome, error, started_at)"
+                " VALUES (?, ?, 1, ?, '', '', ?)",
+                (run_id, position, target, time.time()),
+            )
+            return int(cur.lastrowid)
+
+    async def step_executions(self, run_id: str) -> list[dict[str, Any]]:
+        rows = await self._fetch_all(
+            "SELECT * FROM step_executions WHERE run_id = ? ORDER BY position", (run_id,)
+        )
+        return [dict(r) for r in rows]
+
+    async def finish_step_execution(self, execution_id: int, outcome: str, error: str = "") -> None:
+        async with self._tx(f"finish step {execution_id}") as conn:
+            await conn.execute(
+                "UPDATE step_executions SET outcome = ?, error = ?, finished_at = ? WHERE id = ?",
+                (outcome, error, time.time(), execution_id),
+            )
