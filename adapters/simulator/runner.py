@@ -373,6 +373,45 @@ class SimulationRunner:
             )
             await workspaces.load()
             await workspaces.sync_runtime()
+
+            # W4: the chain runtime rides the sim stack too — terminal
+            # events flow from the same bus, handlers invoke through
+            # the real plugin manager, and scenarios can exercise the
+            # A-acts-B-follows flow against the SAME production path
+            from core.event_bus import TaskCompleted, TaskFailed
+            from core.workspace.runtime import ChainRuntime, TerminalTrigger
+            from core.workspace.signals import SignalOutbox
+
+            chain_runtime = ChainRuntime(
+                db.workspaces,
+                service=workspaces,
+                outbox=SignalOutbox(db.signals),
+                signal_reader=db.signals,
+                invoker=lambda *a, **k: plugins_mgr.invoke_handler(*a, **k),
+            )
+
+            async def _on_task_completed(event: TaskCompleted) -> None:
+                await chain_runtime.on_terminal(
+                    TerminalTrigger(
+                        account=event.account,
+                        plugin=event.plugin,
+                        action=str(getattr(event, "action", "") or ""),
+                        kind="task_completed",
+                    )
+                )
+
+            async def _on_task_failed(event: TaskFailed) -> None:
+                await chain_runtime.on_terminal(
+                    TerminalTrigger(
+                        account=event.account,
+                        plugin=event.plugin,
+                        action=str(getattr(event, "action", "") or ""),
+                        kind="task_failed",
+                    )
+                )
+
+            bus.subscribe(TaskCompleted, _on_task_completed)
+            bus.subscribe(TaskFailed, _on_task_failed)
             audit = mods.AuditRecorder(db.audit)
             # QUEUED PERSISTENCE (production parity): drain workers for the
             # log/audit rows BEFORE any traffic; stopped in teardown BEFORE

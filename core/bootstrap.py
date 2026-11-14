@@ -65,6 +65,77 @@ from .task_scheduler import TaskScheduler
 from .workspace.service import WorkspaceService
 from .workspace.signals import SignalOutbox
 
+
+class _LatePluginsInvoker:
+    """Resolves the plugin manager at CALL time: the W4 assembly runs
+    before the manager is constructed, and handlers only ever invoke
+    long after boot completed."""
+
+    def __init__(self, resolve: Any) -> None:
+        self._resolve = resolve
+
+    async def __call__(
+        self, account: str, plugin: str, handler: str, payload: dict[str, Any]
+    ) -> Any:
+        return await self._resolve().invoke_handler(account, plugin, handler, payload)
+
+
+class _WorkspaceGateReader:
+    """Check-7 facts: plugin assigned/enabled on the account, the
+    step's gate condition against the LIVE settings view, channel
+    binding usability from the registry (only available resolves)."""
+
+    def __init__(self, database: Any) -> None:
+        self._db = database
+        self._plugins: Any = None
+
+    def bind_plugins(self, plugins: Any) -> None:
+        self._plugins = plugins
+
+    async def plugin_gate_facts(
+        self, account: str, plugin: str, gate: dict[str, Any]
+    ) -> dict[str, Any]:
+        assigned = plugin in set(await self._db.account_plugins.plugins_of(account))
+        enabled = True
+        if assigned:
+            row = await self._db.connection.fetch_one(
+                "SELECT enabled FROM plugin_states WHERE account=? AND plugin=?",
+                (account, plugin),
+            )
+            enabled = bool(row["enabled"]) if row is not None else True
+        gate_passed = True
+        setting = str(gate.get("setting") or "")
+        if setting and self._plugins is not None:
+            live = getattr(self._plugins, "live_settings", None)
+            if callable(live):
+                values = live(account, plugin) or {}
+                expected = gate.get("equals")
+                gate_passed = setting in values and values[setting] == expected
+        binding_usable = True
+        binding_reason = ""
+        if assigned:
+            bindings = await self._db.account_channels.plugin_bindings(account, plugin)
+            if bindings:
+                usable = []
+                for binding in bindings:
+                    row = await self._db.connection.fetch_one(
+                        "SELECT validity FROM account_channels WHERE account=? AND channel_id=?",
+                        (account, binding.channel_id),
+                    )
+                    validity = row["validity"] if row is not None else "unknown"
+                    usable.append(validity == "available")
+                binding_usable = any(usable)
+                if not binding_usable:
+                    binding_reason = "no binding resolves to an available channel"
+        return {
+            "plugin_assigned": assigned,
+            "plugin_enabled": enabled,
+            "gate_passed": gate_passed,
+            "channel_binding_usable": binding_usable,
+            "channel_binding_reason": binding_reason,
+        }
+
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -583,6 +654,63 @@ async def _assemble(
     await workspaces.load()
     await workspaces.sync_runtime()
 
+    # W4: the chain runtime (trigger intake + run engine) and the
+    # dispatch guard. Terminal events flow from the bus; handler
+    # invocation rides the plugin manager's per-account contexts; the
+    # check-7 reader answers plugin-assigned/gate/binding facts.
+    from core.event_bus import TaskCompleted, TaskFailed
+    from core.workspace.guard import WorkspaceDispatchGuard, WorkspaceReconciler
+    from core.workspace.runtime import ChainRuntime, TerminalTrigger
+
+    # (the plugin manager binds below, once constructed — gate
+    # resolution needs its live settings view)
+    _workspace_gate_reader = _WorkspaceGateReader(database)
+
+    chain_runtime = ChainRuntime(
+        database.workspaces,
+        service=workspaces,
+        outbox=signals_outbox,
+        signal_reader=database.signals,
+        invoker=_LatePluginsInvoker(lambda: plugins),  # resolved at call time
+        gate_reader=_workspace_gate_reader,
+    )
+
+    async def _on_task_completed(event: TaskCompleted) -> None:
+        with contextlib.suppress(Exception):
+            await chain_runtime.on_terminal(
+                TerminalTrigger(
+                    account=event.account,
+                    plugin=event.plugin,
+                    action=str(getattr(event, "action", "") or ""),
+                    kind="task_completed",
+                )
+            )
+
+    async def _on_task_failed(event: TaskFailed) -> None:
+        with contextlib.suppress(Exception):
+            await chain_runtime.on_terminal(
+                TerminalTrigger(
+                    account=event.account,
+                    plugin=event.plugin,
+                    action=str(getattr(event, "action", "") or ""),
+                    kind="task_failed",
+                )
+            )
+
+    bus.subscribe(TaskCompleted, _on_task_completed)
+    bus.subscribe(TaskFailed, _on_task_failed)
+
+    workspace_reconciler = WorkspaceReconciler(
+        workspaces,
+        runtime=chain_runtime,
+        outbox=signals_outbox,
+        plugin_data=plugin_data_store,
+        channels_repo=database.account_channels,
+    )
+    await workspace_reconciler.reconcile()
+    workspace_reconciler.start()
+    cleanups.append(("workspace reconciler", workspace_reconciler.stop))
+
     settings = SettingsManager(
         bus,
         ServiceLogger(logs, "settings"),
@@ -651,6 +779,12 @@ async def _assemble(
     # pages are visible in the dashboard immediately — not only after an
     # account connects. Class-level instantiation, no account needed.
     await plugins.persist_metadata()
+    # W4: the gate reader resolves chain-step gates through the live
+    # settings view — bound now that the manager exists
+    _workspace_gate_reader.bind_plugins(plugins)
+    # the dispatch guard needs the scheduler (and its halt state) —
+    # wired here, after both sides of the seam exist
+    scheduler.set_dispatch_guard(WorkspaceDispatchGuard(workspaces))
 
     if client_factory is None:
         from adapters.discord import RealClientFactory
