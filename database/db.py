@@ -41,6 +41,7 @@ from .repositories.plugins import PluginRepository
 from .repositories.presets import PresetsRepository
 from .repositories.rate_policies import RatePolicyRepository
 from .repositories.settings import AccountSettingsRepository
+from .repositories.signals import SignalsRepository
 from .repositories.sync_groups import SyncGroupsRepository
 from .repositories.tasks import TaskHistoryRepository
 from .repositories.workspaces import WorkspaceRepository
@@ -89,6 +90,7 @@ class Database:
         self.workspaces = WorkspaceRepository(self)
         self.presets = PresetsRepository(self)
         self.account_channels = AccountChannelsRepository(self)
+        self.signals = SignalsRepository(self)
 
     @property
     def path(self) -> str:

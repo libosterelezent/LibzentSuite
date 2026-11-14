@@ -299,6 +299,7 @@ class AccountPluginServices:
         cooldowns: Any = None,
         plugin_state: Any = None,
         plugin_data: Any = None,
+        signals: Any = None,  # core.workspace.signals.SignalOutbox (W4)
     ) -> None:
         self._account = account
         self._plugin = plugin
@@ -322,6 +323,7 @@ class AccountPluginServices:
         #: PHASE 10 (B3): shared PluginDataStore (None = data API
         #: unavailable here); exposes the pair+scope-scoped data_* API
         self._plugin_data = plugin_data
+        self._signals = signals
         #: bounded wait for a task completion ack (seconds; configurable)
         self.task_ack_timeout: float = 30.0
 
@@ -735,6 +737,22 @@ class AccountPluginServices:
     def publish(self, event: Event) -> None:
         """Fire-and-forget publish on the shared bus (safe from sync code in a loop)."""
         self._bus.publish_nowait(event)
+
+    async def emit_signal(self, name: str, payload: dict | None = None) -> str:
+        """Emit a workspace chain signal (W4, decision 12).
+
+        DURABLE BEFORE RETURN: the outbox row persists first, then this
+        acknowledges with the stable ``signal_id`` (consumers dedupe by
+        it). The name is BARE — ``<plugin>:<name>`` namespacing is
+        added at consumption, so one plugin cannot spoof another's
+        signal. Unwired stacks raise honestly (a lost trigger is worse
+        than a loud error)."""
+        if self._signals is None:
+            raise RuntimeError(
+                f"signal emission is not configured (plugin {self._plugin!r}"
+                " on this stack) — chain triggers need the outbox")
+        return await self._signals.accept(
+            self._account, self._plugin, name, payload or {})
 
     def validate_channel(self, channel_id: int) -> None:
         """Raise :class:`core.errors.TargetGone` when the channel is unusable."""

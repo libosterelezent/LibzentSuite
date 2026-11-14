@@ -63,6 +63,7 @@ from .rate_limit_manager import RateLimitManager
 from .settings_manager import SettingsManager
 from .task_scheduler import TaskScheduler
 from .workspace.service import WorkspaceService
+from .workspace.signals import SignalOutbox
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -560,6 +561,14 @@ async def _assemble(
     # W3: the workspace service replaces SyncGroupManager + FleetService
     # (one writer, no seam closures — WORKSPACE_DESIGN). The v9 modules
     # stay importable and tested until W5 deletes them.
+    # W4: the durable signal outbox — acceptance persists BEFORE the
+    # emission acknowledges; delivery sweeps ride the reconciler loop
+    # (the chain runtime consumes matched signals idempotently by id)
+    signals_outbox = SignalOutbox(
+        database.signals,
+        deliver=None,  # the chain runtime's intake wires in below
+    )
+
     workspaces = WorkspaceService(
         database.workspaces,
         accounts=database.accounts,
@@ -670,6 +679,7 @@ async def _assemble(
         plugin_data=plugin_data_store,  # PHASE 10: data_* plugin API
         lifecycle=LifecycleGovernor(),  # PHASE-4 (S4): anti-thrash defaults
         sync_groups=None,  # W3: workspace membership rides WorkspaceService
+        signals=signals_outbox,
         account_plugins=database.account_plugins,  # capability source
     )
     cleanups.append(("accounts", accounts.stop_all))
