@@ -289,16 +289,288 @@ class FleetTransitionRecord:
         }
 
 
+# --------------------------------------------------------------------------
+# Workspace unification records (W2; migration v10 tables)
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class WorkspaceState:
+    """A workspace row: identity + orchestration state in ONE owner
+    (WORKSPACE_DESIGN §8 — generation/paused folded from fleet_groups)."""
+
+    name: str
+    description: str = ""
+    enabled: bool = True
+    paused: bool = False
+    generation: int = 1
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "enabled": self.enabled,
+            "paused": self.paused,
+            "generation": self.generation,
+            "created_at": round(self.created_at, 3),
+            "updated_at": round(self.updated_at, 3),
+        }
+
+
+@dataclass
+class WorkspaceMemberRecord:
+    """The membership PROJECTION row (decision 11): written only in
+    the same transaction as ``accounts.workspace``, never directly."""
+
+    account: str
+    workspace: str
+    mode: str = "independent"
+    eligibility: str = "eligible"
+    joined_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    version: int = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "account": self.account,
+            "workspace": self.workspace,
+            "mode": self.mode,
+            "eligibility": self.eligibility,
+            "joined_at": round(self.joined_at, 3),
+            "updated_at": round(self.updated_at, 3),
+            "version": self.version,
+        }
+
+
+@dataclass
+class WorkspaceTaskRecord:
+    """A work unit owned by a workspace (carried from fleet_assignments
+    + the chain fields chain_run_id/step for W4)."""
+
+    id: str
+    workspace: str
+    task_id: str
+    account: str | None = None
+    status: str = "queued"
+    priority: int = 0
+    chain_run_id: str | None = None
+    step: int | None = None
+    generation: int = 1
+    error: str | None = None
+    resume_policy: str = ""
+    started_at: float | None = None
+    stopped_at: float | None = None
+    version: int = 1
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "workspace": self.workspace,
+            "task_id": self.task_id,
+            "account": self.account,
+            "status": self.status,
+            "priority": self.priority,
+            "chain_run_id": self.chain_run_id,
+            "step": self.step,
+            "generation": self.generation,
+            "error": self.error,
+            "resume_policy": self.resume_policy,
+            "started_at": self.started_at,
+            "stopped_at": self.stopped_at,
+            "version": self.version,
+            "created_at": round(self.created_at, 3),
+            "updated_at": round(self.updated_at, 3),
+        }
+
+
+@dataclass
+class WorkspaceCooldownRecord:
+    """A scoped policy cooldown (scope: workspace|member|task)."""
+
+    id: int
+    scope_type: str
+    scope_id: str
+    reason: str
+    started_at: float
+    expires_at: float
+    source: str = "manual"
+    cleared_at: float | None = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "scope_type": self.scope_type,
+            "scope_id": self.scope_id,
+            "reason": self.reason,
+            "started_at": round(self.started_at, 3),
+            "expires_at": round(self.expires_at, 3),
+            "source": self.source,
+            "cleared_at": self.cleared_at,
+            "created_at": round(self.created_at, 3),
+            "updated_at": round(self.updated_at, 3),
+        }
+
+
+@dataclass
+class WorkspaceTransitionRecord:
+    """One transition-history row (carried shape, renamed columns)."""
+
+    id: int
+    kind: str
+    workspace: str
+    generation: int
+    reason: str
+    correlation_id: str
+    occurred_at: float
+    task_id: str | None = None
+    run_id: str | None = None
+    account: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "workspace": self.workspace,
+            "generation": self.generation,
+            "reason": self.reason,
+            "correlation_id": self.correlation_id,
+            "occurred_at": round(self.occurred_at, 3),
+            "task_id": self.task_id,
+            "run_id": self.run_id,
+            "account": self.account,
+        }
+
+
+@dataclass
+class PresetTemplateRecord:
+    """A preset row (decisions 9/15): immutable versions under a
+    stable preset_id; ``owner_id`` '' = global (SQLite NULL-unique
+    workaround documented in migration v10)."""
+
+    preset_id: int
+    scope: str
+    owner_id: str
+    plugin: str
+    name: str
+    description: str = ""
+    version: int = 1
+    schema_version: int = 1
+    settings: dict[str, Any] = field(default_factory=dict)
+    archived: bool = False
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "preset_id": self.preset_id,
+            "scope": self.scope,
+            "owner_id": self.owner_id or None,
+            "plugin": self.plugin,
+            "name": self.name,
+            "description": self.description,
+            "version": self.version,
+            "schema_version": self.schema_version,
+            "settings": dict(self.settings),
+            "archived": self.archived,
+            "created_at": round(self.created_at, 3),
+            "updated_at": round(self.updated_at, 3),
+        }
+
+
+@dataclass
+class AccountChannelRecord:
+    """One registry row (§5.1/§5.2): IDENTITY + validity, never
+    proof of usability (only 'available' resolves)."""
+
+    account: str
+    guild_id: str
+    channel_id: str
+    name: str = ""
+    validity: str = "unknown"
+    last_seen_at: float | None = None
+    validation_reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "account": self.account,
+            "guild_id": self.guild_id,
+            "channel_id": self.channel_id,
+            "name": self.name,
+            "validity": self.validity,
+            "last_seen_at": self.last_seen_at,
+            "validation_reason": self.validation_reason,
+        }
+
+
+@dataclass
+class PluginChannelBindingRecord:
+    """One (account, plugin, channel) binding: the plugin's WHERE for
+    that account (rule 2 — initialized by copy, then independent)."""
+
+    account: str
+    plugin: str
+    channel_id: str
+    guild_id: str = ""
+    bound_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "account": self.account,
+            "plugin": self.plugin,
+            "channel_id": self.channel_id,
+            "guild_id": self.guild_id,
+            "bound_at": round(self.bound_at, 3),
+        }
+
+
+@dataclass
+class DeletionJobRecord:
+    """One cross-store account-deletion job (decision 18): durable,
+    retryable, observable — resumed at boot by the reconciler."""
+
+    account: str
+    state: str = "pending"
+    attempts: int = 0
+    last_error: str = ""
+    created_at: float = field(default_factory=time.time)
+    completed_at: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "account": self.account,
+            "state": self.state,
+            "attempts": self.attempts,
+            "last_error": self.last_error,
+            "created_at": round(self.created_at, 3),
+            "completed_at": self.completed_at,
+        }
+
+
 __all__ = [
     "POLICY_LEVELS",
+    "AccountChannelRecord",
     "AccountRecord",
+    "DeletionJobRecord",
     "FleetAssignmentRecord",
     "FleetCooldownRecord",
     "FleetGroupState",
     "FleetMemberRecord",
     "FleetTransitionRecord",
+    "PluginChannelBindingRecord",
     "PluginMetadata",
     "PluginProfileRecord",
+    "PresetTemplateRecord",
     "RatePolicyRecord",
     "SyncGroupRecord",
+    "WorkspaceCooldownRecord",
+    "WorkspaceMemberRecord",
+    "WorkspaceState",
+    "WorkspaceTaskRecord",
+    "WorkspaceTransitionRecord",
 ]
