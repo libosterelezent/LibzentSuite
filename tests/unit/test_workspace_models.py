@@ -115,7 +115,10 @@ class ChannelModelTests(unittest.TestCase):
 class ChainModelTests(unittest.TestCase):
     def _steps(self) -> tuple[ChainStep, ...]:
         return (
-            ChainStep(position=1, plugin="grinder", on={"task_action": "message"}),
+            ChainStep(
+                position=1, plugin="grinder",
+                on={"plugin": "grinder", "task_action": "message",
+                    "event": "task_completed"}),
             ChainStep(
                 position=2,
                 plugin="cleaner",
@@ -136,14 +139,14 @@ class ChainModelTests(unittest.TestCase):
                 position=1,
                 plugin="p",
                 routing=RoutingPolicy.SPECIFIC_ACCOUNT,
-                on={"task_action": "message"},
+                on={"plugin": "p", "task_action": "message"},
             )
         step = ChainStep(
             position=1,
             plugin="p",
             routing=RoutingPolicy.SPECIFIC_ACCOUNT,
             target="acct",
-            on={"task_action": "message"},
+            on={"plugin": "p", "task_action": "message"},
         )
         self.assertEqual(step.target, "acct")
 
@@ -151,7 +154,11 @@ class ChainModelTests(unittest.TestCase):
         with self.assertRaises(InvalidDefinition):  # neither
             ChainStep(position=1, plugin="p")
         with self.assertRaises(InvalidDefinition):  # both
-            ChainStep(position=1, plugin="p", on={"signal": "a:b", "task_action": "message"})
+            ChainStep(
+                position=1, plugin="p",
+                on={"signal": "a:b", "task_action": "message", "plugin": "p"})
+        with self.assertRaises(InvalidDefinition):  # action without plugin
+            ChainStep(position=1, plugin="p", on={"task_action": "message"})
 
     def test_positions_unique_and_ascending(self) -> None:
         with self.assertRaises(InvalidDefinition):

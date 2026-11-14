@@ -671,7 +671,8 @@ class ChainStep:
                   or FIRST_ELIGIBLE (deterministic pick, persisted
                   before execution at the run level)
     ``on``        the trigger: {"signal": "<plugin>:<name>"} or
-                  {"task_action": "<action>", "event": "task_completed"}
+                  {"plugin": "<from-plugin>", "task_action": "<action>",
+                   "event": "task_completed" | "task_failed"}
     ``gate``      optional per-step settings condition:
                   {"setting": name, "equals": value}
     ``emit``      bare signal name the step emits on completion
@@ -699,12 +700,17 @@ class ChainStep:
             raise InvalidDefinition(
                 f"step emit is a bare name (namespacing added at emission), got {self.emit!r}"
             )
-        if self.on and not (set(self.on) <= {"signal", "task_action", "event"}):
+        if self.on and not (set(self.on) <= {"signal", "task_action", "event", "plugin"}):
             raise InvalidDefinition(
-                f"step 'on' keys must be signal/task_action/event, got {sorted(self.on)}"
+                f"step 'on' keys must be signal/task_action/event/plugin, got {sorted(self.on)}"
             )
         if bool(self.on.get("signal")) == bool(self.on.get("task_action")):
             raise InvalidDefinition("step 'on' sets exactly one of signal= or task_action=")
+        # a mechanical trigger names its source plugin (the actor whose
+        # terminal event fires the step) — without it the binding would
+        # fire on ANY account's sends
+        if self.on.get("task_action") and not self.on.get("plugin"):
+            raise InvalidDefinition("a task_action trigger requires plugin= (the acting plugin)")
 
 
 @dataclass(frozen=True)
