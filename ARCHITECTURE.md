@@ -1,711 +1,238 @@
-# LibzentSuite --- Application Architecture
+# LibzentSuite — Application Architecture
 
-**Revision:** 2.0\
-**Date:** 2026-11-12\
-**Status:** Design baseline\
-**Scope:** Full application information architecture and application
-shell\
-**Repository changes:** None\
-**Note:** Section 14 carries the binding engineering invariants ported
-from the v1 architecture (2026-10-25); they remain in force alongside
-this product specification.
+**Revision:** 3.0
+**Date:** 2026-11-14
+**Status:** Binding engineering contract (verified against the current
+codebase; the W0–W5 workspace unification has landed)
+**Companions:** `INTEGRATION.md` (the detailed module contract),
+`roadmap.md` (the active plan + decision records),
+`WORKSPACE_DESIGN.md` (the unification spec — 18 locked decisions)
+
+This document describes the architecture **as it exists in the
+repository**. It is the product/UI-neutral engineering contract: what
+owns what, which boundaries are binding, and the invariants the code
+enforces. The next interface (FastAPI core API + Flet UI) wraps the
+same facade — it changes no ownership described here.
+
+---
 
 ## 1. Purpose
 
-LibzentSuite is a multi-account Discord workspace and orchestration
-application. It provides one control surface for managing account
-identities, coordinating work across accounts, configuring plugins and
-policies, observing events and execution, and operating the local
-runtime.
+LibzentSuite is a multi-account Discord orchestration framework. One
+process manages any number of user accounts, paces their outbound
+actions to look like well-paced humans, coordinates work across them
+(workspaces + chains), and exposes everything through the CLI
+self-commands — one application facade underneath.
 
-This document defines the application-level structure and persistent
-shell. It is a product/UI architecture specification, not a backend
-implementation plan. It does not authorize or describe repository
-modifications.
+```
+    One Core API (ControlAPI — 94 public methods)
+          |
+      +---+---+
+      |       |
+     CLI    Future interface (FastAPI + Flet)
+```
 
 ### Product principles
 
-1.  One application supports multiple workspaces.
-2.  Accounts are first-class resources with their own status, tasks,
-    plugin state, activity, and supported configuration.
-3.  Collections organize accounts; sync groups coordinate account
-    execution. They are distinct concepts. *(Superseded 2026-11-13:
-    the Workspace unification — `roadmap.md` — merges grouping and
-    orchestration into one Workspace concept; this boundary holds
-    only until W5 lands.)*
-4.  Configuration uses global defaults with workspace- and account-level
-    overrides.
-5.  Operational state is observable and distinguishes configured intent
-    from observed runtime state.
-6.  The shell provides consistent navigation, workspace context, scope
-    context, search, notifications, and runtime health.
-7.  UI controls must reflect actual capabilities; unavailable or
-    unimplemented behavior must not be presented as working.
+1. **One orchestration concept** — the workspace owns membership,
+   pacing clocks, chains, presets, and channels. (Sync groups and the
+   fleet module were merged into it and deleted, 2026-11-14.)
+2. Accounts are first-class resources with their own status, tasks,
+   plugin state, and configuration — independent until placed in a
+   workspace.
+3. Configuration is layered with explicit precedence; presets apply by
+   COPY with provenance, never live inheritance.
+4. Operational state is observable and distinguishes configured intent
+   from observed runtime state.
+5. Safety systems mitigate risk; they authorize nothing. The pacing
+   floor, server-limit handling, and audit trails are invariants, not
+   features.
 
-## 2. Account organization model
+## 2. The composition model: Core Engine → Driver
 
-``` text
-LibzentSuite
-└── Workspace
-    ├── Accounts
-    ├── Collections
-    ├── Sync Groups
-    ├── Workspace Policies
-    ├── Workspace Plugin Configurations
-    └── Workspace Activity
+The central architectural relationship is the owner's Core Engine →
+Driver model:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                   CORE ENGINE (framework)                │
+│                                                          │
+│  accounts · workspace orchestration · pacing · scheduler │
+│  persistence · credentials · audit · event bus           │
+│                                                          │
+│  provides ABILITIES through the services middleware     │
+└───────────────┬──────────────────────────────────────────┘
+                │  PluginContext / PluginServices (authoritative)
+                ▼
+┌──────────────────────────────────────────────────────────┐
+│                    DRIVERS (plugins)                     │
+│                                                          │
+│  decide WHEN an ability is used: react to events, run    │
+│  commands, emit signals, follow chains                   │
+└──────────────────────────────────────────────────────────┘
 ```
 
-A workspace is the primary organizational boundary. Accounts belong to a
-workspace. Collections are user-defined groupings and may provide
-alternate views over workspace accounts. Sync groups are
-execution-coordination resources, not visual collections.
-
-  ------------------------------------------------------------------------------
-  Resource                Responsibility                 Relationship
-  ----------------------- ------------------------------ -----------------------
-  Workspace               Organizational/configuration   Contains accounts and
-                          boundary                       workspace-scoped
-                                                         resources
-
-  Account                 Connected Discord identity     Belongs to a workspace
-
-  Collection              Flexible account               References accounts; an
-                          organization/filtering         account may appear in
-                                                         multiple collections
-
-  Sync group              Coordinates work across        References
-                          selected accounts              participating accounts
-                                                         and coordination
-                                                         behavior
-
-  Task                    Unit of runtime work           Assigned to an account
-                                                         or coordinated group,
-                                                         subject to task
-                                                         semantics
-
-  Plugin                  Extension providing            Installed/configured at
-                          capabilities                   supported scopes
-
-  Policy                  Governs behavior               Defined globally and
-                                                         optionally overridden
-                                                         at narrower scopes
-  ------------------------------------------------------------------------------
-
-Workspace switching changes the active organizational context. It must
-not silently change account enablement, task execution, or other runtime
-state.
-
-## 3. Configuration and management scope
-
-### Scope hierarchy
-
-``` text
-Global
-  └── Workspace
-        └── Account
-```
-
-The default management entry point is **Global**. Users can move into
-workspace or account scope for narrower configuration.
-
-### Inheritance
-
-The effective value is resolved from the narrowest scope that defines an
-override:
-
-1.  Account override, if present.
-2.  Otherwise workspace override, if present.
-3.  Otherwise global default.
-
-For each inheritable setting, the UI must show the effective value,
-whether it is inherited or overridden, the source scope, and an action
-to create/edit/reset an override. Resetting an override restores
-inheritance; it does not mutate the parent value.
-
-  -----------------------------------------------------------------------
-  Scope                   Applies to              Responsibilities
-  ----------------------- ----------------------- -----------------------
-  Global                  All applicable          Default policies,
-                          workspaces/accounts     global rate-limit
-                                                  policies, system-wide
-                                                  plugin defaults, global
-                                                  monitoring
-
-  Workspace               Resources in one        Workspace policy
-                          workspace               overrides, plugin
-                                                  configuration,
-                                                  workspace organization
-
-  Account                 One account             Account policy/plugin
-                                                  overrides and supported
-                                                  account-specific
-                                                  behavior
-  -----------------------------------------------------------------------
-
-Not every setting is necessarily overridable at every scope. Each
-setting must declare its supported scopes.
-
-**Scope context and operational selection are separate.** Scope
-determines which configuration is being viewed or edited. Selection
-determines which resources are targets of an operation. Changing scope
-must not implicitly select accounts for bulk operations.
-
-## 4. Full application information architecture
-
-``` text
-LibzentSuite
-│
-├── Workspace
-│   ├── Workspace Overview
-│   └── Workspace Settings
-│
-├── Fleet
-│   ├── Overview
-│   ├── Accounts
-│   │   ├── Account Inventory
-│   │   └── Account Detail
-│   │       ├── Summary
-│   │       ├── Tasks
-│   │       ├── Plugins
-│   │       ├── Sync Groups
-│   │       ├── Policies
-│   │       ├── Activity
-│   │       ├── Plugin Data
-│   │       └── Settings
-│   ├── Collections
-│   └── Account Groups
-│
-├── Orchestration
-│   ├── Sync Groups
-│   ├── Execution Plans
-│   ├── Task Queues
-│   ├── Schedules
-│   └── Execution History
-│
-├── Extensions
-│   ├── Plugin Catalog
-│   ├── Installed Plugins
-│   ├── Plugin Configuration
-│   └── Account Plugin Data
-│
-├── Control Plane
-│   ├── Policies
-│   ├── Rate Limits
-│   ├── Event Bus
-│   ├── Activity
-│   └── Logs
-│
-└── System
-    ├── Local Instance
-    ├── Storage and Databases
-    ├── Connections
-    └── Application Settings
-```
-
-### Module responsibilities
-
--   **Workspace:** workspace identity, switching, overview, and
-    workspace-level settings.
--   **Fleet:** accounts in the active workspace, account
-    lifecycle/status, collections, and account details.
--   **Orchestration:** sync groups, execution plans, task queues,
-    schedules, and execution outcomes/history.
--   **Extensions:** plugin discovery and lifecycle visibility, installed
-    plugins, plugin configuration, and account-scoped plugin data.
--   **Control Plane:** policy configuration and runtime observability
-    for rate limits, event delivery, activity, and logs. It
-    distinguishes configured policy from observed behavior.
--   **System:** local runtime, storage/database, connection, and
-    application-wide settings.
-
-### Account detail sections
-
-  -----------------------------------------------------------------------
-  Section                             Responsibility
-  ----------------------------------- -----------------------------------
-  Summary                             Identity, connection/runtime state,
-                                      key metrics, recent activity
-
-  Tasks                               Assigned tasks, queue membership,
-                                      task history
-
-  Plugins                             Plugins enabled/configured for the
-                                      account
-
-  Sync Groups                         Groups containing the account and
-                                      its coordination role
-
-  Policies                            Effective values and account
-                                      overrides
-
-  Activity                            Account-specific events and
-                                      operations
-
-  Plugin Data                         Account-scoped plugin data, subject
-                                      to availability/permissions
-
-  Settings                            Metadata and supported
-                                      account-specific settings
-  -----------------------------------------------------------------------
-
-Global control-plane pages default to global scope but may provide
-workspace/account filters. Workspace pages operate within the active
-workspace. Account detail pages operate on one account.
-
-## 5. Application shell architecture
-
-### Shell responsibilities
-
-The persistent shell owns: - Primary navigation and navigation state. -
-Active workspace context. - Active configuration scope. - Global
-search/command access. - Notifications and global activity entry
-points. - Runtime/instance health visibility. - Page title, breadcrumbs,
-and contextual actions. - Responsive navigation behavior. - Consistent
-overlays, dialogs, and feedback surfaces.
-
-The shell does not own module-specific business logic. Modules render
-page content and page-level actions inside the shell's content outlet.
-
-### Desktop frame baseline
-
-  Element                             Initial specification
-  --------------------------------- -----------------------
-  Reference viewport                         1440 × 1000 px
-  Expanded sidebar                                   256 px
-  Collapsed sidebar                                   72 px
-  Top application bar                                 64 px
-  Main content horizontal padding                 28--32 px
-  Main content vertical padding                   24--32 px
-  Base spacing increment                               4 px
-  Common spacing tokens                8, 12, 16, 24, 32 px
-
-These are initial construction tokens, not measurements of a verified
-Figma implementation.
-
-### Shell structure
-
-``` text
-┌──────────────────────────────────────────────────────────────────┐
-│                         Application Shell                        │
-├────────────────┬─────────────────────────────────────────────────┤
-│                │ Top Bar                                          │
-│                │ [Nav Toggle] [Breadcrumbs] [Search]              │
-│                │ [Scope] [Notifications] [Profile]                │
-│                ├─────────────────────────────────────────────────┤
-│ Sidebar        │ Page Header                                     │
-│                │ [Title] [Description] [Contextual Actions]      │
-│ Brand          │                                                 │
-│ Workspace      │ Page Content                                    │
-│ Switcher       │                                                 │
-│ Navigation     │                                                 │
-│ Groups         │                                                 │
-│                │                                                 │
-│ Instance       │                                                 │
-│ Status         │                                                 │
-│ Settings       │                                                 │
-└────────────────┴─────────────────────────────────────────────────┘
-```
-
-### Sidebar
-
-Contains product identity, workspace switcher, grouped route navigation,
-active-route indication, expanded/collapsed behavior, local instance
-status entry point, and settings.
-
-Navigation groups: 1. Workspace 2. Fleet 3. Orchestration 4. Extensions
-5. Control Plane 6. System
-
-Collapsed navigation retains accessible labels through tooltips or
-equivalent accessible naming.
-
-### Top application bar
-
-Contains sidebar toggle, breadcrumbs, global search/command palette
-entry, current management scope selector, notifications entry
-point/unread indication, and user/application menu. It should not
-duplicate the workspace switcher if that is persistently available in
-the sidebar.
-
-### Scope context control
-
-``` text
-Global
-Global / Workspace
-Global / Workspace / Account
-```
-
-The selected scope must be explicit. Scope-aware pages identify
-inherited values and their source. Unsaved edits must be protected when
-scope changes.
-
-### Page frame
-
-Every route uses a consistent frame containing route
-context/breadcrumbs, page title, optional description, contextual
-actions, optional filters/view controls, main content, and page-level
-feedback/state surfaces. Page content must not recreate the global
-sidebar or top bar.
-
-### Global status surface
-
-Provide a consistent entry point for local application instance,
-Discord/client connections, worker/runtime state, and background
-operations. The shell may show an aggregate status; detailed diagnostics
-belong in System and Control Plane. Status must support
-unknown/unavailable states and reflect observed state rather than
-requested intent.
-
-## 6. Navigation and route model
-
-The following is a conceptual route contract. Exact syntax can be
-adapted to the existing router without requiring backend changes.
-
-  Route                                   Page
-  --------------------------------------- ---------------------------------------
-  `/overview`                             Fleet overview
-  `/workspaces`                           Workspace selection/management
-  `/workspaces/:workspaceId`              Workspace overview
-  `/workspaces/:workspaceId/settings`     Workspace settings
-  `/accounts`                             Account inventory in active workspace
-  `/accounts/:accountId`                  Account summary
-  `/accounts/:accountId/:section`         Account detail section
-  `/collections`                          Collections
-  `/collections/:collectionId`            Collection detail
-  `/orchestration/sync-groups`            Sync group inventory
-  `/orchestration/sync-groups/:groupId`   Sync group detail
-  `/orchestration/plans`                  Execution plans
-  `/orchestration/queues`                 Task queues
-  `/orchestration/schedules`              Schedules
-  `/orchestration/history`                Execution history
-  `/plugins/catalog`                      Plugin catalog
-  `/plugins/installed`                    Installed plugins
-  `/plugins/configuration`                Plugin configuration
-  `/plugins/account-data`                 Account plugin data
-  `/control/policies`                     Policies
-  `/control/rate-limits`                  Rate limits
-  `/control/events`                       Event bus
-  `/control/activity`                     Activity
-  `/control/logs`                         Logs
-  `/system/instance`                      Local instance
-  `/system/storage`                       Storage and databases
-  `/system/connections`                   Connections
-  `/settings`                             Application settings
-
-Route access and authorization must follow the actual permission model;
-this document does not assume a particular authentication
-implementation.
-
-## 7. Shared interaction contracts
-
-### Workspace switching
-
--   Updates active workspace context and workspace-scoped resource
-    lists.
--   Global routes remain global.
--   If the current resource is outside the new workspace, navigate to a
-    safe landing page or explain the context mismatch.
--   Must not trigger runtime actions.
-
-### Scope switching
-
--   Re-resolves configuration on scope-aware pages.
--   Updates effective values and inheritance sources.
--   Protects unsaved edits.
--   Does not alter operational target selection.
-
-### Global search
-
-Search supported resources: workspaces, accounts, collections, sync
-groups, tasks, plugins, and relevant settings/policies. Results show
-resource type and organizational context and must respect access
-permissions.
-
-### Bulk operations
-
--   Require an explicit selection set.
--   Display target count and target category.
--   Require confirmation for consequential/destructive operations.
--   Report per-target outcomes where supported.
--   Must not preserve ambiguous selections after workspace/scope
-    changes.
-
-### Notifications and activity
-
-Notifications link to relevant resources or diagnostic context when
-available. They are entry points, not replacements for activity/log
-records.
-
-## 8. Responsive shell behavior
-
-  -----------------------------------------------------------------------
-  Viewport                Navigation              Content
-  ----------------------- ----------------------- -----------------------
-  Wide desktop            Expanded persistent     Full layouts and dense
-                          sidebar                 tables
-
-  Compact desktop         Collapsible sidebar     Reduced gutters; retain
-                                                  essential table columns
-
-  Tablet                  Collapsed rail or       Progressively reduced
-                          overlay drawer          columns
-
-  Mobile                  Overlay navigation      Single-column layouts;
-                          drawer                  table-to-card/list
-                                                  alternatives
-  -----------------------------------------------------------------------
-
-Workspace and scope context must remain understandable at every size.
-Important actions cannot depend on hover.
-
-## 9. Shared design-system and component contract
-
-### Token categories
-
--   Color: surface, elevated surface, text, muted text, border, accent,
-    success, warning, danger, informational.
--   Typography: display, page title, section title, body, label,
-    caption, numeric.
--   Spacing: 4 px base increments.
--   Radius: control, card, overlay.
--   Elevation: popover, menu, modal, floating surface.
--   Layout: sidebar widths, top-bar height, content maximum width, page
-    gutters.
--   Motion: transition duration and reduced-motion behavior.
-
-Exact color values and typography families are to be finalized in the
-design system.
-
-### Shared components
-
--   `ApplicationShell`
--   `Sidebar`
--   `NavigationGroup`
--   `NavigationItem`
--   `WorkspaceSwitcher`
--   `TopBar`
--   `Breadcrumbs`
--   `GlobalSearch`
--   `CommandPalette`
--   `ScopeSelector`
--   `ScopeInheritanceIndicator`
--   `NotificationCenter`
--   `InstanceStatus`
--   `PageHeader`
--   `ContextualActionBar`
--   `FilterBar`
--   `DataTable`
--   `ResourceList`
--   `ResourceCard`
--   `StatusIndicator`
--   `EmptyState`
--   `LoadingState`
--   `ErrorState`
--   `ConfirmationDialog`
--   `Toast` / `InlineFeedback`
--   `ResponsiveNavigationDrawer`
-
-Components expose relevant loading, disabled, selected, error, and
-unavailable states.
-
-## 10. State and feedback requirements
-
-  -----------------------------------------------------------------------
-  State                               Required behavior
-  ----------------------------------- -----------------------------------
-  Initial loading                     Preserve layout; do not show false
-                                      zero values
-
-  Empty                               Explain what is empty; provide a
-                                      relevant next action if one exists
-
-  Loaded                              Display current data and its scope
-
-  Partial failure                     Preserve available data and
-                                      identify failed sections
-
-  Error                               Explain failure and provide safe
-                                      retry where appropriate
-
-  Unavailable                         Distinguish
-                                      unsupported/disconnected capability
-                                      from empty result
-
-  Permission denied                   Explain resource/action is
-                                      inaccessible
-
-  Stale data                          Indicate when displayed data is
-                                      known to be out of date
-  -----------------------------------------------------------------------
-
-For runtime operations, distinguish desired state from observed state. A
-requested connection is not proof that a connection succeeded.
-
-## 11. Figma design sequence
-
-1.  **Application shell:** desktop expanded/collapsed, workspace
-    switcher, scope selector, search/command palette, notification
-    panel, tablet/mobile navigation.
-2.  Fleet overview.
-3.  Account inventory, collections, and account detail.
-4.  Sync groups and orchestration.
-5.  Tasks, queues, schedules, and execution history.
-6.  Plugin catalog, installed plugins, configuration, and account data.
-7.  Policies, rate limits, event bus, activity, and logs.
-8.  Local instance, storage, connections, and application settings.
-
-Every module is designed against the shell contract. Modules must not
-redefine global navigation or scope semantics.
-
-## 12. Constraints and non-goals
-
--   No repository files are modified by this document.
--   No backend API, database schema, or runtime behavior is declared
-    implemented.
--   The architecture does not assume every proposed page already has a
-    backend endpoint.
--   It does not invent account permission roles or multi-user
-    collaboration semantics.
--   Collections and sync groups remain distinct.
--   Configuration scope and operational selection remain distinct.
--   Figma implementation is separate and must be verified in the target
-    file before being reported complete.
-
-## 13. Decisions recorded
-
-  -----------------------------------------------------------------------
-  Decision                            Selected value
-  ----------------------------------- -----------------------------------
-  Account organization                Hybrid
-
-  Workspace model                     Multiple workspaces supported
-
-  Account organization                Accounts, collections, operational
-                                      sync groups
-
-  Management scope                    Hybrid
-
-  Default management entry point      Global
-
-  Configuration inheritance           Global → Workspace → Account
-
-  Override behavior                   Explicit scoped override with
-                                      reset-to-inherit
-
-  First design deliverable            Application shell
-
-  Repository modification             Not authorized
-
-  Design implementation               Architecture specified; Figma edits
-                                      not performed by this document
-  -----------------------------------------------------------------------
-
-## 14. Engineering invariants (binding — ported from the v1 architecture)
-
-The sections above describe where the application is going. This section
-carries forward the binding engineering contracts from the previous
-architecture document (v1, 2026-10-25) so they remain in force during and
-after the v2 product transition. It is the invariant summary; the
-detailed module-ownership contract lives in `INTEGRATION.md`.
-
-### Application boundary and composition
-
--   CLI and dashboard mutations go through the same `core.api.ControlAPI`
-    facade. Extend the facade for legitimate features; never add a
-    parallel interface-only business-logic path.
--   `core/bootstrap.py::build()` is the one composition root: it wires
-    every manager, service, and adapter. Modules communicate through
-    their contracts and injected dependencies — no service locators,
-    hidden imports across boundaries, or global mutable wiring.
--   Transport layers (REST handlers, WS, CLI parsing) validate input and
-    serialize output; they never reimplement domain rules.
-
-### Plugins
-
--   Plugins are independent of the interface layer: they own no accounts,
-    pacing, database connections, or dashboard/CLI state. All capability
-    access goes through `PluginContext` / `PluginServices` (`ctx.services`).
--   Python plugins are NOT sandboxed; safety comes from the explicit
-    services surface, not isolation.
--   Core stays game-agnostic — game-specific strings and recognition
-    rules belong in parser packs and plugin code, never in `core/`.
-
-### Safety and data semantics
-
--   The rate-limit floor is a safety invariant: no configured action
-    interval below `MIN_ACTION_INTERVAL = 1.5` s (cap `MAX_INTERVAL =
-    86400` s). Server-provided rate limits (429/Retry-After) are always
-    respected. Fleet policy may allow, block, or defer — it can never
-    weaken or bypass pacing.
--   Discord snowflakes (account, guild, channel, message, user ids)
-    remain exact digit strings end-to-end: Python, JSON, persistence,
-    logs, and browser state. Never `Number` in JavaScript.
--   Credentials are write-only in the UI, encrypted at rest (Fernet),
-    with the master key outside the database. Tokens never render into
-    logs, API responses, or exception messages.
--   Outbound actions follow the single pipeline: `PluginServices` →
-    `TaskScheduler.submit` → one in-flight action per account →
-    `RateLimitManager.acquire` → final validation → sender hook →
-    adapter → audit/history/events. Retries only for scheduler-classified
-    transient errors; timeouts are terminal (never auto-retried — an
-    in-flight send cannot be un-sent).
-
-### Account, plugin, and data models
-
--   Capability model is direct `account_plugins` assignment (fail-closed:
-    no assignments → no plugins run). Do not reintroduce the removed
-    ProfileManager or its `profiles`/`account_profiles` tables.
--   `plugin_profiles` = named per-plugin settings presets. AccountPluginData
-    (`state/plugin-data.db`) = operational documents with the fixed scope
-    lattice account → plugin → guild → channel, standalone copies,
-    optimistic version writes. These are distinct stores; never merge
-    them or add channel-document inheritance.
-
-### Groups and fleet orchestration
-
--   Sync groups (persistent membership + pacing coordination) and Fleet
-    orchestration (task ownership, eligibility, transitions) are distinct
-    concepts with distinct persistence. Never merge them.
--   `core/fleet/transitions.py` is the single transition-validator source;
-    the dashboard never reimplements transition tables. Observations
-    authorize nothing by themselves — restrictions only through validated
-    service operations. Generation/version fences reject stale
-    assignments. The reconciler surfaces ambiguity instead of guessing.
-    Handoff validates the destination before revoking the source; a
-    failed destination check must never destroy the source assignment.
-    `resume_task` requeues a suspended task to QUEUED (UI copy says
-    "Requeue").
-
-### Events, persistence, dashboard
-
--   Typed events communicate observations; an event is never
-    authorization for an operation. Raw library objects convert to
-    immutable DTOs once at the adapter boundary and never leak further.
--   Repositories own persistence; services own domain transactions.
-    Applied migrations are append-only. `Database(":memory:")` must stay
-    usable by tests/simulation.
--   The dashboard is the SPA under `interfaces/dashboard/static/` plus
-    plugin pages through the safe builder contract (`core/dashboard_ui/`)
-    — plugins never gain arbitrary DOM, backend internals, or app state.
-    After a mutation, the server's confirmed state is the source of
-    truth (re-fetch; never fake success locally). The runtime theme
-    engine (presets, density, fonts, custom CSS) is a product feature —
-    shared components consume canonical CSS custom properties, not
-    hardcoded theme values.
--   A dashboard page mounting, unmounting, or failing must never stop or
-    start backend automation.
-
-### Lifecycle and testing
-
--   `build()` boots the whole stack; `Framework.shutdown()` reverses it
-    in a fault-tolerant ordered teardown (scheduler drain → periodic
-    tasks stopped → persistence queues drained → plugin manager →
-    plugin-data store → database). Every step runs even if an earlier
-    one failed.
--   Tests: deterministic (injected clocks, in-memory databases, simulator
-    adapters); no real credentials or network in routine tests; focused
-    suites first, then adjacent, then the full suite. Never weaken a test
-    to reach green.
-
-------------------------------------------------------------------------
-
-**End of architecture document.**
+- The **Core Engine provides the ability** — every outbound action,
+  state read, credential use, and signal emission is a framework
+  service call that carries pacing, validation, audit, and security.
+- The **plugin drives it live** — plugins hold no accounts, clients,
+  database connections, or pacing state; they *utilize* what the
+  engine provides, when their logic decides.
+- **The services middleware is authoritative for security**: a plugin
+  cannot bypass it because there is no other path to the platform.
+  Plugins are NOT sandboxed Python — safety comes from the explicit
+  surface, not isolation.
+- Core stays game-agnostic: game-specific strings and recognition
+  rules belong in parser packs and plugin code, never in `core/`.
+
+## 3. System composition
+
+`core/bootstrap.py::build()` is the ONE composition root. It wires
+every manager, service, and adapter; modules communicate through
+their contracts and injected dependencies — no service locators, no
+hidden imports across boundaries, no global mutable wiring. The boot
+sequence (verified order): credentials/config → database (migrations
+apply under the write lock) → log service → event bus → limiter →
+signal outbox → workspace service (+ pacing restore) → chain runtime
++ dispatch guard + reconciler → scheduler → plugin manager → account
+manager → ControlAPI → framework handle. `Framework.shutdown()`
+reverses it fault-tolerantly: every teardown step runs even if an
+earlier one failed.
+
+### Module map (current)
+
+| Module | Owns |
+|---|---|
+| `core/api.py` | ControlAPI — the shared facade every interface calls |
+| `core/workspace/` | THE orchestration: service (one writer), models, transitions, policy, presets, chains runtime, durable signals, dispatch guard, reconciler |
+| `core/account_manager/` | account lifecycle, runtime client/cache, sender hook, lifecycle governor, waiter registry |
+| `core/plugin_manager/` + `plugin_base.py` | the driver contract: discovery, per-account instances, dispatch, self-commands, EMITS/FOLLOWS validation, `invoke_handler` |
+| `core/settings_manager.py` | the one settings schema every surface consumes |
+| `core/rate_limit_manager/` | policies (global/account/plugin/pair), pacing, workspace clocks, 429s, warnings |
+| `core/task_scheduler/` | queue, per-account lanes (concurrency 1), retries, cancellation, history |
+| `core/event_bus.py` | typed in-process pub/sub (coalesced, bounded) |
+| `core/access_manager.py` | the command gate: per-account allowlists, admin list (fail-closed) |
+| `core/cooldowns.py`, `plugin_state.py`, `plugin_scopes.py` | plugin-facing persistence: cooldowns, scoped state, channel scopes |
+| `core/credential_service.py`, `credentials.py` | Fernet-encrypted tokens; ids from `.env` |
+| `core/audit.py`, `logging_service.py` | the audit trail and structured logs |
+| `database/` | SQLite: ordered migrations (v11 current), repositories (workspaces, presets, signals, channels, accounts, plugins, …) |
+| `adapters/discord/`, `adapters/simulator/` | the platform boundary: live client (better.py-self, lazy import) and the complete offline world |
+| `interfaces/cli/` | REPL + one-shot commands — the only current interface |
+
+## 4. The workspace orchestration layer
+
+`core/workspace/` is the single owner of coordinated behavior
+(WORKSPACE_DESIGN.md is the authoritative spec; this is the contract
+summary):
+
+- **Membership** — `accounts.workspace` is THE authoritative pointer;
+  the `workspace_members` table is a same-transaction projection never
+  independently writable. A move fences the old workspace (generation
+  bump) and requeues stale tasks without touching account-owned
+  configuration.
+- **The one writer** — `WorkspaceService` persists first, then
+  publishes; one command at a time under its lock. Repositories own
+  rows, the service owns domain transactions.
+- **Chains** — the run engine executes IMMUTABLE definition snapshots
+  (edits affect future runs only); routing is deterministic
+  (`specific_account` or `first_eligible` by seniority); every target
+  passes the 7-check policy, and a denial is a **visible skip with the
+  reason recorded** — never a silent drop, never a blind send.
+- **Durable signals** — acceptance persists BEFORE acknowledgement;
+  delivery is at-least-once with dead-lettering; consumers dedupe by
+  `signal_id`. Signals authorize nothing.
+- **Transitions** — `core/workspace/transitions.py` is the single
+  validation source; nothing else decides a legal move. Generation
+  fences reject stale dispatches; the reconciler repairs drift
+  idempotently and never guesses.
+- **The dispatch guard** — the scheduler's pre-dispatch gate. It
+  decides WHETHER, the limiter decides WHEN; it can never weaken
+  pacing. Non-member accounts are none of its business.
+- **Presets** — copy-on-apply with provenance (`source_preset_id`,
+  `source_version`, `applied_at`); a stale preview conflicts, never
+  overwrites. Versions are immutable; updates are explicit.
+- **Channels** — registry (identity + validity, only `available`
+  resolves) / account assignments / per-plugin bindings initialized by
+  copy then free to diverge. A channel-bound operation verifies
+  usability at dispatch.
+- **Cross-store deletion** — account removal is a durable, retryable
+  workflow (`deletion_jobs`) spanning the main DB and the separate
+  plugin-data store; failures quarantine with the error surfaced.
+
+## 5. The driver contract (plugins)
+
+A plugin is a `PluginBase` subclass discovered from a directory. It
+declares: metadata, a `Setting` manifest, lifecycle hooks
+(`on_load`/`on_enable`/`on_disable`/`on_unload`), event handling, and
+optionally:
+
+- **`COMMANDS`** — self-command verbs (`CommandSpec` + `ArgSpec`
+  positional grammar) invocable from Discord with the account's
+  prefix; handlers run with the same paced `services` facade.
+- **`EMITS`** — bare signal names the plugin may emit via
+  `await ctx.services.emit_signal(name, payload)` (namespaced
+  `<plugin>:<name>` at consumption — no cross-plugin spoofing).
+- **`FOLLOWS`** — triggers (a signal, or a terminal task event from an
+  acting plugin) each naming one handler method; workspaces bind the
+  declarations into named chains, and the runtime invokes handlers
+  through `PluginManager.invoke_handler` with the per-account context.
+
+The loader validates declarations at discovery and fails a broken one
+at boot (fail-fast, the `COMMANDS` convention). Capability on an
+account is the direct `account_plugins` assignment — fail-closed: no
+assignment, no plugins. Do not reintroduce permission bundles.
+
+## 6. Safety and data semantics (binding)
+
+- **Pacing floor**: no configured interval below
+  `MIN_ACTION_INTERVAL = 1.5` s (cap `MAX_INTERVAL = 86400` s). Server
+  limits (429/Retry-After) are always respected and earn paced
+  retries. The workspace policy may allow, block, or defer — never
+  weaken pacing.
+- **The one pipeline**: `PluginServices` → `TaskScheduler.submit` →
+  one in-flight action per account → `RateLimitManager.acquire` →
+  final validation → sender hook → adapter → audit/history/events.
+  Retries only for scheduler-classified transient errors; timeouts
+  are terminal (an in-flight send cannot be un-sent).
+- **Snowflakes are strings end-to-end** — Python, JSON, persistence,
+  logs, any future browser state. Never `Number` in JavaScript.
+- **Credentials**: write-only surfaces, Fernet-encrypted at rest, the
+  master key outside the database. Tokens never render into logs,
+  responses, or exceptions.
+- **Scopes compose most-restrictive-wins**: per-task
+  `(account, action)` over per-workspace `(workspace:<name>, action)`;
+  learned per-action defaults apply when no policy is stored.
+
+## 7. Events and persistence
+
+- Typed events communicate observations; **an event is never
+  authorization** for an operation. Durable changes go through the
+  owner service, validated, persisted, then published.
+- The adapter converts raw library objects into immutable DTOs ONCE at
+  the boundary; runtime-only `raw` handles never persist.
+- Repositories own persistence; services own transactions. Applied
+  migrations are append-only (the runner serializes each migration
+  under the write lock — parallel first boots cannot interleave).
+  `Database(":memory:")` stays usable by tests/simulation.
+- Plugin documents (`state/plugin-data.db`) keep the fixed lattice
+  account → plugin → guild → channel: standalone copies, optimistic
+  version writes, conflicts surfaced — never silently merged.
+
+## 8. Lifecycle and testing
+
+- `build()` boots the whole stack; shutdown reverses it in order
+  (scheduler drain → periodic tasks → persistence queues → plugins →
+  plugin-data store → database), every step fault-tolerant.
+- Tests are deterministic: injected clocks, in-memory databases, the
+  simulator adapter. No real credentials or network in routine tests.
+  Focused suites first, then adjacent, then the full suite (~1,636
+  tests). Never weaken a test to reach green.
+- The project is built and its suite runs green on Linux; other
+  platforms are untested.
+
+## 9. Recorded architecture decisions
+
+The binding decision record is `roadmap.md` (18 locked workspace
+decisions + their provenance) and `WORKSPACE_DESIGN.md` (the full
+spec). Historical inventories live under `plans/` (superseded material
+is banner-marked, never silently rewritten).
