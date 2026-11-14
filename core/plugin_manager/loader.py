@@ -41,6 +41,7 @@ from pathlib import Path
 from ..errors import PluginError
 from ..names import PLUGIN_NAME_RE as _NAME_RE
 from ..plugin_base import ArgSpec, CommandSpec, PluginBase
+from ..workspace.models import validate_plugin_declarations
 
 LOG = logging.getLogger("libzent.loader")
 
@@ -230,6 +231,7 @@ class PluginLoader:
                 )
             seen_keys.add(setting.name)
         self._validate_commands(cls, name, path)
+        self._validate_chain_declarations(cls, name, path)
         if name in self._records:
             raise PluginError(
                 f"duplicate plugin name {name!r} ({path} vs {self._records[name].source})"
@@ -293,6 +295,23 @@ class PluginLoader:
                         f" ArgSpec {arg.name!r} must be LAST in {path}"
                     )
             seen.add(spec.name)
+
+    def _validate_chain_declarations(self, cls: type[PluginBase], name: str, path: Path) -> None:
+        """Validate a plugin's EMITS/FOLLOWS declarations at discovery
+        (workspace chains, decision 2 — same fail-fast convention as
+        COMMANDS: a broken declaration must never boot).
+
+        Structural problems (wrong container types, a missing handler,
+        a namespaced EMIT name the plugin cannot emit as) are
+        PluginErrors; ``validate_plugin_declarations`` reports them
+        with the exact why and this wrapper adds the plugin/path
+        context the loader convention carries.
+        """
+        problems = validate_plugin_declarations(cls)
+        if problems:
+            raise PluginError(
+                f"plugin {name!r} has invalid chain declarations in {path}: " + "; ".join(problems)
+            )
 
     # ------------------------------------------------------------- accessors
     def names(self) -> list[str]:
