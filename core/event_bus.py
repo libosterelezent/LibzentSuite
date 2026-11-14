@@ -118,25 +118,33 @@ class TaskStarted(Event):
 
 @dataclass
 class TaskCompleted(Event):
-    """A task finished successfully."""
+    """A task finished successfully.
+
+    ``plugin`` (W4) names the plugin that owned the task — the chain
+    runtime's mechanical trigger matches on it; the scheduler holds it
+    at emit time. Additive with a default: old emitters/payloads stay
+    valid."""
 
     task_id: int = 0
     duration_s: float = 0.0
     summary: str = ""
+    plugin: str = ""
 
 
 @dataclass
 class TaskFailed(Event):
-    """A task failed permanently (retries exhausted or non-retryable).
+    """A task failed permanently (retries exhausted or non-tryable).
 
     ``error_kind`` is the exception CLASS NAME (e.g. "TargetGone") so the
     services layer can faithfully re-raise FlowBlocked subclasses to the
     waiting plugin — the flow-abort contract must survive the task-ack seam.
-    """
+    ``plugin`` (W4) names the owning plugin — the chain runtime's
+    mechanical trigger matches on it."""
 
     task_id: int = 0
     error: str = ""
     error_kind: str = ""
+    plugin: str = ""
 
 
 @dataclass
