@@ -18,7 +18,6 @@ from .presets import PresetsRepository
 from .rate_policies import RatePolicyRepository
 from .settings import AccountSettingsRepository
 from .signals import SignalsRepository
-from .sync_groups import SyncGroupsRepository
 from .tasks import TaskHistoryRepository
 from .workspaces import WorkspaceRepository
 
@@ -35,7 +34,6 @@ __all__ = [
     "PresetsRepository",
     "RatePolicyRepository",
     "SignalsRepository",
-    "SyncGroupsRepository",
     "TaskHistoryRepository",
     "WorkspaceRepository",
     "loads_tolerant",

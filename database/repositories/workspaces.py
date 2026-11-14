@@ -546,7 +546,7 @@ class WorkspaceRepository(BaseRepository):
         """Decision 14's edit path: revision bumps; runs already created
         keep their captured snapshots."""
         async with self._tx(f"update chain {chain_id}") as conn:
-            cur = await conn.execute(
+            await conn.execute(
                 "UPDATE workspace_chains SET definition_json = ?,"
                 " schema_version = ?, revision = revision + 1, updated_at = ?"
                 " WHERE id = ?",

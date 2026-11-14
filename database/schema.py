@@ -706,6 +706,24 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         );
         """,
     ),
+    (
+        11,
+        "workspace unification W5 — the v9 tables drop",
+        """
+        -- The readers are gone (W3 swapped the surfaces, W5 deleted the
+        -- modules): the v9 orchestration tables die now. accounts.sync_group
+        -- drops with them (accounts.workspace has been authoritative since
+        -- v10). Requires SQLite >= 3.35 for DROP COLUMN (the fork's
+        -- Python 3.10+ floor ships it).
+        DROP TABLE IF EXISTS fleet_transitions;
+        DROP TABLE IF EXISTS fleet_cooldowns;
+        DROP TABLE IF EXISTS fleet_assignments;
+        DROP TABLE IF EXISTS fleet_members;
+        DROP TABLE IF EXISTS fleet_groups;
+        DROP TABLE IF EXISTS sync_groups;
+        ALTER TABLE accounts DROP COLUMN sync_group;
+        """,
+    ),
 ]
 
 

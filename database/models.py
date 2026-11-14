@@ -28,9 +28,8 @@ class AccountRecord:
     name: str
     token_ref: str | None = None  # .env key; token VALUES never stored
     enabled: bool = True
-    sync_group: str | None = None  # accounts that act in sync (optional)
-    #: THE workspace membership pointer (decision 11) — authoritative;
-    #: the v9 sync_group column stays read-only until v11 drops it
+    #: THE workspace membership pointer (decision 11) — authoritative
+    #: since v10; the v9 sync_group column dropped at v11
     workspace: str | None = None
     settings: dict[str, Any] = field(default_factory=dict)  # framework layer
     created_at: float = field(default_factory=time.time)
@@ -41,7 +40,6 @@ class AccountRecord:
             "name": self.name,
             "token_ref": self.token_ref,
             "enabled": self.enabled,
-            "sync_group": self.sync_group,
             "workspace": self.workspace,
             "settings": dict(self.settings),
             "created_at": round(self.created_at, 3),

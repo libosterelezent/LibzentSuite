@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 __all__ = ["AccountsRepository"]
 
 _INSERT = """
-    INSERT INTO accounts (name, token_ref, enabled, sync_group, settings_json, created_at)
+    INSERT INTO accounts (name, token_ref, enabled, workspace, settings_json, created_at)
     VALUES (?, ?, ?, ?, '{}', ?)
 """
 
@@ -66,10 +66,9 @@ class AccountsRepository(BaseRepository):
             name=row["name"],
             token_ref=row["token_ref"],
             enabled=bool(row["enabled"]),
-            sync_group=row["sync_group"],
-            # v10 column — absent on pre-v10 databases (the migration
-            # tests build genuine v4-v9 shapes)
-            workspace=(row["workspace"] if "workspace" in row.keys() else None),  # noqa: SIM118
+            workspace=(
+                row["workspace"] if "workspace" in row.keys() else None  # noqa: SIM118
+            ),
             settings=loads_tolerant(
                 row["settings_json"], {}, f"accounts[{row['name']!r}].settings_json"
             ),
@@ -83,7 +82,7 @@ class AccountsRepository(BaseRepository):
         *,
         token_ref: str | None = None,
         enabled: bool = True,
-        sync_group: str | None = None,
+        workspace: str | None = None,
     ) -> AccountRecord:
         """Insert a new account and return its persisted record.
 
@@ -98,7 +97,7 @@ class AccountsRepository(BaseRepository):
         async with self._tx(f"add account {name!r}") as conn:
             try:
                 await conn.execute(
-                    _INSERT, (name, token_ref, int(bool(enabled)), sync_group, time.time())
+                    _INSERT, (name, token_ref, int(bool(enabled)), workspace, time.time())
                 )
             except sqlite3.IntegrityError as exc:
                 raise DatabaseError(f"account {name!r} already exists") from exc
