@@ -232,6 +232,7 @@ class PluginLoader:
             seen_keys.add(setting.name)
         self._validate_commands(cls, name, path)
         self._validate_chain_declarations(cls, name, path)
+        self._validate_cog_declaration(cls, name, path)
         if name in self._records:
             raise PluginError(
                 f"duplicate plugin name {name!r} ({path} vs {self._records[name].source})"
@@ -295,6 +296,34 @@ class PluginLoader:
                         f" ArgSpec {arg.name!r} must be LAST in {path}"
                     )
             seen.add(spec.name)
+
+    def _validate_cog_declaration(self, cls: type[PluginBase], name: str, path: Path) -> None:
+        """Validate the CONVERGED command declaration (C2): ``COG`` is
+        a discord.ext.commands.Cog SUBCLASS (not an instance — the host
+        builds one per (account, plugin) with the toolbox injected).
+        The fail-fast convention carries: a broken declaration never
+        boots. Absent COG is valid during the migration (COMMANDS
+        still serves those plugins until the flip)."""
+        cog = getattr(cls, "COG", None)
+        if cog is None:
+            return  # migration window: the plugin has not flipped yet
+        import inspect
+
+        if not inspect.isclass(cog):
+            raise PluginError(
+                f"plugin {name!r}: COG must be a Cog subclass, got {type(cog).__name__} in {path}"
+            )
+        from discord.ext import commands as ext_commands
+
+        if not issubclass(cog, ext_commands.Cog):
+            raise PluginError(
+                f"plugin {name!r}: COG must subclass commands.Cog (got {cog!r}) in {path}"
+            )
+        if not hasattr(cog, "__cog_name__") or not cog.__cog_name__:
+            raise PluginError(
+                f"plugin {name!r}: COG class {cog.__name__!r} has no cog "
+                f"name (the library derives it from the class name) in {path}"
+            )
 
     def _validate_chain_declarations(self, cls: type[PluginBase], name: str, path: Path) -> None:
         """Validate a plugin's EMITS/FOLLOWS declarations at discovery
