@@ -76,7 +76,9 @@ Workspace → Multiple Accounts → Plugin assignment → Orchestration
 | 5 | Migration | **Big-bang** — one schema version folds groups+fleet into workspaces; old tables drop in the same version |
 | 6 | Fleet survivors | **Core survives, chains replace relay** — transitions tables, generation fences, reconciler, policy check order carry over renamed; observations/relay + FleetTaskHandler are redesigned as the chain layer |
 | 7 | API surface | **Clean replace** — `workspaces_*` replaces `groups_*` + `fleet_*`; no compat aliases (surface debt is lowest now) |
-| 8 | Config layer | **Workspace settings layer** — workspace > account > plugin precedence for member plugin settings (mirrors the `rate_limit_policies` level lattice) |
+| 8 | Workspace config layer | **REVISED 2026-11-14** — copy-only workspace layer: channel default suggestions + preset templates, applied by explicit copy onto accounts. Live plugin settings are strictly account-bound — no workspace/global settings inheritance (replaces the original live workspace > account > plugin precedence) |
+| 9 | Preset semantics | **Copy-on-apply + provenance** (2026-11-14) — apply copies values into the account's own config with source_preset_id/source_version/applied_at; updates explicit; detach preserves values. Today's live-bound profiles end at v10 |
+| 10 | Preset portability | **Plugin-bound by default** (2026-11-14) — cross-plugin reuse only via explicit export/import re-validated against the destination plugin's schema |
 
 ## Entity mapping (what folds where)
 
@@ -114,40 +116,61 @@ bootstrap fleet/group closures     →     (deleted — membership written
     (mode + eligibility columns), WorkspaceTask/step states,
     ChainDefinition, trigger/signal specs (adapted from
     `core/fleet/models.py`, which is already a PURE module)
+[ ] Channel + preset domain models: ChannelAssignment/
+    ChannelBinding, Preset (3 scopes) + provenance record
+    (source_preset_id, source_version, applied_at), and the pure
+    preset lifecycle functions (validate/apply/update-preview/
+    detach semantics — WORKSPACE_DESIGN.md §6)
 [ ] `core/workspace/transitions.py` — carry fleet's tables over +
     chain-step states (`PENDING → READY → RUNNING → DONE | FAILED | SKIPPED`)
 [ ] Plugin capability contract replacing `fleet_handler`:
     declarative `EMITS` / `FOLLOWS` on PluginBase
 [ ] `core/workspace/policy.py` — fleet's check order extended with
     the new gate: *plugin assigned ∧ enabled on the target account ∧
-    settings gate passes* (fleet today knows nothing about plugins —
-    this is the one new, correct coupling through `account_plugins`)
+    settings gate passes ∧ a channel binding resolves* (WORKSPACE_DESIGN
+    §12 — the WHERE is part of eligibility)
 [ ] Pure unit tests green with zero connections (rollout-A discipline)
 
 ### W2 — Persistence + big-bang migration
-[ ] Schema v_next: `workspaces`, `workspace_members`,
-    `workspace_tasks`, `workspace_chains`, `workspace_settings`,
-    `workspace_transitions`; `accounts.sync_group` →
-    `accounts.workspace`; fold `fleet_groups` state; drop
-    `sync_groups` + the 5 fleet tables after the data fold
+[ ] Schema v10 per WORKSPACE_DESIGN §13: `workspaces`,
+    `workspace_members`, `workspace_tasks`, `workspace_chains`,
+    `workspace_transitions`, `presets` (3 scopes + version),
+    `account_channels`, `account_channel_assignments`,
+    `account_plugin_channels`; `accounts.sync_group` →
+    `accounts.workspace`; fold + drop the fleet/sync tables
+[ ] Live-binding materialization: every `account_plugins.profile`
+    binding copies its effective keys into `plugin_settings` with
+    provenance; the profile column drops; the reserved `"channels"`
+    key extracts into `account_plugin_channels`
+[ ] `PluginDataStore.drop_account(account)` — the cross-store
+    deletion boundary for account removal (fixes the inheritance
+    gap found 2026-11-13)
 [ ] Typed repositories following the Protocol patterns (see
     `core/sync_group_manager/manager.py` + `core/fleet/service.py`
     for the established shape)
-[ ] Migration test proves a populated v_current DB lands correctly
-    in the workspace shape
+[ ] Migration test proves a populated v9 DB lands correctly in the
+    workspace shape — memberships, generations, cooldowns,
+    post-materialization effective settings, channel bindings
 
 ### W3 — WorkspaceService (the one writer)
 [ ] `core/workspace/service.py`: membership + orchestration under the
     single-lock persist-first discipline (FleetService's proven
     shape, minus the seam closures)
-[ ] Settings resolution extended with the workspace level
-    (workspace > account > plugin) — full precedence-collision test
-    matrix
+[ ] Channel + preset operations: account channel add/remove/set,
+    plugin bindings (initialize-by-copy from account assignments),
+    preset create/validate/apply/update(explicit diff)/detach/
+    export/import — every apply is a copy with provenance
+    (architecture rules 1-6, WORKSPACE_DESIGN §5-6)
+[ ] Settings resolution: the simplified chain (defaults ← global ←
+    account — the profile layer ends, decision 9) with the
+    precedence-collision test matrix
+[ ] Account-removal cascade: the full deletion boundary across BOTH
+    stores (WORKSPACE_DESIGN §7 — plugin-data documents included)
 [ ] Pacing: membership drives the limiter mapping
     (`workspace:<name>` shared clock — engine key rename rides the
     clean replace)
-[ ] ControlAPI `workspaces_*` + CLI verbs; `groups_*` / `fleet_*`
-    removed in the same series (decision #7)
+[ ] ControlAPI surface per WORKSPACE_DESIGN §14 (workspaces_* +
+    channels + presets; groups_*/fleet_* removed) + CLI verbs
 [ ] Service transition/race tests green (the A→X racing A→Y
     lock discipline)
 
