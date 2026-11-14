@@ -1673,6 +1673,29 @@ class PluginManager:
             explicit_settings=explicit,
         )
 
+    async def invoke_handler(
+        self, account: str, plugin: str, handler: str, payload: dict[str, Any]
+    ) -> Any:
+        """Invoke one plugin handler on one account (W4 chain runtime's
+        production invoker).
+
+        The handler runs with the SAME per-(account, plugin) context the
+        lifecycle hooks see — its sends ride the paced pipeline, its
+        settings are the live view. Raises PluginError when the plugin
+        is not attached to the account (the caller records a visible
+        skip); handler exceptions propagate (the caller records FAILED)."""
+        rt = self._runtime(account, plugin)
+        if not getattr(rt, "active", False):
+            raise PluginError(f"plugin {plugin!r} is not active on account {account!r}")
+        handler_fn = getattr(rt.instance, handler, None)
+        if handler_fn is None or not callable(handler_fn):
+            raise PluginError(
+                f"plugin {plugin!r} has no callable handler {handler!r}"
+                f" on account {account!r}")
+        services = self._services.get(account, lambda _n: None)(plugin)
+        ctx = self._context(account, rt, services)
+        return await handler_fn(ctx, payload)
+
 
 class _ManagerSettingsApi:
     """CommandSettingsApi over the plugin manager's own surfaces.
