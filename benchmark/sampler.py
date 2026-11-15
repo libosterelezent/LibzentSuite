@@ -46,7 +46,7 @@ class ProcessSampler:
 
     def __init__(self, interval_s: float = 0.1) -> None:
         self.interval_s = float(interval_s)
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Task[None] | None = None
         self._rss: list[int] = []
         self._fds: list[int] = []
         self._ru0: tuple[float, float] = (0.0, 0.0)
@@ -132,7 +132,7 @@ class LoopLagMonitor:
 
     def __init__(self, interval_s: float = 0.005) -> None:
         self.interval_s = float(interval_s)
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Task[None] | None = None
         self._hist: list[int] = [0] * len(self.EDGES_MS)
         self._count = 0
         self._max_s = 0.0
@@ -205,7 +205,7 @@ class TaskSampler:
 
     def __init__(self, interval_s: float = 1.0) -> None:
         self.interval_s = float(interval_s)
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Task[None] | None = None
         self._series: list[int] = []
         self._threads: list[int] = []
 
@@ -274,7 +274,7 @@ class SpikeCapture:
         self.rss_jump_mb = float(rss_jump_mb)
         self.debounce_s = float(debounce_s)
         self.cap = int(cap)
-        self.captures: list[dict] = []
+        self.captures: list[dict[str, Any]] = []
         self.capture_ctx: dict[str, Any] = {}  # providers (scenario-set)
         self._last_capture = 0.0
         import time as _time
@@ -294,7 +294,7 @@ class SpikeCapture:
             return
         self._fire({"kind": "rss", "jump_mb": round((now_kb - prev_kb) / 1024.0, 1)})
 
-    def _fire(self, trigger: dict) -> None:
+    def _fire(self, trigger: dict[str, Any]) -> None:
         now = self._now()
         if now - self._last_capture < self.debounce_s:
             return
@@ -335,8 +335,8 @@ class SamplerSession:
             def _on_rss(prev_kb: int, now_kb: int) -> None:
                 capture.on_rss(prev_kb, now_kb)
 
-            self.lag._on_lag = _on_lag  # type: ignore[attr-defined]
-            self.process._on_rss = _on_rss  # type: ignore[attr-defined]
+            self.lag._on_lag = _on_lag
+            self.process._on_rss = _on_rss
 
     def start(self) -> None:
         gc.collect()

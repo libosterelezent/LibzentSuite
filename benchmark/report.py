@@ -227,7 +227,10 @@ def to_json(report: dict[str, Any], path: str) -> None:
 
 def load_json(path: str) -> dict[str, Any]:
     with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a JSON object benchmark report")
+    return data
 
 
 def leak_verdict(rss_series: list[float], task_series: list[int]) -> dict[str, Any]:

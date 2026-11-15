@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+    from benchmark.profiling import AllocHook
+
 
 class PerfCollector:
     """Registers wall-times per label; p50/p95/max per snapshot.
@@ -18,7 +20,7 @@ class PerfCollector:
     paths imports or consults it (profiling is opt-in by construction).
     """
 
-    def __init__(self, alloc_hook: Any = None) -> None:
+    def __init__(self, alloc_hook: AllocHook | None = None) -> None:
         self._records: dict[str, list[float]] = {}
         self._errors: dict[str, int] = {}
         self._counts: dict[str, int] = {}
@@ -48,11 +50,11 @@ class PerfCollector:
                 with suppress(Exception):
                     self._alloc_hook(label, enter_snap, tracemalloc.take_snapshot())
 
-    def timed(self, label: str) -> Callable:
+    def timed(self, label: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Decorator for sync AND async functions."""
         collector = self
 
-        def decorator(fn: Callable) -> Callable:
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
             if asyncio.iscoroutinefunction(fn):
 
                 async def async_wrapper(*a: Any, **k: Any) -> Any:
