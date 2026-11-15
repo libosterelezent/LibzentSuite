@@ -50,7 +50,9 @@ class ApiClient:
             headers["X-API-Token"] = self._token
         data = json.dumps(body).encode() if body else None
         request = Request(url, data=data, headers=headers, method=method)
-        with urlopen(request) as response:
+        # Bandit B310: the base URL is the operator-configured local API
+        # endpoint (never user-supplied HTML input).
+        with urlopen(request) as response:  # nosec B310
             if response.status == 204:
                 return None
             return json.loads(response.read())

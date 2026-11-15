@@ -355,8 +355,10 @@ class WorkspaceRepository(BaseRepository):
         assignments = ", ".join(f"{name} = ?" for name in fields)
         params = [*fields.values(), time.time(), task_row_id]
         async with self._tx(f"update workspace task {task_row_id!r}") as conn:
+            # Bandit B608: assignments expand only the whitelisted
+            # field names; values ride the parameter tuple.
             await conn.execute(
-                f"UPDATE workspace_tasks SET {assignments},"
+                f"UPDATE workspace_tasks SET {assignments},"  # nosec B608
                 " updated_at = ?, version = version + 1 WHERE id = ?",
                 tuple(params),
             )

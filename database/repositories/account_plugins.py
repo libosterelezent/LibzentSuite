@@ -82,8 +82,10 @@ class AccountPluginsRepository(BaseRepository):
             # profile binding (account_plugins.profile).
             if cleaned:
                 marks = ",".join("?" * len(cleaned))
+                # Bandit B608: the f-string only expands the placeholder
+                # count; every value rides the parameter tuple.
                 await conn.execute(
-                    f"DELETE FROM account_plugins WHERE account = ? AND plugin NOT IN ({marks})",
+                    f"DELETE FROM account_plugins WHERE account = ? AND plugin NOT IN ({marks})",  # nosec B608
                     (account, *cleaned),
                 )
             else:

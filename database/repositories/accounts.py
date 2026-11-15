@@ -170,8 +170,13 @@ class AccountsRepository(BaseRepository):
             async with conn.execute("DELETE FROM accounts WHERE name = ?", (name,)) as cur:
                 existed = cur.rowcount > 0
             if existed:
+                # Bandit B608: table names come from the module-level
+                # _DEPENDENT_TABLES constant; the account value is bound.
                 for table in _DEPENDENT_TABLES:
-                    await conn.execute(f"DELETE FROM {table} WHERE account = ?", (name,))
+                    await conn.execute(
+                        f"DELETE FROM {table} WHERE account = ?",  # nosec B608
+                        (name,),
+                    )
                 # PHASE-4 (S3-G5): kv plugin-state prefix sweep (backstop —
                 # the PluginStateService cascade is the primary path).
                 # LIKE wildcards in the account NAME ('\', '%', '_') are

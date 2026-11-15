@@ -88,8 +88,10 @@ class BaseRepository:
 
     async def _prune_newest(self, conn: Any, table: str, keep: int) -> None:
         """Keep only the newest ``keep`` rows (by id); call inside ``_tx``."""
+        # Bandit B608: table is an internal constant supplied by repo
+        # callers; the OFFSET value is bound as a parameter.
         await conn.execute(
-            f"DELETE FROM {table} WHERE id <= "
+            f"DELETE FROM {table} WHERE id <= "  # nosec B608
             f"(SELECT id FROM {table} ORDER BY id DESC LIMIT 1 OFFSET ?)",
             (int(keep),),
         )

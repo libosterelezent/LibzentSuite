@@ -188,8 +188,11 @@ class Database:
         duplicate-column ALTER races, and DROP COLUMN finding the
         column already dropped."""
         safe_name = name.replace("'", "''")
+        # Bandit B608: version/name come from the in-repo migration
+        # registry, not user input; name is quote-escaped above and the
+        # version is int-coerced.
         stamp = (
-            f"INSERT INTO schema_migrations (version, name, applied_at) "
+            f"INSERT INTO schema_migrations (version, name, applied_at) "  # nosec B608
             f"VALUES ({int(version)}, '{safe_name}', {time.time()!r})"
         )
         savepoint = f"mig_{int(version)}"
