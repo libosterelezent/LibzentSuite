@@ -27,6 +27,7 @@ import asyncio
 import logging
 import shlex
 import time
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from .errors import DOMAIN_ERRORS
@@ -34,9 +35,10 @@ from .event_bus import Event, EventBus, MessageReceived
 from .priority import Priority
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from .credentials import Credentials
+
+#: one allowlisted remote verb: (ControlAPI, argv) -> rendered reply
+Handler = Callable[[Any, list[str]], Awaitable[str]]
 
 #: domain errors render their (safe, human-written) message bare; anything
 #: else is an internal failure and must not leak into a Discord channel.
@@ -76,8 +78,8 @@ class RemoteControl:
         self._cooldown_s = max(0.0, float(reply_cooldown_s))
         self._last_reply_at: dict[str, float] = {}
         self._unsub: Callable[[], None] | None = None
-        self._pending: set = set()  # strong refs for fire-and-forget tasks
-        self._handlers: dict[str, Callable[[Any, str], Any]] = {}
+        self._pending: set[asyncio.Task[None]] = set()  # strong refs for fire-and-forget tasks
+        self._handlers: dict[str, Handler] = {}
         self._register_commands()
 
     # ------------------------------------------------------------- lifecycle
@@ -219,14 +221,14 @@ class RemoteControl:
             "simulation": self._cmd_simulation,
         }
 
-    async def _help(self, api: Any = None, args: list = ()) -> str:
+    async def _help(self, api: Any = None, args: list[str] | None = None) -> str:
         return (
             "commands: status · accounts list|info <n>|start <n>|stop <n> · "
             "plugins <account> [<plugin> on|off] · ratelimit show|warnings · "
             "lane [show] · tasks · estop [account] · simulation list · help"
         )
 
-    async def _cmd_status(self, api: Any, args: list) -> str:
+    async def _cmd_status(self, api: Any, args: list[str]) -> str:
         if args:
             return "'status' takes no arguments"
         status = await api.status()
@@ -250,7 +252,7 @@ class RemoteControl:
             lines.append(f"{len(warnings)} warning(s) — 'ratelimit warnings'")
         return "\n".join(lines)
 
-    async def _cmd_accounts(self, api: Any, args: list) -> str:
+    async def _cmd_accounts(self, api: Any, args: list[str]) -> str:
         if not args or args[0] == "list":
             accounts = await api.accounts_list()
             if not accounts:
@@ -277,7 +279,7 @@ class RemoteControl:
             return f"stopped {rest[0]}"
         return "usage: accounts list|info <n>|start <n>|stop <n>"
 
-    async def _cmd_plugins(self, api: Any, args: list) -> str:
+    async def _cmd_plugins(self, api: Any, args: list[str]) -> str:
         if not args:
             return "usage: plugins <account> [<plugin> on|off]"
         account = args[0]
@@ -297,7 +299,7 @@ class RemoteControl:
         await api.plugins_set_enabled(account, plugin, flag == "on")
         return f"{plugin} {'enabled' if flag == 'on' else 'disabled'} on {account}"
 
-    async def _cmd_ratelimit(self, api: Any, args: list) -> str:
+    async def _cmd_ratelimit(self, api: Any, args: list[str]) -> str:
         sub = args[0].lower() if args else "show"
         if sub == "show":
             policies = await api.ratelimit_policies()
@@ -315,7 +317,7 @@ class RemoteControl:
             return "\n".join(f"[{w['level']}] {w['code']}: {w['message']}" for w in warnings)
         return "usage: ratelimit show|warnings"
 
-    async def _cmd_lane(self, api: Any, args: list) -> str:
+    async def _cmd_lane(self, api: Any, args: list[str]) -> str:
         lane = await api.ratelimit_lane()
         if not lane.get("enabled"):
             return "send lane: off (per-account pacing only)"
@@ -325,7 +327,7 @@ class RemoteControl:
             f"waiting {lane.get('waiting')} · grants {lane.get('grants')}"
         )
 
-    async def _cmd_tasks(self, api: Any, args: list) -> str:
+    async def _cmd_tasks(self, api: Any, args: list[str]) -> str:
         rows = await api.tasks_list()
         if not rows:
             return "no queued/running tasks"
@@ -335,7 +337,7 @@ class RemoteControl:
             for t in rows[:10]
         ) + (f"\n(+{len(rows) - 10} more)" if len(rows) > 10 else "")
 
-    async def _cmd_estop(self, api: Any, args: list) -> str:
+    async def _cmd_estop(self, api: Any, args: list[str]) -> str:
         if len(args) == 1:
             out = await api.accounts_emergency_stop(args[0], surface="remote")
             self._logger.info(
@@ -355,7 +357,7 @@ class RemoteControl:
             "cancelled, all accounts halted. Restart manually."
         )
 
-    async def _cmd_simulation(self, api: Any, args: list) -> str:
+    async def _cmd_simulation(self, api: Any, args: list[str]) -> str:
         scenarios = await api.simulation_list()
         if not scenarios:
             return "no scenarios available"

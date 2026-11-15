@@ -207,7 +207,7 @@ async def _seed_config_defaults(
     if not callable(removed):  # vintage manager shape (attr/property):
         removed = None  # no tombstone knowledge -> seed normally
 
-    def _seed(action, spec, level, owner, where):
+    def _seed(action: str, spec: dict[str, Any], level: str, owner: str | None, where: str) -> None:
         if (level, owner, action) in stored:
             return  # DB owns this key already
         if removed is not None and removed(level, owner, action):
@@ -247,7 +247,7 @@ async def _seed_config_defaults(
             _seed(action, spec, "account", account, f"account {account}")
 
 
-def _policy_triple(action: str, spec: dict[str, Any], where: str) -> tuple:
+def _policy_triple(action: str, spec: dict[str, Any], where: str) -> tuple[float, float, float]:
     """{'interval': 2.0, 'jitter': [0.1, 0.5]} -> (2.0, 0.1, 0.5)."""
     try:
         interval = float(spec["interval"])
@@ -360,9 +360,9 @@ class Framework:
             # pipeline (the LAST release stops it) — placing it after the
             # steps above keeps their final warnings on the console
             steps.append(("stderr pipeline", release_stderr_pipeline))
-        steps = tuple(steps)
+        ordered = tuple(steps)
         interrupted: BaseException | None = None
-        for label, step in steps:
+        for label, step in ordered:
             try:
                 outcome = step()
                 if inspect.iscoroutine(outcome):
@@ -488,7 +488,7 @@ async def build(
     # a borrower increment the count and never release it), and the
     # release is registered BEFORE any fallible step so an early boot
     # failure cannot leak the claim.
-    cleanups: list = []
+    cleanups: list[tuple[str, Any]] = []
     if not quiet:
         claim_stderr_pipeline()
         cleanups.append(("stderr pipeline", release_stderr_pipeline))
@@ -539,7 +539,7 @@ async def _safe_close(database: Any) -> None:
 
 
 async def _assemble(
-    cleanups: list,
+    cleanups: list[tuple[str, Any]],
     _time: Any,
     credentials: Credentials,
     config: ProjectConfig,
@@ -652,8 +652,18 @@ async def _assemble(
     def _publish_inbound(event: Any) -> None:
         bus.publish_nowait(event)
 
+    def _to_rich(message: Any) -> Any:
+        """The C1 to_rich seam, wired the way the client's own intake
+        derives the flag: convert_message REQUIRES ``dm`` — passing the
+        bare function would TypeError on every call (found by the
+        mypy-strict pass, 2026-11-15)."""
+        import discord
+
+        channel = getattr(message, "channel", None)
+        return convert_message(message, dm=isinstance(channel, discord.DMChannel))
+
     cog_host = PluginCogHost(
-        to_rich=convert_message,
+        to_rich=_to_rich,
         audit_publisher=_publish_inbound,
         inbound_factory=lambda **kw: MessageReceived(**kw),
     )
@@ -761,6 +771,9 @@ async def _assemble(
     # an account's send pacing (registered once; tests may stub it)
     from .plugin_manager.commands import COMMAND_HUB, PacingBackend
 
+    #: forward declaration — the late-plugins invoker below closes over
+    # ``plugins`` before the manager is constructed (resolved at call time)
+    plugins: PluginManager
     COMMAND_HUB.pacing = PacingBackend(limiter)
     # AccessManager: the admin panel's store (admins, per-account command
     # perms, prefixes, primary bot id) over the kv repo; one-time env migration
