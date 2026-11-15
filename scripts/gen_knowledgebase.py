@@ -225,7 +225,7 @@ def scan_module(path: Path, module: str) -> dict[str, Any]:
             info["symbols"] += 1
         elif isinstance(node, ast.ClassDef):
             decorators = decorators_of(node)
-            entry = {
+            entry: dict[str, Any] = {
                 "name": node.name,
                 "qualified": f"{module}.{node.name}",
                 "kind": classify_class(node, decorators),
@@ -525,7 +525,7 @@ def coverage(modules: list[dict[str, Any]]) -> dict[str, Any]:
                     stats["plugin_api"][0] += 1
                     if method["doc_full"]:
                         stats["plugin_api"][1] += 1
-    report = {"measured_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    report: dict[str, Any] = {"measured_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
     for key, (total, documented) in stats.items():
         report[key] = {
             "total": total,

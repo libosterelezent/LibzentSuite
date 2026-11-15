@@ -52,6 +52,7 @@ import statistics
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -70,6 +71,9 @@ N_ACQUIRES = 1_000
 N_RECORDS = 10_000
 N_DUMPS = 200
 N_CONVERTS = 1_000
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 # --------------------------------------------------------------- helpers
@@ -103,7 +107,7 @@ class BenchResult:
         )
 
 
-def timed(fn) -> float:
+def timed(fn: Callable[[], object]) -> float:
     t0 = time.perf_counter()
     fn()
     return time.perf_counter() - t0
@@ -113,7 +117,7 @@ def timed(fn) -> float:
 def bench_bus(repeat: int) -> BenchResult:
     hits = [0]
 
-    def handler(event) -> None:
+    def handler(event: MessageReceived) -> None:
         hits[0] += 1
 
     bus = EventBus()
@@ -151,11 +155,12 @@ async def _rate_once() -> float:
     # time per acquire under the frozen ManualClock. Route the documented
     # _sleep seam at the clock instead: every timed wait becomes an
     # instant clock advance, so the bench measures pure engine overhead.
+    # (Deliberate monkeypatch of the seam — mypy cannot see it is intended.)
     async def _clock_sleep(seconds: float) -> None:
         if seconds > 0:
             clock.advance(seconds)
 
-    mgr._sleep = _clock_sleep
+    mgr._sleep = _clock_sleep  # type: ignore[method-assign]
 
     async def run() -> None:
         # learned default for "message" (no stored policy) is 2.6s — a
@@ -184,11 +189,11 @@ class NullRepo:
     def __init__(self) -> None:
         self.rows = 0
 
-    async def add_many(self, entries: list[dict]) -> int:
+    async def add_many(self, entries: list[dict[str, object]]) -> int:
         self.rows += len(entries)
         return len(entries)
 
-    async def add(self, entry: dict) -> int:
+    async def add(self, entry: dict[str, object]) -> int:
         self.rows += 1
         return 1
 
@@ -219,7 +224,7 @@ def bench_persist(repeat: int) -> BenchResult:
 
 
 # ---------------------------------------------- 4. dashboard _dumps
-def _big_stats_payload() -> dict:
+def _big_stats_payload() -> dict[str, object]:
     accounts = [
         {
             "name": f"account-{i:03d}",
@@ -307,11 +312,11 @@ def bench_dumps(repeat: int) -> BenchResult:
 class _NS:
     """Attribute bag standing in for a library object."""
 
-    def __init__(self, **kw):
+    def __init__(self, **kw: object) -> None:
         self.__dict__.update(kw)
 
 
-def _fat_message():
+def _fat_message() -> _NS:
     author = _NS(id=111222333, name="benchuser", bot=False)
     channel = _NS(id=444555666, name="general", type="text")
     guild = _NS(id=777888999, name="bench guild", member_count=500)

@@ -38,6 +38,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import TypedDict
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -70,7 +71,7 @@ class LoopStallMeter:
     def __init__(self, period: float = 0.001) -> None:
         self.period = period
         self.gaps: list[float] = []
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Task[None] | None = None
 
     async def _run(self, stop: asyncio.Event) -> None:
         loop = asyncio.get_running_loop()
@@ -96,14 +97,27 @@ class LoopStallMeter:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
 
-    def summary(self) -> dict:
+    def summary(self) -> dict[str, float]:
         return {
             "max_stall_ms": (max(self.gaps) * 1000.0) if self.gaps else 0.0,
             "median_stall_ms": (statistics.median(self.gaps) * 1000.0) if self.gaps else 0.0,
         }
 
 
-def make_entry(i: int) -> dict:
+class BenchLogEntry(TypedDict):
+    """One row of the ``logs`` table shape both harnesses write."""
+
+    ts: float
+    severity: str
+    source: str
+    account: str
+    plugin: str
+    task_id: int | None
+    event: str
+    message: str
+
+
+def make_entry(i: int) -> BenchLogEntry:
     return {
         "ts": time.time(),
         "severity": "INFO" if i % 2 else "ERROR",
@@ -116,7 +130,7 @@ def make_entry(i: int) -> dict:
     }
 
 
-async def bench_legacy_inline(n: int, tmp: Path) -> dict:
+async def bench_legacy_inline(n: int, tmp: Path) -> dict[str, float]:
     """Synchronous sqlite3 execute+commit per record, INLINE on the loop."""
     path = tmp / f"legacy-{time.monotonic_ns()}.db"  # fresh file per run
     conn = sqlite3.connect(str(path))
@@ -160,7 +174,7 @@ async def bench_legacy_inline(n: int, tmp: Path) -> dict:
     return out
 
 
-async def bench_queued_aiosqlite(n: int, tmp: Path) -> dict:
+async def bench_queued_aiosqlite(n: int, tmp: Path) -> dict[str, float]:
     """LogService.record() -> queue -> one async drain worker (production)."""
     db = Database(tmp / f"queued-{time.monotonic_ns()}.db")  # fresh per run
     await db.connect()
@@ -198,7 +212,7 @@ async def bench_queued_aiosqlite(n: int, tmp: Path) -> dict:
     return out
 
 
-def render_table(results: list[tuple[str, dict]]) -> str:
+def render_table(results: list[tuple[str, dict[str, float]]]) -> str:
     header = (
         f"{'harness':<22}{'records':>8}{'wall':>9}{'max stall':>11}{'med stall':>11}{'per-rec':>9}"
     )
@@ -221,7 +235,7 @@ async def main_async(records: int, repeat: int) -> int:
         "stall = longest continuous period the event loop could not run "
         "other work (ticker, ~1ms resolution)\n"
     )
-    all_results: list[tuple[str, dict]] = []
+    all_results: list[tuple[str, dict[str, float]]] = []
     with tempfile.TemporaryDirectory(prefix="sm-bench-") as raw:
         tmp = Path(raw)
         for run in range(repeat):
