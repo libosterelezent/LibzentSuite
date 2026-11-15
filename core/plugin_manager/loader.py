@@ -37,6 +37,7 @@ import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ..errors import PluginError
 from ..names import PLUGIN_NAME_RE as _NAME_RE
@@ -134,7 +135,7 @@ class PluginLoader:
         parent = types.ModuleType(parent_name)
         parent.__path__ = [str(self._dir)]
         sys.modules[parent_name] = parent
-        candidates: list[tuple] = []
+        candidates: list[tuple[str, str, Path]] = []
         for entry in entries:
             if entry.name.startswith(("_", ".")):
                 continue
@@ -303,7 +304,7 @@ class PluginLoader:
         """Fresh instance of a plugin (one per account/plugin pair)."""
         return self.record(name).cls()
 
-    def manifests(self) -> list[dict]:
+    def manifests(self) -> list[dict[str, Any]]:
         """JSON-safe manifests (metadata + settings schema) for CLI/UI."""
         if not self._discovered:
             self.discover()

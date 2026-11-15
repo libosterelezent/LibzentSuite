@@ -52,7 +52,7 @@ from ..errors import DOMAIN_ERRORS
 from ..plugin_base import ArgSpec, CommandContext, CommandSpec, usage_line
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Sequence
 
 HELP_DESC_WIDTH = 25
 HELP_PAGE_CHARS = 1750
@@ -135,7 +135,9 @@ def _framework_api() -> Any:
     return api
 
 
-def _ported(command: Callable) -> Callable:
+def _ported(
+    command: Callable[[CommandContext, list[str]], Awaitable[str]],
+) -> Callable[[CommandContext, list[str]], Coroutine[Any, Any, str]]:
     """Decorator for the ported remote-control verbs: ControlAPI domain
     errors render their (safe) message bare — ``error: …`` — exactly like
     the retired mention bridge did; internal failures raise on and the
@@ -691,8 +693,6 @@ class SelfCommandHub:
 
     def __init__(self) -> None:
         self._manager: Any = None
-        #: account -> registry entries (spec order = registration order)
-        self._entries: dict[str, list[RegisteredCommand]] = {}
         #: account -> the live client's rebuild callback (latest wins)
         self._subscribers: dict[str, Callable[[list[CommandSpec]], None]] = {}
         #: account -> zero-arg stats provider (latency/uptime, set by the
@@ -729,10 +729,26 @@ class SelfCommandHub:
     # --------------------------------------------------------- subscribe
     # ------------------------------------------------------------- reads
     def entries(self, account: str) -> list[RegisteredCommand]:
-        """Current registry entries (fresh recompute — never stale)."""
-        if account not in self._entries:
-            self.refresh(account)
-        return list(self._entries.get(account, ()))
+        """Current registry entries (fresh recompute — never stale).
+
+        The C4 retirement removed the hub's registration cache and its
+        ``refresh``; the bound manager's live view IS the registry:
+        the framework verb table plus the account's plugin-declared
+        specs (cog-declared plugins serve their own native help — their
+        verbs do not appear here).
+        """
+        framework = [
+            RegisteredCommand(spec=spec, plugin=FRAMEWORK_PLUGIN) for spec in FRAMEWORK_COMMANDS
+        ]
+        if self._manager is None:
+            return framework
+        return [
+            *framework,
+            *(
+                RegisteredCommand(spec=spec, plugin=plugin)
+                for spec, plugin in self._manager.command_entries(account)
+            ),
+        ]
 
     def specs(self, account: str) -> list[CommandSpec]:
         """Just the specs (help rendering / registration)."""
