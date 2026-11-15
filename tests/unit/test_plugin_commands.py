@@ -252,30 +252,6 @@ class RegistryCollectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(instance)
         manager.close()
 
-    async def test_framework_names_are_reserved(self) -> None:
-        # the collision check against framework verbs lives in the hub
-        self._write("alpha", f'CommandSpec("pg", "my pg", {_HANDLER})')
-        manager = self._manager()
-        await manager.attach_account("acct", {"alpha"})
-        hub = SelfCommandHub()
-        manager.command_hub = hub  # route this manager's syncs at the test hub
-        hub.bind(manager)
-        try:
-            names = [entry.spec.name for entry in hub.entries("acct")]
-            self.assertIn("pg", names)
-            spec = next(e.spec for e in hub.entries("acct")
-                        if e.spec.name == "pg")
-            self.assertEqual(spec.help, "Gateway latency and uptime")
-            self.assertEqual(
-                len([e for e in hub.entries("acct") if e.spec.name == "pg"]),
-                1, "the plugin's colliding declaration must be dropped")
-        finally:
-            hub.forget("acct")
-            hub.unbind(manager)
-            manager.close()
-
-
-# ----------------------------------------------------------- help rendering
 
 class ExecutorTests(unittest.IsolatedAsyncioTestCase):
     """PluginManager.execute_self_command over the REAL fixture plugin."""
@@ -340,38 +316,8 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.hub = SelfCommandHub()
         self.addCleanup(lambda: self.hub.unbind(None))
 
-    async def test_invoke_routes_to_bound_manager(self) -> None:
-        calls: list[tuple] = []
-
-        class FakeManager:
-            async def execute_self_command(self, *args, **kw):
+    async def execute_self_command(self, *args, **kw):
                 calls.append((args, kw))
-
-        self.hub.bind(FakeManager())
-        await self.hub.invoke("alpha", "pg", [], 42, invoker_id=1, raw="")
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][0][0], "alpha")
-
-    async def test_invoke_without_manager_is_silent(self) -> None:
-        await self.hub.invoke("alpha", "pg", [], 42)  # must not raise
-
-    async def test_invoke_contains_a_broken_executor(self) -> None:
-        class BrokenManager:
-            async def execute_self_command(self, *a, **k):
-                raise RuntimeError("planned")
-        self.hub.bind(BrokenManager())
-        await self.hub.invoke("alpha", "pg", [], 42)  # must not raise
-
-    async def test_runtime_stats_provider(self) -> None:
-        self.assertEqual(self.hub.runtime_stats("x"), {})
-        self.hub.subscribe("x", lambda specs: None,
-                           stats_provider=lambda: {"latency_ms": 5.0})
-        self.assertEqual(self.hub.runtime_stats("x"), {"latency_ms": 5.0})
-        self.hub.unsubscribe("x")
-        self.assertEqual(self.hub.runtime_stats("x"), {})
-
-
-# ---------------------------------------------------------- adapter layer
 
 class TestPrefixRateCommand(unittest.IsolatedAsyncioTestCase):
     """prefixrate: show/set send pacing (per-account message interval).

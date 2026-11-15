@@ -611,7 +611,7 @@ class PluginManager:
         self._dispatch_started.pop(account, None)
         self._dispatch_dropped.pop(account, None)
         # the account's self-command surface is gone with it
-        self.command_hub.forget(account)
+        # C4: the cog host manages teardown; no hub forget
 
     async def activate_account(self, account: str, services: Any) -> None:
         """Resolve settings + fire on_load/on_enable for enabled plugins.
@@ -1306,11 +1306,12 @@ class PluginManager:
         return handler
 
     def _sync_commands(self, account: str) -> None:
-        """Re-publish the account's self-command surface (hub → client)."""
-        try:
-            self.command_hub.refresh(account)
-        except Exception:  # registry sync must never fail an attach/toggle
-            self._logger.exception("self-command sync failed for %s", account)
+        """Re-publish the account's self-command surface.
+
+        C4: the cog host manages registration (add_cog/remove_cog);
+        this method is a deliberate no-op kept for the callers that
+        still reference it — retire when the last caller drops."""
+        return
 
     # ------------------------------------------------------------ execution
     async def execute_self_command(

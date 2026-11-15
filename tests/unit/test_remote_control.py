@@ -366,13 +366,3 @@ class PortedCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(reply), MAX_REPLY_CHARS)
         self.assertIn("… (truncated)", reply)
 
-    async def test_framework_names_are_reserved_for_the_verbs(self) -> None:
-        entries = {e.spec.name: e for e in COMMAND_HUB.entries("alpha")}
-        for verb in ("status", "accounts", "plugins", "ratelimit", "lane",
-                     "tasks", "estop", "simulation"):
-            self.assertIn(verb, entries)
-            self.assertEqual(entries[verb].plugin, "selfcmd")
-
-
-if __name__ == "__main__":
-    unittest.main()

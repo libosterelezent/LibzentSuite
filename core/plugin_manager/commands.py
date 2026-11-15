@@ -43,7 +43,6 @@ the last one (documented last-wins) — executor-level tests can call
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import logging
 from dataclasses import dataclass
@@ -727,92 +726,7 @@ class SelfCommandHub:
         return self._manager
 
     # ----------------------------------------------------------- publish
-    def refresh(self, account: str) -> None:
-        """Recompute one account's registry and notify its subscriber.
-
-        Called by the plugin manager from the SAME paths that re-attach
-        plugins (assignment mutations, enable toggles) — so the client's
-        Bot registrations always track the assigned ∧ enabled set.
-        """
-        entries = self._collect(account)
-        self._entries[account] = entries
-        subscriber = self._subscribers.get(account)
-        if subscriber is None:
-            return
-        try:
-            subscriber([entry.spec for entry in entries])
-        except Exception:
-            # a replaced/reconnecting client: contained, never fatal —
-            # the NEXT subscriber (fresh connect) pulls fresh state.
-            LOG.debug("self-command subscriber failed for %r", account, exc_info=True)
-
-    def forget(self, account: str) -> None:
-        """Drop every trace of an account (detached/removed cascade)."""
-        self._entries.pop(account, None)
-        self._subscribers.pop(account, None)
-        self._stats.pop(account, None)
-
-    def _collect(self, account: str) -> list[RegisteredCommand]:
-        """Framework commands first (reserved), then the manager's
-        plugin entries — first registration of a name wins."""
-        entries: list[RegisteredCommand] = []
-        for spec in FRAMEWORK_COMMANDS:
-            entries.append(RegisteredCommand(spec=spec, plugin=FRAMEWORK_PLUGIN))
-        manager = self._manager
-        if manager is None:
-            return entries
-        collector = getattr(manager, "command_entries", None)
-        if collector is None:
-            return entries
-        try:
-            plugin_entries = collector(account)
-        except Exception:
-            LOG.exception("self-command collection failed for %r", account)
-            return entries
-        for spec, plugin in plugin_entries:
-            if spec.name in _FRAMEWORK_NAMES:
-                LOG.warning(
-                    "self-command %r declared by plugin %r collides with a "
-                    "reserved framework name — the plugin's is dropped",
-                    spec.name,
-                    plugin,
-                )
-                continue
-            entries.append(RegisteredCommand(spec=spec, plugin=plugin))
-        return entries
-
     # --------------------------------------------------------- subscribe
-    def subscribe(
-        self,
-        account: str,
-        rebuild: Callable[[list[CommandSpec]], None],
-        stats_provider: Callable[[], dict[str, Any]] | None = None,
-    ) -> None:
-        """A live client subscribes: register the rebuild callback, then
-        REFRESH from the bound manager and deliver the result — a fresh
-        connect never serves entries a previous manager computed (test
-        boots reuse account names; production restarts are new processes)."""
-        self._subscribers[account] = rebuild
-        if stats_provider is not None:
-            self._stats[account] = stats_provider
-        self.refresh(account)
-
-    def unsubscribe(
-        self,
-        account: str,
-        rebuild: Callable[[list[CommandSpec]], None] | None = None,
-    ) -> None:
-        """The client disconnected/stopped: drop its callback and stats
-        provider (a reconnect re-subscribes both).
-
-        ``rebuild`` makes the drop OWNERSHIP-aware: a stale client's late
-        disconnect must not remove the subscription a newer client
-        already installed under the same account name."""
-        if rebuild is not None and self._subscribers.get(account) != rebuild:
-            return
-        self._subscribers.pop(account, None)
-        self._stats.pop(account, None)
-
     # ------------------------------------------------------------- reads
     def entries(self, account: str) -> list[RegisteredCommand]:
         """Current registry entries (fresh recompute — never stale)."""
@@ -836,58 +750,14 @@ class SelfCommandHub:
             return {}
 
     # ---------------------------------------------------------- invoke
-    async def invoke(
-        self,
-        account: str,
-        name: str,
-        args: list[str],
-        channel_id: int,
-        *,
-        guild_id: int | None = None,
-        invoker_id: int | None = None,
-        raw: str = "",
-    ) -> None:
-        """Route one invocation to the bound manager (fully contained).
 
-        The manager's executor builds the CommandContext, runs the
-        handler with plugin-grade isolation and sends the reply through
-        the paced pipeline. Unknown commands and an unbound manager are
-        dropped quietly (the Bot layer never dispatches unknown names
-        anyway — CommandNotFound).
-        """
-        manager = self._manager
-        if manager is None:
-            LOG.debug("self-command %r dropped: no manager bound", name)
-            return
-        execute = getattr(manager, "execute_self_command", None)
-        if execute is None:
-            return
-        try:
-            await execute(
-                account, name, args, channel_id, guild_id=guild_id, invoker_id=invoker_id, raw=raw
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # the executor is responsible for its own containment; this
-            # guard exists so a BROKEN executor can never kill the Bot's
-            # command dispatch task
-            LOG.exception("self-command execution failed: %s!%s", account, name)
+
+#: process-wide hub (the ONE instance; bootstrap and tests share it)
+COMMAND_HUB = SelfCommandHub()
 
 
 __all__ = [
     "COMMAND_HUB",
-    "FRAMEWORK_CATEGORY",
     "FRAMEWORK_COMMANDS",
-    "FRAMEWORK_PLUGIN",
-    "MAX_REPLY_CHARS",
-    "NO_CATEGORY",
-    "SETTINGS_CATEGORY",
-    "UTILITIES_CATEGORY",
-    "RegisteredCommand",
     "SelfCommandHub",
 ]
-
-
-#: the process-wide hub (one framework per process; managers bind to it)
-COMMAND_HUB = SelfCommandHub()

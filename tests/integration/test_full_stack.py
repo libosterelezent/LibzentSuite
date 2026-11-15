@@ -322,29 +322,6 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
         finally:
             await stack.stop()
 
-    async def test_remote_control_end_to_end(self) -> None:
-        """The retired RemoteControl mention bridge's verbs now ride the
-        self-command hub: the production bootstrap registers the
-        api_provider bridge, so a hub invocation runs the ported
-        Framework command against the ONE ControlAPI and replies through
-        the paced pipeline into the channel (the adapter's mention→Bot
-        parse is covered in tests/unit/test_plugin_commands.py)."""
-        from core.plugin_manager.commands import COMMAND_HUB
-
-        stack = await Stack().boot()
-        api = stack.framework.api
-        await api.accounts_add({"name": "alpha"})
-        await stack.framework.accounts.start("alpha")
-        try:
-            await COMMAND_HUB.invoke("alpha", "lane", [], GUILD_CHANNEL,
-                                     invoker_id=OWNER_ID)
-            await stack.world.wait_for_quiet(GUILD_CHANNEL, quiet=1.2, limit=20.0)
-            replies = [m for m in stack.world.messages_of(GUILD_CHANNEL)
-                       if "send lane" in m]
-            self.assertTrue(replies, "expected a framework-command reply in-channel")
-        finally:
-            await stack.stop()
-
 
 class TestEmergencyStopResume(unittest.IsolatedAsyncioTestCase):
     """REGRESSION: the global estop message says 'restart manually' — the
