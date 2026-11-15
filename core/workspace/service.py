@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from database.models import PresetTemplateRecord, WorkspaceState
+    from database.repositories.workspaces import WorkspaceRepository
 
 __all__ = ["WorkspaceService"]
 
@@ -111,7 +112,7 @@ class WorkspaceService:
 
     def __init__(
         self,
-        workspaces_repo: Any,
+        workspaces_repo: WorkspaceRepository,
         *,
         accounts: AccountsPointer | None = None,
         channels_repo: Any = None,
@@ -493,7 +494,7 @@ class WorkspaceService:
         *,
         error: str | None = None,
         retry_allowed: bool = False,
-    ) -> Any:
+    ) -> dict[str, Any]:
         """The shared terminal/transition path: validate -> persist ->
         record. FAILED -> QUEUED needs the explicit retry allowance."""
         async with self._lock:
@@ -544,7 +545,7 @@ class WorkspaceService:
         found: WorkspaceState = state
         return found
 
-    async def _read_back(self, task_row_id: str) -> Any:
+    async def _read_back(self, task_row_id: str) -> dict[str, Any]:
         """Re-read after write — a vanished row is an integrity
         failure to surface, never a None to smuggle (W1 discipline)."""
         task = await self._repo.task(task_row_id)
