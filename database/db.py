@@ -48,7 +48,7 @@ from .schema import MIGRATIONS, latest_version
 LOG = logging.getLogger("libzent.database")
 
 
-def _split_statements(script: str):
+def _split_statements(script: str) -> Iterator[str]:
     """Split a SQL script on complete statements (the sqlite3
     `complete_statement` rule) — executescript would COMMIT the
     surrounding transaction, and the migration pass now owns it."""
@@ -70,6 +70,7 @@ def _split_statements(script: str):
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 

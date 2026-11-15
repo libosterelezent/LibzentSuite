@@ -18,7 +18,7 @@ from typing import Any
 
 from core.errors import DatabaseError
 
-from .base import BaseRepository
+from .base import BaseRepository, inserted_rowid
 
 __all__ = ["TaskHistoryRepository"]
 
@@ -85,7 +85,7 @@ class TaskHistoryRepository(BaseRepository):
                     f"INSERT INTO task_history ({columns}) VALUES ({placeholders})",  # nosec B608
                     tuple(row.values()),
                 ) as cur:
-                    lastrowid = int(cur.lastrowid)
+                    lastrowid = inserted_rowid(cur)
             except sqlite3.IntegrityError as exc:
                 raise DatabaseError(
                     f"task history row for id {row.get('id')!r} already exists"

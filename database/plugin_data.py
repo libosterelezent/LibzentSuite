@@ -39,6 +39,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import aiosqlite
+
 from core.errors import PluginError
 
 if TYPE_CHECKING:
@@ -79,15 +81,13 @@ class PluginDataStore:
 
     def __init__(self, path: str | Path = "state/plugin-data.db") -> None:
         self._path = str(path)
-        self._conn: Any = None
+        self._conn: aiosqlite.Connection | None = None
 
     # ------------------------------------------------------------- boot
 
     async def connect(self) -> None:
         """Open the connection, apply pragmas, self-initialize the
         schema. Idempotent."""
-        import aiosqlite
-
         if self._conn is not None:
             return
         if self._path != ":memory:":
@@ -115,7 +115,7 @@ class PluginDataStore:
 
     # ------------------------------------------------------------ helpers
 
-    def _require_conn(self) -> Any:
+    def _require_conn(self) -> aiosqlite.Connection:
         if self._conn is None:
             raise PluginError("plugin-data store is not connected")
         return self._conn

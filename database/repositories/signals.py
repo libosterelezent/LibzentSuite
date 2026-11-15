@@ -12,15 +12,19 @@ from __future__ import annotations
 
 import json
 import time
+from typing import TYPE_CHECKING
 
 from core.workspace.models import SignalIdentity
 
 from .base import BaseRepository
 
+if TYPE_CHECKING:
+    import aiosqlite
+
 __all__ = ["SignalsRepository"]
 
 
-def _identity(row) -> SignalIdentity:
+def _identity(row: aiosqlite.Row) -> SignalIdentity:
     payload = row["payload_json"]
     if isinstance(payload, str):
         try:

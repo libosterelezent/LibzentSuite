@@ -15,7 +15,7 @@ from typing import Any
 
 from database.models import PresetTemplateRecord
 
-from .base import BaseRepository
+from .base import BaseRepository, inserted_rowid
 
 __all__ = ["PresetsRepository"]
 
@@ -86,7 +86,7 @@ class PresetsRepository(BaseRepository):
                     now,
                 ),
             )
-            row_id = int(cur.lastrowid)
+            row_id = inserted_rowid(cur)
             # the identity is the row id of its first version
             await conn.execute("UPDATE presets SET preset_id = ? WHERE id = ?", (row_id, row_id))
         record = await self.get(row_id)

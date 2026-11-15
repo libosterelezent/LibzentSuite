@@ -76,7 +76,7 @@ class CooldownRepository(BaseRepository):
         """Non-expired cooldowns for an account (optionally one plugin)."""
         now = time.time() if now is None else now
         sql = "SELECT * FROM cooldowns WHERE account=? AND expires_at>? ORDER BY expires_at"
-        params: list = [account, now]
+        params: list[str | float] = [account, now]
         if plugin is not None:
             sql = sql.replace("ORDER BY", "AND plugin=? ORDER BY")
             params.append(plugin)

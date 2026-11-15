@@ -15,7 +15,7 @@ outside that path may mutate them.
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from database.models import (
     DeletionJobRecord,
@@ -26,7 +26,12 @@ from database.models import (
     WorkspaceTransitionRecord,
 )
 
-from .base import BaseRepository
+from .base import BaseRepository, inserted_rowid
+
+if TYPE_CHECKING:
+    # the domain model shares the insert shape by design (the chain
+    # fields duck-type through getattr until W4's runs exist)
+    from core.workspace.models import WorkspaceTask
 
 __all__ = ["WorkspaceRepository"]
 
@@ -276,7 +281,7 @@ class WorkspaceRepository(BaseRepository):
             await conn.execute("DELETE FROM workspace_members WHERE account = ?", (account,))
 
     # -------------------------------------------------------------- tasks
-    async def insert_task(self, record: WorkspaceTaskRecord) -> None:
+    async def insert_task(self, record: WorkspaceTaskRecord | WorkspaceTask) -> None:
         async with self._tx(f"insert workspace task {record.id!r}") as conn:
             await conn.execute(
                 "INSERT INTO workspace_tasks (id, workspace, task_id, account,"
@@ -382,7 +387,7 @@ class WorkspaceRepository(BaseRepository):
                 " VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
                 (scope_type, scope_id, reason, started_at, expires_at, source, now, now),
             )
-            return int(cur.lastrowid)
+            return inserted_rowid(cur)
 
     async def cooldown(self, cooldown_id: int) -> WorkspaceCooldownRecord | None:
         row = await self._fetch_one(
@@ -521,7 +526,7 @@ class WorkspaceRepository(BaseRepository):
                 " VALUES (?, ?, ?, 1, 1, ?, ?, ?)",
                 (workspace, name, schema_version, definition_json, now, now),
             )
-            return int(cur.lastrowid)
+            return inserted_rowid(cur)
 
     async def chain(self, chain_id: int) -> dict[str, Any] | None:
         row = await self._fetch_one("SELECT * FROM workspace_chains WHERE id = ?", (chain_id,))
@@ -618,7 +623,7 @@ class WorkspaceRepository(BaseRepository):
                 " VALUES (?, ?, 1, ?, '', '', ?)",
                 (run_id, position, target, time.time()),
             )
-            return int(cur.lastrowid)
+            return inserted_rowid(cur)
 
     async def step_executions(self, run_id: str) -> list[dict[str, Any]]:
         rows = await self._fetch_all(

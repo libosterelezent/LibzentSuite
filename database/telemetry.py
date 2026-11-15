@@ -60,9 +60,9 @@ class DbTelemetry:
         self._lock = threading.Lock()
         self._counts: dict[str, int] = dict.fromkeys(_KINDS, 0)
         self._errors = dict.fromkeys(_KINDS, 0)
-        self._hists: dict[str, list] = {k: [0] * len(_BUCKETS_MS) for k in _KINDS}
+        self._hists: dict[str, list[int]] = {k: [0] * len(_BUCKETS_MS) for k in _KINDS}
         self._max_s: dict[str, float] = dict.fromkeys(_KINDS, 0.0)
-        self._ring: deque = deque(maxlen=_RING)
+        self._ring: deque[tuple[str, float, bool]] = deque(maxlen=_RING)
         self._worker_tid: int | None = None
 
     # ------------------------------------------------------------- control

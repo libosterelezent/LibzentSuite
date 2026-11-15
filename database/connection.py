@@ -98,7 +98,7 @@ class _TaskGuard:
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
-        self._owner: asyncio.Task | None = None
+        self._owner: asyncio.Task[None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
     def _check_loop(self) -> None:
@@ -215,11 +215,18 @@ class DatabaseConnection:
         non-daemon worker would hang interpreter shutdown.
         """
         self._guard._check_loop()
-        if self._conn is not None:
+        # both checks read through the `connected` property on purpose: a
+        # direct `self._conn is not None` check narrows the attribute for
+        # mypy across the await, hiding that the lock winner may have
+        # connected while this task waited (double-checked locking).
+        if self.connected:
             return
         async with self._connect_lock:
-            if self._conn is not None:
-                return
+            if self.connected:
+                # reachable only when another task's connect() won the
+                # lock while this one waited; mypy's attribute narrowing
+                # cannot see cross-task mutation, hence the local ignore
+                return  # type: ignore[unreachable]
             if self._path != ":memory:":
                 Path(self._path).parent.mkdir(parents=True, exist_ok=True)
                 _touch_private(Path(self._path))
