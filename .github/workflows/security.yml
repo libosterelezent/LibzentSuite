@@ -1,0 +1,72 @@
+name: security
+
+# The free-tier security surface (owner decision 2026-11-15):
+# secret scanning (gitleaks, full history), dependency audit (pip-audit
+# against the exact uv lock), static analysis (bandit, medium+).
+# CodeQL waits for GHAS / public-visibility unlock.
+on:
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1" # weekly, Monday 04:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: Gitleaks (full history)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4.4.0
+        with:
+          fetch-depth: 0 # full history — secrets anywhere count
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-audit:
+    name: pip-audit (exact lock)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4.4.0
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        run: python -m pip install uv==0.13.5
+      - name: Sync exact lock (fails on pyproject/lock drift)
+        env:
+          UV_PYTHON_PREFERENCE: only-system
+        run: uv sync --locked
+      - name: pip-audit the locked environment
+        # discord-py-self (the git fork) is not on PyPI and is reported
+        # as skipped — auditing it is inherently out of pip-audit's reach.
+        run: uv run --frozen pip-audit --skip-editable
+
+  static-security:
+    name: Bandit (production tree, medium+)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4.4.0
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        run: python -m pip install uv==0.13.5
+      - name: Sync exact lock
+        env:
+          UV_PYTHON_PREFERENCE: only-system
+        run: uv sync --locked
+      # B104 (0.0.0.0 bind) is flagged for the local-only FastAPI bind
+      # default; the deploy surface binds explicitly. Revisit if the API
+      # gains a public deployment mode.
+      - name: Bandit
+        run: >
+          uv run --frozen bandit -q -r
+          main.py core adapters interfaces database benchmark scripts parsers plugins
+          -ll --skip B104
