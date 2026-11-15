@@ -117,13 +117,13 @@ def build_app(api: ControlAPI, *, token: str | None = None) -> FastAPI:
         return await api.workspaces_resume(name, surface="api")
 
     @app.get("/api/workspaces/{name}/tasks", dependencies=[Depends(_auth)])
-    async def workspaces_tasks(name: str, status: str | None = None) -> list[dict]:
+    async def workspaces_tasks(name: str, status: str | None = None) -> list[dict[str, Any]]:
         return await api.workspaces_tasks(workspace=name, status=status)
 
     # ------------------------------------------------------------ plugins
     @app.get("/api/plugins", dependencies=[Depends(_auth)])
     async def plugins_list() -> list[dict[str, Any]]:
-        return await api.plugins_list()
+        return await api.plugins_manifests()
 
     @app.get("/api/accounts/{name}/plugins", dependencies=[Depends(_auth)])
     async def account_plugins(name: str) -> list[str]:
@@ -150,11 +150,11 @@ def build_app(api: ControlAPI, *, token: str | None = None) -> FastAPI:
 
     # -------------------------------------------------------------- logs
     @app.get("/api/logs", dependencies=[Depends(_auth)])
-    async def logs_tail(limit: int = 50, account: str | None = None) -> list[dict]:
+    async def logs_tail(limit: int = 50, account: str | None = None) -> list[dict[str, Any]]:
         return await api.logs_tail(limit, account=account)
 
     @app.get("/api/audit", dependencies=[Depends(_auth)])
-    async def audit_tail(limit: int = 50, account: str | None = None) -> list[dict]:
+    async def audit_tail(limit: int = 50, account: str | None = None) -> list[dict[str, Any]]:
         return await api.audit_tail(limit, account=account)
 
     # -------------------------------------------------------- websocket

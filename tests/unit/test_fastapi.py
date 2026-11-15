@@ -62,7 +62,7 @@ def _stub_api() -> NS:
     async def _workspaces_tasks(workspace=None, status=None):
         return [{"id": "t1", "workspace": workspace}]
 
-    async def _plugins_list():
+    async def _plugins_manifests():
         return [{"name": "probe"}]
 
     async def _accounts_plugins_list(name):
@@ -110,7 +110,7 @@ def _stub_api() -> NS:
         workspaces_pause=_workspaces_pause,
         workspaces_resume=_workspaces_resume,
         workspaces_tasks=_workspaces_tasks,
-        plugins_list=_plugins_list,
+        plugins_manifests=_plugins_manifests,
         accounts_plugins_list=_accounts_plugins_list,
         accounts_plugin_assign=_accounts_plugin_assign,
         accounts_plugin_unassign=_accounts_plugin_unassign,
