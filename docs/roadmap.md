@@ -1,10 +1,11 @@
 # LibzentSuite — Roadmap
 
-Planning and study documents live in `plans/` at the repo root — `docs/`
-stays strictly user-facing functionality and command reference
-(AGENTS.md §5). Binding contracts: `ARCHITECTURE.md`, `INTEGRATION.md`.
-Completed items migrate to `docs/` and `knowledgebase/` as historical
-records (AGENTS.md rule 8).
+The active queue and the historical record of what shipped. Design
+decisions live alongside in `docs/design/`; binding contracts in
+`docs/architecture/architecture.md` + `integration.md`; deep study
+documents in `plans/` at the repo root. Completed items keep their
+summaries here and their full detail in `knowledgebase/` (AGENTS.md
+rule 8).
 
 ---
 
@@ -171,9 +172,9 @@ per-account plugin profile pages.
     freshness probe (uv lock --upgrade → tracking issue).
 [x] Build pipeline (2026-11-15): per-push build gate in tests.yml
     (sdist + wheel); build.yml — the v*-tag release pipeline (build from
-    the exact tag, artifacts attached to the GitHub release; dispatch
-    rehearses build-only). protect-release-tags grants the owner the
-    sole bypass so releases are cut deliberately.
+    the exact tag, CHANGELOG notes attached). DELIBERATELY UNARMED: the
+    tag ruleset carries no bypass, so no release can ship until the
+    owner lifts the hold — structure ready, publishing deferred.
 [ ] Gated on the public flip (owner-approved): repo rulesets (master:
     PR + required `unittest` check, no force push/delete; `v*` tags
     protected), GitHub native secret scanning + push protection,

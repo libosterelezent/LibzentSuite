@@ -1,10 +1,16 @@
 name: build
 
 # The release pipeline: a pushed v* tag builds the sdist + wheel from
-# the exact tag and attaches them to a GitHub release. Per-push build
-# gating lives in tests.yml (the build job); this workflow is the
-# publish path. Note: v* tag pushes require the owner's ruleset bypass
-# (protect-release-tags) — by design, releases are cut deliberately.
+# the exact tag and attaches them to a GitHub release (notes pulled
+# from the matching CHANGELOG.md section). Per-push build gating lives
+# in tests.yml (the build job); this workflow is the publish path.
+#
+# DELIBERATELY UNARMED (owner decision 2026-11-15): the repository is
+# not release-ready, so the protect-release-tags ruleset carries NO
+# bypass actor — nobody (owner included) can push a v* tag and this
+# workflow cannot fire. The structure is pre-ready: when the repo is
+# ready to release, re-add the owner bypass to the ruleset and the
+# pipeline works unchanged.
 on:
   push:
     tags: ["v*"]
@@ -37,7 +43,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/* \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-          || gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          # release notes = this tag's CHANGELOG section; GitHub's
+          # generated notes are the fallback when the section is absent
+          awk -v tag="${GITHUB_REF_NAME#/v}" '
+            BEGIN { p = 0 }
+            /^## \[/ { p = ($0 ~ "\\[" tag "\\]") }
+            p { print }
+          ' CHANGELOG.md > /tmp/notes.md
+          if [ ! -s /tmp/notes.md ]; then
+            echo "(no CHANGELOG section for ${GITHUB_REF_NAME} — generated notes)" > /tmp/notes.md
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --notes-file /tmp/notes.md \
+              || gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --title "${GITHUB_REF_NAME}" \
+              --notes-file /tmp/notes.md \
+              || gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          fi
