@@ -169,6 +169,11 @@ per-account plugin profile pages.
     health sweep — full gate on a fresh runner (workflow_call reuse),
     packaging sanity (uv build + action-pin validation), dependency
     freshness probe (uv lock --upgrade → tracking issue).
+[x] Build pipeline (2026-11-15): per-push build gate in tests.yml
+    (sdist + wheel); build.yml — the v*-tag release pipeline (build from
+    the exact tag, artifacts attached to the GitHub release; dispatch
+    rehearses build-only). protect-release-tags grants the owner the
+    sole bypass so releases are cut deliberately.
 [ ] Gated on the public flip (owner-approved): repo rulesets (master:
     PR + required `unittest` check, no force push/delete; `v*` tags
     protected), GitHub native secret scanning + push protection,
