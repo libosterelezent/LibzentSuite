@@ -1,0 +1,27 @@
+# Local fast gate — mirrors CI (ruff lint + format) and blocks secrets
+# before they ever reach history. The heavy checks (mypy ratchet, the
+# unittest suite, pip-audit, bandit) stay in CI; pre-commit stays
+# seconds-fast. Revs are commit-SHA-pinned with their tags noted;
+# refresh with `pre-commit autoupdate` then re-pin.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: f368fb366ff7f2f808dd324b83a6d32267799e19 # v0.17.2 (matches the locked ruff)
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e # v8.30.1
+    hooks:
+      - id: gitleaks
