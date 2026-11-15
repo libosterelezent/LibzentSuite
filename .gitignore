@@ -35,6 +35,7 @@ opencode.json
 opencode.jsonc
 .opencode/
 
+
 # --- local-only archives ---
 # the retirement wing and the knowledgebase live on the machine that
 # built them; a fresh clone gets the repo, the docs, and dump/'s README
