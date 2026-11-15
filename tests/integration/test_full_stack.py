@@ -8,17 +8,16 @@ audit, logging) is the real production code.
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from adapters.simulator.client import SimClient
 from adapters.simulator.world import SimWorld
 from core.bootstrap import build
 from core.credentials import Credentials
-from core.event_bus import MessageReceived
 from database.db import Database
 
 OWNER_ID = 1001
@@ -29,13 +28,13 @@ GUILD_CHANNEL = 500
 REPO_ROOT = Path(__file__).resolve().parents[2]
 #: framework fixture plugins (probe/spy/echo) — the framework bundles none
 FIXTURE_PLUGINS = REPO_ROOT / "tests" / "fixtures" / "plugins"
-#: the full-stack WORKLOAD fixture (a soulcopy-like paced flow) driving
+#: the full-stack WORKLOAD fixture (a exporter-like paced flow) driving
 #: the pacing/estop e2e scenarios below
 SIM_PLUGINS = REPO_ROOT / "tests" / "fixtures" / "sim_plugins"
 PROBE = "probe"
 
 FAST_SETTINGS = {
-    "soulcopy": {
+    "exporter": {
         "inter_chunk_delay": 0.0,
         "dm_read_timeout": 0.6,
     }
@@ -65,7 +64,7 @@ class Stack:
                  plugin_dir: Path = FIXTURE_PLUGINS) -> None:
         self.world = SimWorld(
             responder_id=PRIMARY_BOT_ID,
-            responses={"$slud-s": [
+            responses={"$dump": [
                 "Soulmates\n---------\nAlice\nBob\nCharlie",
                 "Dana\nEve\nFinn",
             ]},
@@ -89,7 +88,7 @@ class Stack:
         self._extra = extra_accounts
         self._plugin_dir = plugin_dir
 
-    async def boot(self) -> "Stack":
+    async def boot(self) -> Stack:
         """``build()`` is async now (aiosqlite database layer)."""
         self.framework = await build(
             config_dir=str(self.config_dir),
@@ -142,12 +141,12 @@ class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
         stack = await Stack(plugin_dir=SIM_PLUGINS).boot()
         await stack.start()
         try:
-            await stack.owner_says("slcopy")
+            await stack.owner_says("export")
             await stack.world.wait_for_quiet(GUILD_CHANNEL, quiet=2.2, limit=30.0)
             history = stack.world.messages_of(GUILD_CHANNEL)
             # export request + one chunk (pages fit a single chunk)
-            self.assertIn("slcopy", history[0])
-            chunks = [m for m in history if m.startswith("$soulcopy ")]
+            self.assertIn("export", history[0])
+            chunks = [m for m in history if m.startswith("$exporter ")]
             self.assertEqual(len(chunks), 1)
             self.assertIn("Alice", chunks[0])
 
@@ -162,7 +161,7 @@ class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
             outs = [e for e in audit if e.get("direction") == "out"
                     and e.get("action") in ("message", "dm")]
             self.assertGreaterEqual(len(outs), 2)
-            self.assertTrue(all("plugin=soulcopy" in (e.get("note") or "")
+            self.assertTrue(all("plugin=exporter" in (e.get("note") or "")
                                 for e in outs))
             # task history persisted with statuses
             hist = await stack.framework.api.tasks_history(limit=10)
@@ -181,7 +180,7 @@ class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
         stack = await Stack(plugin_dir=SIM_PLUGINS).boot()
         await stack.start()
         try:
-            await stack.owner_says("slcopy")
+            await stack.owner_says("export")
             await stack.world.wait_for_quiet(GUILD_CHANNEL, quiet=2.2, limit=30.0)
             # config policy: 1.5s interval (+50ms jitter max) -> every gap
             # between the account's outbound messages >= 1.45. Measured on

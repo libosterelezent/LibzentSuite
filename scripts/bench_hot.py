@@ -229,7 +229,7 @@ def _big_stats_payload() -> dict:
             "cached_guilds": 12,
             "cached_channels": 340 + i,
             "cached_dms": 27,
-            "plugins": [{"name": "soulcopy", "enabled": True}, {"name": "roll", "enabled": False}],
+            "plugins": [{"name": "exporter", "enabled": True}, {"name": "roll", "enabled": False}],
             "profiles": ["collector"],
         }
         for i in range(100)
@@ -239,7 +239,7 @@ def _big_stats_payload() -> dict:
             "id": i,
             "name": f"task-{i}",
             "account": f"account-{i % 100:03d}",
-            "plugin": "soulcopy",
+            "plugin": "exporter",
             "action": "message",
             "status": "completed",
             "duration_s": 2.5,
@@ -267,7 +267,7 @@ def _big_stats_payload() -> dict:
             "severity": "INFO",
             "source": "scheduler",
             "account": f"account-{i % 100:03d}",
-            "plugin": "soulcopy",
+            "plugin": "exporter",
             "task_id": i,
             "event": "task.completed",
             "message": f"task {i} completed after pacing wait (chunk 1/3)",

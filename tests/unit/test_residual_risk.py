@@ -3,7 +3,6 @@ spikes, G6 dispatch cache equivalence, G7 artifact security, G8 chaos."""
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import stat
 import tempfile
@@ -12,9 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 from core.event_bus import Event, EventBus, MessageReceived
-from core.priority import Priority
 from core.task_scheduler import TaskScheduler
-
 from tests.unit.test_task_scheduler import (
     FakeAudit,
     FakeHistoryRepo,

@@ -1,7 +1,7 @@
 """plugin_scopes tests - positive channel-set scope."""
 import unittest
 
-from core.plugin_scopes import CHANNELS_KEY, channel_allowed, validate
+from core.plugin_scopes import channel_allowed, validate
 
 
 class ValidateTests(unittest.TestCase):

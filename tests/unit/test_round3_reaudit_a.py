@@ -11,12 +11,12 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from core.event_bus import EventBus
 from core.plugin_state import PluginStateService
-from core.rate_limit_manager.engine import RateLimitManager, ManualClock
-from core.settings_manager import SettingsManager, Setting
+from core.rate_limit_manager.engine import ManualClock, RateLimitManager
+from core.settings_manager import Setting, SettingsManager
 from core.task_scheduler.scheduler import TaskScheduler
 from database.db import Database
 
@@ -68,7 +68,7 @@ class _MiniKv:
     tolerant-decodes with raw-string fallback)."""
 
     def __init__(self) -> None:
-        self.rows: Dict[str, str] = {}
+        self.rows: dict[str, str] = {}
 
     async def set(self, key, value):
         import json
@@ -155,7 +155,7 @@ class PluginStateStringRoundTrip(unittest.IsolatedAsyncioTestCase):
 class LogsSeverityCase(unittest.IsolatedAsyncioTestCase):
     class _Api:
         def __init__(self) -> None:
-            self.calls: List[Dict[str, Any]] = []
+            self.calls: list[dict[str, Any]] = []
 
         async def logs_tail(self, limit, account=None, severity=None):
             self.calls.append(
@@ -210,8 +210,8 @@ class StopJoinerRace(unittest.IsolatedAsyncioTestCase):
 
     class _GateRepo:
         def __init__(self) -> None:
-            self.add_calls: List[dict] = []
-            self.gate: Optional[asyncio.Event] = None
+            self.add_calls: list[dict] = []
+            self.gate: asyncio.Event | None = None
 
         async def add(self, entry):
             if self.gate is not None:
@@ -258,7 +258,7 @@ class StopJoinerRace(unittest.IsolatedAsyncioTestCase):
         except asyncio.TimeoutError:
             joiner.cancel()
             raise AssertionError("joiner stop hung after failed owner stop")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise AssertionError(
                 f"joiner stop raised {type(exc).__name__}: {exc}") from exc
         self.assertTrue(scheduler._stopped)
@@ -318,9 +318,9 @@ class StopJoinerRace(unittest.IsolatedAsyncioTestCase):
         await _settle()
 
         loop = asyncio.get_running_loop()
-        unretrieved: List[Any] = []
+        unretrieved: list[Any] = []
 
-        def handler(l: Any, context: Dict[str, Any]) -> None:
+        def handler(l: Any, context: dict[str, Any]) -> None:
             if "exception" in context and "never retrieved" in str(
                     context.get("message", "")):
                 unretrieved.append(context["exception"])
@@ -407,26 +407,26 @@ class SettingsClearRoundTrip(unittest.IsolatedAsyncioTestCase):
             await db.connect()
             try:
                 bus = EventBus()
-                seen: List[Any] = []
+                seen: list[Any] = []
                 bus.subscribe(
                     __import__("core.event_bus", fromlist=["SettingChanged"])
                     .SettingChanged, seen.append)
                 mgr = SettingsManager(
                     bus, _LOG, plugin_repo=db.plugins,
-                    global_layer={"soulcopy": {"trigger": "global-trigger"}})
+                    global_layer={"exporter": {"trigger": "global-trigger"}})
                 await mgr.load()
                 await mgr.set_plugin_setting(
-                    "alpha", "soulcopy", "trigger", "acct", self.SCHEMA)
+                    "alpha", "exporter", "trigger", "acct", self.SCHEMA)
                 effective = await mgr.clear_plugin_setting(
-                    "alpha", "soulcopy", "trigger", self.SCHEMA)
+                    "alpha", "exporter", "trigger", self.SCHEMA)
                 self.assertEqual(effective, "global-trigger")
                 # fresh manager over the SAME db: the override row is gone
                 mgr2 = SettingsManager(
                     EventBus(), _LOG, plugin_repo=db.plugins,
-                    global_layer={"soulcopy": {"trigger": "global-trigger"}})
+                    global_layer={"exporter": {"trigger": "global-trigger"}})
                 await mgr2.load()
                 self.assertEqual(
-                    mgr2.resolve("soulcopy", self.SCHEMA, account="alpha")
+                    mgr2.resolve("exporter", self.SCHEMA, account="alpha")
                     ["trigger"], "global-trigger")
                 # exactly one SettingChanged for the clear, new_value global
                 cleared = [e for e in seen if e.old_value == "acct"]

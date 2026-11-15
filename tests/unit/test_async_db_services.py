@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-import time
 import unittest
 from pathlib import Path
 

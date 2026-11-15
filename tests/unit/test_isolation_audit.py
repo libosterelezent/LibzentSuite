@@ -19,7 +19,7 @@ Each test pins one minimal fix:
   K13 RealClientFactory builds per-account adapter loggers
   K14 settings/profile mirrors are evicted on account removal
   K15 rate-engine residue + account policies are pruned on removal
-  K16 (REMOVED with the soulcopy plugin) the in-flight trigger latch
+  K16 (REMOVED with the exporter plugin) the in-flight trigger latch
   K17 live adapter declares edit/delete/reaction callbacks (undeclared
       attrs are read inside library dispatch, which swallows the error
       and silently drops the events)
@@ -41,11 +41,9 @@ from core.event_bus import AccountConnected, AccountFailed, EventBus
 from core.logging_service import LogService, ServiceLogger
 from core.rate_limit_manager.engine import RateLimitManager
 from core.task_scheduler import TaskScheduler
-
 from tests.unit.helpers import make_manager, make_task
 from tests.unit.test_account_manager import _fast_reconnect_settings
 from tests.unit.test_rate_engine import StubLogger
-from tests.unit._fake_kv import FakeKv
 from tests.unit.test_task_scheduler import (
     FakeAudit,
     FakeHistoryRepo,
@@ -280,7 +278,7 @@ class RemoveFailedAccountTests(unittest.IsolatedAsyncioTestCase):
 class _FakeLibClient:
     """discord.Client stand-in exercising the adapter's connect() contract."""
 
-    last_built: "_FakeLibClient | None" = None
+    last_built: _FakeLibClient | None = None
 
     def __init__(self) -> None:
         self.closed = False
@@ -409,7 +407,7 @@ class EnginePruneTests(unittest.IsolatedAsyncioTestCase):
 
 
 # -------------------------------------------------------------------- K16
-# (REMOVED) SoulcopyInFlightLatchTests tested the soulcopy plugin's
+# (REMOVED) SoulcopyInFlightLatchTests tested the exporter plugin's
 # one-flow-at-a-time latch — plugin behavior that died with the plugin.
 # The framework's dispatch isolation (one crash never kills siblings)
 # stays covered by tests/unit/test_plugin_manager.py.
@@ -598,7 +596,7 @@ class OpenDmSingleFlightTests(unittest.IsolatedAsyncioTestCase):
             return await original(user_id)
 
         client.open_dm = slow_open
-        services = h.manager.services_for("alpha", "soulcopy")
+        services = h.manager.services_for("alpha", "exporter")
         resolved, _message = await asyncio.gather(
             services.open_dm(888),
             h.manager.send_hook(make_task(action="dm", user_id=888, content="hi")),

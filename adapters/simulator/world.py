@@ -11,7 +11,7 @@ The world owns:
   * per-channel history plus an append-only journal that survives channel
     deletion (scenario checks need post-mortem evidence),
   * a configurable scripted responder: an exact command string (e.g.
-    ``"$slud-s"``) triggers a list of pages delivered via DM to the
+    ``"$dump"``) triggers a list of pages delivered via DM to the
     requesting user, one page at a time with a configurable per-page delay,
   * ``wait_for_quiet`` with REAL quiet-window semantics (audit fix: return
     once `quiet` seconds of silence passed, `limit` is only a hard cap),

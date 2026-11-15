@@ -21,11 +21,11 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from core.bootstrap import build
-from core.priority import Priority
 from core.credentials import Credentials
+from core.priority import Priority
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REAL_PLUGINS = REPO_ROOT / "tests" / "fixtures" / "plugins"
@@ -50,12 +50,12 @@ class E2EServices:
     def __init__(self, account: str = "alpha") -> None:
         self.account = account
         self.plugin = "probe"
-        self.sent: List[tuple] = []
+        self.sent: list[tuple] = []
         self.channels = {
             CHANNEL_OK: ChannelInfo(CHANNEL_OK, GUILD),
         }
-        self.settings: Dict[str, Any] = {}
-        self._state: Dict[str, Any] = {}
+        self.settings: dict[str, Any] = {}
+        self._state: dict[str, Any] = {}
 
     @property
     def credentials(self) -> Credentials:
@@ -142,7 +142,7 @@ class RegistryWiringTests(CommandE2EBase):
 
         # assigned -> the declared verbs are collected (bound + categorized)
         names = {s.name for s in fw.plugins.commands_for("alpha")}
-        self.assertTrue(self.PROBE_VERBS <= names)
+        self.assertTrue(names >= self.PROBE_VERBS)
         # probe declares its category explicitly ("Probe")
         self.assertEqual(
             {s.category for s in fw.plugins.commands_for("alpha")}, {"Probe"})
@@ -188,9 +188,9 @@ class ExecutorOverRealDatabaseTests(CommandE2EBase):
         await self.fw.plugins.activate_account(
             "alpha", lambda plugin: self.services)
 
-    async def _run(self, name: str, args: List[str], *,
+    async def _run(self, name: str, args: list[str], *,
                    channel: int = CHANNEL_OK,
-                   invoker: Optional[int] = OWNER_ID) -> Optional[str]:
+                   invoker: int | None = OWNER_ID) -> str | None:
         self.services.sent.clear()
         await self.fw.plugins.execute_self_command(
             "alpha", name, args, channel, guild_id=GUILD, invoker_id=invoker)

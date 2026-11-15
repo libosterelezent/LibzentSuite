@@ -11,7 +11,7 @@ import unittest
 
 from core.errors import RatePolicyError, UnsafePolicyError
 from core.event_bus import EventBus
-from core.rate_limit_manager import MIN_ACTION_INTERVAL, RatePolicy, RateLimitManager
+from core.rate_limit_manager import MIN_ACTION_INTERVAL, RateLimitManager, RatePolicy
 from core.rate_limit_manager.policies import parse_scope, policy_from_row
 from database.models import RatePolicyRecord
 
@@ -193,14 +193,14 @@ class TestParseScope(unittest.TestCase):
 
     def test_account_and_plugin_owners_stripped(self):
         self.assertEqual(parse_scope("account", " alpha "), ("account", "alpha"))
-        self.assertEqual(parse_scope("plugin", " soulcopy "), ("plugin", "soulcopy"))
+        self.assertEqual(parse_scope("plugin", " exporter "), ("plugin", "exporter"))
 
     def test_account_plugin_owner_shape(self):
         self.assertEqual(
-            parse_scope("account_plugin", "alpha/soulcopy"),
-            ("account_plugin", "alpha/soulcopy"),
+            parse_scope("account_plugin", "alpha/exporter"),
+            ("account_plugin", "alpha/exporter"),
         )
-        for bad in ("alpha", "alpha/soul/extra", "/soulcopy", "alpha/", "a//b", "/"):
+        for bad in ("alpha", "alpha/soul/extra", "/exporter", "alpha/", "a//b", "/"):
             with self.assertRaises(RatePolicyError):
                 parse_scope("account_plugin", bad)
 
@@ -283,8 +283,8 @@ class TestSetPolicy(unittest.TestCase):
     def test_floor_applies_at_every_level(self):
         manager = make_manager()
         for level, owner in (
-            ("global", None), ("account", "alpha"), ("plugin", "soulcopy"),
-            ("account_plugin", "alpha/soulcopy"),
+            ("global", None), ("account", "alpha"), ("plugin", "exporter"),
+            ("account_plugin", "alpha/exporter"),
         ):
             with self.assertRaises(UnsafePolicyError):
                 manager.set_policy_values("msg", 0.03, level=level, owner=owner)
@@ -417,11 +417,11 @@ class TestEffectiveComposition(unittest.TestCase):
         self.manager = make_manager()
         self.manager.set_policy_values("poke", 2.0, 0.0, 1.0)                    # global
         self.manager.set_policy_values("poke", 3.0, 0.5, 0.5, level="account", owner="alpha")
-        self.manager.set_policy_values("poke", 2.5, 0.2, 0.9, level="plugin", owner="soulcopy")
-        self.manager.set_policy_values("poke", 4.0, 0.1, 0.4, level="account_plugin", owner="alpha/soulcopy")
+        self.manager.set_policy_values("poke", 2.5, 0.2, 0.9, level="plugin", owner="exporter")
+        self.manager.set_policy_values("poke", 4.0, 0.1, 0.4, level="account_plugin", owner="alpha/exporter")
 
     def test_all_four_levels_compose_to_max(self):
-        eff = self.manager.effective("poke", account="alpha", plugin="soulcopy")
+        eff = self.manager.effective("poke", account="alpha", plugin="exporter")
         self.assertEqual(eff["interval"], 4.0)
         self.assertEqual(eff["jitter"], [0.5, 1.0])  # max of mins, max of maxes
         self.assertEqual([s["level"] for s in eff["sources"]],
@@ -434,10 +434,10 @@ class TestEffectiveComposition(unittest.TestCase):
         eff = self.manager.effective("poke", account="alpha", plugin="roll")
         self.assertEqual(eff["interval"], 3.0)
         self.assertEqual(len(eff["sources"]), 2)
-        # another account + soulcopy: global + plugin
+        # another account + exporter: global + plugin
         # (on "poke": no learned default — stored values compose alone)
         self.assertEqual(
-            self.manager.effective("poke", account="beta", plugin="soulcopy")["interval"], 2.5
+            self.manager.effective("poke", account="beta", plugin="exporter")["interval"], 2.5
         )
         # bare action: global only
         self.assertEqual(self.manager.effective("poke")["interval"], 2.0)
@@ -454,7 +454,7 @@ class TestEffectiveComposition(unittest.TestCase):
         # unconfigured action paces at the unstudied default, clamped
         # up to the 1.5 s floor
         fresh = make_manager()
-        eff = fresh.effective("other", account="alpha", plugin="soulcopy")
+        eff = fresh.effective("other", account="alpha", plugin="exporter")
         self.assertEqual(eff["interval"], 1.5)
         self.assertEqual(eff["sources"], [])
 

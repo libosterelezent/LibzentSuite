@@ -7,8 +7,8 @@ discovered by production boots — only stacks pointed at this fixture
 directory load it.
 
 Flow (behavior ported from the audited original onto the task pipeline):
-  1. an OWNER sends the trigger word (default 'slcopy') in any channel,
-  2. the plugin requests the export by sending '$slud-s' in the TRIGGER
+  1. an OWNER sends the trigger word (default 'export') in any channel,
+  2. the plugin requests the export by sending '$dump' in the TRIGGER
      CHANNEL and collects the the_bot DM replies until dm_read_timeout passes
      with no new page,
   3. pages are collapsed + chunked (see textutils) and sent back to the
@@ -32,6 +32,7 @@ Flow safety (unchanged contract):
   keep running either way: per-account isolation is the dispatcher's job,
   failing clean and quiet is the plugin's.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -42,15 +43,13 @@ from core.plugin_base import PluginBase, PluginContext
 from core.priority import Priority
 from core.settings_manager import Setting
 
-from .textutils import DEFAULT_PREFIX, build_soulcopy_chunks
+from .textutils import DEFAULT_PREFIX, build_exporter_chunks
 
 
+class ExporterPlugin(PluginBase):
+    """Export primary bot's soulmate list as chunks ready for '$exporter' import."""
 
-
-class SoulcopyPlugin(PluginBase):
-    """Export primary bot's soulmate list as chunks ready for '$soulcopy' import."""
-
-    name = "soulcopy"
+    name = "exporter"
     version = "2.0.0"
     description = "Export your the_bot soulmate list and re-import it elsewhere."
 
@@ -60,20 +59,38 @@ class SoulcopyPlugin(PluginBase):
         self._in_flight = False
 
     settings = (
-        Setting("trigger", "str", "slcopy", "Command word that starts the copy (owners only)."),
-        Setting("dm_read_timeout", "float", 10.0, "Idle seconds before DM reading stops.",
-                min_value=0.5, max_value=120.0),
-        Setting("inter_chunk_delay", "float", 10.0, "Seconds between sending chunks.",
-                min_value=0.0, max_value=120.0),
-        Setting("max_chunk_length", "int", 2000, "Hard Discord message limit.",
-                min_value=50, max_value=2000),
-        Setting("export_command", "str", "$slud-s", "the_bot command that DMs the soulmate list."),
+        Setting("trigger", "str", "export", "Command word that starts the copy (owners only)."),
+        Setting(
+            "dm_read_timeout",
+            "float",
+            10.0,
+            "Idle seconds before DM reading stops.",
+            min_value=0.5,
+            max_value=120.0,
+        ),
+        Setting(
+            "inter_chunk_delay",
+            "float",
+            10.0,
+            "Seconds between sending chunks.",
+            min_value=0.0,
+            max_value=120.0,
+        ),
+        Setting(
+            "max_chunk_length",
+            "int",
+            2000,
+            "Hard Discord message limit.",
+            min_value=50,
+            max_value=2000,
+        ),
+        Setting("export_command", "str", "$dump", "the_bot command that DMs the soulmate list."),
         Setting("import_prefix", "str", DEFAULT_PREFIX, "Prefix used for the produced chunks."),
     )
 
     # -------------------------------------------------------------- lifecycle
     async def on_load(self, ctx: PluginContext) -> None:
-        ctx.logger.info("soulcopy loaded (trigger=%r)", ctx.settings["trigger"])
+        ctx.logger.info("exporter loaded (trigger=%r)", ctx.settings["trigger"])
 
     async def handle_event(self, ctx: PluginContext, event: Event) -> None:
         """React to the trigger message; ignore everything else fast."""
@@ -84,14 +101,15 @@ class SoulcopyPlugin(PluginBase):
         if event.author_id not in ctx.services.credentials.owner_user_ids:
             ctx.logger.warning(
                 "ignoring trigger from non-owner %s on account %s (if this is you, "
-                "add the id to OWNER_USER_IDS in .env)", event.author_id, ctx.account,
+                "add the id to OWNER_USER_IDS in .env)",
+                event.author_id,
+                ctx.account,
             )
             return
         if self._in_flight:
             # K16: overlapping flows cross-collect each other's pages (each
             # subscription matches BOTH exports) — drop the re-trigger
-            ctx.logger.info(
-                "copy flow already running on %s — trigger ignored", ctx.account)
+            ctx.logger.info("copy flow already running on %s — trigger ignored", ctx.account)
             return
         self._in_flight = True
         try:
@@ -130,9 +148,7 @@ class SoulcopyPlugin(PluginBase):
         # ask primary bot for the list (in the trigger channel), reading the DM
         # replies as they arrive — same gather structure as the original
         ctx.logger.info("requesting soulmate export from the_bot")
-        collect = asyncio.ensure_future(
-            self._collect_pages(ctx, bot_id, dm_channel)
-        )
+        collect = asyncio.ensure_future(self._collect_pages(ctx, bot_id, dm_channel))
         try:
             pages, _ = await asyncio.gather(collect, _request_export())
         except BaseException:
@@ -147,7 +163,7 @@ class SoulcopyPlugin(PluginBase):
             raise
         ctx.logger.info("collected %d soulmate page(s)", len(pages))
 
-        chunks = build_soulcopy_chunks(
+        chunks = build_exporter_chunks(
             [p.content for p in pages],
             max_chunk_length=ctx.settings["max_chunk_length"],
             prefix=ctx.settings["import_prefix"],
@@ -167,4 +183,4 @@ class SoulcopyPlugin(PluginBase):
         )
 
 
-__all__ = ["SoulcopyPlugin", "flow_block_reason"]
+__all__ = ["ExporterPlugin", "flow_block_reason"]

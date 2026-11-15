@@ -23,7 +23,6 @@ from core.errors import RatePolicyError
 from core.event_bus import EventBus
 from core.rate_limit_manager import RateLimitManager
 from core.rate_limit_manager.engine import DEFAULT_JITTER
-
 from tests.unit.test_rate_engine import (
     ACTION,
     GatedSleepManager,

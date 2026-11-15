@@ -8,8 +8,6 @@ plugins reach the store ONLY through the (account, plugin) facade.
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -100,9 +98,8 @@ class PluginDataStoreTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_snowflake_ids_must_be_digit_strings(self):
         for bad in (123, "abc", "12 3", None, "", "channel-general"):
-            with self.subTest(bad=bad):
-                with self.assertRaises(PluginError):
-                    await self.store.put("a", "p", "1", bad, {})
+            with self.subTest(bad=bad), self.assertRaises(PluginError):
+                await self.store.put("a", "p", "1", bad, {})
         # the REAL transport hazard: a 19-digit id as an int (JS rounds)
         with self.assertRaises(PluginError):
             await self.store.put("a", "p", 1553823440471986326, "0", {})

@@ -16,6 +16,7 @@ Covers:
       message's channel, and forward hydration reports snapshot_count
       (multi-forward truncation is detectable).
 """
+
 from __future__ import annotations
 
 import unittest
@@ -26,8 +27,8 @@ from adapters.simulator.client import SimClient
 from adapters.simulator.world import (
     SYNTHETIC_ALPHA_ID,
     SYNTHETIC_BETA_ID,
-    SYNTHETIC_GUILD_CHANNEL,
     SYNTHETIC_BOT_ID,
+    SYNTHETIC_GUILD_CHANNEL,
     SYNTHETIC_OWNER_ID,
     SimWorld,
 )
@@ -126,13 +127,10 @@ class CapabilityServerLimits(unittest.IsolatedAsyncioTestCase):
     async def test_armed_limit_blocks_next_add_reaction(self):
         world = _world()
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
-        message = world.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "target")
-        world.server_limit_next(
-            channel_id=SYNTHETIC_GUILD_CHANNEL, retry_after=0.6)
+        message = world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "target")
+        world.server_limit_next(channel_id=SYNTHETIC_GUILD_CHANNEL, retry_after=0.6)
         with self.assertRaises(ServerRateLimit) as caught:
-            await client.add_reaction(
-                SYNTHETIC_GUILD_CHANNEL, message.id, "❤")
+            await client.add_reaction(SYNTHETIC_GUILD_CHANNEL, message.id, "❤")
         self.assertEqual(caught.exception.retry_after, 0.6)
         self.assertEqual(len(world.blocked_sends), 1)  # consumed + recorded
         # one-shot: the retry goes through and mutates the aggregate
@@ -144,22 +142,17 @@ class CapabilityServerLimits(unittest.IsolatedAsyncioTestCase):
 
         world = _world()
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
-        button = DiscordComponent(
-            type=2, type_name="button", custom_id="kakera:claim")
-        row = DiscordComponent(
-            type=1, type_name="action_row", components=(button,))
+        button = DiscordComponent(type=2, type_name="button", custom_id="kakera:claim")
+        row = DiscordComponent(type=1, type_name="action_row", components=(button,))
         message = world.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "$mu",
-            components=(row,))
-        world.server_limit_next(
-            channel_id=SYNTHETIC_GUILD_CHANNEL, retry_after=0.4)
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "$mu", components=(row,)
+        )
+        world.server_limit_next(channel_id=SYNTHETIC_GUILD_CHANNEL, retry_after=0.4)
         with self.assertRaises(ServerRateLimit) as caught:
-            await client.click_button(
-                SYNTHETIC_GUILD_CHANNEL, message.id, "kakera:claim")
+            await client.click_button(SYNTHETIC_GUILD_CHANNEL, message.id, "kakera:claim")
         self.assertEqual(caught.exception.retry_after, 0.4)
         self.assertEqual(client.button_clicks, [])  # click never registered
-        await client.click_button(
-            SYNTHETIC_GUILD_CHANNEL, message.id, "kakera:claim")
+        await client.click_button(SYNTHETIC_GUILD_CHANNEL, message.id, "kakera:claim")
         self.assertEqual(client.button_clicks, [(message.id, "kakera:claim")])
 
     async def test_vanished_message_does_not_consume_the_limit(self):
@@ -167,18 +160,15 @@ class CapabilityServerLimits(unittest.IsolatedAsyncioTestCase):
         (same ordering contract as send_message)."""
         world = _world()
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
-        world.server_limit_next(
-            channel_id=SYNTHETIC_GUILD_CHANNEL, retry_after=0.5)
+        world.server_limit_next(channel_id=SYNTHETIC_GUILD_CHANNEL, retry_after=0.5)
         from core.errors import TargetGone
 
         with self.assertRaises(TargetGone):
             await client.add_reaction(SYNTHETIC_GUILD_CHANNEL, 424242, "❤")
         self.assertEqual(world.blocked_sends, [])  # still armed
-        message = world.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "later")
+        message = world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "later")
         with self.assertRaises(ServerRateLimit):
-            await client.add_reaction(
-                SYNTHETIC_GUILD_CHANNEL, message.id, "❤")
+            await client.add_reaction(SYNTHETIC_GUILD_CHANNEL, message.id, "❤")
 
 
 class ResponderFidelity(unittest.IsolatedAsyncioTestCase):
@@ -189,9 +179,7 @@ class ResponderFidelity(unittest.IsolatedAsyncioTestCase):
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
         seen: list = []
         client.on_message = seen.append
-        world.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_BOT_ID, "$mu",
-            author_name="the_bot")
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_BOT_ID, "$mu", author_name="the_bot")
         message = seen[0]
         self.assertTrue(message.author.bot)
         self.assertIsNotNone(message.created_at)
@@ -200,25 +188,21 @@ class ResponderFidelity(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message.author.display_name, "the_bot")
         # timestamps are faithful to the world clock (UTC epoch; tiny
         # float round-trip slack from datetime <-> epoch)
-        self.assertAlmostEqual(
-            message.created_at.timestamp(),
-            world.journal[-1].ts, places=6)
+        self.assertAlmostEqual(message.created_at.timestamp(), world.journal[-1].ts, places=6)
 
     async def test_user_authors_stay_non_bot(self):
         world = _world(responder_id=SYNTHETIC_BOT_ID)
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
         seen: list = []
         client.on_message = seen.append
-        world.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "hello",
-            author_name="owner")
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "hello", author_name="owner")
         self.assertFalse(seen[0].author.bot)
         self.assertIsNotNone(seen[0].created_at)
 
     async def test_dm_pages_from_responder_carry_bot_flag(self):
         world = SimWorld(
             responder_id=SYNTHETIC_BOT_ID,
-            responses={"$slud-s": ["page-one"]},
+            responses={"$dump": ["page-one"]},
             reply_delay=0.01,
         )
         world.add_user(SYNTHETIC_BOT_ID, "bot")
@@ -227,7 +211,7 @@ class ResponderFidelity(unittest.IsolatedAsyncioTestCase):
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
         seen: list = []
         client.on_message = seen.append
-        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "$slud-s")
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "$dump")
         dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
         await world.wait_for_quiet(dm, quiet=0.15, limit=2.0)
         pages = [m for m in seen if m.dm]
@@ -241,8 +225,7 @@ class ReactRemoveAndMe(unittest.IsolatedAsyncioTestCase):
 
     def _world_with_message(self):
         world = _world()
-        message = world.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "target")
+        message = world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "target")
         return world, message
 
     async def test_remove_decrements_and_reports_post_mutation_count(self):
@@ -321,21 +304,35 @@ class ModelReferenceFidelity(unittest.TestCase):
 
     def _lib_dm_reply(self):
         cached = NS(
-            id=999, content="original", author=NS(id=999999, name="the_bot"),
-            channel=NS(id=9001, name=None, type=NS(name="private"),
-                       recipient=NS(id=999999), guild=None),
-            guild=None, embeds=[], components=[], attachments=[],
-            reactions=[], reference=None, created_at=None,
+            id=999,
+            content="original",
+            author=NS(id=999999, name="the_bot"),
+            channel=NS(
+                id=9001, name=None, type=NS(name="private"), recipient=NS(id=999999), guild=None
+            ),
+            guild=None,
+            embeds=[],
+            components=[],
+            attachments=[],
+            reactions=[],
+            reference=None,
+            created_at=None,
         )
         outer = NS(
-            id=1000, content="reply", author=NS(id=2001, name="alpha"),
-            channel=NS(id=9001, name=None, type=NS(name="private"),
-                       recipient=NS(id=999999), guild=None),
-            guild=None, embeds=[], components=[], attachments=[],
+            id=1000,
+            content="reply",
+            author=NS(id=2001, name="alpha"),
+            channel=NS(
+                id=9001, name=None, type=NS(name="private"), recipient=NS(id=999999), guild=None
+            ),
+            guild=None,
+            embeds=[],
+            components=[],
+            attachments=[],
             reactions=[],
-            reference=NS(message_id=999, channel_id=9001, guild_id=None,
-                         resolved=cached),
-            referenced_message=None, created_at=None,
+            reference=NS(message_id=999, channel_id=9001, guild_id=None, resolved=cached),
+            referenced_message=None,
+            created_at=None,
         )
         return outer
 
@@ -362,20 +359,38 @@ class ModelReferenceFidelity(unittest.TestCase):
 
     def test_forward_snapshot_count_reports_truncation(self):
         snapshots = [
-            NS(id=999, content="forwarded one", embeds=[], attachments=[],
-               components=[], created_at=None),
-            NS(id=998, content="forwarded two", embeds=[], attachments=[],
-               components=[], created_at=None),
+            NS(
+                id=999,
+                content="forwarded one",
+                embeds=[],
+                attachments=[],
+                components=[],
+                created_at=None,
+            ),
+            NS(
+                id=998,
+                content="forwarded two",
+                embeds=[],
+                attachments=[],
+                components=[],
+                created_at=None,
+            ),
         ]
         lib = NS(
-            id=1000, content="", author=NS(id=999999, name="the_bot"),
-            channel=NS(id=500, name="grind", type=NS(name="text"),
-                       guild=NS(id=42)),
-            guild=NS(id=42), embeds=[], components=[], attachments=[],
+            id=1000,
+            content="",
+            author=NS(id=999999, name="the_bot"),
+            channel=NS(id=500, name="grind", type=NS(name="text"), guild=NS(id=42)),
+            guild=NS(id=42),
+            embeds=[],
+            components=[],
+            attachments=[],
             reactions=[],
-            reference=NS(message_id=999, channel_id=500, guild_id=42,
-                         type=NS(name="forward"), resolved=None),
-            referenced_message=None, created_at=None,
+            reference=NS(
+                message_id=999, channel_id=500, guild_id=42, type=NS(name="forward"), resolved=None
+            ),
+            referenced_message=None,
+            created_at=None,
             message_snapshots=snapshots,
         )
         dto = convert_message(lib, dm=False)
@@ -388,9 +403,18 @@ class ModelReferenceFidelity(unittest.TestCase):
         dto = convert_message(lib, dm=True)
         self.assertEqual(dto.reference.snapshot_count, 1)
         no_reference = NS(
-            id=1, content="x", author=None, channel=None, guild=None,
-            embeds=[], components=[], attachments=[], reactions=[],
-            reference=None, referenced_message=None, created_at=None,
+            id=1,
+            content="x",
+            author=None,
+            channel=None,
+            guild=None,
+            embeds=[],
+            components=[],
+            attachments=[],
+            reactions=[],
+            reference=None,
+            referenced_message=None,
+            created_at=None,
         )
         self.assertIsNone(convert_message(no_reference, dm=False).reference)
 

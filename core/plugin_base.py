@@ -18,7 +18,7 @@ Plugin contract (unchanged from the audited original):
   * catch :class:`core.errors.FlowBlocked` around any multi-step flow, log
     ONE clean abort line and return — per-account isolation is the
     dispatcher's job, failing clean and quiet is the plugin's (reference:
-    ``tests/fixtures/sim_plugins/soulcopy/plugin.py``, a test-only
+    ``tests/fixtures/sim_plugins/exporter/plugin.py``, a test-only
     workload fixture).
 
 CONTRACT NOTE (A3 decision, documented for A6): the pinned PluginServices

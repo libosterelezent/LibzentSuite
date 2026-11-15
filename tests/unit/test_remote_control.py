@@ -17,8 +17,7 @@ from __future__ import annotations
 import logging
 import tempfile
 import unittest
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from core.credentials import Credentials
 from core.event_bus import EventBus
@@ -38,7 +37,7 @@ class FakeApi:
     """ControlAPI double: canned replies + a call journal."""
 
     def __init__(self) -> None:
-        self.calls: List[tuple] = []
+        self.calls: list[tuple] = []
 
     async def status(self):
         self.calls.append(("status",))
@@ -68,7 +67,7 @@ class FakeApi:
         return {"stopped": name}
 
     async def plugins_state(self, account):
-        return [{"name": "soulcopy", "enabled": True, "error_count": 0},
+        return [{"name": "exporter", "enabled": True, "error_count": 0},
                 {"name": "roll", "enabled": False, "error_count": 0}]
 
     async def plugins_set_enabled(self, account, plugin, enabled):
@@ -88,7 +87,7 @@ class FakeApi:
                 "waiting": 0, "grants": 4}
 
     async def tasks_list(self, status=None, account=None):
-        return [{"id": 7, "account": "alpha", "plugin": "soulcopy",
+        return [{"id": 7, "account": "alpha", "plugin": "exporter",
                  "action": "message", "status": "queued"}]
 
     async def emergency_stop_all(self):
@@ -100,7 +99,7 @@ class FakeApi:
         return {"cancelled_tasks": 1}
 
     async def simulation_list(self):
-        return [{"name": "soulcopy_basic", "description": "d"}]
+        return [{"name": "export_basic", "description": "d"}]
 
 
 class FakeServices:
@@ -109,7 +108,7 @@ class FakeServices:
     def __init__(self) -> None:
         self.account = "alpha"
         self.plugin = "selfcmd"
-        self.sent: List[tuple] = []
+        self.sent: list[tuple] = []
 
     @property
     def credentials(self) -> Credentials:
@@ -129,14 +128,14 @@ class FakeAccess:
     def __init__(self, *owners: int, admins: tuple = ()) -> None:
         self._owners = set(owners)
         self._admins = set(admins)
-        self.can_invoke_calls: List[tuple] = []
+        self.can_invoke_calls: list[tuple] = []
 
-    async def can_invoke(self, account: str, user_id: Optional[int]) -> bool:
+    async def can_invoke(self, account: str, user_id: int | None) -> bool:
         self.can_invoke_calls.append((account, user_id))
         return user_id is not None and (
             user_id in self._owners or user_id in self._admins)
 
-    async def is_admin_id(self, user_id: Optional[int]) -> bool:
+    async def is_admin_id(self, user_id: int | None) -> bool:
         return user_id is not None and user_id in self._admins
 
 
@@ -173,8 +172,8 @@ class PortedCommandTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.activate_account(
             "alpha", lambda plugin: self.services)
 
-    async def _run(self, name: str, args: List[str], *,
-                   invoker: Optional[int] = OWNER) -> Optional[str]:
+    async def _run(self, name: str, args: list[str], *,
+                   invoker: int | None = OWNER) -> str | None:
         await self.manager.execute_self_command(
             "alpha", name, args, CHANNEL, guild_id=GUILD, invoker_id=invoker)
         if not self.services.sent:
@@ -223,7 +222,7 @@ class PortedCommandTests(unittest.IsolatedAsyncioTestCase):
     # ------------------------------------------------------------ plugins
     async def test_plugins_listing(self) -> None:
         reply = await self._run("plugins", ["alpha"])
-        self.assertIn("+ soulcopy", reply)
+        self.assertIn("+ exporter", reply)
         self.assertIn("- roll", reply)
 
     async def test_plugins_toggle_and_usage(self) -> None:
@@ -268,7 +267,7 @@ class PortedCommandTests(unittest.IsolatedAsyncioTestCase):
     # --------------------------------------------------------------- tasks
     async def test_tasks_listing(self) -> None:
         reply = await self._run("tasks", [])
-        self.assertIn("· #7 alpha/soulcopy message [queued]", reply)
+        self.assertIn("· #7 alpha/exporter message [queued]", reply)
 
     async def test_tasks_capped_at_ten_with_overflow_note(self) -> None:
         rows = [{"id": i, "account": "alpha", "plugin": "p",
@@ -318,7 +317,7 @@ class PortedCommandTests(unittest.IsolatedAsyncioTestCase):
 
     # ---------------------------------------------------------- simulation
     async def test_simulation_list_bare_and_explicit(self) -> None:
-        expected = "· soulcopy_basic: d"
+        expected = "· export_basic: d"
         self.assertIn(expected, await self._run("simulation", []))
         self.assertIn(expected, await self._run("simulation", ["list"]))
 

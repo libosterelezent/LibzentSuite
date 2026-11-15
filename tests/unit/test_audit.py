@@ -7,7 +7,6 @@ falls back to the ring.
 """
 from __future__ import annotations
 
-import asyncio
 import time
 import unittest
 

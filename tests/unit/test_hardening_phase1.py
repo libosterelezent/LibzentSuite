@@ -24,12 +24,10 @@ from core.credential_service import CredentialService
 from core.credentials import Credentials, CredentialsError
 from core.errors import CredentialsError as CoreCredentialsError
 from core.errors import DatabaseError
-from core.event_bus import EventBus, Event
+from core.event_bus import Event, EventBus
 from core.logging_service import LogService, ServiceLogger
 from database.connection import DatabaseError as ConnDatabaseError
 from database.db import Database
-
-from pathlib import Path
 
 #: fixture plugins (the framework ships none; the fixture keeps the boot
 #: path exercising plugin discovery/attachment)
@@ -69,9 +67,8 @@ class TestDatabaseLayer(_TmpCase):
     async def test_failed_migration_is_atomic(self) -> None:
         bad = ((1, "bad", "CREATE TABLE ok_t (x INTEGER);\nTHIS IS NOT SQL;"),)
         db = Database(self.dir / "m.db")
-        with mock.patch("database.db.MIGRATIONS", bad):
-            with self.assertRaises(DatabaseError):
-                await db.connect()
+        with mock.patch("database.db.MIGRATIONS", bad), self.assertRaises(DatabaseError):
+            await db.connect()
         # connection was released and nothing half-applied remained
         self.assertFalse(db.connection.connected)
         import sqlite3
@@ -197,8 +194,7 @@ class TestDatabaseLayer(_TmpCase):
 class TestTaskIdsSurviveRestart(_TmpCase):
     async def _boot(self, db_name: str, restore: bool, n: int) -> list:
         from core.task_scheduler import TaskScheduler
-        from tests.unit.test_task_scheduler import (
-            FakeAudit, FakeLimiter, FakeLogger, FakeSender)
+        from tests.unit.test_task_scheduler import FakeAudit, FakeLimiter, FakeLogger, FakeSender
 
         db = Database(self.dir / db_name)
         await db.connect()
@@ -254,7 +250,7 @@ class TestCancellationHelper(unittest.IsolatedAsyncioTestCase):
     async def test_internal_handler_cancel_is_isolated_not_propagated(self) -> None:
         bus = EventBus()
 
-        async def selfcancel(event) -> None:  # noqa: ANN001
+        async def selfcancel(event) -> None:
             raise asyncio.CancelledError()
 
         got = []

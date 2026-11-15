@@ -37,14 +37,13 @@ over real HTTP (the style of tests/unit/test_dashboard_http.py).
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import tempfile
 import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 from core.bootstrap import build
 from core.errors import AccountError
@@ -60,7 +59,7 @@ DASH_TOKEN = "e2e-dash-token"
 
 
 # ------------------------------------------------------------- HTTP helpers
-def http_get(url: str, token: Optional[str] = DASH_TOKEN) -> Tuple[int, str]:
+def http_get(url: str, token: str | None = DASH_TOKEN) -> tuple[int, str]:
     request = urllib.request.Request(url)
     if token:
         request.add_header("X-Dashboard-Token", token)
@@ -73,7 +72,7 @@ def http_get(url: str, token: Optional[str] = DASH_TOKEN) -> Tuple[int, str]:
 
 
 def http_post(url: str, payload: Any,
-              token: Optional[str] = DASH_TOKEN) -> Tuple[int, str]:
+              token: str | None = DASH_TOKEN) -> tuple[int, str]:
     request = urllib.request.Request(
         url, data=json.dumps(payload).encode(), method="POST")
     request.add_header("Content-Type", "application/json")
@@ -101,7 +100,7 @@ class AccountPluginsE2EBase(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.tmp.name)
         self.db_path = self.root / "state" / "libzent.db"
 
-    async def boot(self) -> Tuple[Any, List[Tuple[str, Optional[Set[str]]]]]:
+    async def boot(self) -> tuple[Any, list[tuple[str, set[str] | None]]]:
         """``await build(...)`` + an attach spy on the PluginManager.
 
         The spy records the EXACT allowed set the account manager hands
@@ -117,10 +116,10 @@ class AccountPluginsE2EBase(unittest.IsolatedAsyncioTestCase):
             plugin_dir=str(REAL_PLUGINS),
             quiet=True,
         )
-        attach_calls: List[Tuple[str, Optional[Set[str]]]] = []
+        attach_calls: list[tuple[str, set[str] | None]] = []
         original = fw.plugins.attach_account
 
-        async def _spy(account: str, allowed: Optional[Set[str]] = None):
+        async def _spy(account: str, allowed: set[str] | None = None):
             attach_calls.append(
                 (account, None if allowed is None else set(allowed)))
             return await original(account, allowed)
@@ -134,17 +133,17 @@ class AccountPluginsE2EBase(unittest.IsolatedAsyncioTestCase):
 
     # ------------------------------------------------------------ assertions
     @staticmethod
-    async def attached(api: Any, account: str) -> Set[str]:
+    async def attached(api: Any, account: str) -> set[str]:
         """Plugin names the PluginManager currently has attached."""
         return {p["name"] for p in await api.plugins_state(account)}
 
     @staticmethod
-    async def assigned(api: Any, account: str) -> List[str]:
+    async def assigned(api: Any, account: str) -> list[str]:
         return list(await api.accounts_plugins_list(account))
 
     @staticmethod
-    def last_attach(attach_calls: List[Tuple[str, Optional[Set[str]]]],
-                    account: str) -> Optional[Set[str]]:
+    def last_attach(attach_calls: list[tuple[str, set[str] | None]],
+                    account: str) -> set[str] | None:
         """The allowed set of the account's most recent attach (None when
         the account was never attached)."""
         for name, allowed in reversed(attach_calls):
@@ -153,7 +152,7 @@ class AccountPluginsE2EBase(unittest.IsolatedAsyncioTestCase):
         return None
 
     @staticmethod
-    async def account_row(api: Any, name: str) -> Dict[str, Any]:
+    async def account_row(api: Any, name: str) -> dict[str, Any]:
         rows = {r["name"]: r for r in await api.accounts_list()}
         return rows[name]
 
@@ -261,7 +260,7 @@ class TestMutationFlows(AccountPluginsE2EBase):
 class TestAssignedVersusEnabled(AccountPluginsE2EBase):
 
     @staticmethod
-    def _enabled_map(states: List[Dict[str, Any]]) -> Dict[str, bool]:
+    def _enabled_map(states: list[dict[str, Any]]) -> dict[str, bool]:
         return {s["name"]: s["enabled"] for s in states}
 
     async def test_5_axes_are_independent(self) -> None:

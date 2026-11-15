@@ -3,10 +3,10 @@ prefix settings, admin accounts, the_bot id, and the env migration."""
 from __future__ import annotations
 
 import unittest
-from typing import Any, Dict, List
+from typing import Any
 
 from core.access_manager import (
-    AccessManager, PREFIX_MODES, account_key, KEY_ADMINS,
+    AccessManager,
 )
 
 
@@ -14,7 +14,7 @@ class FakeKv:
     """KvRepository double: dict-backed get/set/prefix/delete."""
 
     def __init__(self) -> None:
-        self.rows: Dict[str, Any] = {}
+        self.rows: dict[str, Any] = {}
 
     async def get(self, key: str, default: Any = None) -> Any:
         return self.rows.get(key, default)
@@ -25,7 +25,7 @@ class FakeKv:
     async def delete(self, key: str) -> bool:
         return self.rows.pop(key, None) is not None
 
-    async def prefix(self, p: str) -> Dict[str, Any]:
+    async def prefix(self, p: str) -> dict[str, Any]:
         return {k: v for k, v in self.rows.items() if k.startswith(p)}
 
 
@@ -247,6 +247,7 @@ if __name__ == "__main__":
 class TestConnectRecordsUserId(unittest.IsolatedAsyncioTestCase):
     async def test_account_manager_records_user_id_for_admin_gate(self):
         import logging
+
         from core.account_manager import AccountManager
         from core.plugin_manager.commands import COMMAND_HUB
 

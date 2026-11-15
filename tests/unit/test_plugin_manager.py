@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.event_bus import EventBus, MessageReceived, PluginEnabledChanged
 from core.errors import PluginError, SettingsValidationError
+from core.event_bus import EventBus, MessageReceived, PluginEnabledChanged
 from core.plugin_manager import PluginLoader, PluginManager
 from core.settings_manager import SettingsManager
 
@@ -138,7 +138,6 @@ class TestLoader(unittest.TestCase):
 
 class TestLifecycle(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        import sys
         self.spy_module = None
 
     async def test_attach_activate_deactivate_order(self) -> None:

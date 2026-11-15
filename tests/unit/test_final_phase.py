@@ -11,13 +11,9 @@ from types import SimpleNamespace as NS
 from core.account_manager import AccountStatus
 from core.account_manager.services import MessageWaiterRegistry
 from core.cooldowns import CooldownService
-from core.errors import AccountError
-from core.event_bus import AccountConnected, EventBus, MessageReceived
+from core.event_bus import EventBus, MessageReceived
 from core.rate_limit_manager.engine import RateLimitManager
-from core.rate_limit_manager.policies import RatePolicy
-
 from tests.unit.helpers import make_manager
-from tests.unit.test_account_manager import _fast_reconnect_settings
 from tests.unit.test_rate_engine import StubLogger
 
 
@@ -313,7 +309,7 @@ class GateDepthTests(unittest.IsolatedAsyncioTestCase):
             try:
                 await gate.acquire()
                 results.append(("ok", n))
-            except ConnectionError as exc:
+            except ConnectionError:
                 results.append(("fail", n))
         await asyncio.gather(*[attempt(n) for n in range(12)])
         ok = [n for status, n in results if status == "ok"]
@@ -341,6 +337,7 @@ class SecurityHardeningTests(unittest.IsolatedAsyncioTestCase):
     async def test_key_file_tightened_on_read(self) -> None:
         import tempfile
         from pathlib import Path
+
         from core.credential_service import CredentialService
 
         with tempfile.TemporaryDirectory() as tmp:

@@ -16,7 +16,6 @@ from core.task_scheduler import (
     TERMINAL_STATUSES,
     TaskScheduler,
 )
-
 from tests.unit.helpers import (
     FakeDetailsLimiter,
     default_snapshot,
@@ -25,7 +24,6 @@ from tests.unit.helpers import (
 )
 
 STATUS_KEYS = {"id", "name", "status", "user_id", "enabled", "workspace",
-               "workspace",
                "assigned_plugins", "plugin_profiles",
                "latency_ms", "uptime_s", "last_error", "credential",
                "plugins"}
@@ -105,15 +103,15 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_add_with_plugins_assigns_and_gates(self) -> None:
         h = make_manager()
-        out = await h.manager.add_account("alpha", plugins=["soulcopy"])
-        self.assertEqual(out["assigned_plugins"], ["soulcopy"])
-        self.assertEqual(h.plugins.attached[-1], ("alpha", {"soulcopy"}))
+        out = await h.manager.add_account("alpha", plugins=["exporter"])
+        self.assertEqual(out["assigned_plugins"], ["exporter"])
+        self.assertEqual(h.plugins.attached[-1], ("alpha", {"exporter"}))
         self.assertEqual(await h.account_plugins.plugins_of("alpha"),
-                         ["soulcopy"])  # persisted capability rows
+                         ["exporter"])  # persisted capability rows
 
     async def test_add_with_bad_plugins_type_rejected_before_persist(self) -> None:
         h = make_manager()
-        for bad in ("soulcopy", 7, ["soulcopy", 3], {"soulcopy"}):
+        for bad in ("exporter", 7, ["exporter", 3], {"exporter"}):
             with self.assertRaises(AccountError):
                 await h.manager.add_account("alpha", plugins=bad)
         self.assertEqual(h.manager.names(), [])
@@ -153,13 +151,13 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         h = make_manager()
         await h.manager.add_account("alpha")
         h.plugins.states_map["alpha"] = [
-            {"name": "soulcopy", "enabled": True, "settings": {"x": 1},
+            {"name": "exporter", "enabled": True, "settings": {"x": 1},
              "last_error": None, "error_count": 0},
             {"name": "roll", "enabled": False, "settings": {},
              "last_error": "boom", "error_count": 2},
         ]
         rows = await h.manager.accounts()
-        self.assertEqual(rows[0]["plugins"]["soulcopy"]["enabled"], True)
+        self.assertEqual(rows[0]["plugins"]["exporter"]["enabled"], True)
         self.assertEqual(rows[0]["plugins"]["roll"]["error_count"], 2)
         self.assertEqual(rows[0]["plugins"]["roll"]["last_error"], "boom")
 
@@ -167,26 +165,26 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         h = make_manager()
         await h.manager.add_account("alpha")
         h.plugins.states_map["alpha"] = [
-            {"name": "soulcopy", "enabled": True, "settings": {},
+            {"name": "exporter", "enabled": True, "settings": {},
              "last_error": None, "error_count": 0},
         ]
         await h.manager.accounts()
         h.plugins.fail_states = True
         rows = await h.manager.accounts()
-        self.assertIn("soulcopy", rows[0]["plugins"])  # last known kept
+        self.assertIn("exporter", rows[0]["plugins"])  # last known kept
 
     async def test_fail_closed_reattach_clears_stale_plugin_view(self) -> None:
         """Round-3: an account re-attached with ZERO plugins (its
         assignments emptied) must not keep showing its previous plugin
         rows as if they were still attached."""
         h = make_manager()
-        await h.manager.add_account("alpha", plugins=["soulcopy"])
+        await h.manager.add_account("alpha", plugins=["exporter"])
         h.plugins.states_map["alpha"] = [
-            {"name": "soulcopy", "enabled": True, "settings": {},
+            {"name": "exporter", "enabled": True, "settings": {},
              "last_error": None, "error_count": 0},
         ]
         rows = await h.manager.accounts()
-        self.assertIn("soulcopy", rows[0]["plugins"])  # truthful view
+        self.assertIn("exporter", rows[0]["plugins"])  # truthful view
 
         # a transient assignment-repo failure: the refresh fail-closes to
         # ZERO assignments, so the next attach (the one every start()
@@ -211,14 +209,14 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         h = make_manager()
         await h.manager.add_account("alpha")
         h.plugins.states_map["alpha"] = [
-            {"name": "soulcopy", "enabled": True, "settings": {},
+            {"name": "exporter", "enabled": True, "settings": {},
              "last_error": None, "error_count": 0},
         ]
         await h.manager.accounts()
         h.plugins.states_map["alpha"] = []
         h.manager._plugin_attached.discard("alpha")  # simulate "not attached"
         rows = await h.manager.accounts()
-        self.assertIn("soulcopy", rows[0]["plugins"])  # last known kept
+        self.assertIn("exporter", rows[0]["plugins"])  # last known kept
 
     async def test_set_enabled_persists(self) -> None:
         h = make_manager()
@@ -253,7 +251,7 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_happy_path(self) -> None:
         h = make_manager()
         h.plugins.states_map["alpha"] = [
-            {"name": "soulcopy", "enabled": True, "settings": {"k": 1},
+            {"name": "exporter", "enabled": True, "settings": {"k": 1},
              "last_error": None, "error_count": 0},
         ]
         await h.manager.add_account("alpha")
@@ -266,8 +264,8 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(h.plugins.activated), 1)
         account_name, factory = h.plugins.activated[0]
         self.assertEqual(account_name, "alpha")
-        services = factory("soulcopy")
-        self.assertEqual((services.account, services.plugin), ("alpha", "soulcopy"))
+        services = factory("exporter")
+        self.assertEqual((services.account, services.plugin), ("alpha", "exporter"))
         # cache ingested from the client's READY snapshot
         cache = h.manager.get("alpha").runtime.cache
         cache.validate_channel(100)  # would raise TargetGone if not ingested
@@ -381,7 +379,7 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         for _ in range(3):
-            h.scheduler.submit("alpha", "soulcopy", "message",
+            h.scheduler.submit("alpha", "exporter", "message",
                                channel_id=100, content="x")
         out = h.manager.emergency_stop("alpha")
         self.assertEqual(out["cancelled_tasks"], 3)
@@ -701,9 +699,9 @@ class DetailsTests(unittest.IsolatedAsyncioTestCase):
              "interval": 4.0, "jitter": [0.1, 0.3]},
         ]
         h = make_manager(limiter=limiter)
-        await h.manager.add_account("alpha", plugins=["soulcopy"])
+        await h.manager.add_account("alpha", plugins=["exporter"])
         h.plugins.states_map["alpha"] = [
-            {"name": "soulcopy", "enabled": True, "settings": {},
+            {"name": "exporter", "enabled": True, "settings": {},
              "last_error": None, "error_count": 0},
         ]
         await h.manager.start("alpha")
@@ -722,7 +720,7 @@ class DetailsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(d["runtime"]["cached_channels"], 3)  # 100, 101 + dm 9001
         self.assertEqual(d["runtime"]["cached_dms"], 1)
         self.assertEqual(d["runtime"]["cache_source"], "client cache (READY)")
-        self.assertEqual(d["plugins"], [{"name": "soulcopy", "enabled": True}])
+        self.assertEqual(d["plugins"], [{"name": "exporter", "enabled": True}])
         self.assertEqual(d["rate_limit"], {
             "message": {"interval": 5.0, "jitter": [0.0, 0.0],
                         "source": "global, account:alpha"},
@@ -744,10 +742,10 @@ class DetailsTests(unittest.IsolatedAsyncioTestCase):
         h = make_manager()
         await h.manager.add_account("alpha")
         h.manager.get("alpha").plugins = {
-            "soulcopy": {"enabled": False, "last_error": None, "error_count": 0},
+            "exporter": {"enabled": False, "last_error": None, "error_count": 0},
         }
         d = await h.manager.details("alpha")
-        self.assertEqual(d["plugins"], [{"name": "soulcopy", "enabled": False}])
+        self.assertEqual(d["plugins"], [{"name": "exporter", "enabled": False}])
 
     async def test_details_unknown_account(self) -> None:
         h = make_manager()
@@ -803,6 +801,7 @@ class CredentialWiringTests(unittest.IsolatedAsyncioTestCase):
     async def test_resolve_db_first_and_status_field(self) -> None:
         import tempfile
         from pathlib import Path
+
         from core.credential_service import CredentialService
         from database.db import Database
 
@@ -835,6 +834,7 @@ class CredentialWiringTests(unittest.IsolatedAsyncioTestCase):
         -> MISSING_CREDENTIAL, NOT env fallback. The old .env path is GONE."""
         import tempfile
         from pathlib import Path
+
         from core.credential_service import CredentialService
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -870,6 +870,7 @@ class CredentialWiringTests(unittest.IsolatedAsyncioTestCase):
 
         import tempfile
         from pathlib import Path
+
         from core.credential_service import CredentialService
         from database.db import Database
 
@@ -984,7 +985,7 @@ class EmergencyStopIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 return await original_send(channel_id, content)
 
             client.send_message = slow_send
-            task = scheduler.submit("alpha", "soulcopy", "message",
+            task = scheduler.submit("alpha", "exporter", "message",
                                     channel_id=100, content="slow",
                                     timeout=10.0)
             await _poll_until(
@@ -1007,7 +1008,7 @@ class EmergencyStopIntegrationTests(unittest.IsolatedAsyncioTestCase):
             # restart works right away, and sends flow again (fast client)
             await h.manager.start("alpha")
             self.assertEqual(runtime.status, AccountStatus.RUNNING)
-            fresh = scheduler.submit("alpha", "soulcopy", "message",
+            fresh = scheduler.submit("alpha", "exporter", "message",
                                      channel_id=100, content="after")
             await _poll_until(
                 lambda: scheduler.get(fresh.id).status == STATUS_COMPLETED)

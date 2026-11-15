@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from parsers import (
     InvalidMessageError,
     ParserManager,
-    PARSER_MANAGER,
     UnknownParserError,
 )
 

@@ -23,21 +23,30 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from core.credentials import Credentials
 from core.errors import PluginError, TargetGone
 from core.event_bus import EventBus
 from core.plugin_base import (
-    ArgSpec, CommandSpec, parse_command_args, usage_line,
+    ArgSpec,
+    CommandSpec,
+    parse_command_args,
+    usage_line,
 )
 from core.plugin_manager import PluginManager
 from core.plugin_manager.commands import (
-    COMMAND_HUB, FRAMEWORK_COMMANDS, MAX_REPLY_CHARS, SelfCommandHub, _prefixrate_handler, render_help,
+    COMMAND_HUB,
+    FRAMEWORK_COMMANDS,
+    MAX_REPLY_CHARS,
+    SelfCommandHub,
+    _prefixrate_handler,
+    render_help,
 )
 from core.plugin_manager.loader import PluginLoader
 from core.priority import Priority
 from core.settings_manager import SettingsManager
+
 
 class TestArgSpecParsing(unittest.TestCase):
     """Declarative positional grammar (the rollset-style endpoint)."""
@@ -115,7 +124,7 @@ LOG = logging.getLogger("test-plugin-commands")
 
 # ------------------------------------------------------------- fakes
 class FakeChannelInfo:
-    def __init__(self, channel_id: int, guild_id: Optional[int] = GUILD,
+    def __init__(self, channel_id: int, guild_id: int | None = GUILD,
                  dm: bool = False) -> None:
         self.id = channel_id
         self.guild_id = guild_id
@@ -125,18 +134,18 @@ class FakeChannelInfo:
 class FakeServices:
     """PluginServices double: records sends, validates known channels."""
 
-    def __init__(self, channels: Optional[Dict[int, FakeChannelInfo]] = None,
-                 settings: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(self, channels: dict[int, FakeChannelInfo] | None = None,
+                 settings: dict[str, Any] | None = None) -> None:
         self.account = "alpha"
         self.plugin = "probe"
-        self.sent: List[tuple] = []
+        self.sent: list[tuple] = []
         self.channels = channels if channels is not None else {
             CHANNEL: FakeChannelInfo(CHANNEL),
             43: FakeChannelInfo(43),  # exists but scope-refused in tests
         }
         self._settings = settings if settings is not None else {}
-        self._state: Dict[str, Any] = {}
-        self._cooldowns: Dict[str, float] = {}
+        self._state: dict[str, Any] = {}
+        self._cooldowns: dict[str, float] = {}
 
     @property
     def credentials(self) -> Credentials:
@@ -144,7 +153,7 @@ class FakeServices:
             "OWNER_USER_IDS": str(OWNER_ID), "PRIMARY_BOT_ID": "999"})
 
     @property
-    def settings(self) -> Dict[str, Any]:
+    def settings(self) -> dict[str, Any]:
         return self._settings
 
     async def send_message(self, channel_id: int, content: str, *,
@@ -442,15 +451,15 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.manager.close()
 
     async def _boot(self, account: str = "alpha",
-                    allowed: Optional[set] = None) -> None:
+                    allowed: set | None = None) -> None:
         await self.manager.attach_account(
             account, {PROBE} if allowed is None else allowed)
         await self.manager.activate_account(
             account, lambda plugin: self.services)
 
-    async def _run(self, name: str, args: List[str], *,
+    async def _run(self, name: str, args: list[str], *,
                    account: str = "alpha", channel: int = CHANNEL,
-                   invoker: Optional[int] = OWNER_ID) -> Optional[str]:
+                   invoker: int | None = OWNER_ID) -> str | None:
         await self.manager.execute_self_command(
             account, name, args, channel, guild_id=GUILD, invoker_id=invoker)
         if not self.services.sent:
@@ -596,7 +605,7 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.hub.bind(manager)
         manager.command_hub = self.hub  # this manager's syncs → the test hub
         await manager.attach_account("alpha", {PROBE})
-        delivered: List[List[str]] = []
+        delivered: list[list[str]] = []
         self.hub.subscribe("alpha",
                            lambda specs: delivered.append(
                                [s.name for s in specs]))
@@ -608,7 +617,7 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.hub.forget("alpha")
 
     async def test_invoke_routes_to_bound_manager(self) -> None:
-        calls: List[tuple] = []
+        calls: list[tuple] = []
 
         class FakeManager:
             async def execute_self_command(self, *args, **kw):
@@ -736,7 +745,7 @@ class AdapterLayerTests(unittest.IsolatedAsyncioTestCase):
     async def test_dispatch_gates_non_owner_before_the_hub(self) -> None:
         client = self._client()
         self._bot(client)
-        invoked: List[tuple] = []
+        invoked: list[tuple] = []
         original = COMMAND_HUB.invoke
 
         async def fake_invoke(account, name, args, channel_id, **kw):
@@ -797,7 +806,7 @@ class AdapterLayerTests(unittest.IsolatedAsyncioTestCase):
         self._bot(client)
         client.set_plugin_commands(FRAMEWORK_COMMANDS)
         self.assertIn("status", client._client.all_commands)
-        invoked: List[tuple] = []
+        invoked: list[tuple] = []
         original = COMMAND_HUB.invoke
 
         async def fake_invoke(account, name, args, channel_id, **kw):
@@ -871,10 +880,11 @@ class TestPrefixRateCommand(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(setattr, COMMAND_HUB, "api_provider", saved_api)
 
     async def test_set_goes_through_control_api_when_wired(self) -> None:
+        import logging
+
+        from core.event_bus import EventBus
         from core.plugin_manager.commands import COMMAND_HUB, PacingBackend
         from core.rate_limit_manager import RateLimitManager
-        from core.event_bus import EventBus
-        import logging
         lim = RateLimitManager(EventBus(), logging.getLogger("t"), None)
         calls = []
 
@@ -889,10 +899,11 @@ class TestPrefixRateCommand(unittest.IsolatedAsyncioTestCase):
         self.assertIn("2.60s → 3.00s", reply)
 
     async def test_show_without_args(self) -> None:
+        import logging
+
+        from core.event_bus import EventBus
         from core.plugin_manager.commands import COMMAND_HUB, PacingBackend
         from core.rate_limit_manager import RateLimitManager
-        from core.event_bus import EventBus
-        import logging
         lim = RateLimitManager(EventBus(), logging.getLogger("t"), None)
         lim.set_policy_values("message", 2.6)
         COMMAND_HUB.pacing = PacingBackend(lim)
@@ -901,10 +912,11 @@ class TestPrefixRateCommand(unittest.IsolatedAsyncioTestCase):
         self.assertIn("alpha", reply)
 
     async def test_set_then_show(self) -> None:
+        import logging
+
+        from core.event_bus import EventBus
         from core.plugin_manager.commands import COMMAND_HUB, PacingBackend
         from core.rate_limit_manager import RateLimitManager
-        from core.event_bus import EventBus
-        import logging
         lim = RateLimitManager(EventBus(), logging.getLogger("t"), None)
         # NO stored global policy: the learned default (2.6) is the
         # fallback baseline the command reports; the set then stores the
@@ -920,10 +932,11 @@ class TestPrefixRateCommand(unittest.IsolatedAsyncioTestCase):
         """The mutation branch is admin-only: a non-admin invoker is
         rejected before the limiter is touched (the executor's _ported
         wrapper renders the ValueError as ``error: admins only``)."""
+        import logging
+
+        from core.event_bus import EventBus
         from core.plugin_manager.commands import COMMAND_HUB, PacingBackend
         from core.rate_limit_manager import RateLimitManager
-        from core.event_bus import EventBus
-        import logging
         lim = RateLimitManager(EventBus(), logging.getLogger("t"), None)
         lim.set_policy_values("message", 2.6)
         COMMAND_HUB.pacing = PacingBackend(lim)
@@ -951,8 +964,9 @@ class TestPrefixRateCommand(unittest.IsolatedAsyncioTestCase):
 
 
 def _ctx(account="alpha", invoker_id=1):
-    from core.plugin_base import CommandContext
     import logging
+
+    from core.plugin_base import CommandContext
     return CommandContext(
         account=account, plugin="selfcmd", services=None,
         logger=logging.getLogger("t"), channel_id=1, guild_id=1,

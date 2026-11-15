@@ -24,25 +24,14 @@ Covers, per the audit report:
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
-from core.credentials import Credentials
-from core.event_bus import EventBus, MessageReceived
-from core.plugin_base import ArgSpec, CommandSpec, parse_command_args
+from core.event_bus import EventBus
 from core.plugin_manager import PluginManager
-from core.plugin_manager.commands import (
-    COMMAND_HUB,
-    HELP_PAGE_CHARS,
-    _paginate_help,
-    _render_help_body,
-    render_help,
-)
 from core.plugin_manager.loader import PluginLoader
 from core.settings_manager import SettingsManager
 
@@ -108,9 +97,6 @@ class LoaderFailurePurgeTests(unittest.TestCase):
 def _make_manager():
     """Plugin manager over the fixture plugins for set_enabled tests."""
     import logging
-    from core.event_bus import EventBus
-    from core.plugin_manager import PluginManager
-    from core.settings_manager import SettingsManager
     return PluginManager(
         EventBus(), logging.getLogger("test"),
         SettingsManager(EventBus(), logging.getLogger("test")),
@@ -138,7 +124,7 @@ class SetEnabledActiveClearTests(unittest.IsolatedAsyncioTestCase):
         await manager.activate_account("alpha", FakeServices())
         runtime = manager._accounts["alpha"][SPY]
         self.assertTrue(runtime.active)
-        observed: List[bool] = []
+        observed: list[bool] = []
 
         async def spy_disable(ctx):
             observed.append(runtime.active)  # must already be False

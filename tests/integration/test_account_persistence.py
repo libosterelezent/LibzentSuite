@@ -30,7 +30,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_PLUGINS = REPO_ROOT / "tests" / "fixtures" / "plugins"
@@ -42,7 +42,7 @@ TOKEN_GAMMA = "SYNTHETIC-TOKEN-gamma-do-not-use-0003"
 TOKEN_ENV_X = "SYNTHETIC-TOKEN-env-x-do-not-use-0004"
 
 
-def _pending_reason() -> Optional[str]:
+def _pending_reason() -> str | None:
     """Which pinned contracts are still missing (None when all landed)."""
     missing: list[str] = []
     from core import bootstrap
@@ -293,7 +293,7 @@ class TestMissingCredential(AccountPersistenceTestBase):
         await api.accounts_add({"name": "gamma"})
         self.assertEqual(await self.credential_status(api, "gamma", fw=fw), "missing")
 
-        start_error: Optional[BaseException] = None
+        start_error: BaseException | None = None
         try:
             await api.accounts_start("gamma")
         except Exception as exc:  # pinned: raises CredentialsError (or records)

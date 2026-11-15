@@ -37,7 +37,6 @@ from core.account_manager.services import AccountPluginServices
 from core.credentials import Credentials
 from core.errors import AccountError
 from core.event_bus import AccountFailed, EventBus, MessageReceived
-
 from tests.unit.helpers import FakeSettings, default_snapshot, make_manager
 
 
@@ -61,7 +60,7 @@ def _fast_reconnect_settings() -> FakeSettings:
     )
 
 
-def _parking_factory(manager, gates: list) -> "callable":
+def _parking_factory(manager, gates: list) -> callable:
     """Wrap the manager's factory: every client's connect() parks on its
     own gate until the test sets it (test_final_phase.py pattern)."""
     original_factory = manager._client_factory
@@ -130,7 +129,7 @@ class NewerStartProtectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_stale_start_in_activate_never_deactivates_newer_plugins(
             self) -> None:
         h = make_manager()
-        await h.manager.add_account("alpha", plugins=["soulcopy"])
+        await h.manager.add_account("alpha", plugins=["exporter"])
         gate = asyncio.Event()
         original = h.plugins.activate_account
         calls: list = []
@@ -422,7 +421,7 @@ class RemoveIdentityGuardTests(unittest.IsolatedAsyncioTestCase):
 # ------------------------------------------------- bonus: services fixes
 def _services(bus: EventBus, client_getter=None, api_cache_repo=None):
     return AccountPluginServices(
-        "alpha", "soulcopy", bus=bus, scheduler=None,
+        "alpha", "exporter", bus=bus, scheduler=None,
         credentials=Credentials.from_values({}),
         cache=DiscordCache("alpha"),
         client_getter=client_getter, api_cache_repo=api_cache_repo,

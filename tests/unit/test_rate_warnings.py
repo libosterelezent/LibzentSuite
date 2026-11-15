@@ -8,11 +8,11 @@ from __future__ import annotations
 import unittest
 
 from core.event_bus import EventBus
-from core.rate_limit_manager import MIN_ACTION_INTERVAL, RatePolicy, RateLimitManager
+from core.rate_limit_manager import MIN_ACTION_INTERVAL, RateLimitManager, RatePolicy
 from core.rate_limit_manager.warnings import (
     describe_scope,
-    evaluate_policy,
     evaluate_policies,
+    evaluate_policy,
     floor_warning,
     sort_warnings,
 )

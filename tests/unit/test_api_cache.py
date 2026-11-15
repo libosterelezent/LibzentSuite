@@ -108,7 +108,7 @@ class TestServicesFetchUserCached(AsyncDbTestCase):
     async def test_fetch_user_cached_per_account(self) -> None:
         client = FakeClient()
         services = AccountPluginServices(
-            "alpha", "soulcopy", bus=EventBus(), scheduler=None,
+            "alpha", "exporter", bus=EventBus(), scheduler=None,
             credentials=Credentials.from_values({}),
             cache=DiscordCache("alpha"), client_getter=lambda: client,
             api_cache_repo=self.db.cache,

@@ -5,13 +5,13 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from core.errors import TargetGone  # noqa: E402
-from core.plugin_base import CommandContext  # noqa: E402
-from plugins.ping.plugin import PingPlugin  # noqa: E402
+from core.errors import TargetGone
+from core.plugin_base import CommandContext
+from plugins.ping.plugin import PingPlugin
 
 
 class _FakeServices:
@@ -19,7 +19,7 @@ class _FakeServices:
 
     def __init__(self, blocked: bool = False) -> None:
         self.blocked = blocked
-        self.sent: List[tuple] = []
+        self.sent: list[tuple] = []
 
     async def send_message(self, channel_id: int, content: str,
                            **kw: Any) -> None:

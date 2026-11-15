@@ -6,7 +6,6 @@ the pre-audit code.
 from __future__ import annotations
 
 import asyncio
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,8 +32,7 @@ class _TmpCase(unittest.IsolatedAsyncioTestCase):
 # ---------------------------------------------------------------- scheduler
 class SchedulerStopSingleFlight(_TmpCase):
     async def test_concurrent_stops_join_and_resume_survives(self) -> None:
-        from tests.unit.test_task_scheduler import (
-            FakeAudit, FakeLimiter, FakeLogger)
+        from tests.unit.test_task_scheduler import FakeAudit, FakeLimiter, FakeLogger
 
         bus = EventBus()
         started = asyncio.Event()
@@ -61,15 +59,14 @@ class SchedulerStopSingleFlight(_TmpCase):
         async def ok_sender(task) -> None:
             ran.set()
 
-        sched._sender = ok_sender  # noqa: SLF001 — test seam
+        sched._sender = ok_sender
         sched.submit("alpha", "p", "message", channel_id=1, content="y")
         await asyncio.wait_for(ran.wait(), timeout=2.0)
         await sched.stop(drain=True, timeout=5.0)
         self.assertEqual(sched.stats()["completed"], 1)
 
     async def test_timeout_zero_means_no_budget(self) -> None:
-        from tests.unit.test_task_scheduler import (
-            FakeAudit, FakeLimiter, FakeLogger)
+        from tests.unit.test_task_scheduler import FakeAudit, FakeLimiter, FakeLogger
 
         ran = asyncio.Event()
 
@@ -102,7 +99,7 @@ class TimeoutCancelsQueuedTask(_TmpCase):
         cache = DiscordCache("alpha")
         cache.ingest_snapshot(default_snapshot())
         services = AccountPluginServices(
-            "alpha", "soulcopy", bus=EventBus(), scheduler=scheduler,
+            "alpha", "exporter", bus=EventBus(), scheduler=scheduler,
             credentials=None, cache=cache, settings_dict={},
             client_getter=lambda: None,
         )
@@ -127,7 +124,7 @@ class RemoveAccountCascade(_TmpCase):
         h = make_manager()
         await h.manager.add_account("alpha")
         # wire the kv-backed state service into the manager for the cascade
-        h.manager._plugin_state = state  # noqa: SLF001 — test seam
+        h.manager._plugin_state = state
         await h.manager.remove_account("alpha")
         self.assertIsNone(await state.get_account("alpha", "marker"))
         self.assertIsNone(await state.get_pair("alpha", "roll", "counter"))
@@ -157,7 +154,7 @@ class ZombieClientGuards(_TmpCase):
         first = runtime.client
         # simulate the supervisor building client #2 while #1 lingers
         second = h.factory("alpha", "tok-alpha")
-        h.manager._wire_client("alpha", runtime, second)  # noqa: SLF001
+        h.manager._wire_client("alpha", runtime, second)
         runtime.client = second
         from adapters.base import DiscordMessage
 

@@ -231,7 +231,7 @@ class SchedulerTestBase(unittest.IsolatedAsyncioTestCase):
 class TestLifecycle(SchedulerTestBase):
     async def test_submit_lifecycle_events_in_order(self) -> None:
         task = self.scheduler.submit(
-            "alpha", "soulcopy", "message", channel_id=123, content="hello"
+            "alpha", "exporter", "message", channel_id=123, content="hello"
         )
         await self.settle()
         self.assertEqual(task.status, "completed")
@@ -241,7 +241,7 @@ class TestLifecycle(SchedulerTestBase):
         )
         queued = self.recorder.of(TaskQueued)[0]
         self.assertEqual((queued.account, queued.task_id, queued.plugin, queued.action),
-                         ("alpha", task.id, "soulcopy", "message"))
+                         ("alpha", task.id, "exporter", "message"))
         completed = self.recorder.of(TaskCompleted)[0]
         self.assertEqual(completed.task_id, task.id)
         self.assertGreaterEqual(completed.duration_s, 0.0)
@@ -273,9 +273,9 @@ class TestLifecycle(SchedulerTestBase):
         self.assertEqual(call["note"], "plugin=p task=1")  # no attempts suffix on first-try success
 
     async def test_default_name_and_get(self) -> None:
-        task = self.scheduler.submit("alpha", "soulcopy", "dm", user_id=42, content="hi")
+        task = self.scheduler.submit("alpha", "exporter", "dm", user_id=42, content="hi")
         await self.settle()
-        self.assertEqual(task.name, "soulcopy:dm")
+        self.assertEqual(task.name, "exporter:dm")
         self.assertIs(self.scheduler.get(task.id), task)   # live
         self.assertIs(self.scheduler.get(task.id), task)   # finished fallback keeps the object
         self.assertIsNone(self.scheduler.get(9999))
@@ -323,9 +323,9 @@ class TestLanes(SchedulerTestBase):
         self.assertEqual(high.status, "completed")
 
     async def test_limiter_receives_full_context(self) -> None:
-        self.scheduler.submit("alpha", "soulcopy", "message", priority=Priority.HIGH)
+        self.scheduler.submit("alpha", "exporter", "message", priority=Priority.HIGH)
         await self.settle()
-        self.assertEqual(self.limiter.acquire_calls, [("message", "alpha", "soulcopy", 0)])
+        self.assertEqual(self.limiter.acquire_calls, [("message", "alpha", "exporter", 0)])
 
 
 # ------------------------------------------------------------------ cancel

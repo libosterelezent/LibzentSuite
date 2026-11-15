@@ -7,7 +7,7 @@ Each :class:`Scenario` bundles everything the runner needs:
   * ``world_setup`` — builds the synthetic topology (users, the trigger
     channel, the scripted the primary bot responder and its pages),
   * ``script``     — drives the built stack (usually: the owner types the
-    soulcopy fixture's trigger, then the world settles),
+    exporter fixture's trigger, then the world settles),
   * ``checks``     — pure post-mortem over (audit dicts, world) returning
     human-readable failure strings ([] == pass).
 
@@ -48,12 +48,12 @@ if TYPE_CHECKING:
 
 #: the single account every scenario runs (synthetic ids only)
 ACCOUNT_NAME = "alpha"
-#: the primary bot command the soulcopy workload fixture sends to request the export
-EXPORT_COMMAND = "$slud-s"
-#: prefix the fixture puts on every produced chunk (soulcopy textutils)
-IMPORT_PREFIX = "$soulcopy "
+#: the primary bot command the exporter workload fixture sends to request the export
+EXPORT_COMMAND = "$dump"
+#: prefix the fixture puts on every produced chunk (exporter textutils)
+IMPORT_PREFIX = "$exporter "
 #: owner trigger word that starts the fixture's flow (its default)
-TRIGGER_WORD = "slcopy"
+TRIGGER_WORD = "export"
 #: pacing used by pacing_respected and its verification tolerance (seconds)
 PACING_INTERVAL = 1.6
 PACING_TOLERANCE = 0.05
@@ -70,7 +70,7 @@ MAX_CHUNK_LENGTH = 2000
 #: demo plugin settings (sim pacing in seconds; production values live in
 #: config/). The runner passes this as the SettingsManager global layer.
 DEMO_PLUGIN_SETTINGS: dict[str, dict[str, Any]] = {
-    "soulcopy": {
+    "exporter": {
         "dm_read_timeout": 3.0,
         "inter_chunk_delay": 0.05,
         "max_chunk_length": MAX_CHUNK_LENGTH,
@@ -84,7 +84,7 @@ def quiet_window() -> float:
     Derived (not hardcoded) so a demo pacing change can never make a script
     return before the chunks land — port of the audited transcript helper.
     """
-    return float(DEMO_PLUGIN_SETTINGS["soulcopy"]["dm_read_timeout"]) + 1.2
+    return float(DEMO_PLUGIN_SETTINGS["exporter"]["dm_read_timeout"]) + 1.2
 
 
 @dataclass
@@ -205,9 +205,9 @@ def _delivered_chunks(world: SimWorld) -> list[WorldMessage]:
 
 
 def _checks_basic(audit: list[dict], world: SimWorld) -> list[str]:
-    """soulcopy_basic: 2 pages -> >= 2 outbound sends and one prefixed chunk.
+    """export_basic: 2 pages -> >= 2 outbound sends and one prefixed chunk.
 
-    The workload plugin is the tests/fixtures/sim_plugins/soulcopy
+    The workload plugin is the tests/fixtures/sim_plugins/exporter
     fixture (the framework bundles no plugins); the checks only read
     world/audit observables, so they are unchanged by the move.
     """
@@ -230,7 +230,7 @@ def _checks_basic(audit: list[dict], world: SimWorld) -> list[str]:
 
 
 def _checks_multichunk(audit: list[dict], world: SimWorld) -> list[str]:
-    """soulcopy_multichunk: >= 2 chunks, each <= 2000 chars incl. prefix."""
+    """export_multichunk: >= 2 chunks, each <= 2000 chars incl. prefix."""
     failures: list[str] = []
     chunks = _delivered_chunks(world)
     if len(chunks) < 2:
@@ -481,19 +481,19 @@ def _checks_control_mention(audit: list[dict], world: SimWorld) -> list[str]:
 
 
 SCENARIOS: dict[str, Scenario] = {
-    "soulcopy_basic": Scenario(
-        name="soulcopy_basic",
+    "export_basic": Scenario(
+        name="export_basic",
         description=(
-            "Owner triggers slcopy; the primary bot answers with 2 short pages and the "
-            "plugin delivers a single $soulcopy chunk back to the channel."
+            "Owner triggers export; the primary bot answers with 2 short pages and the "
+            "plugin delivers a single $exporter chunk back to the channel."
         ),
         policies={"message": {"interval": 1.5, "jitter": [0.0, 0.05]}},
         world_setup=_base_world(SHORT_PAGES),
         script=_trigger_and_settle,
         checks=_checks_basic,
     ),
-    "soulcopy_multichunk": Scenario(
-        name="soulcopy_multichunk",
+    "export_multichunk": Scenario(
+        name="export_multichunk",
         description=(
             "A long roster forces the chunker to emit several chunks, each "
             "within the 2000-char Discord limit (prefix included)."

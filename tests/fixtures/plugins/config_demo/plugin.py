@@ -32,14 +32,10 @@ state actions mutate small and account-agnostic, or key it off
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List
-
 from core.event_bus import Event
 from core.plugin_base import PluginBase, PluginContext
 from core.settings_manager import Setting
 
-if TYPE_CHECKING:
-    pass
 
 class ConfigDemoPlugin(PluginBase):
     """A realistic configuration page built with the Dashboard UI API."""
@@ -62,8 +58,8 @@ class ConfigDemoPlugin(PluginBase):
         #: scope note: one instance owns the UI plugin-wide)
         self._feature_enabled = False
         self._verbose = False
-        self._rules: List[dict] = []
-        self._events: List[dict] = []
+        self._rules: list[dict] = []
+        self._events: list[dict] = []
         self._action_count = 0
 
     # ------------------------------------------------------------ lifecycle

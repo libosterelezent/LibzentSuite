@@ -25,15 +25,11 @@ from adapters.model import (
     DiscordEmbed,
     DiscordEmbedField,
     DiscordMessage,
-    DiscordReaction,
     convert_component,
-    convert_embed,
     convert_message,
 )
 from core.event_bus import (
     EventBus,
-    MessageDeleted,
-    MessageEdited,
     MessageReceived,
     ReactionAdded,
 )
@@ -303,7 +299,6 @@ class TestSimulatorRichBoundary(unittest.IsolatedAsyncioTestCase):
         from core.audit import AuditRecorder
         from core.event_bus import EventBus
         from core.priority import Priority
-        from core.rate_limit_manager import RateLimitManager
         from core.task_scheduler import TaskScheduler
 
         world = self._world()
@@ -414,7 +409,7 @@ class TestEventBusTypedEvents(unittest.IsolatedAsyncioTestCase):
 
 class TestFuturePluginShapes(unittest.TestCase):
     """§22: demonstrate snipe / kakerareact / kakeraloot / soulmate-farm /
-    soulcopy needs are met WITHOUT another core rewrite (shapes only)."""
+    exporter needs are met WITHOUT another core rewrite (shapes only)."""
 
     def test_snipe_shape(self) -> None:
         lib = library_message(content="caught!", reference=NS(
@@ -439,7 +434,7 @@ class TestFuturePluginShapes(unittest.TestCase):
         self.assertEqual(dto.embeds[0].description, "Rarity: ★★★")
         self.assertEqual(len(dto.buttons), 2)
 
-    def test_soulcopy_shape_dm(self) -> None:
+    def test_exporter_shape_dm(self) -> None:
         lib = library_message(content="Soulmates\n---\nAlice",
                               channel=NS(id=9001, name=None,
                                          type=NS(name="private"),
@@ -817,7 +812,7 @@ class TestConnectedFlagRound2(unittest.IsolatedAsyncioTestCase):
                           attachments=[], reactions=[], reference=None,
                           created_at=None)
 
-            handler = getattr(client._client, "on_message")
+            handler = client._client.on_message
             await handler(lib_message(1001))
             await handler(lib_message(1001))  # gateway RESUME replay
             await handler(lib_message(1002))

@@ -15,7 +15,6 @@ from core.errors import AccountError, SchedulerError, ServerRateLimit, TargetGon
 from core.event_bus import EventBus, MessageReceived, TaskCancelled, TaskCompleted, TaskFailed
 from core.priority import Priority
 from core.task_scheduler import TaskScheduler
-
 from tests.unit.helpers import FakeClient, FakeScheduler, default_snapshot, make_manager
 
 _TEST_LOG = logging.getLogger("tests.account_services")
@@ -41,7 +40,7 @@ def make_services(*, bus=None, scheduler=None, client=None, settings_dict=None,
     cache = DiscordCache("alpha")
     cache.ingest_snapshot(default_snapshot())
     return AccountPluginServices(
-        "alpha", "soulcopy",
+        "alpha", "exporter",
         bus=bus or EventBus(),
         scheduler=scheduler or FakeScheduler(),
         credentials=Credentials.from_values({"PRIMARY_BOT_ID": "123"}),
@@ -61,7 +60,7 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
         task = scheduler.submitted[0]
         self.assertEqual(
             (task.account, task.plugin, task.action, task.channel_id, task.content),
-            ("alpha", "soulcopy", "message", 100, "hi"),
+            ("alpha", "exporter", "message", 100, "hi"),
         )
         self.assertEqual(task.priority, Priority.LOW)
         await bus.publish(TaskCompleted(
@@ -97,7 +96,7 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
     async def test_flow_blocked_survives_the_ack_seam(self) -> None:
         """REGRESSION (channel_gone debug round): a task failing with
         TargetGone must re-raise TargetGone at the waiting plugin — NOT an
-        opaque SchedulerError — so the flow-abort contract (soulcopy's
+        opaque SchedulerError — so the flow-abort contract (exporter's
         catch-all) actually fires."""
         from core.errors import TargetGone
 
@@ -199,11 +198,11 @@ class SendAckTests(unittest.IsolatedAsyncioTestCase):
         h = make_manager()
         await h.manager.add_account("alpha")
         h.plugins.states_map["alpha"] = [
-            {"name": "soulcopy", "enabled": True, "settings": {"k": 9},
+            {"name": "exporter", "enabled": True, "settings": {"k": 9},
              "last_error": None, "error_count": 0},
         ]
-        services = h.manager.services_for("alpha", "soulcopy")
-        self.assertIs(h.manager.services_for("alpha", "soulcopy"), services)
+        services = h.manager.services_for("alpha", "exporter")
+        self.assertIs(h.manager.services_for("alpha", "exporter"), services)
         self.assertEqual(services.settings, {"k": 9})  # seeded from states()
         pending = asyncio.create_task(services.send_message(100, "hi"))
         await asyncio.sleep(0.02)
@@ -367,7 +366,7 @@ class CooldownStateApiTests(unittest.IsolatedAsyncioTestCase):
         cache = DiscordCache("alpha")
         cache.ingest_snapshot(default_snapshot())
         return AccountPluginServices(
-            "alpha", "soulcopy",
+            "alpha", "exporter",
             bus=EventBus(),
             scheduler=FakeScheduler(),
             credentials=Credentials.from_values({"PRIMARY_BOT_ID": "123"}),
@@ -380,6 +379,7 @@ class CooldownStateApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_cooldown_and_state_over_real_services(self) -> None:
         import tempfile
         from pathlib import Path
+
         from core.cooldowns import CooldownService
         from core.plugin_state import PluginStateService
         from database.db import Database
@@ -432,7 +432,7 @@ class CooldownStateApiTests(unittest.IsolatedAsyncioTestCase):
         plugin_state = PluginStateService(KvSpy())
         alpha = self._services(plugin_state=plugin_state)
         beta = AccountPluginServices(
-            "beta", "soulcopy",
+            "beta", "exporter",
             bus=EventBus(), scheduler=FakeScheduler(),
             credentials=Credentials.from_values({}),
             cache=DiscordCache("beta"), settings_dict={},
@@ -481,7 +481,7 @@ class PassthroughTests(unittest.IsolatedAsyncioTestCase):
         settings_dict = {"live": True}
         services = make_services(settings_dict=settings_dict)
         self.assertEqual(services.account, "alpha")
-        self.assertEqual(services.plugin, "soulcopy")
+        self.assertEqual(services.plugin, "exporter")
         self.assertEqual(services.credentials.primary_bot_id, 123)
         self.assertIs(services.settings, settings_dict)  # live reference kept
         settings_dict["live"] = False
@@ -571,7 +571,7 @@ class TransientTypingAcrossAckSeamTests(unittest.IsolatedAsyncioTestCase):
         h.manager._scheduler = scheduler
         try:
             await h.manager.add_account("alpha")  # never started: not running
-            services = h.manager.services_for("alpha", "soulcopy")
+            services = h.manager.services_for("alpha", "exporter")
             services.task_ack_timeout = 2.0
             with self.assertRaises(ConnectionError) as ctx:
                 await asyncio.wait_for(services.send_message(100, "hi"), 2.5)
@@ -624,10 +624,11 @@ class CredentialDeleteGenerationTests(unittest.IsolatedAsyncioTestCase):
     tombstone (the service-wide counter made store('beta') delete its
     own freshly written ciphertext when alpha was deleted mid-write)."""
 
-    def _service(self) -> "CredentialService":
+    def _service(self) -> CredentialService:
         import shutil
         import tempfile
         from pathlib import Path
+
         from core.credential_service import CredentialService
         tmp = tempfile.mkdtemp(prefix="sm-cred-")
         self.addCleanup(shutil.rmtree, tmp, True)

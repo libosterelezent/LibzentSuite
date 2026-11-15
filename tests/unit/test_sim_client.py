@@ -4,6 +4,7 @@ from __future__ import annotations
 import unittest
 
 from adapters.base import DiscordMessage
+from adapters.simulator import client as client_module
 from adapters.simulator.client import (
     LATENCY_MAX_MS,
     LATENCY_MIN_MS,
@@ -12,12 +13,11 @@ from adapters.simulator.client import (
 from adapters.simulator.world import (
     SYNTHETIC_ALPHA_ID,
     SYNTHETIC_BETA_ID,
-    SYNTHETIC_GUILD_CHANNEL,
     SYNTHETIC_BOT_ID,
+    SYNTHETIC_GUILD_CHANNEL,
     SYNTHETIC_OWNER_ID,
     SimWorld,
 )
-from adapters.simulator import client as client_module
 from core.errors import ServerRateLimit, TargetGone
 
 

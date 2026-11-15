@@ -1,4 +1,4 @@
-"""Pure text transforms for the soulcopy plugin (no I/O -> fully unit-testable).
+"""Pure text transforms for the exporter plugin (no I/O -> fully unit-testable).
 
 Semantics ported verbatim from the audited original (Soulcopy/autocopy.py):
   * each the_bot DM page: if the first line contains 'Soulmates', drop the first
@@ -9,15 +9,16 @@ Semantics ported verbatim from the audited original (Soulcopy/autocopy.py):
   * improvement over the original: a single entry longer than the limit is
     hard-split instead of silently producing an oversized chunk.
 """
+
 from __future__ import annotations
 
-from typing import Iterable, List, Sequence
+from collections.abc import Iterable, Sequence
 
-DEFAULT_PREFIX = "$soulcopy "
+DEFAULT_PREFIX = "$exporter "
 HEADER_MARKER = "Soulmates"
 
 
-def strip_page_header(page: str) -> List[str]:
+def strip_page_header(page: str) -> list[str]:
     """One DM page -> its lines, minus the 'Soulmates' header block when present."""
     lines = (page or "").split("\n")
     if lines and HEADER_MARKER in lines[0]:
@@ -30,7 +31,7 @@ def collapse_pages(pages: Iterable[str]) -> str:
 
     Returns '' when every page is empty/header-only.
     """
-    entries: List[str] = []
+    entries: list[str] = []
     for page in pages:
         entries.extend(strip_page_header(page))
     return "$".join(entries)
@@ -45,7 +46,7 @@ def _u16len(s: str) -> int:
     return len(s.encode("utf-16-le")) // 2
 
 
-def split_into_chunks(stream: str, max_chunk_length: int, prefix: str) -> List[str]:
+def split_into_chunks(stream: str, max_chunk_length: int, prefix: str) -> list[str]:
     """'$'-separated stream -> chunks fitting prefix + content in max_chunk_length.
 
     The budget is measured in UTF-16 code units (Discord's limit). Raises
@@ -53,12 +54,10 @@ def split_into_chunks(stream: str, max_chunk_length: int, prefix: str) -> List[s
     """
     if max_chunk_length < _u16len(prefix) + 1:
         # raise only when prefix + ONE character cannot fit
-        raise ValueError(
-            f"max_chunk_length {max_chunk_length} too small for prefix {prefix!r}"
-        )
+        raise ValueError(f"max_chunk_length {max_chunk_length} too small for prefix {prefix!r}")
     budget = max_chunk_length - _u16len(prefix)
-    chunks: List[str] = []
-    current: List[str] = []
+    chunks: list[str] = []
+    current: list[str] = []
     current_len = 0
     for entry in stream.split("$"):
         piece = entry
@@ -76,8 +75,7 @@ def split_into_chunks(stream: str, max_chunk_length: int, prefix: str) -> List[s
                     cut -= 1
                 if cut <= 0:  # prefix dominates the budget entirely
                     raise ValueError(
-                        f"max_chunk_length {max_chunk_length} too small "
-                        f"for prefix {prefix!r}"
+                        f"max_chunk_length {max_chunk_length} too small for prefix {prefix!r}"
                     )
                 chunks.append(piece[:cut])
                 piece = piece[cut:]
@@ -92,12 +90,12 @@ def split_into_chunks(stream: str, max_chunk_length: int, prefix: str) -> List[s
     return chunks
 
 
-def build_soulcopy_chunks(
+def build_exporter_chunks(
     pages: Sequence[str],
     max_chunk_length: int = 2000,
     prefix: str = DEFAULT_PREFIX,
-) -> List[str]:
-    """Full pipeline: DM pages -> ready-to-send '$soulcopy ...' chunks."""
+) -> list[str]:
+    """Full pipeline: DM pages -> ready-to-send '$exporter ...' chunks."""
     stream = collapse_pages(pages)
     if not stream:
         return []
@@ -105,6 +103,10 @@ def build_soulcopy_chunks(
 
 
 __all__ = [
-    "DEFAULT_PREFIX", "HEADER_MARKER", "strip_page_header", "collapse_pages",
-    "split_into_chunks", "build_soulcopy_chunks",
+    "DEFAULT_PREFIX",
+    "HEADER_MARKER",
+    "build_exporter_chunks",
+    "collapse_pages",
+    "split_into_chunks",
+    "strip_page_header",
 ]

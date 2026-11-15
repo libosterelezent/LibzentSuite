@@ -24,19 +24,18 @@ import tempfile
 import time
 import unittest
 from types import SimpleNamespace
-from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.api import ControlAPI
-from core.errors import SchedulerError, SettingsValidationError, TargetGone
-from core.event_bus import EventBus, MessageReceived
-from core.settings_manager import Setting, SettingsManager
-from core.task_scheduler.scheduler import TaskScheduler
 from core.account_manager.services import (
     AccountPluginServices,
     TaskAckRegistry,
 )
+from core.api import ControlAPI
+from core.errors import SchedulerError, TargetGone
+from core.event_bus import EventBus, MessageReceived
+from core.settings_manager import Setting, SettingsManager
+from core.task_scheduler.scheduler import TaskScheduler
 
 LOG = logging.getLogger("reaudit-b")
 FIXTURES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

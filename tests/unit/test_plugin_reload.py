@@ -360,6 +360,7 @@ class TestPassFourFenceSemantics(unittest.IsolatedAsyncioTestCase):
 
     async def test_fenced_activation_does_not_start_remaining(self):
         import asyncio
+
         from core.plugin_manager.manager import PluginRuntime
         mgr = self._two_runtime_mgr()
         mgr._activation_settle_timeout_s = 0.05
@@ -404,6 +405,7 @@ class TestPassFourFenceSemantics(unittest.IsolatedAsyncioTestCase):
 
     async def test_reload_timeout_does_not_fence_running_account(self):
         import asyncio
+
         from core.plugin_manager.manager import PluginRuntime
         mgr = self._two_runtime_mgr()
         mgr._activation_settle_timeout_s = 0.05
@@ -580,7 +582,6 @@ class TestPassSevenTeardownTakeover(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls["on_unload"], 1)
 
     async def test_completed_teardown_is_not_redone(self):
-        import asyncio
         mgr = make_manager()
         mgr.discover()
         await mgr.attach_account("alpha", allowed={"probe"})
@@ -741,6 +742,7 @@ class TestPassEightClaimLoop(unittest.IsolatedAsyncioTestCase):
 class TestLoaderRollback(unittest.TestCase):
     def test_failed_discover_keeps_records_and_old_modules(self):
         import tempfile
+
         from core.errors import PluginError
         from core.plugin_manager.loader import PluginLoader
         loader = PluginLoader(Path("tests/fixtures/plugins"))

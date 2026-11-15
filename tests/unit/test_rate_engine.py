@@ -163,10 +163,10 @@ class PacingBasics(unittest.IsolatedAsyncioTestCase):
 
     async def test_grant_is_plain_dataclass(self):
         manager = make_manager(interval=2.0)
-        grant = await manager.acquire(ACTION, account="alpha", plugin="soulcopy")
+        grant = await manager.acquire(ACTION, account="alpha", plugin="exporter")
         self.assertIsInstance(grant, Grant)
         self.assertEqual(grant.account, "alpha")
-        self.assertEqual(grant.plugin, "soulcopy")
+        self.assertEqual(grant.plugin, "exporter")
 
 
 class PacingKeys(unittest.IsolatedAsyncioTestCase):

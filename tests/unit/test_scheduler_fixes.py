@@ -25,7 +25,6 @@ from core.event_bus import Event, EventBus, MessageReceived, TaskCancelled, Task
 from core.priority import Priority
 from core.task_scheduler import Task, TaskScheduler
 from core.task_scheduler.scheduler import LOW_STARVATION_S
-
 from tests.unit.test_task_scheduler import (
     FakeAudit,
     FakeGrant,

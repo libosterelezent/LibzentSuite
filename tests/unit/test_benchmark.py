@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import tempfile
 import unittest
 from pathlib import Path
 
 from benchmark.collector import PerfCollector
-from benchmark.report import leak_verdict, render_table, compare
+from benchmark.report import compare, leak_verdict, render_table
 from benchmark.sampler import LoopLagMonitor, TaskSampler
 
 
@@ -69,9 +67,8 @@ class PerfCollectorTests(unittest.IsolatedAsyncioTestCase):
 
     def test_error_path_counts_and_reraises(self) -> None:
         perf = PerfCollector()
-        with self.assertRaises(RuntimeError):
-            with perf.stage("boom"):
-                raise RuntimeError("x")
+        with self.assertRaises(RuntimeError), perf.stage("boom"):
+            raise RuntimeError("x")
         snap = perf.snapshot()
         self.assertEqual(snap["boom"]["errors"], 1)
 
@@ -124,7 +121,6 @@ class ScenarioSmokeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_scenarios_smoke(self) -> None:
         from benchmark.cli import build_parser, run_suite
-        from benchmark.scenarios import BENCH_SCENARIOS
 
         for name in ("cold_boot",):
             args = build_parser().parse_args(
