@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 LOG = logging.getLogger("libzent.cogs")
 
-__all__ = ["CogServices", "FrameworkIntakeCog", "PluginCogHost"]
+__all__ = ["CogServices", "PluginCogHost"]
 
 
 class RichConverter(Protocol):
@@ -172,12 +172,3 @@ class PluginCogHost:
         await bot.remove_cog(name)
         LOG.debug("cog detached: %s/%s", account, plugin)
         return True
-
-
-class FrameworkIntakeCog:
-    """C1's framework-side event wiring shape ( lands with the adapter
-    integration in C1's wiring commit): the ONE framework listener —
-    audit + bus publication — with plugin listeners running alongside
-    it, never behind it. Implemented as a mixin the adapter builds its
-    intake cog from; the dispatch order guarantee comes from the
-    library: every listener is an independently scheduled task."""

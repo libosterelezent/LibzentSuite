@@ -229,13 +229,7 @@ def main() -> int:
     args, extra = parser.parse_known_args()
 
     if args.sim is not None or args.sim_list:
-        if (
-            args.start_all
-            or args.dashboard
-            or args.headless
-            or extra
-            or args.db != "state/libzent.db"
-        ):
+        if args.start_all or args.headless or extra or args.db != "state/libzent.db":
             print(
                 "error: --sim/--sim-list cannot be combined with live-stack "
                 "flags (--start-all/--dashboard/--headless/--db or a command)",
