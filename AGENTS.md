@@ -69,7 +69,7 @@ Use `@dataclass` when a class primarily represents structured data with named fi
 
 The root `AGENTS.md` plus `docs/architecture/architecture.md` and `docs/architecture/integration.md` are the places for agent guidance and binding engineering/architecture contracts. **Do not put coding rules, agent instructions, linting policy, or behavioral mandates inside `knowledgebase/` or `docs/`.**
 
-`knowledgebase/` exists to preserve project knowledge and technical reference material, not to govern agents.
+`knowledgebase/` exists to preserve project knowledge and technical reference material, not to govern agents. It is LOCAL-ONLY: gitignored, never in a fresh clone (same for the `dump/` retirement wing — only its README stays tracked as the pointer).
 
 - Treat existing knowledgebase entries as read-only historical knowledge during ordinary implementation work. Do not rewrite, delete, reorder, or silently “clean up” existing material.
 - The knowledgebase is append-only: add knowledge as a new focused document or a clearly dated/attributed addendum. Never replace earlier observations; correct a previous statement by adding a traceable correction that explains what superseded it.
