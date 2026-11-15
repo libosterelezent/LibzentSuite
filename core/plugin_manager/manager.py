@@ -44,6 +44,7 @@ from core.event_bus import (
 from core.plugin_base import (
     CommandContext,
     CommandSpec,
+    PluginServices,
     parse_command_args,
     usage_line,
 )
@@ -55,7 +56,18 @@ from .loader import PluginLoader
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from core.settings_manager import SettingsManager
+    from core.access_manager import AccessManager
+    from core.settings_manager import Setting, SettingsManager
+
+    from ..logging_service import ServiceLogger
+    from .cog_host import PluginCogHost
+
+
+def _no_services(_plugin: str) -> PluginServices | None:
+    """Typed default factory for accounts with no services wiring
+    (direct-construction stacks) — dispatch treats None as unwired."""
+    return None
+
 
 #: "no factory provided" for _teardown_runtime (None is a VALID factory
 #: answer — deactivate passes its already-popped factory explicitly)
@@ -77,15 +89,32 @@ class PluginRuntime:
     #: PHASE-4 (S7-L1): cached dispatch context (rebuilt whenever services
     #: are unwired — deactivated/reattached — via the services-is-None check)
     ctx: Any = None
+    #: PHASE-4 exactly-once teardown markers, set/cleared by the manager's
+    #: disable/unload compensation paths — declared on the runtime so the
+    #: lifecycle shape is honest to the checker (and to the reader)
+    _disable_done: bool = False
+    _unload_done: bool = False
+    _teardown_event: asyncio.Event | None = None
+    _teardown_task: asyncio.Task[None] | None = None
+    _teardown_owe: tuple[bool, bool] | None = None
 
 
 class PluginManager:
     """Discovery + lifecycle + event dispatch for every account's plugins."""
 
+    #: the C2 cog-host seam — bootstrap injects the process's PluginCogHost
+    #: (None on direct-construction stacks; cog verbs are then unavailable)
+    cog_host: PluginCogHost | None = None
+
+    #: the invoker gate's access seam — bootstrap wires the DB-backed
+    #: AccessManager here (None on direct-construction stacks, where the
+    #: gate falls back to the legacy env owner-ids grant)
+    _access_manager: AccessManager | None = None
+
     def __init__(
         self,
         bus: EventBus,
-        logger: logging.Logger,
+        logger: logging.Logger | ServiceLogger,
         settings: SettingsManager,
         plugin_repo: Any = None,
         plugin_dir: str = "plugins",
@@ -127,17 +156,17 @@ class PluginManager:
         #: dropped from the account (it is no longer in loader.names())
         self._attach_allowed: dict[str, set[str] | None] = {}
         #: account -> services factory: (plugin_name) -> PluginServices
-        self._services: dict[str, Callable[[str], Any]] = {}
+        self._services: dict[str, Callable[[str], PluginServices | None]] = {}
         #: strong refs for fire-and-forget dispatch tasks (no GC mid-flight)
-        self._pending: set[asyncio.Task] = set()
+        self._pending: set[asyncio.Task[None]] = set()
         #: account -> in-flight dispatch tasks (quiesced on deactivation)
-        self._pending_by_account: dict[str, set[asyncio.Task]] = {}
+        self._pending_by_account: dict[str, set[asyncio.Task[None]]] = {}
         #: account -> dispatch tasks that have STARTED and not finished.
         #: The slow-handler pileup is what the flood bound caps; created-
         #: but-not-yet-scheduled tasks don't count — the bus dispatcher
         #: yields only every SLICE_EVENTS, so a same-slice burst of instant
         #: handlers would otherwise be miscounted as a flood and dropped.
-        self._dispatch_started: dict[str, set[asyncio.Task]] = {}
+        self._dispatch_started: dict[str, set[asyncio.Task[None]]] = {}
         #: bounded grace for in-flight handlers during deactivate_account
         self._dispatch_grace_s = dispatch_grace_s
         #: central registry for plugin-attached dashboard UIs (Stage C);
@@ -250,7 +279,7 @@ class PluginManager:
         self._ensure_discovered()
         return self._loader.names()
 
-    def _schema_for(self, plugin: str) -> tuple:
+    def _schema_for(self, plugin: str) -> tuple[Setting, ...]:
         """Setting schema of a plugin: from the loader record."""
         self._ensure_discovered()
         record = self._loader.record(plugin)  # PluginError when unknown
@@ -441,8 +470,8 @@ class PluginManager:
         restored = 0
         reactivated = 0
         for acct, old_rt in list(affected.items()) + [(a, None) for a in orphaned]:
-            runtimes = self._accounts.get(acct)
-            if runtimes is None:
+            acct_runtimes = self._accounts.get(acct)
+            if acct_runtimes is None:
                 continue  # account gone while we worked
             profile_layers = await self._bound_profile_settings(acct)
             try:
@@ -459,7 +488,7 @@ class PluginManager:
                 loaded=False,
                 active=False,
             )
-            runtimes[name] = rt
+            acct_runtimes[name] = rt
             restored += 1
             # resolve settings NOW — same contract as attach_account
             # (fail-fast on bad config; the effective-settings view and
@@ -586,7 +615,7 @@ class PluginManager:
 
     async def unhost_cog(self, account: str, plugin: str) -> bool:
         """C2: the detach-side remove_cog (idempotent)."""
-        host = getattr(self, "cog_host", None)
+        host = self.cog_host
         if host is None:
             return False
         return await host.detach(account, plugin)
@@ -689,7 +718,7 @@ class PluginManager:
         # deactivation skipped on_unload for the newly loaded resources
         runtime._disable_done = False
         runtime._unload_done = False
-        services = self._services.get(account, lambda _n: None)(runtime.name)
+        services = self._services.get(account, _no_services)(runtime.name)
         runtime.ctx = None  # PHASE-4 (S7-L1): new facade -> rebuild cache
         try:
             profile = (await self._bound_profile_settings(account)).get(runtime.name)
@@ -784,7 +813,7 @@ class PluginManager:
                 " (the late activation will be fenced)" if fence else "",
             )
 
-    def active_instance_for(self, plugin_name: str, account=None):
+    def active_instance_for(self, plugin_name: str, account: str | None = None) -> Any:
         """VALIDATED live instance for a plugin, optionally per account.
 
         Raises PluginError naming the exact problem (unknown account,
@@ -817,7 +846,7 @@ class PluginManager:
                 return runtime.instance
         return None
 
-    def services_for(self, account: str, plugin_name: str):
+    def services_for(self, account: str, plugin_name: str) -> PluginServices | None:
         """The account's services facade for one plugin (or None).
 
         None means the account has no active service wiring (never
@@ -964,7 +993,7 @@ class PluginManager:
                 # deactivate must not see an active runtime past this
                 # point and fire on_disable a second time
                 runtime.active = False
-                services = self._services.get(account, lambda _n: None)(plugin)
+                services = self._services.get(account, _no_services)(plugin)
                 ctx = self._context(account, runtime, services)
                 with contextlib.suppress(Exception):
                     await self._hook(
@@ -1057,7 +1086,7 @@ class PluginManager:
         """
         ctx = entry.ctx
         if ctx is None or ctx.services is None:
-            services = self._services.get(account, lambda _n: None)(entry.name)
+            services = self._services.get(account, _no_services)(entry.name)
             ctx = entry.ctx = self._context(account, entry, services)
         return ctx if ctx.services is not None else None
 
@@ -1561,9 +1590,13 @@ class PluginManager:
         task = asyncio.get_running_loop().create_task(self._dispatch(event, runtimes))
         self._pending.add(task)
         self._pending_by_account.setdefault(account, set()).add(task)
-        task.add_done_callback(lambda t, account=account: self._reap_dispatch(account, t))
 
-    def _reap_dispatch(self, account: str, task: asyncio.Task) -> None:
+        def _reap(done: asyncio.Task[None], acct: str = account) -> None:
+            self._reap_dispatch(acct, done)
+
+        task.add_done_callback(_reap)
+
+    def _reap_dispatch(self, account: str, task: asyncio.Task[None]) -> None:
         """Drop a finished dispatch task from all bookkeeping sets."""
         self._pending.discard(task)
         tasks = self._pending_by_account.get(account)
@@ -1577,7 +1610,11 @@ class PluginManager:
             if not started:
                 self._dispatch_started.pop(account, None)
 
-    async def _dispatch(self, event: MessageReceived, runtimes: dict[str, PluginRuntime]) -> None:
+    async def _dispatch(
+        self,
+        event: MessageReceived | MessageEdited | MessageDeleted | ReactionAdded,
+        runtimes: dict[str, PluginRuntime],
+    ) -> None:
         """Await every enabled plugin's handle_event, isolated per plugin.
 
         RUNNING bookkeeping: the task registers itself at coroutine entry
@@ -1617,7 +1654,7 @@ class PluginManager:
             # SKIPPED, never delivered — the plugin would crash on None)
             ctx = runtime.ctx
             if ctx is None or ctx.services is None:
-                services = self._services.get(event.account, lambda _n: None)(runtime.name)
+                services = self._services.get(event.account, _no_services)(runtime.name)
                 ctx = runtime.ctx = self._context(event.account, runtime, services)
                 if ctx.services is None:
                     continue
@@ -1678,10 +1715,11 @@ class PluginManager:
             raise
 
     @staticmethod
-    def _services_factory(services: Any) -> Callable[[str], Any]:
+    def _services_factory(services: Any) -> Callable[[str], PluginServices | None]:
         """Accept a services object OR a (plugin_name) -> services factory."""
         if callable(services) and not hasattr(services, "send_message"):
-            return services
+            factory: Callable[[str], PluginServices | None] = services
+            return factory  # already a factory (the duck-check above)
         return lambda _name: services
 
     def _context(
@@ -1689,7 +1727,7 @@ class PluginManager:
         account: str,
         runtime: PluginRuntime,
         services: Any,
-        explicit: frozenset | None = None,
+        explicit: frozenset[str] | None = None,
     ) -> Any:
         from core.plugin_base import PluginContext
 
@@ -1721,7 +1759,7 @@ class PluginManager:
             raise PluginError(
                 f"plugin {plugin!r} has no callable handler {handler!r} on account {account!r}"
             )
-        services = self._services.get(account, lambda _n: None)(plugin)
+        services = self._services.get(account, _no_services)(plugin)
         ctx = self._context(account, rt, services)
         return await handler_fn(ctx, payload)
 
@@ -1752,7 +1790,7 @@ class _ManagerSettingsApi:
 
     # ------------------------------------------------------------- repos
     @staticmethod
-    def _repos(manager: PluginManager) -> tuple:
+    def _repos(manager: PluginManager) -> tuple[Any, Any]:
         """(plugin_profiles repo, account_plugins repo) — either None."""
         database = getattr(manager._repo, "_db", None)  # BaseRepository
         return (
@@ -1761,7 +1799,7 @@ class _ManagerSettingsApi:
         )
 
     # -------------------------------------------------------------- api
-    def schema(self) -> tuple:
+    def schema(self) -> tuple[Setting, ...]:
         return tuple(self._manager._schema_for(self._plugin))
 
     async def binding(self) -> str | None:
