@@ -1,0 +1,102 @@
+name: health
+
+# The weekly keep-the-repo-healthy sweep (owner decision 2026-11-15).
+# Per-push health gates live in tests.yml; this catches the drift no PR
+# would surface: runner-image bitrot, packaging rot, stale action pins,
+# and dependency staleness. Runs after security.yml's Monday 04:17 UTC
+# pass so the week opens with the full picture.
+on:
+  schedule:
+    - cron: "45 4 * * 1" # weekly, Monday 04:45 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  suite-bitrot:
+    name: Full gate on a fresh runner
+    # Reuses the entire tests.yml gate (lint, format, export sync,
+    # mypy ratchet, full suite) — one source of truth, zero duplication.
+    uses: ./.github/workflows/tests.yml
+
+  packaging-sanity:
+    name: Build still works
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4.4.0
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        run: python -m pip install uv==0.13.5
+      - name: Build sdist + wheel (the pyproject inventory contract)
+        env:
+          UV_PYTHON_PREFERENCE: only-system
+        run: |
+          uv build
+          ls -1 dist/
+      - name: Action pins still valid
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh extension install github/gh-actions-lock
+          gh actions-lock --no-fix
+
+  dependency-freshness:
+    name: Dependency updates probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4.4.0
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        run: python -m pip install uv==0.13.5
+      - name: Probe available updates (never mutates the lock)
+        id: probe
+        env:
+          UV_PYTHON_PREFERENCE: only-system
+        run: |
+          uv lock --upgrade &> /tmp/upgrade.log || true
+          if git diff --quiet -- uv.lock; then
+            echo "updates=none" >> "$GITHUB_OUTPUT"
+            echo "lock is current — nothing to do"
+          else
+            echo "updates=available" >> "$GITHUB_OUTPUT"
+            git diff --stat -- uv.lock | tail -5 | tee /tmp/upgrades.stat
+            git diff -- uv.lock > /tmp/upgrades.diff
+          fi
+          git checkout -- uv.lock
+      - name: Open or refresh the tracking issue
+        if: steps.probe.outputs.updates == 'available'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "Weekly probe: \`uv lock --upgrade\` would change the lock."
+            echo
+            echo '```'
+            cat /tmp/upgrades.stat
+            head -n 60 /tmp/upgrades.diff
+            echo '```'
+            echo
+            echo "To adopt (AGENTS.md §8 order matters):"
+            echo "1. \`uv lock --upgrade\`"
+            echo "2. \`uv export --format requirements-txt --no-hashes --no-dev --no-emit-project -o requirements.txt\`"
+            echo "3. run the suite, then commit lock + export together"
+          } > /tmp/issue-body.md
+          existing=$(gh issue list --state open --search "in:title dependency updates available" --json number --jq 'length')
+          if [ "$existing" -eq 0 ]; then
+            gh issue create \
+              --title "dependency updates available (uv lock --upgrade)" \
+              --body-file /tmp/issue-body.md
+          else
+            number=$(gh issue list --state open --search "in:title dependency updates available" --json number --jq '.[0].number')
+            gh issue comment "$number" --body-file /tmp/issue-body.md
+          fi
