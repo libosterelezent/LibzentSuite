@@ -3,6 +3,12 @@
 # Docs: https://gh.io/actions-lockfile
 version: 'v0.0.3'
 workflows:
+    '.github/workflows/build.yml':
+        - 'actions/checkout@v4.4.0'
+        - 'actions/setup-python@v5.6.0'
+    '.github/workflows/health.yml':
+        - 'actions/checkout@v4.4.0'
+        - 'actions/setup-python@v5.6.0'
     '.github/workflows/security.yml':
         - 'actions/checkout@v4.4.0'
         - 'actions/setup-python@v5.6.0'

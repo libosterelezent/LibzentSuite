@@ -1,0 +1,43 @@
+name: build
+
+# The release pipeline: a pushed v* tag builds the sdist + wheel from
+# the exact tag and attaches them to a GitHub release. Per-push build
+# gating lives in tests.yml (the build job); this workflow is the
+# publish path. Note: v* tag pushes require the owner's ruleset bypass
+# (protect-release-tags) — by design, releases are cut deliberately.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: # build-only rehearsal, no release step
+
+permissions:
+  contents: write # release creation + artifact upload (tag pushes only)
+
+jobs:
+  release:
+    name: Build and publish release artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4.4.0
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        run: python -m pip install uv==0.13.5
+      - name: Build sdist + wheel
+        env:
+          UV_PYTHON_PREFERENCE: only-system
+        run: |
+          uv build
+          ls -1 dist/
+      - name: Attach artifacts to the release
+        # Tag pushes only — a workflow_dispatch rehearsal stops at build.
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+          || gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
