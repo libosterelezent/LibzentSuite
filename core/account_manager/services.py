@@ -67,6 +67,11 @@ from .cache import DiscordCache, resolve_dm_channel
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from core.cooldowns import CooldownService
+    from core.plugin_state import PluginStateService
+    from core.workspace.signals import SignalOutbox
+    from database.plugin_data import PluginDataStore
+
 LOG = logging.getLogger("libzent.services")
 
 
@@ -228,7 +233,7 @@ class MessageWaiterRegistry:
 
     def __init__(self, bus: EventBus) -> None:
         self._by_account: dict[str, list[Callable[[MessageReceived], None]]] = {}
-        self._unsub = bus.subscribe(MessageReceived, self._on_message)
+        self._unsub: Callable[[], None] | None = bus.subscribe(MessageReceived, self._on_message)
 
     def _on_message(self, event: Event) -> None:
         if not isinstance(event, MessageReceived):
@@ -296,10 +301,10 @@ class AccountPluginServices:
         waiter_registry: MessageWaiterRegistry | None = None,
         client_getter: Callable[[], Any] | None = None,
         api_cache_repo: Any = None,
-        cooldowns: Any = None,
-        plugin_state: Any = None,
-        plugin_data: Any = None,
-        signals: Any = None,  # core.workspace.signals.SignalOutbox (W4)
+        cooldowns: CooldownService | None = None,
+        plugin_state: PluginStateService | None = None,
+        plugin_data: PluginDataStore | None = None,
+        signals: SignalOutbox | None = None,  # core.workspace.signals (W4)
     ) -> None:
         self._account = account
         self._plugin = plugin
@@ -448,7 +453,7 @@ class AccountPluginServices:
         )
         await self._acks.wait_for_task(task.id, self.task_ack_timeout)
 
-    async def fetch_user(self, user_id: int):
+    async def fetch_user(self, user_id: int) -> Any:
         """Resolve a user, cached per account in the database.
 
         Resolution order: the account's persistent api_cache 'user' row ->
@@ -492,7 +497,7 @@ class AccountPluginServices:
         return user
 
     # ------------------------------------------------------------- cooldowns
-    def _require_cooldowns(self) -> Any:
+    def _require_cooldowns(self) -> CooldownService:
         """The shared CooldownService, or a clear error when unwired."""
         if self._cooldowns is None:
             raise PluginError(
@@ -544,7 +549,7 @@ class AccountPluginServices:
         return await self._require_cooldowns().active_for(self._account, plugin=self._plugin)
 
     # ----------------------------------------------------------- plugin state
-    def _require_plugin_state(self) -> Any:
+    def _require_plugin_state(self) -> PluginStateService:
         """The shared PluginStateService, or a clear error when unwired."""
         if self._plugin_state is None:
             raise PluginError(
@@ -570,7 +575,7 @@ class AccountPluginServices:
         return await self._require_plugin_state().delete_pair(self._account, self._plugin, key)
 
     # -------------------------------------------- plugin data (PHASE 10/B3)
-    def _require_plugin_data(self) -> Any:
+    def _require_plugin_data(self) -> PluginDataStore:
         """The shared PluginDataStore, or an honest error when unwired."""
         if self._plugin_data is None:
             raise PluginError(
@@ -683,7 +688,8 @@ class AccountPluginServices:
         """
         if not isinstance(idle_timeout, (int, float)) or idle_timeout <= 0:
             raise AccountError(f"collect_messages idle_timeout must be > 0, got {idle_timeout!r}")
-        queue: asyncio.Queue[MessageReceived] = asyncio.Queue()
+        # MessageReceived | None: the teardown sentinel wakes parked getters
+        queue: asyncio.Queue[MessageReceived | None] = asyncio.Queue()
         failure: list[BaseException] = []
 
         def _handler(event: Event) -> None:
@@ -721,6 +727,8 @@ class AccountPluginServices:
                     break
                 if failure:
                     break  # woken by the failure sentinel, not a match
+                if event is None:
+                    break  # the sentinel itself (its failure flag races us)
                 collected.append(event)
             if failure:
                 exc = failure[0]
@@ -738,7 +746,7 @@ class AccountPluginServices:
         """Fire-and-forget publish on the shared bus (safe from sync code in a loop)."""
         self._bus.publish_nowait(event)
 
-    async def emit_signal(self, name: str, payload: dict | None = None) -> str:
+    async def emit_signal(self, name: str, payload: dict[str, Any] | None = None) -> str:
         """Emit a workspace chain signal (W4, decision 12).
 
         DURABLE BEFORE RETURN: the outbox row persists first, then this

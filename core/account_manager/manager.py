@@ -1968,7 +1968,7 @@ class AccountManager:
         # the hub path keeps serving COMMANDS-only plugins)
         plugins_mgr = getattr(self, "_plugin_manager", None)
         cog_host = getattr(plugins_mgr, "cog_host", None) if plugins_mgr else None
-        if cog_host is not None:
+        if cog_host is not None and plugins_mgr is not None:
             bot = getattr(client, "_client", None)
             if bot is not None and hasattr(bot, "add_cog"):
                 runtimes = getattr(plugins_mgr, "_accounts", {}).get(name, {})

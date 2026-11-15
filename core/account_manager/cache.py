@@ -242,6 +242,8 @@ class DiscordCache:
             return f"channel-{channel_id}"
         if info.dm:
             return f"dm with {info.recipient}"
+        if info.guild_id is None:  # non-DM channel without a guild record
+            return f"#{info.name}"
         guild = self.guilds.get(info.guild_id, {}).get("name", "?")
         return f"#{info.name} in {guild}"
 
