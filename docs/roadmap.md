@@ -183,8 +183,19 @@ per-account plugin profile pages.
     fixed to ZERO across all 108 source files. Strict mode is now a
     hard floor (.github/mypy-baseline = 0). The pass surfaced and fixed
     four latent runtime bugs along the way (see the commit series).
-[ ] `core/remote_control.py` — delete when the sim's control_mention
-    scenario retires
+[x] Retirement sweep (2026-11-15, the cleanup pass): the mention
+    bridge (RemoteControl + sim control_mention + REMOTE_CONTROL gate),
+    the hub command machinery (spec table/executor/PacingBackend),
+    plugin_base's command grammar, dashboard residue in the facade,
+    the test-only intake mixin, the dead launcher script — all in
+    dump/ (preserved verbatim; README inventories every move). The
+    audit-driven fixes: --sim's stale args.dashboard crash, estop
+    drives ControlAPI directly, emit_signal declared on the
+    PluginServices protocol.
+[ ] ping's command face returns as a COG — blocked on the cog host
+    injecting the paced PluginServices facade into plugin cogs (the
+    capability gap the audit surfaced; today the toolbox carries only
+    to_rich/audit_rich)
 
 ---
 

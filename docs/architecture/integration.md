@@ -22,9 +22,10 @@ bug in one of them — fix the divergence, do not fork the contract.
 
 ```
 main.py -> core/bootstrap.py::build()  (the ONE composition root)
-        -> ControlAPI (core/api.py — the shared facade, 94 methods)
-        -> interfaces/cli (the current interface; FastAPI wraps the
-           same facade next)
+        -> ControlAPI (core/api.py — the shared facade, 105 methods)
+        -> interfaces/cli (the wired interface; the FastAPI surface in
+           interfaces/api/ + the Flet shell in interfaces/ui/ are
+           landed-but-unwired over the same facade)
 ```
 
 - Interfaces (CLI today, REST/WS + Flet next) parse input, call
@@ -145,9 +146,11 @@ owner service, validated and persisted first.
 ## 8. Plugin integration
 
 - Capability = direct `account_plugins` assignment (fail-closed).
-- Declarations: `COMMANDS` (self-command verbs), `EMITS` (bare signal
+- Declarations: `COG` (a discord.ext.commands.Cog subclass — the
+  command face; typed params are the grammar), `EMITS` (bare signal
   names), `FOLLOWS` (triggers + handler names) — validated at
-  discovery; a broken declaration fails the boot.
+  discovery; a broken declaration fails the boot. The legacy COMMANDS
+  registry retired to dump/ (2026-11-15).
 - Chain handlers are invoked through `PluginManager.invoke_handler`
   with the per-account context: paced sends, live settings. A missing
   plugin/handler raises `PluginError` (the runtime records a visible
@@ -180,7 +183,9 @@ owner service, validated and persisted first.
 - CLI verbs: `accounts | credentials | plugins | workspaces |
   ratelimit | cooldowns | tasks | simulation | logs | audit | estop |
   status | help | quit`.
-- Self-command framework verbs: `pg`, `say`, `help`, `prefixrate`,
-  `adminlist`, `adminperms`, `adminprefix` (+ every plugin `COMMANDS`
-  verb) — all gated by the access manager, replies paced.
-- Surface reference: `knowledgebase/API_ENDPOINTS.md`.
+- Framework verbs (`status`, `accounts`, `plugins`, `ratelimit`,
+  `tasks`, `estop`, `simulation`, `say`, `pg`, `admin*`,
+  `prefixrate`, `help`) ride FrameworkVerbsCog — library commands,
+  gated by the access manager before argument parsing. Plugin verbs
+  are their COGs.
+- REST surface reference: `interfaces/api/app.py` (27 routes).

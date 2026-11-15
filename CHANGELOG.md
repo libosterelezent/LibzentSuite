@@ -53,7 +53,17 @@ nothing can ship until that hold is lifted; see
 
 ### Removed
 - Dashboard (custom HTTP/WS/SPA), Mudae parser pack, sync groups +
-  fleet, the COMMANDS facade, and the soulcopy naming (now `exporter`).
+  fleet, and the soulcopy naming (now `exporter`).
+- The retirement sweep (2026-11-15): the RemoteControl mention bridge
+  (+ the sim's control_mention scenario and the REMOTE_CONTROL gate),
+  the hub command machinery (spec table, executor chain, PacingBackend,
+  runtime_stats), plugin_base's hub-internal command grammar, the
+  dashboard-era UI surface on ControlAPI, the never-constructed intake
+  mixin, and the dead `serve_dashboard.sh` launcher — everything
+  preserved verbatim under `dump/` with a full inventory.
+### Fixed
+- The offline simulator entrypoint crashed on every invocation (stale
+  `args.dashboard` read predating the dashboard removal).
 
 ### Security
 - Credentials encrypted at rest (Fernet); workflow tokens read-only;
