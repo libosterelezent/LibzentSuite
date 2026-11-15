@@ -158,6 +158,15 @@ per-account plugin profile pages.
 
 ## Codebase Hygiene
 
+[x] Repository hardening, free tier (2026-11-15): security workflow
+    (gitleaks full-history + pip-audit vs the lock + bandit -ll),
+    pre-commit local gate, Dependabot (github-actions only), read-only
+    workflow tokens, CODEOWNERS + SECURITY.md, bandit triage (8 sites,
+    values always parameterized).
+[ ] Gated on the public flip (owner-approved): repo rulesets (master:
+    PR + required `unittest` check, no force push/delete; `v*` tags
+    protected), GitHub native secret scanning + push protection,
+    Dependabot alerts, then CodeQL (free once public).
 [ ] mypy strict ratchet: continue module by module
     (settings_manager + plugin_manager next)
 [ ] `core/remote_control.py` — delete when the sim's control_mention
