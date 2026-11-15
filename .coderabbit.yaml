@@ -5,11 +5,9 @@
 
 language: en-US
 tone_instructions: >-
-  Be direct and technical. This is a solo-maintained, strictly-gated
-  repository: mypy strict is at ZERO errors (a hard floor), ruff owns
-  style, coverage has a 76% branch floor, and CI runs a 3.10–3.13
-  matrix. Do not restate what a linter or the type checker already
-  catches — focus on logic, contracts, and isolation.
+  Be direct and technical. The gates already catch lint/types (mypy
+  zero floor, ruff, coverage floor, 3.10-3.13 matrix) — do not restate
+  those. Focus on logic, contracts, and account isolation.
 
 reviews:
   profile: chill
