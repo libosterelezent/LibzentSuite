@@ -12,6 +12,7 @@ import math
 import os
 import stat
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -230,6 +231,11 @@ class TestTaskIdsSurviveRestart(_TmpCase):
 
 
 class TestCancellationHelper(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipIf(
+        sys.version_info < (3, 11),
+        "Task.cancelling is 3.11+; on 3.10 the helper's getattr guard "
+        "returns `unknown` and the count is unobservable",
+    )
     async def test_check_does_not_consume_cancellation(self) -> None:
         seen = {}
 
