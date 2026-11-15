@@ -244,8 +244,8 @@ class PluginLoader:
         a discord.ext.commands.Cog SUBCLASS (not an instance — the host
         builds one per (account, plugin) with the toolbox injected).
         The fail-fast convention carries: a broken declaration never
-        boots. Absent COG is valid during the migration (COMMANDS
-        still serves those plugins until the flip)."""
+        boots. Absent COG means the plugin simply has no command face
+        (event-only plugins are valid)."""
         cog = getattr(cls, "COG", None)
         if cog is None:
             return  # migration window: the plugin has not flipped yet
@@ -269,8 +269,8 @@ class PluginLoader:
 
     def _validate_chain_declarations(self, cls: type[PluginBase], name: str, path: Path) -> None:
         """Validate a plugin's EMITS/FOLLOWS declarations at discovery
-        (workspace chains, decision 2 — same fail-fast convention as
-        COMMANDS: a broken declaration must never boot).
+        (workspace chains, decision 2 — the loader's fail-fast
+        convention: a broken declaration must never boot).
 
         Structural problems (wrong container types, a missing handler,
         a namespaced EMIT name the plugin cannot emit as) are

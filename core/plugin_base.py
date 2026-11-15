@@ -1,52 +1,22 @@
-"""Plugin contract: base class, runtime context, services protocol (spec §4-6).
+"""plugin_base — the plugin DRIVER contract (post-C2).
 
-Ported from the audited ``core/plugin_base.py`` (git aa76da4) onto the rewrite
-spine:
-
-  * settings manifests now use :class:`core.settings_manager.Setting`,
-  * Discord I/O goes ONLY through the :class:`PluginServices` protocol
-    (implemented per account by the account manager, A6) — plugins never
-    touch a client, a limiter or the bus directly,
-  * the runtime context is a plain dataclass built by the plugin manager
-    (one context per (account, plugin) pair).
-
-Plugin contract (unchanged from the audited original):
-  * declare metadata (``name`` — lowercase ``[a-z0-9_-]+`` — ``version``,
-    ``description``) and a settings manifest (``settings``),
-  * implement lifecycle hooks (``on_load``/``on_enable``/``on_disable``/
-    ``on_unload``) and :meth:`PluginBase.handle_event`,
-  * catch :class:`core.errors.FlowBlocked` around any multi-step flow, log
-    ONE clean abort line and return — per-account isolation is the
-    dispatcher's job, failing clean and quiet is the plugin's (reference:
-    ``tests/fixtures/sim_plugins/exporter/plugin.py``, a test-only
-    workload fixture).
-
-CONTRACT NOTE (A3 decision, documented for A6): the pinned PluginServices
-protocol gained ``open_dm(user_id) -> int`` — flow plugins need the target bot
-DM channel id to filter collected pages. The account manager implements it
-(the underlying DiscordClient protocol already exposes ``open_dm``).
-
-SELF-COMMAND DECLARATION (per-account command interface): a plugin may
-declare a ``COG`` class attribute — a library Cog subclass —
-making its verbs available as ``<prefix><name>`` self-commands on every
-account it is ASSIGNED to and ENABLED on (e.g. ``sm!rollstart``). Handlers
-run through the SAME paced/isolated pipeline as plugin code: replies go
-through ``ctx.services.send_message`` (never a raw client), a crashing
-handler is contained by the executor, and the plugin manager binds each
-declared handler to the per-account plugin instance before invocation
-(the cog carries the command callbacks).
+Plugins subclass PluginBase: identity ClassVars (name/version/
+description/settings), the COG command face, EMITS/FOLLOWS chain
+declarations, and the optional lifecycle hooks. At runtime every hook
+receives a PluginContext whose .services is the paced PluginServices
+facade. The hub-internal command grammar retired with the registry
+(2026-11-15) — commands ARE cogs now; see dump/README.md.
 """
 
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
     Protocol,
-    runtime_checkable,
 )
 
 from .priority import Priority
@@ -61,16 +31,6 @@ if TYPE_CHECKING:  # runtime duck-typing avoids import cycles / hard deps
     from .credentials import Credentials as Credentials
     from .event_bus import Event, MessageReceived
     from .settings_manager import Setting as Setting
-
-
-class CommandSettingsApi(Protocol):
-    """Settings surface a self-command handler may read/mutate."""
-
-    def get(self, plugin: str, key: str, default: Any = None) -> Any: ...
-
-    def set(self, plugin: str, key: str, value: Any) -> Any: ...
-
-    def clear(self, plugin: str, key: str) -> Any: ...
 
 
 class PluginBase(abc.ABC):  # noqa: B024 -- contract marker; every hook is optional by design
@@ -168,45 +128,6 @@ class PluginContext:
         return f"<PluginContext {self.account}:{self.plugin} settings={sorted(self.settings)}>"
 
 
-@dataclass(frozen=True)
-class CommandContext:
-    """Everything a self-command handler may touch at runtime.
-
-    Built per invocation by the plugin manager. ``services`` is the SAME
-    per-(account, plugin) facade plugin code uses, so a handler's sends
-    flow through the paced pipeline with identical guarantees — there is
-    deliberately NO raw client access here. ``channel_id``/``guild_id``
-    describe where the command was invoked (DM commands have
-    ``guild_id=None``); ``raw`` is the verbatim argument remainder after
-    the command word.
-    """
-
-    #: account name the command was invoked on
-    account: str
-    #: plugin name the command belongs to ("selfcmd" for framework verbs)
-    plugin: str
-    #: per-(account, plugin) services facade (paced sends, credentials...);
-    #: None ONLY for framework verbs, which run without a plugin facade
-    services: PluginServices | None
-    #: pre-scoped logger: libzent.<account>.<plugin>
-    logger: logging.Logger
-    #: channel the command was invoked in
-    channel_id: int = 0
-    #: guild of the invoking channel (None for DMs)
-    guild_id: int | None = None
-    #: validated settings surface (None on stripped stacks)
-    settings_api: CommandSettingsApi | None = None
-    #: verbatim argument remainder (whitespace-normalized by the parser)
-    raw: str = ""
-    #: the invoking Discord user id (None when unknown) — admin-gated
-    #: handlers check it against the AccessManager
-    invoker_id: int | None = None
-    #: Reserved: the converged cog path parses typed kwargs natively
-    #: (the library's converters); this field is vestigial.
-    parsed: dict[str, Any] = field(default_factory=dict)
-
-
-@runtime_checkable
 class PluginServices(Protocol):
     """Discord I/O surface handed to plugins (implemented by A6 per account).
 
@@ -327,6 +248,12 @@ class PluginServices(Protocol):
     def publish(self, event: Event) -> None:
         """Publish an event on the shared bus (fire-and-forget safe)."""
 
+    async def emit_signal(self, name: str, payload: dict[str, Any] | None = None) -> str:
+        """Emit a workspace chain signal (W4, decision 12) — the durable
+        outbox path; returns the signal id. Declared on the protocol so
+        the seam the facade implements (audit finding #10, 2026-11-15)
+        is visible to every plugin author and to the checker."""
+
     def validate_channel(self, channel_id: int) -> None:
         """Raise :class:`core.errors.TargetGone` when the channel is not
         usable for this account (call BEFORE sending — flow safety)."""
@@ -351,100 +278,4 @@ class PluginServices(Protocol):
         """Resolved settings of this (account, plugin) pair."""
 
 
-@dataclass(frozen=True)
-class ArgSpec:
-    """HUB-INTERNAL: one positional argument of a framework verb.
-
-    No longer the plugin-facing grammar (plugins declare typed params
-    on cog callbacks); this shape serves the framework verb
-    definitions inside the hub until C3 migrates them to cogs."""
-
-    name: str
-    kind: Any = str
-    required: bool = True
-    default: Any = None
-    greedy: bool = False
-    choices: tuple[Any, ...] | None = None
-
-
-def _convert_arg(spec: ArgSpec, token: str) -> Any:
-    """HUB-INTERNAL: coerce one token to the ArgSpec's kind."""
-    if spec.kind is str or (callable(spec.kind) is False and spec.kind is None):
-        return token
-    if spec.kind in (int, float):
-        try:
-            return spec.kind(token)
-        except (TypeError, ValueError):
-            raise ValueError(
-                f"<{spec.name}> must be a valid {spec.kind.__name__}, got {token!r}"
-            ) from None
-    if callable(spec.kind):
-        try:
-            return spec.kind(token)
-        except ValueError:
-            raise ValueError(f"<{spec.name}>: {token!r} is not valid") from None
-    raise ValueError(
-        f"<{spec.name}> has an unsupported kind {spec.kind!r} (use str, int, float or a callable)"
-    )
-
-
-@dataclass(frozen=True)
-class CommandSpec:
-    """HUB-INTERNAL: one framework verb definition.
-
-    The plugin-facing COMMANDS contract is RETIRED (plugins declare
-    COG classes); this shape defines the hub's own verbs until C3
-    migrates them to the FrameworkVerbsCog."""
-
-    name: str
-    help: str
-    usage: str = ""
-    category: str = ""
-    args: tuple[ArgSpec, ...] = ()
-    handler: Callable[..., Any] | None = None
-
-
-def parse_command_args(spec: CommandSpec, argv: list[str]) -> dict[str, Any]:
-    """HUB-INTERNAL: parse one framework verb invocation's positional
-    arguments against its ArgSpec grammar. Raises ValueError with a
-    usage-ready message on arity/type/choice failures."""
-    out: dict[str, Any] = {}
-    rest = list(argv)
-    for arg in spec.args:
-        if arg.greedy:
-            out[arg.name] = list(rest)
-            rest = []
-            break
-        if not rest:
-            if arg.required:
-                raise ValueError(f"missing <{arg.name}>")
-            out[arg.name] = arg.default
-            continue
-        token = rest.pop(0)
-        if arg.choices is not None and token not in arg.choices:
-            raise ValueError(f"<{arg.name}> must be one of {list(arg.choices)}, got {token!r}")
-        out[arg.name] = _convert_arg(arg, token)
-    if rest:
-        raise ValueError(f"unexpected extra argument(s): {' '.join(rest)}")
-    return out
-
-
-def usage_line(spec: CommandSpec) -> str:
-    """HUB-INTERNAL: render a framework verb's usage hint."""
-    parts = [f"<{a.name}>" if a.required else f"[{a.name}]" for a in spec.args]
-    if any(a.greedy for a in spec.args):
-        parts.append("...")
-    return " ".join(parts)
-
-
-__all__ = [
-    "ArgSpec",
-    "CommandContext",
-    "CommandSettingsApi",
-    "CommandSpec",
-    "PluginBase",
-    "PluginContext",
-    "PluginServices",
-    "parse_command_args",
-    "usage_line",
-]
+__all__ = ["PluginBase", "PluginContext", "PluginServices"]

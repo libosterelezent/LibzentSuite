@@ -17,9 +17,7 @@ from typing import Any
 
 from discord.ext import commands as _ext_commands
 
-from core.event_bus import Event
 from core.plugin_base import (
-    CommandContext,
     PluginBase,
     PluginContext,
 )
@@ -63,42 +61,10 @@ class ProbePlugin(PluginBase):
     async def handle_event(self, ctx: PluginContext, event: Event) -> None:
         return  # no-op: the fixture never reacts to traffic
 
-    # ------------------------------------------------------- UI extension
-    async def _probe_action(self, context, payload):
-        return ActionResult(success=True, message="probe executed", data={"ts": time.time()})
-
-    async def _set_verbose(self, context, payload):
-        return ActionResult(success=True, message=f"verbose → {payload.get('value')}")
-
-    # -------------------------------------------------------- self-commands
-    async def _cmd_probeinfo(self, ctx: CommandContext, args: list[str]) -> str:
-        """One-line status reply through the paced pipeline."""
-        return "probe ok"
-
-    async def _cmd_probeset(self, ctx: CommandContext, args: list[str]) -> str:
-        """Positional-grammar demo: everything arrives typed+validated
-        in ``ctx.parsed`` — the handler never parses strings itself."""
-        p: dict[str, Any] = ctx.parsed
-        return (
-            f"probe set: name={p.get('name')} mode={p.get('mode')} "
-            f"count={p.get('count')} note={p.get('note')!r}"
-        )
-
-    async def _cmd_probestart(self, ctx: CommandContext, args: list[str]) -> str:
-        """Greedy-args demo: consumes every remaining token as a list
-        (multi-target commands) with per-item verdicts, original-style."""
-        names: list[str] = ctx.parsed.get("names") or []
-        started = [n for n in names if not n.startswith("x")]
-        skipped = [n for n in names if n.startswith("x")]
-        parts = [
-            f"started: {', '.join(started)}" if started else "",
-            f"skipped: {', '.join(skipped)}" if skipped else "",
-        ]
-        return "\n".join(p for p in parts if p) or "nothing started"
-
-    #: declared LAST: the handler names above already exist in the class
-    #: namespace (a class body is sequential)
-    #: C2 (migration window): the CONVERGED declaration alongside the
+    # ------------------------------------------------ command face (COG)
+    #: the CONVERGED declaration: the cog host builds one per
+    #: (account, plugin) with the toolbox injected; typed params
+    #: are the grammar now (the legacy COMMANDS retired 2026-11-15)
     #: legacy COMMANDS — the cog host builds this per (account, plugin)
     #: with the toolbox injected; typed params replace ArgSpec grammar
     class _ProbeCog(_ext_commands.Cog):

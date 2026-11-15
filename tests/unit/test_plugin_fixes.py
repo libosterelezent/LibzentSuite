@@ -5,10 +5,7 @@ Covers, per the audit report:
   (a) help pagination — groups join with blank lines so _paginate_help
       can actually split; page 1 carries the more-help suffix and
       ``help 2`` returns the second disjoint page;
-  (b) ArgSpec grammar — an unrecognized kind (e.g. kind="int") fails at
-      parse time; a greedy arg with a scalar default parses as a
-      ONE-element list, never char-split;
-  (c) executor authz — a wired access manager is consulted (and the
+  (b) executor authz — a wired access manager is consulted (and the
       legacy env-owner list ignored); invoker_id=None denies;
   (d) admin gate — fleet-wide mutating verbs (accounts start/stop,
       plugins on/off, prefixrate set) are admin-only; reads stay open

@@ -57,7 +57,7 @@ from .logging_service import (
     detach_stdlib_bridge,
     release_stderr_pipeline,
 )
-from .plugin_manager import PluginManager
+from .plugin_manager import COMMAND_HUB, PluginManager
 from .plugin_state import PluginStateService
 from .rate_limit_manager import RateLimitManager
 from .settings_manager import SettingsManager
@@ -767,14 +767,9 @@ async def _assemble(
         audit=audit,
         history_repo=database.tasks,
     )
-    # prefixrate command bridge: the hub needs the limiter for get/set of
-    # an account's send pacing (registered once; tests may stub it)
-    from .plugin_manager.commands import COMMAND_HUB, PacingBackend
-
     #: forward declaration — the late-plugins invoker below closes over
     # ``plugins`` before the manager is constructed (resolved at call time)
     plugins: PluginManager
-    COMMAND_HUB.pacing = PacingBackend(limiter)
     # AccessManager: the admin panel's store (admins, per-account command
     # perms, prefixes, primary bot id) over the kv repo; one-time env migration
     # seeds admins from OWNER_USER_IDS when the stored list is empty.
@@ -966,12 +961,9 @@ async def _assemble(
     )
 
     # Framework management from chat (status/accounts/plugins/ratelimit/
-    # lane/tasks/estop/simulation) rides the SELF-COMMAND layer now: the
-    # hub's api_provider bridges the ported Framework verbs to the ONE
-    # ControlAPI — same commands, same replies, one dispatch path and one
-    # authorization gate with the plugin commands. The separate
-    # RemoteControl bus handler is retired (class kept for compat; the
-    # simulator stack still exercises it for its control_mention scenario).
+    # lane/tasks/estop/simulation) rides FrameworkVerbsCog: the hub's
+    # api_provider bridges the verbs to the ONE ControlAPI. The mention
+    # bridge (RemoteControl) retired with the hub's registry — see dump/.
     COMMAND_HUB.api_provider = lambda: api
 
     return Framework(
