@@ -3,6 +3,8 @@
 Planning and study documents live in `plans/` at the repo root — `docs/`
 stays strictly user-facing functionality and command reference
 (AGENTS.md §5). Binding contracts: `ARCHITECTURE.md`, `INTEGRATION.md`.
+Completed items migrate to `docs/` and `knowledgebase/` as historical
+records (AGENTS.md rule 8).
 
 ---
 
@@ -15,134 +17,139 @@ stays strictly user-facing functionality and command reference
       CLI     Future UI (FastAPI + Flet)
 
 Both interfaces manipulate the same: accounts + plugin assignments,
-presets, tasks and scheduling, rate-limit policies + the safety floor,
-credentials (encrypted at rest), logs and audit, simulation, workspace
+profiles (plugin-owned) + workspace presets (coordination), tasks and
+scheduling, rate-limit policies + the safety floor, credentials
+(encrypted at rest), logs and audit, simulation, workspace
 orchestration. Plugins stay independent of the interface layer.
 
-## Current State (2026-11-14)
+## Current State (2026-11-15)
 
-**1,636 tests green, CI green.** Core framework (bootstrap →
-ControlAPI → managers → repositories → adapters); multi-account Discord
-orchestration on the better.py-self fork; workspace unification
-complete (`core/workspace/`: membership, chains, durable signals,
-presets, channels, guard, reconciler); plugin system with
-EMITS/FOLLOWS; rate limiting (1.5 s floor, learned defaults);
-Fernet-encrypted credentials; CLI (the only interface); full offline
-simulator; uv-locked, ruff-gated, mypy-ratcheted.
+**1,620 tests green, CI green.** Core framework; workspace
+orchestration (chains, durable signals, membership); plugin system
+with COG declarations + EMITS/FOLLOWS; command convergence complete
+(cogs are the only command model); FastAPI core API + Flet UI shell
+landed; better.py-self fully adopted. Rate limiting (1.5 s floor);
+Fernet-encrypted credentials; CLI; full offline simulator; uv-locked,
+ruff-gated, mypy-ratcheted.
 
 Removed: dashboard (2026-11-13), Mudae parser pack (2026-11-13),
-sync groups + fleet (2026-11-14 — replaced by the workspace layer).
+sync groups + fleet (2026-11-14), COMMANDS/CommandSpec/ArgSpec facade
+(2026-11-15 — cogs replaced it).
 
 ---
 
-## DONE — Workspace Unification (W0–W5, 2026-11-13 → 2026-11-14)
+## DONE — Historical Records
 
-ONE concept replaced SyncGroupManager + the fleet module: accounts stay
-independent until placed in a **workspace** owning membership, pacing
-clocks, chains ("A acts → B follows, visibly"), presets (copy-on-apply
-with provenance), and channels (registry / assignments / per-plugin
-bindings).
+*These items are complete. Their detail lives in the knowledgebase and
+the linked commit ranges. This section keeps only the summary.*
 
-- **W0** — spec: `WORKSPACE_DESIGN.md` (18 locked decisions, rev 3)
-- **W1** — pure domain core (models, transitions, 7-check policy,
-  presets) — 76 tests
-- **W2** — persistence + the v10 fold (materialization, provenance,
-  channels) — 20 tests
-- **W3** — WorkspaceService (one writer) + the `workspaces_*`
-  ControlAPI/CLI surface — 19 tests
-- **W4** — chain runtime (durable signal outbox, immutable snapshots,
-  visible skips, deterministic routing) + guard + reconciler — 23 tests
-- **W5** — old modules deleted; v11 drops the v9 tables; the
-  migration runner race-proofed at the root
+### Workspace Unification (W0–W5, 2026-11-13 → 2026-11-14)
 
-Full decision record: `WORKSPACE_DESIGN.md`. Landing detail: the
-commit series `0332ed4`..`cb70a63`.
+ONE concept replaced SyncGroupManager + the fleet module: workspaces
+own membership, pacing clocks, chains ("A acts → B follows,
+visibly"), and the orchestration correctness core. Commits
+`0332ed4`..`cb70a63`. Decision record: `WORKSPACE_DESIGN.md`.
+Historical record: `knowledgebase/WORKSPACE_SUPERSESSION.md`.
+
+### Command Convergence (C1–C4, 2026-11-14 → 2026-11-15)
+
+Plugins ARE cogs for their command face. The COMMANDS/CommandSpec/
+ArgSpec facade, manual tokenization, custom help, and the 922-line
+SelfCommandHub bridge retired. `FrameworkVerbsCog` carries all 15
+framework verbs. The hub keeps only bind/unbind + api_provider +
+access wiring. Commits `415eab3`..`62b7fc7`. Historical record:
+`knowledgebase/DISCORD_ADAPTER_FORK_INTEGRATION.md`.
+
+### better.py-self adoption (complete)
+
+Dependency switch, memory caps + cache persistence, `bot.add_check()`
+gate, dynamic callable prefixes, throttle bridge, EWMA constants,
+probe-down recipe, `cache_stats()` via ControlAPI. Commits
+`8637d0a`, `9f2321b`, `06cec37`, `252aa78`, `838a0a1`.
+
+### FastAPI core API (2026-11-14)
+
+`interfaces/api/` — routers over ControlAPI: Pydantic models,
+X-API-Token auth, the full surface, WebSocket scaffold. Commit
+`ad417cb`.
+
+### Flet UI shell (2026-11-14)
+
+`interfaces/ui/` — page registry, ApiClient, NavigationRail shell,
+four default pages. Commit `b713195`.
 
 ---
 
 ## Active Queue
 
-### NEXT — Command convergence (C1–C4; owner-locked 2026-11-14: cogs only · full convergence · before FastAPI)
+### NEXT — Plugin Profiles + Workspace Presets (P1–P8)
 
-**Plugins ARE cogs for their command face.** The parallel facade
-retires: `COMMANDS`/`CommandSpec`/`ArgSpec`, manual tokenization
-(`_parse_invocation`, `_convert_arg`), custom `render_help`, and the
-922-line `SelfCommandHub` bridge. Plugins declare a real library Cog —
-typed params via annotations (`target: discord.Member` resolves
-mention/ID/name through the client cache), command groups, native
-help, `cog_command_error`, `cog_before_invoke` audit. Framework verbs
-become cogs in the same slice — ONE command model.
+**The two-level data model** (owner-locked 2026-11-15, full plan:
+`adoption_of_data_management.md`):
 
-The seams (owner-refined):
+- **Account plugin profiles** — each plugin defines its own profile
+  schema, channels, cooldowns, and execution lifecycle. Identity:
+  `(account, plugin, profile_name)`. The core persists + isolates but
+  never interprets plugin-specific fields.
+- **Workspace presets** — coordinate multiple accounts as a group.
+  They REFERENCE profiles (never copy), own workflow state, execution
+  dependencies, and cross-account synchronization. A workspace preset
+  is a reusable orchestration definition; a workspace execution is a
+  running/recoverable instance.
 
-- **Pacing** — `ctx.send` stays LIBRARY-NATIVE: command replies are
-  invocation-gated (the access check bounds them). The documented
-  discipline: `ctx.send` for COMMAND RESPONSES ONLY — never in loops,
-  background work, or anything scheduled. Loops (and any future
-  app-wide task runner) ride `ctx.services.send_message`, the paced
-  pipeline.
-- **Events** — two first-class paths, one toolbox: plugin cogs carry
-  `@Cog.listener()` freely (the full library event surface; self-echo
-  is standard `author.id` discipline). The event bus stays for the
-  routed `handle_event` path. The DTO/audit layer is a FEATURE MODULE:
-  `to_rich(message)` hands a listener the same frozen DiscordMessage
-  the framework builds (embeds/components/buttons parsed once) and can
-  fire the inbound audit — first-hand handling without per-plugin
-  walkers. Injection rides the cog host (plugins never import
-  adapters).
-- **Cooldowns** — `commands.cooldown()` stays EXCLUDED (per-account,
-  DB-persisted domain state).
-- **Capability gating** — one cog instance per (account, plugin) with
-  the services facade injected; assignment ∧ enabled become
-  `add_cog`/`remove_cog` — the library's hot-reload IS the rebuild.
-- **Framework intake** — the framework's own cog (audit + bus
-  publication) is the single framework listener; plugin listeners run
-  alongside, not behind.
-- **Testing** — listeners are methods: direct invocation with
-  constructed library fixtures (the fork is a pinned dependency; the
-  standard cog pattern). The simulator is one harness, not the
-  definition of testability — no feature is prohibited for being
-  outside it.
+| Capability | Account plugin profile | Workspace preset |
+|---|---|---|
+| Plugin configuration | **Owns** | References |
+| Channel configuration | **Owns** | References indirectly |
+| Cooldown state | **Owns** (profile-scoped) | Tracks dependencies |
+| Individual execution task | **Owns** | Orchestrates |
+| Multi-account workflow state | — | **Owns** |
+| Cross-account synchronization | — | **Owns** |
 
-Phasing: **C1 DONE 2026-11-14** (host + toolbox + before_invoke audit
-+ intake cog; commits 415eab3..5f51cbc) → **C2 (in progress)** plugin
-commands migrate
-(fixtures first, then the declaration flip: COMMANDS removed, loader
-validates cog classes) → **C3** framework verbs migrate; the hub
-bridge + `COMMAND_HUB` registration retire → **C4** the hub keeps only
-its hub-shaped residue (access wiring, verb definitions,
-`api_provider`).
+Implementation decisions (owner-locked):
+1. Reference profiles, don't copy them.
+2. Keep runtime state separate — profile cooldowns stay profile-scoped.
+3. Workspace membership is explicit — presets reference only members.
+4. Profile changes detected, not silently substituted.
+5. Coordination is recoverable — workflow checkpoints enable resume.
+6. No shared-state ownership ambiguity — workspace observes, never owns.
 
-### FastAPI core API — [x] DONE 2026-11-14 (commit ad417cb)
+Phasing:
 
-`interfaces/api/` — routers over the ONE ControlAPI: Pydantic models,
-X-API-Token auth, the full surface (status/estop/resume, accounts
-CRUD, workspaces + members + pause/resume + tasks, plugins
-assign/unassign, tasks, logs, audit), a WebSocket endpoint scaffolding
-the live-event bridge. Zero business logic in the interface layer.
-5 tests over a stub ControlAPI.
+- **P1** — ownership model: profile identity, plugin-defined schemas,
+  channel-in-profile, profile-scoped cooldowns/tasks, independent
+  lifecycle, restart recovery
+- **P2** — core persistence: generic profile storage API (CRUD +
+  exists), JSON body (core never interprets), `UNIQUE(account, plugin,
+  profile_name)`, schema versioning
+- **P3** — plugin lifecycle: plugins define defaults + validation;
+  profile CRUD/selection is plugin-managed (cog commands or hooks)
+- **P4** — runtime execution: resolve profile before task start; pass
+  profile config into execution; per-profile isolation
+- **P5** — application interfaces: generic profile persistence through
+  ControlAPI; plugin-provided management operations; CLI/GUI consume
+  without imposing a universal schema
+- **P6** — isolation testing: cross-account/plugin profile-name
+  collisions; CRUD + restart persistence; concurrent execution;
+  channel isolation; deletion/recovery
+- **P7** — migration: existing `plugin_profiles` + bindings map into
+  profile instances; extract `"channels"` key; merge `plugin_settings`
+  overrides; drop redundant centralized preset mechanisms
+- **P8** — workspace preset integration: reference `(account, plugin,
+  profile)` tuples; workspace execution instances hold runtime state;
+  profile-change detection; workflow checkpoints
 
-### Flet UI — [x] SHELLED 2026-11-14 (commit b713195)
+Migration contract: `adoption_of_data_management.md` (the full
+existing → new table/column mapping).
 
-`interfaces/ui/` — the dashboard replacement shell: ApiClient (stdlib
-REST), the page registry, the flet NavigationRail shell, and four
-default pages (Status/Accounts/Workspaces/Logs). Flet imports lazily
-(the module and the registry test without it). The page model targets
-workspaces. Pages deepen in the next iteration (preset management,
-chain inspection, live WS events).
+### Flet UI (pages deepen)
+
+Preset/profile management, chain inspection, live WS events,
+per-account plugin profile pages.
 
 ---
 
 ## Open Ideas (unscheduled)
-
-### better.py-self adoption (remaining)
-
-ALL DONE 2026-11-15: dependency switch (`8637d0a`); memory caps +
-persistence (`9f2321b`); `bot.add_check()` gate (`06cec37`); dynamic
-prefixes (`252aa78`); throttle bridge + EWMA constants + probe-down
-recipe + `cache_stats()` (`838a0a1`).
-
-### Plugin data
 
 [ ] Metric rollup wiring — the opt-in global view over
     AccountPluginData (store + local view shipped; aggregation missing).
@@ -151,8 +158,8 @@ recipe + `cache_stats()` (`838a0a1`).
 
 ## Codebase Hygiene
 
-[ ] mypy strict ratchet: 456 → 0 (event_bus, workspace, account_manager
-    at zero; settings_manager + plugin_manager next)
+[ ] mypy strict ratchet: continue module by module
+    (settings_manager + plugin_manager next)
 [ ] `core/remote_control.py` — delete when the sim's control_mention
     scenario retires
 
@@ -164,5 +171,6 @@ recipe + `cache_stats()` (`838a0a1`).
 |---|---|---|
 | ProfileManager (permission bundles) | 2026-10-22 | Direct `account_plugins` assignment |
 | Mudae parser pack | 2026-11-13 | Generic parser registry (ships empty) |
-| Dashboard (custom HTTP/WS/SPA) | 2026-11-13 | FastAPI + Flet (planned) |
+| Dashboard (custom HTTP/WS/SPA) | 2026-11-13 | FastAPI + Flet |
 | Sync groups + fleet | 2026-11-14 | Workspace unification (`core/workspace/`) |
+| COMMANDS/CommandSpec/ArgSpec facade | 2026-11-15 | Cog declarations (the convergence) |

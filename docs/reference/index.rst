@@ -24,3 +24,8 @@ per-subsystem references, the formal plugin API, configuration, CLI,
 endpoint reference, testing, security, glossary, changelog)
 live in ``knowledgebase/*.md`` — committed with the repository,
 maintained by hand, never overwritten by the generator.
+
+.. toctree::
+   :maxdepth: 1
+
+   completed
