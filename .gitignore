@@ -12,6 +12,7 @@ credentials.key*
 config/accounts/*.local.json
 *.log
 state/
+.vscode/
 
 # --- python ---
 __pycache__/
@@ -26,8 +27,15 @@ docs/_build/
 # the knowledgebase is stored locally to avoid irrelevant repo size expansion.
 knowledgebase/
 
+# --- local-only agent tooling (skills, session config) ---
+# personal per-machine configuration: the agent skills and the opencode
+# session config never leave the machine that uses them
+.agents/
+opencode.json
+opencode.jsonc
+.opencode/
+
 # python build artifacts (uv build / pip install -e .)
 /dist/
 /build/
 *.egg-info/
-.vscode/
