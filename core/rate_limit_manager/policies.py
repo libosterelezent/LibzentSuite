@@ -168,7 +168,7 @@ def parse_scope(level: Any, owner: Any) -> tuple[str, str | None]:
     return level, owner
 
 
-def policy_from_row(row: Any | dict) -> tuple[str, str | None, RatePolicy]:
+def policy_from_row(row: Any | dict[str, Any]) -> tuple[str, str | None, RatePolicy]:
     """Convert one repository row into a validated ``(level, owner, policy)``.
 
     Rows arrive either as RatePolicyRecord-shaped objects (attribute access)

@@ -37,7 +37,7 @@ with level one of ``"danger" | "warn" | "info"``, sorted danger > warn > info.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -58,7 +58,9 @@ def describe_scope(level: str, owner: str | None) -> str:
     return owner if level == "account_plugin" else f"{level} {owner}"
 
 
-def evaluate_policy(policy: RatePolicy, level: str, owner: str | None, floor: float) -> list[dict]:
+def evaluate_policy(
+    policy: RatePolicy, level: str, owner: str | None, floor: float
+) -> list[dict[str, Any]]:
     """Advisory verdicts for ONE stored policy (never blocks anything).
 
     Returns zero or more ``{"level", "code", "message"}`` dicts. Only a
@@ -67,7 +69,7 @@ def evaluate_policy(policy: RatePolicy, level: str, owner: str | None, floor: fl
     floor raised after the policy was stored. Everything at or above the
     floor is a legitimate Discord-driven pacing configuration.
     """
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
     where = describe_scope(level, owner)
     if policy.interval < floor:
         out.append(
@@ -109,7 +111,7 @@ def evaluate_policy(policy: RatePolicy, level: str, owner: str | None, floor: fl
     return out
 
 
-def floor_warning(floor: float) -> dict:
+def floor_warning(floor: float) -> dict[str, Any]:
     """The floor as a displayable entry (info).
 
     NOT part of evaluate_policies() output anymore — a permanent entry is
@@ -127,7 +129,7 @@ def floor_warning(floor: float) -> dict:
     }
 
 
-def sort_warnings(items: Iterable[dict]) -> list[dict]:
+def sort_warnings(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Order danger first, then warn, then info (stable + deterministic)."""
     return sorted(
         items,
@@ -141,7 +143,7 @@ def sort_warnings(items: Iterable[dict]) -> list[dict]:
 
 def evaluate_policies(
     policies: Iterable[tuple[RatePolicy, str, str | None]], floor: float
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Review every stored policy; sorted danger > warn > info.
 
     Args:
@@ -153,7 +155,7 @@ def evaluate_policies(
     A clean configuration yields an EMPTY list — no permanent/residual
     entries are prepended.
     """
-    items: list[dict] = []
+    items: list[dict[str, Any]] = []
     for policy, level, owner in policies:
         items.extend(evaluate_policy(policy, level, owner, floor))
     return sort_warnings(items)

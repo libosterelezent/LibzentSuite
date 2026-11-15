@@ -95,7 +95,7 @@ class DiscordEmbed:
         """British spelling alias (mirrors the library's dual naming)."""
         return self.color
 
-    def field_map(self) -> dict:
+    def field_map(self) -> dict[str, str]:
         """{name: value} for quick lookups (roster-style parsing)."""
         return {f.name: f.value for f in self.fields}
 
@@ -241,7 +241,7 @@ class DiscordMessage:
     @property
     def buttons(self) -> tuple[DiscordComponent, ...]:
         """Every BUTTON component in the tree (kakeraloot convenience)."""
-        out: list = []
+        out: list[DiscordComponent] = []
         for top in self.components:
             for component in top.walk():
                 if component.type_name == "button":
@@ -420,10 +420,11 @@ def convert_channel(channel: Any, *, dm: bool) -> DiscordChannel:
     name = _text(getattr(channel, "name", ""))
     if dm and not name and recipient is not None:
         name = f"dm:{_optional_int(getattr(recipient, 'id', None))}"
+    ctype_name = getattr(ctype, "name", None)
     return DiscordChannel(
         id=_optional_int(getattr(channel, "id", None)) or 0,
         name=name,
-        type=ctype.name if hasattr(ctype, "name") else _text(ctype),
+        type=ctype_name if isinstance(ctype_name, str) else _text(ctype),
         guild_id=(_optional_int(getattr(guild, "id", None)) if guild else None),
     )
 
@@ -521,7 +522,7 @@ def convert_message(
     if _depth >= _MAX_REFERENCED_DEPTH:
         referenced = None
 
-    def _ref_ids(ref: Any) -> tuple:
+    def _ref_ids(ref: Any) -> tuple[int | None, int | None, int | None]:
         if ref is None:
             return (None, None, None)
         return (

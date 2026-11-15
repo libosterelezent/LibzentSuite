@@ -108,7 +108,7 @@ class DiscordClient(Protocol):
         the message on demand (plugin-requested fetch) and clicks the
         matching button; raises the shared domain errors."""
 
-    def cached_snapshot(self) -> dict:
+    def cached_snapshot(self) -> dict[str, Any]:
         """In-memory view: {"available": bool, "user": {"id","name"},
         "latency_ms": float|None, "guilds": [{"id","name",
         "channels": [{"id","name"}...]}...], "dm_channels": [{"id","recipient"}...]}.
