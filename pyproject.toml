@@ -5,6 +5,7 @@
 name = "libzentsuite"
 version = "0.0.0"
 description = "Game-agnostic, multi-account Discord flow-orchestration framework"
+license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
     "aiosqlite>=0.20",
@@ -43,6 +44,7 @@ include = [
 # runtime lock; NOT runtime dependencies.
 dev = [
     "bandit>=1.9.4",
+    "coverage>=7.16.2",
     "mypy==2.4.0",
     "pip-audit>=2.10.1",
     "ruff==0.17.2",
@@ -109,3 +111,28 @@ files = ["core", "adapters", "database", "interfaces", "plugins", "benchmark", "
 [[tool.mypy.overrides]]
 module = "flet"
 ignore_missing_imports = true
+
+[tool.coverage.run]
+# the production tree only — tests measure the shipped code, not
+# themselves; main.py is the interactive entry point (never imported
+# by the suite) so it stays out of the measured set
+source = [
+    "core",
+    "adapters",
+    "database",
+    "interfaces",
+    "plugins",
+    "benchmark",
+    "parsers",
+    "scripts",
+]
+branch = true
+
+[tool.coverage.report]
+# floor set just under the first full measured level (77.0% branch
+# coverage, 2026-11-15); raise it as coverage grows — never lower it
+# without recording why
+fail_under = 76.0
+precision = 1
+show_missing = false
+skip_covered = true
