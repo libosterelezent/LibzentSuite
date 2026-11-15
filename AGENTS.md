@@ -119,10 +119,12 @@ check through `uv run --frozen` (ruff's `F` rules superseded the former
 pyflakes step). `requirements.txt` is a generated pip-compat export of the
 lock (`uv export --format requirements-txt --no-hashes --no-dev
 --no-emit-project -o requirements.txt`) — regenerate it, never hand-edit.
-The mypy strict run is an advisory CI step until the legacy error baseline
-reaches zero — fix strictness in modules as they are touched and ratchet
-coverage outward; never add a blanket ignore or a blanket suppression to
-shrink the count.
+The export-sync and lock-integrity gates in CI enforce this mechanically.
+The mypy strict run is a ratchet gate (`.github/mypy-baseline`): CI fails
+when the error count grows past the baseline, and the baseline is only
+lowered after errors are fixed — fix strictness in modules as they are
+touched and ratchet coverage outward; never add a blanket ignore or a
+blanket suppression to shrink the count.
 
 ### Ruff baseline
 
