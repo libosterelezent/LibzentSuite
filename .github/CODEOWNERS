@@ -1,0 +1,5 @@
+# Default owner for everything in the repository.
+# Enforcement (required reviews on protected branches) activates with
+# the repository rulesets; the file lands first so ownership is on
+# record from day one.
+* @libosterelezent
