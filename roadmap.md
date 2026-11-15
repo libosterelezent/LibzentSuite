@@ -178,8 +178,10 @@ per-account plugin profile pages.
     PR + required `unittest` check, no force push/delete; `v*` tags
     protected), GitHub native secret scanning + push protection,
     Dependabot alerts, then CodeQL (free once public).
-[ ] mypy strict ratchet: continue module by module
-    (settings_manager + plugin_manager next)
+[x] mypy strict ratchet: **COMPLETE (2026-11-15)** — 485 legacy errors
+    fixed to ZERO across all 108 source files. Strict mode is now a
+    hard floor (.github/mypy-baseline = 0). The pass surfaced and fixed
+    four latent runtime bugs along the way (see the commit series).
 [ ] `core/remote_control.py` — delete when the sim's control_mention
     scenario retires
 

@@ -122,9 +122,11 @@ lock (`uv export --format requirements-txt --no-hashes --no-dev
 The export-sync and lock-integrity gates in CI enforce this mechanically.
 The mypy strict run is a ratchet gate (`.github/mypy-baseline`): CI fails
 when the error count grows past the baseline, and the baseline is only
-lowered after errors are fixed — fix strictness in modules as they are
-touched and ratchet coverage outward; never add a blanket ignore or a
-blanket suppression to shrink the count.
+lowered after errors are fixed. The baseline reached ZERO on 2026-11-15
+(485 legacy errors fixed across all 108 source files) — strict mode is
+now a hard floor: any new strict error fails CI, and the baseline must
+stay at zero. Never add a blanket ignore or a blanket suppression to
+shrink the count.
 
 ### Ruff baseline
 
