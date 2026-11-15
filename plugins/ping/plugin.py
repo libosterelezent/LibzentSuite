@@ -30,8 +30,8 @@ from core.plugin_base import (
 )
 
 if TYPE_CHECKING:
-    from core.settings_manager import Setting
     from core.event_bus import Event
+    from core.settings_manager import Setting
 
 LOG = logging.getLogger("libzent.ping")
 

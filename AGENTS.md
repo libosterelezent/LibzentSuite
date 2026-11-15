@@ -1,6 +1,6 @@
 # AGENTS.md — LibzentSuite Engineering Standards
 
-These instructions apply to the whole repository. They describe how to make changes that are correct, readable, maintainable, and consistent with LibzentSuite's architecture. They are not a substitute for the current source code, tests, `ARCHITECTURE.md`, or `INTEGRATION.md`.
+These instructions apply to the whole repository. They describe how to make changes that are correct, readable, maintainable, and consistent with LibzentSuite's architecture. They are not a substitute for the current source code, tests, `docs/architecture/architecture.md`, or `docs/architecture/integration.md`.
 
 ## 1. Working principles
 
@@ -67,7 +67,7 @@ Use `@dataclass` when a class primarily represents structured data with named fi
 
 ## 5. Documentation and knowledgebase policy
 
-The root `AGENTS.md`, `ARCHITECTURE.md`, and `INTEGRATION.md` are the places for agent guidance and binding engineering/architecture contracts. **Do not put coding rules, agent instructions, linting policy, or behavioral mandates inside `knowledgebase/` or `docs/`.**
+The root `AGENTS.md` plus `docs/architecture/architecture.md` and `docs/architecture/integration.md` are the places for agent guidance and binding engineering/architecture contracts. **Do not put coding rules, agent instructions, linting policy, or behavioral mandates inside `knowledgebase/` or `docs/`.**
 
 `knowledgebase/` exists to preserve project knowledge and technical reference material, not to govern agents.
 
@@ -80,6 +80,7 @@ The root `AGENTS.md`, `ARCHITECTURE.md`, and `INTEGRATION.md` are the places for
 
 `docs/` exists to describe the projects structure in a user-friendly way and how to use its available commands and the entire LibzentSuite.
 
+- Future plans and direction of design also lives in docs.
 - Treat existing docs as a copy of what is available in the codebase and its functionalities rather then considering it as the source of truth.
 - The docs folder exists just to keep the functionalities, commmands and their uses in a user readable format entirely separate to the knowledgebase folder.
 - If there is any new addition or removal of feature or command and functionality note down it in the related files inside docs folder if available and always keep the docs updated of any changes in commands or functionalities to avoid keeping stale dumps.
@@ -89,7 +90,7 @@ The root `AGENTS.md`, `ARCHITECTURE.md`, and `INTEGRATION.md` are the places for
 
 ## 6. Public contracts, architecture, and UI
 
-- Read `ARCHITECTURE.md` for ownership and architectural boundaries and `INTEGRATION.md` for the current inter-module contract. Verify those documents against current code when they appear stale; do not perpetuate a known contradiction. Propose corrections to the root contract docs when necessary.
+- Read `docs/architecture/architecture.md` for ownership and architectural boundaries and `docs/architecture/integration.md` for the current inter-module contract. Verify those documents against current code when they appear stale; do not perpetuate a known contradiction. Propose corrections to the contract docs when necessary.
 - Keep `core.api.ControlAPI` the shared application facade for CLI and dashboard. Add or modify methods there when a feature legitimately requires a shared operation, and update implementations, both interfaces, and tests consistently.
 - The dashboard may change its layout, navigation, component structure, and interaction flow without changing backend behavior. An old page list or prior implementation is not automatically a permanent UI requirement unless reaffirmed in the current task or a current binding contract.
 - For UI work, specify a component's purpose, inputs/outputs, interaction states, disabled/loading states, success/failure feedback, validation, focus/keyboard behavior, responsive behavior, and accessible name/state. Judge acceptance by observable behavior and user outcomes, not by a required markup trick or presence of a comment.

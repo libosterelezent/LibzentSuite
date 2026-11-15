@@ -23,7 +23,7 @@ Waiting model (three stages inside ``acquire``, in order):
     how the draws differ (a post-grant-only draw let a smaller second jitter
     compress the wire gap to ``interval - jitter_max`` and even invert it).
 
-Determinism seams (all time flows through them — see INTEGRATION.md):
+Determinism seams (all time flows through them — see docs/architecture/integration.md):
 
 * ``clock``      — injected Clock; default is monotonic SystemClock; tests
                    pass a ManualClock and advance() it.

@@ -14,7 +14,7 @@ Each :class:`Scenario` bundles everything the runner needs:
 All ids are SYNTHETIC (module constants in adapters.simulator.world); real
 Discord ids/tokens only ever live in .env.
 
-Documented decisions (contract ambiguities — see INTEGRATION.md ground rules):
+Documented decisions (contract ambiguities — see docs/architecture/integration.md ground rules):
   * Retry evidence in ``server_429_respected`` is verified primarily from
     WORLD observables (the recorded blocked attempt followed by a later
     successful delivery). Audit notes mentioning attempts/retries are

@@ -26,7 +26,8 @@ keeps the report private until a fix lands.
 
 Include: affected surface, reproduction steps, impact, and — if
 relevant to account isolation or credential handling — which invariant
-you believe breaks (the boundaries are documented in `ARCHITECTURE.md`).
+you believe breaks (the boundaries are documented in
+`docs/architecture/architecture.md`).
 
 ## Handling expectations
 

@@ -1,4 +1,4 @@
-"""Shared unit-test fixtures (any agent may extend — see INTEGRATION.md).
+"""Shared unit-test fixtures (any agent may extend — see docs/architecture/integration.md).
 
 Currently provides the A6 account-manager test doubles:
 

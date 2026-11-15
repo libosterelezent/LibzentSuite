@@ -12,3 +12,5 @@ pages are the navigable digest.
    boundaries
    dataflow
    lifecycle
+   architecture <architecture>
+   integration <integration>

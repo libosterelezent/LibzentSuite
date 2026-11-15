@@ -20,10 +20,12 @@ ONE Core API.
    :caption: Site
 
    architecture/index
+   design/index
    plugins/index
    operations/index
    api/index
    reference/index
+   roadmap
 
 Indices
 -------

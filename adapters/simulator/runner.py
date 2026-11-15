@@ -63,7 +63,7 @@ Manager modules from A3/A5/A6 are imported INSIDE run(): when one is still
 pending integration, run() raises SimulationError with a human-readable
 message instead of an ImportError traceback.
 
-Documented contract decisions (ambiguous seams — see INTEGRATION.md
+Documented contract decisions (ambiguous seams — see docs/architecture/integration.md
 ground rules; the lead reconciles at integration):
 
 - LOGGER SHAPE: the spine SettingsManager and the A3/A6 managers call the
