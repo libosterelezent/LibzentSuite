@@ -144,6 +144,20 @@ KV_REMOVED_KEY = "ratelimit:removed"
 #: full policy recomputation per waiter 4x/second)
 POLL_INTERVAL = 2.0
 
+#: EWMA smoothing factor for the per-route latency monitor (the fork's
+#: http_route_latencies() — queuing inflation, not 429s, is how the
+#: send ceiling manifests). 0.2 = ~5-sample memory.
+ROUTE_LATENCY_ALPHA = 0.2
+
+#: threshold (seconds) at which the send route's EWMA triggers a
+#: congestion warning — queuing is visible WELL before the 429
+SEND_ROUTE_LATENCY_WARNING_S = 2.0
+
+#: probe-down recovery: after this many seconds without a server
+#: cooldown, the backoff decays by this factor per recovery tick
+PROBE_DOWN_CLEAN_WINDOW_S = 120.0
+PROBE_DOWN_DECAY = 0.90  # ≤10% per tick, never below the base interval
+
 #: single-task concurrency is guaranteed by the heap; grant order is
 #: (priority, seq) — seq comes from this counter (FIFO within a priority).
 

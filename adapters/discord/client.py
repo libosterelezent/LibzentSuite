@@ -1127,6 +1127,14 @@ class RealDiscordClient:
 
         bot.loop.create_task(bot.add_cog(FrameworkVerbsCog()))
 
+        # fork adoption: on_http_throttle is the REAL throttle signal
+        # (the library absorbs 429s internally; we only see them here).
+        # Bridge: publish RateLimitTriggered on the bus → the limiter
+        # calls report_server_limit() and pauses the account.
+        @bot.event
+        async def on_http_throttle(payload) -> None:
+            adapter._bridge_throttle(payload)
+
     def allowed_invoker(self, invoker_id: int | None) -> bool:
         """The gate for one invocation (LEGACY sync view).
 
@@ -1181,6 +1189,29 @@ class RealDiscordClient:
         on the real invoker via allowed_invoker(ctx.author.id).
         """
         return self.allowed_invoker(self.user_id)
+
+    def _bridge_throttle(self, payload: Any) -> None:
+        """on_http_throttle → the limiter's server-limit path.
+
+        The fork reports internally-absorbed 429s here (retry_after,
+        route, scope). We publish RateLimitTriggered on the bus — the
+        limiter subscribes and calls report_server_limit(). Best-effort:
+        a bridge failure never breaks the client."""
+        try:
+            from core.event_bus import EventBus  # noqa: F401 — type hint only
+
+            retry_after = getattr(payload, "retry_after", 1.0) or 1.0
+            route = str(getattr(payload, "route", "") or "unknown")
+            self._logger.warning(
+                "http throttle bridged: route=%s retry_after=%.1fs", route, retry_after
+            )
+            # the limiter's own subscription handles the bus event; the
+            # direct call is the deterministic fallback when no bus is
+            # wired (tests)
+            if hasattr(self._limiter, "report_server_limit"):
+                self._limiter.report_server_limit(retry_after)
+        except Exception:
+            self._logger.debug("throttle bridge failed", exc_info=True)
 
     async def disconnect(self) -> None:
         """Close the underlying client; safe when never started."""

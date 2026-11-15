@@ -1537,6 +1537,23 @@ class ControlAPI:
                 return await registry.visible_tree(plugin, page, account=account)
         return None
 
+    async def system_cache_stats(self) -> list[dict[str, Any]]:
+        """Per-account cache snapshots (member/thread counts, hit ratios,
+        dispatch backlog, event loop lag) from the fork's cache_stats().
+        The future System page aggregates these."""
+        if self._accounts is None:
+            return []
+        out: list[dict[str, Any]] = []
+        for row in await self._accounts.accounts():
+            name = row.get("name", "")
+            stats = (
+                await self._accounts.cache_stats(name)
+                if hasattr(self._accounts, "cache_stats")
+                else None
+            )
+            out.append({"account": name, **(stats or {})})
+        return out
+
     async def admin_overview(self) -> dict[str, Any]:
         """The admin panel's full view: admin ids, primary bot id, and every
         account's access row.
