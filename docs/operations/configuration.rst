@@ -12,8 +12,8 @@ of the layers:
      - Where
      - Applies to
    * - ``.env``
-     - ``PRIMARY_BOT_ID``, ``OWNER_USER_IDS``,
-       ``REMOTE_CONTROL`` (+ ``LZ_MASTER_KEY`` via process env only) —
+     - ``PRIMARY_BOT_ID``, ``OWNER_USER_IDS``
+       (+ ``LZ_MASTER_KEY`` via process env only) —
        account tokens live ENCRYPTED in the DB, imported from ``.env``
        only via ``credentials import-env``
      - secrets & ids (never in the DB)

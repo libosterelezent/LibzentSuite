@@ -130,8 +130,6 @@ class ScenarioAPI:
     audit_entries: Callable[[], list[dict[str, Any]]]
     #: plugin settings overrides the runner applied (global layer)
     settings_overrides: dict[str, dict[str, Any]]
-    #: the mention-prefix RemoteControl bridge (control_mention scenario)
-    remote: Any = None
     #: the wired RateLimitManager — the send lane is PRESENT but disabled
     #: in sims (a disabled lane is a 0s pass-through); scenarios flip it
     #: live via set_lane_enabled / set_lane_prefixrate (audit round 3)
@@ -390,8 +388,8 @@ async def _script_channel_gone(api: ScenarioAPI) -> None:
 async def _script_estop_halt(api: ScenarioAPI) -> None:
     """Halt mid-flow: estop between the flow's two paced chunk sends.
 
-    Deterministic staging: the roster yields exactly two chunks; the owner
-    mentions estop right after chunk one lands, so chunk two is always
+    Deterministic staging: the roster yields exactly two chunks; the estop
+    fires right after chunk one lands, so chunk two is always
     still pending when the halt executes — either as a queued paced task
     (cancelled by the estop) or as the plugin's next submit (rejected by
     the stopped scheduler). Either way nothing further may leave the
@@ -399,14 +397,14 @@ async def _script_estop_halt(api: ScenarioAPI) -> None:
     """
     if api.control is None:
         raise RuntimeError("ControlAPI not exposed on the scenario facade")
-    mention = f"<@{api.account_user_id}>"
     api.owner_says(api.channel_id, TRIGGER_WORD, api.owner_id)
     flowing = await _await_true(lambda: _delivered_chunks(api.world) != [], timeout=20.0)
     if not flowing:
         raise RuntimeError("no chunk delivered before the estop - cannot stage the halt")
-    # owner mentions the account with estop: RemoteControl -> ControlAPI
-    # .emergency_stop_all() (cancel tasks, stop scheduler, stop accounts)
-    api.owner_says(api.channel_id, f"{mention} estop", api.owner_id)
+    # estop through the CONTROL SURFACE (the mention bridge retired with
+    # RemoteControl, 2026-11-15): ControlAPI.emergency_stop_all() — cancel
+    # tasks, stop scheduler, stop accounts — exactly what the bridge called
+    await api.control.emergency_stop_all(surface="simulation")
     stopped = await _await_true(
         # duck-typed A6 facade: runtime.status is an enum whose .value the
         # Any-typed accounts boundary cannot express to the checker
@@ -424,60 +422,6 @@ async def _script_estop_halt(api: ScenarioAPI) -> None:
     await api.accounts.start(ACCOUNT_NAME)
     api.owner_says(api.channel_id, TRIGGER_WORD, api.owner_id)
     await api.world.wait_for_quiet(api.channel_id, quiet=quiet_window(), limit=90.0)
-
-
-# ------------------------------------------------------------------ registry
-async def _script_control_mention(api: ScenarioAPI) -> None:
-    """Owner drives @account commands; a stranger tries and gets nothing."""
-    mention = f"<@{api.account_user_id}>"
-    api.owner_says(api.channel_id, f"{mention} status", api.owner_id)
-    await api.world.wait_for_quiet(api.channel_id, quiet=0.6, limit=15.0)
-    # non-owner mentions the same account: must be ignored completely
-    stranger = 4242
-    api.world.add_user(stranger, "stranger")
-    api.owner_says(api.channel_id, f"{mention} estop", stranger)
-    await api.world.wait_for_quiet(api.channel_id, quiet=0.6, limit=15.0)
-
-
-def _checks_control_mention(audit: list[dict[str, Any]], world: SimWorld) -> list[str]:
-    failures: list[str] = []
-    out = [
-        e
-        for e in audit
-        if e.get("direction") == "out" and e.get("note", "").find("plugin=control") >= 0
-    ]
-    if not out:
-        failures.append("owner mention produced no reply (expected a 'status' answer)")
-    history = world.messages_of(SYNTHETIC_GUILD_CHANNEL)
-    replies = [m for m in history if "uptime" in m or "tasks" in m]
-    if not replies:
-        failures.append("no status reply text landed in the guild channel")
-    # the stranger's estop must NOT have produced a reply or halted anything
-    estop_replies = [m for m in history if "EMERGENCY STOP" in m]
-    if estop_replies:
-        failures.append("non-owner mention was answered — owner gating broken")
-    stranger_msgs = [
-        m
-        for m in world.journal
-        if m.channel_id == SYNTHETIC_GUILD_CHANNEL and m.content.endswith("estop")
-    ]
-    if not stranger_msgs:
-        failures.append("stranger mention never landed - owner-gating check is void")
-        return failures
-    stranger_ts = stranger_msgs[-1].ts
-    later = [
-        m
-        for m in world.journal
-        if m.channel_id == SYNTHETIC_GUILD_CHANNEL
-        and m.author_id == SYNTHETIC_ALPHA_ID
-        and m.ts > stranger_ts
-    ]
-    if later:
-        failures.append(
-            f"account replied after a non-owner mention "
-            f"({len(later)} message(s)) - owner gating broken"
-        )
-    return failures
 
 
 SCENARIOS: dict[str, Scenario] = {
@@ -535,18 +479,6 @@ SCENARIOS: dict[str, Scenario] = {
         world_setup=_base_world(SHORT_PAGES),
         script=_script_channel_gone,
         checks=_checks_channel_gone,
-    ),
-    "control_mention": Scenario(
-        name="control_mention",
-        description=(
-            "The owner manages the fleet from Discord by MENTIONING the "
-            "account as the command prefix (@account status, estop); replies "
-            "arrive through the paced pipeline and non-owners are ignored."
-        ),
-        policies={"message": {"interval": 1.5, "jitter": [0.0, 0.05]}},
-        world_setup=_base_world(SHORT_PAGES),
-        script=_script_control_mention,
-        checks=_checks_control_mention,
     ),
     "estop_halt": Scenario(
         name="estop_halt",

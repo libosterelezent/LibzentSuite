@@ -47,7 +47,6 @@ REQUIRED_SCENARIOS = (
     "pacing_respected",
     "server_429_respected",
     "channel_gone_aborts",
-    "control_mention",
     "estop_halt",
 )
 

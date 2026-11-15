@@ -319,7 +319,6 @@ class SimulationRunner:
             account_settings_repo=db.account_settings,
             global_layer=DEMO_PLUGIN_SETTINGS,
         )
-        remote = None
         audit = None  # bound inside the assembly try (partial-failure teardown)
         #: loader modules created by THIS run's discover (sys.modules purge
         #: set — see _purge_plugin_modules)
@@ -530,19 +529,6 @@ class SimulationRunner:
                 credentials=credentials,
                 workspaces=workspaces,
             )
-            from core.remote_control import RemoteControl
-
-            if not getattr(credentials, "remote_control_enabled", True):
-                remote = None  # REMOTE_CONTROL=0: opt out here too, not
-            else:  # just in production — parity with bootstrap wiring
-                remote = RemoteControl(
-                    bus,
-                    scheduler,
-                    accounts,
-                    lambda: api,
-                    credentials,
-                    ServiceLogger(logger, "remote-control"),
-                ).start()
         except BaseException as exc:
             # partial-assembly teardown (mirrors the main finally's steps
             # for everything that can exist at this point)
@@ -654,7 +640,6 @@ class SimulationRunner:
                     ),
                     audit_entries=lambda: list(interactions),
                     settings_overrides=DEMO_PLUGIN_SETTINGS,
-                    remote=remote,
                     limiter=limiter,
                     scheduler=scheduler,
                     control=api,
@@ -712,11 +697,6 @@ class SimulationRunner:
             # account can still send), THEN the accounts stop. The old
             # order killed the senders before the queued work, so a drain
             # could never deliver what it waited for.
-            try:
-                if remote is not None:
-                    remote.stop()
-            except Exception:
-                pass
             if scheduler_started:
                 try:
                     await scheduler.stop(drain=True)

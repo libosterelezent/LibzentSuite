@@ -124,23 +124,6 @@ class TestPrimaryBotIdTruncation(unittest.TestCase):
         self.assertNotIn("x" * 41, str(ctx.exception))
 
 
-# --------------------------------------------------- REMOTE_CONTROL matrix
-class TestRemoteControlMatrix(unittest.TestCase):
-    def test_absent_key_defaults_on(self):
-        self.assertIs(Credentials({}).remote_control_enabled, True)
-
-    def test_matrix(self):
-        cases = {
-            "0": False, "disable": False, "": False,
-            "false": False, "OFF": False,
-            "1": True, "on": True, "yes": True,
-        }
-        for raw, expected in cases.items():
-            creds = Credentials({"REMOTE_CONTROL": raw})
-            self.assertIs(creds.remote_control_enabled, expected,
-                          f"REMOTE_CONTROL={raw!r}")
-
-
 # ------------------------------------------- access-manager concurrency
 class SlowKv:
     """kv double that YIELDS on every await so tasks really interleave."""

@@ -51,7 +51,6 @@ TOKEN_PREFIX = "DISCORD_TOKEN_"
 
 #: guards the one-time unrecognized-REMOTE_CONTROL warning (module logger,
 #: once per process — the gate itself stays non-raising on every read)
-_remote_control_warned = False
 
 
 class Credentials:
@@ -233,33 +232,6 @@ class Credentials:
         OWNER_USER_IDS for the triggers to pass the owner check.
         """
         return (self._values.get("SELF_COMMAND_PREFIX") or "").strip()
-
-    @property
-    def remote_control_enabled(self) -> bool:
-        """Mention-prefix management from Discord (REMOTE_CONTROL=0 opts out).
-
-        FAIL CLOSED: an absent key keeps the documented default (on);
-        a present-but-empty or unrecognized value DISABLES the gate —
-        the old parse failed OPEN (anything unrecognized meant enabled).
-        """
-        global _remote_control_warned
-        raw = self._values.get("REMOTE_CONTROL")
-        if raw is None:
-            return True  # documented default: enabled
-        value = raw.strip().lower()
-        if value in ("1", "true", "yes", "on"):
-            return True
-        if value in ("0", "false", "no", "off", ""):
-            return False
-        if not _remote_control_warned:
-            _remote_control_warned = True
-            LOG.warning(
-                "REMOTE_CONTROL=%r is not a recognized value (expected "
-                "1/true/yes/on or 0/false/no/off) — remote control is "
-                "DISABLED (fail closed)",
-                raw[:40],
-            )
-        return False
 
     # ---------------------------------------------------------------- display
     def redacted(self) -> dict[str, str]:
