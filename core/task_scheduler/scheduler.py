@@ -178,9 +178,9 @@ class _GrantGate:
     """
 
     def __init__(self) -> None:
-        self._heap: list[tuple] = []  # (priority, seq, future)
+        self._heap: list[tuple[int, int, asyncio.Future[None]]] = []  # (priority, seq, future)
         self._cycle_pending = False
-        self._cycles: set = set()  # strong refs (create_task GC hazard)
+        self._cycles: set[asyncio.Task[None]] = set()  # strong refs (create_task GC hazard)
 
     async def enter(self, priority: int, seq: int) -> None:
         """Wait until it is this (priority, seq) pair's turn to acquire."""
@@ -283,7 +283,7 @@ class TaskScheduler:
 
         self._seq = itertools.count(1)
         self._tasks: dict[int, Task] = {}  # live (queued/running) by id
-        self._finished_rows: deque[dict] = deque(maxlen=_FINISHED_KEEP)
+        self._finished_rows: deque[dict[str, Any]] = deque(maxlen=_FINISHED_KEEP)
         self._finished_tasks: deque[Task] = deque(maxlen=_FINISHED_KEEP)
         self._counts: dict[str, int] = {
             STATUS_COMPLETED: 0,
@@ -291,17 +291,19 @@ class TaskScheduler:
             STATUS_CANCELLED: 0,
             STATUS_TIMED_OUT: 0,
         }
-        self._queues: dict[str, list] = {}  # account -> heap of (prio, id, task)
+        self._queues: dict[
+            str, list[tuple[int, int, Task]]
+        ] = {}  # account -> heap of (prio, id, task)
         self._lane_events: dict[str, asyncio.Event] = {}
-        self._lanes: dict[str, asyncio.Task] = {}
+        self._lanes: dict[str, asyncio.Task[None]] = {}
         # LOW anti-starvation bookkeeping (see LOW_STARVATION_S): queued
         # LOW tasks per account in submission order + pops since a LOW
         # task last ran. The heap itself stays the sole ordering authority.
         self._low_lanes: dict[str, deque[Task]] = {}
         self._pops_since_low: dict[str, int] = {}
-        self._worker_refs: set = set()  # strong refs to spawned lane tasks
-        self._tail_refs: set = set()  # strong refs to scheduled finish tails
-        self._acquire_refs: set = set()  # strong refs to preemptible acquires
+        self._worker_refs: set[asyncio.Task[None]] = set()  # strong refs to spawned lane tasks
+        self._tail_refs: set[asyncio.Task[None]] = set()  # strong refs to scheduled finish tails
+        self._acquire_refs: set[asyncio.Task[None]] = set()  # strong refs to preemptible acquires
         self._inflight_tails = 0  # finish tails running now (drain barrier)
         self._gate = _GrantGate()
         self._started = False
@@ -673,15 +675,15 @@ class TaskScheduler:
                 raise SchedulerError(f"task {label} must be a non-empty string, got {value!r}")
         if content is not None and not isinstance(content, str):
             raise SchedulerError(f"content must be a string or None, got {type(content).__name__}")
-        for label, value in (
+        for label, raw in (
             ("channel_id", channel_id),
             ("user_id", user_id),
             ("message_id", message_id),
         ):
-            if value is None:
+            if raw is None:
                 continue
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise SchedulerError(f"task {label} must be an int or None, got {value!r}")
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                raise SchedulerError(f"task {label} must be an int or None, got {raw!r}")
         if name is not None and not isinstance(name, str):
             raise SchedulerError(f"task name must be a string or None, got {name!r}")
         try:
@@ -865,9 +867,13 @@ class TaskScheduler:
                 return finished
         return None
 
-    def tasks(self, *, status: str | None = None, account: str | None = None) -> list[dict]:
+    def tasks(
+        self, *, status: str | None = None, account: str | None = None
+    ) -> list[dict[str, Any]]:
         """Live queued/running tasks plus recently finished ones, newest last."""
-        rows: list[dict] = [t.as_dict() for t in sorted(self._tasks.values(), key=lambda t: t.id)]
+        rows: list[dict[str, Any]] = [
+            t.as_dict() for t in sorted(self._tasks.values(), key=lambda t: t.id)
+        ]
         rows.extend(self._finished_rows)
         if status is not None:
             rows = [r for r in rows if r.get("status") == status]
@@ -875,7 +881,7 @@ class TaskScheduler:
             rows = [r for r in rows if r.get("account") == account]
         return rows
 
-    async def history(self, limit: int = 50, account: str | None = None) -> list[dict]:
+    async def history(self, limit: int = 50, account: str | None = None) -> list[dict[str, Any]]:
         """Finished tasks, newest last — repo-backed (awaited), else the
         in-memory tail."""
         try:
@@ -896,7 +902,7 @@ class TaskScheduler:
             rows = [r for r in rows if r.get("account") == account]
         return rows[-limit:] if limit > 0 else []
 
-    def stats(self) -> dict:
+    def stats(self) -> dict[str, Any]:
         """Scheduler counters from in-memory tallies (UI Overview page).
 
         FINAL-PHASE (G2): adds depth/HWM, oldest-queued age, per-priority
@@ -956,7 +962,7 @@ class TaskScheduler:
             "pressure": pressure["level"],
         }
 
-    def pressure(self) -> dict:
+    def pressure(self) -> dict[str, Any]:
         """Soft pressure signal (FINAL-PHASE G2; pure, no task mutation).
 
         Threshold grounding: steady-state queued depth ≈ 1 per producing
@@ -1010,8 +1016,18 @@ class TaskScheduler:
             "queued_by_account": per_account,
         }
 
+    def _cancel_raced(self, task: Task) -> bool:
+        """Race-aware ``task.cancelled`` read for the mid-flight checkpoints.
+
+        The loop-head guards narrow ``task.cancelled`` to False for the
+        checker, but estop flips it from ANOTHER task while this worker is
+        parked inside the sender try — a method call is the honest read
+        (the returned value is never stale-narrowed).
+        """
+        return task.cancelled
+
     # ---------------------------------------------------- worker machinery
-    def _pop_next(self, account: str, heap: list) -> Task:
+    def _pop_next(self, account: str, heap: list[tuple[int, int, Task]]) -> Task:
         """Pop the next task for this account's lane.
 
         Strict (priority, seq) order, EXCEPT the LOW anti-starvation rule:
@@ -1134,7 +1150,7 @@ class TaskScheduler:
             parts.append(f"ch={channel}")
         return " ".join(parts)[:79]
 
-    async def _reap_acquire(self, acquire_task: asyncio.Task) -> None:
+    async def _reap_acquire(self, acquire_task: asyncio.Task[None]) -> None:
         """Bounded-join a cancelled acquire so the engine's waiter cleanup
         (prune + wake successors) lands before we report the lane free."""
         try:
@@ -1143,7 +1159,7 @@ class TaskScheduler:
         except Exception:  # pragma: no cover - reap is best-effort
             pass
 
-    def _on_acquire_done(self, acquire_task: asyncio.Task) -> None:
+    def _on_acquire_done(self, acquire_task: asyncio.Task[None]) -> None:
         """Drop the strong ref; retrieve any failure (GC hygiene)."""
         self._acquire_refs.discard(acquire_task)
         if not acquire_task.cancelled():
@@ -1220,7 +1236,7 @@ class TaskScheduler:
                 # ask for a grant
                 # (a retry iteration legitimately re-enters here while RUNNING)
                 if (
-                    task.cancelled
+                    self._cancel_raced(task)
                     or self._sweeping
                     or task.status not in (STATUS_QUEUED, STATUS_RUNNING)
                 ):
@@ -1231,7 +1247,7 @@ class TaskScheduler:
                 # guard allows; never consumes an attempt, never sends
                 await self._await_guard(task)
                 if (
-                    task.cancelled
+                    self._cancel_raced(task)
                     or self._sweeping
                     or task.status not in (STATUS_QUEUED, STATUS_RUNNING)
                 ):
@@ -1242,7 +1258,7 @@ class TaskScheduler:
                 # checkpoint 0.5: cancelled while parked on the GATE — never
                 # reach the limiter (no grant consumed, no clock stamps)
                 if (
-                    task.cancelled
+                    self._cancel_raced(task)
                     or self._sweeping
                     or task.status not in (STATUS_QUEUED, STATUS_RUNNING)
                 ):
@@ -1281,7 +1297,7 @@ class TaskScheduler:
 
                 # checkpoint 1: cancelled while waiting for the grant
                 if (
-                    task.cancelled
+                    self._cancel_raced(task)
                     or self._sweeping
                     or task.status not in (STATUS_QUEUED, STATUS_RUNNING)
                 ):
@@ -1351,7 +1367,7 @@ class TaskScheduler:
                     retryable = exc
                 except FlowBlocked as exc:
                     self._classify_wire(task, exc)
-                    if task.cancelled:  # checkpoint 2 (estop raced the failure)
+                    if self._cancel_raced(task):  # checkpoint 2 (estop raced the failure)
                         await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                         return
                     await self._finish(
@@ -1363,7 +1379,7 @@ class TaskScheduler:
                     return
                 except Exception as exc:
                     self._classify_wire(task, exc)
-                    if task.cancelled:  # checkpoint 2 (estop raced the failure)
+                    if self._cancel_raced(task):  # checkpoint 2 (estop raced the failure)
                         await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                         return
                     await self._finish(
@@ -1387,7 +1403,7 @@ class TaskScheduler:
                     )
                     return
 
-                if task.cancelled:
+                if self._cancel_raced(task):
                     await self._finish(task, STATUS_CANCELLED, started_mono=started_mono)
                     return
                 if timed_out:
@@ -1422,13 +1438,17 @@ class TaskScheduler:
                     continue
 
                 # retries exhausted -> terminal
-                exc = retryable
-                if exc is not None:
-                    self._classify_wire(task, exc)
+                final_exc = retryable
+                if final_exc is not None:
+                    self._classify_wire(task, final_exc)
                 await self._finish(
                     task,
                     STATUS_FAILED,
-                    error=f"{type(exc).__name__}: {exc}" if exc is not None else "failed",
+                    error=(
+                        f"{type(final_exc).__name__}: {final_exc}"
+                        if final_exc is not None
+                        else "failed"
+                    ),
                     started_mono=started_mono,
                 )
                 return
@@ -1476,7 +1496,7 @@ class TaskScheduler:
         error: str | None = None,
         summary: str | None = None,
         started_mono: float | None = None,
-    ) -> dict | None:
+    ) -> dict[str, Any] | None:
         """Synchronous exactly-once half of a terminal transition.
 
         Applies the status/error/summary fields, finished-task memory,
@@ -1570,7 +1590,7 @@ class TaskScheduler:
         self,
         task: Task,
         status: str,
-        row: dict,
+        row: dict[str, Any],
         *,
         error: str | None = None,
         summary: str | None = None,
@@ -1653,11 +1673,11 @@ class TaskScheduler:
         self,
         task: Task,
         status: str,
-        row: dict,
+        row: dict[str, Any],
         *,
         error: str | None = None,
         summary: str | None = None,
-    ) -> asyncio.Task:
+    ) -> asyncio.Task[None]:
         """Schedule one finish tail as an independent task (strong ref)."""
         tail = asyncio.get_running_loop().create_task(
             self._finish_tail(task, status, row, error=error, summary=summary),
@@ -1667,7 +1687,7 @@ class TaskScheduler:
         tail.add_done_callback(self._on_tail_done)
         return tail
 
-    def _on_tail_done(self, tail: asyncio.Task) -> None:
+    def _on_tail_done(self, tail: asyncio.Task[None]) -> None:
         """Drop the strong ref; retrieve any failure (a shielded owner that
         was cancelled mid-await would otherwise leave it unretrieved)."""
         self._tail_refs.discard(tail)
