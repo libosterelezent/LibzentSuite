@@ -21,6 +21,7 @@ ONE Core API.
 
    architecture/index
    design/index
+   plans/index
    plugins/index
    operations/index
    api/index

@@ -3,7 +3,7 @@
 The active queue and the historical record of what shipped. Design
 decisions live alongside in `docs/design/`; binding contracts in
 `docs/architecture/architecture.md` + `integration.md`; deep study
-documents in `plans/` at the repo root. Completed items keep their
+studies under `docs/plans/`. Completed items keep their
 summaries here and their full detail in `knowledgebase/` (AGENTS.md
 rule 8).
 

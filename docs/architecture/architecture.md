@@ -234,5 +234,5 @@ assignment, no plugins. Do not reintroduce permission bundles.
 
 The binding decision record is `roadmap.md` (18 locked workspace
 decisions + their provenance) and `WORKSPACE_DESIGN.md` (the full
-spec). Historical inventories live under `plans/` (superseded material
+spec). Historical inventories live under `docs/plans/` (superseded material
 is banner-marked, never silently rewritten).
