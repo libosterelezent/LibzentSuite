@@ -163,6 +163,12 @@ per-account plugin profile pages.
     pre-commit local gate, Dependabot (github-actions only), read-only
     workflow tokens, CODEOWNERS + SECURITY.md, bandit triage (8 sites,
     values always parameterized).
+[x] Always-healthy workflows (2026-11-15): per-push gates — export-sync
+    (the §8 contract, mechanically enforced) + mypy ratchet
+    (.github/mypy-baseline = 485; grow = red, shrink locks in); weekly
+    health sweep — full gate on a fresh runner (workflow_call reuse),
+    packaging sanity (uv build + action-pin validation), dependency
+    freshness probe (uv lock --upgrade → tracking issue).
 [ ] Gated on the public flip (owner-approved): repo rulesets (master:
     PR + required `unittest` check, no force push/delete; `v*` tags
     protected), GitHub native secret scanning + push protection,
