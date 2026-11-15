@@ -1,0 +1,20 @@
+version: 2
+
+# github-actions ONLY, on purpose (owner decision 2026-11-15): the pip
+# ecosystem would hand-edit requirements.txt, which is a generated
+# export of uv.lock here (AGENTS.md §8) — Dependabot PRs would desync
+# it. Dependency freshness is owned by the weekly security workflow
+# (pip-audit against the lock); upgrades land via `uv lock --upgrade`.
+#
+# NOTE: after Dependabot bumps an action ref, regenerate the pin lock:
+#   gh actions-lock && git commit .github/workflows/actions.lock
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(ci)"
+      include: scope
+    labels:
+      - ci
