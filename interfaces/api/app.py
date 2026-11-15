@@ -10,13 +10,14 @@ the REST surface is operator-facing).
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
-from core.api import ControlAPI
+if TYPE_CHECKING:
+    from core.api import ControlAPI
 
 __all__ = ["build_app"]
 
@@ -160,10 +161,8 @@ def build_app(api: ControlAPI, *, token: str | None = None) -> FastAPI:
     @app.websocket("/api/ws")
     async def ws_events(ws: WebSocket) -> None:
         await ws.accept()
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=256)
-        # subscribe to the bus: every event lands as a JSON frame
-        bus = getattr(api, "_database", None)
-
+        # the live-event bridge lands with the bus wiring (the W4
+        # reconciler already publishes; the WS consumer follows)
         try:
             while True:
                 # poll ControlAPI's status snapshot at a gentle cadence —
