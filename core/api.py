@@ -62,7 +62,7 @@ import asyncio
 import inspect
 import logging
 import time as _time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from . import plugin_scopes
 from .errors import DatabaseError, PluginError
@@ -74,30 +74,47 @@ from .rate_limit_manager import (
 from .rate_limit_manager.policies import parse_scope
 
 if TYPE_CHECKING:  # duck-typed at runtime — no manager imports here
+    from collections.abc import Coroutine
+
+    from adapters.simulator.runner import SimulationRunner
+    from database.plugin_data import PluginDataStore
+    from database.repositories.account_plugins import AccountPluginsRepository
+    from database.repositories.plugin_profiles import PluginProfilesRepository
+
+    from .access_manager import AccessManager
     from .account_manager import AccountManager
     from .audit import AuditRecorder
     from .cooldowns import CooldownService
-    from .credential_service import CredentialService
+    from .credential_service import CredentialService, EnvImportReport
     from .credentials import Credentials
     from .logging_service import LogService
     from .plugin_manager import PluginManager
     from .rate_limit_manager import RateLimitManager
-    from .settings_manager import SettingsManager
+    from .settings_manager import Setting, SettingsManager
     from .task_scheduler import TaskScheduler
+    from .workspace.service import WorkspaceService
 
 LOG = logging.getLogger("libzent.api")
+
+T = TypeVar("T")
 
 #: back-compat alias for the kv key persisting the send-lane configuration
 #: (the canonical constants live in core.rate_limit_manager)
 LANE_KV_KEY = KV_LANE_KEY
 
 
+@overload
+async def _resolved(outcome: Coroutine[Any, Any, T]) -> T: ...
+@overload
+async def _resolved(outcome: T) -> T: ...
 async def _resolved(outcome: Any) -> Any:
     """Await manager results when the manager went async (migration shim).
 
     Same tolerance pattern AccountManager uses for its collaborators: a
     method may return a plain value today and a coroutine after the async
-    persistence switch — both shapes work through here.
+    persistence switch — both shapes work through here. The overloads keep
+    the caller's declared type: coroutines unwrap to their result type,
+    plain values pass through unchanged.
     """
     if inspect.iscoroutine(outcome):
         return await outcome
@@ -130,14 +147,14 @@ class ControlAPI:
         scheduler: TaskScheduler,
         logs: LogService,
         audit: AuditRecorder | None = None,
-        simulation: Any = None,  # adapters.simulator.runner.SimulationRunner
+        simulation: SimulationRunner | None = None,
         credentials: Credentials | None = None,
         database: Any = None,
         credentials_svc: CredentialService | None = None,
         cooldowns: CooldownService | None = None,
-        workspaces: Any = None,  # core.workspace.WorkspaceService (W3)
-        plugin_data: Any = None,  # database.plugin_data.PluginDataStore (PHASE 10)
-        access: Any = None,  # core.access_manager.AccessManager
+        workspaces: WorkspaceService | None = None,  # (W3)
+        plugin_data: PluginDataStore | None = None,  # (PHASE 10)
+        access: AccessManager | None = None,
         started_at: float = 0.0,
         reconcile_interval_s: float = 30.0,
     ) -> None:
@@ -213,10 +230,8 @@ class ControlAPI:
 
     async def _enrich_accounts(self, accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Add 'credential' + 'cooldowns' to manager status dicts (in place)."""
-        if not isinstance(accounts, list):
-            return accounts
         for account in accounts:
-            if not isinstance(account, dict) or not account.get("name"):
+            if not account.get("name"):
                 continue
             name = account["name"]
             if "credential" not in account:
@@ -270,8 +285,11 @@ class ControlAPI:
         performs NO network activity (saving is always separate from
         connecting, spec §16).
         """
-        if not isinstance(payload, dict) or not payload.get("name"):
-            raise ValueError("account payload needs at least {'name': ...}")
+        if not isinstance(payload, dict):
+            raise ValueError("account payload needs a dict")
+        name = payload.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("account payload needs at least {'name': <non-empty str>}")
         allowed = {"name", "token_ref", "workspace", "enabled", "plugins", "credential"}
         unknown = set(payload) - allowed
         if unknown:
@@ -294,24 +312,27 @@ class ControlAPI:
                 )
         out = await _resolved(
             self._accounts.add_account(
-                payload["name"],
+                name,
                 token_ref=payload.get("token_ref"),
                 enabled=enabled,
                 workspace=payload.get("workspace"),
                 plugins=plugins or None,
             )
         )
-        name = out.get("name", payload["name"]) if isinstance(out, dict) else payload["name"]
-        self._audit_mgmt(name, "mgmt:account.created", surface)
+        echoed = out.get("name") if isinstance(out, dict) else None
+        account_name = echoed if isinstance(echoed, str) and echoed else name
+        self._audit_mgmt(account_name, "mgmt:account.created", surface)
         if credential is not None:
             # TOCTOU: an interleaved remove_account between the add above
             # and the store below would re-create an orphan credential row
             # for a dead account — re-check the registration first
-            await _resolved(self._accounts.get(name))  # AccountError if gone
-            await self._credentials_svc.store(name, credential)
-            self._audit_mgmt(name, "mgmt:credential.stored", surface)
+            await _resolved(self._accounts.get(account_name))  # AccountError if gone
+            svc = self._credentials_svc
+            assert svc is not None  # the fail-fast check above raised otherwise
+            await svc.store(account_name, credential)
+            self._audit_mgmt(account_name, "mgmt:credential.stored", surface)
             if isinstance(out, dict):
-                out["credential"] = self._credential_state(name)
+                out["credential"] = self._credential_state(account_name)
         return out
 
     async def accounts_remove(self, name: str, surface: str = "api") -> dict[str, Any]:
@@ -482,16 +503,16 @@ class ControlAPI:
                 return sorted(set(names() or []))
             return sorted(
                 {
-                    m.get("name")
+                    name
                     for m in self._plugins.manifests()
-                    if isinstance(m, dict) and m.get("name")
+                    if isinstance(m, dict) and isinstance((name := m.get("name")), str) and name
                 }
             )
         except Exception:
             LOG.exception("could not list discovered plugins")
             return []
 
-    def _plugin_schema(self, plugin: str) -> tuple:
+    def _plugin_schema(self, plugin: str) -> tuple[Setting, ...]:
         """Setting schema of one plugin, duck-typed over the manager.
 
         Prefers the plugin manager's ``_schema_for`` (the SAME source the
@@ -561,20 +582,20 @@ class ControlAPI:
     # bindings. Persistence is schema-agnostic; THIS layer validates
     # settings against the plugin's Setting schema (plugin_profiles_*)
     # and enforces "binding requires assignment" (accounts_plugin_profile).
-    def _profile_repo(self) -> Any:
+    def _profile_repo(self) -> PluginProfilesRepository | None:
         """PluginProfilesRepository, or None on stacks without a database."""
         return (
             getattr(self._database, "plugin_profiles", None) if self._database is not None else None
         )
 
-    def _require_profile_repo(self) -> Any:
+    def _require_profile_repo(self) -> PluginProfilesRepository:
         """Honest failure on stacks built without profile storage."""
         repo = self._profile_repo()
         if repo is None:
             raise RuntimeError("plugin profiles are not configured on this api")
         return repo
 
-    def _binding_repo(self) -> Any:
+    def _binding_repo(self) -> AccountPluginsRepository | None:
         """AccountPluginsRepository (bindings), or None without a database."""
         return (
             getattr(self._database, "account_plugins", None) if self._database is not None else None
@@ -744,7 +765,9 @@ class ControlAPI:
                 raise ValueError(
                     f"unknown profile {profile!r} for plugin {plugin!r} (known: {known})"
                 )
-        await self._binding_repo().set_profile(account, plugin, profile)
+        binding_repo = self._binding_repo()
+        assert binding_repo is not None  # the require path above raised
+        await binding_repo.set_profile(account, plugin, profile)
         self._set_account_plugin_profile(account, plugin, profile)
         await self._refresh_live_settings(account, plugin)
         self._audit_mgmt(
@@ -844,7 +867,7 @@ class ControlAPI:
             return []
 
     # -------------------------------------------------- plugin data (PHASE 10, B3)
-    def _require_plugin_data(self) -> Any:
+    def _require_plugin_data(self) -> PluginDataStore:
         """The shared PluginDataStore, or an honest error."""
         if self._plugin_data is None:
             raise RuntimeError("plugin-data store is not configured on this api")
@@ -1045,7 +1068,7 @@ class ControlAPI:
 
     async def credentials_import_env(
         self, overwrite: bool = False, surface: str = "api"
-    ) -> dict[str, Any]:
+    ) -> EnvImportReport:
         """MIGRATION-ONLY: explicit one-shot import of legacy .env tokens.
 
         Reads each registered account's ``DISCORD_TOKEN_<NAME>`` value from
@@ -1125,8 +1148,9 @@ class ControlAPI:
             names: list[str] = [account]
         else:
             names = [
-                row.get("name")
+                name
                 for row in await self._accounts.accounts()
+                if isinstance((name := row.get("name")), str)
                 if isinstance(row, dict) and row.get("name")
             ]
         now = _time.time()
@@ -1205,9 +1229,7 @@ class ControlAPI:
         # set yet must stay reloadable; the manager re-scans and rejects
         # genuinely unknown names itself
         try:
-            out = self._plugins.reload_plugin(plugin)
-            if inspect.iscoroutine(out):
-                out = await out
+            out = await self._plugins.reload_plugin(plugin)
         except PluginError as exc:
             if str(exc).startswith("unknown plugin"):
                 raise ValueError(f"unknown plugin {plugin!r}") from exc
@@ -1218,9 +1240,7 @@ class ControlAPI:
     async def plugins_unload(self, plugin: str, surface: str = "api") -> dict[str, Any]:
         """Unload a plugin (detach everywhere, unregister UI; assignments
         stay in the DB so reload restores them)."""
-        out = self._plugins.unload_plugin(plugin)
-        if inspect.iscoroutine(out):
-            out = await out
+        out = await self._plugins.unload_plugin(plugin)
         self._audit_mgmt("system", "mgmt:plugin.unloaded", surface, extra=f"plugin={plugin}")
         return out
 
@@ -1283,8 +1303,8 @@ class ControlAPI:
 
     async def workspaces_get(self, workspace: str) -> dict[str, Any]:
         """One workspace: state + members (RuntimeError when unwired)."""
-        self._require_workspaces()
-        out = await self._workspaces.workspace(str(workspace))
+        ws = self._require_workspaces()
+        out = await ws.workspace(str(workspace))
         if out is None:
             raise ValueError(f"unknown workspace {workspace!r}")
         return out
@@ -1293,24 +1313,24 @@ class ControlAPI:
         self, payload: dict[str, Any], surface: str = "api"
     ) -> dict[str, Any]:
         """Create a workspace (name, description). Membership is separate."""
-        self._require_workspaces()
+        ws = self._require_workspaces()
         name = str(payload.get("name") or "").strip()
         if not name:
             raise ValueError("workspace name must be a non-empty string")
-        out = await self._workspaces.create_workspace(name, str(payload.get("description") or ""))
+        out = await ws.create_workspace(name, str(payload.get("description") or ""))
         self._audit_mgmt(name, "mgmt:workspace.create", surface)
         return out
 
     async def workspaces_pause(self, workspace: str, surface: str = "api") -> dict[str, Any]:
         """Pause: bumps the generation (fences approved-not-dispatched work)."""
-        self._require_workspaces()
-        out = await self._workspaces.pause(str(workspace))
+        ws = self._require_workspaces()
+        out = await ws.pause(str(workspace))
         self._audit_mgmt(str(workspace), "mgmt:workspace.pause", surface)
         return out
 
     async def workspaces_resume(self, workspace: str, surface: str = "api") -> dict[str, Any]:
-        self._require_workspaces()
-        out = await self._workspaces.resume(str(workspace))
+        ws = self._require_workspaces()
+        out = await ws.resume(str(workspace))
         self._audit_mgmt(str(workspace), "mgmt:workspace.resume", surface)
         return out
 
@@ -1322,10 +1342,8 @@ class ControlAPI:
     ) -> dict[str, Any]:
         """Delete a workspace (accounts never die; refused while members
         remain unless detach_members is explicit)."""
-        self._require_workspaces()
-        out = await self._workspaces.delete_workspace(
-            str(workspace), detach_members=bool(detach_members)
-        )
+        ws = self._require_workspaces()
+        out = await ws.delete_workspace(str(workspace), detach_members=bool(detach_members))
         self._audit_mgmt(str(workspace), "mgmt:workspace.delete", surface)
         return out
 
@@ -1333,8 +1351,8 @@ class ControlAPI:
         self, account: str, workspace: str, surface: str = "api"
     ) -> dict[str, Any]:
         """Put an account in a workspace (join or move; at-most-one)."""
-        self._require_workspaces()
-        out = await self._workspaces.join(str(account), str(workspace))
+        ws = self._require_workspaces()
+        out = await ws.join(str(account), str(workspace))
         self._refresh_account_workspace(str(account), out.get("workspace"))
         self._audit_mgmt(
             str(workspace), "mgmt:workspace.add-member", surface, extra=f"account={account}"
@@ -1343,8 +1361,8 @@ class ControlAPI:
 
     async def workspaces_remove_account(self, account: str, surface: str = "api") -> dict[str, Any]:
         """Remove the account from any workspace (config untouched)."""
-        self._require_workspaces()
-        out = await self._workspaces.leave(str(account))
+        ws = self._require_workspaces()
+        out = await ws.leave(str(account))
         self._refresh_account_workspace(str(account), None)
         self._audit_mgmt(str(account), "mgmt:workspace.remove-member", surface)
         return out
@@ -1371,8 +1389,7 @@ class ControlAPI:
     async def workspaces_op(self, op: str, **params: Any) -> dict[str, Any]:
         """The ONE mutation dispatch (explicit op table): pause/resume/
         task ops/cooldowns/eligibility."""
-        self._require_workspaces()
-        ws = self._workspaces
+        ws = self._require_workspaces()
         op = str(op or "")
         if op == "pause":
             return await ws.pause(str(params.get("workspace")))
@@ -1389,7 +1406,7 @@ class ControlAPI:
             )
             return {"id": row_id}
         if op == "assign_task":
-            return await ws.assign_task(str(params.get("id")), str(params.get("account")))
+            return dict(await ws.assign_task(str(params.get("id")), str(params.get("account"))))
         if op == "task_status":
             return await ws.report_task_status(
                 str(params.get("id")),
@@ -1409,7 +1426,11 @@ class ControlAPI:
                 float(params.get("duration_s") or 0),
             )
         if op == "cooldown_clear":
-            return await ws.clear_cooldown(int(params.get("id")))
+            try:
+                clear_id = int(params["id"])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("op 'cooldown_clear' needs an integer 'id'") from None
+            return await ws.clear_cooldown(clear_id)
         raise ValueError(f"unknown workspace op {op!r}")
 
     async def workspaces_cooldowns(
@@ -1435,10 +1456,8 @@ class ControlAPI:
     async def workspaces_bind_plugin_channels(self, account: str, plugin: str) -> dict[str, Any]:
         """Initialize the plugin's channel bindings BY COPY from the
         account's assignments (then they diverge freely)."""
-        self._require_workspaces()
-        count = await self._workspaces.bind_plugin_channels_from_assignments(
-            str(account), str(plugin)
-        )
+        ws = self._require_workspaces()
+        count = await ws.bind_plugin_channels_from_assignments(str(account), str(plugin))
         self._audit_mgmt(
             str(account),
             "mgmt:workspace.bind-channels",
@@ -1458,8 +1477,8 @@ class ControlAPI:
         surface: str = "api",
     ) -> dict[str, Any]:
         """COPY-ON-APPLY with the stale-preview guard (decisions 9/16)."""
-        self._require_workspaces()
-        out = await self._workspaces.preset_apply(
+        ws = self._require_workspaces()
+        out = await ws.preset_apply(
             str(account),
             str(plugin),
             int(preset_id),
@@ -1489,17 +1508,18 @@ class ControlAPI:
         self, account: str, plugin: str, surface: str = "api"
     ) -> dict[str, Any]:
         """Detach: the account KEEPS its values; the provenance link drops."""
-        self._require_workspaces()
-        out = await self._workspaces.preset_detach(str(account), str(plugin))
+        ws = self._require_workspaces()
+        out = await ws.preset_detach(str(account), str(plugin))
         self._audit_mgmt(
             str(account), "mgmt:workspace.preset-detach", surface, extra=f"plugin={plugin}"
         )
         return out
 
-    def _require_workspaces(self) -> None:
+    def _require_workspaces(self) -> WorkspaceService:
         """Honest failure on stacks built without the workspace service."""
         if self._workspaces is None:
             raise RuntimeError("workspace service is not configured on this api")
+        return self._workspaces
 
     def _refresh_account_workspace(self, account: str, workspace: str | None) -> None:
         """Propagate a membership change into the account manager's
@@ -1514,6 +1534,19 @@ class ControlAPI:
     # ------------------------------------------------------- UI extension
 
     # ------------------------------------------- dashboard UI extension (D)
+    async def _ui_account_context(self, plugin: str, account: str) -> tuple[str, Any]:
+        """Validate the dashboard's account selection for a plugin UI tree.
+
+        Delegates to the manager's ``active_instance_for`` — the documented
+        dashboard validation seam: it raises PluginError naming the exact
+        problem (unknown account, plugin not assigned, disabled, not
+        active), the same fail-closed verdicts the dispatch surface
+        enforces. Returns the account with its services facade (None when
+        the account is not actively wired).
+        """
+        self._plugins.active_instance_for(plugin, account)
+        return account, self._plugins.services_for(account, plugin)
+
     async def dashboard_ui_page(
         self, plugin: str, page_id: str, account: str | None = None
     ) -> dict[str, Any] | None:
@@ -1527,6 +1560,8 @@ class ControlAPI:
         validated dashboard selection) reaches account-dependent checks.
         """
         registry = self._plugins.ui_registry
+        if registry is None:
+            return None  # no UI system wired on this stack (dashboard retired)
         if account is not None:
             account, _services = await self._ui_account_context(plugin, account)
         layout = registry.get_layout(plugin)
@@ -1534,15 +1569,14 @@ class ControlAPI:
             return None
         for page in layout.get("children") or []:
             if page.get("id") == page_id:
-                return await registry.visible_tree(plugin, page, account=account)
+                tree = await registry.visible_tree(plugin, page, account=account)
+                return tree if isinstance(tree, dict) else None
         return None
 
     async def system_cache_stats(self) -> list[dict[str, Any]]:
         """Per-account cache snapshots (member/thread counts, hit ratios,
         dispatch backlog, event loop lag) from the fork's cache_stats().
         The future System page aggregates these."""
-        if self._accounts is None:
-            return []
         out: list[dict[str, Any]] = []
         for row in await self._accounts.accounts():
             name = row.get("name", "")
@@ -1594,8 +1628,8 @@ class ControlAPI:
     async def admin_account_flag(
         self, account: str, is_admin: bool, surface: str = "api"
     ) -> dict[str, Any]:
-        self._require_access()
-        out = await _resolved(self._access.set_admin_flag(account, is_admin))
+        access = self._require_access()
+        out = await _resolved(access.set_admin_flag(account, is_admin))
         self._audit_mgmt(account, "mgmt:admin.flag_set", surface, extra=f"is_admin={is_admin}")
         return out
 
@@ -1672,7 +1706,9 @@ class ControlAPI:
         access = self._require_access()
         return {"primary_bot_id": await access.primary_bot_id()}
 
-    async def admin_primary_bot_id_set(self, user_id, surface: str = "api") -> dict[str, Any]:
+    async def admin_primary_bot_id_set(
+        self, user_id: int | None, surface: str = "api"
+    ) -> dict[str, Any]:
         access = self._require_access()
         if user_id is not None and not str(user_id).strip().lstrip("-").isdigit():
             raise ValueError("primary bot id must be an integer (or null)")
@@ -1690,11 +1726,10 @@ class ControlAPI:
         self._audit_mgmt(account, "mgmt:admin.forgot", surface)
         return {"forgotten": account}
 
-    def _require_access(self) -> Any:
-        access = getattr(self, "_access", None)
-        if access is None:
+    def _require_access(self) -> AccessManager:
+        if self._access is None:
             raise RuntimeError("admin access store not wired on this api")
-        return access
+        return self._access
 
     # ------------------------------------------------------------- rate limits
     async def ratelimit_policies(self) -> list[dict[str, Any]]:
