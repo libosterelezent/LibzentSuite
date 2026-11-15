@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sqlite3
 import stat
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -249,15 +250,32 @@ class DatabaseConnection:
                 conn = await aiosqlite.connect(str(self._path), isolation_level=None)
                 try:
                     conn.row_factory = aiosqlite.Row
-                    for pragma in PRAGMAS:
-                        # entries are either full "PRAGMA x=y" strings or (name, value)
-                        statement = (
-                            pragma
-                            if isinstance(pragma, str)
-                            else (f"PRAGMA {pragma[0]}={pragma[1]}")
-                        )
-                        await conn.execute(statement)
-                    await conn.commit()
+                    # The parallel-first-boot race (two Database objects
+                    # connecting to the same FRESH file): journal_mode=WAL
+                    # briefly needs a lock the busy handler cannot retry
+                    # (deadlock-prone upgrades return SQLITE_BUSY
+                    # immediately), so a concurrent first connect can
+                    # collide. The pragma burst retries instead — the
+                    # loser of the first attempt re-runs against the
+                    # winner's already-WAL file and no-ops. Python 3.10's
+                    # scheduling opens the window wide enough to hit it
+                    # in CI; every version benefits.
+                    for attempt in range(5):
+                        try:
+                            for pragma in PRAGMAS:
+                                # entries are either full "PRAGMA x=y" strings or (name, value)
+                                statement = (
+                                    pragma
+                                    if isinstance(pragma, str)
+                                    else (f"PRAGMA {pragma[0]}={pragma[1]}")
+                                )
+                                await conn.execute(statement)
+                            await conn.commit()
+                            break
+                        except sqlite3.OperationalError as exc:
+                            if "locked" not in str(exc) or attempt == 4:
+                                raise
+                            await asyncio.sleep(0.05 * (attempt + 1))
                 except BaseException:
                     # never leak the worker thread when setup fails (it would keep
                     # the interpreter alive at exit)
