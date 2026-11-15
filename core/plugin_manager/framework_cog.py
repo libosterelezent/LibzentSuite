@@ -16,14 +16,14 @@ from discord.ext import commands
 __all__ = ["FrameworkVerbsCog"]
 
 
-def _api(ctx: Any) -> Any:
+def _api(ctx: commands.Context[Any]) -> Any:
     """The hub's api_provider — the ONE ControlAPI every verb hits."""
     from core.plugin_manager.commands import COMMAND_HUB
 
     return COMMAND_HUB.api_provider()
 
 
-async def _admin_gate(ctx: Any) -> bool:
+async def _admin_gate(ctx: commands.Context[Any]) -> bool:
     """The admin-only mutation gate (the hub's _require_admin, as a
     cog check). Returns True when the invoker is a framework admin."""
     from core.plugin_manager.commands import COMMAND_HUB
@@ -32,7 +32,7 @@ async def _admin_gate(ctx: Any) -> bool:
     access = getattr(provider, "_access", None)
     if access is None:
         return False
-    return await access.is_admin_id(getattr(getattr(ctx, "author", None), "id", None))
+    return bool(await access.is_admin_id(getattr(getattr(ctx, "author", None), "id", None)))
 
 
 class FrameworkVerbsCog(commands.Cog):
@@ -43,23 +43,23 @@ class FrameworkVerbsCog(commands.Cog):
 
     # ------------------------------------------------------- status verbs
     @commands.command(name="status")
-    async def status(self, ctx) -> None:
+    async def status(self, ctx: commands.Context[Any]) -> None:
         api = _api(ctx)
         out = await api.status()
         await ctx.send(str(out))
 
     @commands.command(name="pg")
-    async def pg(self, ctx, view: str = "show") -> None:
+    async def pg(self, ctx: commands.Context[Any], view: str = "show") -> None:
         api = _api(ctx)
-        out = await api.ratelimit_show()
+        out = await api.ratelimit_stats()
         await ctx.send(str(out))
 
     @commands.command(name="say")
-    async def say(self, ctx, *, text: str) -> None:
+    async def say(self, ctx: commands.Context[Any], *, text: str) -> None:
         await ctx.send(text)
 
     @commands.command(name="help")
-    async def help_cmd(self, ctx) -> None:
+    async def help_cmd(self, ctx: commands.Context[Any]) -> None:
         await ctx.send(
             "Commands: status, accounts, plugins, ratelimit, "
             "tasks, estop, simulation, adminlist, adminperms, "
@@ -68,7 +68,7 @@ class FrameworkVerbsCog(commands.Cog):
 
     # ---------------------------------------------------- management verbs
     @commands.command(name="accounts")
-    async def accounts(self, ctx, sub: str = "", *args) -> None:
+    async def accounts(self, ctx: commands.Context[Any], sub: str = "", *args: str) -> None:
         api = _api(ctx)
         if sub == "list" or sub == "":
             out = await api.accounts_list()
@@ -88,10 +88,10 @@ class FrameworkVerbsCog(commands.Cog):
             await ctx.send("usage: accounts [list|start <name>|stop <name>]")
 
     @commands.command(name="plugins")
-    async def plugins(self, ctx, sub: str = "", *args) -> None:
+    async def plugins(self, ctx: commands.Context[Any], sub: str = "", *args: str) -> None:
         api = _api(ctx)
         if sub == "list" or sub == "":
-            out = await api.plugins_list()
+            out = await api.plugins_manifests()
             await ctx.send(
                 "\n".join(f"{p['name']:<24} {p.get('version', '')}" for p in out) or "no plugins"
             )
@@ -99,13 +99,13 @@ class FrameworkVerbsCog(commands.Cog):
             await ctx.send("usage: plugins [list]")
 
     @commands.command(name="ratelimit")
-    async def ratelimit(self, ctx, sub: str = "show", *args) -> None:
+    async def ratelimit(self, ctx: commands.Context[Any], sub: str = "show", *args: str) -> None:
         api = _api(ctx)
-        out = await api.ratelimit_show()
+        out = await api.ratelimit_stats()
         await ctx.send(str(out))
 
     @commands.command(name="tasks")
-    async def tasks(self, ctx, sub: str = "list", *args) -> None:
+    async def tasks(self, ctx: commands.Context[Any], sub: str = "list", *args: str) -> None:
         api = _api(ctx)
         out = await api.tasks_list()
         await ctx.send(
@@ -114,13 +114,13 @@ class FrameworkVerbsCog(commands.Cog):
         )
 
     @commands.command(name="estop")
-    async def estop(self, ctx) -> None:
+    async def estop(self, ctx: commands.Context[Any]) -> None:
         api = _api(ctx)
         await api.emergency_stop_all(surface="chat")
         await ctx.send("emergency stop engaged")
 
     @commands.command(name="simulation")
-    async def simulation(self, ctx, sub: str = "", *args) -> None:
+    async def simulation(self, ctx: commands.Context[Any], sub: str = "", *args: str) -> None:
         api = _api(ctx)
         if sub == "list" or sub == "":
             out = await api.simulation_list()
@@ -130,13 +130,15 @@ class FrameworkVerbsCog(commands.Cog):
 
     # ------------------------------------------------------- admin verbs
     @commands.command(name="adminlist")
-    async def adminlist(self, ctx) -> None:
+    async def adminlist(self, ctx: commands.Context[Any]) -> None:
         api = _api(ctx)
         out = await api.admin_overview()
         await ctx.send(str(out))
 
     @commands.command(name="adminperms")
-    async def adminperms(self, ctx, account: str = "", action: str = "", user_id: str = "") -> None:
+    async def adminperms(
+        self, ctx: commands.Context[Any], account: str = "", action: str = "", user_id: str = ""
+    ) -> None:
         api = _api(ctx)
         if not account or action == "list":
             out = await api.admin_perms(account or "")
@@ -151,7 +153,9 @@ class FrameworkVerbsCog(commands.Cog):
             await ctx.send("usage: adminperms <account> [add|remove|list] [user_id]")
 
     @commands.command(name="adminprefix")
-    async def adminprefix(self, ctx, account: str = "", mode: str = "", symbol: str = "") -> None:
+    async def adminprefix(
+        self, ctx: commands.Context[Any], account: str = "", mode: str = "", symbol: str = ""
+    ) -> None:
         api = _api(ctx)
         if not account or mode == "list":
             out = await api.admin_prefix(account or "")
@@ -163,11 +167,11 @@ class FrameworkVerbsCog(commands.Cog):
             await ctx.send("usage: adminprefix <account> [mention|symbol|both] [symbol]")
 
     @commands.command(name="prefixrate")
-    async def prefixrate(self, ctx, interval: float = 0) -> None:
+    async def prefixrate(self, ctx: commands.Context[Any], interval: float = 0) -> None:
         api = _api(ctx)
         if interval > 0:
             await api.ratelimit_set({"action": "message", "interval": interval}, surface="chat")
             await ctx.send(f"message interval set to {interval}s")
         else:
-            out = await api.ratelimit_show()
+            out = await api.ratelimit_stats()
             await ctx.send(str(out))
