@@ -47,7 +47,6 @@ from core.errors import (
     ServerRateLimit,
     TargetGone,
 )
-from core.plugin_manager.commands import COMMAND_HUB
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1076,7 +1075,7 @@ class RealDiscordClient:
         the rejection at debug).
 
         The concrete verb set comes from the process-wide self-command
-        registry (:data:`core.plugin_manager.commands.COMMAND_HUB`): the
+        converged cog surface (the FrameworkVerbsCog + plugin COGs): the
         plugin manager publishes an account's (assigned ∧ enabled)
         commands there and this layer rebuilds its Bot registrations from
         whatever is current — framework verbs (help/pg/say) plus every
@@ -1122,13 +1121,11 @@ class RealDiscordClient:
                 return
             adapter._logger.debug("self-command error: %s", error, exc_info=True)
 
-        # registry-driven verbs: subscribe delivers the CURRENT set and
-        # every later publish (assignment/enable mutations) rebuilds us
-        COMMAND_HUB.subscribe(
-            self._account,
-            self.set_plugin_commands,
-            stats_provider=self._self_command_stats,
-        )
+        # C3: the framework verbs ride a real cog — one add_cog, the
+        # library's dispatch; the hub's registration path is retired
+        from core.plugin_manager.framework_cog import FrameworkVerbsCog
+
+        bot.loop.create_task(bot.add_cog(FrameworkVerbsCog()))
 
     def allowed_invoker(self, invoker_id: int | None) -> bool:
         """The gate for one invocation (LEGACY sync view).
@@ -1185,15 +1182,6 @@ class RealDiscordClient:
         """
         return self.allowed_invoker(self.user_id)
 
-    def _self_command_stats(self) -> dict:
-        """Runtime stats for the framework ``pg`` verb (hub-pulled)."""
-        uptime = (
-            (time.monotonic() - self._connected_since)
-            if self._connected_since is not None
-            else None
-        )
-        return {"latency_ms": self.latency_ms, "uptime_s": uptime}
-
     async def disconnect(self) -> None:
         """Close the underlying client; safe when never started."""
         # drop the debounced loss forward and mark the session dead BEFORE
@@ -1209,10 +1197,9 @@ class RealDiscordClient:
             except Exception as exc:  # closing a half-open client can throw
                 self._logger.warning("live client close raised %s", exc)
         if self._commands_on:
-            # drop this client's registry subscription (a reconnect's fresh
-            # client re-subscribes with its own rebuild callback)
-            with contextlib.suppress(Exception):
-                COMMAND_HUB.unsubscribe(self._account, self.set_plugin_commands)
+            # C3: cogs ride add_cog/remove_cog; no hub subscription to
+            # drop (the library's close removes the cogs with the Bot)
+            pass
         await self._cancel_run_task()
         self._release_identify_slot()
         # allow a later connect() on the same instance — the client
