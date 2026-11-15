@@ -90,7 +90,7 @@ database (see [Setting up accounts](#setting-up-accounts)).
 ```bash
 # 30-second offline tour — no Discord account needed
 python3 main.py --sim-list              # list scenarios
-python3 main.py --sim soulcopy_basic    # full pipeline over the simulator
+python3 main.py --sim export_basic    # full pipeline over the simulator
 
 # go live
 python3 main.py                        # interactive REPL
@@ -171,7 +171,7 @@ python3 main.py accounts plugin-add alpha <plugin>
 
 The test suite exercises the framework through fixture plugins
 (`tests/fixtures/plugins/probe` for the loader/manager/command registry;
-`tests/fixtures/sim_plugins/soulcopy` as the full-stack simulation
+`tests/fixtures/sim_plugins/exporter` as the full-stack simulation
 workload) — those are tests-only, never discovered by a production
 boot.
 
@@ -398,7 +398,7 @@ DM pairs, history, a scripted responder, one-shot 429s, channel deletion).
 `SimulationRunner` boots a FULL ephemeral framework per run (with its own
 temp master key — never touching production state) and produces a timed
 execution log, the audit trail and pass/fail checks. Scenarios:
-`soulcopy_basic`, `soulcopy_multichunk`, `pacing_respected`,
+`export_basic`, `export_multichunk`, `pacing_respected`,
 `server_429_respected`, `channel_gone_aborts`, `control_mention`,
 `estop_halt`.
 
