@@ -4,6 +4,7 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  workflow_call: # the weekly health sweep reuses this whole gate
 
 permissions:
   contents: read
@@ -35,8 +36,22 @@ jobs:
         run: |
           uv run --frozen ruff format --check main.py core adapters interfaces database benchmark scripts parsers plugins \
             && echo "ruff format clean"
-      - name: Mypy strict (advisory ratchet — legacy error baseline must shrink, never grow)
-        continue-on-error: true
-        run: uv run --frozen mypy
+      - name: requirements.txt export sync (the AGENTS.md §8 contract)
+        run: |
+          uv export --format requirements-txt --no-hashes --no-dev --no-emit-project -o requirements.txt
+          git diff --exit-code -- requirements.txt
+      - name: Mypy strict ratchet (baseline must shrink, never grow)
+        run: |
+          uv run --frozen mypy &> /tmp/mypy.log || true
+          errors=$(grep -c "error:" /tmp/mypy.log || true)
+          baseline=$(<.github/mypy-baseline)
+          echo "mypy errors: $errors (baseline: $baseline)"
+          if [ "$errors" -gt "$baseline" ]; then
+            echo "::error::The mypy error count grew ($baseline -> $errors). Fix the new strict errors; lower .github/mypy-baseline only after fixing existing ones."
+            exit 1
+          fi
+          if [ "$errors" -lt "$baseline" ]; then
+            echo "::notice::mypy improved ($baseline -> $errors) — lower .github/mypy-baseline in this PR to lock in the gain."
+          fi
       - name: Unit / integration / simulation / stress tests
         run: uv run --frozen python -m unittest discover -s tests -t . -v
