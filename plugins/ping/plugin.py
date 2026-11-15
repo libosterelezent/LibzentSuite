@@ -18,7 +18,7 @@ dropped at collection time.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from core.errors import FlowBlocked
 from core.plugin_base import (
@@ -30,6 +30,7 @@ from core.plugin_base import (
 )
 
 if TYPE_CHECKING:
+    from core.settings_manager import Setting
     from core.event_bus import Event
 
 LOG = logging.getLogger("libzent.ping")
@@ -43,7 +44,7 @@ class PingPlugin(PluginBase):
     description = "sends a provided message to a chosen channel"
 
     #: no settings — the channel + text arrive per invocation
-    settings: tuple = ()
+    settings: ClassVar[tuple[Setting, ...]] = ()
 
     def __init__(self) -> None:
         self._ctx: PluginContext | None = None
@@ -69,24 +70,29 @@ class PingPlugin(PluginBase):
         return  # ping is command-driven; it never reacts to traffic
 
     # ------------------------------------------------------------ the action
-    async def _ping(self, ctx: PluginContext, channel_id: int, text: str) -> str:
+    async def _ping(self, ctx: PluginContext | CommandContext, channel_id: int, text: str) -> str:
         """Validate, send through the paced pipeline, remember the send.
 
         Returns the operator reply; raises nothing on FlowBlocked (one
         clean abort line is the plugin's own contract).
         """
+        services = ctx.services
+        if services is None:
+            # only the CommandContext half of the union can be unwired,
+            # and its handler checks before calling — belt for the union
+            return "usage: ping <channel_id> <text...>"
         try:
-            ctx.services.validate_channel(channel_id)
+            services.validate_channel(channel_id)
         except FlowBlocked as exc:
             ctx.logger.info("ping: channel %s unusable — %s", channel_id, exc)
             return f"channel unusable: {exc}"
         try:
-            await ctx.services.send_message(channel_id, text)
+            await services.send_message(channel_id, text)
         except FlowBlocked as exc:
             ctx.logger.info("ping: send to %s blocked — %s", channel_id, exc)
             return f"send blocked: {exc}"
         self._sent.append({"channel_id": channel_id, "text": text[:80]})
-        where = ctx.services.describe_channel(channel_id)
+        where = services.describe_channel(channel_id)
         ctx.logger.info("ping: delivered to %s (%s)", where, channel_id)
         return f"sent to {where}"
 
