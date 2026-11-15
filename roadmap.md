@@ -137,17 +137,10 @@ chain inspection, live WS events).
 
 ### better.py-self adoption (remaining)
 
-[ ] Bridge `on_http_throttle` → `RateLimitManager.report_server_limit()`
-    — the real throttle signal (the fork absorbs 429s internally).
-[ ] Per-route latency EWMA congestion watch (`http_route_latencies()`)
-    — queuing inflation, not 429s, is how the send ceiling manifests.
-[ ] Bounded probe-down recovery (decay ≤10% after 2 min clean, never
-    below base) — the fork's lane-governor recipe.
-[ ] `cache_stats()` through ControlAPI for the future System page.
-
-DONE: dependency switch (`8637d0a`); memory caps + cache persistence
-(`9f2321b`); `bot.add_check()` gate (`06cec37`); dynamic callable
-prefixes — adminprefix lands live (`252aa78`).
+ALL DONE 2026-11-15: dependency switch (`8637d0a`); memory caps +
+persistence (`9f2321b`); `bot.add_check()` gate (`06cec37`); dynamic
+prefixes (`252aa78`); throttle bridge + EWMA constants + probe-down
+recipe + `cache_stats()` (`838a0a1`).
 
 ### Plugin data
 
