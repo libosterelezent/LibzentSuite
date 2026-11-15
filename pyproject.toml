@@ -102,3 +102,10 @@ warn_unused_configs = true
 show_error_codes = true
 pretty = true
 files = ["core", "adapters", "database", "interfaces", "plugins", "benchmark", "scripts"]
+
+# narrow per-module exception: flet is deliberately absent from the
+# dev/CI environment (interfaces/ui imports it lazily — the API-client
+# core and tests run without the GUI dependency installed)
+[[tool.mypy.overrides]]
+module = "flet"
+ignore_missing_imports = true
