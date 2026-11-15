@@ -169,7 +169,7 @@ def _purge_plugin_modules(names: set[str]) -> None:
         sys.modules.pop(name, None)
 
 
-def _entry_dict(entry: Any) -> dict:
+def _entry_dict(entry: Any) -> dict[str, Any]:
     """Normalize one audit/log entry to a plain dict (A5 shape-agnostic)."""
     if isinstance(entry, dict):
         return dict(entry)
@@ -241,7 +241,7 @@ class SimulationRunner:
         self._credentials = credentials
 
     # ------------------------------------------------------------- listing
-    def list(self) -> builtins.list[dict]:
+    def list(self) -> builtins.list[dict[str, Any]]:
         """[{name, description}] for every registered scenario."""
         return [
             {"name": scenario.name, "description": scenario.description}
@@ -257,7 +257,7 @@ class SimulationRunner:
         return scenario
 
     # ----------------------------------------------------------------- run
-    async def run(self, name: str) -> dict:
+    async def run(self, name: str) -> dict[str, Any]:
         """Run one scenario on a fresh ephemeral stack; returns the report.
 
         The report: {"name", "passed", "duration_s", "failures",
@@ -331,7 +331,7 @@ class SimulationRunner:
         # every live self-command died after one dashboard simulation.
         # Save the current binding and restore it on EVERY exit path.
         saved_hub_manager = COMMAND_HUB.bound_manager
-        plugins_mgr = None
+        plugins_mgr: Any = None  # None until assembly binds the ephemeral manager
 
         def _restore_command_hub() -> None:
             """Put the production manager back behind the process hub."""
@@ -582,7 +582,7 @@ class SimulationRunner:
                 line += f" [{event}]"
             log_lines.append(line)
 
-        interactions: list[dict] = []
+        interactions: list[dict[str, Any]] = []
 
         def _on_audit(entry: Any) -> None:
             interactions.append(_entry_dict(entry))
@@ -810,7 +810,7 @@ class SimulationRunner:
     def _build_account_manager(
         mods: SimpleNamespace,
         bus: EventBus,
-        logger: LogService,
+        logger: ServiceLogger,
         db: Any,
         plugins_mgr: Any,
         scheduler: Any,

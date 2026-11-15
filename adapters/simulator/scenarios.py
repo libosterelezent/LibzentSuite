@@ -101,7 +101,7 @@ class Scenario:
     #: async; receives the ScenarioAPI facade built by the runner
     script: Callable[[Any], Awaitable[None]] = None  # type: ignore[assignment]
     #: (audit dicts, world) -> failure strings; [] means pass
-    checks: Callable[[list[dict], SimWorld], list[str]] = None  # type: ignore[assignment]
+    checks: Callable[[list[dict[str, Any]], SimWorld], list[str]] = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -125,9 +125,9 @@ class ScenarioAPI:
     #: synthetic the primary bot responder user id
     bot_id: int
     #: (channel_id, content, author_id) -> deliver an inbound message
-    owner_says: Callable[[int, str, int], None]
+    owner_says: Callable[[int, str, int], WorldMessage]
     #: fresh list of the collected audit dicts (normalized)
-    audit_entries: Callable[[], list[dict]]
+    audit_entries: Callable[[], list[dict[str, Any]]]
     #: plugin settings overrides the runner applied (global layer)
     settings_overrides: dict[str, dict[str, Any]]
     #: the mention-prefix RemoteControl bridge (control_mention scenario)
@@ -189,7 +189,7 @@ async def _trigger_and_settle(api: ScenarioAPI) -> None:
 
 
 # -------------------------------------------------------------------- checks
-def _outbound(audit: list[dict], account: str = ACCOUNT_NAME) -> list[dict]:
+def _outbound(audit: list[dict[str, Any]], account: str = ACCOUNT_NAME) -> list[dict[str, Any]]:
     """Audit entries of one account's outbound sends, oldest first."""
     entries = [
         entry
@@ -204,7 +204,7 @@ def _delivered_chunks(world: SimWorld) -> list[WorldMessage]:
     return [m for m in world.journal if m.content.startswith(IMPORT_PREFIX)]
 
 
-def _checks_basic(audit: list[dict], world: SimWorld) -> list[str]:
+def _checks_basic(audit: list[dict[str, Any]], world: SimWorld) -> list[str]:
     """export_basic: 2 pages -> >= 2 outbound sends and one prefixed chunk.
 
     The workload plugin is the tests/fixtures/sim_plugins/exporter
@@ -229,7 +229,7 @@ def _checks_basic(audit: list[dict], world: SimWorld) -> list[str]:
     return failures
 
 
-def _checks_multichunk(audit: list[dict], world: SimWorld) -> list[str]:
+def _checks_multichunk(audit: list[dict[str, Any]], world: SimWorld) -> list[str]:
     """export_multichunk: >= 2 chunks, each <= 2000 chars incl. prefix."""
     failures: list[str] = []
     chunks = _delivered_chunks(world)
@@ -244,7 +244,7 @@ def _checks_multichunk(audit: list[dict], world: SimWorld) -> list[str]:
     return failures
 
 
-def _checks_pacing(audit: list[dict], world: SimWorld) -> list[str]:
+def _checks_pacing(audit: list[dict[str, Any]], world: SimWorld) -> list[str]:
     """pacing_respected: every outbound gap >= interval - tolerance."""
     failures: list[str] = []
     outbound = _outbound(audit)
@@ -266,7 +266,7 @@ def _checks_pacing(audit: list[dict], world: SimWorld) -> list[str]:
     return failures
 
 
-def _checks_server_429(audit: list[dict], world: SimWorld) -> list[str]:
+def _checks_server_429(audit: list[dict[str, Any]], world: SimWorld) -> list[str]:
     """server_429_respected: blocked send retried AFTER the server wait."""
     failures: list[str] = []
     blocked = world.blocked_sends
@@ -277,7 +277,7 @@ def _checks_server_429(audit: list[dict], world: SimWorld) -> list[str]:
     if export is None:
         failures.append("export command never delivered - the 429 was not retried")
         return failures
-    gap = export.ts - float(blocked[0]["ts"])
+    gap = export.ts - float(blocked[0]["ts"] or 0.0)
     minimum = RETRY_AFTER - RETRY_TOLERANCE
     if gap < minimum:
         failures.append(f"retry came {gap:.3f}s after the 429 (expected >= {minimum:.2f}s)")
@@ -290,7 +290,7 @@ def _checks_server_429(audit: list[dict], world: SimWorld) -> list[str]:
     return failures
 
 
-def _checks_channel_gone(audit: list[dict], world: SimWorld) -> list[str]:
+def _checks_channel_gone(audit: list[dict[str, Any]], world: SimWorld) -> list[str]:
     """channel_gone_aborts: mid-flow deletion stops the flow with no chunks."""
     failures: list[str] = []
     if world.channel_exists(SYNTHETIC_GUILD_CHANNEL):
@@ -315,7 +315,7 @@ def _checks_channel_gone(audit: list[dict], world: SimWorld) -> list[str]:
     return failures
 
 
-def _estop_halt_ts(audit: list[dict]) -> float | None:
+def _estop_halt_ts(audit: list[dict[str, Any]]) -> float | None:
     """Timestamp of the owner-driven global estop (None when it never ran)."""
     for entry in audit:
         if "mgmt:estop" in str(entry.get("action", "")):
@@ -325,7 +325,7 @@ def _estop_halt_ts(audit: list[dict]) -> float | None:
     return None
 
 
-def _checks_estop_halt(audit: list[dict], world: SimWorld) -> list[str]:
+def _checks_estop_halt(audit: list[dict[str, Any]], world: SimWorld) -> list[str]:
     """estop_halt: zero sends after the halt, resume re-arms the pipeline.
 
     Evidence is purely world/audit-side: the mgmt:estop audit row stamps
@@ -408,9 +408,9 @@ async def _script_estop_halt(api: ScenarioAPI) -> None:
     # .emergency_stop_all() (cancel tasks, stop scheduler, stop accounts)
     api.owner_says(api.channel_id, f"{mention} estop", api.owner_id)
     stopped = await _await_true(
-        lambda: (
-            str(getattr(api.accounts.get(ACCOUNT_NAME).runtime, "status", "").value) == "stopped"
-        ),
+        # duck-typed A6 facade: runtime.status is an enum whose .value the
+        # Any-typed accounts boundary cannot express to the checker
+        lambda: str(api.accounts.get(ACCOUNT_NAME).runtime.status.value) == "stopped",
         timeout=15.0,
     )
     if not stopped:
@@ -439,7 +439,7 @@ async def _script_control_mention(api: ScenarioAPI) -> None:
     await api.world.wait_for_quiet(api.channel_id, quiet=0.6, limit=15.0)
 
 
-def _checks_control_mention(audit: list[dict], world: SimWorld) -> list[str]:
+def _checks_control_mention(audit: list[dict[str, Any]], world: SimWorld) -> list[str]:
     failures: list[str] = []
     out = [
         e
