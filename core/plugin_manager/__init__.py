@@ -13,7 +13,6 @@ from .commands import (
     FRAMEWORK_PLUGIN,
     RegisteredCommand,
     SelfCommandHub,
-    render_help,
 )
 from .loader import PluginLoader, PluginRecord
 from .manager import PluginManager, PluginRuntime
@@ -28,5 +27,4 @@ __all__ = [
     "PluginRuntime",
     "RegisteredCommand",
     "SelfCommandHub",
-    "render_help",
 ]

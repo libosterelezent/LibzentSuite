@@ -55,6 +55,9 @@ from ..plugin_base import ArgSpec, CommandContext, CommandSpec, usage_line
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+HELP_DESC_WIDTH = 25
+HELP_PAGE_CHARS = 1750
+
 LOG = logging.getLogger("libzent.selfcommands")
 
 #: services-facade plugin label used for framework-owned commands (task
@@ -619,37 +622,6 @@ FRAMEWORK_COMMANDS: Sequence[CommandSpec] = (
 _FRAMEWORK_NAMES = frozenset(spec.name for spec in FRAMEWORK_COMMANDS)
 
 
-def render_help(specs: Sequence[CommandSpec]) -> str:
-    """The categorized ``help`` text for one account's spec list.
-
-    Layout (the primary bot-style)::
-
-        Roll:
-          rollinfo    ...
-          rolllist    ...
-        Utilities:
-          pg          ...
-          say         Repeats the user's message.
-        No Category:
-          help        Shows this message
-
-    Plugin categories first (sorted, title-cased), then Utilities, then
-    No Category; inside a category commands are name-sorted and the
-    help column is aligned to the longest name. Category groups are
-    separated by ONE blank line so :func:`_paginate_help` can split on
-    group boundaries — this is the page-1 view of the same rendering
-    the ``help`` verb paginates.
-    """
-    pages = _paginate_help(_render_help_body(specs))
-    return pages[0] if len(pages) == 1 else pages[0] + "\n(help 2 for more…)"
-
-
-#: max description width in the help listing (25 chars + ellipsis)
-HELP_DESC_WIDTH = 25
-#: soft page budget for the paginated help (Discord limit is 2000)
-HELP_PAGE_CHARS = 1750
-
-
 def _paginate_help(body: str) -> list[str]:
     """Split the rendered help on GROUP boundaries into <=page-budget
     chunks (never mid-group; a single oversized group stays whole)."""
@@ -914,7 +886,6 @@ __all__ = [
     "UTILITIES_CATEGORY",
     "RegisteredCommand",
     "SelfCommandHub",
-    "render_help",
 ]
 
 

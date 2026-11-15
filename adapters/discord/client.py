@@ -328,8 +328,6 @@ class RealDiscordClient:
         self._account = ""
         #: self-command registry state: name -> spec (latest published set)
         #: and the names currently registered on the Bot (rebuild diffing)
-        self._self_command_specs: dict = {}
-        self._self_command_names: set = set()
         #: wall-clock anchor for the `pg` uptime stat (set at READY)
         self._connected_since: float | None = None
         #: callbacks assigned by the account manager BEFORE connect()
@@ -1132,47 +1130,6 @@ class RealDiscordClient:
             stats_provider=self._self_command_stats,
         )
 
-    # ------------------------------------------------------- self-commands
-    def set_plugin_commands(self, specs: Any) -> None:
-        """Adopt a newly published command set (hub → client).
-
-        Stores the specs and (once the Bot + command layer exist) rebuilds
-        the Bot registrations by DIFF: names that disappeared are removed,
-        names that appeared are registered — assignment/enable mutations
-        take effect on the live account without a reconnect.
-        """
-        self._self_command_specs = {
-            getattr(spec, "name", ""): spec for spec in (specs or ()) if getattr(spec, "name", "")
-        }
-        self._rebuild_self_commands()
-
-    def _rebuild_self_commands(self) -> None:
-        """Sync the Bot's registered registry commands with the stored set."""
-        bot = self._client
-        register = getattr(bot, "command", None)
-        if bot is None or not callable(register):
-            return  # no Bot (no prefix / pre-connect): specs stay stored
-        wanted = set(self._self_command_specs)
-        for stale in sorted(self._self_command_names - wanted):
-            with contextlib.suppress(Exception):
-                bot.remove_command(stale)
-        for fresh in sorted(wanted - self._self_command_names):
-            self._register_self_command(fresh)
-        self._self_command_names = wanted
-
-    def _register_self_command(self, name: str) -> None:
-        """Register ONE registry command as a thin Bot pass-through."""
-        bot = self._client
-        adapter = self
-
-        async def _invoke(ctx):
-            await adapter._dispatch_self_command(ctx, name)
-
-        try:
-            bot.command(name=name)(_invoke)
-        except Exception:
-            self._logger.exception("self-command registration failed: %s", name)
-
     def allowed_invoker(self, invoker_id: int | None) -> bool:
         """The gate for one invocation (LEGACY sync view).
 
@@ -1236,68 +1193,6 @@ class RealDiscordClient:
             else None
         )
         return {"latency_ms": self.latency_ms, "uptime_s": uptime}
-
-    @staticmethod
-    def _parse_invocation(content: Any, name: str, *, prefix: Any = None) -> tuple:
-        """``"sm!rollstart 123"`` + ``rollstart`` + prefix ``"sm!"`` ->
-        ``(["123"], "123")``.
-
-        Re-tokenizes on the content FOLLOWING the parsed prefix (the
-        library-parsed ``ctx.prefix`` — the mention form, a symbol, or
-        whatever when_mentioned_or matched) and takes the first token
-        EQUAL to the command name (case-insensitive) as the invocation
-        word; everything after it is the argument list
-        (whitespace-normalized raw). Matching a token that merely ENDS
-        WITH the name (the old rule) mis-anchors on the mention token
-        itself when a numeric command name is a suffix of the account's
-        own user id — the raw content still contains the mention, so
-        argument parsing shifted by one token (audit fix). Library-parsed
-        views are avoided on purpose so this helper stays unit-testable
-        without the library.
-        """
-        text = content or ""
-        if prefix:
-            prefix = str(prefix)
-            if text.startswith(prefix):
-                text = text[len(prefix) :]
-        tokens = text.split()
-        lowered = name.lower()
-        for index, token in enumerate(tokens):
-            if token.lower() == lowered:
-                args = tokens[index + 1 :]
-                return args, " ".join(args)
-        return [], ""
-
-    async def _dispatch_self_command(self, ctx: Any, name: str) -> None:
-        """One invocation: parse and hub-dispatch (contained).
-
-        Authorization is NOT handled here: the Bot-level ``_invoker_gate``
-        (installed in :meth:`_install_command_layer`) already rejected
-        unauthorized invokers before the library parsed any arguments."""
-        try:
-            message = getattr(ctx, "message", None)
-            # re-parse on the content FOLLOWING the library-parsed prefix
-            # (ctx.prefix) — see _parse_invocation for the boundary fix
-            args, raw = self._parse_invocation(
-                getattr(message, "content", None), name, prefix=getattr(ctx, "prefix", None)
-            )
-            channel = ctx.channel
-            guild = getattr(channel, "guild", None)
-            guild_id = getattr(guild, "id", None) if guild is not None else None
-            await COMMAND_HUB.invoke(
-                self._account,
-                name,
-                args,
-                channel.id,
-                guild_id=guild_id,
-                invoker_id=getattr(getattr(ctx, "author", None), "id", None),
-                raw=raw,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # a broken dispatch must never kill the Bot's command task
-            self._logger.exception("self-command dispatch failed: %s", name)
 
     async def disconnect(self) -> None:
         """Close the underlying client; safe when never started."""

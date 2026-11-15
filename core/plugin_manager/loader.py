@@ -40,7 +40,7 @@ from pathlib import Path
 
 from ..errors import PluginError
 from ..names import PLUGIN_NAME_RE as _NAME_RE
-from ..plugin_base import ArgSpec, CommandSpec, PluginBase
+from ..plugin_base import PluginBase
 from ..workspace.models import validate_plugin_declarations
 
 LOG = logging.getLogger("libzent.loader")
@@ -230,7 +230,6 @@ class PluginLoader:
                     f"plugin {name!r} declares duplicate setting key {setting.name!r}"
                 )
             seen_keys.add(setting.name)
-        self._validate_commands(cls, name, path)
         self._validate_chain_declarations(cls, name, path)
         self._validate_cog_declaration(cls, name, path)
         if name in self._records:
@@ -238,64 +237,6 @@ class PluginLoader:
                 f"duplicate plugin name {name!r} ({path} vs {self._records[name].source})"
             )
         self._records[name] = PluginRecord(name=name, cls=cls, source=path)
-
-    def _validate_commands(self, cls: type[PluginBase], name: str, path: Path) -> None:
-        """Validate a plugin's declared self-commands at discovery.
-
-        Fail-fast (same convention as duplicate setting keys): an invalid
-        command name, a missing handler, a missing/blank help line or a
-        duplicate name WITHIN one plugin is a PluginError — a broken
-        declaration must never boot. Cross-plugin collisions are NOT
-        checked here (the plugin manager resolves them at collection with
-        first-registered-wins, deterministic manifest order).
-        """
-        commands = getattr(cls, "COMMANDS", ()) or ()
-        if not isinstance(commands, tuple):
-            raise PluginError(
-                f"plugin {name!r}: COMMANDS must be a tuple of CommandSpec"
-                f" (got {type(commands).__name__}) in {path}"
-            )
-        seen: set = set()
-        for spec in commands:
-            if not isinstance(spec, CommandSpec):
-                raise PluginError(
-                    f"plugin {name!r}: COMMANDS entries must be CommandSpec"
-                    f" (got {type(spec).__name__}) in {path}"
-                )
-            if not COMMAND_NAME_RE.fullmatch(spec.name or ""):
-                raise PluginError(
-                    f"plugin {name!r}: command name {spec.name!r} must be"
-                    f" lowercase [a-z0-9_] (max 32) in {path}"
-                )
-            if spec.name in seen:
-                raise PluginError(
-                    f"plugin {name!r} declares duplicate command {spec.name!r} in {path}"
-                )
-            if not callable(spec.handler):
-                raise PluginError(
-                    f"plugin {name!r}: command {spec.name!r} has no callable handler in {path}"
-                )
-            if not (spec.help or "").strip():
-                raise PluginError(
-                    f"plugin {name!r}: command {spec.name!r} needs a help line in {path}"
-                )
-            for arg in spec.args:
-                if not isinstance(arg, ArgSpec):
-                    raise PluginError(
-                        f"plugin {name!r}: command {spec.name!r} args must"
-                        f" be ArgSpec (got {type(arg).__name__}) in {path}"
-                    )
-                if not (arg.name or "").strip():
-                    raise PluginError(
-                        f"plugin {name!r}: command {spec.name!r} declares"
-                        f" an ArgSpec with an empty name in {path}"
-                    )
-                if arg.greedy and arg is not spec.args[-1]:
-                    raise PluginError(
-                        f"plugin {name!r}: command {spec.name!r} greedy"
-                        f" ArgSpec {arg.name!r} must be LAST in {path}"
-                    )
-            seen.add(spec.name)
 
     def _validate_cog_declaration(self, cls: type[PluginBase], name: str, path: Path) -> None:
         """Validate the CONVERGED command declaration (C2): ``COG`` is

@@ -27,14 +27,14 @@ DM channel id to filter collected pages. The account manager implements it
 (the underlying DiscordClient protocol already exposes ``open_dm``).
 
 SELF-COMMAND DECLARATION (per-account command interface): a plugin may
-declare a ``COMMANDS`` class attribute — a tuple of :class:`CommandSpec` —
+declare a ``COG`` class attribute — a library Cog subclass —
 making its verbs available as ``<prefix><name>`` self-commands on every
 account it is ASSIGNED to and ENABLED on (e.g. ``sm!rollstart``). Handlers
 run through the SAME paced/isolated pipeline as plugin code: replies go
 through ``ctx.services.send_message`` (never a raw client), a crashing
 handler is contained by the executor, and the plugin manager binds each
 declared handler to the per-account plugin instance before invocation
-(handlers may be plain methods — see CommandSpec).
+(the cog carries the command callbacks).
 """
 
 from __future__ import annotations
@@ -63,6 +63,16 @@ if TYPE_CHECKING:  # runtime duck-typing avoids import cycles / hard deps
     from .settings_manager import Setting
 
 
+class CommandSettingsApi(Protocol):
+    """Settings surface a self-command handler may read/mutate."""
+
+    def get(self, plugin: str, key: str, default: Any = None) -> Any: ...
+
+    def set(self, plugin: str, key: str, value: Any) -> Any: ...
+
+    def clear(self, plugin: str, key: str) -> Any: ...
+
+
 class PluginBase(abc.ABC):  # noqa: B024 -- contract marker; every hook is optional by design
     """Contract every plugin module must fulfil.
 
@@ -80,11 +90,12 @@ class PluginBase(abc.ABC):  # noqa: B024 -- contract marker; every hook is optio
     description: ClassVar[str] = ""
     #: everything the plugin supports; resolved per account by SettingsManager
     settings: ClassVar[Sequence[Setting]] = ()
-    #: self-commands the plugin declares (per-account command interface).
-    #: Declared ONCE on the class — the loader validates the tuple at
-    #: discovery and the plugin manager binds each handler to the
-    #: per-(account, plugin) instance. See :class:`CommandSpec`.
-    COMMANDS: ClassVar[tuple[CommandSpec, ...]] = ()
+    #: self-commands the plugin declares — the CONVERGED form: a real
+    #: library Cog class carrying the command face (typed converter
+    #: params, command groups, native help). The loader validates it
+    #: at discovery; the cog host builds one instance per
+    #: (account, plugin) with the services toolbox injected.
+    COG: ClassVar[Any] = None
     #: WORKSPACE chains (decision 2, DEFAULT OFF — chain-inert without
     #: them): bare signal names this plugin may emit at runtime via
     #: ``await ctx.services.emit_signal(name, payload)`` (namespacing
@@ -158,191 +169,6 @@ class PluginContext:
 
 
 @dataclass(frozen=True)
-class ArgSpec:
-    """One declarative positional argument of a self-command.
-
-    This is the ENDPOINT for bot-flow-style grammar:
-    ``rollset <profile_name> <roulette> <channel_id> <userstack>
-    <ignore_keys>`` is five ArgSpecs — the executor parses, converts and
-    validates them BEFORE the handler runs, filling ``ctx.parsed``;
-    failures render the auto-generated usage line back to the invoker
-    (exactly like the original's MissingRequiredArgument handlers).
-    """
-
-    #: placeholder name — renders as ``<name>`` in usage lines
-    name: str
-    #: str | int | float, or any callable(text) -> value (raises
-    #: ValueError on bad input)
-    kind: Any = str
-    required: bool = True
-    default: Any = None
-    #: consume the REMAINING tokens as a list (``rollstop <p...>``)
-    greedy: bool = False
-    #: allowed values (checked AFTER conversion)
-    choices: tuple[Any, ...] | None = None
-
-
-def _convert_arg(spec: ArgSpec, token: str) -> Any:
-    if spec.kind is str or (callable(spec.kind) is False and spec.kind is None):
-        value: Any = token
-    elif spec.kind in (int, float):
-        try:
-            value = spec.kind(token)
-        except (TypeError, ValueError):
-            raise ValueError(
-                f"<{spec.name}> must be a valid {spec.kind.__name__}, got {token!r}"
-            ) from None
-    elif callable(spec.kind):
-        try:
-            value = spec.kind(token)
-        except ValueError:
-            raise ValueError(f"<{spec.name}>: {token!r} is not valid") from None
-    else:
-        # unrecognized kind (e.g. kind="int"): silently skipping the
-        # conversion used to leave the value a STRING — fail at parse
-        # time instead so the typo surfaces immediately
-        raise ValueError(
-            f"<{spec.name}> has an unsupported kind {spec.kind!r} "
-            f"(use str, int, float or a callable)"
-        )
-    if spec.choices is not None and value not in spec.choices:
-        allowed = "/".join(str(c) for c in spec.choices)
-        raise ValueError(f"<{spec.name}> must be one of: {allowed} (got {token!r})")
-    return value
-
-
-def parse_command_args(spec: CommandSpec, argv: list[str]) -> dict[str, Any]:
-    """Parse ``argv`` against the command's declared ArgSpecs.
-
-    Returns the name->value dict for ``ctx.parsed``. Raises ValueError
-    with a one-line reason on: missing required args, failed type
-    conversion, an unsupported ArgSpec kind, disallowed choices, or
-    leftover tokens.
-    """
-    out: dict[str, Any] = {}
-    rest = list(argv or [])
-    for arg in spec.args:
-        if arg.greedy:
-            taken = list(rest)
-            rest = []
-            if not taken:
-                if arg.required:
-                    raise ValueError(f"missing <{arg.name}> (one or more)")
-                # only list/tuple defaults expand element-wise; any other
-                # non-None default becomes a ONE-element list (a scalar
-                # string default used to be char-split by list("...")
-                default = arg.default
-                if default is None:
-                    taken = []
-                elif isinstance(default, (list, tuple)):
-                    taken = list(default)
-                else:
-                    taken = [default]
-            out[arg.name] = taken
-            continue
-        if not rest:
-            if arg.required:
-                raise ValueError(f"missing <{arg.name}>")
-            out[arg.name] = arg.default
-            continue
-        out[arg.name] = _convert_arg(arg, rest.pop(0))
-    if rest:
-        raise ValueError(
-            f"unexpected argument {rest[0]!r} — this command takes {len(spec.args)} argument(s)"
-        )
-    return out
-
-
-def usage_line(spec: CommandSpec) -> str:
-    """Auto-generated usage: ``<a> <b> [c...]`` from the ArgSpecs
-    (empty when the command declares none — falls back to spec.usage)."""
-    parts = []
-    for arg in spec.args:
-        if arg.greedy:
-            parts.append(f"[{arg.name}...]" if not arg.required else f"<{arg.name}...>")
-        else:
-            parts.append(f"<{arg.name}>" if arg.required else f"[{arg.name}]")
-    return " ".join(parts)
-
-
-@dataclass(frozen=True)
-class CommandSpec:
-    """One plugin-declared self-command (bot-command-style grammar).
-
-    Declared on the plugin class as part of ``COMMANDS`` (the ONE
-    declaration mechanism — there is no runtime/on_load registration; the
-    class attribute keeps the registry static, discoverable and sortable
-    by manifest order).
-
-    ``name`` is the BARE name without the account's command prefix
-    (``rollstart``, not ``sm!rollstart``) and must match ``[a-z0-9_]+``.
-    ``handler`` is ``async def handler(ctx: CommandContext, args) -> str``
-    — the string it returns is sent back through the paced pipeline as a
-    normal self-message in the invoking channel. Raising ``ValueError``
-    (which includes :class:`core.errors.SettingsValidationError`) renders
-    the usage line back to the invoker instead. The handler may be a
-    PLAIN METHOD of the plugin class: the plugin manager binds it to the
-    per-(account, plugin) instance, so handlers reach the plugin's own
-    state and internals exactly like lifecycle hooks do.
-
-    An empty ``category`` defaults to the plugin's display name at
-    collection time; the auto-help groups commands by it.
-    """
-
-    #: bare command name WITHOUT prefix, e.g. "rollstart"
-    name: str
-    #: one-liner for the categorized help
-    help: str
-    #: argument usage, e.g. "<key> <value>" (display-only hint; the
-    #: declarative ArgSpecs below are the enforced contract)
-    usage: str = ""
-    #: declarative positional arguments — when present the executor
-    #: parses/validates them and fills ``ctx.parsed`` before the handler
-    args: tuple[ArgSpec, ...] = ()
-    #: defaults to the plugin's display name
-    category: str = ""
-    #: async def handler(ctx: CommandContext, args: List[str]) -> str
-    handler: Callable | None = None
-
-
-@runtime_checkable
-class CommandSettingsApi(Protocol):
-    """Validated settings surface for self-command handlers.
-
-    Implemented by the plugin manager per (account, plugin) pair and
-    handed to handlers as ``ctx.settings_api`` (None on stripped-down
-    test stacks — handlers must degrade gracefully). This is the SAME
-    validation path as the dashboard/CLI ``set-setting`` surface
-    (:meth:`core.plugin_manager.PluginManager.set_setting`) and the SAME
-    effective-settings merge as the Phase-1 account view (plugin Setting
-    defaults <- bound profile (minus the reserved ``channels`` key) <-
-    per-account overrides, with the profile's channel scope riding along
-    under ``"channels"``).
-    """
-
-    def schema(self) -> Sequence[Setting]:
-        """The plugin's setting schema (declared order)."""
-
-    async def effective(self) -> dict[str, Any]:
-        """Merged effective settings incl. the reserved ``channels`` scope."""
-
-    async def set(self, key: str, value: Any) -> Any:
-        """Validate + persist one per-account override; returns typed value.
-
-        Raises SettingsValidationError for unknown keys / bad values.
-        """
-
-    async def clear(self, key: str) -> Any:
-        """Remove one per-account override; returns the newly-effective value."""
-
-    async def binding(self) -> str | None:
-        """Name of the account's bound profile for this plugin (None = none)."""
-
-    async def profiles(self) -> list[dict[str, Any]]:
-        """The plugin's available profiles (``name``/``description`` rows)."""
-
-
-@dataclass(frozen=True)
 class CommandContext:
     """Everything a self-command handler may touch at runtime.
 
@@ -374,9 +200,8 @@ class CommandContext:
     #: the invoking Discord user id (None when unknown) — admin-gated
     #: handlers check it against the AccessManager
     invoker_id: int | None = None
-    #: PARSED arguments when the spec declares ArgSpecs (name -> typed
-    #: value; greedy args are lists). Empty dict for spec-less commands
-    #: (they read the raw ``args`` list instead).
+    #: Reserved: the converged cog path parses typed kwargs natively
+    #: (the library's converters); this field is vestigial.
     parsed: dict[str, Any] = field(default_factory=dict)
 
 
@@ -525,11 +350,100 @@ class PluginServices(Protocol):
         """Resolved settings of this (account, plugin) pair."""
 
 
+@dataclass(frozen=True)
+class ArgSpec:
+    """HUB-INTERNAL: one positional argument of a framework verb.
+
+    No longer the plugin-facing grammar (plugins declare typed params
+    on cog callbacks); this shape serves the framework verb
+    definitions inside the hub until C3 migrates them to cogs."""
+
+    name: str
+    kind: Any = str
+    required: bool = True
+    default: Any = None
+    greedy: bool = False
+    choices: tuple[Any, ...] | None = None
+
+
+def _convert_arg(spec: ArgSpec, token: str) -> Any:
+    """HUB-INTERNAL: coerce one token to the ArgSpec's kind."""
+    if spec.kind is str or (callable(spec.kind) is False and spec.kind is None):
+        return token
+    if spec.kind in (int, float):
+        try:
+            return spec.kind(token)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"<{spec.name}> must be a valid {spec.kind.__name__}, got {token!r}"
+            ) from None
+    if callable(spec.kind):
+        try:
+            return spec.kind(token)
+        except ValueError:
+            raise ValueError(f"<{spec.name}>: {token!r} is not valid") from None
+    raise ValueError(
+        f"<{spec.name}> has an unsupported kind {spec.kind!r} (use str, int, float or a callable)"
+    )
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    """HUB-INTERNAL: one framework verb definition.
+
+    The plugin-facing COMMANDS contract is RETIRED (plugins declare
+    COG classes); this shape defines the hub's own verbs until C3
+    migrates them to the FrameworkVerbsCog."""
+
+    name: str
+    help: str
+    usage: str = ""
+    category: str = ""
+    args: tuple[ArgSpec, ...] = ()
+    handler: Callable | None = None
+
+
+def parse_command_args(spec: CommandSpec, argv: list[str]) -> dict[str, Any]:
+    """HUB-INTERNAL: parse one framework verb invocation's positional
+    arguments against its ArgSpec grammar. Raises ValueError with a
+    usage-ready message on arity/type/choice failures."""
+    out: dict[str, Any] = {}
+    rest = list(argv)
+    for arg in spec.args:
+        if arg.greedy:
+            out[arg.name] = list(rest)
+            rest = []
+            break
+        if not rest:
+            if arg.required:
+                raise ValueError(f"missing <{arg.name}>")
+            out[arg.name] = arg.default
+            continue
+        token = rest.pop(0)
+        if arg.choices is not None and token not in arg.choices:
+            raise ValueError(f"<{arg.name}> must be one of {list(arg.choices)}, got {token!r}")
+        out[arg.name] = _convert_arg(arg, token)
+    if rest:
+        raise ValueError(f"unexpected extra argument(s): {' '.join(rest)}")
+    return out
+
+
+def usage_line(spec: CommandSpec) -> str:
+    """HUB-INTERNAL: render a framework verb's usage hint."""
+    parts = [f"<{a.name}>" if a.required else f"[{a.name}]" for a in spec.args]
+    if any(a.greedy for a in spec.args):
+        parts.append("...")
+    return " ".join(parts)
+
+
 __all__ = [
+    "ArgSpec",
     "CommandContext",
     "CommandSettingsApi",
     "CommandSpec",
     "PluginBase",
     "PluginContext",
     "PluginServices",
+    "parse_command_args",
+    "usage_line",
 ]

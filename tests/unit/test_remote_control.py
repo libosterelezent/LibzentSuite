@@ -246,12 +246,6 @@ class PortedCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[global] below_floor: interval under the safety floor",
                       reply)
 
-    async def test_ratelimit_bad_choice_is_usage_error(self) -> None:
-        reply = await self._run("ratelimit", ["explode"])
-        self.assertIn("usage: ratelimit show|warnings", reply)
-        self.assertIn("must be one of: show/warnings", reply)
-
-    # ---------------------------------------------------------------- lane
     async def test_lane_state(self) -> None:
         self.assertIn("send lane: on (active) · spacing 1.5s · "
                       "waiting 0 · grants 4", await self._run("lane", []))
@@ -371,17 +365,6 @@ class PortedCommandTests(unittest.IsolatedAsyncioTestCase):
         reply = await self._run("accounts", ["list"])
         self.assertLessEqual(len(reply), MAX_REPLY_CHARS)
         self.assertIn("… (truncated)", reply)
-
-    async def test_help_lists_the_framework_category(self) -> None:
-        reply = await self._run("help", [])
-        self.assertIn("FRAMEWORK", reply)
-        for verb in ("status", "accounts", "plugins", "ratelimit", "lane",
-                     "tasks", "estop", "simulation"):
-            self.assertIn(verb, reply)
-        # per-command help shows the ported grammar
-        detail = await self._run("help", ["estop"])
-        self.assertIn("usage: estop [account]", detail)
-        self.assertIn("category: Framework", detail)
 
     async def test_framework_names_are_reserved_for_the_verbs(self) -> None:
         entries = {e.spec.name: e for e in COMMAND_HUB.entries("alpha")}

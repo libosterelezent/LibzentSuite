@@ -135,29 +135,6 @@ class RegistryWiringTests(CommandE2EBase):
 
     PROBE_VERBS = {"probeinfo", "probeset", "probestart"}
 
-    async def test_assign_unassign_disable_drive_commands_for(self):
-        fw = await self.boot()
-        api = fw.api
-        await api.accounts_add({"name": "alpha", "plugins": [PROBE]})
-
-        # assigned -> the declared verbs are collected (bound + categorized)
-        names = {s.name for s in fw.plugins.commands_for("alpha")}
-        self.assertTrue(names >= self.PROBE_VERBS)
-        # probe declares its category explicitly ("Probe")
-        self.assertEqual(
-            {s.category for s in fw.plugins.commands_for("alpha")}, {"Probe"})
-
-        # disabled -> gone (assignment = visibility; enabled also required)
-        await api.plugins_set_enabled("alpha", PROBE, False)
-        self.assertEqual(fw.plugins.commands_for("alpha"), [])
-        await api.plugins_set_enabled("alpha", PROBE, True)
-        self.assertEqual({s.name for s in fw.plugins.commands_for("alpha")},
-                         self.PROBE_VERBS)
-
-        # unassigned -> gone
-        await api.accounts_plugin_unassign("alpha", PROBE)
-        self.assertEqual(fw.plugins.commands_for("alpha"), [])
-
 
 class ExecutorOverRealDatabaseTests(CommandE2EBase):
     """The full execution path with profiles/bindings in a real DB."""
@@ -196,12 +173,6 @@ class ExecutorOverRealDatabaseTests(CommandE2EBase):
             "alpha", name, args, channel, guild_id=GUILD, invoker_id=invoker)
         return self.services.sent[-1][1] if self.services.sent else None
 
-    async def test_declared_command_runs_over_the_real_db(self):
-        """probeinfo executes through the executor, and its reply flows
-        back through the per-plugin services facade."""
-        reply = await self._run("probeinfo", [])
-        self.assertEqual(reply, "probe ok")
-
     async def test_profile_settings_reach_the_live_view(self):
         """The bound profile's settings ride into the runtime effective
         view (the merge path the executor's settings api serves)."""
@@ -213,15 +184,3 @@ class ExecutorOverRealDatabaseTests(CommandE2EBase):
                          {"channels": [str(CHANNEL_OK)]})
         self.assertEqual(await api.binding(), "grind-only")
 
-    async def test_help_and_framework_verbs_over_the_real_stack(self):
-        reply = await self._run("help", [])
-        for verb in ("probeinfo", "pg", "say", "help"):
-            self.assertIn(verb, reply)
-        say = await self._run("say", ["integration", "echo"])
-        self.assertEqual(say, "integration echo")
-        # non-owner: silently ignored (no reply at all)
-        self.assertIsNone(await self._run("pg", [], invoker=999))
-
-
-if __name__ == "__main__":
-    unittest.main()
