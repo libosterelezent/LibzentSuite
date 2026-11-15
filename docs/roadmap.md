@@ -159,6 +159,9 @@ per-account plugin profile pages.
 
 ## Codebase Hygiene
 
+[x] CodeRabbit review integration (2026-11-16): chill profile with
+    per-area contract instructions over the gated tree; auto-review on
+    PRs against master + feat/pivot-core; local-only archives filtered.
 [x] Repository hardening, free tier (2026-11-15): security workflow
     (gitleaks full-history + pip-audit vs the lock + bandit -ll),
     pre-commit local gate, Dependabot (github-actions only), read-only
