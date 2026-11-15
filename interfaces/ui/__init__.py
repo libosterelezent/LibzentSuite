@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
@@ -93,7 +92,7 @@ def build_app(client: ApiClient):
         rail.on_change = _navigate
         # initial page
         if PAGES:
-            first = list(PAGES)[0]
+            first = next(iter(PAGES))
             content.content = PAGES[first](page, client)
 
         page.add(
