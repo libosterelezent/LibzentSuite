@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeAlias
 from urllib.request import Request, urlopen
 
 LOG = logging.getLogger("libzent.ui")
@@ -23,13 +24,13 @@ __all__ = ["ApiClient", "build_app"]
 
 #: page modules register into this registry (name -> callable building
 #: the flet controls); the shell iterates it for the sidebar
-PAGES: dict[str, Any] = {}
+PAGES: dict[str, PageBuilder] = {}
 
 
-def page(name: str):
+def page(name: str) -> Callable[[PageBuilder], PageBuilder]:
     """Decorator: register a page builder under its sidebar name."""
 
-    def _register(builder: Any) -> Any:
+    def _register(builder: PageBuilder) -> PageBuilder:
         PAGES[name] = builder
         return builder
 
@@ -43,7 +44,7 @@ class ApiClient:
         self._base = base_url.rstrip("/")
         self._token = token
 
-    def _request(self, method: str, path: str, body: dict | None = None) -> Any:
+    def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
         url = f"{self._base}{path}"
         headers = {"Content-Type": "application/json"}
         if self._token:
@@ -60,15 +61,26 @@ class ApiClient:
     def get(self, path: str) -> Any:
         return self._request("GET", path)
 
-    def post(self, path: str, body: dict | None = None) -> Any:
+    def post(self, path: str, body: dict[str, Any] | None = None) -> Any:
         return self._request("POST", path, body)
 
     def delete(self, path: str) -> Any:
         return self._request("DELETE", path)
 
 
-def build_app(client: ApiClient):
-    """Build the flet application shell with every registered page."""
+#: a page builder: renders one page's flet controls into the shell. The
+#: flet param/return stay Any because flet is deliberately absent from the
+#: type-check environment (see the mypy override in pyproject.toml).
+PageBuilder: TypeAlias = Callable[[Any, ApiClient], Any]
+
+
+def build_app(client: ApiClient) -> Callable[[Any], None]:
+    """Build the flet application shell with every registered page.
+
+    Returns the flet app target — ``Callable[[ft.Page], None]``; the page
+    type stays Any because flet is deliberately absent from the type-check
+    environment (see the mypy override in pyproject.toml).
+    """
     import flet as ft
 
     def _shell(page: ft.Page) -> None:

@@ -409,7 +409,7 @@ def _check_level_owner(level: str, owner: str | None, ctx: str) -> None:
         raise UsageError(f"{ctx}: level 'global' takes no owner")
     if level != "global" and owner is None:
         raise UsageError(f"{ctx}: level {level!r} needs an owner")
-    if level == "account_plugin" and "/" not in owner:
+    if level == "account_plugin" and owner is not None and "/" not in owner:
         raise UsageError(f"{ctx}: account_plugin owner must be '<account>/<plugin>', got {owner!r}")
 
 
@@ -484,16 +484,18 @@ async def _accounts_group(api: Any, args: list[str]) -> str:
     if sub in ("start", "stop"):
         if len(rest) > 1:
             raise UsageError(f"usage: {_ACCOUNTS_USAGE[sub]}")
-        name: str | None = None
+        # 'target' (not reusing 'name' from the credential/remove branches
+        # above): None means "all accounts" — start/stop accept both
+        target: str | None = None
         if rest and rest[0].lower() != "all":
             if not rest[0]:  # a quoted empty token must never mean "all"
                 raise UsageError(
                     f"account name cannot be empty — use 'all' for every account "
                     f"(usage: {_ACCOUNTS_USAGE[sub]})"
                 )
-            name = rest[0]
+            target = rest[0]
         method = api.accounts_start if sub == "start" else api.accounts_stop
-        return _result(await method(name, surface="cli"), verb=sub)
+        return _result(await method(target, surface="cli"), verb=sub)
     if sub == "estop":
         name = _exact(rest, 1, ctx)
         return _result(
@@ -785,7 +787,7 @@ async def _simulation_group(api: Any, args: list[str]) -> str:
 
 
 # ---------------------------------------------------------------- formatters
-def format_status(status: dict) -> str:
+def format_status(status: dict[str, Any]) -> str:
     """Overview payload (api.status) -> aligned text: uptime/tasks/accounts/
     policies + the safety-warning block."""
     lines: list[str] = []
@@ -807,7 +809,7 @@ def format_status(status: dict) -> str:
     return "\n".join(lines)
 
 
-def format_accounts(accounts: list[dict]) -> str:
+def format_accounts(accounts: list[dict[str, Any]]) -> str:
     """Account list payload (api.accounts_list) -> one block per account.
 
     Capabilities render from ``assigned_plugins`` (the direct account→plugin
@@ -834,7 +836,7 @@ def format_accounts(accounts: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_account_info(details: dict) -> str:
+def format_account_info(details: dict[str, Any]) -> str:
     """Account details payload (api.accounts_info) -> the spec §8 page.
 
     Sections: Status / Identity / Runtime (clearly marked as CLIENT CACHE —
@@ -906,7 +908,7 @@ def format_account_plugins(account: str, plugins: Sequence[str]) -> str:
     return "\n".join(f"  {name}" for name in names)
 
 
-def format_plugins(manifests: list[dict]) -> str:
+def format_plugins(manifests: list[dict[str, Any]]) -> str:
     """Plugin manifests (api.plugins_manifests) -> metadata + settings schema."""
     if not manifests:
         return "  (no plugins discovered)"
@@ -928,7 +930,7 @@ def format_plugins(manifests: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_plugin_state(states: list[dict]) -> str:
+def format_plugin_state(states: list[dict[str, Any]]) -> str:
     """Per-account plugin state (api.plugins_state / plugins_settings).
 
     Renders '[+]' enabled / '[-]' disabled / '[*]' unknown (the settings-only
@@ -952,7 +954,7 @@ def format_plugin_state(states: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_lane(lane: dict) -> str:
+def format_lane(lane: dict[str, Any]) -> str:
     """Lane state -> display lines (the send lane is REMOVED).
 
     The backend keeps ratelimit_lane/ratelimit_set_lane as documented
@@ -980,7 +982,7 @@ def format_lane(lane: dict) -> str:
     )
 
 
-def format_policies(policies: list[dict]) -> str:
+def format_policies(policies: list[dict[str, Any]]) -> str:
     """Stored policies (api.ratelimit_policies) -> scope/action/policy table."""
     if not policies:
         return "  (no policies set — 'ratelimit set <action> <interval>')"
@@ -1003,7 +1005,7 @@ def format_policies(policies: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_effective(effective: dict) -> str:
+def format_effective(effective: dict[str, Any]) -> str:
     """Effective pacing (api.ratelimit_effective) -> interval + source stack.
 
     The effective interval is the MAX across every applicable level; the
@@ -1032,7 +1034,7 @@ def format_effective(effective: dict) -> str:
     return "\n".join(lines)
 
 
-def format_tasks(tasks: list[dict]) -> str:
+def format_tasks(tasks: list[dict[str, Any]]) -> str:
     """Queued/running tasks (api.tasks_list) -> a compact table."""
     if not tasks:
         return "  (no tasks — 'tasks list [status]')"
@@ -1048,7 +1050,7 @@ def format_tasks(tasks: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_history(tasks: list[dict]) -> str:
+def format_history(tasks: list[dict[str, Any]]) -> str:
     """Finished tasks (api.tasks_history) -> outcome + duration per task."""
     if not tasks:
         return "  (no history yet)"
@@ -1073,7 +1075,7 @@ def format_history(tasks: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_logs(entries: list[dict]) -> str:
+def format_logs(entries: list[dict[str, Any]]) -> str:
     """Structured log entries (api.logs_tail) -> 'HH:MM:SS SEVERITY source msg'."""
     if not entries:
         return "  (no log entries)"
@@ -1096,7 +1098,7 @@ def format_logs(entries: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_audit(entries: list[dict]) -> str:
+def format_audit(entries: list[dict[str, Any]]) -> str:
     """Audit entries (api.audit_tail) -> compact interaction lines.
 
     Format: ``HH:MM:SS -> account action ch=... content (wait Xms, jitter Yms)``
@@ -1120,7 +1122,7 @@ def format_audit(entries: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_warnings(warnings: list[dict]) -> str:
+def format_warnings(warnings: list[dict[str, Any]]) -> str:
     """Safety warnings (api.ratelimit_warnings) -> icon lines.
 
     Icons: ``[i]`` informational, ``[!]`` worth a look, ``[X]`` dangerous.
@@ -1138,7 +1140,7 @@ def format_warnings(warnings: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_simulation_report(report: dict) -> str:
+def format_simulation_report(report: dict[str, Any]) -> str:
     """Simulation report (api.simulation_run) -> verdict + first 30 log lines.
 
     Long transcripts are capped at 30 timed lines with a '(+N more lines)'
@@ -1169,7 +1171,7 @@ def format_simulation_report(report: dict) -> str:
     return "\n".join(lines)
 
 
-def format_credential_status(rows: list[dict]) -> str:
+def format_credential_status(rows: list[dict[str, Any]]) -> str:
     """Credential status payload (api.accounts_credential_status) -> table.
 
     One line per account: name + db/env/missing chip. NEVER a value — the
@@ -1180,13 +1182,14 @@ def format_credential_status(rows: list[dict]) -> str:
     labels = {"db": "db (encrypted)", "env": "env (.env fallback)"}
     lines: list[str] = []
     for row in rows:
-        state = row.get("credential")
+        # unvalidated API JSON: the chip is "db"/"env" or missing (None)
+        state: Any = row.get("credential")
         state_text = labels.get(state, str(state or "missing"))
         lines.append(f"  {_col(str(row.get('name', '?')), 20)}credential: {state_text}")
     return "\n".join(lines)
 
 
-def format_import_report(report: dict) -> str:
+def format_import_report(report: dict[str, Any]) -> str:
     """Import report (api.credentials_import_env) -> names-only summary."""
     imported = report.get("imported") or []
     skipped = report.get("skipped") or []
@@ -1204,7 +1207,7 @@ def format_import_report(report: dict) -> str:
     return "\n".join(lines)
 
 
-def format_cooldowns(rows: list[dict]) -> str:
+def format_cooldowns(rows: list[dict[str, Any]]) -> str:
     """Active cooldowns (api.cooldowns_list) -> account/plugin/key table."""
     if not rows:
         return "  (no active cooldowns)"
