@@ -22,9 +22,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .errors import CredentialsError
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from core.credentials import Credentials
+    from database.repositories.kv import KvRepository
 
 LOG = logging.getLogger("libzent.access")
 
@@ -59,7 +65,11 @@ class AccessManager:
     """
 
     def __init__(
-        self, kv: Any, logger: logging.Logger | None = None, *, credentials: Any = None
+        self,
+        kv: KvRepository,
+        logger: logging.Logger | None = None,
+        *,
+        credentials: Credentials | None = None,
     ) -> None:
         self._kv = kv
         self._log = logger or LOG
@@ -214,7 +224,7 @@ class AccessManager:
         (:meth:`prefix_config`) serves every later rebuild."""
         return self._prefix_cache.get(name)
 
-    async def warm_prefix_cache(self, names=None) -> None:
+    async def warm_prefix_cache(self, names: Sequence[str] | None = None) -> None:
         """Load prefix rows for the given accounts (all when None)."""
         if names is None:
             rows = await self._kv.prefix("access:account:") or {}

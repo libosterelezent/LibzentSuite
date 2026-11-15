@@ -58,9 +58,9 @@ if TYPE_CHECKING:  # runtime duck-typing avoids import cycles / hard deps
     import logging
     from collections.abc import Callable, Sequence
 
-    from .credentials import Credentials
+    from .credentials import Credentials as Credentials
     from .event_bus import Event, MessageReceived
-    from .settings_manager import Setting
+    from .settings_manager import Setting as Setting
 
 
 class CommandSettingsApi(Protocol):
@@ -185,8 +185,9 @@ class CommandContext:
     account: str
     #: plugin name the command belongs to ("selfcmd" for framework verbs)
     plugin: str
-    #: per-(account, plugin) services facade (paced sends, credentials...)
-    services: PluginServices
+    #: per-(account, plugin) services facade (paced sends, credentials...);
+    #: None ONLY for framework verbs, which run without a plugin facade
+    services: PluginServices | None
     #: pre-scoped logger: libzent.<account>.<plugin>
     logger: logging.Logger
     #: channel the command was invoked in
@@ -400,7 +401,7 @@ class CommandSpec:
     usage: str = ""
     category: str = ""
     args: tuple[ArgSpec, ...] = ()
-    handler: Callable | None = None
+    handler: Callable[..., Any] | None = None
 
 
 def parse_command_args(spec: CommandSpec, argv: list[str]) -> dict[str, Any]:

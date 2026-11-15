@@ -86,6 +86,7 @@ class Setting:
                 # float(True) == 1.0 silently inverted the operator's intent
                 # ({"interval": true} must not become a 1s interval)
                 raise ValueError(value)
+            coerced: int | float | str
             if self.type == "int":
                 coerced = int(value)
                 if isinstance(value, float) and not value.is_integer():
@@ -96,18 +97,21 @@ class Setting:
                     raise ValueError(value)
             else:
                 coerced = str(value)
+                limit = self.max_length if self.max_length is not None else STR_MAX_LENGTH
+                if len(coerced) > limit:
+                    raise SettingsValidationError(
+                        self.name,
+                        f"string is {len(coerced)} chars, longer than the max {limit}",
+                    )
         except (TypeError, ValueError, OverflowError) as exc:
             raise SettingsValidationError(
                 self.name, f"expected {self.type}, got {value!r}"
             ) from exc
-        if self.type == "str":
-            limit = self.max_length if self.max_length is not None else STR_MAX_LENGTH
-            if len(coerced) > limit:
-                raise SettingsValidationError(
-                    self.name,
-                    f"string is {len(coerced)} chars, longer than the max {limit}",
-                )
-        if self.type in ("int", "float"):
+        # numeric tail: min/max bounds and finiteness are numeric-setting
+        # concerns; the isinstance narrowing expresses that contract (a
+        # str setting with bounds set is a manifest authoring error, and
+        # max_length already governs strings)
+        if isinstance(coerced, (int, float)):
             try:
                 nonfinite = math.isinf(coerced)
             except OverflowError:
@@ -116,10 +120,10 @@ class Setting:
                 nonfinite = True
             if nonfinite:
                 raise SettingsValidationError(self.name, f"{value!r} is not a finite number")
-        if self.min_value is not None and coerced < self.min_value:
-            raise SettingsValidationError(self.name, f"{coerced} < min {self.min_value}")
-        if self.max_value is not None and coerced > self.max_value:
-            raise SettingsValidationError(self.name, f"{coerced} > max {self.max_value}")
+            if self.min_value is not None and coerced < self.min_value:
+                raise SettingsValidationError(self.name, f"{coerced} < min {self.min_value}")
+            if self.max_value is not None and coerced > self.max_value:
+                raise SettingsValidationError(self.name, f"{coerced} > max {self.max_value}")
         return coerced
 
     def as_manifest(self) -> dict[str, Any]:
@@ -138,7 +142,7 @@ class Setting:
 #: policy knobs every account owns. Persisted in `account_settings`;
 #: surfaced via ControlAPI.account_setting_get / account_setting_set
 #: (surfaces can adopt those facades — see the round-3 report).
-ACCOUNT_SETTINGS: tuple = (
+ACCOUNT_SETTINGS: tuple[Setting, ...] = (
     Setting("reconnect_enabled", "bool", True, "Reconnect automatically after drops."),
     Setting(
         "reconnect_initial_delay",
@@ -176,10 +180,10 @@ ACCOUNT_SETTINGS: tuple = (
 )
 
 
-_ACCOUNT_DEFS_CACHE: tuple | None = None
+_ACCOUNT_DEFS_CACHE: tuple[dict[str, Setting], dict[str, Any]] | None = None
 
 
-def _account_defs() -> tuple:
+def _account_defs() -> tuple[dict[str, Setting], dict[str, Any]]:
     """(name -> Setting, name -> validated default) for ACCOUNT_SETTINGS.
 
     Built once: ``account_settings()`` runs on every reconnect/typing
@@ -202,7 +206,10 @@ class SettingsManager:
         *,
         plugin_repo: Any = None,
         account_settings_repo: Any = None,
-        global_layer: Mapping[str, Mapping[str, Any]] | None = None,
+        # config-file JSON: the plugin layers are UNVALIDATED — the value
+        # type is Any so the malformed-shape filter + warning below stay
+        # meaningful to the checker (and to the reader)
+        global_layer: Mapping[str, Any] | None = None,
     ) -> None:
         self._bus = bus
         self._logger = logger or logging.getLogger("libzent.settings")
@@ -296,7 +303,9 @@ class SettingsManager:
         """
         defs = {s.name: s for s in schema}
         values: dict[str, Any] = {s.name: s.validate(s.default) for s in schema}
-        layers = [("global layer", self._global.get(plugin_name, {}))]
+        layers: list[tuple[str, Mapping[str, Any]]] = [
+            ("global layer", self._global.get(plugin_name, {}))
+        ]
         if profile is not None:
             layers.append(("profile layer", profile))
         if account is not None:

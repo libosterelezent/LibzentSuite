@@ -60,7 +60,7 @@ class Credentials:
     def __init__(self, values: Mapping[str, str], path: Path | None = None) -> None:
         self._values: dict[str, str] = {k: v for k, v in values.items() if v is not None}
         self._path = path
-        self._owner_ids: frozenset | None = None  # parsed once, lazily
+        self._owner_ids: frozenset[int] | None = None  # parsed once, lazily
 
     # ------------------------------------------------------------------ load
     @staticmethod

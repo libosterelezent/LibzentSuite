@@ -80,7 +80,7 @@ def validate(scope: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def channel_allowed(
-    scope: dict[str, Any] | None,
+    scope: object,
     guild_id: Any,
     channel_id: Any,
 ) -> bool:

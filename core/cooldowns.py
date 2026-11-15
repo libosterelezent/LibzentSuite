@@ -36,7 +36,7 @@ class CooldownService:
         self._repo = repository
         self._now = time_fn or time.time
         # (account, plugin, key) -> {"expires_at":..., ...} restored at boot
-        self._active: dict[tuple, dict[str, Any]] = {}
+        self._active: dict[tuple[str, str, str], dict[str, Any]] = {}
 
     # ---------------------------------------------------------------- boot
     async def restore(self) -> dict[str, int]:
@@ -196,7 +196,7 @@ class CooldownService:
         row = await self.get(account, plugin, cooldown_key)
         if row is None:
             return 0.0
-        return max(0.0, row["expires_at"] - self._now())
+        return max(0.0, float(row["expires_at"]) - self._now())
 
     async def is_active(self, account: str, plugin: str, cooldown_key: str) -> bool:
         return await self.get(account, plugin, cooldown_key) is not None
@@ -252,7 +252,7 @@ class CooldownService:
         """
         return self.active_counts_all().get(account, 0)
 
-    def active_counts_all(self) -> dict:
+    def active_counts_all(self) -> dict[str, int]:
         """One O(C) pass computing EVERY account's active count.
 
         status() needs the count for all accounts per build; calling
@@ -260,7 +260,7 @@ class CooldownService:
         500-account fleet with 10k rows stalled the loop ~300ms/s.
         """
         now = self._now()
-        counts: dict = {}
+        counts: dict[str, int] = {}
         for r in self._active.values():
             if r["expires_at"] > now:
                 counts[r["account"]] = counts.get(r["account"], 0) + 1

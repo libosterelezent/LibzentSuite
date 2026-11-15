@@ -170,7 +170,7 @@ class AuditRecorder:
     # ------------------------------------------------- queued persistence
     async def start_persistence(
         self, repo: Any, *, batch: int = 50, interval: float = 0.25
-    ) -> asyncio.Task | None:
+    ) -> asyncio.Task[None] | None:
         """Spawn the async drain worker (call BEFORE traffic flows).
 
         Batched writes (``repo.add_many``) when available; failures

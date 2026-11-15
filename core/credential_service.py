@@ -32,7 +32,7 @@ import contextlib
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -44,6 +44,14 @@ KEY_ENV = "LZ_MASTER_KEY"
 DEFAULT_KEY_PATH = Path("state/credentials.key")
 
 
+class EnvImportReport(TypedDict):
+    """Result shape of :meth:`CredentialService.import_from_env`."""
+
+    imported: list[str]
+    skipped: list[str]
+    failed: dict[str, str]
+
+
 class CredentialService:
     """Encrypt-at-rest credential storage over the credentials repository."""
 
@@ -51,9 +59,9 @@ class CredentialService:
         self._repo = repository
         self._key_path = Path(key_path) if key_path is not None else DEFAULT_KEY_PATH
         self._fernet: Fernet | None = None
-        self._memory: dict = {}  # runtime cache: account -> plaintext (§14)
-        self._runtime_sources: dict = {}  # account -> "db" | "env"
-        self._db_accounts: set = set()  # accounts with a stored credential
+        self._memory: dict[str, str] = {}  # runtime cache: account -> plaintext (§14)
+        self._runtime_sources: dict[str, str] = {}  # account -> "db" | "env"
+        self._db_accounts: set[str] = set()  # accounts with a stored credential
         self._delete_generation: int = 0  # PHASE-4 await-race guard (S5-L1)
         # PER-ACCOUNT deletion generations (review finding #4): the single
         # service-wide counter let delete('B') mid-store('A') trigger A's
@@ -335,7 +343,9 @@ class CredentialService:
             return "db"
         return "missing"
 
-    async def import_from_env(self, env_tokens: dict, overwrite: bool = False) -> dict:
+    async def import_from_env(
+        self, env_tokens: dict[str, str], overwrite: bool = False
+    ) -> EnvImportReport:
         """Explicit one-shot import of legacy .env tokens (spec §17).
 
         Never silently overwrites: accounts with an existing DB credential
