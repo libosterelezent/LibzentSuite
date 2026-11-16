@@ -28,8 +28,8 @@ command groups, native help, cog hooks. The manual COMMANDS facade
 15 framework verbs ride the FrameworkVerbsCog.
 
 **Key files:** ``core/plugin_manager/cog_host.py``,
-``core/plugin_manager/framework_cog.py``,
-``core/plugin_manager/intake_cog.py``
+``core/plugin_manager/framework_cog.py`` (the C1 intake mixin retired
+to ``dump/`` 2026-11-15 — the adapter wires its own event handlers)
 
 better.py-self Fork (fully adopted)
 -----------------------------------

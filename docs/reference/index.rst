@@ -3,7 +3,7 @@ Reference
 
 Generated knowledge artifacts (regenerate with
 ``python3 scripts/gen_knowledgebase.py``; drift-check with ``--check``).
-The handwritten deep dives in ``knowledgebase/*.md`` are committed with
+The handwritten deep dives in ``knowledgebase/*.md`` are LOCAL-ONLY
 the repository; only ``knowledgebase/generated/`` is gitignored.
 
 * ``knowledgebase/read_only/SYMBOL_INDEX.md`` — module inventory snapshot
@@ -22,7 +22,7 @@ the repository; only ``knowledgebase/generated/`` is gitignored.
 Handwritten deep dives (architecture, data flow, lifecycle,
 per-subsystem references, the formal plugin API, configuration, CLI,
 endpoint reference, testing, security, glossary, changelog)
-live in ``knowledgebase/*.md`` — committed with the repository,
+live in ``knowledgebase/*.md`` — local-only, not in a fresh clone,
 maintained by hand, never overwritten by the generator.
 
 .. toctree::

@@ -65,7 +65,7 @@ pipeline. The optional ``EMITS`` / ``FOLLOWS`` declarations opt the
 plugin into workspace chains (durable signals, follow handlers — see
 :doc:`writing_plugins`).
 
-Deep dive (why/ownership/errors per method): ``knowledgebase/PLUGIN_API.md``.
-Examples: ``knowledgebase/PLUGIN_EXAMPLES.md``. Anti-patterns:
-``knowledgebase/PLUGIN_ANTIPATTERNS.md``.
+Deep dives, examples, and the anti-pattern catalog live in the
+LOCAL-ONLY ``knowledgebase/`` archive (on the machines that built it;
+not present in a fresh clone).
 

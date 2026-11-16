@@ -2,7 +2,7 @@
 
 The active queue and the historical record of what shipped. Design
 decisions live alongside in `docs/design/`; binding contracts in
-`docs/architecture/architecture.md` + `integration.md`; deep study
+`docs/architecture/architecture.md` + `architecture/integration.md`; deep study
 studies under `docs/plans/`. Completed items keep their
 summaries here and their full detail in `knowledgebase/` (AGENTS.md
 rule 8).
@@ -49,7 +49,7 @@ the linked commit ranges. This section keeps only the summary.*
 ONE concept replaced SyncGroupManager + the fleet module: workspaces
 own membership, pacing clocks, chains ("A acts → B follows,
 visibly"), and the orchestration correctness core. Commits
-`0332ed4`..`cb70a63`. Decision record: `WORKSPACE_DESIGN.md`.
+`0332ed4`..`cb70a63`. Decision record: `design/workspace-design.md`.
 Historical record: `knowledgebase/WORKSPACE_SUPERSESSION.md`.
 
 ### Command Convergence (C1–C4, 2026-11-14 → 2026-11-15)
@@ -86,7 +86,7 @@ four default pages. Commit `b713195`.
 ### NEXT — Plugin Profiles + Workspace Presets (P1–P8)
 
 **The two-level data model** (owner-locked 2026-11-15, full plan:
-`adoption_of_data_management.md`):
+`design/data-management-adoption.md`):
 
 - **Account plugin profiles** — each plugin defines its own profile
   schema, channels, cooldowns, and execution lifecycle. Identity:
@@ -140,7 +140,7 @@ Phasing:
   profile)` tuples; workspace execution instances hold runtime state;
   profile-change detection; workflow checkpoints
 
-Migration contract: `adoption_of_data_management.md` (the full
+Migration contract: `design/data-management-adoption.md` (the full
 existing → new table/column mapping).
 
 ### Flet UI (pages deepen)

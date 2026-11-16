@@ -6,7 +6,7 @@ owner go.** Locked 2026-11-13 (1–8), refined 2026-11-14 (8 revised,
 owner calls: pointer-canonical membership, preset-keys-only apply,
 single-source provenance, archive on workspace delete). Review input
 preserved verbatim: `docs/plans/WORKSPACE_DESIGN_W0_REV3_AMENDMENTS.md`.
-Companions: `roadmap.md`, `knowledgebase/WORKSPACE_SUPERSESSION.md`.
+Companions: `../roadmap.md`, `knowledgebase/WORKSPACE_SUPERSESSION.md`.
 
 ---
 

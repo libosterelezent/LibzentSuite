@@ -5,9 +5,9 @@ codebase; the workspace layer is the single orchestration owner)
 
 ## 1. Authority, scope, and conflict resolution
 
-This document binds how modules integrate TODAY. `ARCHITECTURE.md`
+This document binds how modules integrate TODAY. `architecture.md`
 carries the engineering invariants and the composition model;
-`roadmap.md` carries the decision record. When documents conflict:
+`../roadmap.md` carries the decision record. When documents conflict:
 the code is truth, this contract is the summary, and a divergence is a
 bug in one of them — fix the divergence, do not fork the contract.
 
@@ -50,7 +50,7 @@ main.py -> core/bootstrap.py::build()  (the ONE composition root)
 | `core/rate_limit_manager/` | action pacing, workspace clocks, cooldowns/server 429s, warnings | task ownership or interpreting game messages |
 | `core/access_manager.py` | the command gate (per-account allowlists, admin list — fail-closed) | interface rendering of the gate |
 | `core/event_bus.py` | in-process typed event delivery | durable state truth or authorization |
-| `core/audit.py`, `logging_service.py` | audit trail and structured logs | secret disclosure or business-state ownership |
+| `core/audit.py`, `core/logging_service.py` | audit trail and structured logs | secret disclosure or business-state ownership |
 | `database/` | schemas (v11 current), ordered migrations, repository persistence | interface behavior or UI transformations |
 | `adapters/` | Discord/simulator boundary and DTO conversion | core policy decisions |
 | `interfaces/cli/` | command parsing, help, presentation, ControlAPI calls | separate business rules |

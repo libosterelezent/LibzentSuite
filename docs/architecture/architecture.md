@@ -4,9 +4,9 @@
 **Date:** 2026-11-14
 **Status:** Binding engineering contract (verified against the current
 codebase; the W0–W5 workspace unification has landed)
-**Companions:** `INTEGRATION.md` (the detailed module contract),
-`roadmap.md` (the active plan + decision records),
-`WORKSPACE_DESIGN.md` (the unification spec — 18 locked decisions)
+**Companions:** `integration.md` (the detailed module contract),
+`../roadmap.md` (the active plan + decision records),
+`../design/workspace-design.md` (the unification spec — 18 locked decisions)
 
 This document describes the architecture **as it exists in the
 repository**. It is the product/UI-neutral engineering contract: what
@@ -106,15 +106,15 @@ earlier one failed.
 | `core/api.py` | ControlAPI — the shared facade every interface calls |
 | `core/workspace/` | THE orchestration: service (one writer), models, transitions, policy, presets, chains runtime, durable signals, dispatch guard, reconciler |
 | `core/account_manager/` | account lifecycle, runtime client/cache, sender hook, lifecycle governor, waiter registry |
-| `core/plugin_manager/` + `plugin_base.py` | the driver contract: discovery, per-account instances, dispatch, self-commands, EMITS/FOLLOWS validation, `invoke_handler` |
+| `core/plugin_manager/` + `core/plugin_base.py` | the driver contract: discovery, per-account instances, dispatch, COG/EMITS/FOLLOWS validation |
 | `core/settings_manager.py` | the one settings schema every surface consumes |
 | `core/rate_limit_manager/` | policies (global/account/plugin/pair), pacing, workspace clocks, 429s, warnings |
 | `core/task_scheduler/` | queue, per-account lanes (concurrency 1), retries, cancellation, history |
 | `core/event_bus.py` | typed in-process pub/sub (coalesced, bounded) |
 | `core/access_manager.py` | the command gate: per-account allowlists, admin list (fail-closed) |
-| `core/cooldowns.py`, `plugin_state.py`, `plugin_scopes.py` | plugin-facing persistence: cooldowns, scoped state, channel scopes |
-| `core/credential_service.py`, `credentials.py` | Fernet-encrypted tokens; ids from `.env` |
-| `core/audit.py`, `logging_service.py` | the audit trail and structured logs |
+| `core/cooldowns.py`, `core/plugin_state.py`, `core/plugin_scopes.py` | plugin-facing persistence: cooldowns, scoped state, channel scopes |
+| `core/credential_service.py`, `core/credentials.py` | Fernet-encrypted tokens; ids from `.env` |
+| `core/audit.py`, `core/logging_service.py` | the audit trail and structured logs |
 | `database/` | SQLite: ordered migrations (v11 current), repositories (workspaces, presets, signals, channels, accounts, plugins, …) |
 | `adapters/discord/`, `adapters/simulator/` | the platform boundary: live client (better.py-self, lazy import) and the complete offline world |
 | `interfaces/cli/` | REPL + one-shot commands — the only current interface |
@@ -232,7 +232,7 @@ assignment, no plugins. Do not reintroduce permission bundles.
 
 ## 9. Recorded architecture decisions
 
-The binding decision record is `roadmap.md` (18 locked workspace
-decisions + their provenance) and `WORKSPACE_DESIGN.md` (the full
+The binding decision record is `../roadmap.md` (18 locked workspace
+decisions + their provenance) and `../design/workspace-design.md` (the full
 spec). Historical inventories live under `docs/plans/` (superseded material
 is banner-marked, never silently rewritten).

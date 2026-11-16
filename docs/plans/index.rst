@@ -3,7 +3,9 @@ Plans & Studies
 
 Historical planning documents, audits, and design studies — dated
 records of how decisions were reached. They describe the state of
-their moment; the living contracts live in `docs/architecture/` and
+their moment (file references included — links may point at code that
+has since retired to ``dump/`` or been deleted; that is the record,
+not an error); the living contracts live in `docs/architecture/` and
 the active queue in `docs/roadmap.md`.
 
 .. toctree::

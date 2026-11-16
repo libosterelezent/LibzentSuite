@@ -423,8 +423,8 @@ will expose the same surface over REST + WebSocket.
 
 ## Documentation
 
-- `roadmap.md` — the active plan and decision records
-- `WORKSPACE_DESIGN.md` — the workspace unification spec (18 locked
+- `docs/roadmap.md` — the active plan and decision records
+- `docs/design/workspace-design.md` — the workspace unification spec (18 locked
   decisions; the architecture's foundation)
 - `knowledgebase/` — deep knowledge base (handwritten guides + generated
   read-only reference; `generated/*.json` is gitignored). Start at
@@ -432,6 +432,6 @@ will expose the same surface over REST + WebSocket.
   `knowledgebase/API_ENDPOINTS.md`.
 - `docs/` — Sphinx user-facing reference: `pip install --user sphinx
   myst-parser` then `python3 -m sphinx -W -b html docs docs/_build/html`
-- `INTEGRATION.md` — inter-module contracts
+- `docs/architecture/integration.md` — inter-module contracts
 - `scripts/bench_db.py`, `scripts/bench_hot.py` — perf harnesses
 - `benchmark/README.md` — the benchmark subsystem
