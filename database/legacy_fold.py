@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any
 from core.errors import DatabaseError
 
 if TYPE_CHECKING:
-
     from database.db import Database
 
 __all__ = ["fold_legacy_profiles"]
