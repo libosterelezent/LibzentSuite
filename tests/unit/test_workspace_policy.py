@@ -8,6 +8,7 @@ addition and must produce "visible skip" reasons.
 from __future__ import annotations
 
 import unittest
+from typing import Any
 
 from core.workspace import (
     CooldownRecord,
@@ -21,9 +22,9 @@ from core.workspace import (
 POLICY = WorkspacePolicy()
 
 
-def facts(**overrides) -> DispatchFacts:
+def facts(**overrides: Any) -> DispatchFacts:
     """A fully-passing member dispatch; tests override one axis."""
-    base: dict[str, object] = {
+    base: dict[str, Any] = {
         "framework_safe": True,
         "workspace_name": "alpha",
         "workspace_enabled": True,

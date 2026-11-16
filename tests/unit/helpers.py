@@ -10,15 +10,15 @@ Currently provides the A6 account-manager test doubles:
 They implement EXACTLY the duck-typed surfaces pinned in INTEGRATION.md, so
 tests never import the parallel-built real packages.
 """
+
 from __future__ import annotations
 
 import asyncio
-import builtins
 import copy
 import logging
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from adapters.base import DiscordMessage
 from core.account_manager import AccountManager
@@ -26,6 +26,10 @@ from core.credentials import Credentials
 from core.errors import DatabaseError, SchedulerError
 from core.event_bus import EventBus
 from database.models import AccountRecord
+
+if TYPE_CHECKING:
+    import builtins
+    from collections.abc import Callable, Iterable
 
 LOG = logging.getLogger("tests.helpers")
 
@@ -43,7 +47,14 @@ class FakeAccountsRepo:
         if self.fail_on == what:
             raise RuntimeError(f"injected repository failure: {what}")
 
-    async def add(self, name, *, token_ref=None, enabled=True, workspace=None):
+    async def add(
+        self,
+        name: str,
+        *,
+        token_ref: str | None = None,
+        enabled: bool = True,
+        workspace: str | None = None,
+    ) -> AccountRecord:
         self._maybe_fail("add")
         # parity with the real AccountsRepository (database/repositories/
         # accounts.py): empty/whitespace and duplicate names are
@@ -53,14 +64,17 @@ class FakeAccountsRepo:
         if name in self.records:
             raise DatabaseError(f"account {name!r} already exists")
         record = AccountRecord(
-            id=self.next_id, name=name, token_ref=token_ref,
-            enabled=enabled, workspace=workspace,
+            id=self.next_id,
+            name=name,
+            token_ref=token_ref,
+            enabled=enabled,
+            workspace=workspace,
         )
         self.next_id += 1
         self.records[name] = record
         return self._copy(record)
 
-    async def get(self, name) -> AccountRecord | None:
+    async def get(self, name: str) -> AccountRecord | None:
         self._maybe_fail("get")
         record = self.records.get(name)
         return self._copy(record) if record is not None else None
@@ -68,20 +82,20 @@ class FakeAccountsRepo:
     async def list(self) -> builtins.list[AccountRecord]:
         return [self._copy(r) for _, r in sorted(self.records.items())]
 
-    async def set_enabled(self, name, enabled) -> None:
+    async def set_enabled(self, name: str, enabled: bool) -> None:
         self._maybe_fail("set_enabled")
         record = self.records.get(name)
         if record is None:
             raise RuntimeError(f"unknown account {name!r}")
         record.enabled = bool(enabled)
 
-    async def set_settings(self, name, settings: dict[str, Any]) -> None:
+    async def set_settings(self, name: str, settings: dict[str, Any]) -> None:
         record = self.records.get(name)
         if record is None:
             raise RuntimeError(f"unknown account {name!r}")
         record.settings = dict(settings)
 
-    async def delete(self, name) -> bool:
+    async def delete(self, name: str) -> bool:
         self._maybe_fail("delete")
         return self.records.pop(name, None) is not None
 
@@ -105,33 +119,33 @@ class FakeAccountPluginsRepo:
     def __init__(self) -> None:
         self.rows: dict[str, list[str]] = {}
         #: (account, plugin) -> bound profile name or None
-        self.profile_of: dict[tuple, str | None] = {}
+        self.profile_of: dict[tuple[str, str], str | None] = {}
         self.fail_on: str | None = None  # method name that raises
 
     def _maybe_fail(self, what: str) -> None:
         if self.fail_on == what:
             raise RuntimeError(f"injected repository failure: {what}")
 
-    async def assign_plugin(self, account, plugin) -> None:
+    async def assign_plugin(self, account: str, plugin: str) -> None:
         self._maybe_fail("assign_plugin")
         plugins = set(self.rows.get(account, []))
         plugins.add(plugin)
         self.rows[account] = sorted(plugins)
 
-    async def unassign_plugin(self, account, plugin) -> None:
+    async def unassign_plugin(self, account: str, plugin: str) -> None:
         self._maybe_fail("unassign_plugin")
         plugins = set(self.rows.get(account, []))
         plugins.discard(plugin)
         self.rows[account] = sorted(plugins)
         self.profile_of.pop((account, plugin), None)
 
-    async def plugins_of(self, account) -> list[str]:
+    async def plugins_of(self, account: str) -> list[str]:
         self._maybe_fail("plugins_of")
         return list(self.rows.get(account, []))
 
-    async def set_plugins(self, account, plugins) -> list[str]:
+    async def set_plugins(self, account: str, plugins: Iterable[str]) -> list[str]:
         self._maybe_fail("set_plugins")
-        cleaned = sorted({p for p in (plugins or [])})
+        cleaned = sorted(set(plugins or []))
         kept = set(cleaned)
         for plugin in list(self.rows.get(account, [])):
             if plugin not in kept:  # delete+insert drops the binding column
@@ -143,24 +157,25 @@ class FakeAccountPluginsRepo:
         self._maybe_fail("all_assignments")
         return {a: list(ps) for a, ps in sorted(self.rows.items()) if ps}
 
-    async def set_profile(self, account, plugin, profile) -> bool:
+    async def set_profile(self, account: str, plugin: str, profile: str | None) -> bool:
         self._maybe_fail("set_profile")
         if plugin not in set(self.rows.get(account, [])):
             return False  # no assignment row: binding never creates one
         self.profile_of[(account, plugin)] = profile
         return True
 
-    async def bindings(self, account) -> dict[str, str | None]:
+    async def bindings(self, account: str) -> dict[str, str | None]:
         self._maybe_fail("bindings")
-        return {plugin: self.profile_of.get((account, plugin))
-                for plugin in self.rows.get(account, [])}
+        return {
+            plugin: self.profile_of.get((account, plugin)) for plugin in self.rows.get(account, [])
+        }
 
     async def all_bindings(self) -> dict[str, dict[str, str | None]]:
         self._maybe_fail("all_bindings")
         return {
-            account: {plugin: self.profile_of.get((account, plugin))
-                      for plugin in plugins}
-            for account, plugins in sorted(self.rows.items()) if plugins
+            account: {plugin: self.profile_of.get((account, plugin)) for plugin in plugins}
+            for account, plugins in sorted(self.rows.items())
+            if plugins
         }
 
 
@@ -175,9 +190,9 @@ class FakePluginManager:
     """
 
     def __init__(self, known_names: list[str] | None = None) -> None:
-        self.attached: list[Any] = []       # (account, allowed)
+        self.attached: list[Any] = []  # (account, allowed)
         self.detached: list[str] = []
-        self.activated: list[Any] = []      # (account, services_factory)
+        self.activated: list[Any] = []  # (account, services_factory)
         self.deactivated: list[str] = []
         self.states_map: dict[str, list[dict[str, Any]]] = {}
         self.fail_states = False
@@ -187,24 +202,24 @@ class FakePluginManager:
         """Discovered-plugin surface (ControlAPI typo trap)."""
         return list(self.known_names)
 
-    async def attach_account(self, account, allowed) -> None:
+    async def attach_account(self, account: str, allowed: list[str]) -> None:
         self.attached.append((account, allowed))
 
-    def detach_account(self, account) -> None:
+    def detach_account(self, account: str) -> None:
         self.detached.append(account)
 
-    async def activate_account(self, account, services_factory) -> None:
+    async def activate_account(self, account: str, services_factory: Any) -> None:
         self.activated.append((account, services_factory))
 
-    async def deactivate_account(self, account) -> None:
+    async def deactivate_account(self, account: str) -> None:
         self.deactivated.append(account)
 
-    def states(self, account) -> list[dict[str, Any]]:
+    def states(self, account: str) -> list[dict[str, Any]]:
         if self.fail_states:
             raise RuntimeError("states() boom")
         return [dict(s) for s in self.states_map.get(account, [])]
 
-    def live_settings(self, account, plugin):
+    def live_settings(self, account: str, plugin: str) -> dict[str, Any] | None:
         for state in self.states_map.get(account, []):
             if state.get("name") == plugin:
                 return state.get("settings") or {}
@@ -220,9 +235,21 @@ class FakeScheduler:
         self.next_id = 1
         self.fail_submit = False
 
-    def submit(self, account, plugin, action, *, channel_id=None, user_id=None,
-               content=None, message_id=None, priority=None, name=None,
-               timeout=None, retries=0):
+    def submit(
+        self,
+        account: str,
+        plugin: str,
+        action: str,
+        *,
+        channel_id: int | None = None,
+        user_id: int | None = None,
+        content: str | None = None,
+        message_id: int | None = None,
+        priority: Any = None,
+        name: str | None = None,
+        timeout: float | None = None,
+        retries: int = 0,
+    ) -> SimpleNamespace:
         # ``message_id`` mirrors the real scheduler signature
         # (core/task_scheduler/scheduler.py submit) — reaction/button
         # sends pass it positionally-by-keyword and a fake without it
@@ -230,32 +257,41 @@ class FakeScheduler:
         if self.fail_submit:
             raise SchedulerError("scheduler is stopped")
         task = SimpleNamespace(
-            id=self.next_id, name=name or f"{action}-{self.next_id}",
-            account=account, plugin=plugin, action=action,
-            channel_id=channel_id, user_id=user_id, content=content,
-            message_id=message_id, priority=priority, status="queued",
-            grant_wait_ms=12.0, grant_jitter_ms=5.0,
+            id=self.next_id,
+            name=name or f"{action}-{self.next_id}",
+            account=account,
+            plugin=plugin,
+            action=action,
+            channel_id=channel_id,
+            user_id=user_id,
+            content=content,
+            message_id=message_id,
+            priority=priority,
+            status="queued",
+            grant_wait_ms=12.0,
+            grant_jitter_ms=5.0,
             # parity with core.task_scheduler.Task attributes consumed by
             # the account manager's send/audit paths
-            attempts=0, cancelled=False, sender_ran=False,
+            attempts=0,
+            cancelled=False,
+            sender_ran=False,
         )
-        task.is_terminal = task.status in (
-            "completed", "failed", "cancelled", "timed_out")
+        task.is_terminal = task.status in ("completed", "failed", "cancelled", "timed_out")
         self.next_id += 1
         self.submitted.append(task)
         return task
 
-    def cancel_matching(self, *, account=None, plugin=None, action=None) -> int:
-        self.cancel_calls.append(
-            {"account": account, "plugin": plugin, "action": action}
-        )
+    def cancel_matching(
+        self, *, account: str | None = None, plugin: str | None = None, action: str | None = None
+    ) -> int:
+        self.cancel_calls.append({"account": account, "plugin": plugin, "action": action})
         return len(self.submitted)
 
 
 class FakeSettings:
     """account_settings() with per-account overrides."""
 
-    def __init__(self, **defaults) -> None:
+    def __init__(self, **defaults: Any) -> None:
         self.defaults: dict[str, Any] = {
             "reconnect_enabled": True,
             "reconnect_initial_delay": 1.0,
@@ -265,7 +301,7 @@ class FakeSettings:
         self.defaults.update(defaults)
         self.overrides: dict[str, dict[str, Any]] = {}
 
-    def account_settings(self, account) -> dict[str, Any]:
+    def account_settings(self, account: str) -> dict[str, Any]:
         merged = dict(self.defaults)
         merged.update(self.overrides.get(account, {}))
         return merged
@@ -277,7 +313,7 @@ class FakeAudit:
     def __init__(self) -> None:
         self.entries: list[dict[str, Any]] = []
 
-    def record(self, **kwargs) -> dict[str, Any]:
+    def record(self, **kwargs: Any) -> dict[str, Any]:
         self.entries.append(kwargs)
         return kwargs
 
@@ -291,11 +327,13 @@ class FakeDetailsLimiter:
     def policies(self) -> list[dict[str, Any]]:
         return [dict(p) for p in self.policies_list]
 
-    def effective(self, action, account=None, plugin=None) -> dict[str, Any]:
+    def effective(
+        self, action: str, account: str | None = None, plugin: str | None = None
+    ) -> dict[str, Any]:
         applicable = [
-            p for p in self.policies_list
-            if p["action"] == action
-            and (p["level"] == "global" or p["owner"] == account)
+            p
+            for p in self.policies_list
+            if p["action"] == action and (p["level"] == "global" or p["owner"] == account)
         ]
         sources = [
             {"level": p["level"], "owner": p["owner"], "interval": p["interval"]}
@@ -317,13 +355,16 @@ def default_snapshot() -> dict[str, Any]:
         "available": True,
         "user": {"id": 555, "name": "AlphaSelf"},
         "latency_ms": 42.0,
-        "guilds": [{
-            "id": 10, "name": "Guildy",
-            "channels": [
-                {"id": 100, "name": "general"},
-                {"id": 101, "name": "bot-spam"},
-            ],
-        }],
+        "guilds": [
+            {
+                "id": 10,
+                "name": "Guildy",
+                "channels": [
+                    {"id": 100, "name": "general"},
+                    {"id": 101, "name": "bot-spam"},
+                ],
+            }
+        ],
         "dm_channels": [{"id": 9001, "recipient": 777}],
     }
 
@@ -331,9 +372,15 @@ def default_snapshot() -> dict[str, Any]:
 class FakeClient:
     """In-memory DiscordClient: connect/send/open_dm/drop/receive."""
 
-    def __init__(self, *, fail_connect: bool = False, snapshot=None,
-                 user_id: int = 555, latency_ms: float = 42.0,
-                 fail_message: str = "login failed: invalid token") -> None:
+    def __init__(
+        self,
+        *,
+        fail_connect: bool = False,
+        snapshot: dict[str, Any] | None = None,
+        user_id: int = 555,
+        latency_ms: float = 42.0,
+        fail_message: str = "login failed: invalid token",
+    ) -> None:
         self.connected = False
         self.fail_connect = fail_connect
         self.fail_message = fail_message  # G8: default matches NONE of the
@@ -342,9 +389,9 @@ class FakeClient:
         self.user_id: int | None = None
         self._user_id = user_id
         self.latency_ms = latency_ms
-        self.on_message = None
-        self.on_disconnect = None
-        self.sent: list[Any] = []          # (kind, channel_id, content)
+        self.on_message: Callable[[DiscordMessage], None] | None = None
+        self.on_disconnect: Callable[[str], None] | None = None
+        self.sent: list[Any] = []  # (kind, channel_id, content)
         self.open_dm_calls: list[int] = []
         self.dm_channels: dict[int, int] = {}
         self._snapshot = snapshot if snapshot is not None else default_snapshot()
@@ -362,8 +409,11 @@ class FakeClient:
     def _message(self, channel_id: int, content: str, dm: bool) -> DiscordMessage:
         self._next_msg_id += 1
         return DiscordMessage(
-            id=self._next_msg_id, channel_id=channel_id,
-            author_id=self.user_id or 1, content=content, dm=dm,
+            id=self._next_msg_id,
+            channel_id=channel_id,
+            author_id=self.user_id or 1,
+            content=content,
+            dm=dm,
         )
 
     async def send_message(self, channel_id: int, content: str) -> DiscordMessage:
@@ -406,7 +456,7 @@ class FakeClient:
 class FakeClientFactory:
     """Builds FakeClients and records every client it handed out."""
 
-    def __init__(self, **client_kwargs) -> None:
+    def __init__(self, **client_kwargs: Any) -> None:
         self.clients: list[FakeClient] = []
         self.client_kwargs = client_kwargs
 
@@ -426,18 +476,19 @@ class EventCollector:
         self.events: list[Any] = []
         self._unsubs: list[Any] = []
 
-    def subscribe(self, *event_types) -> None:
+    def subscribe(self, *event_types: type[Any]) -> None:
         for event_type in event_types:
             self._unsubs.append(self.bus.subscribe(event_type, self._append))
 
     def _append(self, event: Any) -> None:
         self.events.append(event)
 
-    def of(self, event_type) -> list[Any]:
+    def of(self, event_type: type[Any]) -> list[Any]:
         return [e for e in self.events if isinstance(e, event_type)]
 
-    async def wait_for(self, event_type, count: int = 1,
-                       timeout: float = 2.0) -> list[Any]:
+    async def wait_for(
+        self, event_type: type[Any], count: int = 1, timeout: float = 2.0
+    ) -> list[Any]:
         """Poll until `count` events of the type arrived (bounded)."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
@@ -472,7 +523,6 @@ class ManagerHarness:
     collector: EventCollector = field(default_factory=lambda: EventCollector(EventBus()))
 
 
-
 def make_manager(
     *,
     token_values: dict[str, str] | None = None,
@@ -488,10 +538,16 @@ def make_manager(
     plugins = FakePluginManager()
     scheduler = FakeScheduler()
     settings = settings or FakeSettings()
+    # AccountManager annotates this collaborator as SettingsManager but
+    # only duck-types it (like every other collaborator); the fake here
+    # implements exactly that surface, so the boundary stays dynamic.
+    settings_for_manager: Any = settings
     audit = FakeAudit()
     factory = FakeClientFactory(**(client_kwargs or {}))
     credentials = Credentials.from_values(
-        token_values if token_values is not None else {
+        token_values
+        if token_values is not None
+        else {
             "DISCORD_TOKEN_ALPHA": "tok-alpha",
             "DISCORD_TOKEN_BETA": "tok-beta",
             "DISCORD_TOKEN_GAMMA": "tok-gamma",
@@ -502,29 +558,32 @@ def make_manager(
     from core.credential_service import CredentialService
 
     class _MemCredRepo:
-        def __init__(self):
-            self.rows = {}
+        def __init__(self) -> None:
+            self.rows: dict[str, str] = {}
 
-        async def store(self, account, ciphertext):
+        async def store(self, account: str, ciphertext: str) -> None:
             self.rows[account] = ciphertext
 
-        async def load(self, account):
+        async def load(self, account: str) -> str | None:
             return self.rows.get(account)
 
-        async def delete(self, account):
+        async def delete(self, account: str) -> bool:
             return self.rows.pop(account, None) is not None
 
-        async def accounts_with_credential(self):
+        async def accounts_with_credential(self) -> list[str]:
             return sorted(self.rows)
 
     cred_repo = _MemCredRepo()
-    credential_service = CredentialService(
-        cred_repo, key_path="/tmp/opencode/test-cred.key")
-    seed = token_values if token_values is not None else {
-        "DISCORD_TOKEN_ALPHA": "tok-alpha",
-        "DISCORD_TOKEN_BETA": "tok-beta",
-        "DISCORD_TOKEN_GAMMA": "tok-gamma",
-    }
+    credential_service = CredentialService(cred_repo, key_path="/tmp/opencode/test-cred.key")
+    seed = (
+        token_values
+        if token_values is not None
+        else {
+            "DISCORD_TOKEN_ALPHA": "tok-alpha",
+            "DISCORD_TOKEN_BETA": "tok-beta",
+            "DISCORD_TOKEN_GAMMA": "tok-gamma",
+        }
+    )
     for acct, tok in seed.items():
         name = acct.replace("DISCORD_TOKEN_", "").lower()
         credential_service._memory[name] = tok
@@ -532,11 +591,21 @@ def make_manager(
         credential_service._runtime_sources[name] = "db"
 
     manager = AccountManager(
-        bus, LOG, repo, plugins, scheduler, settings, audit,
-        factory, credentials, limiter=limiter, supervisor_tick=supervisor_tick,
+        bus,
+        LOG,
+        repo,
+        plugins,
+        scheduler,
+        settings_for_manager,
+        audit,
+        factory,
+        credentials,
+        limiter=limiter,
+        supervisor_tick=supervisor_tick,
         credential_service=credential_service,
         account_plugins=account_plugins
-        if account_plugins is not None else FakeAccountPluginsRepo(),
+        if account_plugins is not None
+        else FakeAccountPluginsRepo(),
     )
     collector = EventCollector(bus)
     from core.event_bus import (
@@ -545,13 +614,24 @@ def make_manager(
         AccountFailed,
         MessageReceived,
     )
+
     collector.subscribe(
-        AccountConnected, AccountDisconnected, AccountFailed, MessageReceived,
+        AccountConnected,
+        AccountDisconnected,
+        AccountFailed,
+        MessageReceived,
     )
     return ManagerHarness(
-        manager=manager, bus=bus, repo=repo, plugins=plugins, scheduler=scheduler,
-        settings=settings, audit=audit, factory=factory,
-        credentials=credentials, collector=collector,
+        manager=manager,
+        bus=bus,
+        repo=repo,
+        plugins=plugins,
+        scheduler=scheduler,
+        settings=settings,
+        audit=audit,
+        factory=factory,
+        credentials=credentials,
+        collector=collector,
         account_plugins=manager._account_plugins,
     )
 
@@ -559,9 +639,16 @@ def make_manager(
 def make_task(**overrides: Any) -> SimpleNamespace:
     """A scheduler-task lookalike for send_hook tests."""
     task = SimpleNamespace(
-        id=1, name="t", account="alpha", plugin="exporter", action="message",
-        channel_id=100, user_id=None, content="hi",
-        grant_wait_ms=12.0, grant_jitter_ms=5.0,
+        id=1,
+        name="t",
+        account="alpha",
+        plugin="exporter",
+        action="message",
+        channel_id=100,
+        user_id=None,
+        content="hi",
+        grant_wait_ms=12.0,
+        grant_jitter_ms=5.0,
     )
     for key, value in overrides.items():
         setattr(task, key, value)

@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace as NS
+from typing import Any
 
-from adapters.model import convert_message
+from adapters.model import DiscordMessage, convert_message
 from adapters.simulator.client import SimClient
 from adapters.simulator.world import (
     SYNTHETIC_ALPHA_ID,
@@ -31,11 +32,12 @@ from adapters.simulator.world import (
     SYNTHETIC_GUILD_CHANNEL,
     SYNTHETIC_OWNER_ID,
     SimWorld,
+    WorldMessage,
 )
 from core.errors import ServerRateLimit
 
 
-def _world(responder_id=None) -> SimWorld:
+def _world(responder_id: int | None = None) -> SimWorld:
     world = SimWorld(responder_id=responder_id)
     world.add_user(SYNTHETIC_OWNER_ID, "owner")
     world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
@@ -56,19 +58,19 @@ class _Sub:
 
     def __init__(self, user_id: int) -> None:
         self.user_id = user_id
-        self.reactions: list = []
+        self.reactions: list[tuple[Any, ...]] = []
         self.on_reaction = lambda *args: self.reactions.append(args)
 
 
 class DmPairScoping(unittest.IsolatedAsyncioTestCase):
     """(e) only DM-pair members receive DM deliveries."""
 
-    async def test_foreign_account_does_not_receive_dm_pages(self):
+    async def test_foreign_account_does_not_receive_dm_pages(self) -> None:
         world = _world(responder_id=SYNTHETIC_BOT_ID)
         alpha = await _connected(world, SYNTHETIC_ALPHA_ID)
         beta = await _connected(world, SYNTHETIC_BETA_ID)
-        alpha_seen: list = []
-        beta_seen: list = []
+        alpha_seen: list[DiscordMessage] = []
+        beta_seen: list[DiscordMessage] = []
         alpha.on_message = alpha_seen.append
         beta.on_message = beta_seen.append
 
@@ -83,15 +85,15 @@ class DmPairScoping(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(alpha_seen), 2)
         self.assertEqual(len(beta_seen), 1)
 
-    async def test_foreign_account_does_not_see_dm_reactions_edits_deletes(self):
+    async def test_foreign_account_does_not_see_dm_reactions_edits_deletes(self) -> None:
         # the message-path leak was fixed earlier; reactions/edits/deletes
         # used to fan out to EVERY subscriber — impossible live (a foreign
         # account's gateway never sees the pair's channel)
         world = _world(responder_id=SYNTHETIC_BOT_ID)
         alpha = await _connected(world, SYNTHETIC_ALPHA_ID)
         beta = await _connected(world, SYNTHETIC_BETA_ID)
-        beta_rx: list = []
-        alpha_rx: list = []
+        beta_rx: list[tuple[str, Any]] = []
+        alpha_rx: list[tuple[str, Any]] = []
         beta.on_reaction = lambda *a, **k: beta_rx.append(("reaction", a))
         beta.on_message_edit = lambda dto: beta_rx.append(("edit", dto))
         beta.on_message_delete = lambda *a: beta_rx.append(("delete", a))
@@ -107,12 +109,12 @@ class DmPairScoping(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(beta_rx, [], "foreign account saw DM traffic")
         self.assertEqual(len(alpha_rx), 1)  # pair member sees the reaction
 
-    async def test_dm_pair_other_member_still_receives(self):
+    async def test_dm_pair_other_member_still_receives(self) -> None:
         world = _world()
         alpha = await _connected(world, SYNTHETIC_ALPHA_ID)
         bot_client = await _connected(world, SYNTHETIC_BOT_ID)
-        alpha_seen: list = []
-        bot_seen: list = []
+        alpha_seen: list[DiscordMessage] = []
+        bot_seen: list[DiscordMessage] = []
         alpha.on_message = alpha_seen.append
         bot_client.on_message = bot_seen.append
         dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
@@ -124,7 +126,7 @@ class DmPairScoping(unittest.IsolatedAsyncioTestCase):
 class CapabilityServerLimits(unittest.IsolatedAsyncioTestCase):
     """(f) add_reaction/click_button honor the one-shot 429 queue."""
 
-    async def test_armed_limit_blocks_next_add_reaction(self):
+    async def test_armed_limit_blocks_next_add_reaction(self) -> None:
         world = _world()
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
         message = world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "target")
@@ -137,7 +139,7 @@ class CapabilityServerLimits(unittest.IsolatedAsyncioTestCase):
         await client.add_reaction(SYNTHETIC_GUILD_CHANNEL, message.id, "❤")
         self.assertEqual(message.reactions[0].count, 1)
 
-    async def test_armed_limit_blocks_next_click_button(self):
+    async def test_armed_limit_blocks_next_click_button(self) -> None:
         from adapters.model import DiscordComponent
 
         world = _world()
@@ -155,7 +157,7 @@ class CapabilityServerLimits(unittest.IsolatedAsyncioTestCase):
         await client.click_button(SYNTHETIC_GUILD_CHANNEL, message.id, "kakera:claim")
         self.assertEqual(client.button_clicks, [(message.id, "kakera:claim")])
 
-    async def test_vanished_message_does_not_consume_the_limit(self):
+    async def test_vanished_message_does_not_consume_the_limit(self) -> None:
         """A 429 is never spent on an action whose target is already gone
         (same ordering contract as send_message)."""
         world = _world()
@@ -174,32 +176,41 @@ class CapabilityServerLimits(unittest.IsolatedAsyncioTestCase):
 class ResponderFidelity(unittest.IsolatedAsyncioTestCase):
     """(g) bot flag + created_at on the sim's rich boundary."""
 
-    async def test_mudae_delivery_is_bot_with_created_at(self):
+    async def test_mudae_delivery_is_bot_with_created_at(self) -> None:
         world = _world(responder_id=SYNTHETIC_BOT_ID)
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
-        seen: list = []
+        seen: list[DiscordMessage] = []
         client.on_message = seen.append
         world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_BOT_ID, "$mu", author_name="the_bot")
         message = seen[0]
-        self.assertTrue(message.author.bot)
-        self.assertIsNotNone(message.created_at)
-        self.assertIsNotNone(message.created_at.tzinfo)  # tz-aware like live
-        self.assertEqual(message.created_at.utcoffset().total_seconds(), 0)
-        self.assertEqual(message.author.display_name, "the_bot")
+        author = message.author
+        assert author is not None  # narrowing: sim always sets an author
+        self.assertTrue(author.bot)
+        created_at = message.created_at
+        assert created_at is not None  # narrowing: sim stamps every message
+        self.assertIsNotNone(created_at)
+        self.assertIsNotNone(created_at.tzinfo)  # tz-aware like live
+        offset = created_at.utcoffset()
+        assert offset is not None  # tz-aware datetimes always carry one
+        self.assertEqual(offset.total_seconds(), 0)
+        self.assertEqual(author.display_name, "the_bot")
         # timestamps are faithful to the world clock (UTC epoch; tiny
         # float round-trip slack from datetime <-> epoch)
-        self.assertAlmostEqual(message.created_at.timestamp(), world.journal[-1].ts, places=6)
+        self.assertAlmostEqual(created_at.timestamp(), world.journal[-1].ts, places=6)
 
-    async def test_user_authors_stay_non_bot(self):
+    async def test_user_authors_stay_non_bot(self) -> None:
         world = _world(responder_id=SYNTHETIC_BOT_ID)
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
-        seen: list = []
+        seen: list[DiscordMessage] = []
         client.on_message = seen.append
         world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "hello", author_name="owner")
-        self.assertFalse(seen[0].author.bot)
-        self.assertIsNotNone(seen[0].created_at)
+        msg = seen[0]
+        author = msg.author
+        assert author is not None  # narrowing: sim always sets an author
+        self.assertFalse(author.bot)
+        self.assertIsNotNone(msg.created_at)
 
-    async def test_dm_pages_from_responder_carry_bot_flag(self):
+    async def test_dm_pages_from_responder_carry_bot_flag(self) -> None:
         world = SimWorld(
             responder_id=SYNTHETIC_BOT_ID,
             responses={"$dump": ["page-one"]},
@@ -209,26 +220,28 @@ class ResponderFidelity(unittest.IsolatedAsyncioTestCase):
         world.add_user(SYNTHETIC_ALPHA_ID, "alpha")
         world.add_channel(SYNTHETIC_GUILD_CHANNEL, "guild-channel")
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
-        seen: list = []
+        seen: list[DiscordMessage] = []
         client.on_message = seen.append
         world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "$dump")
         dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
         await world.wait_for_quiet(dm, quiet=0.15, limit=2.0)
         pages = [m for m in seen if m.dm]
         self.assertEqual(len(pages), 1)
-        self.assertTrue(pages[0].author.bot)
+        page_author = pages[0].author
+        assert page_author is not None  # narrowing: sim always sets an author
+        self.assertTrue(page_author.bot)
         self.assertIsNotNone(pages[0].created_at)
 
 
 class ReactRemoveAndMe(unittest.IsolatedAsyncioTestCase):
     """(h) remove branch, post-mutation counts, per-subscriber me."""
 
-    def _world_with_message(self):
+    def _world_with_message(self) -> tuple[SimWorld, WorldMessage]:
         world = _world()
         message = world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "target")
         return world, message
 
-    async def test_remove_decrements_and_reports_post_mutation_count(self):
+    async def test_remove_decrements_and_reports_post_mutation_count(self) -> None:
         world, message = self._world_with_message()
         reactor = _Sub(SYNTHETIC_ALPHA_ID)
         other = _Sub(SYNTHETIC_BETA_ID)
@@ -250,7 +263,7 @@ class ReactRemoveAndMe(unittest.IsolatedAsyncioTestCase):
             reaction, _user = raw
             self.assertEqual(reaction.count, 1)  # AFTER the mutation
 
-    async def test_remove_last_reaction_deletes_aggregate_entry(self):
+    async def test_remove_last_reaction_deletes_aggregate_entry(self) -> None:
         world, message = self._world_with_message()
         world.react(SYNTHETIC_ALPHA_ID, message.id, "❤", kind="add")
         world.react(SYNTHETIC_ALPHA_ID, message.id, "❤", kind="remove")
@@ -262,7 +275,7 @@ class ReactRemoveAndMe(unittest.IsolatedAsyncioTestCase):
         reaction, _user = sub.reactions[0][6]
         self.assertEqual(reaction.count, 0)
 
-    async def test_me_true_for_reactor_false_for_others(self):
+    async def test_me_true_for_reactor_false_for_others(self) -> None:
         world, message = self._world_with_message()
         reactor = _Sub(SYNTHETIC_ALPHA_ID)
         other = _Sub(SYNTHETIC_BETA_ID)
@@ -274,12 +287,12 @@ class ReactRemoveAndMe(unittest.IsolatedAsyncioTestCase):
         reaction_other, _user = other.reactions[0][6]
         self.assertFalse(reaction_other.me)
 
-    async def test_sim_client_filters_own_reactions_like_live(self):
+    async def test_sim_client_filters_own_reactions_like_live(self) -> None:
         """SimClient.reaction_event applies the live adapter's self-filter:
         the session never sees its own reaction events."""
         world, message = self._world_with_message()
         client = await _connected(world, SYNTHETIC_ALPHA_ID)
-        seen: list = []
+        seen: list[tuple[Any, ...]] = []
         client.on_reaction = lambda *args: seen.append(args)
         world.react(SYNTHETIC_ALPHA_ID, message.id, "❤", kind="add")
         self.assertEqual(seen, [])  # own reaction: dropped
@@ -288,7 +301,7 @@ class ReactRemoveAndMe(unittest.IsolatedAsyncioTestCase):
         reaction, _user = seen[0][6]
         self.assertFalse(reaction.me)
 
-    async def test_custom_emoji_aggregate_parses_name_and_id(self):
+    async def test_custom_emoji_aggregate_parses_name_and_id(self) -> None:
         world, message = self._world_with_message()
         world.react(SYNTHETIC_ALPHA_ID, message.id, "<:kakera:77>")
         stored = message.reactions[0]
@@ -302,7 +315,7 @@ class ReactRemoveAndMe(unittest.IsolatedAsyncioTestCase):
 class ModelReferenceFidelity(unittest.TestCase):
     """(i) adapters.model reference/reference hydration fixes."""
 
-    def _lib_dm_reply(self):
+    def _lib_dm_reply(self) -> NS:
         cached = NS(
             id=999,
             content="original",
@@ -336,17 +349,22 @@ class ModelReferenceFidelity(unittest.TestCase):
         )
         return outer
 
-    def test_referenced_inherits_outer_dm_flag(self):
+    def test_referenced_inherits_outer_dm_flag(self) -> None:
         dto = convert_message(self._lib_dm_reply(), dm=True)
         self.assertTrue(dto.dm)
-        self.assertIsNotNone(dto.reference.referenced)
+        reference = dto.reference
+        assert reference is not None  # narrowing: the fixture carries one
+        self.assertIsNotNone(reference.referenced)
         # the nested DTO shares the outer channel's DM-ness (was hardcoded
         # False, mislabeling references inside DM channels)
-        self.assertTrue(dto.reference.referenced.dm)
+        assert reference.referenced is not None  # narrowing for the check
+        self.assertTrue(reference.referenced.dm)
 
-    def test_reference_channel_id_falls_back_to_referenced(self):
+    def test_reference_channel_id_falls_back_to_referenced(self) -> None:
         dto = convert_message(self._lib_dm_reply(), dm=True)
-        self.assertEqual(dto.reference.channel_id, 9001)
+        reference = dto.reference
+        assert reference is not None  # narrowing: the fixture carries one
+        self.assertEqual(reference.channel_id, 9001)
         # asymmetric-fallback fix: an id-only reference (channel_id None on
         # the reference object itself) now inherits the referenced message's
         # channel, exactly like message_id inherits referenced.id
@@ -354,10 +372,12 @@ class ModelReferenceFidelity(unittest.TestCase):
         lib.reference.channel_id = None
         lib.reference.guild_id = None
         dto2 = convert_message(lib, dm=True)
-        self.assertEqual(dto2.reference.message_id, 999)
-        self.assertEqual(dto2.reference.channel_id, 9001)
+        reference2 = dto2.reference
+        assert reference2 is not None  # narrowing: same fixture shape
+        self.assertEqual(reference2.message_id, 999)
+        self.assertEqual(reference2.channel_id, 9001)
 
-    def test_forward_snapshot_count_reports_truncation(self):
+    def test_forward_snapshot_count_reports_truncation(self) -> None:
         snapshots = [
             NS(
                 id=999,
@@ -394,14 +414,19 @@ class ModelReferenceFidelity(unittest.TestCase):
             message_snapshots=snapshots,
         )
         dto = convert_message(lib, dm=False)
-        self.assertEqual(dto.reference.snapshot_count, 2)  # both carried
+        reference = dto.reference
+        assert reference is not None  # narrowing: forward fixture has one
+        self.assertEqual(reference.snapshot_count, 2)  # both carried
         # only snapshots[0] is hydrated — the documented truncation
-        self.assertEqual(dto.reference.referenced.content, "forwarded one")
+        assert reference.referenced is not None  # narrowing for the check
+        self.assertEqual(reference.referenced.content, "forwarded one")
 
-    def test_snapshot_count_defaults_to_one(self):
+    def test_snapshot_count_defaults_to_one(self) -> None:
         lib = self._lib_dm_reply()
         dto = convert_message(lib, dm=True)
-        self.assertEqual(dto.reference.snapshot_count, 1)
+        reference = dto.reference
+        assert reference is not None  # narrowing: the fixture carries one
+        self.assertEqual(reference.snapshot_count, 1)
         no_reference = NS(
             id=1,
             content="x",

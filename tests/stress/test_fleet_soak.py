@@ -8,6 +8,7 @@ assertion). Tagged via env var so the default suite stays fast:
 
     LZ_SOAK=1 python -m unittest tests.stress.test_fleet_soak
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -25,11 +26,14 @@ SOAK_ENABLED = bool(os.environ.get("LZ_SOAK"))
 @unittest.skipUnless(SOAK_ENABLED, "set LZ_SOAK=1 to run the fleet soak")
 class FleetSoakTests(unittest.IsolatedAsyncioTestCase):
     async def test_chaos_soak(self) -> None:
-        h = make_manager(token_values={
-            "DISCORD_TOKEN_ALPHA": "tok-alpha",
-            "DISCORD_TOKEN_BETA": "tok-beta",
-            "DISCORD_TOKEN_GAMMA": "tok-gamma",
-        }, settings=_fast_reconnect_settings())
+        h = make_manager(
+            token_values={
+                "DISCORD_TOKEN_ALPHA": "tok-alpha",
+                "DISCORD_TOKEN_BETA": "tok-beta",
+                "DISCORD_TOKEN_GAMMA": "tok-gamma",
+            },
+            settings=_fast_reconnect_settings(),
+        )
         names = ["alpha", "beta", "gamma"]
         for name in names:
             await h.manager.add_account(name)
@@ -37,7 +41,7 @@ class FleetSoakTests(unittest.IsolatedAsyncioTestCase):
             await h.manager.start(name)
         await h.collector.wait_for(AccountConnected, 3)
 
-        loop = asyncio.get_running_loop()
+        _loop = asyncio.get_running_loop()
         baseline_tasks = TaskProbe.live_count()
         connects_before = len(h.collector.of(AccountConnected))
 
@@ -48,40 +52,41 @@ class FleetSoakTests(unittest.IsolatedAsyncioTestCase):
             if client is not None:
                 client.drop(f"gateway closed (code=100{round_no % 8})")
 
-        for round_no in range(6):            # ~12s of rolling chaos
+        for round_no in range(6):  # ~12s of rolling chaos
             await asyncio.sleep(2.0)
             await chaos(round_no)
-            if round_no == 2:                # one manual restart mid-soak
+            if round_no == 2:  # one manual restart mid-soak
                 target = names[(round_no + 1) % len(names)]
                 await h.manager.stop(target)
                 await h.manager.start(target)
-            if round_no == 3:                # one estop mid-soak
+            if round_no == 3:  # one estop mid-soak
                 target = names[(round_no + 2) % len(names)]
                 h.manager.emergency_stop(target)
                 await asyncio.sleep(0.3)
                 await h.manager.start(target)
 
-        await asyncio.sleep(3.0)             # let reconnects converge
+        await asyncio.sleep(3.0)  # let reconnects converge
 
         # --- pass criteria -------------------------------------------------
-        for name in names:                   # statuses converge
+        for name in names:  # statuses converge
             rt = h.manager.get(name).runtime
-            self.assertIn(rt.status, (AccountStatus.RUNNING,),
-                          f"{name} did not converge: {rt.status}")
+            self.assertIn(
+                rt.status, (AccountStatus.RUNNING,), f"{name} did not converge: {rt.status}"
+            )
             self.assertIsNotNone(rt.client)
 
         live = TaskProbe.live_count()
         # bounded growth: 3 supervisors + test machinery, nothing leaked
-        self.assertLessEqual(live - baseline_tasks, 8,
-                             f"task growth {baseline_tasks}->{live}")
+        self.assertLessEqual(live - baseline_tasks, 8, f"task growth {baseline_tasks}->{live}")
 
-        zombies = [c for c in h.factory.clients if c.connected
-                   and c is not h.manager.get(
-                       names[0]).runtime.client
-                   and c is not h.manager.get(
-                       names[1]).runtime.client
-                   and c is not h.manager.get(
-                       names[2]).runtime.client]
+        zombies = [
+            c
+            for c in h.factory.clients
+            if c.connected
+            and c is not h.manager.get(names[0]).runtime.client
+            and c is not h.manager.get(names[1]).runtime.client
+            and c is not h.manager.get(names[2]).runtime.client
+        ]
         self.assertEqual(zombies, [], "zombie clients after soak")
 
         connects = len(h.collector.of(AccountConnected)) - connects_before

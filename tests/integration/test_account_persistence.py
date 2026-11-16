@@ -23,14 +23,16 @@ conversion (bootstrap ``async def build`` awaiting ``database.connect()``,
 When a pinned API has not landed yet, the affected tests self-skip with
 "pending agent integration" so the file always collects.
 """
+
 from __future__ import annotations
 
 import inspect
 import os
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_PLUGINS = REPO_ROOT / "tests" / "fixtures" / "plugins"
@@ -51,8 +53,13 @@ def _pending_reason() -> str | None:
         missing.append("bootstrap.build is not async")
     from core.api import ControlAPI
 
-    for name in ("accounts_set_credential", "accounts_credential_status",
-                 "credentials_import_env", "cooldowns_list", "cooldowns_clear"):
+    for name in (
+        "accounts_set_credential",
+        "accounts_credential_status",
+        "credentials_import_env",
+        "cooldowns_list",
+        "cooldowns_clear",
+    ):
         if not inspect.iscoroutinefunction(getattr(ControlAPI, name, None)):
             missing.append(f"ControlAPI.{name}")
     from core.account_manager import AccountManager
@@ -66,7 +73,10 @@ PENDING = _pending_reason()
 SKIPMSG = f"pending agent integration ({PENDING})" if PENDING else ""
 
 
-def _requires_pinned_contract(test_method):
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _requires_pinned_contract(test_method: _F) -> _F:
     return unittest.skipIf(PENDING is not None, SKIPMSG)(test_method)
 
 
@@ -93,7 +103,9 @@ class AccountPersistenceTestBase(unittest.IsolatedAsyncioTestCase):
         lines = [f"{k}={v}" for k, v in values.items()]
         self.env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    async def build(self, *, env: bool = True):
+    async def build(self, *, env: bool = True) -> Any:
+        """bootstrap.build's Framework (typed loosely: this suite pins
+        the wiring contract, not the framework class shape)."""
         from core import bootstrap
 
         return await bootstrap.build(
@@ -107,9 +119,9 @@ class AccountPersistenceTestBase(unittest.IsolatedAsyncioTestCase):
     async def shutdown(self, fw: Any) -> None:
         await fw.shutdown()
 
-    async def add_account_with_credential(self, api: Any, name: str,
-                                          token: str,
-                                          plugins: list | None = None) -> None:
+    async def add_account_with_credential(
+        self, api: Any, name: str, token: str, plugins: list[str] | None = None
+    ) -> None:
         """Register an account and give it a stored credential.
 
         Pinned contract: the credential string rides the accounts_add
@@ -118,7 +130,7 @@ class AccountPersistenceTestBase(unittest.IsolatedAsyncioTestCase):
         ``plugins`` (optional) assigns capabilities directly (the profile
         era's "new account = every plugin" default is gone).
         """
-        payload = {"name": name, "credential": token}
+        payload: dict[str, Any] = {"name": name, "credential": token}
         if plugins is not None:
             payload["plugins"] = plugins
         try:
@@ -126,8 +138,7 @@ class AccountPersistenceTestBase(unittest.IsolatedAsyncioTestCase):
         except Exception:
             await api.accounts_add({"name": name})
 
-    async def credential_status(self, api: Any, name: str,
-                                fw: Any = None) -> str:
+    async def credential_status(self, api: Any, name: str, fw: Any = None) -> str:
         """One account's credential state ('db' | 'env' | 'missing' | ...).
 
         Pinned surface: ControlAPI.accounts_credential_status() returns the
@@ -153,7 +164,7 @@ class AccountPersistenceTestBase(unittest.IsolatedAsyncioTestCase):
                 pass
         return state
 
-    def cooldown_service(self, fw: Any):
+    def cooldown_service(self, fw: Any) -> Any:
         """The framework's CooldownService (pinned attribute) or a direct
         equivalent over the same repository."""
         svc = getattr(fw, "cooldowns", None)
@@ -163,17 +174,18 @@ class AccountPersistenceTestBase(unittest.IsolatedAsyncioTestCase):
 
         return CooldownService(fw.database.cooldowns)
 
-    def credential_service(self, fw: Any):
+    def credential_service(self, fw: Any) -> Any:
         for attr in ("credential_service", "credentials_svc"):
             svc = getattr(fw, attr, None)
             if svc is not None:
                 return svc  # the FRAMEWORK'S instance (runtime cache + sources)
         from core.credential_service import CredentialService
 
-        return CredentialService(fw.database.credentials,
-                                 key_path=self.root / "state" / "credentials.key")
+        return CredentialService(
+            fw.database.credentials, key_path=self.root / "state" / "credentials.key"
+        )
 
-    def plugin_state(self, fw: Any):
+    def plugin_state(self, fw: Any) -> Any:
         from core.plugin_state import PluginStateService
 
         return PluginStateService(fw.database.kv)
@@ -216,11 +228,9 @@ class TestFullRestartMatrix(AccountPersistenceTestBase):
         # ---------------------------------------------------------- boot 1
         fw = await self.build(env=False)
         api = fw.api
-        await self.add_account_with_credential(
-            api, "alpha", TOKEN_ALPHA, plugins=["spy"])
+        await self.add_account_with_credential(api, "alpha", TOKEN_ALPHA, plugins=["spy"])
         await api.plugins_set_setting("alpha", "spy", "greeting", "hola")
-        await api.ratelimit_set("message", 12.0, 0.1, 0.4,
-                                level="account", owner="alpha")
+        await api.ratelimit_set("message", 12.0, 0.1, 0.4, level="account", owner="alpha")
         await self.cooldown_service(fw).set("alpha", "spy", "restart-cd", 300)
         await self.plugin_state(fw).set_pair("alpha", "spy", "wins", 42)
         await self.shutdown(fw)
@@ -247,10 +257,12 @@ class TestFullRestartMatrix(AccountPersistenceTestBase):
             self.assertEqual(await self.credential_status(api2, "alpha", fw=fw2), "db")
 
             # plugin setting restored (raw layer always; api layer when wired)
-            self.assertEqual(
-                await fw2.database.plugins.setting("alpha", "spy", "greeting"), "hola")
-            resolved = {(p["name"], k): v for p in await api2.plugins_settings("alpha")
-                        for k, v in (p.get("settings") or {}).items()}
+            self.assertEqual(await fw2.database.plugins.setting("alpha", "spy", "greeting"), "hola")
+            resolved = {
+                (p["name"], k): v
+                for p in await api2.plugins_settings("alpha")
+                for k, v in (p.get("settings") or {}).items()
+            }
             self.assertEqual(resolved.get(("spy", "greeting")), "hola")
 
             # rate policy restored at the raw layer; effective when load_persisted landed
@@ -335,10 +347,12 @@ class TestMultiAccountIsolation(AccountPersistenceTestBase):
             self.assertEqual(await self.credential_status(api, "beta", fw=fw), "db")
 
             # same (plugin, key) on both accounts: each sees only its own
-            self.assertAlmostEqual(await cd.remaining("alpha", "spy", "shared-key"),
-                                   500.0, delta=10.0)
-            self.assertAlmostEqual(await cd.remaining("beta", "spy", "shared-key"),
-                                   900.0, delta=10.0)
+            self.assertAlmostEqual(
+                await cd.remaining("alpha", "spy", "shared-key"), 500.0, delta=10.0
+            )
+            self.assertAlmostEqual(
+                await cd.remaining("beta", "spy", "shared-key"), 900.0, delta=10.0
+            )
             alpha_rows = await cd.active_for("alpha")
             beta_rows = await cd.active_for("beta")
             self.assertEqual(len(alpha_rows), 1)
@@ -370,14 +384,12 @@ class TestEnvTokenIgnoredByRuntime(AccountPersistenceTestBase):
             # runtime: env token is IGNORED -> MISSING (no fallback)
             resolved = await creds.resolve("x")
             self.assertIsNone(resolved)
-            self.assertEqual(await self.credential_status(api, "x", fw=fw),
-                             "missing")
+            self.assertEqual(await self.credential_status(api, "x", fw=fw), "missing")
             # migration: explicit import stores it encrypted
             report = await api.credentials_import_env()
             self.assertIn("x", report.get("imported") or [])
             self.assertEqual(await creds.resolve("x"), TOKEN_ENV_X)
-            self.assertEqual(await self.credential_status(api, "x", fw=fw),
-                             "db")
+            self.assertEqual(await self.credential_status(api, "x", fw=fw), "db")
         finally:
             await self.shutdown(fw)
 

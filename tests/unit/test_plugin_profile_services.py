@@ -13,12 +13,18 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from core.account_manager.services import AccountPluginServices
 from core.errors import PluginError
 from database.db import Database
+
+#: the facade types bus/cache as REQUIRED, but these tests exercise the
+#: deliberately unwired construction — bind None through Any (runtime
+#: accepts it; only the type signature says EventBus/DiscordCache).
+_UNWIRED: Any = None
 
 
 class _Facade:
@@ -28,10 +34,10 @@ class _Facade:
         self.svc = AccountPluginServices(
             account,
             plugin,
-            bus=None,
+            bus=_UNWIRED,
             scheduler=None,
             credentials=None,
-            cache=None,
+            cache=_UNWIRED,
             profile_store=db.account_plugin_profiles,
         )
 
@@ -149,8 +155,13 @@ class ActiveProfile(_Base):
         self.db = Database(Path(self._tmp.name) / "s.db")
         await self.db.connect()
         fac2 = AccountPluginServices(
-            "alpha", "exporter", bus=None, scheduler=None, credentials=None,
-            cache=None, profile_store=self.db.account_plugin_profiles,
+            "alpha",
+            "exporter",
+            bus=_UNWIRED,
+            scheduler=None,
+            credentials=None,
+            cache=_UNWIRED,
+            profile_store=self.db.account_plugin_profiles,
         )
         self.assertEqual(await fac2.profile_active(), "main")
 
@@ -165,7 +176,12 @@ class ActiveProfile(_Base):
 class Unwired(_Base):
     async def test_unwired_store_fails_honest(self) -> None:
         fac = AccountPluginServices(
-            "alpha", "exporter", bus=None, scheduler=None, credentials=None, cache=None
+            "alpha",
+            "exporter",
+            bus=_UNWIRED,
+            scheduler=None,
+            credentials=None,
+            cache=_UNWIRED,
         )
         with self.assertRaises(RuntimeError):
             await fac.profile_list()

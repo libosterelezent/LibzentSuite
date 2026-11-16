@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from typing import Any
 from unittest import mock
 
 from interfaces.ui import PAGES, ApiClient, page
@@ -39,7 +40,7 @@ class PageRegistryTests(unittest.TestCase):
 
     def test_decorator_registers(self) -> None:
         @page("custom")
-        def _builder(page_ref, client):
+        def _builder(page_ref: Any, client: Any) -> None:
             return None
 
         self.assertIn("custom", PAGES)

@@ -12,8 +12,7 @@ mention/ID/name before the handler runs).
 
 from __future__ import annotations
 
-import time
-from typing import Any
+from typing import TYPE_CHECKING
 
 from discord.ext import commands as _ext_commands
 
@@ -22,6 +21,11 @@ from core.plugin_base import (
     PluginContext,
 )
 from core.settings_manager import Setting
+
+if TYPE_CHECKING:
+    from typing import Any
+
+    from core.event_bus import Event
 
 
 class ProbePlugin(PluginBase):
@@ -70,15 +74,17 @@ class ProbePlugin(PluginBase):
     class _ProbeCog(_ext_commands.Cog):
         """The probe command face in converged form (typed params)."""
 
-        def __init__(self, *, services):
+        def __init__(self, *, services: Any) -> None:
             self.services = services
 
         @_ext_commands.command(name="probeset_cog")
-        async def probeset_cog(self, ctx, name: str, mode: str, count: int, note: str = "") -> None:
+        async def probeset_cog(
+            self, ctx: Any, name: str, mode: str, count: int, note: str = ""
+        ) -> None:
             await ctx.send(f"set {name}:{mode}:{count}:{note or '-'} on {self.services.account}")
 
         @_ext_commands.command(name="probestart_cog")
-        async def probestart_cog(self, ctx, names: str) -> None:
+        async def probestart_cog(self, ctx: Any, names: str) -> None:
             await ctx.send(f"start {names} on {self.services.account}")
 
     COG = _ProbeCog

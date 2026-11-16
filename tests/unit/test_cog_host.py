@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace as NS
+from typing import Any
 
 from discord.ext import commands
 
@@ -20,11 +21,11 @@ class SampleCog(commands.Cog):
         self.services = services
 
     @commands.command(name="poke")
-    async def poke(self, ctx) -> None:
+    async def poke(self, ctx: Any) -> None:
         await ctx.send(f"{self.services.account}:{self.services.plugin}")
 
     @commands.Cog.listener("on_message")
-    async def on_message(self, message) -> None:
+    async def on_message(self, message: Any) -> None:
         # first-hand handling with the toolbox: rich parse + audit
         self.services.audit_rich(message)
 
@@ -81,12 +82,14 @@ class PluginCogHostTests(unittest.IsolatedAsyncioTestCase):
     async def test_command_invocation_reaches_the_cog(self) -> None:
         """The standard library drive: a typed ctx, the command runs,
         the reply carries the toolbox attribution."""
-        import asyncio
-
         host = PluginCogHost(to_rich=_rich_converter)
         bot = _make_bot()
         await host.attach(bot, "alpha", "cleaner", SampleCog)
         sent: list[str] = []
+
+        async def send(text: str) -> None:
+            sent.append(text)
+
         ctx = NS(
             bot=bot,
             prefix="!",
@@ -94,9 +97,12 @@ class PluginCogHostTests(unittest.IsolatedAsyncioTestCase):
             command=bot.get_command("poke"),
             message=NS(attachments=[]),  # the parser reads attachments
             view=NS(),  # and the StringView
-            send=lambda text: sent.append(text) or asyncio.sleep(0),
+            send=send,
         )
-        await bot.get_command("poke").invoke(ctx)
+        poke_command = bot.get_command("poke")
+        assert poke_command is not None  # attached three lines above
+        command_seam: Any = poke_command  # ctx is a duck-typed stand-in
+        await command_seam.invoke(ctx)
         self.assertEqual(sent, ["alpha:cleaner"])
 
     async def test_listener_receives_the_toolbox_audit(self) -> None:
@@ -110,7 +116,9 @@ class PluginCogHostTests(unittest.IsolatedAsyncioTestCase):
         await host.attach(bot, "alpha", "cleaner", SampleCog)
         # direct invocation — the deterministic listener pattern
         cog = bot.get_cog("SampleCog")
-        await cog.on_message(NS(id=42))
+        assert cog is not None  # attached above
+        cog_seam: Any = cog  # on_message is a listener, not a Cog method
+        await cog_seam.on_message(NS(id=42))
         self.assertEqual(len(published), 1)
         self.assertEqual(published[0].message.id, 42)
 

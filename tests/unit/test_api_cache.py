@@ -5,6 +5,7 @@ Covers the repository round-trip, the three-layer DM resolution order
 the DB-cached services.fetch_user. The database layer is async (aiosqlite):
 every test awaits connect()/close() and the repository calls.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -28,14 +29,14 @@ class FakeClient:
     """Counts REST-touching calls (open_dm / fetch_user)."""
 
     def __init__(self) -> None:
-        self.open_dm_calls: list = []
-        self.fetch_user_calls: list = []
+        self.open_dm_calls: list[int] = []
+        self.fetch_user_calls: list[int] = []
 
-    async def open_dm(self, user_id):
+    async def open_dm(self, user_id: int) -> int:
         self.open_dm_calls.append(user_id)
         return 1_000_000 + user_id
 
-    async def fetch_user(self, user_id):
+    async def fetch_user(self, user_id: int) -> SimpleNamespace:
         self.fetch_user_calls.append(user_id)
         return SimpleNamespace(id=user_id, name=f"user{user_id}")
 
@@ -64,8 +65,7 @@ class TestCacheRepository(AsyncDbTestCase):
 
     async def test_corrupt_row_tolerated(self) -> None:
         async with self.db.connection.write() as conn:
-            await conn.execute(
-                "INSERT INTO api_cache VALUES ('a','dm','1','{broken',0)")
+            await conn.execute("INSERT INTO api_cache VALUES ('a','dm','1','{broken',0)")
         self.assertIsNone(await self.db.cache.get("a", "dm", "1"))
 
     async def test_counts_and_drop(self) -> None:
@@ -92,8 +92,7 @@ class TestDmResolutionLayers(AsyncDbTestCase):
 
         # 3rd: fresh memory (simulated restart) -> served from the DB
         fresh_cache = DiscordCache("alpha")
-        cid2 = await resolve_dm_channel(
-            fresh_cache, client, 77, "alpha", self.db.cache)
+        cid2 = await resolve_dm_channel(fresh_cache, client, 77, "alpha", self.db.cache)
         self.assertEqual(cid2, cid)
         self.assertEqual(len(client.open_dm_calls), 1)  # STILL one call
 
@@ -108,9 +107,13 @@ class TestServicesFetchUserCached(AsyncDbTestCase):
     async def test_fetch_user_cached_per_account(self) -> None:
         client = FakeClient()
         services = AccountPluginServices(
-            "alpha", "exporter", bus=EventBus(), scheduler=None,
+            "alpha",
+            "exporter",
+            bus=EventBus(),
+            scheduler=None,
             credentials=Credentials.from_values({}),
-            cache=DiscordCache("alpha"), client_getter=lambda: client,
+            cache=DiscordCache("alpha"),
+            client_getter=lambda: client,
             api_cache_repo=self.db.cache,
         )
         user = await services.fetch_user(999)
@@ -132,24 +135,24 @@ class TestDmResolutionHardening(AsyncDbTestCase):
         client = FakeClient()
         original = client.open_dm
 
-        async def slow_open(user_id):
+        async def slow_open(user_id: int) -> int:
             await asyncio.sleep(delay)
             return await original(user_id)
 
-        client.open_dm = slow_open
+        # delay spy: monkey-patching a method has no typed spelling
+        client.open_dm = slow_open  # type: ignore[method-assign]
         return client
 
-    async def test_concurrent_resolves_open_dm_exactly_once(self):
+    async def test_concurrent_resolves_open_dm_exactly_once(self) -> None:
         cache = DiscordCache("alpha")
         client = self._slow_client()
-        results = await asyncio.gather(*(
-            resolve_dm_channel(cache, client, 5, "alpha", self.db.cache)
-            for _ in range(3)
-        ))
+        results = await asyncio.gather(
+            *(resolve_dm_channel(cache, client, 5, "alpha", self.db.cache) for _ in range(3))
+        )
         self.assertEqual(len(set(results)), 1)
         self.assertEqual(client.open_dm_calls, [5])
 
-    async def test_stale_db_row_never_resurrects_invalidated_channel(self):
+    async def test_stale_db_row_never_resurrects_invalidated_channel(self) -> None:
         """Invalidation whose db delete failed leaves the row behind; the
         memory cache's deleted flag must WIN over the stale row (trusting
         it re-marks a proven-dead channel usable on every subsequent send)."""
@@ -161,9 +164,9 @@ class TestDmResolutionHardening(AsyncDbTestCase):
         cid2 = await resolve_dm_channel(cache, client, 5, "alpha", self.db.cache)
         self.assertEqual(cid2, cid)
         self.assertEqual(client.open_dm_calls, [5, 5])  # re-opened, not trusted
-        self.assertFalse(cache.channels[cid].deleted)   # fresh open cleared it
+        self.assertFalse(cache.channels[cid].deleted)  # fresh open cleared it
 
-    async def test_bool_poisoned_row_not_treated_as_channel_id(self):
+    async def test_bool_poisoned_row_not_treated_as_channel_id(self) -> None:
         await self.db.cache.set("alpha", "dm", "7", True)  # isinstance(True, int)
         cache = DiscordCache("alpha")
         client = FakeClient()
@@ -171,16 +174,16 @@ class TestDmResolutionHardening(AsyncDbTestCase):
         self.assertEqual(cid, 1_000_007)
         self.assertEqual(client.open_dm_calls, [7])
 
-    async def test_invalidate_during_open_dm_cannot_resurrect_the_row(self):
+    async def test_invalidate_during_open_dm_cannot_resurrect_the_row(self) -> None:
         """invalidate blocked on the resolve lock: by the time it runs, the
         fresh channel AND its db row are both gone (no resurrect window)."""
         cache = DiscordCache("alpha")
         client = self._slow_client()
         resolving = asyncio.create_task(
-            resolve_dm_channel(cache, client, 5, "alpha", self.db.cache))
+            resolve_dm_channel(cache, client, 5, "alpha", self.db.cache)
+        )
         await asyncio.sleep(0.01)
-        invalidated = asyncio.create_task(
-            invalidate_dm_channel(cache, self.db.cache, 5, "alpha"))
+        invalidated = asyncio.create_task(invalidate_dm_channel(cache, self.db.cache, 5, "alpha"))
         cid = await resolving
         await invalidated
         self.assertTrue(cache.channels[cid].deleted)

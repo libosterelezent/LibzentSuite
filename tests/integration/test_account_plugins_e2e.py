@@ -35,6 +35,7 @@ Plus the dashboard surface: a REAL DashboardServer over the REAL
 ControlAPI driving the four plugin routes and the add-account payloads
 over real HTTP (the style of tests/unit/test_dashboard_http.py).
 """
+
 from __future__ import annotations
 
 import json
@@ -71,10 +72,8 @@ def http_get(url: str, token: str | None = DASH_TOKEN) -> tuple[int, str]:
             return exc.code, exc.read().decode("utf-8")
 
 
-def http_post(url: str, payload: Any,
-              token: str | None = DASH_TOKEN) -> tuple[int, str]:
-    request = urllib.request.Request(
-        url, data=json.dumps(payload).encode(), method="POST")
+def http_post(url: str, payload: Any, token: str | None = DASH_TOKEN) -> tuple[int, str]:
+    request = urllib.request.Request(url, data=json.dumps(payload).encode(), method="POST")
     request.add_header("Content-Type", "application/json")
     if token:
         request.add_header("X-Dashboard-Token", token)
@@ -86,8 +85,9 @@ def http_post(url: str, payload: Any,
             return exc.code, exc.read().decode("utf-8")
 
 
-def get_json(text: str) -> dict:
-    return json.loads(text)
+def get_json(text: str) -> dict[str, Any]:
+    payload: dict[str, Any] = json.loads(text)
+    return payload
 
 
 # ------------------------------------------------------------------ harness
@@ -116,17 +116,18 @@ class AccountPluginsE2EBase(unittest.IsolatedAsyncioTestCase):
             plugin_dir=str(REAL_PLUGINS),
             quiet=True,
         )
-        attach_calls: list[tuple[str, set[str] | None]] = []
+        _attach_calls: list[tuple[str, set[str] | None]] = []
         original = fw.plugins.attach_account
 
-        async def _spy(account: str, allowed: set[str] | None = None):
-            attach_calls.append(
-                (account, None if allowed is None else set(allowed)))
+        async def _spy(account: str, allowed: set[str] | None = None) -> None:
+            _attach_calls.append((account, None if allowed is None else set(allowed)))
             return await original(account, allowed)
 
-        fw.plugins.attach_account = _spy
+        # attach spy: records the exact allowed-set the account manager
+        # hands the plugin manager (a monkey-patch has no typed spelling)
+        fw.plugins.attach_account = _spy  # type: ignore[method-assign]
         self.addCleanup(self._shutdown, fw)
-        return fw, attach_calls
+        return fw, _attach_calls
 
     async def _shutdown(self, fw: Any) -> None:
         await fw.shutdown()
@@ -142,29 +143,29 @@ class AccountPluginsE2EBase(unittest.IsolatedAsyncioTestCase):
         return list(await api.accounts_plugins_list(account))
 
     @staticmethod
-    def last_attach(attach_calls: list[tuple[str, set[str] | None]],
-                    account: str) -> set[str] | None:
+    def last_attach(
+        _attach_calls: list[tuple[str, set[str] | None]], account: str
+    ) -> set[str] | None:
         """The allowed set of the account's most recent attach (None when
         the account was never attached)."""
-        for name, allowed in reversed(attach_calls):
+        for name, allowed in reversed(_attach_calls):
             if name == account:
                 return allowed
         return None
 
     @staticmethod
     async def account_row(api: Any, name: str) -> dict[str, Any]:
-        rows = {r["name"]: r for r in await api.accounts_list()}
-        return rows[name]
+        rows: dict[str, Any] = {r["name"]: r for r in await api.accounts_list()}
+        row: dict[str, Any] = rows[name]
+        return row
 
 
 # --------------------------------------------------------- 1 + 2 + 3 (boot)
 class TestAssignmentBootSemantics(AccountPluginsE2EBase):
-
     async def test_1_add_persists_rows_and_lists_sorted(self) -> None:
-        fw, attach_calls = await self.boot()
+        fw, _attach_calls = await self.boot()
         api = fw.api
-        out = await api.accounts_add(
-            {"name": "alpha", "plugins": [SPY, PROBE, SPY]})
+        out = await api.accounts_add({"name": "alpha", "plugins": [SPY, PROBE, SPY]})
         # add_account's own answer carries the canonical (sorted, deduped) set
         self.assertEqual(out["assigned_plugins"], [PROBE, SPY])
         # rows persist in the account_plugins table (queried DIRECTLY)
@@ -177,7 +178,7 @@ class TestAssignmentBootSemantics(AccountPluginsE2EBase):
         self.assertEqual(row["assigned_plugins"], [PROBE, SPY])
 
     async def test_2_zero_assignments_attach_zero_plugins(self) -> None:
-        fw, attach_calls = await self.boot()
+        fw, _attach_calls = await self.boot()
         api = fw.api
         await api.accounts_add({"name": "beta", "plugins": []})
         self.assertEqual(await self.assigned(api, "beta"), [])
@@ -185,44 +186,38 @@ class TestAssignmentBootSemantics(AccountPluginsE2EBase):
         # allowed set it received was a CONCRETE empty set, not the
         # unrestricted None of the profile era
         self.assertEqual(await self.attached(api, "beta"), set())
-        self.assertIsNotNone(self.last_attach(attach_calls, "beta"))
-        self.assertEqual(self.last_attach(attach_calls, "beta"), set())
+        self.assertIsNotNone(self.last_attach(_attach_calls, "beta"))
+        self.assertEqual(self.last_attach(_attach_calls, "beta"), set())
         # repo truth agrees: no rows for beta anywhere
-        self.assertEqual(
-            await fw.database.account_plugins.plugins_of("beta"), [])
+        self.assertEqual(await fw.database.account_plugins.plugins_of("beta"), [])
         row = await self.account_row(api, "beta")
         self.assertEqual(row["assigned_plugins"], [])
 
     async def test_3_attached_set_is_exactly_the_assigned_set(self) -> None:
-        fw, attach_calls = await self.boot()
+        fw, _attach_calls = await self.boot()
         api = fw.api
         discovered = {m["name"] for m in await api.plugins_manifests()}
-        self.assertEqual(discovered,
-                         {"probe", "spy", "echo", "config_demo"})  # sanity
+        self.assertEqual(discovered, {"probe", "spy", "echo", "config_demo"})  # sanity
 
-        await api.accounts_add(
-            {"name": "alpha", "plugins": [PROBE, SPY]})
+        await api.accounts_add({"name": "alpha", "plugins": [PROBE, SPY]})
         await api.accounts_add({"name": "gamma", "plugins": [PROBE]})
 
         # alpha: exactly its two; gamma: exactly its one — a STRICT subset
         # of the discovered set, so attachment is assignment-driven, not
         # discovery-driven (the "all plugins" default is gone)
         self.assertEqual(await self.attached(api, "alpha"), {PROBE, SPY})
-        self.assertEqual(self.last_attach(attach_calls, "alpha"),
-                         {PROBE, SPY})
+        self.assertEqual(self.last_attach(_attach_calls, "alpha"), {PROBE, SPY})
         self.assertEqual(await self.attached(api, "gamma"), {PROBE})
-        self.assertEqual(self.last_attach(attach_calls, "gamma"), {PROBE})
+        self.assertEqual(self.last_attach(_attach_calls, "gamma"), {PROBE})
         self.assertNotEqual(await self.attached(api, "gamma"), discovered)
 
 
 # ------------------------------------------------------------ 4 (mutation)
 class TestMutationFlows(AccountPluginsE2EBase):
-
     async def test_4_assign_unassign_missing_reassign(self) -> None:
-        fw, attach_calls = await self.boot()
+        fw, _attach_calls = await self.boot()
         api = fw.api
-        await api.accounts_add(
-            {"name": "alpha", "plugins": [PROBE, SPY]})
+        await api.accounts_add({"name": "alpha", "plugins": [PROBE, SPY]})
         await api.accounts_add({"name": "beta", "plugins": []})
 
         # assign spy to beta -> beta attached set grows NOW
@@ -258,16 +253,14 @@ class TestMutationFlows(AccountPluginsE2EBase):
 
 # --------------------------------------------------- 5 (assigned ≠ enabled)
 class TestAssignedVersusEnabled(AccountPluginsE2EBase):
-
     @staticmethod
     def _enabled_map(states: list[dict[str, Any]]) -> dict[str, bool]:
         return {s["name"]: s["enabled"] for s in states}
 
     async def test_5_axes_are_independent(self) -> None:
-        fw, attach_calls = await self.boot()
+        fw, _attach_calls = await self.boot()
         api = fw.api
-        await api.accounts_add(
-            {"name": "alpha", "plugins": [PROBE, SPY]})
+        await api.accounts_add({"name": "alpha", "plugins": [PROBE, SPY]})
 
         # (a) disabling a plugin never touches its assignment...
         await api.plugins_set_enabled("alpha", SPY, False)
@@ -290,52 +283,47 @@ class TestAssignedVersusEnabled(AccountPluginsE2EBase):
         await api.accounts_plugin_assign("alpha", PROBE)
         states = self._enabled_map(await api.plugins_state("alpha"))
         self.assertEqual(set(states), {PROBE, SPY})
-        self.assertFalse(states[PROBE])     # still disabled after round-trip
+        self.assertFalse(states[PROBE])  # still disabled after round-trip
         self.assertTrue(states[SPY])  # untouched by any of this
 
 
 # ------------------------------------------------------------ 6 (restart)
 class TestRestartRestoresAssignments(AccountPluginsE2EBase):
-
     async def test_6_rebuild_restores_assignments_and_attachment(self) -> None:
         # ---------------------------------------------------------- boot 1
         fw, _ = await self.boot()
         api = fw.api
-        await api.accounts_add(
-            {"name": "alpha", "plugins": [PROBE, SPY]})
+        await api.accounts_add({"name": "alpha", "plugins": [PROBE, SPY]})
         await api.accounts_add({"name": "beta", "plugins": []})
         # mutate past the initial state so restore cannot pass by luck
         await api.accounts_plugin_assign("beta", SPY)
         await api.accounts_plugin_unassign("alpha", PROBE)
-        before_assigned = {"alpha": await self.assigned(api, "alpha"),
-                           "beta": await self.assigned(api, "beta")}
-        before_attached = {"alpha": await self.attached(api, "alpha"),
-                           "beta": await self.attached(api, "beta")}
-        self.assertEqual(before_assigned,
-                         {"alpha": [SPY], "beta": [SPY]})
+        before_assigned = {
+            "alpha": await self.assigned(api, "alpha"),
+            "beta": await self.assigned(api, "beta"),
+        }
+        before_attached = {
+            "alpha": await self.attached(api, "alpha"),
+            "beta": await self.attached(api, "beta"),
+        }
+        self.assertEqual(before_assigned, {"alpha": [SPY], "beta": [SPY]})
         await fw.shutdown()
 
         # ---------------------------------------------------------- boot 2
         # same DB path: build() runs AccountManager.load() (the bulk
         # assignment restore) before anything attaches
-        fw2, attach_calls2 = await self.boot()
+        fw2, _attach_calls2 = await self.boot()
         api2 = fw2.api
         try:
             rows = {r["name"]: r for r in await api2.accounts_list()}
             self.assertEqual(sorted(rows), ["alpha", "beta"])
-            self.assertEqual(rows["alpha"]["assigned_plugins"],
-                             before_assigned["alpha"])
-            self.assertEqual(rows["beta"]["assigned_plugins"],
-                             before_assigned["beta"])
-            self.assertEqual(await self.assigned(api2, "alpha"),
-                             before_assigned["alpha"])
-            self.assertEqual(await self.assigned(api2, "beta"),
-                             before_assigned["beta"])
+            self.assertEqual(rows["alpha"]["assigned_plugins"], before_assigned["alpha"])
+            self.assertEqual(rows["beta"]["assigned_plugins"], before_assigned["beta"])
+            self.assertEqual(await self.assigned(api2, "alpha"), before_assigned["alpha"])
+            self.assertEqual(await self.assigned(api2, "beta"), before_assigned["beta"])
             # attachment sets identical too — restored FROM the rows
-            self.assertEqual(await self.attached(api2, "alpha"),
-                             before_attached["alpha"])
-            self.assertEqual(await self.attached(api2, "beta"),
-                             before_attached["beta"])
+            self.assertEqual(await self.attached(api2, "alpha"), before_attached["alpha"])
+            self.assertEqual(await self.attached(api2, "beta"), before_attached["beta"])
             self.assertEqual(
                 await fw2.database.account_plugins.all_assignments(),
                 {"alpha": [SPY], "beta": [SPY]},
@@ -348,20 +336,18 @@ class TestRestartRestoresAssignments(AccountPluginsE2EBase):
                 self.assertEqual(sorted(mirror), before_assigned[name])
             # any post-boot mutation re-attaches from that mirror alone
             await api2.accounts_plugin_unassign("beta", SPY)
-            self.assertEqual(self.last_attach(attach_calls2, "beta"), set())
-            self.assertIsNotNone(self.last_attach(attach_calls2, "beta"))
+            self.assertEqual(self.last_attach(_attach_calls2, "beta"), set())
+            self.assertIsNotNone(self.last_attach(_attach_calls2, "beta"))
         finally:
             await fw2.shutdown()
 
 
 # -------------------------------------------------- 8 (sync group isolation)
 class TestSyncGroupIsolation(AccountPluginsE2EBase):
-
     async def test_8_workspace_membership_and_assignments_are_independent(self) -> None:
-        fw, attach_calls = await self.boot()
+        fw, _attach_calls = await self.boot()
         api = fw.api
-        await api.accounts_add(
-            {"name": "alpha", "plugins": [PROBE, SPY]})
+        await api.accounts_add({"name": "alpha", "plugins": [PROBE, SPY]})
 
         # a workspace move does not change assignments
         await api.workspaces_create({"name": "grinders"})
@@ -369,8 +355,7 @@ class TestSyncGroupIsolation(AccountPluginsE2EBase):
         row = await self.account_row(api, "alpha")
         self.assertEqual(row["workspace"], "grinders")
         self.assertEqual(row["assigned_plugins"], [PROBE, SPY])
-        self.assertEqual(await self.attached(api, "alpha"),
-                         {PROBE, SPY})
+        self.assertEqual(await self.attached(api, "alpha"), {PROBE, SPY})
 
         # assignment change does not change the membership
         await api.accounts_plugins_set("alpha", [PROBE])
@@ -384,19 +369,16 @@ class TestSyncGroupIsolation(AccountPluginsE2EBase):
 
 # ------------------------------------------------------ 9 (plugin settings)
 class TestPluginSettingsIndependence(AccountPluginsE2EBase):
-
     async def test_9_settings_survive_assignment_changes(self) -> None:
-        fw, attach_calls = await self.boot()
+        fw, _attach_calls = await self.boot()
         api = fw.api
-        await api.accounts_add(
-            {"name": "alpha", "plugins": [PROBE, SPY]})
+        await api.accounts_add({"name": "alpha", "plugins": [PROBE, SPY]})
         await api.plugins_set_setting("alpha", PROBE, "trigger", "$go")
 
         # a DIFFERENT plugin's assignment churn leaves this setting alone
         await api.accounts_plugin_unassign("alpha", PROBE)
         await api.accounts_plugin_assign("alpha", PROBE)
-        settings = {p["name"]: p["settings"]
-                    for p in await api.plugins_settings("alpha")}
+        settings = {p["name"]: p["settings"] for p in await api.plugins_settings("alpha")}
         self.assertEqual(settings[PROBE]["trigger"], "$go")
         self.assertEqual(
             await fw.database.plugins.setting("alpha", PROBE, "trigger"),
@@ -411,16 +393,14 @@ class TestPluginSettingsIndependence(AccountPluginsE2EBase):
             "$go",
         )
         await api.accounts_plugin_assign("alpha", SPY)
-        settings = {p["name"]: p["settings"]
-                    for p in await api.plugins_settings("alpha")}
+        settings = {p["name"]: p["settings"] for p in await api.plugins_settings("alpha")}
         self.assertEqual(settings[PROBE]["trigger"], "$go")
 
 
 # ---------------------------------------------------------- 10 (validation)
 class TestValidationErrors(AccountPluginsE2EBase):
-
     async def test_10_unknown_plugin_account_and_profiles_key(self) -> None:
-        fw, attach_calls = await self.boot()
+        fw, _attach_calls = await self.boot()
         api = fw.api
         await api.accounts_add({"name": "alpha", "plugins": [PROBE]})
 
@@ -436,19 +416,19 @@ class TestValidationErrors(AccountPluginsE2EBase):
         self.assertEqual(await self.assigned(api, "alpha"), [PROBE])
 
         # unknown account: the AccountError family (typo trap)
-        for call in (
+        calls: tuple[Any, ...] = (
             lambda: api.accounts_plugin_assign("ghost", PROBE),
             lambda: api.accounts_plugin_unassign("ghost", PROBE),
             lambda: api.accounts_plugins_set("ghost", [PROBE]),
             lambda: api.accounts_plugins_list("ghost"),
-        ):
+        )
+        for call in calls:
             with self.assertRaises(AccountError):
                 await call()
 
         # accounts_add rejects the legacy 'profiles' key as unknown
         with self.assertRaises(ValueError) as ctx:
-            await api.accounts_add(
-                {"name": "delta", "profiles": ["copier"]})
+            await api.accounts_add({"name": "delta", "profiles": ["copier"]})
         self.assertIn("profiles", str(ctx.exception))
         self.assertNotIn("delta", [r["name"] for r in await api.accounts_list()])
 

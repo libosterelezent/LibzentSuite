@@ -3,6 +3,7 @@
 Every test here pins a defect found in the phase-2 audit; each failed on
 the pre-audit code.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -10,6 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
 from core.account_manager import DiscordCache
@@ -17,7 +19,7 @@ from core.account_manager.services import AccountPluginServices
 from core.errors import AccountError, DatabaseError
 from core.event_bus import EventBus, MessageReceived
 from core.plugin_state import PluginStateService
-from core.task_scheduler.scheduler import TaskScheduler
+from core.task_scheduler import Task, TaskScheduler
 from database.db import Database
 from tests.unit.helpers import FakeScheduler, default_snapshot, make_manager
 
@@ -37,12 +39,13 @@ class SchedulerStopSingleFlight(_TmpCase):
         bus = EventBus()
         started = asyncio.Event()
 
-        async def slow_sender(task) -> None:
+        async def slow_sender(task: Task) -> None:
             started.set()
             await asyncio.sleep(10)  # drains time out in tests below
 
-        sched = TaskScheduler(bus, FakeLogger(), FakeLimiter(), slow_sender,
-                              FakeAudit(), default_timeout=5.0)
+        sched = TaskScheduler(
+            bus, FakeLogger(), FakeLimiter(), slow_sender, FakeAudit(), default_timeout=5.0
+        )
         sched.start()
         sched.submit("alpha", "p", "message", channel_id=1, content="x")
         await started.wait()
@@ -56,7 +59,7 @@ class SchedulerStopSingleFlight(_TmpCase):
         sched.start()
         ran = asyncio.Event()
 
-        async def ok_sender(task) -> None:
+        async def ok_sender(task: Task) -> None:
             ran.set()
 
         sched._sender = ok_sender
@@ -70,12 +73,11 @@ class SchedulerStopSingleFlight(_TmpCase):
 
         ran = asyncio.Event()
 
-        async def slow_but_fine(task) -> None:
+        async def slow_but_fine(task: Task) -> None:
             await asyncio.sleep(0.15)  # would die instantly under timeout=0
             ran.set()
 
-        sched = TaskScheduler(EventBus(), FakeLogger(), FakeLimiter(),
-                              slow_but_fine, FakeAudit())
+        sched = TaskScheduler(EventBus(), FakeLogger(), FakeLimiter(), slow_but_fine, FakeAudit())
         sched.start()
         sched.submit("alpha", "p", "poke", timeout=0)
         await asyncio.wait_for(ran.wait(), timeout=2.0)
@@ -89,9 +91,9 @@ class TimeoutCancelsQueuedTask(_TmpCase):
         class SlowScheduler(FakeScheduler):
             def __init__(self) -> None:
                 super().__init__()
-                self.cancelled: list = []
+                self.cancelled: list[int] = []
 
-            def cancel(self, task_id) -> bool:
+            def cancel(self, task_id: int) -> bool:
                 self.cancelled.append(task_id)
                 return True
 
@@ -99,8 +101,13 @@ class TimeoutCancelsQueuedTask(_TmpCase):
         cache = DiscordCache("alpha")
         cache.ingest_snapshot(default_snapshot())
         services = AccountPluginServices(
-            "alpha", "exporter", bus=EventBus(), scheduler=scheduler,
-            credentials=None, cache=cache, settings_dict={},
+            "alpha",
+            "exporter",
+            bus=EventBus(),
+            scheduler=scheduler,
+            credentials=None,
+            cache=cache,
+            settings_dict={},
             client_getter=lambda: None,
         )
         services.task_ack_timeout = 0.05
@@ -159,17 +166,18 @@ class ZombieClientGuards(_TmpCase):
         from adapters.base import DiscordMessage
 
         def msg(i: int, text: str) -> DiscordMessage:
-            return DiscordMessage(
-                id=i, channel_id=1, author_id=2, content=text, dm=False)
+            return DiscordMessage(id=i, channel_id=1, author_id=2, content=text, dm=False)
 
         # the OLD client's callbacks must no longer publish
         with mock.patch.object(h.bus, "publish_nowait") as pub:
             first.on_message(msg(1, "x"))
             pub.assert_not_called()
         # the fresh client still works
-        events: list = []
+        events: list[MessageReceived] = []
         h.bus.subscribe(MessageReceived, events.append)
-        second.on_message(msg(2, "y"))
+        wired = second.on_message
+        assert wired is not None  # set by _wire_client above
+        wired(msg(2, "y"))
         for _ in range(5):  # publish_nowait defers via create_task
             await asyncio.sleep(0)
         self.assertEqual(len(events), 1)
@@ -221,10 +229,10 @@ class KvDeletePrefix(_TmpCase):
 class PersistQueueBoundedStop(_TmpCase):
     async def test_stop_counts_undrained_items(self) -> None:
         class StuckRepo:
-            async def add_many(self, batch):
+            async def add_many(self, batch: list[dict[str, Any]]) -> None:
                 await asyncio.sleep(30)  # simulates a locked DB
 
-            async def add(self, item):
+            async def add(self, item: dict[str, Any]) -> None:
                 await asyncio.sleep(30)
 
         import core._persist_queue as pq
@@ -241,8 +249,8 @@ class PersistQueueBoundedStop(_TmpCase):
         self.assertFalse(q.active)
 
 
-
 # ------------------------------------------------------- (dashboard hardening tests removed with the dashboard interface)
+
 
 class CliEmptyName(unittest.IsolatedAsyncioTestCase):
     async def test_empty_name_token_is_usage_error(self) -> None:
@@ -250,7 +258,6 @@ class CliEmptyName(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(UsageError):
             await run_command(SimpleNamespace(), 'accounts stop ""')
-
 
 
 if __name__ == "__main__":

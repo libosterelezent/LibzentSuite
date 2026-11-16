@@ -135,7 +135,7 @@ class ParserManager:
         with self._lock:
             return tuple(sorted(self._backends))
 
-    def catalog(self) -> dict[str, dict]:
+    def catalog(self) -> dict[str, dict[str, Any]]:
         """Backend metadata for inspection (no instantiation)."""
         with self._lock:
             return {

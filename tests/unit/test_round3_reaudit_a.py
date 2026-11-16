@@ -4,6 +4,7 @@ is SOUND or pins a defect (marked expectedFailure where the defect stands).
 
 Findings keyed as RA-<n>; see the audit report for file:line evidence.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -45,13 +46,15 @@ class _StubLogger:
 
 class _InstantLimiter:
     class _Grant:
-        wait_s = 0.0
-        jitter_s = 0.0
+        wait_s: float = 0.0
+        jitter_s: float = 0.0
 
-    async def acquire(self, action, account, plugin, priority):
+    async def acquire(
+        self, action: str, account: str | None, plugin: str | None, priority: Any
+    ) -> _InstantLimiter._Grant:
         return self._Grant()
 
-    def report_server_limit(self, *a, **k):
+    def report_server_limit(self, *a: Any, **k: Any) -> None:
         pass
 
 
@@ -70,12 +73,14 @@ class _MiniKv:
     def __init__(self) -> None:
         self.rows: dict[str, str] = {}
 
-    async def set(self, key, value):
+    async def set(self, key: str, value: Any) -> None:
         import json
+
         self.rows[key] = json.dumps(value)
 
-    async def get(self, key, default=None):
+    async def get(self, key: str, default: Any = None) -> Any:
         import json
+
         raw = self.rows.get(key)
         if raw is None:
             return default
@@ -84,14 +89,21 @@ class _MiniKv:
         except ValueError:
             return raw
 
-    async def delete(self, key):
+    async def delete(self, key: str) -> bool:
         return self.rows.pop(key, None) is not None
 
-    async def delete_prefix(self, p):
+    async def delete_prefix(self, p: str) -> int:
         gone = [k for k in self.rows if k.startswith(p)]
         for k in gone:
             del self.rows[k]
         return len(gone)
+
+
+def _state_service() -> Any:
+    """PluginStateService over the duck-typed _MiniKv double (KvRepository
+    is a concrete class, so the fake binds through Any)."""
+    kv: Any = _MiniKv()
+    return PluginStateService(kv)
 
 
 class PluginStateStringRoundTrip(unittest.IsolatedAsyncioTestCase):
@@ -100,36 +112,37 @@ class PluginStateStringRoundTrip(unittest.IsolatedAsyncioTestCase):
     (silent type change). Pre-round-3 (double encoding) round-tripped
     every value correctly, so this is a regression."""
 
-    async def test_json_object_string_comes_back_as_dict(self):
-        state = PluginStateService(_MiniKv())
+    async def test_json_object_string_comes_back_as_dict(self) -> None:
+        state = _state_service()
         await state.set_global("payload", '{"a": 1}')
         self.assertEqual(await state.get_global("payload"), '{"a": 1}')
 
-    async def test_numeric_string_comes_back_as_int(self):
-        state = PluginStateService(_MiniKv())
+    async def test_numeric_string_comes_back_as_int(self) -> None:
+        state = _state_service()
         await state.set_global("count_text", "123")
         self.assertEqual(await state.get_global("count_text"), "123")
         self.assertIsInstance(await state.get_global("count_text"), str)
 
-    async def test_null_string_comes_back_as_none(self):
-        state = PluginStateService(_MiniKv())
+    async def test_null_string_comes_back_as_none(self) -> None:
+        state = _state_service()
         await state.set_global("marker", "null")
         self.assertEqual(await state.get_global("marker"), "null")
 
-    async def test_plain_string_survives(self):
-        state = PluginStateService(_MiniKv())
+    async def test_plain_string_survives(self) -> None:
+        state = _state_service()
         await state.set_global("note", "hello world")
         self.assertEqual(await state.get_global("note"), "hello world")
 
-    async def test_legacy_double_encoded_row_still_decodes(self):
+    async def test_legacy_double_encoded_row_still_decodes(self) -> None:
         import json
-        kv = _MiniKv()
+
+        kv: Any = _MiniKv()
         # a legacy row: the service pre-encoded the dict, kv encoded again
         await kv.set("pstate:global:old", json.dumps({"legacy": [1, 2]}))
         state = PluginStateService(kv)
         self.assertEqual(await state.get_global("old"), {"legacy": [1, 2]})
 
-    async def test_real_repo_round_trip_non_json_types(self):
+    async def test_real_repo_round_trip_non_json_types(self) -> None:
         """Non-string values must round-trip through the REAL repository
         (dict/bool/list) — the fix's primary goal."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -138,12 +151,9 @@ class PluginStateStringRoundTrip(unittest.IsolatedAsyncioTestCase):
             try:
                 state = PluginStateService(db.kv)
                 await state.set_pair("alpha", "roll", "userstack_available", False)
-                self.assertIs(
-                    await state.get_pair("alpha", "roll", "userstack_available"),
-                    False)
+                self.assertIs(await state.get_pair("alpha", "roll", "userstack_available"), False)
                 await state.set_pair("alpha", "roll", "stats", {"rolls": 3})
-                self.assertEqual(
-                    await state.get_pair("alpha", "roll", "stats"), {"rolls": 3})
+                self.assertEqual(await state.get_pair("alpha", "roll", "stats"), {"rolls": 3})
             finally:
                 await db.close()
 
@@ -157,52 +167,57 @@ class LogsSeverityCase(unittest.IsolatedAsyncioTestCase):
         def __init__(self) -> None:
             self.calls: list[dict[str, Any]] = []
 
-        async def logs_tail(self, limit, account=None, severity=None):
-            self.calls.append(
-                {"limit": limit, "account": account, "severity": severity})
+        async def logs_tail(
+            self, limit: int, account: str | None = None, severity: str | None = None
+        ) -> list[dict[str, Any]]:
+            self.calls.append({"limit": limit, "account": account, "severity": severity})
             return []
 
     @unittest.expectedFailure
-    async def test_lowercase_severity_still_filters_by_severity(self):
+    async def test_lowercase_severity_still_filters_by_severity(self) -> None:
         from interfaces.cli.commands import run_command
+
         api = self._Api()
         await run_command(api, "logs 50 error")
-        self.assertEqual(
-            api.calls, [{"limit": 50, "account": None, "severity": "ERROR"}])
+        self.assertEqual(api.calls, [{"limit": 50, "account": None, "severity": "ERROR"}])
 
-    async def test_lowercase_severity_now_account_filters(self):
+    async def test_lowercase_severity_now_account_filters(self) -> None:
         """Pin the (introduced) new behavior: `logs 50 error` silently
         account-filters instead of severity-filtering — see the report."""
         from interfaces.cli.commands import run_command
+
         api = self._Api()
         await run_command(api, "logs 50 error")
-        self.assertEqual(
-            api.calls, [{"limit": 50, "account": "error", "severity": None}])
+        self.assertEqual(api.calls, [{"limit": 50, "account": "error", "severity": None}])
 
-    async def test_uppercase_severity_filters(self):
+    async def test_uppercase_severity_filters(self) -> None:
         from interfaces.cli.commands import run_command
+
         api = self._Api()
         await run_command(api, "logs 50 ERROR")
-        self.assertEqual(
-            api.calls, [{"limit": 50, "account": None, "severity": "ERROR"}])
+        self.assertEqual(api.calls, [{"limit": 50, "account": None, "severity": "ERROR"}])
 
-    async def test_bare_lowercase_token_is_an_account_filter(self):
+    async def test_bare_lowercase_token_is_an_account_filter(self) -> None:
         """`logs error` was an ACCOUNT filter before round 3 too (the old
         detection needed >= 2 args) — pin that unchanged."""
         from interfaces.cli.commands import run_command
+
         api = self._Api()
         await run_command(api, "logs error")
-        self.assertEqual(
-            api.calls, [{"limit": 20, "account": "error", "severity": None}])
+        self.assertEqual(api.calls, [{"limit": 20, "account": "error", "severity": None}])
 
 
 # ---------------------------------------------------------------------------
 # RA-3: scheduler — stop() joiner racing a failed (aborted) stop owner
 # ---------------------------------------------------------------------------
 class StopJoinerRace(unittest.IsolatedAsyncioTestCase):
-    def _scheduler(self, sender, repo) -> TaskScheduler:
+    def _scheduler(self, sender: Any, repo: Any) -> TaskScheduler:
         scheduler = TaskScheduler(
-            EventBus(), _LOG, _InstantLimiter(), sender, None,
+            EventBus(),
+            _LOG,
+            _InstantLimiter(),
+            sender,
+            None,
             history_repo=repo,
         )
         scheduler.start()
@@ -210,19 +225,19 @@ class StopJoinerRace(unittest.IsolatedAsyncioTestCase):
 
     class _GateRepo:
         def __init__(self) -> None:
-            self.add_calls: list[dict] = []
+            self.add_calls: list[dict[str, Any]] = []
             self.gate: asyncio.Event | None = None
 
-        async def add(self, entry):
+        async def add(self, entry: dict[str, Any]) -> Any:
             if self.gate is not None:
                 await self.gate.wait()
             self.add_calls.append(dict(entry))
             return entry.get("id")
 
-        async def max_id(self):
+        async def max_id(self) -> int:
             return 0
 
-    async def test_joiner_during_abort_recovers(self):
+    async def test_joiner_during_abort_recovers(self) -> None:
         """A joiner stop() that observes the FAILED latch while the owner's
         _abort_stop is still running must not corrupt state: tasks reach
         terminal states, and a later stop() completes the teardown."""
@@ -230,7 +245,7 @@ class StopJoinerRace(unittest.IsolatedAsyncioTestCase):
         repo = self._GateRepo()
         repo.gate = gate
 
-        async def sender(task):
+        async def sender(task: Any) -> str:
             return "ok"
 
         scheduler = self._scheduler(sender, repo)
@@ -240,10 +255,9 @@ class StopJoinerRace(unittest.IsolatedAsyncioTestCase):
         repo.gate = gate
         t2 = scheduler.submit("alpha", "p", "message")
         await _settle()
-        scheduler._tail_refs  # strong refs exist
+        self.assertTrue(scheduler._tail_refs)  # strong refs exist
 
-        owner = asyncio.create_task(
-            scheduler.stop(drain=False, timeout=0.0))
+        owner = asyncio.create_task(scheduler.stop(drain=False, timeout=0.0))
         await asyncio.sleep(0.05)  # owner parked inside the blocked sweep
         owner.cancel()
         with self.assertRaises(asyncio.CancelledError):
@@ -255,18 +269,17 @@ class StopJoinerRace(unittest.IsolatedAsyncioTestCase):
         gate.set()  # unblock everything
         try:
             await asyncio.wait_for(joiner, 5.0)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             joiner.cancel()
-            raise AssertionError("joiner stop hung after failed owner stop")
+            raise AssertionError("joiner stop hung after failed owner stop") from exc
         except Exception as exc:
-            raise AssertionError(
-                f"joiner stop raised {type(exc).__name__}: {exc}") from exc
+            raise AssertionError(f"joiner stop raised {type(exc).__name__}: {exc}") from exc
         self.assertTrue(scheduler._stopped)
         self.assertTrue(t1.is_terminal)
         self.assertTrue(t2.is_terminal)
 
-    async def test_start_rearms_faulted_gate(self):
-        async def sender(task):
+    async def test_start_rearms_faulted_gate(self) -> None:
+        async def sender(task: Any) -> str:
             return "ok"
 
         gate = asyncio.Event()
@@ -285,6 +298,7 @@ class StopJoinerRace(unittest.IsolatedAsyncioTestCase):
         # a task-less abort: fault must still gate submits and start() must
         # retire it (the estop-resume recovery path)
         from core.errors import SchedulerError
+
         with self.assertRaises(SchedulerError):
             scheduler.submit("a", "p", "message")
         scheduler.start()
@@ -296,14 +310,14 @@ class StopJoinerRace(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(task.is_terminal)
         await scheduler.stop(drain=False)
 
-    async def test_start_does_not_leak_failed_latch_exception(self):
+    async def test_start_does_not_leak_failed_latch_exception(self) -> None:
         """FIXED (round-3 re-audit): start() retrieves a FAILED latch's
         exception before retiring it (no GC 'never retrieved' stderr noise)."""
         gate = asyncio.Event()
         repo = self._GateRepo()
         repo.gate = gate
 
-        async def sender(task):
+        async def sender(task: Any) -> str:
             return "ok"
 
         scheduler = self._scheduler(sender, repo)
@@ -320,15 +334,15 @@ class StopJoinerRace(unittest.IsolatedAsyncioTestCase):
         loop = asyncio.get_running_loop()
         unretrieved: list[Any] = []
 
-        def handler(l: Any, context: dict[str, Any]) -> None:
-            if "exception" in context and "never retrieved" in str(
-                    context.get("message", "")):
+        def handler(log: Any, context: dict[str, Any]) -> None:
+            if "exception" in context and "never retrieved" in str(context.get("message", "")):
                 unretrieved.append(context["exception"])
 
         loop.set_exception_handler(handler)
         try:
             scheduler.start()  # drops the failed latch
             import gc
+
             gc.collect()  # force the Future's __del__ path
             await _settle(0.02, 3)
         finally:
@@ -343,14 +357,17 @@ class StopJoinerRace(unittest.IsolatedAsyncioTestCase):
 class _ClockAdvanceManager(RateLimitManager):
     """Deterministic manager: every timed wait advances the ManualClock."""
 
-    def __init__(self, *a, **k):
+    #: constructed with a ManualClock in every test (the seam's point)
+    _clock: ManualClock
+
+    def __init__(self, *a: Any, **k: Any) -> None:
         super().__init__(*a, **k)
 
     async def _sleep(self, seconds: float) -> None:
         if seconds > 0:
             self._clock.advance(seconds)
 
-    async def _wait_either(self, seconds: float, key=None) -> None:
+    async def _wait_either(self, seconds: float, key: tuple[str, str] | None = None) -> None:
         await self._sleep(seconds)
 
 
@@ -363,45 +380,44 @@ class _ParkManager(RateLimitManager):
 
 
 class CancelledWaiterJitter(unittest.IsolatedAsyncioTestCase):
-    async def test_cancelled_waiter_does_not_stamp_clocks(self):
+    async def test_cancelled_waiter_does_not_stamp_clocks(self) -> None:
         manager = _ParkManager(
-            EventBus(), _StubLogger(), None, clock=ManualClock(0.0),
-            jitter_seed=3)
+            EventBus(), _StubLogger(), None, clock=ManualClock(0.0), jitter_seed=3
+        )
         manager.set_policy_values("message", 1.5, 0.3, 0.9)
         first = await manager.acquire("message", account="alpha")
         stamp_after_first = manager._last_fire[("alpha", "message")]
         self.assertGreater(first.jitter_s, 0.0)
         # a second waiter cancelled mid-wait must leave the stamp untouched
-        waiter = asyncio.get_running_loop().create_task(
-            manager.acquire("message", account="alpha"))
+        waiter = asyncio.get_running_loop().create_task(manager.acquire("message", account="alpha"))
         await _settle(0.01, 3)
         waiter.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await waiter
-        self.assertEqual(
-            manager._last_fire[("alpha", "message")], stamp_after_first)
+        self.assertEqual(manager._last_fire[("alpha", "message")], stamp_after_first)
 
-    async def test_grant_stamps_include_jitter(self):
+    async def test_grant_stamps_include_jitter(self) -> None:
         manager = _ClockAdvanceManager(
-            EventBus(), _StubLogger(), None, clock=ManualClock(0.0),
-            jitter_seed=5)
+            EventBus(), _StubLogger(), None, clock=ManualClock(0.0), jitter_seed=5
+        )
         manager.set_policy_values("message", 1.5, 0.5, 0.5)
         grant = await manager.acquire("message", account="alpha")
         self.assertAlmostEqual(grant.jitter_s, 0.5, places=6)
         # stamp sits at grant + jitter (the expected wire instant)
         self.assertAlmostEqual(
             manager._last_fire[("alpha", "message")],
-            manager._clock.now() - 0.5 + grant.jitter_s, places=6)
+            manager._clock.now() - 0.5 + grant.jitter_s,
+            places=6,
+        )
 
 
 # ---------------------------------------------------------------------------
 # RA-5: settings clear round-trip through the REAL plugin repository
 # ---------------------------------------------------------------------------
 class SettingsClearRoundTrip(unittest.IsolatedAsyncioTestCase):
-    SCHEMA = (Setting("trigger", "str", "default-trigger"),
-              Setting("gain", "int", 1))
+    SCHEMA = (Setting("trigger", "str", "default-trigger"), Setting("gain", "int", 1))
 
-    async def test_clear_deletes_row_and_reloads_clean(self):
+    async def test_clear_deletes_row_and_reloads_clean(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "s.db")
             await db.connect()
@@ -409,25 +425,33 @@ class SettingsClearRoundTrip(unittest.IsolatedAsyncioTestCase):
                 bus = EventBus()
                 seen: list[Any] = []
                 bus.subscribe(
-                    __import__("core.event_bus", fromlist=["SettingChanged"])
-                    .SettingChanged, seen.append)
+                    __import__("core.event_bus", fromlist=["SettingChanged"]).SettingChanged,
+                    seen.append,
+                )
                 mgr = SettingsManager(
-                    bus, _LOG, plugin_repo=db.plugins,
-                    global_layer={"exporter": {"trigger": "global-trigger"}})
+                    bus,
+                    _LOG,
+                    plugin_repo=db.plugins,
+                    global_layer={"exporter": {"trigger": "global-trigger"}},
+                )
                 await mgr.load()
-                await mgr.set_plugin_setting(
-                    "alpha", "exporter", "trigger", "acct", self.SCHEMA)
+                await mgr.set_plugin_setting("alpha", "exporter", "trigger", "acct", self.SCHEMA)
                 effective = await mgr.clear_plugin_setting(
-                    "alpha", "exporter", "trigger", self.SCHEMA)
+                    "alpha", "exporter", "trigger", self.SCHEMA
+                )
                 self.assertEqual(effective, "global-trigger")
                 # fresh manager over the SAME db: the override row is gone
                 mgr2 = SettingsManager(
-                    EventBus(), _LOG, plugin_repo=db.plugins,
-                    global_layer={"exporter": {"trigger": "global-trigger"}})
+                    EventBus(),
+                    _LOG,
+                    plugin_repo=db.plugins,
+                    global_layer={"exporter": {"trigger": "global-trigger"}},
+                )
                 await mgr2.load()
                 self.assertEqual(
-                    mgr2.resolve("exporter", self.SCHEMA, account="alpha")
-                    ["trigger"], "global-trigger")
+                    mgr2.resolve("exporter", self.SCHEMA, account="alpha")["trigger"],
+                    "global-trigger",
+                )
                 # exactly one SettingChanged for the clear, new_value global
                 cleared = [e for e in seen if e.old_value == "acct"]
                 self.assertEqual(len(cleared), 1)
@@ -440,7 +464,7 @@ class SettingsClearRoundTrip(unittest.IsolatedAsyncioTestCase):
 # RA-6: connection close rebirth — double close, then reuse
 # ---------------------------------------------------------------------------
 class ConnectionDoubleClose(unittest.IsolatedAsyncioTestCase):
-    async def test_double_close_then_reuse_same_loop(self):
+    async def test_double_close_then_reuse_same_loop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Database(Path(tmp) / "c.db")
             await db.connect()
@@ -456,15 +480,17 @@ class ConnectionDoubleClose(unittest.IsolatedAsyncioTestCase):
 # RA-7: identify gate — 1-account fleet keeps the configured interval
 # ---------------------------------------------------------------------------
 class IdentifyGateSanity(unittest.TestCase):
-    def test_single_account_unchanged(self):
+    def test_single_account_unchanged(self) -> None:
         from adapters.discord.client import IdentifyGate
+
         gate = IdentifyGate(5.0)
         self.assertEqual(gate.effective_interval, 5.0)
         gate.expected = 1
         self.assertEqual(gate.effective_interval, 5.0)
 
-    def test_zero_and_negative_expected_clamped(self):
+    def test_zero_and_negative_expected_clamped(self) -> None:
         from adapters.discord.client import IdentifyGate
+
         gate = IdentifyGate(5.0)
         gate.expected = 0
         self.assertEqual(gate.effective_interval, 5.0)
@@ -476,28 +502,25 @@ class IdentifyGateSanity(unittest.TestCase):
 # RA-8: server-rate-limit intake clamp — MAX_INTERVAL passthrough sanity
 # ---------------------------------------------------------------------------
 class RetryAfterClamp(unittest.TestCase):
-    def test_values_below_cap_pass_through(self):
-        manager = RateLimitManager(
-            EventBus(), _StubLogger(), None, clock=ManualClock(0.0))
+    def test_values_below_cap_pass_through(self) -> None:
+        manager = RateLimitManager(EventBus(), _StubLogger(), None, clock=ManualClock(0.0))
         manager.report_server_limit("alpha", "message", 3600.0)
-        self.assertEqual(
-            manager.cooldown_remaining("alpha", "message"), 3600.0)
+        self.assertEqual(manager.cooldown_remaining("alpha", "message"), 3600.0)
 
-    def test_over_cap_clamped_to_max_interval(self):
+    def test_over_cap_clamped_to_max_interval(self) -> None:
         from core.rate_limit_manager.policies import MAX_INTERVAL
-        manager = RateLimitManager(
-            EventBus(), _StubLogger(), None, clock=ManualClock(0.0))
+
+        manager = RateLimitManager(EventBus(), _StubLogger(), None, clock=ManualClock(0.0))
         manager.report_server_limit("alpha", "message", 1e9)
-        self.assertEqual(
-            manager.cooldown_remaining("alpha", "message"), MAX_INTERVAL)
+        self.assertEqual(manager.cooldown_remaining("alpha", "message"), MAX_INTERVAL)
 
+    def test_none_action_rejected_not_stored(self) -> None:
+        from core.errors import RatePolicyError
 
-    def test_none_action_rejected_not_stored(self):
-        from core.rate_limit_manager.policies import RatePolicyError
-        manager = RateLimitManager(
-            EventBus(), _StubLogger(), None, clock=ManualClock(0.0))
+        manager = RateLimitManager(EventBus(), _StubLogger(), None, clock=ManualClock(0.0))
+        no_action: Any = None  # runtime validation rejects a None action
         with self.assertRaises(RatePolicyError):
-            manager.report_server_limit("alpha", None, 5.0)
+            manager.report_server_limit("alpha", no_action, 5.0)
         manager.report_server_limit("alpha", "message", 5.0)
         manager.stats()  # a None-keyed cooldown made sorted() raise TypeError
 

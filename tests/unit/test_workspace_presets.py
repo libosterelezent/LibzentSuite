@@ -67,7 +67,7 @@ class ReferencesNotCopies(_Base):
                 {"account": "beta", "plugin": "exporter", "profile": "secondary"},
             ],
         )
-        applied = await self.svc.preset_apply_references(preset["preset_id"])
+        await self.svc.preset_apply_references(preset["preset_id"])
         # every referenced profile is now ACTIVE on its account — the
         # BODY was never copied anywhere
         self.assertEqual(

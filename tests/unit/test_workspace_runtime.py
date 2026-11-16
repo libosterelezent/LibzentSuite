@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
+from typing import Any
 
 from core.workspace.runtime import ChainRuntime, TerminalTrigger
 from core.workspace.service import WorkspaceService
@@ -34,9 +35,9 @@ class RuntimeTestBase(unittest.IsolatedAsyncioTestCase):
             await self.db.accounts.add(name)
             await self.service.join(name, "alpha")
         # the stub seams
-        self.invocations: list[tuple[str, str, dict]] = []
+        self.invocations: list[tuple[str, str, dict[str, Any]]] = []
         self.fail_handlers: set[str] = set()
-        self.gate_overrides: dict[tuple[str, str], dict] = {}
+        self.gate_overrides: dict[tuple[str, str], dict[str, Any]] = {}
         self.runtime = ChainRuntime(
             self.db.workspaces,
             service=self.service,
@@ -45,30 +46,30 @@ class RuntimeTestBase(unittest.IsolatedAsyncioTestCase):
             gate_reader=NS(plugin_gate_facts=self._gate_facts),
         )
 
-    async def _invoke(self, account: str, plugin: str, handler: str, payload: dict):
+    async def _invoke(
+        self, account: str, plugin: str, handler: str, payload: dict[str, Any]
+    ) -> None:
         self.invocations.append((account, plugin, dict(payload)))
         if handler in self.fail_handlers:
             raise RuntimeError(f"handler {handler} exploded")
 
-    async def _gate_facts(self, account: str, plugin: str, gate: dict):
+    async def _gate_facts(self, account: str, plugin: str, gate: dict[str, Any]) -> dict[str, Any]:
         return self.gate_overrides.get((account, plugin), {})
 
-    async def _chain(self, **step_overrides) -> int:
+    async def _chain(self, **step_overrides: Any) -> int:
         step = {
             "position": 1,
             "plugin": "cleaner",
-            "on": {"plugin": "grinder", "task_action": "message",
-                   "event": "task_completed"},
+            "on": {"plugin": "grinder", "task_action": "message", "event": "task_completed"},
         }
         step.update(step_overrides)
-        row = await self.runtime.create_chain(
-            "alpha", {"name": "claim-cleanup", "steps": [step]})
+        row = await self.runtime.create_chain("alpha", {"name": "claim-cleanup", "steps": [step]})
         return int(row["id"])
 
     async def _trigger_grinder(self) -> list[str]:
-        return await self.runtime.on_terminal(TerminalTrigger(
-            account="A", plugin="grinder", action="message",
-            kind="task_completed"))
+        return await self.runtime.on_terminal(
+            TerminalTrigger(account="A", plugin="grinder", action="message", kind="task_completed")
+        )
 
 
 class MechanicalTriggerTests(RuntimeTestBase):
@@ -88,13 +89,14 @@ class MechanicalTriggerTests(RuntimeTestBase):
         await self._chain()
         runs = await self._trigger_grinder()
         run = await self.db.workspaces.chain_run(runs[0])
+        assert run is not None
         self.assertEqual(run["status"], "completed")
 
     async def test_non_matching_terminal_does_not_fire(self) -> None:
         await self._chain()
-        runs = await self.runtime.on_terminal(TerminalTrigger(
-            account="A", plugin="OTHER", action="message",
-            kind="task_completed"))
+        runs = await self.runtime.on_terminal(
+            TerminalTrigger(account="A", plugin="OTHER", action="message", kind="task_completed")
+        )
         self.assertEqual(runs, [])
         self.assertEqual(self.invocations, [])
 
@@ -105,8 +107,7 @@ class SignalTriggerTests(RuntimeTestBase):
 
         outbox = SignalOutbox(self.db.signals)
         signal_id = await outbox.accept("A", "grinder", "claim_done")
-        await self._chain(
-            on={"signal": "grinder:claim_done"}, plugin="cleaner")
+        await self._chain(on={"signal": "grinder:claim_done"}, plugin="cleaner")
         runs = await self.runtime.on_signal(signal_id)
         self.assertEqual(len(runs), 1)
         self.assertEqual(self.invocations[0][1], "cleaner")
@@ -144,9 +145,9 @@ class VisibleSkipTests(RuntimeTestBase):
         await self._chain()
         self.gate_overrides[("A", "cleaner")] = {
             "channel_binding_usable": False,
-            "channel_binding_reason": "channel deleted"}
-        self.gate_overrides[("B", "cleaner")] = {
-            "channel_binding_usable": False}
+            "channel_binding_reason": "channel deleted",
+        }
+        self.gate_overrides[("B", "cleaner")] = {"channel_binding_usable": False}
         runs = await self._trigger_grinder()
         steps = await self.runtime.run_steps(runs[0])
         self.assertEqual(steps[0]["outcome"], "skipped")
@@ -163,7 +164,8 @@ class VisibleSkipTests(RuntimeTestBase):
     async def test_workspace_cooldown_blocks_dispatch_visibly(self) -> None:
         await self._chain()
         await self.service.start_cooldown(
-            "workspace", "alpha", "observed limit", 300.0, source="observed")
+            "workspace", "alpha", "observed limit", 300.0, source="observed"
+        )
         runs = await self._trigger_grinder()
         steps = await self.runtime.run_steps(runs[0])
         self.assertEqual(steps[0]["outcome"], "skipped")
@@ -176,6 +178,7 @@ class FailureSemanticsTests(RuntimeTestBase):
         self.fail_handlers.add("on_cleaner_trigger")
         runs = await self._trigger_grinder()
         run = await self.db.workspaces.chain_run(runs[0])
+        assert run is not None
         self.assertEqual(run["status"], "partial")  # FAILED recorded, run ended
         steps = await self.runtime.run_steps(runs[0])
         self.assertEqual(steps[0]["outcome"], "failed")
@@ -184,17 +187,27 @@ class FailureSemanticsTests(RuntimeTestBase):
     async def test_abort_fails_the_run(self) -> None:
         await self._chain()
         row = await self.db.workspaces.chain_by_name("alpha", "claim-cleanup")
+        assert row is not None
         definition = {
-            "name": "claim-cleanup", "on_skip": "abort",
-            "steps": [{
-                "position": 1, "plugin": "cleaner",
-                "on": {"plugin": "grinder", "task_action": "message",
-                       "event": "task_completed"}}],
+            "name": "claim-cleanup",
+            "on_skip": "abort",
+            "steps": [
+                {
+                    "position": 1,
+                    "plugin": "cleaner",
+                    "on": {
+                        "plugin": "grinder",
+                        "task_action": "message",
+                        "event": "task_completed",
+                    },
+                }
+            ],
         }
         await self.runtime.update_chain(int(row["id"]), definition)
         self.fail_handlers.add("on_cleaner_trigger")
         runs = await self._trigger_grinder()
         run = await self.db.workspaces.chain_run(runs[0])
+        assert run is not None
         self.assertEqual(run["status"], "failed")
 
 
@@ -202,18 +215,29 @@ class SnapshotTests(RuntimeTestBase):
     async def test_edits_affect_future_runs_only(self) -> None:
         chain_id = await self._chain()
         # run 1 on the original definition
-        first = await self._trigger_grinder()
+        _first = await self._trigger_grinder()
         # edit: swap the plugin
-        await self.runtime.update_chain(chain_id, {
-            "name": "claim-cleanup",
-            "steps": [{
-                "position": 1, "plugin": "scrubber",
-                "on": {"plugin": "grinder", "task_action": "message",
-                       "event": "task_completed"}}],
-        })
+        await self.runtime.update_chain(
+            chain_id,
+            {
+                "name": "claim-cleanup",
+                "steps": [
+                    {
+                        "position": 1,
+                        "plugin": "scrubber",
+                        "on": {
+                            "plugin": "grinder",
+                            "task_action": "message",
+                            "event": "task_completed",
+                        },
+                    }
+                ],
+            },
+        )
         row = await self.db.workspaces.chain(chain_id)
+        assert row is not None
         self.assertEqual(row["revision"], 2)  # the revision bumped
-        second = await self._trigger_grinder()
+        _second = await self._trigger_grinder()
         # run 1 executed cleaner; run 2 (post-edit) executes scrubber
         self.assertEqual(self.invocations[0][1], "cleaner")
         self.assertEqual(self.invocations[1][1], "scrubber")
@@ -221,16 +245,24 @@ class SnapshotTests(RuntimeTestBase):
 
 class MultiStepTests(RuntimeTestBase):
     async def test_sequential_steps_and_partial_on_skip(self) -> None:
-        row = await self.runtime.create_chain("alpha", {
-            "name": "two-step",
-            "steps": [
-                {"position": 1, "plugin": "grinder",
-                 "on": {"plugin": "grinder", "task_action": "message",
-                        "event": "task_completed"}},
-                {"position": 2, "plugin": "cleaner",
-                 "on": {"signal": "grinder:done"}},
-            ],
-        })
+        row = await self.runtime.create_chain(
+            "alpha",
+            {
+                "name": "two-step",
+                "steps": [
+                    {
+                        "position": 1,
+                        "plugin": "grinder",
+                        "on": {
+                            "plugin": "grinder",
+                            "task_action": "message",
+                            "event": "task_completed",
+                        },
+                    },
+                    {"position": 2, "plugin": "cleaner", "on": {"signal": "grinder:done"}},
+                ],
+            },
+        )
         del row
         runs = await self._trigger_grinder()
         # step 1 ran; step 2's trigger never fired (no signal emitted)
@@ -238,6 +270,7 @@ class MultiStepTests(RuntimeTestBase):
         # started (the chain is the unit, not per-step retriggering)
         self.assertEqual(len(self.invocations), 2)
         run = await self.db.workspaces.chain_run(runs[0])
+        assert run is not None
         self.assertEqual(run["status"], "completed")
 
 
@@ -246,15 +279,16 @@ class ReconcileTests(RuntimeTestBase):
         await self._chain()
         # simulate a crash mid-run: a live run + an unfinished step row
         await self.db.workspaces.insert_chain_run(
-            "run-stuck", 1, "alpha", "{}", triggered_by="test")
-        execution_id = await self.db.workspaces.insert_step_execution(
-            "run-stuck", 1, "A")
+            "run-stuck", 1, "alpha", "{}", triggered_by="test"
+        )
+        _execution_id = await self.db.workspaces.insert_step_execution("run-stuck", 1, "A")
         repaired = await self.runtime.reconcile_interrupted_runs()
         self.assertEqual(repaired, 1)
         steps = await self.runtime.run_steps("run-stuck")
         self.assertEqual(steps[0]["outcome"], "failed")
         self.assertIn("restart", steps[0]["error"])
         run = await self.db.workspaces.chain_run("run-stuck")
+        assert run is not None
         self.assertEqual(run["status"], "failed")
 
 

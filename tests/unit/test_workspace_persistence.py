@@ -127,9 +127,11 @@ class PresetsRepoTests(unittest.IsolatedAsyncioTestCase):
             await repo.create("global", "", "cleaner", "standard", {})
         # same name under another owner is a DIFFERENT identity
         account_copy = await repo.create("account", "A", "cleaner", "standard", {})
+        global_copy = await repo.latest_version("global", "", "cleaner", "standard")
+        assert global_copy is not None
         self.assertNotEqual(
             account_copy.preset_id,
-            (await repo.latest_version("global", "", "cleaner", "standard")).preset_id,
+            global_copy.preset_id,
         )
 
     async def test_archive_hides_from_default_list(self) -> None:
@@ -215,7 +217,9 @@ class PluginDataDropAccountTests(unittest.IsolatedAsyncioTestCase):
             assert kept is not None
             self.assertEqual(kept.get("data", {}).get("claimed"), 3)
             self.assertEqual(await store.drop_account("alpha"), 0)  # idempotent
-            with self.assertRaises(Exception):
+            # B017 suppression: the refusal path is intentionally pinned
+            # broadly — any failure beats silently dropping an empty name
+            with self.assertRaises(Exception):  # noqa: B017
                 await store.drop_account("")  # refuses an empty name
         finally:
             await store.close()

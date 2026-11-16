@@ -8,12 +8,14 @@ typed-event mismatch, subclass delivery, and sequential sync/async
 handler ordering (a blocking sync handler delays later handlers BY
 DESIGN — publish is an ordered inline dispatch, not a thread pool).
 """
+
 from __future__ import annotations
 
 import asyncio
 import time
 import unittest
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from core.event_bus import (
     Event,
@@ -23,6 +25,9 @@ from core.event_bus import (
     TaskFailed,
     TaskQueued,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class Kaboom(BaseException):
@@ -37,7 +42,7 @@ class TaskFailedSub(TaskFailed):
 class TestMutationDuringDispatch(unittest.IsolatedAsyncioTestCase):
     async def test_unsubscribe_of_other_during_dispatch_snapshot(self) -> None:
         bus = EventBus()
-        seen: list = []
+        seen: list[str] = []
 
         def b(event: Event) -> None:
             seen.append("b")
@@ -55,11 +60,12 @@ class TestMutationDuringDispatch(unittest.IsolatedAsyncioTestCase):
 
     async def test_self_unsubscribe_during_dispatch(self) -> None:
         bus = EventBus()
-        calls: list = []
-        unsub = None
+        calls: list[str] = []
+        unsub: Callable[[], None] | None = None
 
         def a(event: Event) -> None:
             calls.append("a")
+            assert unsub is not None  # wired below before first dispatch
             unsub()
             unsub()  # idempotent
 
@@ -70,7 +76,7 @@ class TestMutationDuringDispatch(unittest.IsolatedAsyncioTestCase):
 
     async def test_subscribe_during_dispatch_not_seen_this_round(self) -> None:
         bus = EventBus()
-        seen: list = []
+        seen: list[str] = []
 
         def late(event: Event) -> None:
             seen.append("late")
@@ -80,14 +86,14 @@ class TestMutationDuringDispatch(unittest.IsolatedAsyncioTestCase):
             bus.subscribe(Event, late)
 
         bus.subscribe(Event, a)
-        results = await bus.publish(SettingChanged())
+        await bus.publish(SettingChanged())
         self.assertEqual(seen, ["a"])  # snapshot: late missed THIS event
         await bus.publish(SettingChanged())
         self.assertEqual(seen, ["a", "a", "late"])
 
     async def test_double_unsubscribe_then_publish(self) -> None:
         bus = EventBus()
-        seen: list = []
+        seen: list[int] = []
         unsub = bus.subscribe(Event, lambda e: seen.append(1))
         unsub()
         unsub()
@@ -98,7 +104,7 @@ class TestMutationDuringDispatch(unittest.IsolatedAsyncioTestCase):
 class TestBaseExceptionPolicy(unittest.IsolatedAsyncioTestCase):
     async def test_custom_base_exception_isolated(self) -> None:
         bus = EventBus()
-        ran: list = []
+        ran: list[str] = []
 
         def hostile(event: Event) -> None:
             raise Kaboom("not an Exception")
@@ -106,13 +112,13 @@ class TestBaseExceptionPolicy(unittest.IsolatedAsyncioTestCase):
         bus.subscribe(Event, hostile)
         bus.subscribe(Event, lambda e: ran.append("after"))
         results = await bus.publish(SettingChanged())
-        self.assertEqual(ran, ["after"])            # later handler still ran
+        self.assertEqual(ran, ["after"])  # later handler still ran
         self.assertEqual(len(results), 2)
-        self.assertIsInstance(results[0], Kaboom)   # captured, not raised
+        self.assertIsInstance(results[0], Kaboom)  # captured, not raised
 
     async def test_system_exit_propagates(self) -> None:
         bus = EventBus()
-        ran: list = []
+        ran: list[str] = []
 
         def hostile(event: Event) -> None:
             raise SystemExit(3)
@@ -122,7 +128,7 @@ class TestBaseExceptionPolicy(unittest.IsolatedAsyncioTestCase):
         bus.subscribe(Event, lambda e: ran.append("never"))
         with self.assertRaises(SystemExit):
             await bus.publish(SettingChanged())
-        self.assertEqual(ran, ["before"])          # sequential up to the raise
+        self.assertEqual(ran, ["before"])  # sequential up to the raise
 
     async def test_keyboard_interrupt_propagates(self) -> None:
         bus = EventBus()
@@ -152,14 +158,16 @@ class TestDrainAndTyping(unittest.IsolatedAsyncioTestCase):
 
     async def test_drain_awaits_fire_and_forget_backlog(self) -> None:
         bus = EventBus()
-        done: list = []
+        done: list[int] = []
 
         async def slow(event: Event) -> None:
             await asyncio.sleep(0.05)
             done.append(1)
 
         bus.subscribe(SettingChanged, slow)
-        tasks = [bus.publish_nowait(SettingChanged()) for _ in range(5)]
+        tasks: list[asyncio.Task[None]] = [
+            t for t in (bus.publish_nowait(SettingChanged()) for _ in range(5)) if t is not None
+        ]
         await bus.drain(timeout=2.0)
         self.assertEqual(len(done), 5)
         self.assertTrue(all(t.done() for t in tasks))
@@ -168,7 +176,7 @@ class TestDrainAndTyping(unittest.IsolatedAsyncioTestCase):
 
     async def test_typed_mismatch_no_delivery(self) -> None:
         bus = EventBus()
-        seen: list = []
+        seen: list[str] = []
         bus.subscribe(TaskFailed, lambda e: seen.append(type(e).__name__))
         await bus.publish(TaskCompleted())
         await bus.publish(TaskQueued())
@@ -178,8 +186,8 @@ class TestDrainAndTyping(unittest.IsolatedAsyncioTestCase):
 
     async def test_subclass_event_reaches_base_subscribers(self) -> None:
         bus = EventBus()
-        task_seen: list = []
-        base_seen: list = []
+        task_seen: list[int] = []
+        base_seen: list[str] = []
         bus.subscribe(TaskFailed, lambda e: task_seen.append(1))
         bus.subscribe(Event, lambda e: base_seen.append(type(e).__name__))
         await bus.publish(TaskFailedSub())
@@ -192,7 +200,7 @@ class TestDrainAndTyping(unittest.IsolatedAsyncioTestCase):
         """Sequential dispatch: a sync handler that busy-waits delays the
         async handler behind it (pinned as the intended inline semantic)."""
         bus = EventBus()
-        order: list = []
+        order: list[str] = []
 
         def blocking_sync(event: Event) -> None:
             time.sleep(0.05)

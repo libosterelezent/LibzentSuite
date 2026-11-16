@@ -1,5 +1,6 @@
 """AccessManager + admin-gate tests: per-account command permissions,
 prefix settings, admin accounts, the_bot id, and the env migration."""
+
 from __future__ import annotations
 
 import unittest
@@ -32,43 +33,45 @@ class FakeKv:
 class FakeCredentials:
     """Credentials double for the migration + primary-bot fallback paths."""
 
-    def __init__(self, owner_ids="", bot_id=None):
+    def __init__(self, owner_ids: str = "", bot_id: int | None = None) -> None:
         self._owner = owner_ids
         self._bot_id = bot_id
 
     @property
-    def owner_user_ids(self):
+    def owner_user_ids(self) -> frozenset[int]:
         if not self._owner:
             return frozenset()
         return frozenset(int(x) for x in self._owner.split(",") if x.strip())
 
     @property
-    def primary_bot_id(self):
+    def primary_bot_id(self) -> int:
         if self._bot_id is None:
             raise KeyError("PRIMARY_BOT_ID")
         return int(self._bot_id)
 
 
-def make(kv=None, creds=None) -> AccessManager:
-    return AccessManager(kv or FakeKv(), credentials=creds)
+def make(kv: Any = None, creds: FakeCredentials | None = None) -> AccessManager:
+    kv_repo: Any = kv or FakeKv()  # duck-typed KvRepository double
+    creds_view: Any = creds  # duck-typed Credentials double
+    return AccessManager(kv_repo, credentials=creds_view)
 
 
 # ------------------------------------------------------------ admin list
 class TestAdminIds(unittest.IsolatedAsyncioTestCase):
-    async def test_empty_by_default_fail_closed(self):
+    async def test_empty_by_default_fail_closed(self) -> None:
         am = make()
         self.assertEqual(await am.admin_ids(), [])
         self.assertFalse(await am.is_admin_id(123))
         self.assertFalse(await am.can_invoke("alpha", 123))
 
-    async def test_add_remove_set(self):
+    async def test_add_remove_set(self) -> None:
         am = make()
         self.assertEqual(await am.add_admin(10), [10])
         self.assertEqual(await am.add_admin(5), [5, 10])
-        self.assertEqual(await am.add_admin(10), [5, 10])   # idempotent
+        self.assertEqual(await am.add_admin(10), [5, 10])  # idempotent
         self.assertEqual(await am.remove_admin(10), [5])
 
-    async def test_admin_bypasses_per_account_list(self):
+    async def test_admin_bypasses_per_account_list(self) -> None:
         am = make()
         await am.add_admin(1)
         self.assertTrue(await am.can_invoke("alpha", 1))
@@ -77,7 +80,7 @@ class TestAdminIds(unittest.IsolatedAsyncioTestCase):
 
 # ------------------------------------------------------------- migration
 class TestMigration(unittest.IsolatedAsyncioTestCase):
-    async def test_seeds_once_from_env(self):
+    async def test_seeds_once_from_env(self) -> None:
         am = make(creds=FakeCredentials(owner_ids="111,222"))
         n = await am.migrate_from_credentials()
         self.assertEqual(n, 2)
@@ -87,13 +90,13 @@ class TestMigration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(n2, 0)
         self.assertEqual(await am.admin_ids(), [111, 222])
 
-    async def test_no_seed_when_list_exists(self):
+    async def test_no_seed_when_list_exists(self) -> None:
         am = make(creds=FakeCredentials(owner_ids="111"))
         await am.set_admin_ids([999])
         await am.migrate_from_credentials()
         self.assertEqual(await am.admin_ids(), [999])
 
-    async def test_no_env_no_admins(self):
+    async def test_no_env_no_admins(self) -> None:
         am = make(creds=FakeCredentials(owner_ids=""))
         n = await am.migrate_from_credentials()
         self.assertEqual(n, 0)
@@ -102,11 +105,11 @@ class TestMigration(unittest.IsolatedAsyncioTestCase):
 
 # ---------------------------------------------------- command permissions
 class TestCommandPermissions(unittest.IsolatedAsyncioTestCase):
-    async def test_empty_list_fails_closed(self):
+    async def test_empty_list_fails_closed(self) -> None:
         am = make()
         self.assertFalse(await am.can_invoke("alpha", 42))
 
-    async def test_listed_id_allowed(self):
+    async def test_listed_id_allowed(self) -> None:
         am = make()
         await am.set_allowed_user_ids("alpha", [42, 7])
         self.assertTrue(await am.can_invoke("alpha", 42))
@@ -114,86 +117,88 @@ class TestCommandPermissions(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await am.can_invoke("alpha", 99))
         self.assertFalse(await am.can_invoke("beta", 42))  # per-account
 
-    async def test_add_remove(self):
+    async def test_add_remove(self) -> None:
         am = make()
         self.assertEqual(await am.add_allowed("a", 5), [5])
         self.assertEqual(await am.add_allowed("a", 3), [3, 5])
         self.assertEqual(await am.remove_allowed("a", 5), [3])
 
-    async def test_dedup_and_sort(self):
+    async def test_dedup_and_sort(self) -> None:
         am = make()
-        self.assertEqual(await am.set_allowed_user_ids(
-            "a", [9, 3, 9, 1]), [1, 3, 9])
+        self.assertEqual(await am.set_allowed_user_ids("a", [9, 3, 9, 1]), [1, 3, 9])
 
 
 # --------------------------------------------------------- prefix config
 class TestPrefixConfig(unittest.IsolatedAsyncioTestCase):
-    async def test_default_is_mention(self):
+    async def test_default_is_mention(self) -> None:
         am = make()
         cfg = await am.prefix_config("alpha")
         self.assertEqual(cfg["prefix_mode"], "mention")
         self.assertEqual(cfg["prefix_symbol"], "")
 
-    async def test_set_valid_modes(self):
+    async def test_set_valid_modes(self) -> None:
         am = make()
-        for mode, symbol in (("mention", ""), ("symbol", "sm!"),
-                             ("both", "!")):
+        for mode, symbol in (("mention", ""), ("symbol", "sm!"), ("both", "!")):
             cfg = await am.set_prefix_config("alpha", mode, symbol)
             self.assertEqual(cfg["prefix_mode"], mode)
             self.assertEqual(cfg["prefix_symbol"], symbol)
 
-    async def test_symbol_requires_symbol(self):
+    async def test_symbol_requires_symbol(self) -> None:
         am = make()
         from core.errors import CredentialsError
+
         with self.assertRaises(CredentialsError):
             await am.set_prefix_config("a", "symbol", "")
         with self.assertRaises(CredentialsError):
             await am.set_prefix_config("a", "both", "")
 
-    async def test_symbol_validation(self):
+    async def test_symbol_validation(self) -> None:
         am = make()
         from core.errors import CredentialsError
-        with self.assertRaises(CredentialsError):   # too long
+
+        with self.assertRaises(CredentialsError):  # too long
             await am.set_prefix_config("a", "symbol", "toolong")
-        with self.assertRaises(CredentialsError):   # whitespace
+        with self.assertRaises(CredentialsError):  # whitespace
             await am.set_prefix_config("a", "symbol", "a b")
 
-    async def test_invalid_mode_rejected(self):
+    async def test_invalid_mode_rejected(self) -> None:
         am = make()
         from core.errors import CredentialsError
+
         with self.assertRaises(CredentialsError):
             await am.set_prefix_config("a", "bogus")
 
-    async def test_sync_cache_warmed_by_set(self):
+    async def test_sync_cache_warmed_by_set(self) -> None:
         am = make()
         self.assertIsNone(am.prefix_config_sync("alpha"))
         await am.set_prefix_config("alpha", "symbol", "sm!")
-        self.assertEqual(am.prefix_config_sync("alpha"),
-                         {"prefix_mode": "symbol", "prefix_symbol": "sm!"})
+        self.assertEqual(
+            am.prefix_config_sync("alpha"), {"prefix_mode": "symbol", "prefix_symbol": "sm!"}
+        )
 
 
 # ------------------------------------------------------------- admin flag
 class TestAdminFlag(unittest.IsolatedAsyncioTestCase):
-    async def test_flag_off_by_default(self):
+    async def test_flag_off_by_default(self) -> None:
         am = make()
         row = await am.account_view("alpha")
         self.assertFalse(row["is_admin"])
 
-    async def test_flag_set_and_clear(self):
+    async def test_flag_set_and_clear(self) -> None:
         am = make()
         row = await am.set_admin_flag("alpha", True)
         self.assertTrue(row["is_admin"])
         row = await am.set_admin_flag("alpha", False)
         self.assertFalse(row["is_admin"])
 
-    async def test_admin_account_user_id_gates(self):
+    async def test_admin_account_user_id_gates(self) -> None:
         am = make()
         await am.set_admin_flag("alpha", True)
         await am.set_account_user_id("alpha", 777)
-        self.assertTrue(await am.is_admin_id(777))       # flagged account
+        self.assertTrue(await am.is_admin_id(777))  # flagged account
         self.assertFalse(await am.is_admin_id(888))
 
-    async def test_flag_without_user_id_does_not_gate(self):
+    async def test_flag_without_user_id_does_not_gate(self) -> None:
         am = make()
         await am.set_admin_flag("alpha", True)  # no user_id recorded
         self.assertFalse(await am.is_admin_id(1))
@@ -201,20 +206,20 @@ class TestAdminFlag(unittest.IsolatedAsyncioTestCase):
 
 # -------------------------------------------------------------- primary bot id
 class TestPrimaryBotId(unittest.IsolatedAsyncioTestCase):
-    async def test_none_when_unset_no_env(self):
+    async def test_none_when_unset_no_env(self) -> None:
         am = make()
         self.assertIsNone(await am.primary_bot_id())
 
-    async def test_db_value_wins(self):
+    async def test_db_value_wins(self) -> None:
         am = make(creds=FakeCredentials(bot_id=111))
         await am.set_primary_bot_id(222)
         self.assertEqual(await am.primary_bot_id(), 222)
 
-    async def test_env_fallback_when_db_unset(self):
+    async def test_env_fallback_when_db_unset(self) -> None:
         am = make(creds=FakeCredentials(bot_id=111))
         self.assertEqual(await am.primary_bot_id(), 111)
 
-    async def test_clear_reverts_to_env(self):
+    async def test_clear_reverts_to_env(self) -> None:
         am = make(creds=FakeCredentials(bot_id=111))
         await am.set_primary_bot_id(222)
         await am.set_primary_bot_id(None)
@@ -223,7 +228,7 @@ class TestPrimaryBotId(unittest.IsolatedAsyncioTestCase):
 
 # ------------------------------------------------------------- overview
 class TestOverview(unittest.IsolatedAsyncioTestCase):
-    async def test_all_account_rows(self):
+    async def test_all_account_rows(self) -> None:
         am = make()
         await am.add_allowed("alpha", 5)
         await am.set_admin_flag("beta", True)
@@ -232,7 +237,7 @@ class TestOverview(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows["alpha"]["allowed_user_ids"], [5])
         self.assertTrue(rows["beta"]["is_admin"])
 
-    async def test_unknown_account_gets_defaults(self):
+    async def test_unknown_account_gets_defaults(self) -> None:
         am = make()
         row = await am.account_view("ghost")
         self.assertEqual(row["prefix_mode"], "mention")
@@ -245,7 +250,7 @@ if __name__ == "__main__":
 
 # ------------------------------------------------- connect records user id
 class TestConnectRecordsUserId(unittest.IsolatedAsyncioTestCase):
-    async def test_account_manager_records_user_id_for_admin_gate(self):
+    async def test_account_manager_records_user_id_for_admin_gate(self) -> None:
         import logging
 
         from core.account_manager import AccountManager

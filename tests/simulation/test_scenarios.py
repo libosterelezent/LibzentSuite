@@ -6,11 +6,13 @@ full production stack (managers, scheduler, limiter, rich event model)
 over the in-memory world. Everything that does not need the other
 managers (registry shape, world setups, pure checks) runs now.
 """
+
 from __future__ import annotations
 
 import sys
 import unittest
 from pathlib import Path
+from typing import Any
 
 from adapters.simulator.runner import SimulationRunner
 from adapters.simulator.scenarios import (
@@ -64,7 +66,7 @@ def _fabricated_world() -> SimWorld:
     return world
 
 
-def _audit_out(ts_values, contents) -> list:
+def _audit_out(ts_values: list[float], contents: list[str]) -> list[dict[str, Any]]:
     """Fabricated outbound audit entries (alpha, direction 'out')."""
     return [
         {
@@ -74,7 +76,7 @@ def _audit_out(ts_values, contents) -> list:
             "ts": ts,
             "content": content,
         }
-        for ts, content in zip(ts_values, contents)
+        for ts, content in zip(ts_values, contents, strict=False)
     ]
 
 
@@ -129,9 +131,7 @@ class TestRegistryShape(unittest.TestCase):
 
     def test_demo_settings_and_quiet_window_consistent(self) -> None:
         self.assertIn("exporter", DEMO_PLUGIN_SETTINGS)
-        read_timeout = float(
-            DEMO_PLUGIN_SETTINGS["exporter"]["dm_read_timeout"]
-        )
+        read_timeout = float(DEMO_PLUGIN_SETTINGS["exporter"]["dm_read_timeout"])
         self.assertGreaterEqual(read_timeout, 1.0)
         self.assertAlmostEqual(quiet_window(), read_timeout + 1.2)
 
@@ -157,9 +157,7 @@ class TestChecksPure(unittest.TestCase):
 
     def test_basic_passes_on_complete_flow(self) -> None:
         world = _fabricated_world()
-        audit = _audit_out(
-            [10.0, 11.8], [EXPORT_COMMAND, IMPORT_PREFIX + "Alice$Bob"]
-        )
+        audit = _audit_out([10.0, 11.8], [EXPORT_COMMAND, IMPORT_PREFIX + "Alice$Bob"])
         self.assertEqual(SCENARIOS["export_basic"].checks(audit, world), [])
 
     def test_basic_fails_when_chunk_missing(self) -> None:
@@ -173,24 +171,20 @@ class TestChecksPure(unittest.TestCase):
 
     def test_basic_fails_on_multiple_chunks(self) -> None:
         world = _fabricated_world()
-        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
-                      IMPORT_PREFIX + "second")
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, IMPORT_PREFIX + "second")
         failures = SCENARIOS["export_basic"].checks([], world)
         self.assertTrue(any("1 chunk" in f for f in failures))
 
     def test_multichunk_passes_and_catches_oversize(self) -> None:
         world = SimWorld()
         SCENARIOS["export_multichunk"].world_setup(world)
-        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
-                      IMPORT_PREFIX + "a" * 100)
-        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
-                      IMPORT_PREFIX + "b" * 100)
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, IMPORT_PREFIX + "a" * 100)
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, IMPORT_PREFIX + "b" * 100)
         self.assertEqual(SCENARIOS["export_multichunk"].checks([], world), [])
 
         oversized = SimWorld()
         SCENARIOS["export_multichunk"].world_setup(oversized)
-        oversized.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
-                          IMPORT_PREFIX + "x" * 2100)
+        oversized.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, IMPORT_PREFIX + "x" * 2100)
         failures = SCENARIOS["export_multichunk"].checks([], oversized)
         self.assertTrue(any("2000" in f for f in failures))
 
@@ -198,26 +192,21 @@ class TestChecksPure(unittest.TestCase):
         check = SCENARIOS["pacing_respected"].checks
         good = _audit_out(
             [10.0, 11.7, 13.4, 15.1],
-            [EXPORT_COMMAND, IMPORT_PREFIX + "a", IMPORT_PREFIX + "b",
-             IMPORT_PREFIX + "c"],
+            [EXPORT_COMMAND, IMPORT_PREFIX + "a", IMPORT_PREFIX + "b", IMPORT_PREFIX + "c"],
         )
         self.assertEqual(check(good, SimWorld()), [])
         rushed = _audit_out(
             [10.0, 11.0, 13.0, 14.9],
-            [EXPORT_COMMAND, IMPORT_PREFIX + "a", IMPORT_PREFIX + "b",
-             IMPORT_PREFIX + "c"],
+            [EXPORT_COMMAND, IMPORT_PREFIX + "a", IMPORT_PREFIX + "b", IMPORT_PREFIX + "c"],
         )
         failures = check(rushed, SimWorld())
         self.assertTrue(any("pacing violated" in f for f in failures))
-        self.assertLessEqual(
-            PACING_INTERVAL, 1.7, "pacing scenario stays sim-cheap"
-        )
+        self.assertLessEqual(PACING_INTERVAL, 1.7, "pacing scenario stays sim-cheap")
 
     def test_pacing_needs_timestamps_and_three_sends(self) -> None:
         check = SCENARIOS["pacing_respected"].checks
         self.assertTrue(check([], SimWorld()))  # not enough sends
-        no_ts = [{"account": ACCOUNT_NAME, "direction": "out", "content": "x"}
-                 for _ in range(3)]
+        no_ts = [{"account": ACCOUNT_NAME, "direction": "out", "content": "x"} for _ in range(3)]
         failures = check(no_ts, SimWorld())
         self.assertTrue(any("timestamps" in f for f in failures))
 
@@ -226,22 +215,16 @@ class TestChecksPure(unittest.TestCase):
         world = SimWorld()
         scenario.world_setup(world)
         world.blocked_sends.append({"ts": 100.0, "retry_after": 0.8})
-        export = world.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, EXPORT_COMMAND
-        )
+        export = world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, EXPORT_COMMAND)
         export.ts = 100.9  # 0.9s later: >= retry_after - tolerance
-        chunk = world.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, IMPORT_PREFIX + "x"
-        )
+        chunk = world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, IMPORT_PREFIX + "x")
         chunk.ts = 102.5
         self.assertEqual(scenario.checks([], world), [])
 
         too_fast = SimWorld()
         scenario.world_setup(too_fast)
         too_fast.blocked_sends.append({"ts": 100.0, "retry_after": 0.8})
-        early = too_fast.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, EXPORT_COMMAND
-        )
+        early = too_fast.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, EXPORT_COMMAND)
         early.ts = 100.1
         failures = scenario.checks([], too_fast)
         self.assertTrue(any("retry came" in f for f in failures))
@@ -256,9 +239,7 @@ class TestChecksPure(unittest.TestCase):
         # pass: export went out, pages arrived, channel deleted, zero chunks
         world = SimWorld()
         scenario.world_setup(world)
-        export = world.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, EXPORT_COMMAND
-        )
+        export = world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, EXPORT_COMMAND)
         dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
         world.deliver(dm, SYNTHETIC_BOT_ID, "Soulmates\n...", dm=True)
         world.channel_gone(SYNTHETIC_GUILD_CHANNEL)
@@ -268,9 +249,7 @@ class TestChecksPure(unittest.TestCase):
         # violation: a chunk landed despite the deletion
         leaked = SimWorld()
         scenario.world_setup(leaked)
-        leaked.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, EXPORT_COMMAND
-        )
+        leaked.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, EXPORT_COMMAND)
         dm = leaked.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_BOT_ID)
         leaked.deliver(dm, SYNTHETIC_BOT_ID, "page", dm=True)
         leaked.channel_gone(SYNTHETIC_GUILD_CHANNEL)
@@ -289,30 +268,25 @@ class TestChecksPure(unittest.TestCase):
         from adapters.simulator.scenarios import ESTOP_GRACE_S
 
         scenario = SCENARIOS["estop_halt"]
-        audit = [{"account": "system", "direction": "out",
-                  "action": "mgmt:estop", "ts": 100.0}]
+        audit = [{"account": "system", "direction": "out", "action": "mgmt:estop", "ts": 100.0}]
         # pass: chunk one + halt + quiet + re-trigger + post-resume chunk
         world = SimWorld()
         scenario.world_setup(world)
-        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
-                      IMPORT_PREFIX + "one")
-        retrigger = world.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "export")
+        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, IMPORT_PREFIX + "one")
+        retrigger = world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "export")
         retrigger.ts = 105.0
-        world.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
-                      IMPORT_PREFIX + "two")  # after resume: fine
+        world.deliver(
+            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, IMPORT_PREFIX + "two"
+        )  # after resume: fine
         self.assertEqual(scenario.checks(audit, world), [])
 
         # violation: a send after the halt (inside the re-trigger window)
         leaker = SimWorld()
         scenario.world_setup(leaker)
-        leaker.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
-                       IMPORT_PREFIX + "one")
-        late = leaker.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "post-halt send")
+        leaker.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, IMPORT_PREFIX + "one")
+        late = leaker.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "post-halt send")
         late.ts = 102.0  # 2.0s past the estop: outside any in-flight grace
-        retrigger = leaker.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "export")
+        retrigger = leaker.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "export")
         retrigger.ts = 105.0
         failures = scenario.checks(audit, leaker)
         self.assertTrue(any("after the halt" in f for f in failures))
@@ -320,27 +294,21 @@ class TestChecksPure(unittest.TestCase):
         # in-flight grace: a send INSIDE the grace window is not a leak
         grace = SimWorld()
         scenario.world_setup(grace)
-        grace.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
-                      IMPORT_PREFIX + "one")
-        racing = grace.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "mid-flight")
+        grace.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, IMPORT_PREFIX + "one")
+        racing = grace.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, "mid-flight")
         racing.ts = 100.0 + ESTOP_GRACE_S / 2
-        retrigger = grace.deliver(
-            SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "export")
+        retrigger = grace.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_OWNER_ID, "export")
         retrigger.ts = 105.0
-        grace.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID,
-                      IMPORT_PREFIX + "two")
+        grace.deliver(SYNTHETIC_GUILD_CHANNEL, SYNTHETIC_ALPHA_ID, IMPORT_PREFIX + "two")
         self.assertEqual(scenario.checks(audit, grace), [])
 
         # violation: estop never executed
-        self.assertTrue(any("never executed" in f for f in
-                            scenario.checks([], SimWorld())))
+        self.assertTrue(any("never executed" in f for f in scenario.checks([], SimWorld())))
         # violation: no re-trigger after the halt
         halted = SimWorld()
         scenario.world_setup(halted)
         failures = scenario.checks(audit, halted)
         self.assertTrue(any("re-triggered" in f for f in failures))
-
 
 
 class TestFullStackRuns(unittest.IsolatedAsyncioTestCase):
@@ -352,17 +320,22 @@ class TestFullStackRuns(unittest.IsolatedAsyncioTestCase):
     tests/fixtures/sim_plugins (the framework bundles no plugins).
     """
 
-    async def _run(self, name: str) -> dict:
+    async def _run(self, name: str) -> dict[str, Any]:
         runner = SimulationRunner(plugin_dir=str(SIM_PLUGINS))
         report = await runner.run(name)
-        for key in ("name", "passed", "duration_s", "failures", "log_lines",
-                    "interactions", "summary"):
+        for key in (
+            "name",
+            "passed",
+            "duration_s",
+            "failures",
+            "log_lines",
+            "interactions",
+            "summary",
+        ):
             self.assertIn(key, report)
         if not report["passed"]:
             tail = "\n".join(report["log_lines"][-40:])
-            self.fail(
-                f"{name} failed: {report['failures']}\nlog tail:\n{tail}"
-            )
+            self.fail(f"{name} failed: {report['failures']}\nlog tail:\n{tail}")
         return report
 
     async def test_export_basic(self) -> None:

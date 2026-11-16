@@ -13,6 +13,7 @@ Covers, one class per fix:
   (e) core.audit.format_audit escapes newlines in note/account/action;
   (f) the REPL prompt is flushed before the reader can accept input.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -34,10 +35,10 @@ from interfaces.cli.repl import Repl
 class FakeAccountsManager:
     """Duck-typed AccountManager stub returning a canned remove verdict."""
 
-    def __init__(self, verdict: dict) -> None:
+    def __init__(self, verdict: dict[str, Any]) -> None:
         self._verdict = verdict
 
-    async def remove_account(self, name: str) -> dict:
+    async def remove_account(self, name: str) -> dict[str, Any]:
         return dict(self._verdict)
 
 
@@ -45,10 +46,12 @@ class RecordingService:
     """Records every call; raises nothing (deletes must be observable)."""
 
     def __init__(self, *method_names: str) -> None:
-        self.calls: list[tuple] = []
+        self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
         for method in method_names:
-            async def stub(*args, _m=method, **kwargs):
+
+            async def stub(*args: Any, _m: str = method, **kwargs: Any) -> None:
                 self.calls.append((_m, args, kwargs))
+
             setattr(self, method, stub)
 
 
@@ -56,9 +59,9 @@ class RecordingAudit:
     """Duck-typed AuditRecorder recording record() calls."""
 
     def __init__(self) -> None:
-        self.entries: list[dict] = []
+        self.entries: list[dict[str, Any]] = []
 
-    def record(self, **kwargs: Any) -> dict:
+    def record(self, **kwargs: Any) -> dict[str, Any]:
         self.entries.append(kwargs)
         return dict(kwargs)
 
@@ -72,14 +75,16 @@ class _Manager:
 
 def build_api(**overrides: Any) -> ControlAPI:
     """A ControlAPI over inert stubs; overrides replace any collaborator."""
-    kwargs = dict(
-        accounts=_Manager(),
-        plugins=_Manager(),
-        settings=_Manager(),
-        limiter=_Manager(),
-        scheduler=_Manager(),
-        logs=_Manager(),
-    )
+    # Any-valued map: the stubs are duck-typed doubles of the ctor's
+    # concrete collaborator types.
+    kwargs: dict[str, Any] = {
+        "accounts": _Manager(),
+        "plugins": _Manager(),
+        "settings": _Manager(),
+        "limiter": _Manager(),
+        "scheduler": _Manager(),
+        "logs": _Manager(),
+    }
     kwargs.update(overrides)
     return ControlAPI(**kwargs)
 
@@ -88,12 +93,17 @@ class FakeClearApi:
     """Tiny ControlAPI double for the 'plugins clear' verb test."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple] = []
+        self.calls: list[tuple[str, str, str]] = []
 
-    async def plugins_clear_setting(self, account, plugin, key):
+    async def plugins_clear_setting(self, account: str, plugin: str, key: str) -> dict[str, Any]:
         self.calls.append((account, plugin, key))
-        return {"account": account, "plugin": plugin, "key": key,
-                "cleared": True, "value": "default"}
+        return {
+            "account": account,
+            "plugin": plugin,
+            "key": key,
+            "cleared": True,
+            "value": "default",
+        }
 
 
 # --------------------------------------------------- (a) accounts_remove
@@ -104,8 +114,7 @@ class TestAccountsRemoveRecreated(unittest.IsolatedAsyncioTestCase):
         access = RecordingService("forget_account")
         audit = RecordingAudit()
         api = build_api(
-            accounts=FakeAccountsManager(
-                {"removed": False, "name": "alpha", "recreated": True}),
+            accounts=FakeAccountsManager({"removed": False, "name": "alpha", "recreated": True}),
             credentials_svc=creds,
             cooldowns=cooldowns,
             access=access,
@@ -126,8 +135,7 @@ class TestAccountsRemoveRecreated(unittest.IsolatedAsyncioTestCase):
         access = RecordingService("forget_account")
         audit = RecordingAudit()
         api = build_api(
-            accounts=FakeAccountsManager(
-                {"removed": "alpha", "existed": True}),
+            accounts=FakeAccountsManager({"removed": "alpha", "existed": True}),
             credentials_svc=creds,
             cooldowns=cooldowns,
             access=access,
@@ -147,16 +155,14 @@ class TestAccountsRemoveRecreated(unittest.IsolatedAsyncioTestCase):
 class TestPluginsClearVerb(unittest.IsolatedAsyncioTestCase):
     async def test_clear_reaches_plugins_clear_setting(self) -> None:
         api = FakeClearApi()
-        text = await run_command(api, "plugins clear alpha exporter trigger")
-        self.assertEqual(
-            api.calls, [("alpha", "exporter", "trigger")])
+        text: Any = await run_command(api, "plugins clear alpha exporter trigger")
+        self.assertEqual(api.calls, [("alpha", "exporter", "trigger")])
         self.assertIn("cleared", text)
 
     async def test_clear_usage_errors(self) -> None:
         from interfaces.cli.commands import UsageError
 
-        for line in ("plugins clear a p", "plugins clear a p k extra",
-                     "plugins clear"):
+        for line in ("plugins clear a p", "plugins clear a p k extra", "plugins clear"):
             with self.subTest(line=line), self.assertRaises(UsageError):
                 await run_command(FakeClearApi(), line)
 
@@ -170,16 +176,21 @@ class TestPluginsClearVerb(unittest.IsolatedAsyncioTestCase):
 # ---------------------------------------------- (c) unpaced None interval
 class TestFormatEffectiveUnpaced(unittest.TestCase):
     def test_none_interval_renders_unpaced_marker(self) -> None:
-        text = format_effective({"action": "message", "interval": None,
-                                 "jitter": None, "sources": []})
+        text = format_effective(
+            {"action": "message", "interval": None, "jitter": None, "sources": []}
+        )
         self.assertIn("- (unpaced)", text)
         self.assertNotIn("None", text)
 
     def test_none_source_interval_renders_dash(self) -> None:
-        text = format_effective({
-            "action": "message", "interval": None, "jitter": None,
-            "sources": [{"level": "global", "owner": None, "interval": None}],
-        })
+        text = format_effective(
+            {
+                "action": "message",
+                "interval": None,
+                "jitter": None,
+                "sources": [{"level": "global", "owner": None, "interval": None}],
+            }
+        )
         self.assertIn("- (unpaced)", text.splitlines()[0])
         self.assertIn("-", text.splitlines()[1])
         self.assertNotIn("0.00s", text)
@@ -194,8 +205,8 @@ class TestStdlibBridgeTraceback(unittest.TestCase):
             raise ValueError("kaboom")
         except ValueError:
             record = logging.LogRecord(
-                "libzent.core", logging.ERROR, "f", 1,
-                "it broke", None, sys.exc_info())
+                "libzent.core", logging.ERROR, "f", 1, "it broke", None, sys.exc_info()
+            )
         bridge.emit(record)
         message = service.tail(1)[0]["message"]
         self.assertIn("it broke", message)
@@ -205,8 +216,7 @@ class TestStdlibBridgeTraceback(unittest.TestCase):
     def test_plain_records_are_unchanged(self) -> None:
         service = LogService()
         bridge = StdlibBridge(service)
-        record = logging.LogRecord(
-            "libzent.core", logging.INFO, "f", 1, "fine", None, None)
+        record = logging.LogRecord("libzent.core", logging.INFO, "f", 1, "fine", None, None)
         bridge.emit(record)
         self.assertEqual(service.tail(1)[0]["message"], "fine")
 
@@ -216,11 +226,19 @@ class TestAuditNewlineEscaping(unittest.TestCase):
     TS = 1700000000.5
 
     def test_note_and_account_newlines_are_escaped(self) -> None:
-        lines = format_audit([
-            {"ts": self.TS, "account": "evil\naccount", "direction": "out",
-             "action": "message\nFORGED", "channel_id": 1, "content": "x",
-             "note": "surface=cli\nplugin=roll"},
-        ])
+        lines = format_audit(
+            [
+                {
+                    "ts": self.TS,
+                    "account": "evil\naccount",
+                    "direction": "out",
+                    "action": "message\nFORGED",
+                    "channel_id": 1,
+                    "content": "x",
+                    "note": "surface=cli\nplugin=roll",
+                },
+            ]
+        )
         self.assertEqual(len(lines), 1)  # one entry -> ONE rendered line
         self.assertIn("evil\\naccount", lines[0])
         self.assertIn("message\\nFORGED", lines[0])
@@ -262,8 +280,7 @@ class PromptAwareStdin:
         deadline = time.monotonic() + 5.0
         while "sm> " not in self._out.visible():
             if time.monotonic() > deadline:
-                raise AssertionError(
-                    "prompt bytes never became visible before input read")
+                raise AssertionError("prompt bytes never became visible before input read")
             time.sleep(0.001)
         return self._lines.pop(0) if self._lines else ""
 
@@ -277,7 +294,9 @@ class TestReplPromptFlush(unittest.IsolatedAsyncioTestCase):
     async def test_prompt_flushed_before_input_is_read(self) -> None:
         out = TtyLikeOutput()
         stdin = PromptAwareStdin(out, "quit\n")
-        repl = Repl(_QuitApi(), stdin=stdin, stdout=out)
+        # readline-only double standing in for the TextIO the REPL declares
+        duck_stdin: Any = stdin
+        repl = Repl(_QuitApi(), stdin=duck_stdin, stdout=out)
         await asyncio.wait_for(repl.run(), timeout=10)
         # the reader only released once the flushed prompt was visible
         self.assertIn("sm> ", out.visible())

@@ -1,4 +1,5 @@
 """PluginManager tests: discovery, attach/activate, toggles, dispatch isolation."""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,17 +8,23 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from core.errors import PluginError, SettingsValidationError
 from core.event_bus import EventBus, MessageReceived, PluginEnabledChanged
 from core.plugin_manager import PluginLoader, PluginManager
 from core.settings_manager import SettingsManager
+from database.repositories.kv import KvRepository
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from types import ModuleType
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "plugins"
 BAD_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "plugins_bad"
 
 
-def spy_module(manager: PluginManager):
+def spy_module(manager: PluginManager) -> ModuleType:
     """Live module object of the loaded spy fixture.
 
     The loader imports plugins under synthetic module names, so tests MUST
@@ -34,28 +41,32 @@ class FakeRepo:
     """Dict-backed stand-in for database PluginRepository."""
 
     def __init__(self) -> None:
-        self.states: dict = {}
-        self.settings_rows: dict = {}
-        self.metadata: dict = {}
+        self.states: dict[tuple[str, str], bool] = {}
+        self.settings_rows: dict[tuple[str, str, str], Any] = {}
+        self.metadata: dict[str, dict[str, Any]] = {}
 
-    async def state(self, account, plugin):
+    async def state(self, account: str, plugin: str) -> bool | None:
         return self.states.get((account, plugin))
 
-    async def set_state(self, account, plugin, enabled):
+    async def set_state(self, account: str, plugin: str, enabled: bool) -> None:
         self.states[(account, plugin)] = bool(enabled)
 
-    async def set_setting(self, account, plugin, key, value):
+    async def set_setting(self, account: str, plugin: str, key: str, value: Any) -> None:
         self.settings_rows[(account, plugin, key)] = value
 
-    async def all_account_settings(self):
-        out: dict = {}
+    async def all_account_settings(self) -> dict[str, dict[str, dict[str, Any]]]:
+        out: dict[str, dict[str, dict[str, Any]]] = {}
         for (acct, plug, key), value in self.settings_rows.items():
             out.setdefault(acct, {}).setdefault(plug, {})[key] = value
         return out
 
-    async def upsert_metadata(self, name, version, description, settings_manifest):
+    async def upsert_metadata(
+        self, name: str, version: str, description: str, settings_manifest: Any
+    ) -> None:
         self.metadata[name] = {
-            "name": name, "version": version, "description": description,
+            "name": name,
+            "version": version,
+            "description": description,
             "settings": settings_manifest,
         }
 
@@ -63,52 +74,59 @@ class FakeRepo:
 class FakeServices:
     """Minimal PluginServices stand-in (records sends)."""
 
-    def __init__(self, account="alpha", plugin="spy") -> None:
+    def __init__(self, account: str = "alpha", plugin: str = "spy") -> None:
         self.account = account
         self.plugin = plugin
-        self.sent: list = []
+        self.sent: list[tuple[Any, Any, int]] = []
 
-    async def send_message(self, channel_id, content, *, priority=1):
+    async def send_message(self, channel_id: int, content: str, *, priority: int = 1) -> None:
         self.sent.append((channel_id, content, int(priority)))
         return None
 
-    async def send_dm(self, user_id, content, *, priority=1):
+    async def send_dm(self, user_id: int, content: str, *, priority: int = 1) -> None:
         self.sent.append((f"dm:{user_id}", content, int(priority)))
         return None
 
-    async def open_dm(self, user_id):
+    async def open_dm(self, user_id: int) -> int:
         return 1_000_000 + user_id
 
-    async def wait_for_message(self, check, timeout):
+    async def wait_for_message(self, check: Any, timeout: float) -> None:
         return None
 
-    async def collect_messages(self, check, idle_timeout):
+    async def collect_messages(self, check: Any, idle_timeout: float) -> list[Any]:
         return []
 
-    def publish(self, event):
+    def publish(self, event: Any) -> None:
         pass
 
-    def validate_channel(self, channel_id):
+    def validate_channel(self, channel_id: Any) -> None:
         pass
 
-    def describe_channel(self, channel_id):
+    def describe_channel(self, channel_id: Any) -> str:
         return f"channel-{channel_id}"
 
     @property
-    def credentials(self):
+    def credentials(self) -> Any:
         raise NotImplementedError
 
     @property
-    def settings(self):
+    def settings(self) -> dict[str, Any]:
         return {}
 
 
-def make_manager(repo=None, global_layer=None, plugin_dir=None,
-                 dispatch_grace_s=1.0) -> tuple:
+def make_manager(
+    repo: FakeRepo | None = None,
+    global_layer: Mapping[str, Any] | None = None,
+    plugin_dir: Path | None = None,
+    dispatch_grace_s: float = 1.0,
+) -> tuple[PluginManager, EventBus, SettingsManager]:
     bus = EventBus()
     settings = SettingsManager(bus, logging.getLogger("t"), global_layer=global_layer)
     manager = PluginManager(
-        bus, logging.getLogger("t"), settings, plugin_repo=repo,
+        bus,
+        logging.getLogger("t"),
+        settings,
+        plugin_repo=repo,
         plugin_dir=str(plugin_dir if plugin_dir is not None else FIXTURES),
         dispatch_grace_s=dispatch_grace_s,
     )
@@ -141,7 +159,7 @@ class TestLifecycle(unittest.IsolatedAsyncioTestCase):
         self.spy_module = None
 
     async def test_attach_activate_deactivate_order(self) -> None:
-        manager, bus, _ = make_manager()
+        manager, _bus, _ = make_manager()
         await manager.attach_account("alpha")
         await manager.activate_account("alpha", FakeServices("alpha"))
         # spy + echo both attached; only spy records hooks
@@ -213,11 +231,11 @@ class TestLifecycle(unittest.IsolatedAsyncioTestCase):
         manager, bus, _ = make_manager()
         await manager.attach_account("alpha")
         await manager.activate_account("alpha", FakeServices("alpha"))
-        events: list = []
+        events: list[PluginEnabledChanged] = []
         bus.subscribe(PluginEnabledChanged, events.append)
         spy = manager._accounts["alpha"]["spy"]
 
-        async def _boom(ctx):
+        async def _boom(ctx: Any) -> None:
             raise RuntimeError("enable explodes")
 
         spy.instance.on_enable = _boom
@@ -264,15 +282,21 @@ class TestConstructorIsolation(unittest.IsolatedAsyncioTestCase):
             boom_rt = manager._accounts["alpha"]["boom"]
             self.assertFalse(boom_rt.enabled)
             self.assertFalse(boom_rt.active)
+            assert boom_rt.last_error is not None
             self.assertIn("constructor explodes", boom_rt.last_error)
             state = {s["name"]: s for s in manager.states("alpha")}["boom"]
             self.assertEqual(state["error_count"], 1)
             # dispatch to the healthy plugin still works
             ok_inst = manager._accounts["alpha"]["ok"].instance
-            bus.publish_nowait(MessageReceived(
-                account="alpha", message_id=1, channel_id=5, author_id=9,
-                content="hi",
-            ))
+            bus.publish_nowait(
+                MessageReceived(
+                    account="alpha",
+                    message_id=1,
+                    channel_id=5,
+                    author_id=9,
+                    content="hi",
+                )
+            )
             await asyncio.sleep(0.05)
             self.assertEqual(len(ok_inst.seen), 1)
 
@@ -287,27 +311,46 @@ class TestDispatch(unittest.IsolatedAsyncioTestCase):
 
         # an alpha message routes to alpha's spy only
         spy_a = manager._accounts["alpha"]["spy"].instance
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=2, channel_id=5, author_id=9, content="again",
-        ))
+        bus.publish_nowait(
+            MessageReceived(
+                account="alpha",
+                message_id=2,
+                channel_id=5,
+                author_id=9,
+                content="again",
+            )
+        )
         await asyncio.sleep(0.05)
         self.assertEqual(len(spy_a.seen), 1)
         self.assertEqual(spy_a.seen[0].content, "again")
 
         # a crashing handler is contained: error recorded, dispatch continues
         runtime_a = manager._accounts["alpha"]["spy"]
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=3, channel_id=5, author_id=9, content="boom-spy",
-        ))
+        bus.publish_nowait(
+            MessageReceived(
+                account="alpha",
+                message_id=3,
+                channel_id=5,
+                author_id=9,
+                content="boom-spy",
+            )
+        )
         await asyncio.sleep(0.05)
         self.assertEqual(runtime_a.error_count, 1)
+        assert runtime_a.last_error is not None
         self.assertIn("RuntimeError", runtime_a.last_error)
 
         # beta message does NOT reach alpha's spy (separate instance)
         seen_before = len(spy_a.seen)
-        bus.publish_nowait(MessageReceived(
-            account="beta", message_id=4, channel_id=5, author_id=9, content="beta-msg",
-        ))
+        bus.publish_nowait(
+            MessageReceived(
+                account="beta",
+                message_id=4,
+                channel_id=5,
+                author_id=9,
+                content="beta-msg",
+            )
+        )
         await asyncio.sleep(0.05)
         self.assertEqual(len(spy_a.seen), seen_before)
 
@@ -317,16 +360,22 @@ class TestDispatch(unittest.IsolatedAsyncioTestCase):
         await manager.activate_account("alpha", FakeServices("alpha"))
         await manager.set_enabled("alpha", "spy", False)
         spy = manager._accounts["alpha"]["spy"].instance
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=5, channel_id=5, author_id=9, content="x",
-        ))
+        bus.publish_nowait(
+            MessageReceived(
+                account="alpha",
+                message_id=5,
+                channel_id=5,
+                author_id=9,
+                content="x",
+            )
+        )
         await asyncio.sleep(0.05)
         self.assertEqual(spy.seen, [])
 
     async def test_services_factory_form(self) -> None:
         manager, _, _ = make_manager()
         await manager.attach_account("alpha")
-        made: dict = {}
+        made: dict[str, FakeServices] = {}
 
         def factory(plugin_name: str) -> FakeServices:
             made[plugin_name] = FakeServices("alpha", plugin_name)
@@ -381,8 +430,7 @@ class TestLoaderHardening(unittest.TestCase):
             self.assertIn(str(culprit), str(ctx.exception))
             self.assertIn("import-time death", str(ctx.exception))
             # no half-executed module residue under any synthetic prefix
-            residue = [m for m in sys.modules
-                       if m.startswith("_plugin_root") and "kaboom" in m]
+            residue = [m for m in sys.modules if m.startswith("_plugin_root") and "kaboom" in m]
             self.assertEqual(residue, [])
 
     def test_rescan_purges_previous_synthetic_modules(self) -> None:
@@ -418,8 +466,11 @@ class TestLoaderHardening(unittest.TestCase):
             rec1 = PluginLoader(Path(tmp1)).discover()["twin"]
             rec2 = PluginLoader(Path(tmp2)).discover()["twin"]
             self.assertIsNot(rec1.cls, rec2.cls)
-            self.assertEqual(rec1.cls.marker, 1)
-            self.assertEqual(rec2.cls.marker, 2)
+            # the twin classes carry a dynamic marker attribute baked by
+            # the generated source (not part of the PluginBase surface)
+            marker_attr = "marker"
+            self.assertEqual(getattr(rec1.cls, marker_attr), 1)
+            self.assertEqual(getattr(rec2.cls, marker_attr), 2)
             self.assertNotEqual(rec1.cls.__module__, rec2.cls.__module__)
 
 
@@ -438,7 +489,7 @@ class TestRetryAfterFailure(unittest.IsolatedAsyncioTestCase):
                 "    def __init__(self):\n"
                 "        raise RuntimeError('constructor explodes')\n"
             )
-            manager, bus, _ = make_manager(plugin_dir=Path(tmp))
+            manager, _bus, _ = make_manager(plugin_dir=Path(tmp))
             await manager.attach_account("alpha")
             self.assertFalse(manager._accounts["alpha"]["boom"].enabled)
 
@@ -470,16 +521,14 @@ class TestRetryAfterFailure(unittest.IsolatedAsyncioTestCase):
             manager, bus, _ = make_manager(plugin_dir=Path(tmp))
             await manager.attach_account("alpha")
             await manager.activate_account("alpha", FakeServices("alpha"))
-            events: list = []
+            events: list[PluginEnabledChanged] = []
             bus.subscribe(PluginEnabledChanged, events.append)
             await manager.set_enabled("alpha", "boom", True)  # must not raise
             runtime = manager._accounts["alpha"]["boom"]
-            self.assertFalse(runtime.enabled)   # ended disabled, not zombie
+            self.assertFalse(runtime.enabled)  # ended disabled, not zombie
             self.assertFalse(runtime.active)
             await asyncio.sleep(0.05)
-            self.assertEqual(
-                [(e.plugin, e.enabled) for e in events], [("boom", False)]
-            )
+            self.assertEqual([(e.plugin, e.enabled) for e in events], [("boom", False)])
 
 
 class TestDispatchHardening(unittest.IsolatedAsyncioTestCase):
@@ -490,9 +539,15 @@ class TestDispatchHardening(unittest.IsolatedAsyncioTestCase):
         await manager.attach_account("alpha")
         await manager.activate_account("alpha", FakeServices("alpha"))
         spy = manager._accounts["alpha"]["spy"].instance
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=6, channel_id=5, author_id=9, content="x",
-        ))
+        bus.publish_nowait(
+            MessageReceived(
+                account="alpha",
+                message_id=6,
+                channel_id=5,
+                author_id=9,
+                content="x",
+            )
+        )
         manager.detach_account("alpha")  # between enqueue and dispatch
         await asyncio.sleep(0.05)
         self.assertEqual(spy.seen, [])
@@ -503,21 +558,33 @@ class TestDispatchHardening(unittest.IsolatedAsyncioTestCase):
         await manager.activate_account("alpha", FakeServices("alpha"))
         spy = manager._accounts["alpha"]["spy"].instance
         gate = asyncio.Event()
-        calls: list = []
+        calls: list[Any] = []
 
-        async def handler(ctx, event):
+        async def handler(ctx: Any, event: Any) -> None:
             calls.append(event)
             if len(calls) == 1:
                 await gate.wait()  # first handler wedges "forever"
 
         spy.handle_event = handler
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=7, channel_id=5, author_id=9, content="one",
-        ))
+        bus.publish_nowait(
+            MessageReceived(
+                account="alpha",
+                message_id=7,
+                channel_id=5,
+                author_id=9,
+                content="one",
+            )
+        )
         await asyncio.sleep(0.05)  # first dispatch is now wedged
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=8, channel_id=5, author_id=9, content="two",
-        ))
+        bus.publish_nowait(
+            MessageReceived(
+                account="alpha",
+                message_id=8,
+                channel_id=5,
+                author_id=9,
+                content="two",
+            )
+        )
         await asyncio.sleep(0.05)
         self.assertEqual(len(calls), 2)  # second event got through
         gate.set()  # unwind the wedged dispatch
@@ -530,20 +597,26 @@ class TestDispatchHardening(unittest.IsolatedAsyncioTestCase):
         await manager.activate_account("alpha", FakeServices("alpha"))
         spy_runtime = manager._accounts["alpha"]["spy"]
         inst = spy_runtime.instance
-        events: list = []
+        events: list[PluginEnabledChanged] = []
         bus.subscribe(PluginEnabledChanged, events.append)
         started = asyncio.Event()
         finish = asyncio.Event()
 
-        async def handler(ctx, event):
+        async def handler(ctx: Any, event: Any) -> None:
             started.set()
             await finish.wait()  # handler parks mid-dispatch
             inst.seen.append(event)
 
         inst.handle_event = handler
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=9, channel_id=5, author_id=9, content="x",
-        ))
+        bus.publish_nowait(
+            MessageReceived(
+                account="alpha",
+                message_id=9,
+                channel_id=5,
+                author_id=9,
+                content="x",
+            )
+        )
         await started.wait()
         await manager.set_enabled("alpha", "spy", False)  # disable mid-flight
         self.assertFalse(spy_runtime.enabled)
@@ -551,15 +624,19 @@ class TestDispatchHardening(unittest.IsolatedAsyncioTestCase):
         finish.set()  # the in-flight handler completes
         await asyncio.sleep(0.05)
         self.assertEqual(len(inst.seen), 1)
-        bus.publish_nowait(MessageReceived(  # further events skipped
-            account="alpha", message_id=10, channel_id=5, author_id=9, content="y",
-        ))
+        bus.publish_nowait(
+            MessageReceived(  # further events skipped
+                account="alpha",
+                message_id=10,
+                channel_id=5,
+                author_id=9,
+                content="y",
+            )
+        )
         await asyncio.sleep(0.05)
         self.assertEqual(len(inst.seen), 1)
         await asyncio.sleep(0.05)
-        self.assertEqual(
-            [(e.plugin, e.enabled) for e in events], [("spy", False)]
-        )
+        self.assertEqual([(e.plugin, e.enabled) for e in events], [("spy", False)])
 
     async def test_allowlist_with_unknown_names_is_ignored(self) -> None:
         manager, _, _ = make_manager()
@@ -580,20 +657,25 @@ class TestRound3DispatchHardening(unittest.IsolatedAsyncioTestCase):
         await manager.attach_account("alpha")
         await manager.activate_account("alpha", FakeServices("alpha"))
         spy = manager._accounts["alpha"]["spy"]
-        services_seen: list = []
+        services_seen: list[Any] = []
 
-        async def handler(ctx, event):
+        async def handler(ctx: Any, event: Any) -> None:
             services_seen.append(ctx.services)
 
         spy.instance.handle_event = handler
         manager._services.pop("alpha")  # simulate the deactivate window:
         # services gone while the runtime still reads enabled+active
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=20, channel_id=5, author_id=9,
-            content="x",
-        ))
+        bus.publish_nowait(
+            MessageReceived(
+                account="alpha",
+                message_id=20,
+                channel_id=5,
+                author_id=9,
+                content="x",
+            )
+        )
         await asyncio.sleep(0.05)
-        self.assertEqual(services_seen, [])   # skipped, not fed services=None
+        self.assertEqual(services_seen, [])  # skipped, not fed services=None
         self.assertEqual(spy.error_count, 0)  # no plugin blamed
         self.assertIsNone(spy.last_error)
 
@@ -609,16 +691,21 @@ class TestRound3DispatchHardening(unittest.IsolatedAsyncioTestCase):
         started = asyncio.Event()
         finished = asyncio.Event()
 
-        async def handler(ctx, event):
+        async def handler(ctx: Any, event: Any) -> None:
             started.set()
             await asyncio.sleep(0.2)  # sleeping past the deactivate call
-            finished.set()            # the "late write"
+            finished.set()  # the "late write"
 
         inst.handle_event = handler
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=21, channel_id=5, author_id=9,
-            content="x",
-        ))
+        bus.publish_nowait(
+            MessageReceived(
+                account="alpha",
+                message_id=21,
+                channel_id=5,
+                author_id=9,
+                content="x",
+            )
+        )
         await started.wait()
         await manager.deactivate_account("alpha")  # bounded-join (1s grace)
         self.assertTrue(finished.is_set())
@@ -633,45 +720,49 @@ class TestRound3DispatchHardening(unittest.IsolatedAsyncioTestCase):
         await manager.activate_account("alpha", FakeServices("alpha"))
         inst = manager._accounts["alpha"]["spy"].instance
         started = asyncio.Event()
-        ghost_writes: list = []
+        ghost_writes: list[str] = []
 
-        async def handler(ctx, event):
+        async def handler(ctx: Any, event: Any) -> None:
             started.set()
-            await asyncio.sleep(10)           # never finishes within grace
+            await asyncio.sleep(10)  # never finishes within grace
             ghost_writes.append("ghost-row")  # must NEVER land
 
         inst.handle_event = handler
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=22, channel_id=5, author_id=9,
-            content="x",
-        ))
+        bus.publish_nowait(
+            MessageReceived(
+                account="alpha",
+                message_id=22,
+                channel_id=5,
+                author_id=9,
+                content="x",
+            )
+        )
         await started.wait()
         loop = asyncio.get_running_loop()
         t0 = loop.time()
         await manager.deactivate_account("alpha")
         self.assertLess(loop.time() - t0, 2.0)  # grace + cancel, not 10s
         await asyncio.sleep(0.2)
-        self.assertEqual(ghost_writes, [])       # cancelled, not landed
+        self.assertEqual(ghost_writes, [])  # cancelled, not landed
         self.assertIsNone(manager._pending_by_account.get("alpha"))
 
     async def test_concurrent_enable_fires_on_load_once(self) -> None:
         """set_enabled(True) landing on an await point of activate_account
         used to re-fire on_load (both read loaded=False before either set
         it). The loaded flag is now marked BEFORE the hook is awaited."""
-        manager, bus, _ = make_manager()
+        manager, _bus, _ = make_manager()
         await manager.attach_account("alpha")
         spy = manager._accounts["alpha"]["spy"]
         inst = spy.instance
         gate = asyncio.Event()
-        loads: list = []
+        loads: list[str] = []
 
-        async def slow_on_load(ctx):
+        async def slow_on_load(ctx: Any) -> None:
             loads.append("on_load")
             await gate.wait()  # activation parked mid-on_load
 
         inst.on_load = slow_on_load
-        activation = asyncio.create_task(
-            manager.activate_account("alpha", FakeServices("alpha")))
+        activation = asyncio.create_task(manager.activate_account("alpha", FakeServices("alpha")))
         while not loads:  # activation is parked inside on_load
             await asyncio.sleep(0.01)
         # the racing toggle cycle that used to double-fire the load hook
@@ -685,22 +776,24 @@ class TestRound3DispatchHardening(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(inst.calls.count("on_enable"), 2)  # 1st + re-enable
 
 
-class FakeKv:
-    """Dict-backed kv repository incl. prefix deletes."""
+class FakeKv(KvRepository):
+    """Dict-backed kv repository incl. prefix deletes (no database —
+    every I/O method is overridden, so the base's connection is never
+    touched; subclassing keeps the seam type-checkable)."""
 
     def __init__(self) -> None:
-        self.rows: dict = {}
+        self.rows: dict[str, Any] = {}
 
-    async def set(self, key, value):
+    async def get(self, key: str, default: Any = None) -> Any:
+        return self.rows.get(key, default)
+
+    async def set(self, key: str, value: Any) -> None:
         self.rows[key] = value
 
-    async def get(self, key):
-        return self.rows.get(key)
-
-    async def delete(self, key):
+    async def delete(self, key: str) -> bool:
         return self.rows.pop(key, None) is not None
 
-    async def delete_prefix(self, prefix):
+    async def delete_prefix(self, prefix: str) -> int:
         doomed = [k for k in self.rows if k.startswith(prefix)]
         for k in doomed:
             self.rows.pop(k)
@@ -712,13 +805,14 @@ class TestPluginStateKeys(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         from core.plugin_state import PluginStateService
+
         self.kv = FakeKv()
         self.state = PluginStateService(self.kv)
 
     async def test_pair_owner_separator_collisions_rejected(self) -> None:
         with self.assertRaises(PluginError):
             await self.state.set_pair("a/p", "x", "k", 1)  # would collide with
-        with self.assertRaises(PluginError):               # ("a", "p/x")
+        with self.assertRaises(PluginError):  # ("a", "p/x")
             await self.state.set_pair("a", "p/x", "k", 1)
         with self.assertRaises(PluginError):
             await self.state.set_pair("a:b", "p", "k", 1)
@@ -737,14 +831,15 @@ class TestPluginStateKeys(unittest.IsolatedAsyncioTestCase):
     async def test_cascade_account_complete_and_selective(self) -> None:
         await self.state.set_account("a", "k1", 1)
         await self.state.set_pair("a", "p", "k2", 2)
-        await self.state.set_pair("other", "p", "k3", 3)   # survives
-        await self.state.set_plugin("a", "k4", 4)          # survives
-        await self.state.set_global("k5", 5)               # survives
+        await self.state.set_pair("other", "p", "k3", 3)  # survives
+        await self.state.set_plugin("a", "k4", 4)  # survives
+        await self.state.set_global("k5", 5)  # survives
         removed = await self.state.cascade_account("a")
         self.assertEqual(removed, 2)
-        self.assertEqual(sorted(self.kv.rows),
-                         ["pstate:account_plugin:other/p:k3",
-                          "pstate:global:k5", "pstate:plugin:a:k4"])
+        self.assertEqual(
+            sorted(self.kv.rows),
+            ["pstate:account_plugin:other/p:k3", "pstate:global:k5", "pstate:plugin:a:k4"],
+        )
 
     async def test_cascade_rejects_slash_in_account(self) -> None:
         with self.assertRaises(PluginError):

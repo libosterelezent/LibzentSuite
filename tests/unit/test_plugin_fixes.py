@@ -19,6 +19,7 @@ Covers, per the audit report:
       registrations survive deactivation), and loader sys.modules
       purge on a failed discover.
 """
+
 from __future__ import annotations
 
 import logging
@@ -26,6 +27,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from core.event_bus import EventBus
 from core.plugin_manager import PluginManager
@@ -59,26 +61,23 @@ class _P(PluginBase):
 
 
 class LoaderFailurePurgeTests(unittest.TestCase):
-
     def test_failed_discover_purges_its_synthetic_modules(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "good.py").write_text(_plugin_src(
-                "name = 'good'\nversion = '1.0.0'\n"))
+            (root / "good.py").write_text(_plugin_src("name = 'good'\nversion = '1.0.0'\n"))
             bad = root / "bad"
             bad.mkdir()
-            (bad / "__init__.py").write_text(
-                "raise RuntimeError('package import-time death')\n")
+            (bad / "__init__.py").write_text("raise RuntimeError('package import-time death')\n")
             loader = PluginLoader(root)
-            before = {m for m in sys.modules
-                      if m.startswith("_plugin_root")}
-            with self.assertRaises(Exception):
+            before = {m for m in sys.modules if m.startswith("_plugin_root")}
+            # B017 suppression: a synthetic package that dies at import
+            # time can surface any wrapper exception — breadth is the contract
+            with self.assertRaises(Exception):  # noqa: B017
                 loader.discover()
             # the synthetic parent AND every module this discover pulled
             # in are gone (OTHER loaders' live modules are not ours to
             # judge — scope the assertion to the delta)
-            delta = {m for m in sys.modules
-                     if m.startswith("_plugin_root")} - before
+            delta = {m for m in sys.modules if m.startswith("_plugin_root")} - before
             self.assertEqual(delta, set(), f"leaked modules: {delta}")
             # and the loader is retry-able: healing the tree works
             (bad / "__init__.py").write_text(
@@ -90,12 +89,13 @@ class LoaderFailurePurgeTests(unittest.TestCase):
             self.assertEqual(sorted(records), ["bad", "good"])
 
 
-
-def _make_manager():
+def _make_manager() -> PluginManager:
     """Plugin manager over the fixture plugins for set_enabled tests."""
     import logging
+
     return PluginManager(
-        EventBus(), logging.getLogger("test"),
+        EventBus(),
+        logging.getLogger("test"),
         SettingsManager(EventBus(), logging.getLogger("test")),
         plugin_dir="tests/fixtures/plugins",
     )
@@ -104,17 +104,15 @@ def _make_manager():
 class FakeServices:
     """Minimal services facade for activation tests."""
 
-    def __init__(self):
-        self.sent = []
+    def __init__(self) -> None:
+        self.sent: list[tuple[int, str, Any]] = []
 
-    async def send_message(self, channel_id, content, **kw):
+    async def send_message(self, channel_id: int, content: str, **kw: Any) -> None:
         self.sent.append((channel_id, content, kw.get("priority")))
-
 
 
 # --------------------------------------------- set_enabled active clearing
 class SetEnabledActiveClearTests(unittest.IsolatedAsyncioTestCase):
-
     async def test_disable_clears_active_before_the_hook(self) -> None:
         manager = _make_manager()
         await manager.attach_account("alpha")
@@ -123,7 +121,7 @@ class SetEnabledActiveClearTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runtime.active)
         observed: list[bool] = []
 
-        async def spy_disable(ctx):
+        async def spy_disable(ctx: Any) -> None:
             observed.append(runtime.active)  # must already be False
 
         runtime.instance.on_disable = spy_disable

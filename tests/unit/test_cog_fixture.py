@@ -9,19 +9,28 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
+from typing import TYPE_CHECKING, Any
 
 from discord.ext import commands
 
 from core.plugin_manager.cog_host import PluginCogHost
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "plugins"
 
 
 class CogFixturePluginTests(unittest.IsolatedAsyncioTestCase):
-    def _load(self):
+    def _load(self) -> tuple[Any, Any]:
         sys.path.insert(0, str(_FIXTURES))
         try:
-            from cogprobe.plugin import CogProbePlugin, ProbeCog
+            # the fixture package is reachable only through the runtime
+            # sys.path injection above — statically invisible to mypy
+            from cogprobe.plugin import (  # type: ignore[import-not-found]
+                CogProbePlugin,
+                ProbeCog,
+            )
 
             return CogProbePlugin, ProbeCog
         finally:
@@ -44,7 +53,7 @@ class CogFixturePluginTests(unittest.IsolatedAsyncioTestCase):
         # param (count: int) is parsed BY THE LIBRARY
         sent: list[str] = []
 
-        async def _send(text):
+        async def _send(text: str) -> None:
             sent.append(text)
 
         # direct callback invocation with the typed kwargs — the
@@ -58,7 +67,12 @@ class CogFixturePluginTests(unittest.IsolatedAsyncioTestCase):
             message=NS(attachments=[]),
             send=_send,  # replies via ctx.send — the documented seam
         )
-        await bot.get_command("cogprobe")(ctx, count=5)
+        command = bot.get_command("cogprobe")
+        assert command is not None
+        # the ctx is a duck-typed stand-in for the library Context, so
+        # the invocation goes through an untyped callable seam
+        invoke: Callable[..., Any] = command
+        await invoke(ctx, count=5)
         self.assertEqual(sent, ["cog ok bravo:5"])
 
 

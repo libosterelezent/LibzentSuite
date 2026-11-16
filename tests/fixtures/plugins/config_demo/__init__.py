@@ -6,6 +6,7 @@ Dashboard UI API — every pattern a plugin author needs in one file
 table/list, metrics, progress, confirmation + disabled buttons and a
 visibility check). See ``plugin.py``.
 """
+
 from .plugin import ConfigDemoPlugin
 
 __all__ = ["ConfigDemoPlugin"]

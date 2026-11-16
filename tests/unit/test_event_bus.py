@@ -6,23 +6,25 @@ drop-newest accounting, slice yielding, reentrant publish, and the
 ack-deferral invariant (dispatch happens across an await, never in the
 publisher's own step).
 """
+
 from __future__ import annotations
 
 import asyncio
 import unittest
 
-from core.event_bus import Event, EventBus, MessageReceived
+from core.event_bus import EventBus, MessageReceived
 
 
 def _msg(account: str, i: int) -> MessageReceived:
-    return MessageReceived(account=account, message_id=i, channel_id=500,
-                           author_id=1, content=f"m{i}")
+    return MessageReceived(
+        account=account, message_id=i, channel_id=500, author_id=1, content=f"m{i}"
+    )
 
 
 class CoalescedDispatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_delivery_completeness_after_drain(self) -> None:
         bus = EventBus()
-        seen: list = []
+        seen: list[MessageReceived] = []
         bus.subscribe(MessageReceived, seen.append)
         for i in range(10_000):
             bus.publish_nowait(_msg("alpha", i))
@@ -30,14 +32,15 @@ class CoalescedDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(seen), 10_000)
         self.assertEqual(bus.stats()["dropped"], 0)
         self.assertEqual(bus.stats()["queued"], 0)
-        self.assertEqual([m.message_id for m in seen],
-                         list(range(10_000)))  # global FIFO
+        self.assertEqual([m.message_id for m in seen], list(range(10_000)))  # global FIFO
 
     async def test_per_account_fifo_under_interleaved_burst(self) -> None:
         bus = EventBus()
-        per_account: dict = {}
-        def handler(event: Event) -> None:
+        per_account: dict[str, list[int]] = {}
+
+        def handler(event: MessageReceived) -> None:
             per_account.setdefault(event.account, []).append(event.message_id)
+
         bus.subscribe(MessageReceived, handler)
         for i in range(6_000):
             bus.publish_nowait(_msg(("alpha", "beta", "gamma")[i % 3], i))
@@ -49,10 +52,12 @@ class CoalescedDispatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_overflow_drops_newest_and_counts(self) -> None:
         bus = EventBus()
         gate = asyncio.Event()
-        seen: list = []
-        async def slow_handler(event: Event) -> None:
+        seen: list[MessageReceived] = []
+
+        async def slow_handler(event: MessageReceived) -> None:
             await gate.wait()
             seen.append(event)
+
         bus.subscribe(MessageReceived, slow_handler)
         bus.MAX_QUEUE = 8  # tiny bound for the test
         # the dispatcher parks inside the async handler; queue fills
@@ -71,17 +76,18 @@ class CoalescedDispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_slice_budget_yields_the_loop(self) -> None:
         bus = EventBus()
-        yields: list = []
-        seen: list = []
+        yields: list[int] = []
+        seen: list[MessageReceived] = []
         bus.subscribe(MessageReceived, seen.append)
-        task = asyncio.create_task(bus._drain_queue()) if False else None
         # fill the queue synchronously (no dispatcher yet)
         for i in range(5_000):
             bus._queue.append(_msg("a", i))
+
         async def ticker() -> None:
             while len(seen) < 5_000:
                 yields.append(len(seen))
                 await asyncio.sleep(0)
+
         tick = asyncio.create_task(ticker())
         bus.publish_nowait(_msg("a", 9_999))  # spawns the dispatcher
         await bus.drain(timeout=30.0)
@@ -89,28 +95,31 @@ class CoalescedDispatchTests(unittest.IsolatedAsyncioTestCase):
         # the ticker got multiple slices DURING the 5k-event drain —
         # the dispatcher did not hog the loop in one callback
         mid_drain = [y for y in yields if 0 < y < 5_000]
-        self.assertGreaterEqual(len(mid_drain), 3,
-                                f"dispatcher hogged the loop: {yields[:5]}")
+        self.assertGreaterEqual(len(mid_drain), 3, f"dispatcher hogged the loop: {yields[:5]}")
 
     async def test_reentrant_publish_from_handler(self) -> None:
         bus = EventBus()
-        seen: list = []
-        def reentrant(event: Event) -> None:
+        seen: list[int] = []
+
+        def reentrant(event: MessageReceived) -> None:
             seen.append(event.message_id)
             if event.message_id == 0:
                 bus.publish_nowait(_msg(event.account, 1))
+
         bus.subscribe(MessageReceived, reentrant)
         bus.publish_nowait(_msg("alpha", 0))
         await bus.drain(timeout=5.0)
-        self.assertEqual([m for m in seen], [0, 1])
+        self.assertEqual(list(seen), [0, 1])
 
     async def test_dispatch_deferred_across_await(self) -> None:
         """The TaskAck no-lost-ack invariant: a subscribe in the SAME step
         as submit must see the completion event of that submit."""
         bus = EventBus()
-        order: list = []
-        def handler(event: Event) -> None:
+        order: list[str] = []
+
+        def handler(event: MessageReceived) -> None:
             order.append("handler")
+
         # simulate: publish (enqueue), then subscribe, both sync in one step
         bus.publish_nowait(_msg("alpha", 0))
         bus.subscribe(MessageReceived, handler)
@@ -122,7 +131,7 @@ class CoalescedDispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_dispatcher_recreates_after_idle(self) -> None:
         bus = EventBus()
-        seen: list = []
+        seen: list[MessageReceived] = []
         bus.subscribe(MessageReceived, seen.append)
         bus.publish_nowait(_msg("a", 0))
         await bus.drain(timeout=5.0)
@@ -141,10 +150,17 @@ class CoalescedDispatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_stats_shape(self) -> None:
         bus = EventBus()
         stats = bus.stats()
-        self.assertEqual(set(stats), {
-            "queued", "control_queued", "dispatched", "dropped",
-            "control_dropped", "unattributed_cancels",
-        })
+        self.assertEqual(
+            set(stats),
+            {
+                "queued",
+                "control_queued",
+                "dispatched",
+                "dropped",
+                "control_dropped",
+                "unattributed_cancels",
+            },
+        )
 
 
 if __name__ == "__main__":

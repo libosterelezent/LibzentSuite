@@ -1,15 +1,26 @@
 """Unit tests for core.account_manager: registry, lifecycle, supervisor,
 send hook, details page shape and inbound audit."""
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import unittest
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from adapters.base import DiscordMessage
-from core.account_manager import AccountStatus
+from core.account_manager import AccountManager, AccountStatus
 from core.errors import AccountError, CredentialsError, SchedulerError, TargetGone
-from core.event_bus import AccountConnected, AccountDisconnected, AccountFailed
+from core.event_bus import (
+    AccountConnected,
+    AccountDisconnected,
+    AccountFailed,
+    EventBus,
+)
 from core.task_scheduler import (
     STATUS_COMPLETED,
     STATUS_RUNNING,
@@ -18,17 +29,28 @@ from core.task_scheduler import (
 )
 from tests.unit.helpers import (
     FakeDetailsLimiter,
+    FakeSettings,
     default_snapshot,
     make_manager,
     make_task,
 )
 
-STATUS_KEYS = {"id", "name", "status", "user_id", "enabled", "workspace",
-               "assigned_plugins", "plugin_profiles",
-               "latency_ms", "uptime_s", "last_error", "credential",
-               "plugins"}
-DETAILS_KEYS = {"name", "status", "identity", "runtime", "plugins",
-                "rate_limit", "credential"}
+STATUS_KEYS = {
+    "id",
+    "name",
+    "status",
+    "user_id",
+    "enabled",
+    "workspace",
+    "assigned_plugins",
+    "plugin_profiles",
+    "latency_ms",
+    "uptime_s",
+    "last_error",
+    "credential",
+    "plugins",
+}
+DETAILS_KEYS = {"name", "status", "identity", "runtime", "plugins", "rate_limit", "credential"}
 
 _TEST_LOG = logging.getLogger("tests.account_manager")
 
@@ -40,23 +62,25 @@ class _InstantLimiter:
         wait_s = 0.0
         jitter_s = 0.0
 
-    async def acquire(self, action, account, plugin, priority):
+    async def acquire(
+        self, action: str, account: str | None, plugin: str | None, priority: Any
+    ) -> _InstantLimiter._Grant:
         return self._Grant()
 
-    def report_server_limit(self, *args, **kwargs):
+    def report_server_limit(self, *args: Any, **kwargs: Any) -> None:
         pass
 
 
-def _real_scheduler(bus, sender, **kwargs) -> TaskScheduler:
+def _real_scheduler(bus: EventBus, sender: Any, **kwargs: Any) -> TaskScheduler:
     """A started real TaskScheduler wired to the given sender."""
-    scheduler = TaskScheduler(bus, _TEST_LOG, _InstantLimiter(), sender,
-                              **kwargs)
+    scheduler = TaskScheduler(bus, _TEST_LOG, _InstantLimiter(), sender, **kwargs)
     scheduler.start()
     return scheduler
 
 
-async def _poll_until(predicate, timeout: float = 2.0,
-                      interval: float = 0.01) -> None:
+async def _poll_until(
+    predicate: Callable[[], bool], timeout: float = 2.0, interval: float = 0.01
+) -> None:
     """Bounded wait until predicate() is true (AssertionError on timeout)."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -73,15 +97,16 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["name"], "alpha")
         self.assertEqual(out["status"], "created")
         self.assertEqual(set(out), STATUS_KEYS)
-        self.assertIsNotNone(await h.repo.get("alpha"))          # persisted
-        self.assertEqual(h.manager.names(), ["alpha"])     # memory
+        self.assertIsNotNone(await h.repo.get("alpha"))  # persisted
+        self.assertEqual(h.manager.names(), ["alpha"])  # memory
         # capability model: no assignments -> an EMPTY allowed set (the
         # old "no profile = unrestricted (None)" default is gone)
         self.assertEqual(h.plugins.attached, [("alpha", set())])
 
     async def test_add_account_invalid_name(self) -> None:
         h = make_manager()
-        for bad in ("", "ALPHA", "a b", "-x", "x" * 33, 5, None):
+        bad_names: tuple[Any, ...] = ("", "ALPHA", "a b", "-x", "x" * 33, 5, None)
+        for bad in bad_names:
             with self.assertRaises(AccountError):
                 await h.manager.add_account(bad)
 
@@ -106,12 +131,14 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         out = await h.manager.add_account("alpha", plugins=["exporter"])
         self.assertEqual(out["assigned_plugins"], ["exporter"])
         self.assertEqual(h.plugins.attached[-1], ("alpha", {"exporter"}))
-        self.assertEqual(await h.account_plugins.plugins_of("alpha"),
-                         ["exporter"])  # persisted capability rows
+        self.assertEqual(
+            await h.account_plugins.plugins_of("alpha"), ["exporter"]
+        )  # persisted capability rows
 
     async def test_add_with_bad_plugins_type_rejected_before_persist(self) -> None:
         h = make_manager()
-        for bad in ("exporter", 7, ["exporter", 3], {"exporter"}):
+        bad_plugins: tuple[Any, ...] = ("exporter", 7, ["exporter", 3], {"exporter"})
+        for bad in bad_plugins:
             with self.assertRaises(AccountError):
                 await h.manager.add_account("alpha", plugins=bad)
         self.assertEqual(h.manager.names(), [])
@@ -123,7 +150,7 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError) as ctx:
             await h.manager.add_account("alpha", profiles=["basic"])
         self.assertIn("profiles", str(ctx.exception))
-        self.assertEqual(h.manager.names(), [])     # nothing created
+        self.assertEqual(h.manager.names(), [])  # nothing created
         self.assertEqual(h.account_plugins.rows, {})
 
     async def test_get_unknown_and_names_sorted(self) -> None:
@@ -134,8 +161,9 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(h.manager.get("beta").record.name, "beta")
         with self.assertRaises(AccountError):
             h.manager.get("ghost")
+        unhashable_payload: Any = {"name": "alpha"}  # dashboard sends dicts
         with self.assertRaises(AccountError):  # unhashable dashboard payload
-            h.manager.get({"name": "alpha"})
+            h.manager.get(unhashable_payload)
 
     async def test_accounts_sorted_status_dicts(self) -> None:
         h = make_manager()
@@ -151,10 +179,20 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         h = make_manager()
         await h.manager.add_account("alpha")
         h.plugins.states_map["alpha"] = [
-            {"name": "exporter", "enabled": True, "settings": {"x": 1},
-             "last_error": None, "error_count": 0},
-            {"name": "roll", "enabled": False, "settings": {},
-             "last_error": "boom", "error_count": 2},
+            {
+                "name": "exporter",
+                "enabled": True,
+                "settings": {"x": 1},
+                "last_error": None,
+                "error_count": 0,
+            },
+            {
+                "name": "roll",
+                "enabled": False,
+                "settings": {},
+                "last_error": "boom",
+                "error_count": 2,
+            },
         ]
         rows = await h.manager.accounts()
         self.assertEqual(rows[0]["plugins"]["exporter"]["enabled"], True)
@@ -165,8 +203,13 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         h = make_manager()
         await h.manager.add_account("alpha")
         h.plugins.states_map["alpha"] = [
-            {"name": "exporter", "enabled": True, "settings": {},
-             "last_error": None, "error_count": 0},
+            {
+                "name": "exporter",
+                "enabled": True,
+                "settings": {},
+                "last_error": None,
+                "error_count": 0,
+            },
         ]
         await h.manager.accounts()
         h.plugins.fail_states = True
@@ -180,8 +223,13 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         h = make_manager()
         await h.manager.add_account("alpha", plugins=["exporter"])
         h.plugins.states_map["alpha"] = [
-            {"name": "exporter", "enabled": True, "settings": {},
-             "last_error": None, "error_count": 0},
+            {
+                "name": "exporter",
+                "enabled": True,
+                "settings": {},
+                "last_error": None,
+                "error_count": 0,
+            },
         ]
         rows = await h.manager.accounts()
         self.assertIn("exporter", rows[0]["plugins"])  # truthful view
@@ -209,8 +257,13 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         h = make_manager()
         await h.manager.add_account("alpha")
         h.plugins.states_map["alpha"] = [
-            {"name": "exporter", "enabled": True, "settings": {},
-             "last_error": None, "error_count": 0},
+            {
+                "name": "exporter",
+                "enabled": True,
+                "settings": {},
+                "last_error": None,
+                "error_count": 0,
+            },
         ]
         await h.manager.accounts()
         h.plugins.states_map["alpha"] = []
@@ -223,7 +276,9 @@ class RegistryTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.add_account("alpha")
         out = await h.manager.set_enabled("alpha", False)
         self.assertFalse(out["enabled"])
-        self.assertFalse((await h.repo.get("alpha")).enabled)
+        persisted = await h.repo.get("alpha")
+        assert persisted is not None
+        self.assertFalse(persisted.enabled)
         self.assertTrue((await h.manager.set_enabled("alpha", True))["enabled"])
 
     async def test_remove_stopped_account(self) -> None:
@@ -251,8 +306,13 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_happy_path(self) -> None:
         h = make_manager()
         h.plugins.states_map["alpha"] = [
-            {"name": "exporter", "enabled": True, "settings": {"k": 1},
-             "last_error": None, "error_count": 0},
+            {
+                "name": "exporter",
+                "enabled": True,
+                "settings": {"k": 1},
+                "last_error": None,
+                "error_count": 0,
+            },
         ]
         await h.manager.add_account("alpha")
         out = await h.manager.start("alpha")
@@ -268,6 +328,7 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((services.account, services.plugin), ("alpha", "exporter"))
         # cache ingested from the client's READY snapshot
         cache = h.manager.get("alpha").runtime.cache
+        assert cache is not None
         cache.validate_channel(100)  # would raise TargetGone if not ingested
         self.assertEqual(cache.dms(), 1)
         # supervisor running (reconnect enabled by default settings)
@@ -278,7 +339,8 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
         h = make_manager(token_values={"DISCORD_TOKEN_ALPHA": "tok-alpha"})
         await h.manager.add_account("alpha")
         await h.manager.start("alpha")
-        self.assertEqual(h.factory.clients[0].token, "tok-alpha")
+        client_zero: Any = h.factory.clients[0]  # factory stamps .token
+        self.assertEqual(client_zero.token, "tok-alpha")
         await h.manager.stop("alpha")
 
     async def test_start_missing_token(self) -> None:
@@ -332,8 +394,7 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
         await self._drain()
         self.assertEqual(len(h.collector.of(AccountDisconnected)), 1)
         self.assertEqual(h.plugins.deactivated, ["alpha"])
-        self.assertEqual(h.manager.get("alpha").runtime.status,
-                         AccountStatus.STOPPED)
+        self.assertEqual(h.manager.get("alpha").runtime.status, AccountStatus.STOPPED)
 
     async def test_stop_never_started_account(self) -> None:
         h = make_manager()
@@ -345,10 +406,12 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_start_all_skips_disabled_and_collects_failures(self) -> None:
         # only alpha and gamma have stored credentials; beta does not
-        h = make_manager(token_values={
-            "DISCORD_TOKEN_ALPHA": "tok-alpha",
-            "DISCORD_TOKEN_GAMMA": "tok-gamma",
-        })
+        h = make_manager(
+            token_values={
+                "DISCORD_TOKEN_ALPHA": "tok-alpha",
+                "DISCORD_TOKEN_GAMMA": "tok-gamma",
+            }
+        )
         await h.manager.add_account("alpha")
         await h.manager.add_account("beta")
         await h.manager.add_account("gamma")
@@ -357,8 +420,7 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["started"], ["alpha"])
         self.assertEqual(out["skipped"], ["gamma"])
         self.assertIn("beta", out["failed"])
-        self.assertEqual(h.manager.get("beta").runtime.status,
-                         AccountStatus.MISSING_CREDENTIAL)
+        self.assertEqual(h.manager.get("beta").runtime.status, AccountStatus.MISSING_CREDENTIAL)
         await h.manager.stop_all()
 
     async def test_stop_all_logs_and_continues(self) -> None:
@@ -371,16 +433,14 @@ class StartStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(out["stopped"]), ["alpha", "beta"])
         self.assertEqual(out["failed"], {})
         for name in ("alpha", "beta"):
-            self.assertEqual(h.manager.get(name).runtime.status,
-                             AccountStatus.STOPPED)
+            self.assertEqual(h.manager.get(name).runtime.status, AccountStatus.STOPPED)
 
     async def test_emergency_stop_cancels_tasks_and_stops(self) -> None:
         h = make_manager()
         await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         for _ in range(3):
-            h.scheduler.submit("alpha", "exporter", "message",
-                               channel_id=100, content="x")
+            h.scheduler.submit("alpha", "exporter", "message", channel_id=100, content="x")
         out = h.manager.emergency_stop("alpha")
         self.assertEqual(out["cancelled_tasks"], 3)
         self.assertTrue(out["stop_initiated"])
@@ -414,6 +474,7 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(runtime.client, h.factory.clients[1])  # fresh client
         self.assertIsNot(runtime.client, first)
         cache = runtime.cache
+        assert cache is not None
         cache.validate_channel(100)  # re-ingested on reconnect
         await h.manager.stop("alpha")
         self.assertEqual(len(h.factory.clients), 2)  # no extra reconnects
@@ -426,7 +487,7 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         first = h.manager.get("alpha").runtime.client
-        h.manager._client_factory = RejectingFactory()  # type: ignore[attr-defined]
+        h.manager._client_factory = RejectingFactory()
         first.drop("socket closed")
         runtime = h.manager.get("alpha").runtime
         for _ in range(100):
@@ -434,18 +495,20 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(0.02)
         self.assertEqual(runtime.status, AccountStatus.INVALID_CREDENTIAL)
-        built = len(h.manager._client_factory.clients)  # type: ignore[attr-defined]
+        built = len(h.manager._client_factory.clients)
         await asyncio.sleep(0.5)
-        self.assertEqual(len(h.manager._client_factory.clients), built)  # type: ignore[attr-defined]
+        self.assertEqual(len(h.manager._client_factory.clients), built)
         self.assertFalse(runtime.lost.is_set())
         await h.manager.stop("alpha")
 
     def test_auth_marker_ignores_401_inside_names(self) -> None:
         from core.account_manager.manager import _looks_like_auth_error
+
         self.assertTrue(_looks_like_auth_error(Exception("HTTP 401 Unauthorized")))
         self.assertTrue(_looks_like_auth_error(Exception("Improper token passed")))
-        self.assertFalse(_looks_like_auth_error(
-            Exception("client for account 'alt401' did not connect")))
+        self.assertFalse(
+            _looks_like_auth_error(Exception("client for account 'alt401' did not connect"))
+        )
         self.assertFalse(_looks_like_auth_error(Exception("user 1401234 gone")))
 
     async def test_drop_reason_recorded(self) -> None:
@@ -508,8 +571,7 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             h.manager.get("alpha").runtime.client.drop("flaky")
             await asyncio.sleep(0.05)
         await h.collector.wait_for(AccountConnected, 3)
-        self.assertEqual(h.manager.get("alpha").runtime.status,
-                          AccountStatus.RUNNING)
+        self.assertEqual(h.manager.get("alpha").runtime.status, AccountStatus.RUNNING)
         await h.manager.stop("alpha")
 
     async def test_backoff_overflow_never_kills_supervisor(self) -> None:
@@ -534,9 +596,10 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_sleep(seconds: float) -> None:
             recorded.append(seconds)
-            await asyncio.sleep(0)   # yield: never busy-spin the loop
+            await asyncio.sleep(0)  # yield: never busy-spin the loop
 
-        h.manager._sleep = fake_sleep
+        sleep_override: Any = fake_sleep  # asyncio.sleep's overloaded shape
+        h.manager._sleep = sleep_override
         h.manager._typing_rng = __import__("random").Random(0)
         await h.manager.add_account("alpha")
         await h.manager.start("alpha")
@@ -547,9 +610,11 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         # the COUNT of attempts, never wall-clock
         await _poll_until(lambda: len(recorded) >= 3, timeout=2.0)
         # overflow clamps to max (0.1 floor) with x[1.0,1.5) jitter
-        self.assertTrue(all(0.1 <= d <= 0.15 for d in recorded),
-                        f"delays escaped the clamp: {recorded}")
+        self.assertTrue(
+            all(0.1 <= d <= 0.15 for d in recorded), f"delays escaped the clamp: {recorded}"
+        )
         supervisor = runtime.supervisor
+        assert supervisor is not None
         self.assertIsNotNone(supervisor)
         self.assertFalse(supervisor.done())  # alive, still driving retries
         self.assertGreaterEqual(len(h.factory.clients), 4)  # kept retrying
@@ -565,16 +630,17 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.start("alpha")
         runtime = h.manager.get("alpha").runtime
 
-        async def _boom(name, rt, gen=None):
+        async def _boom(name: str, rt: Any, gen: int | None = None) -> None:
             raise RuntimeError("kaboom")
 
         h.manager._reconnect_loop = _boom  # type: ignore[method-assign]
         runtime.client.drop("bye")
-        await _poll_until(
-            lambda: runtime.status == AccountStatus.FAILED, timeout=1.0)
+        await _poll_until(lambda: runtime.status == AccountStatus.FAILED, timeout=1.0)
+        assert runtime.last_error is not None
         self.assertIn("kaboom", runtime.last_error)
         self.assertFalse(runtime.lost.is_set())  # no stale wake-ups
         supervisor = runtime.supervisor
+        assert supervisor is not None
         self.assertTrue(supervisor.done())
         self.assertIsNone(supervisor.exception())  # clean stand-down
         # automation path: the account can simply be started again
@@ -583,9 +649,7 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.stop("alpha")
 
 
-def _fast_reconnect_settings():
-    from tests.unit.helpers import FakeSettings
-
+def _fast_reconnect_settings() -> FakeSettings:
     return FakeSettings(
         reconnect_enabled=True,
         reconnect_initial_delay=0.02,
@@ -618,6 +682,7 @@ class SendHookTests(unittest.IsolatedAsyncioTestCase):
         message = await h.manager.send_hook(
             make_task(action="dm", user_id=777, channel_id=None, content="psst")
         )
+        assert message is not None
         self.assertTrue(message.dm)
         self.assertEqual(client.open_dm_calls, [])  # snapshot DM 9001 was cached
         # unified path: DMs send through send_message with the resolved
@@ -632,7 +697,9 @@ class SendHookTests(unittest.IsolatedAsyncioTestCase):
         runtime = h.manager.get("alpha").runtime
         await h.manager.send_hook(make_task(action="dm", user_id=888, content="hi"))
         self.assertEqual(runtime.client.open_dm_calls, [888])
-        self.assertEqual(runtime.cache.dm_channel_for(888), 9888)
+        dm_cache = runtime.cache
+        assert dm_cache is not None
+        self.assertEqual(dm_cache.dm_channel_for(888), 9888)
         await h.manager.send_hook(make_task(action="dm", user_id=888, content="again"))
         self.assertEqual(runtime.client.open_dm_calls, [888])  # cached now
         await h.manager.stop("alpha")
@@ -675,15 +742,18 @@ class SendHookTests(unittest.IsolatedAsyncioTestCase):
         runtime = h.manager.get("alpha").runtime
         client = runtime.client
 
-        async def vanish(channel_id, message_id, custom_id):
+        async def vanish(channel_id: int, message_id: int, custom_id: str) -> None:
             raise TargetGone("alpha", f"channel {channel_id} vanished")
 
         client.click_button = vanish
         with self.assertRaises(TargetGone):
-            await h.manager.send_hook(make_task(
-                action="button", channel_id=100, message_id=5, content="btn"))
+            await h.manager.send_hook(
+                make_task(action="button", channel_id=100, message_id=5, content="btn")
+            )
+        stale_cache = runtime.cache
+        assert stale_cache is not None
         with self.assertRaises(TargetGone):
-            runtime.cache.validate_channel(100)
+            stale_cache.validate_channel(100)
         await h.manager.stop("alpha")
 
 
@@ -691,18 +761,38 @@ class DetailsTests(unittest.IsolatedAsyncioTestCase):
     async def test_details_exact_shape_with_limiter(self) -> None:
         limiter = FakeDetailsLimiter()
         limiter.policies_list = [
-            {"level": "global", "owner": None, "action": "message",
-             "interval": 3.0, "jitter": [0.2, 0.8]},
-            {"level": "account", "owner": "alpha", "action": "message",
-             "interval": 5.0, "jitter": [0.0, 0.0]},
-            {"level": "global", "owner": None, "action": "dm",
-             "interval": 4.0, "jitter": [0.1, 0.3]},
+            {
+                "level": "global",
+                "owner": None,
+                "action": "message",
+                "interval": 3.0,
+                "jitter": [0.2, 0.8],
+            },
+            {
+                "level": "account",
+                "owner": "alpha",
+                "action": "message",
+                "interval": 5.0,
+                "jitter": [0.0, 0.0],
+            },
+            {
+                "level": "global",
+                "owner": None,
+                "action": "dm",
+                "interval": 4.0,
+                "jitter": [0.1, 0.3],
+            },
         ]
         h = make_manager(limiter=limiter)
         await h.manager.add_account("alpha", plugins=["exporter"])
         h.plugins.states_map["alpha"] = [
-            {"name": "exporter", "enabled": True, "settings": {},
-             "last_error": None, "error_count": 0},
+            {
+                "name": "exporter",
+                "enabled": True,
+                "settings": {},
+                "last_error": None,
+                "error_count": 0,
+            },
         ]
         await h.manager.start("alpha")
         d = await h.manager.details("alpha")
@@ -714,19 +804,25 @@ class DetailsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(d["status"]["latency_ms"], 42.0)
         self.assertGreaterEqual(d["status"]["uptime_s"], 0.0)
         self.assertEqual(d["identity"], {"name": "AlphaSelf", "discord_id": 555})
-        self.assertEqual(set(d["runtime"]),
-                         {"cached_guilds", "cached_channels", "cached_dms", "cache_source"})
+        self.assertEqual(
+            set(d["runtime"]), {"cached_guilds", "cached_channels", "cached_dms", "cache_source"}
+        )
         self.assertEqual(d["runtime"]["cached_guilds"], 1)
         self.assertEqual(d["runtime"]["cached_channels"], 3)  # 100, 101 + dm 9001
         self.assertEqual(d["runtime"]["cached_dms"], 1)
         self.assertEqual(d["runtime"]["cache_source"], "client cache (READY)")
         self.assertEqual(d["plugins"], [{"name": "exporter", "enabled": True}])
-        self.assertEqual(d["rate_limit"], {
-            "message": {"interval": 5.0, "jitter": [0.0, 0.0],
-                        "source": "global, account:alpha"},
-            "dm": {"interval": 4.0, "jitter": [0.1, 0.3],
-                   "source": "inherited from global"},
-        })
+        self.assertEqual(
+            d["rate_limit"],
+            {
+                "message": {
+                    "interval": 5.0,
+                    "jitter": [0.0, 0.0],
+                    "source": "global, account:alpha",
+                },
+                "dm": {"interval": 4.0, "jitter": [0.1, 0.3], "source": "inherited from global"},
+            },
+        )
         await h.manager.stop("alpha")
 
     async def test_details_rate_limit_empty_without_limiter(self) -> None:
@@ -757,12 +853,23 @@ class DetailsTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         client = h.manager.get("alpha").runtime.client
-        client.receive(DiscordMessage(
-            id=1, channel_id=100, author_id=42, content="x" * 100,
-        ))
-        client.receive(DiscordMessage(
-            id=2, channel_id=9001, author_id=777, content="dm\nline", dm=True,
-        ))
+        client.receive(
+            DiscordMessage(
+                id=1,
+                channel_id=100,
+                author_id=42,
+                content="x" * 100,
+            )
+        )
+        client.receive(
+            DiscordMessage(
+                id=2,
+                channel_id=9001,
+                author_id=777,
+                content="dm\nline",
+                dm=True,
+            )
+        )
         await asyncio.sleep(0.05)
         inbound = [e for e in h.audit.entries if e.get("direction") == "in"]
         self.assertEqual(len(inbound), 2)
@@ -780,11 +887,11 @@ class DetailsTests(unittest.IsolatedAsyncioTestCase):
         h = make_manager()
 
         class ExplodingAudit:
-            def record(self, **kwargs):
+            def record(self, **kwargs: Any) -> None:
                 raise RuntimeError("audit backend down")
 
         manager = h.manager
-        manager._audit = ExplodingAudit()  # type: ignore[attr-defined]
+        manager._audit = ExplodingAudit()
         await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         client = h.manager.get("alpha").runtime.client
@@ -809,18 +916,19 @@ class CredentialWiringTests(unittest.IsolatedAsyncioTestCase):
             db = Database(":memory:")
             await db.connect()
             try:
-                h = make_manager(token_values={
-                    "DISCORD_TOKEN_ALPHA": "env-token",
-                })
-                service = CredentialService(
-                    db.credentials, key_path=Path(tmp) / "k.key"
+                h = make_manager(
+                    token_values={
+                        "DISCORD_TOKEN_ALPHA": "env-token",
+                    }
                 )
+                service = CredentialService(db.credentials, key_path=Path(tmp) / "k.key")
                 await service.store("alpha", "db-token")
-                h.manager._credential_service = service  # type: ignore[attr-defined]
+                h.manager._credential_service = service
                 await h.manager.add_account("alpha")
                 await h.manager.start("alpha")
                 # DB credential wins over the legacy env value
-                self.assertEqual(h.factory.clients[0].token, "db-token")
+                client_zero: Any = h.factory.clients[0]  # factory stamps .token
+                self.assertEqual(client_zero.token, "db-token")
                 row = (await h.manager.accounts())[0]
                 self.assertEqual(row["credential"], "db")
                 d = await h.manager.details("alpha")
@@ -841,18 +949,20 @@ class CredentialWiringTests(unittest.IsolatedAsyncioTestCase):
             # .env HAS a token, but the credential service has NO DB store
             h = make_manager(token_values={"DISCORD_TOKEN_ALPHA": "env-token"})
             service = CredentialService(None, key_path=Path(tmp) / "k.key")
-            h.manager._credential_service = service  # type: ignore[attr-defined]
+            h.manager._credential_service = service
             await h.manager.add_account("alpha")
             row = (await h.manager.accounts())[0]
             self.assertEqual(row["credential"], "missing")  # NOT "env"
-            await h.manager.stop("alpha") if h.manager.get("alpha").runtime.status.value == "running" else None
+            await h.manager.stop("alpha") if h.manager.get(
+                "alpha"
+            ).runtime.status.value == "running" else None
 
     async def test_auth_error_classified_invalid_credential(self) -> None:
         from core.errors import AccountError
 
         h = make_manager()
         await h.manager.add_account("alpha")
-        h.manager._client_factory = RejectingFactory()  # type: ignore[attr-defined]
+        h.manager._client_factory = RejectingFactory()
         with self.assertRaises(AccountError):
             await h.manager.start("alpha")
         runtime = h.manager.get("alpha").runtime
@@ -862,7 +972,7 @@ class CredentialWiringTests(unittest.IsolatedAsyncioTestCase):
     async def test_remove_cascades_credential_and_cooldowns(self) -> None:
         class FakeCooldowns:
             def __init__(self) -> None:
-                self.deleted: list = []
+                self.deleted: list[str] = []
 
             async def delete_account(self, account: str) -> int:
                 self.deleted.append(account)
@@ -880,12 +990,10 @@ class CredentialWiringTests(unittest.IsolatedAsyncioTestCase):
             try:
                 h = make_manager()
                 cooldowns = FakeCooldowns()
-                service = CredentialService(
-                    db.credentials, key_path=Path(tmp) / "k.key"
-                )
+                service = CredentialService(db.credentials, key_path=Path(tmp) / "k.key")
                 await service.store("alpha", "tok")
-                h.manager._cooldowns = cooldowns  # type: ignore[attr-defined]
-                h.manager._credential_service = service  # type: ignore[attr-defined]
+                h.manager._cooldowns = cooldowns
+                h.manager._credential_service = service
                 await h.manager.add_account("alpha")
                 await h.manager.remove_account("alpha")
                 self.assertEqual(cooldowns.deleted, ["alpha"])
@@ -902,23 +1010,23 @@ class _RemovalWindowPlugins:
     resurrect the removed account's scheduler lane
     (probe_lane_resurrect.py)."""
 
-    def __init__(self, inner, manager, scheduler) -> None:
+    def __init__(self, inner: Any, manager: AccountManager, scheduler: TaskScheduler) -> None:
         self._inner = inner
         self._manager = manager
         self._scheduler = scheduler
-        self.farewell_tasks: list = []
+        self.farewell_tasks: list[Any] = []
 
-    async def deactivate_account(self, account):
+    async def deactivate_account(self, account: str) -> None:
         if account not in self._manager._accounts:  # removal window
-            try:
-                self.farewell_tasks.append(self._scheduler.submit(
-                    account, "roll", "message",
-                    channel_id=100, content="farewell"))
-            except Exception:
-                pass
-        return await self._inner.deactivate_account(account)
+            with contextlib.suppress(Exception):
+                self.farewell_tasks.append(
+                    self._scheduler.submit(
+                        account, "roll", "message", channel_id=100, content="farewell"
+                    )
+                )
+        await self._inner.deactivate_account(account)  # always None in practice
 
-    def __getattr__(self, attr):
+    def __getattr__(self, attr: str) -> Any:
         return getattr(self._inner, attr)
 
 
@@ -938,10 +1046,13 @@ class RemoveLaneIsolationTests(unittest.IsolatedAsyncioTestCase):
         try:
             await h.manager.add_account("ghost")
             await h.manager.start("ghost")
-            first = scheduler.submit("ghost", "roll", "message",
-                                     channel_id=100, content="one")
-            await _poll_until(
-                lambda: scheduler.get(first.id).status == STATUS_COMPLETED)
+            first = scheduler.submit("ghost", "roll", "message", channel_id=100, content="one")
+
+            def first_done() -> bool:
+                first_row = scheduler.get(first.id)
+                return first_row is not None and first_row.status == STATUS_COMPLETED
+
+            await _poll_until(first_done)
             await h.manager.stop("ghost")
             # stop-time deactivation is NOT the removal window: no submit
             self.assertEqual(farewell.farewell_tasks, [])
@@ -958,10 +1069,8 @@ class RemoveLaneIsolationTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("ghost", scheduler._lane_events)
             self.assertNotIn("ghost", scheduler._queues)
         finally:
-            try:
+            with contextlib.suppress(AccountError):  # already removed
                 await h.manager.stop("ghost")
-            except AccountError:
-                pass  # already removed
             await scheduler.stop()
 
 
@@ -978,46 +1087,58 @@ class EmergencyStopIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await h.manager.add_account("alpha")
             await h.manager.start("alpha")
             client = h.manager.get("alpha").runtime.client
-            original_send = client.send_message
+            original_send: Any = client.send_message
 
-            async def slow_send(channel_id, content):
+            async def slow_send(channel_id: int, content: str) -> DiscordMessage:
                 await asyncio.sleep(0.4)  # the "slow task in flight"
-                return await original_send(channel_id, content)
+                sent: DiscordMessage = await original_send(channel_id, content)
+                return sent
 
             client.send_message = slow_send
-            task = scheduler.submit("alpha", "exporter", "message",
-                                    channel_id=100, content="slow",
-                                    timeout=10.0)
-            await _poll_until(
-                lambda: scheduler.get(task.id).status == STATUS_RUNNING)
+            task = scheduler.submit(
+                "alpha", "exporter", "message", channel_id=100, content="slow", timeout=10.0
+            )
+
+            def is_running() -> bool:
+                row = scheduler.get(task.id)
+                return row is not None and row.status == STATUS_RUNNING
+
+            await _poll_until(is_running)
 
             out = h.manager.emergency_stop("alpha")
             self.assertTrue(out["stop_initiated"])
             self.assertEqual(out["cancelled_tasks"], 1)
 
             runtime = h.manager.get("alpha").runtime
-            await _poll_until(
-                lambda: scheduler.get(task.id).status in TERMINAL_STATUSES,
-                timeout=3.0)
-            self.assertEqual(scheduler.get(task.id).status, "cancelled")
-            await _poll_until(
-                lambda: runtime.status == AccountStatus.STOPPED, timeout=3.0)
+
+            def is_terminal() -> bool:
+                row = scheduler.get(task.id)
+                return row is not None and row.status in TERMINAL_STATUSES
+
+            await _poll_until(is_terminal, timeout=3.0)
+            cancelled_row = scheduler.get(task.id)
+            assert cancelled_row is not None
+            self.assertEqual(cancelled_row.status, "cancelled")
+            await _poll_until(lambda: runtime.status == AccountStatus.STOPPED, timeout=3.0)
             await h.collector.wait_for(AccountDisconnected, 1)
             self.assertIsNone(runtime.client)
 
             # restart works right away, and sends flow again (fast client)
             await h.manager.start("alpha")
             self.assertEqual(runtime.status, AccountStatus.RUNNING)
-            fresh = scheduler.submit("alpha", "exporter", "message",
-                                     channel_id=100, content="after")
-            await _poll_until(
-                lambda: scheduler.get(fresh.id).status == STATUS_COMPLETED)
+            fresh = scheduler.submit(
+                "alpha", "exporter", "message", channel_id=100, content="after"
+            )
+
+            def fresh_done() -> bool:
+                fresh_row = scheduler.get(fresh.id)
+                return fresh_row is not None and fresh_row.status == STATUS_COMPLETED
+
+            await _poll_until(fresh_done)
             await h.manager.stop("alpha")
         finally:
-            try:
+            with contextlib.suppress(AccountError):
                 await h.manager.stop("alpha")
-            except AccountError:
-                pass
             await scheduler.stop()
 
 
@@ -1025,9 +1146,9 @@ class RejectingFactory:
     """Builds clients whose connect() fails like a rejected token."""
 
     def __init__(self) -> None:
-        self.clients: list = []
+        self.clients: list[FakeRejectingClient] = []
 
-    def __call__(self, name: str, token: str):
+    def __call__(self, name: str, token: str) -> FakeRejectingClient:
         client = FakeRejectingClient()
         client.token = token
         self.clients.append(client)
@@ -1039,8 +1160,9 @@ class FakeRejectingClient:
 
     def __init__(self) -> None:
         self.connected = False
-        self.user_id = None
-        self.latency_ms = None
+        self.token = ""
+        self.user_id: int | None = None
+        self.latency_ms: float | None = None
 
     async def connect(self) -> None:
         from core.errors import AccountError
@@ -1050,7 +1172,7 @@ class FakeRejectingClient:
     async def disconnect(self) -> None:
         self.connected = False
 
-    def cached_snapshot(self):
+    def cached_snapshot(self) -> dict[str, Any]:
         return {"available": False}
 
 
@@ -1062,7 +1184,7 @@ class CachePortTests(unittest.IsolatedAsyncioTestCase):
         cache = DiscordCache("alpha")
         cache.ingest_snapshot(default_snapshot())
         cache.validate_channel(100)
-        seen = []
+        seen: list[tuple[str, int, str]] = []
         cache.on_invalidate(lambda acct, cid, reason: seen.append((acct, cid, reason)))
         self.assertTrue(cache.invalidate_channel(100, "deleted by mod"))
         with self.assertRaises(TGone):

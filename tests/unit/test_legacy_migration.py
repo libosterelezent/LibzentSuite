@@ -31,8 +31,7 @@ class LegacyMigrationTests(unittest.IsolatedAsyncioTestCase):
             # the v4-era writes use the v4-era column directly (the
             # repository's surface has moved on with the schema)
             conn = db.connection
-            for name, group in (("a", "Alpha"), ("b", "Alpha"),
-                                ("c", "Beta"), ("d", None)):
+            for name, group in (("a", "Alpha"), ("b", "Alpha"), ("c", "Beta"), ("d", None)):
                 await conn.execute(
                     "INSERT INTO accounts (name, token_ref, enabled,"
                     " sync_group, settings_json, created_at)"
@@ -48,8 +47,12 @@ class LegacyMigrationTests(unittest.IsolatedAsyncioTestCase):
         # model's v12 store + v13 cooldown profile + v14 active pointer
         self.assertEqual(applied, 12)
         # the fold carried the pointer + projection
-        self.assertEqual((await db.accounts.get("a")).workspace, "Alpha")
-        self.assertIsNone((await db.accounts.get("d")).workspace)
+        account_a = await db.accounts.get("a")
+        assert account_a is not None
+        self.assertEqual(account_a.workspace, "Alpha")
+        account_d = await db.accounts.get("d")
+        assert account_d is not None
+        self.assertIsNone(account_d.workspace)
         members = await db.workspaces.members("Alpha")
         self.assertEqual([m.account for m in members], ["a", "b"])
         beta = await db.workspaces.members("Beta")
@@ -61,8 +64,7 @@ class LegacyMigrationTests(unittest.IsolatedAsyncioTestCase):
             " 'fleet_cooldowns','fleet_transitions')"
         )
         self.assertEqual(gone, [])
-        columns = await db.connection.fetch_all(
-            "SELECT name FROM pragma_table_info('accounts')")
+        columns = await db.connection.fetch_all("SELECT name FROM pragma_table_info('accounts')")
         self.assertNotIn("sync_group", [c["name"] for c in columns])
         await db.close()
 

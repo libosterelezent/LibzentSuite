@@ -5,6 +5,7 @@ These tests prove the OUTCOME: after remove_account + settle, the
 Account / runtime / client / supervisor objects are COLLECTED, task
 count returns to baseline, and loggerDict stays bounded (G3 pruning).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -12,6 +13,7 @@ import gc
 import logging
 import unittest
 import weakref
+from typing import Any
 
 from core.event_bus import AccountConnected
 from tests.unit.helpers import make_manager
@@ -28,7 +30,7 @@ async def settle() -> None:
 
 
 class TombstoneChurnTests(unittest.IsolatedAsyncioTestCase):
-    async def _one_cycle(self, h) -> dict:
+    async def _one_cycle(self, h: Any) -> dict[str, weakref.ref[Any]]:
         await h.manager.add_account(NAME)
         await h.manager._credential_service.store(NAME, "tok")
         await h.manager.start(NAME)
@@ -91,10 +93,8 @@ class TombstoneChurnTests(unittest.IsolatedAsyncioTestCase):
         await settle()
         after = len(logging.Logger.manager.loggerDict)
         # pruning dropped all 30 churned entries; nothing but statics remain
-        self.assertLessEqual(after, before + 2,
-                             f"loggerDict grew {before} -> {after}")
-        residue = [k for k in logging.Logger.manager.loggerDict
-                   if k.startswith("libzent.churn")]
+        self.assertLessEqual(after, before + 2, f"loggerDict grew {before} -> {after}")
+        residue = [k for k in logging.Logger.manager.loggerDict if k.startswith("libzent.churn")]
         self.assertEqual(residue, [])
 
     async def test_live_account_loggers_survive_others_pruning(self) -> None:
@@ -109,8 +109,7 @@ class TombstoneChurnTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.remove_account("beta")
         # alpha's logger still works and is still registered
         logger = logging.getLogger("libzent.alpha.roll")
-        self.assertIn("libzent.alpha.roll",
-                      logging.Logger.manager.loggerDict)
+        self.assertIn("libzent.alpha.roll", logging.Logger.manager.loggerDict)
         logger.info("still alive after beta removal")
         await h.manager.stop_all()
 
