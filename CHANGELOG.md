@@ -17,10 +17,15 @@ nothing can ship until that hold is lifted; see
 ## [Unreleased]
 
 ### Added
-- Two-level data model adopted: account-owned plugin profiles (plugin
-  defined schema, channels-in-profile, profile-scoped cooldowns/tasks)
-  coordinated by workspace presets that reference — never copy —
-  profiles (`docs/design/data-management-adoption.md`).
+- The two-level data model IMPLEMENTED (all eight phases, migrations
+  v12–v16): account-owned plugin profiles — identity (account, plugin,
+  name), profile-scoped cooldowns and task attribution, the
+  plugin-facing lifecycle facade (zero scope parameters: isolation by
+  construction), REST + CLI surfaces, the legacy fold (template
+  bindings became instances, idempotent), and workspace presets that
+  REFERENCE profiles (apply activates in place, never copies) with
+  executions that checkpoint and resume without replaying
+  (`docs/design/data-management-adoption.md` — the full contract).
 - FastAPI core API (`interfaces/api/`) and Flet UI shell
   (`interfaces/ui/`) over the one ControlAPI facade.
 - Repository health stack: security workflow (gitleaks full-history,
