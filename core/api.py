@@ -74,7 +74,11 @@ if TYPE_CHECKING:  # duck-typed at runtime — no manager imports here
     from collections.abc import Coroutine
 
     from adapters.simulator.runner import SimulationRunner
+    from database.models import AccountPluginProfileRecord
     from database.plugin_data import PluginDataStore
+    from database.repositories.account_plugin_profiles import (
+        AccountPluginProfilesRepository,
+    )
     from database.repositories.account_plugins import AccountPluginsRepository
     from database.repositories.plugin_profiles import PluginProfilesRepository
 
@@ -98,6 +102,27 @@ T = TypeVar("T")
 #: back-compat alias for the kv key persisting the send-lane configuration
 #: (the canonical constants live in core.rate_limit_manager)
 LANE_KV_KEY = KV_LANE_KEY
+
+
+def _validate_profile_name(name: str) -> None:
+    """The one profile-name check every account-owned profile entry shares."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("profile name must be a non-empty string")
+
+
+def _account_profile_dict(record: AccountPluginProfileRecord) -> dict[str, Any]:
+    """The JSON-safe shape every account-profile surface returns."""
+    return {
+        "id": record.id,
+        "account": record.account,
+        "plugin": record.plugin,
+        "name": record.name,
+        "description": record.description,
+        "settings": record.settings,
+        "schema_version": record.schema_version,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+    }
 
 
 @overload
@@ -592,6 +617,15 @@ class ControlAPI:
             raise RuntimeError("plugin profiles are not configured on this api")
         return repo
 
+    def _account_profile_repo(self) -> AccountPluginProfilesRepository:
+        """The account-owned profile store (P2); honest error unwired."""
+        repo: AccountPluginProfilesRepository | None = getattr(
+            self._database, "account_plugin_profiles", None
+        )
+        if repo is None:
+            raise RuntimeError("account plugin profiles are not configured on this api")
+        return repo
+
     def _binding_repo(self) -> AccountPluginsRepository | None:
         """AccountPluginsRepository (bindings), or None without a database."""
         return (
@@ -608,6 +642,123 @@ class ControlAPI:
         if repo is None:
             return []
         return [record.to_dict() for record in await _resolved(repo.list(plugin))]
+
+    # ------------------------------------ account-owned profiles (P2, v12)
+    async def account_plugin_profiles(self, account: str, plugin: str) -> list[dict[str, Any]]:
+        """The account's profile INSTANCES for one plugin (name order).
+
+        The two-level model's execution layer: each row is owned by the
+        full (account, plugin, name) triple; ``settings`` is opaque —
+        the plugin owns its schema (schema_version travels with it).
+        """
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        repo = self._account_profile_repo()
+        records = await _resolved(repo.list_for(account, plugin))
+        return [_account_profile_dict(r) for r in records]
+
+    async def account_plugin_profile_create(
+        self,
+        account: str,
+        plugin: str,
+        name: str,
+        description: str = "",
+        settings: dict[str, Any] | None = None,
+        schema_version: int = 1,
+        surface: str = "api",
+    ) -> dict[str, Any]:
+        """Create one account-owned profile instance.
+
+        Raises:
+            ValueError: unknown account/plugin, or a non-string/empty name.
+            DatabaseError: the (account, plugin, name) triple exists.
+        """
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        _validate_profile_name(name)
+        repo = self._account_profile_repo()
+        record = await _resolved(
+            repo.create(account, plugin, name, description, settings, schema_version=schema_version)
+        )
+        self._audit_mgmt(
+            account,
+            "mgmt:account_plugin_profile.created",
+            surface,
+            extra=f"plugin={plugin} profile={name} v{schema_version}",
+        )
+        return _account_profile_dict(record)
+
+    async def account_plugin_profile_get(
+        self, account: str, plugin: str, name: str
+    ) -> dict[str, Any] | None:
+        """One profile instance (None when the triple does not exist)."""
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        repo = self._account_profile_repo()
+        record = await _resolved(repo.get(account, plugin, name))
+        return _account_profile_dict(record) if record is not None else None
+
+    async def account_plugin_profile_update(
+        self,
+        account: str,
+        plugin: str,
+        name: str,
+        *,
+        description: str | None = None,
+        settings: dict[str, Any] | None = None,
+        schema_version: int | None = None,
+        surface: str = "api",
+    ) -> dict[str, Any]:
+        """Update named fields of the account's profile (None keeps them).
+
+        Raises:
+            ValueError: unknown account/plugin, or bad name.
+            KeyError: the (account, plugin, name) triple does not exist.
+        """
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        _validate_profile_name(name)
+        repo = self._account_profile_repo()
+        updated = await _resolved(
+            repo.update(
+                account,
+                plugin,
+                name,
+                description=description,
+                settings=settings,
+                schema_version=schema_version,
+            )
+        )
+        if updated is None:
+            raise KeyError(f"no profile {name!r} for {plugin!r} on {account!r}")
+        self._audit_mgmt(
+            account,
+            "mgmt:account_plugin_profile.updated",
+            surface,
+            extra=f"plugin={plugin} profile={name}",
+        )
+        return _account_profile_dict(updated)
+
+    async def account_plugin_profile_delete(
+        self, account: str, plugin: str, name: str, surface: str = "api"
+    ) -> dict[str, Any]:
+        """Delete the account's exact profile; ``existed`` says whether it did.
+
+        Raises:
+            ValueError: unknown account/plugin, or bad name.
+        """
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        _validate_profile_name(name)
+        repo = self._account_profile_repo()
+        existed = await _resolved(repo.delete(account, plugin, name))
+        self._audit_mgmt(
+            account,
+            "mgmt:account_plugin_profile.deleted",
+            surface,
+            extra=f"plugin={plugin} profile={name} existed={existed}",
+        )
+        return {"account": account, "plugin": plugin, "profile": name, "existed": existed}
 
     async def plugin_profile_create(
         self,
