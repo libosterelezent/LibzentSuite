@@ -43,6 +43,8 @@ reviews:
     - "!dump/**"
     - "!knowledgebase/**"
     - "!docs/plans/**"
+    - "!.agents/**" # agent-local config (gitignored on the tip)
+    - "!uv.lock" # generated lock — the export-sync gate owns it
   path_instructions:
     - path: "database/schema.py"
       instructions: >-
