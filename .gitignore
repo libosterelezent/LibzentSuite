@@ -12,6 +12,7 @@ credentials.key*
 config/accounts/*.local.json
 *.log
 state/
+.vscode/
 
 # --- python ---
 __pycache__/
@@ -23,6 +24,27 @@ venv/
 .coverage
 htmlcov/
 docs/_build/
-# the knowledgebase is committed; only its generated machine data is local
+# the knowledgebase is stored locally to avoid irrelevant repo size expansion.
 knowledgebase/
-knowledgebase_*.db
+
+# --- local-only agent tooling (skills, session config) ---
+# personal per-machine configuration: the agent skills and the opencode
+# session config never leave the machine that uses them
+.agents/
+opencode.json
+opencode.jsonc
+.opencode/
+
+
+# --- local-only archives ---
+# the retirement wing and the knowledgebase live on the machine that
+# built them; a fresh clone gets the repo, the docs, and dump/'s README
+# pointer in the roadmap — not the archives themselves
+dump/*
+!dump/README.md
+knowledgebase/
+
+# python build artifacts (uv build / pip install -e .)
+/dist/
+/build/
+*.egg-info/

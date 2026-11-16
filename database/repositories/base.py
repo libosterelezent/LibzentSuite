@@ -19,9 +19,35 @@ from ..connection import DatabaseError
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
+    import aiosqlite
+
+    from database.db import Database
+
 LOG = logging.getLogger("libzent.database")
 
-__all__ = ["BaseRepository", "loads_tolerant"]
+__all__ = ["BaseRepository", "loads_tolerant", "row_to_dict"]
+
+
+def row_to_dict(row: aiosqlite.Row) -> dict[str, Any]:
+    """The one Row -> plain-dict boundary converter.
+
+    ``dict(row)`` is untypeable on ``sqlite3.Row`` (it is not a Mapping in
+    typeshed), so this comprehension is the canonical typed conversion
+    every repository uses; column values stay whatever SQLite stored
+    (str/int/float/bytes/None).
+    """
+    return {key: row[key] for key in tuple(row.keys())}
+
+
+def inserted_rowid(cursor: aiosqlite.Cursor) -> int:
+    """``lastrowid`` of a just-executed INSERT (typeshed types it optional).
+
+    SQLite always allocates a rowid for an INSERT into a rowid table, so
+    the assert documents that invariant rather than defending against it.
+    """
+    rowid = cursor.lastrowid
+    assert rowid is not None, "INSERT must allocate a rowid"
+    return rowid
 
 
 #: sentinel default for callers that must tell a stored JSON ``null`` (a real
@@ -48,12 +74,14 @@ def loads_tolerant(raw: str | None, default: Any, context: str) -> Any:
 class BaseRepository:
     """Base class for all repositories: the shared async connection."""
 
-    def __init__(self, database: Any) -> None:
+    def __init__(self, database: Database) -> None:
         #: the owning Database service (provides ``.connection``)
         self._db = database
 
     # ------------------------------------------------------------------ reads
-    async def _fetch_all(self, sql: str, params: Sequence[Any] = (), *, what: str = "read") -> list:
+    async def _fetch_all(
+        self, sql: str, params: Sequence[Any] = (), *, what: str = "read"
+    ) -> list[aiosqlite.Row]:
         """SELECT -> all rows (WAL read; never takes the writer lock)."""
         try:
             return await self._db.connection.fetch_all(sql, params)
@@ -62,7 +90,7 @@ class BaseRepository:
 
     async def _fetch_one(
         self, sql: str, params: Sequence[Any] = (), *, what: str = "read"
-    ) -> Any | None:
+    ) -> aiosqlite.Row | None:
         """SELECT -> first row or None."""
         try:
             return await self._db.connection.fetch_one(sql, params)
@@ -71,7 +99,7 @@ class BaseRepository:
 
     # ----------------------------------------------------------------- writes
     @asynccontextmanager
-    async def _tx(self, what: str = "write") -> AsyncIterator[Any]:
+    async def _tx(self, what: str = "write") -> AsyncIterator[aiosqlite.Connection]:
         """One all-or-nothing write transaction (writers serialized).
 
         Use as ``async with self._tx("delete account") as conn:
@@ -86,10 +114,12 @@ class BaseRepository:
         except Exception as exc:
             raise DatabaseError(f"database {what} failed: {exc}") from exc
 
-    async def _prune_newest(self, conn: Any, table: str, keep: int) -> None:
+    async def _prune_newest(self, conn: aiosqlite.Connection, table: str, keep: int) -> None:
         """Keep only the newest ``keep`` rows (by id); call inside ``_tx``."""
+        # Bandit B608: table is an internal constant supplied by repo
+        # callers; the OFFSET value is bound as a parameter.
         await conn.execute(
-            f"DELETE FROM {table} WHERE id <= "
+            f"DELETE FROM {table} WHERE id <= "  # nosec B608
             f"(SELECT id FROM {table} ORDER BY id DESC LIMIT 1 OFFSET ?)",
             (int(keep),),
         )

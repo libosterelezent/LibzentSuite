@@ -54,7 +54,7 @@ def _deep_copy(value: Any) -> Any:
     return json.loads(json.dumps(value))
 
 
-def _read_json(path: Path) -> dict:
+def _read_json(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {}
     try:
@@ -68,7 +68,7 @@ def _read_json(path: Path) -> dict:
     return parsed
 
 
-def _skip_doc_keys(data: dict) -> dict:
+def _skip_doc_keys(data: dict[str, Any]) -> dict[str, Any]:
     """Drop ``_comment``-style documentation keys (typo traps at boot)."""
     return {k: v for k, v in data.items() if not (isinstance(k, str) and k.startswith("_"))}
 

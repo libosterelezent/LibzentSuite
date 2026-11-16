@@ -16,7 +16,6 @@ import unittest
 
 from core.account_manager import AccountStatus
 from core.event_bus import AccountConnected
-
 from tests.unit.helpers import make_manager
 from tests.unit.test_account_manager import _fast_reconnect_settings
 

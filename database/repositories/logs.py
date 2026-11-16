@@ -14,11 +14,14 @@ ordering — matching the old audit code and LogService.tail.
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from core.errors import DatabaseError
 
 from .base import BaseRepository
+
+if TYPE_CHECKING:
+    from database.db import Database
 
 __all__ = ["AuditRepository", "LogRepository"]
 
@@ -32,7 +35,9 @@ _LOG_SQL = """INSERT INTO logs (ts, severity, source, account, plugin, task_id, 
    VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
 
 
-def _audit_row(entry: dict[str, Any]) -> tuple:
+def _audit_row(
+    entry: dict[str, Any],
+) -> tuple[float, str, str, str, str | None, str, float, float, str | None]:
     if not isinstance(entry, dict):
         raise DatabaseError(f"audit entry must be a dict, got {type(entry).__name__}")
     return (
@@ -48,7 +53,9 @@ def _audit_row(entry: dict[str, Any]) -> tuple:
     )
 
 
-def _log_row(entry: dict[str, Any]) -> tuple:
+def _log_row(
+    entry: dict[str, Any],
+) -> tuple[float, str, str, str | None, str | None, str | None, str | None, str]:
     if not isinstance(entry, dict):
         raise DatabaseError(f"log entry must be a dict, got {type(entry).__name__}")
     return (
@@ -70,7 +77,7 @@ def _log_row(entry: dict[str, Any]) -> tuple:
 class AuditRepository(BaseRepository):
     """Interaction audit trail (bounded, newest-kept pruning)."""
 
-    def __init__(self, database, keep: int = 10_000) -> None:
+    def __init__(self, database: Database, keep: int = 10_000) -> None:
         """``keep`` is the pruning bound applied on every add."""
         super().__init__(database)
         self._keep = max(0, int(keep))
@@ -126,7 +133,7 @@ class AuditRepository(BaseRepository):
 class LogRepository(BaseRepository):
     """Structured log persistence (bounded, newest-kept pruning)."""
 
-    def __init__(self, database, keep: int = 10_000) -> None:
+    def __init__(self, database: Database, keep: int = 10_000) -> None:
         """``keep`` is the pruning bound applied on every add."""
         super().__init__(database)
         self._keep = max(0, int(keep))

@@ -69,11 +69,11 @@ class SimClient:
         self.fail_connect = fail_connect
         self._rng = random.Random(seed)
         #: typing indicators fired (observable for anti-flag tests)
-        self.typing_calls: list = []
+        self.typing_calls: list[tuple[int, float]] = []
         #: REST-touching DM opens (observable for API-trim tests)
-        self.open_dm_calls: list = []
+        self.open_dm_calls: list[int] = []
         #: button clicks performed (observable for capability tests)
-        self.button_clicks: list = []
+        self.button_clicks: list[tuple[int, str]] = []
 
     # -------------------------------------------------------------- lifecycle
     async def connect(self) -> None:
@@ -204,7 +204,7 @@ class SimClient:
         """Synthetic heartbeat latency: deterministic 40-90ms per seed."""
         return round(self._rng.uniform(LATENCY_MIN_MS, LATENCY_MAX_MS), 1)
 
-    def cached_snapshot(self) -> dict:
+    def cached_snapshot(self) -> dict[str, Any]:
         """World-backed equivalent of the live client's in-memory cache.
 
         AUDIT FIX (ported): DM channels are filtered to pairs involving THIS
@@ -268,7 +268,7 @@ class SimClient:
 
         DM parity: a DM is delivered only to the two members of its pair
         (non-creating world lookup) — every client used to receive every
-        DM, so account B's on_message fired for pages between A and Mudae.
+        DM, so account B's on_message fired for pages between A and the primary bot.
         """
         if message.author_id == self.user_id:
             return

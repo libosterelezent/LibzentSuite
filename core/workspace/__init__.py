@@ -1,0 +1,128 @@
+"""core.workspace — the Workspace unification's domain core (W1).
+
+Supersedes core.sync_group_manager + core.fleet per
+WORKSPACE_DESIGN.md (rev 3). This package is PURE at its base:
+``models``, ``transitions``, ``policy`` and ``presets`` import
+nothing with I/O — no Discord, no database, no event bus — so the
+whole correctness core is testable with zero connections (the
+rollout-A discipline carried from the fleet module).
+
+The service (W3) and the chain runtime (W4) layer on top of this
+vocabulary; the old modules keep working (and tested) until W5
+deletes them.
+"""
+
+from .models import (
+    POLICY_CHECK_ORDER,
+    ChainDefinition,
+    ChainRun,
+    ChainRunStatus,
+    ChainStep,
+    ChannelBinding,
+    ChannelDescriptor,
+    ChannelValidity,
+    CooldownRecord,
+    CooldownScopeType,
+    CooldownSource,
+    ExecutionMode,
+    FieldClass,
+    FollowSpec,
+    InvalidDefinition,
+    MemberEligibility,
+    MetricHint,
+    PolicyDecision,
+    PresetScope,
+    Provenance,
+    RoutingPolicy,
+    SignalIdentity,
+    StepExecution,
+    StepStatus,
+    TaskDefinition,
+    TaskStatus,
+    WorkspaceEvent,
+    WorkspaceTask,
+    effective_cooldown,
+    validate_channel_scope,
+    validate_plugin_declarations,
+)
+from .policy import DispatchFacts, WorkspacePolicy
+from .presets import (
+    PresetRecord,
+    StalePreview,
+    apply_diff,
+    compute_apply_diff,
+    detach,
+    preview_revision_ok,
+    validate_preset_settings,
+)
+from .transitions import (
+    CHAIN_RUN_TRANSITIONS,
+    MEMBER_TRANSITIONS,
+    STEP_TRANSITIONS,
+    TASK_TRANSITIONS,
+    InvalidTransition,
+    chain_run_can_transition,
+    member_can_transition,
+    step_can_transition,
+    task_can_transition,
+    validate_chain_run_transition,
+    validate_member_transition,
+    validate_step_transition,
+    validate_task_transition,
+)
+
+__all__ = [
+    "CHAIN_RUN_TRANSITIONS",
+    "MEMBER_TRANSITIONS",
+    "POLICY_CHECK_ORDER",
+    "STEP_TRANSITIONS",
+    "TASK_TRANSITIONS",
+    "ChainDefinition",
+    "ChainRun",
+    "ChainRunStatus",
+    "ChainStep",
+    "ChannelBinding",
+    "ChannelDescriptor",
+    "ChannelValidity",
+    "CooldownRecord",
+    "CooldownScopeType",
+    "CooldownSource",
+    "DispatchFacts",
+    "ExecutionMode",
+    "FieldClass",
+    "FollowSpec",
+    "InvalidDefinition",
+    "InvalidTransition",
+    "MemberEligibility",
+    "MetricHint",
+    "PolicyDecision",
+    "PresetRecord",
+    "PresetScope",
+    "Provenance",
+    "RoutingPolicy",
+    "SignalIdentity",
+    "StalePreview",
+    "StepExecution",
+    "StepStatus",
+    "TaskDefinition",
+    "TaskStatus",
+    "WorkspaceEvent",
+    "WorkspacePolicy",
+    "WorkspaceTask",
+    "apply_diff",
+    "chain_run_can_transition",
+    "compute_apply_diff",
+    "detach",
+    "effective_cooldown",
+    "member_can_transition",
+    "preview_revision_ok",
+    "step_can_transition",
+    "task_can_transition",
+    "validate_chain_run_transition",
+    "validate_channel_scope",
+    "validate_member_transition",
+    "validate_plugin_declarations",
+    "validate_preset_settings",
+    "validate_step_transition",
+    "validate_task_transition",
+]

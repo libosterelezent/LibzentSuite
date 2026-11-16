@@ -9,12 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from types import SimpleNamespace as NS
 
 from core.account_manager import AccountStatus
-from core.errors import AccountError
-from core.event_bus import AccountConnected, AccountFailed, MessageReceived
-
+from core.event_bus import AccountConnected
 from tests.unit.helpers import make_manager
 from tests.unit.test_account_manager import _fast_reconnect_settings
 

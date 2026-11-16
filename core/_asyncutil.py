@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
-def cancellation_attributable(task: asyncio.Task | None = None) -> bool:
+def cancellation_attributable(task: asyncio.Task[None] | None = None) -> bool:
     """True when this interpreter can TELL an outer ``Task.cancel()`` apart
     from a handler that merely raised ``CancelledError`` internally.
 
@@ -20,7 +24,7 @@ def cancellation_attributable(task: asyncio.Task | None = None) -> bool:
     return getattr(task, "cancelling", None) is not None
 
 
-def outer_cancel_pending(task: asyncio.Task | None = None, *, unknown: bool = False) -> bool:
+def outer_cancel_pending(task: asyncio.Task[None] | None = None, *, unknown: bool = False) -> bool:
     """True when ``task`` (default: the current one) has a PENDING cancel
     request from outside (``Task.cancel()``), as opposed to a handler that
     merely raised ``CancelledError`` by itself.
@@ -36,7 +40,7 @@ def outer_cancel_pending(task: asyncio.Task | None = None, *, unknown: bool = Fa
     task = task or asyncio.current_task()
     if task is None:
         return False
-    cancelling = getattr(task, "cancelling", None)
+    cancelling: Callable[[], int] | None = getattr(task, "cancelling", None)
     if cancelling is None:
         return unknown
     try:

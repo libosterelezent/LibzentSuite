@@ -48,7 +48,7 @@ from ._persist_queue import PersistQueue
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 SEVERITIES = ("DEBUG", "INFO", "WARNING", "ERROR")
 #: per-entry message cap (ring memory + DB row size stay bounded)
@@ -220,7 +220,9 @@ def configure_stderr(level: int = logging.INFO) -> None:
     root = logging.getLogger("libzent")
     root.setLevel(level)
     _start_stderr_pipeline()
-    root.addHandler(_STDERR_QUEUE_HANDLER)
+    handler = _STDERR_QUEUE_HANDLER
+    if handler is not None:
+        root.addHandler(handler)
     root.propagate = False
     _STDERR_CONFIGURED = True
 
@@ -255,7 +257,7 @@ class LogService:
         self._ingest = threading.local()
 
     @contextmanager
-    def ingest_context(self):
+    def ingest_context(self) -> Iterator[None]:
         """Mark this thread as inside a bridge ingestion (mirror suppressed).
 
         Used by StdlibBridge around its ``record()`` call: the record is
@@ -281,7 +283,7 @@ class LogService:
     # ------------------------------------------------- queued persistence
     async def start_persistence(
         self, repo: Any, *, batch: int = 50, interval: float = 0.25
-    ) -> asyncio.Task | None:
+    ) -> asyncio.Task[None] | None:
         """Spawn the async drain worker (call BEFORE heavy logging).
 
         The worker drains the queue in batches (``repo.add_many`` when the
@@ -498,7 +500,12 @@ class ServiceLogger:
         self.name = f"libzent.{source}"
 
     def _record(
-        self, severity: str, msg: Any, args: tuple, with_location: bool = False, **ctx: Any
+        self,
+        severity: str,
+        msg: Any,
+        args: tuple[Any, ...],
+        with_location: bool = False,
+        **ctx: Any,
     ) -> None:
         try:
             message = self._format(msg, args)
@@ -510,7 +517,7 @@ class ServiceLogger:
             pass  # logging must never break the caller
 
     @staticmethod
-    def _format(msg: Any, args: tuple) -> str:
+    def _format(msg: Any, args: tuple[Any, ...]) -> str:
         """Render (msg, args) for either logger convention, never raising."""
         text = str(msg)
         if not args:
@@ -567,7 +574,7 @@ class ServiceLogger:
         self._record(severity.lower(), msg, args, **ctx)
 
     # ---------------------------------------------- LogService-style surface
-    def record(self, severity: str, source: str, message: str, **ctx: Any) -> dict:
+    def record(self, severity: str, source: str, message: str, **ctx: Any) -> dict[str, Any]:
         """LogService-style call passes through tagged with THIS source."""
         return self._service.record(severity, self._source, message, **ctx)
 

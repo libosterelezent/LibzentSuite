@@ -15,8 +15,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from database.connection import DatabaseError as ConnectionDatabaseError
 from core.errors import DatabaseError as CoreDatabaseError
+from database.connection import DatabaseError as ConnectionDatabaseError
 from database.db import Database
 from database.models import AccountRecord, RatePolicyRecord
 from database.schema import MIGRATIONS, latest_version
@@ -77,15 +77,13 @@ class TestMigrations(AsyncDatabaseTestCase):
 
     async def test_misordered_migrations_rejected(self) -> None:
         bad = ((2, "later", ""), (1, "earlier", ""))
-        with mock.patch("database.db.MIGRATIONS", bad):
-            with self.assertRaises(ANY_DB_ERROR):
-                await self.db.migrate()
+        with mock.patch("database.db.MIGRATIONS", bad), self.assertRaises(ANY_DB_ERROR):
+            await self.db.migrate()
 
     async def test_duplicate_migration_versions_rejected(self) -> None:
         bad = ((1, "first", ""), (1, "second", ""))
-        with mock.patch("database.db.MIGRATIONS", bad):
-            with self.assertRaises(ANY_DB_ERROR):
-                await self.db.migrate()
+        with mock.patch("database.db.MIGRATIONS", bad), self.assertRaises(ANY_DB_ERROR):
+            await self.db.migrate()
 
     async def test_bad_list_leaves_fresh_file_untouched(self) -> None:
         """The version guard fires BEFORE any SQL: a bad list applies
@@ -177,14 +175,14 @@ class TestMigrations(AsyncDatabaseTestCase):
 
 class TestAccounts(AsyncDatabaseTestCase):
     async def test_add_get_list_roundtrip(self) -> None:
-        await self.db.accounts.add("alpha", token_ref="DISCORD_TOKEN_ALPHA", sync_group="g1")
+        await self.db.accounts.add("alpha", token_ref="DISCORD_TOKEN_ALPHA", workspace="g1")
         await self.db.accounts.add("beta")
         names = [r.name for r in await self.db.accounts.list()]
         self.assertEqual(names, ["alpha", "beta"])
         rec = await self.db.accounts.get("alpha")
         self.assertIsInstance(rec, AccountRecord)
         self.assertEqual(rec.token_ref, "DISCORD_TOKEN_ALPHA")
-        self.assertEqual(rec.sync_group, "g1")
+        self.assertEqual(rec.workspace, "g1")
         self.assertTrue(rec.enabled)
         self.assertIsNone(await self.db.accounts.get("nope"))
 
@@ -208,14 +206,14 @@ class TestAccounts(AsyncDatabaseTestCase):
 
     async def test_delete_cascades(self) -> None:
         await self.db.accounts.add("alpha")
-        await self.db.plugins.set_state("alpha", "soulcopy", False)
-        await self.db.plugins.set_setting("alpha", "soulcopy", "trigger", "x")
+        await self.db.plugins.set_state("alpha", "exporter", False)
+        await self.db.plugins.set_setting("alpha", "exporter", "trigger", "x")
         await self.db.account_settings.set("alpha", "reconnect_enabled", False)
         await self.db.cache.set("alpha", "dm", "42", 4242)
         self.assertTrue(await self.db.accounts.delete("alpha"))
         self.assertIsNone(await self.db.accounts.get("alpha"))
-        self.assertEqual(await self.db.plugins.settings("alpha", "soulcopy"), {})
-        self.assertIsNone(await self.db.plugins.state("alpha", "soulcopy"))
+        self.assertEqual(await self.db.plugins.settings("alpha", "exporter"), {})
+        self.assertIsNone(await self.db.plugins.state("alpha", "exporter"))
         self.assertEqual(await self.db.account_settings.get("alpha"), {})
         self.assertIsNone(await self.db.cache.get("alpha", "dm", "42"))  # api_cache cascade
         self.assertFalse(await self.db.accounts.delete("alpha"))
@@ -241,51 +239,51 @@ class TestAccountSettings(AsyncDatabaseTestCase):
 
 class TestPlugins(AsyncDatabaseTestCase):
     async def test_metadata(self) -> None:
-        await self.db.plugins.upsert_metadata("soulcopy", "1.2.0", "desc", [{"name": "trigger"}])
-        meta = await self.db.plugins.metadata_for("soulcopy")
+        await self.db.plugins.upsert_metadata("exporter", "1.2.0", "desc", [{"name": "trigger"}])
+        meta = await self.db.plugins.metadata_for("exporter")
         self.assertEqual(meta["version"], "1.2.0")
         self.assertEqual(meta["settings"], [{"name": "trigger"}])
-        await self.db.plugins.upsert_metadata("soulcopy", "1.3.0", "desc2", [])
-        self.assertEqual((await self.db.plugins.metadata_for("soulcopy"))["version"], "1.3.0")
+        await self.db.plugins.upsert_metadata("exporter", "1.3.0", "desc2", [])
+        self.assertEqual((await self.db.plugins.metadata_for("exporter"))["version"], "1.3.0")
         self.assertEqual(len(await self.db.plugins.metadata()), 1)
 
     async def test_state_defaults_none_then_set(self) -> None:
-        self.assertIsNone(await self.db.plugins.state("alpha", "soulcopy"))
-        await self.db.plugins.set_state("alpha", "soulcopy", False)
-        self.assertFalse(await self.db.plugins.state("alpha", "soulcopy"))
-        await self.db.plugins.set_state("alpha", "soulcopy", True)
-        self.assertTrue(await self.db.plugins.state("alpha", "soulcopy"))
+        self.assertIsNone(await self.db.plugins.state("alpha", "exporter"))
+        await self.db.plugins.set_state("alpha", "exporter", False)
+        self.assertFalse(await self.db.plugins.state("alpha", "exporter"))
+        await self.db.plugins.set_state("alpha", "exporter", True)
+        self.assertTrue(await self.db.plugins.state("alpha", "exporter"))
 
     async def test_settings_and_all_account_settings(self) -> None:
-        await self.db.plugins.set_setting("alpha", "soulcopy", "trigger", "go")
-        await self.db.plugins.set_setting("beta", "soulcopy", "trigger", "go2")
+        await self.db.plugins.set_setting("alpha", "exporter", "trigger", "go")
+        await self.db.plugins.set_setting("beta", "exporter", "trigger", "go2")
         await self.db.plugins.set_setting("beta", "roll", "command", "$m")
-        self.assertEqual(await self.db.plugins.setting("alpha", "soulcopy", "trigger"), "go")
+        self.assertEqual(await self.db.plugins.setting("alpha", "exporter", "trigger"), "go")
         self.assertEqual(await self.db.plugins.settings("beta", "roll"), {"command": "$m"})
         all_layers = await self.db.plugins.all_account_settings()
-        self.assertEqual(all_layers["beta"]["soulcopy"]["trigger"], "go2")
+        self.assertEqual(all_layers["beta"]["exporter"]["trigger"], "go2")
 
     async def test_delete_setting(self) -> None:
         """Round 3 (F7 unpin support): remove ONE override; missing rows
         are a clean False (idempotent), sibling rows stay untouched."""
-        await self.db.plugins.set_setting("alpha", "soulcopy", "trigger", "go")
-        await self.db.plugins.set_setting("alpha", "soulcopy", "other", 2)
-        await self.db.plugins.set_setting("beta", "soulcopy", "trigger", "x")
+        await self.db.plugins.set_setting("alpha", "exporter", "trigger", "go")
+        await self.db.plugins.set_setting("alpha", "exporter", "other", 2)
+        await self.db.plugins.set_setting("beta", "exporter", "trigger", "x")
         self.assertTrue(
-            await self.db.plugins.delete_setting("alpha", "soulcopy", "trigger"))
+            await self.db.plugins.delete_setting("alpha", "exporter", "trigger"))
         self.assertIsNone(
-            await self.db.plugins.setting("alpha", "soulcopy", "trigger"))
+            await self.db.plugins.setting("alpha", "exporter", "trigger"))
         self.assertEqual(  # same (account, plugin): only the one key went
-            await self.db.plugins.settings("alpha", "soulcopy"), {"other": 2})
+            await self.db.plugins.settings("alpha", "exporter"), {"other": 2})
         self.assertEqual(  # same key elsewhere is untouched
-            await self.db.plugins.setting("beta", "soulcopy", "trigger"), "x")
+            await self.db.plugins.setting("beta", "exporter", "trigger"), "x")
         self.assertFalse(  # idempotent on a missing row
-            await self.db.plugins.delete_setting("alpha", "soulcopy", "trigger"))
+            await self.db.plugins.delete_setting("alpha", "exporter", "trigger"))
         self.assertFalse(
             await self.db.plugins.delete_setting("ghost", "plugin", "key"))
         self.assertNotIn(  # gone from the preload layer too
             "trigger",
-            (await self.db.plugins.all_account_settings())["alpha"]["soulcopy"])
+            (await self.db.plugins.all_account_settings())["alpha"]["exporter"])
 
     async def test_delete_setting_signature_pinned(self) -> None:
         """SettingsManager (F7) calls this duck-typed — parameter names
@@ -300,8 +298,8 @@ class TestRatePolicies(AsyncDatabaseTestCase):
     async def test_roundtrip_all_levels(self) -> None:
         await self.db.policies.set("global", "", "message", 2.0, 0.1, 0.5)
         await self.db.policies.set("account", "alpha", "message", 3.0, 0.0, 1.0)
-        await self.db.policies.set("plugin", "soulcopy", "dm", 4.0, 0.2, 0.6)
-        await self.db.policies.set("account_plugin", "alpha/soulcopy", "dm", 5.0, 0.0, 0.0)
+        await self.db.policies.set("plugin", "exporter", "dm", 4.0, 0.2, 0.6)
+        await self.db.policies.set("account_plugin", "alpha/exporter", "dm", 5.0, 0.0, 0.0)
         rec = await self.db.policies.get("global", "", "message")
         self.assertIsInstance(rec, RatePolicyRecord)
         self.assertEqual(rec.interval, 2.0)
@@ -404,7 +402,7 @@ class TestAuditAndLogs(AsyncDatabaseTestCase):
 
 class TestTaskHistory(AsyncDatabaseTestCase):
     async def test_add_update_recent(self) -> None:
-        tid = await self.db.tasks.add({"name": "t", "account": "alpha", "plugin": "soulcopy",
+        tid = await self.db.tasks.add({"name": "t", "account": "alpha", "plugin": "exporter",
                                        "action": "message", "status": "completed",
                                        "submitted_at": 1.0, "duration_s": 0.5})
         self.assertIsInstance(tid, int)
@@ -566,7 +564,7 @@ class TestConnectionRobustness(AsyncDatabaseTestCase):
                         "INSERT INTO kv (key, value) VALUES ('w','1')")
                     started.set()
                     await release.wait()
-            except BaseException as exc:  # noqa: BLE001 - recorded, not raised
+            except BaseException as exc:
                 outcome["err"] = exc
 
         task = asyncio.create_task(slow_write())
@@ -591,7 +589,6 @@ class TestConnectionRobustness(AsyncDatabaseTestCase):
     async def test_thread_submitted_op_via_run_coroutine_threadsafe(self) -> None:
         """An op submitted from a thread with no running loop must work
         when routed to the owning loop (the supported bridge)."""
-        import threading
         loop = asyncio.get_running_loop()
         errors: list = []
 
@@ -603,7 +600,7 @@ class TestConnectionRobustness(AsyncDatabaseTestCase):
                     self.db.kv.get("threaded"), loop).result(5)
                 if got != "ok":
                     errors.append(f"bad readback {got!r}")
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:
                 errors.append(exc)
 
         await loop.run_in_executor(None, worker)
@@ -711,11 +708,10 @@ class TestWriteSelectSnapshotHygiene(AsyncDatabaseTestCase):
         await self.db.kv.set("seed", "1")
         other = await aiosqlite.connect(str(self.path), isolation_level=None)
         try:
-            async with self.db.connection.write() as conn:
-                async with conn.execute(
-                    "SELECT value FROM kv WHERE key = 'seed'"
-                ) as cur:
-                    self.assertEqual(len(await cur.fetchall()), 1)
+            async with self.db.connection.write() as conn, conn.execute(
+                "SELECT value FROM kv WHERE key = 'seed'"
+            ) as cur:
+                self.assertEqual(len(await cur.fetchall()), 1)
             # a commit by the OTHER connection lands between our writes
             await other.execute(
                 "INSERT INTO kv (key, value) VALUES ('ext', '\"ext-v\"')")

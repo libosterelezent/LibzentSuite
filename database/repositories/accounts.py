@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 __all__ = ["AccountsRepository"]
 
 _INSERT = """
-    INSERT INTO accounts (name, token_ref, enabled, sync_group, settings_json, created_at)
+    INSERT INTO accounts (name, token_ref, enabled, workspace, settings_json, created_at)
     VALUES (?, ?, ?, ?, '{}', ?)
 """
 
@@ -45,6 +45,8 @@ _DEPENDENT_TABLES = (
     "credentials",
     "cooldowns",
     "account_plugins",
+    "account_plugin_profiles",
+    "account_plugin_active_profile",
 )
 #: kv rows keyed by PREFIX (PHASE-4 S3-G5 defense-in-depth): plugin state
 #: lives in kv under these prefixes; the service-level cascade is primary,
@@ -66,7 +68,9 @@ class AccountsRepository(BaseRepository):
             name=row["name"],
             token_ref=row["token_ref"],
             enabled=bool(row["enabled"]),
-            sync_group=row["sync_group"],
+            workspace=(
+                row["workspace"] if "workspace" in row.keys() else None  # noqa: SIM118
+            ),
             settings=loads_tolerant(
                 row["settings_json"], {}, f"accounts[{row['name']!r}].settings_json"
             ),
@@ -80,7 +84,7 @@ class AccountsRepository(BaseRepository):
         *,
         token_ref: str | None = None,
         enabled: bool = True,
-        sync_group: str | None = None,
+        workspace: str | None = None,
     ) -> AccountRecord:
         """Insert a new account and return its persisted record.
 
@@ -95,7 +99,7 @@ class AccountsRepository(BaseRepository):
         async with self._tx(f"add account {name!r}") as conn:
             try:
                 await conn.execute(
-                    _INSERT, (name, token_ref, int(bool(enabled)), sync_group, time.time())
+                    _INSERT, (name, token_ref, int(bool(enabled)), workspace, time.time())
                 )
             except sqlite3.IntegrityError as exc:
                 raise DatabaseError(f"account {name!r} already exists") from exc
@@ -168,8 +172,13 @@ class AccountsRepository(BaseRepository):
             async with conn.execute("DELETE FROM accounts WHERE name = ?", (name,)) as cur:
                 existed = cur.rowcount > 0
             if existed:
+                # Bandit B608: table names come from the module-level
+                # _DEPENDENT_TABLES constant; the account value is bound.
                 for table in _DEPENDENT_TABLES:
-                    await conn.execute(f"DELETE FROM {table} WHERE account = ?", (name,))
+                    await conn.execute(
+                        f"DELETE FROM {table} WHERE account = ?",  # nosec B608
+                        (name,),
+                    )
                 # PHASE-4 (S3-G5): kv plugin-state prefix sweep (backstop —
                 # the PluginStateService cascade is the primary path).
                 # LIKE wildcards in the account NAME ('\', '%', '_') are

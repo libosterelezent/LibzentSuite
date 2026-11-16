@@ -15,10 +15,12 @@ from typing import TYPE_CHECKING, Any
 from benchmark.collector import PerfCollector
 from benchmark.report import SCHEMA, compare, load_json, render_table, to_json
 from benchmark.sampler import SamplerSession, SpikeCapture
-from benchmark.scenarios import BENCH_SCENARIOS
+from benchmark.scenarios import BENCH_SCENARIOS, BenchScenario, reset_run_series
 
 if TYPE_CHECKING:
-    from types import SimpleNamespace as NS
+    import tracemalloc
+
+    from benchmark.profiling import AllocHook
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -100,7 +102,7 @@ def _list_scenarios() -> str:
     return "\n".join(lines)
 
 
-async def run_suite(args: NS) -> dict[str, Any]:
+async def run_suite(args: argparse.Namespace) -> dict[str, Any]:
     names = args.scenario or list(BENCH_SCENARIOS)
     unknown = [n for n in names if n not in BENCH_SCENARIOS]
     if unknown:
@@ -140,7 +142,7 @@ async def run_suite(args: NS) -> dict[str, Any]:
             TELEMETRY.reset()
             repeats = max(1, int(getattr(args, "repeat", 1)))
             run_results: list[dict[str, Any]] = []
-            all_spikes: list[dict] = []
+            all_spikes: list[dict[str, Any]] = []
             for _rep in range(repeats):
                 session = SamplerSession(
                     sampling_ms=args.sampling_ms,
@@ -153,16 +155,15 @@ async def run_suite(args: NS) -> dict[str, Any]:
                 # FINAL-PHASE (F6): per-mode wrapping. Profiled runs are marked
                 # and excluded from compare verdicts (profiler overhead makes
                 # their numbers non-comparable — documented in the README).
-                alloc_hook = None
-                stage_allocs: dict = {}
+                alloc_hook: AllocHook | None = None
+                stage_allocs: dict[str, list[dict[str, Any]]] = {}
                 if getattr(args, "tracemalloc", False):
                     from benchmark.profiling import make_alloc_hook
 
                     alloc_hook, stage_allocs = make_alloc_hook(args.trace_top)
                 perf = PerfCollector(alloc_hook=alloc_hook)
                 # reset the per-run leak trackers (module-level series)
-                scenario.run._rss_series = []
-                scenario.run._task_series = []
+                reset_run_series(scenario.run)
                 if getattr(args, "tracemalloc", False):
                     from benchmark.profiling import trace_reset
 
@@ -171,7 +172,12 @@ async def run_suite(args: NS) -> dict[str, Any]:
 
                     start_snap = _tm.take_snapshot()
 
-                async def _run_scenario(scenario, session, perf, cycles):
+                async def _run_scenario(
+                    scenario: BenchScenario,
+                    session: SamplerSession,
+                    perf: PerfCollector,
+                    cycles: int,
+                ) -> dict[str, Any]:
                     return await scenario.run(
                         session,
                         perf,
@@ -224,7 +230,7 @@ async def run_suite(args: NS) -> dict[str, Any]:
                     all_spikes.extend(session.spike_capture.captures)
                 run_results.append(result)
             # per-run trackers reset for the next repeat
-            scenario.run._rss_series = getattr(scenario.run, "_rss_series", []) and []
+            reset_run_series(scenario.run)
             result = run_results[0]
             if repeats > 1:
                 from benchmark.report import aggregate_repeats
@@ -254,7 +260,9 @@ async def run_suite(args: NS) -> dict[str, Any]:
         TELEMETRY.enabled = False
 
 
-def top_sites_safe(end_snap: Any, start_snap: Any, n: int) -> list[dict]:
+def top_sites_safe(
+    end_snap: tracemalloc.Snapshot, start_snap: tracemalloc.Snapshot, n: int
+) -> list[dict[str, Any]]:
     from benchmark.profiling import top_sites
 
     try:
@@ -263,7 +271,7 @@ def top_sites_safe(end_snap: Any, start_snap: Any, n: int) -> list[dict]:
         return []
 
 
-def _run_mode(args: NS) -> str:
+def _run_mode(args: argparse.Namespace) -> str:
     """G5: run-mode label — one of BASELINE / PROFILED / MEMORY_PROFILED /
     DEEP_DIAGNOSTIC. Profiled and diagnostic runs are compare-excluded."""
     if getattr(args, "capture_spikes", False):

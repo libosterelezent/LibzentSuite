@@ -25,8 +25,8 @@ class SpyPlugin(PluginBase):
     )
 
     def __init__(self) -> None:
-        self.calls: List[str] = []
-        self.seen: List[Any] = []
+        self.calls: list[str] = []
+        self.seen: list[Any] = []
 
     async def on_load(self, ctx: PluginContext) -> None:
         self.calls.append("on_load")

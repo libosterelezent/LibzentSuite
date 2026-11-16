@@ -39,6 +39,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import aiosqlite
+
 from core.errors import PluginError
 
 if TYPE_CHECKING:
@@ -79,15 +81,13 @@ class PluginDataStore:
 
     def __init__(self, path: str | Path = "state/plugin-data.db") -> None:
         self._path = str(path)
-        self._conn: Any = None
+        self._conn: aiosqlite.Connection | None = None
 
     # ------------------------------------------------------------- boot
 
     async def connect(self) -> None:
         """Open the connection, apply pragmas, self-initialize the
         schema. Idempotent."""
-        import aiosqlite
-
         if self._conn is not None:
             return
         if self._path != ":memory:":
@@ -115,7 +115,7 @@ class PluginDataStore:
 
     # ------------------------------------------------------------ helpers
 
-    def _require_conn(self) -> Any:
+    def _require_conn(self) -> aiosqlite.Connection:
         if self._conn is None:
             raise PluginError("plugin-data store is not connected")
         return self._conn
@@ -289,3 +289,22 @@ class PluginDataStore:
         )
         await conn.commit()
         return cur.rowcount > 0
+
+    async def drop_account(self, account: str) -> int:
+        """Delete EVERY document keyed under one account.
+
+        The cross-store deletion boundary (WORKSPACE_DESIGN §13.3,
+        decision 18): account removal invokes this idempotently inside
+        its durable deletion-job workflow — a re-created same-named
+        account must never inherit the old one's documents (the gap
+        found 2026-11-13). Returns rows removed; 0 is the normal
+        second call (idempotent by construction)."""
+        if not account or not str(account).strip():
+            raise PluginError("drop_account needs a non-empty account name")
+        conn = self._require_conn()
+        cur = await conn.execute(
+            "DELETE FROM plugin_data WHERE account=?",
+            (str(account).strip(),),
+        )
+        await conn.commit()
+        return int(cur.rowcount or 0)

@@ -33,7 +33,6 @@ from core.event_bus import EventBus
 from core.plugin_manager import PluginManager
 from core.settings_manager import SettingsManager
 from database.db import Database
-
 from tests.unit.helpers import (
     FakeAudit,
     FakeClientFactory,
@@ -47,7 +46,7 @@ LOG = logging.getLogger("tests.account_plugins_core")
 
 #: the two production plugins the assertions name (the fake plugin manager
 #: accepts ANY set — these names are just stable fixtures)
-ROLL, SOULCOPY = "roll", "soulcopy"
+ROLL, EXPORTER = "roll", "exporter"
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "plugins"
 
@@ -65,10 +64,10 @@ class AttachmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_multiple_plugins_attach_the_union(self) -> None:
         h = make_manager()
         await h.manager.add_account(
-            "alpha", plugins=[SOULCOPY, ROLL, SOULCOPY])  # dupe is stored once
-        self.assertEqual(h.plugins.attached[-1], ("alpha", {ROLL, SOULCOPY}))
+            "alpha", plugins=[EXPORTER, ROLL, EXPORTER])  # dupe is stored once
+        self.assertEqual(h.plugins.attached[-1], ("alpha", {EXPORTER, ROLL}))
         self.assertEqual(await h.account_plugins.plugins_of("alpha"),
-                         [ROLL, SOULCOPY])  # sorted + deduped on disk
+                         [EXPORTER, ROLL])  # sorted + deduped on disk
 
     async def test_zero_plugins_attaches_empty_set_not_all(self) -> None:
         """THE invariant: no assignments -> NOTHING attached (never the
@@ -88,22 +87,22 @@ class AttachmentTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.assign_plugin("alpha", ROLL)
         self.assertEqual(h.plugins.attached[-1], ("alpha", {ROLL}))
 
-        await h.manager.assign_plugin("alpha", SOULCOPY)
-        self.assertEqual(h.plugins.attached[-1], ("alpha", {ROLL, SOULCOPY}))
+        await h.manager.assign_plugin("alpha", EXPORTER)
+        self.assertEqual(h.plugins.attached[-1], ("alpha", {EXPORTER, ROLL}))
 
         await h.manager.unassign_plugin("alpha", ROLL)
-        self.assertEqual(h.plugins.attached[-1], ("alpha", {SOULCOPY}))
+        self.assertEqual(h.plugins.attached[-1], ("alpha", {EXPORTER}))
         self.assertEqual(len(h.plugins.attached), base + 3)  # every mutation
 
     async def test_set_account_plugins_replaces_whole_set(self) -> None:
         h = make_manager()
         await h.manager.add_account("alpha", plugins=[ROLL])
         stored = await h.manager.set_account_plugins(
-            "alpha", [SOULCOPY, "echo"])
-        self.assertEqual(stored, ["echo", SOULCOPY])
-        self.assertEqual(h.plugins.attached[-1], ("alpha", {"echo", SOULCOPY}))
+            "alpha", [EXPORTER, "echo"])
+        self.assertEqual(stored, ["echo", EXPORTER])
+        self.assertEqual(h.plugins.attached[-1], ("alpha", {"echo", EXPORTER}))
         self.assertEqual(await h.account_plugins.plugins_of("alpha"),
-                         ["echo", SOULCOPY])
+                         ["echo", EXPORTER])
 
     async def test_assignment_mirrors_into_status_poll(self) -> None:
         """The 1 Hz dashboard poll serves fresh assigned_plugins."""
@@ -112,9 +111,9 @@ class AttachmentTests(unittest.IsolatedAsyncioTestCase):
         rows = await h.manager.accounts()
         self.assertEqual(rows[0]["assigned_plugins"], [ROLL])
 
-        await h.manager.assign_plugin("alpha", SOULCOPY)
+        await h.manager.assign_plugin("alpha", EXPORTER)
         rows = await h.manager.accounts()
-        self.assertEqual(rows[0]["assigned_plugins"], [ROLL, SOULCOPY])
+        self.assertEqual(rows[0]["assigned_plugins"], [EXPORTER, ROLL])
 
 
 # -------------------------------------------------------------- persistence
@@ -129,7 +128,7 @@ class PersistenceSemanticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_unassign_missing_reports_existed_false(self) -> None:
         h = make_manager()
         await h.manager.add_account("alpha", plugins=[ROLL])
-        existed = await h.manager.unassign_plugin("alpha", SOULCOPY)
+        existed = await h.manager.unassign_plugin("alpha", EXPORTER)
         self.assertFalse(existed)  # not an error
         existed = await h.manager.unassign_plugin("alpha", ROLL)
         self.assertTrue(existed)
@@ -149,7 +148,7 @@ class PersistenceSemanticsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_remove_account_clears_assignments(self) -> None:
         h = make_manager()
-        await h.manager.add_account("alpha", plugins=[ROLL, SOULCOPY])
+        await h.manager.add_account("alpha", plugins=[EXPORTER, ROLL])
         await h.manager.remove_account("alpha")
         self.assertEqual(await h.account_plugins.plugins_of("alpha"), [])
         self.assertNotIn("alpha", await h.account_plugins.all_assignments())
@@ -212,7 +211,7 @@ class RestartTests(unittest.IsolatedAsyncioTestCase):
             await db.connect()
             try:
                 first, plugins1 = _manager_over(db)
-                await first.add_account("alpha", plugins=[ROLL, SOULCOPY])
+                await first.add_account("alpha", plugins=[EXPORTER, ROLL])
                 await first.add_account("beta")  # zero plugins
 
                 # "restart": a fresh manager over the SAME database
@@ -220,12 +219,12 @@ class RestartTests(unittest.IsolatedAsyncioTestCase):
                 await second.load()
                 attached = {name: allowed
                             for name, allowed in plugins2.attached}
-                self.assertEqual(attached["alpha"], {ROLL, SOULCOPY})
+                self.assertEqual(attached["alpha"], {EXPORTER, ROLL})
                 self.assertEqual(attached["beta"], set())
                 self.assertIsNotNone(attached["beta"])  # set(), never None
                 self.assertEqual(
                     (await second.accounts())[0]["assigned_plugins"],
-                    [ROLL, SOULCOPY],
+                    [EXPORTER, ROLL],
                 )
             finally:
                 await db.close()
@@ -262,7 +261,7 @@ class BindingMirrorTests(unittest.IsolatedAsyncioTestCase):
             await db.connect()
             try:
                 first, _ = _manager_over(db)
-                await first.add_account("alpha", plugins=[ROLL, SOULCOPY])
+                await first.add_account("alpha", plugins=[EXPORTER, ROLL])
                 await db.plugin_profiles.create(ROLL, "grind")
                 await db.account_plugins.set_profile("alpha", ROLL, "grind")
 
@@ -271,27 +270,27 @@ class BindingMirrorTests(unittest.IsolatedAsyncioTestCase):
                 # memory-first read: {plugin: profile or None} for every
                 # ASSIGNED plugin
                 self.assertEqual(await second.plugin_profiles("alpha"),
-                                 {ROLL: "grind", SOULCOPY: None})
+                                 {ROLL: "grind", EXPORTER: None})
                 rows = await second.accounts()
                 self.assertEqual(rows[0]["plugin_profiles"],
-                                 {ROLL: "grind", SOULCOPY: None})
+                                 {ROLL: "grind", EXPORTER: None})
             finally:
                 await db.close()
 
     async def test_unassign_clears_the_binding_mirror(self) -> None:
         h = make_manager()
-        await h.manager.add_account("alpha", plugins=[ROLL, SOULCOPY])
+        await h.manager.add_account("alpha", plugins=[EXPORTER, ROLL])
         await h.account_plugins.set_profile("alpha", ROLL, "grind")
         await h.manager._refresh_assignment("alpha")
         self.assertEqual(
             h.manager.get("alpha").plugin_profiles,
-            {ROLL: "grind", SOULCOPY: None})
+            {ROLL: "grind", EXPORTER: None})
         await h.manager.unassign_plugin("alpha", ROLL)  # row (and its
         # profile column) is gone — the mirror must not keep the name
         self.assertEqual(
-            h.manager.get("alpha").plugin_profiles, {SOULCOPY: None})
+            h.manager.get("alpha").plugin_profiles, {EXPORTER: None})
         self.assertEqual(await h.manager.plugin_profiles("alpha"),
-                         {SOULCOPY: None})
+                         {EXPORTER: None})
 
 
 # --------------------------------------------------------------- ControlAPI
@@ -316,7 +315,7 @@ class ApiStack:
 
     def __init__(self) -> None:
         self.h = make_manager()
-        self.h.plugins.known_names = [ROLL, SOULCOPY, "echo"]
+        self.h.plugins.known_names = [EXPORTER, ROLL, "echo"]
         self.api = ControlAPI(
             accounts=self.h.manager, plugins=self.h.plugins,
             settings=self.h.settings,
@@ -339,25 +338,25 @@ class ControlAPITests(unittest.IsolatedAsyncioTestCase):
         await api.accounts_add({"name": "alpha", "plugins": [ROLL]})
         self.assertEqual(await api.accounts_plugins_list("alpha"), [ROLL])
 
-        out = await api.accounts_plugin_assign("alpha", SOULCOPY, surface="cli")
-        self.assertEqual(out, {"account": "alpha", "plugin": SOULCOPY})
+        out = await api.accounts_plugin_assign("alpha", EXPORTER, surface="cli")
+        self.assertEqual(out, {"account": "alpha", "plugin": EXPORTER})
         self.assertEqual(await api.accounts_plugins_list("alpha"),
-                         [ROLL, SOULCOPY])
+                         [EXPORTER, ROLL])
         self.assertEqual(
-            self.stack.h.plugins.attached[-1], ("alpha", {ROLL, SOULCOPY}))
+            self.stack.h.plugins.attached[-1], ("alpha", {EXPORTER, ROLL}))
 
-        out = await api.accounts_plugins_set("alpha", ["echo", SOULCOPY])
+        out = await api.accounts_plugins_set("alpha", ["echo", EXPORTER])
         self.assertEqual(out, {"account": "alpha",
-                               "plugins": ["echo", SOULCOPY]})
+                               "plugins": ["echo", EXPORTER]})
         self.assertEqual(
-            self.stack.h.plugins.attached[-1], ("alpha", {"echo", SOULCOPY}))
+            self.stack.h.plugins.attached[-1], ("alpha", {"echo", EXPORTER}))
 
         out = await api.accounts_plugin_unassign("alpha", "echo")
         self.assertEqual(out, {"account": "alpha", "plugin": "echo",
                                "existed": True})
         out = await api.accounts_plugin_unassign("alpha", ROLL)  # not assigned
         self.assertEqual(out["existed"], False)
-        self.assertEqual(await api.accounts_plugins_list("alpha"), [SOULCOPY])
+        self.assertEqual(await api.accounts_plugins_list("alpha"), [EXPORTER])
 
     async def test_assign_rejects_unknown_plugin_listing_known(self) -> None:
         api = self.stack.api
@@ -372,7 +371,7 @@ class ControlAPITests(unittest.IsolatedAsyncioTestCase):
         api = self.stack.api
         await api.accounts_add({"name": "alpha", "plugins": [ROLL]})
         with self.assertRaises(ValueError):
-            await api.accounts_plugins_set("alpha", [SOULCOPY, "nope"])
+            await api.accounts_plugins_set("alpha", [EXPORTER, "nope"])
         # nothing was written — the pre-existing set survives whole
         self.assertEqual(await api.accounts_plugins_list("alpha"), [ROLL])
         self.assertEqual(
@@ -408,8 +407,8 @@ class ControlAPITests(unittest.IsolatedAsyncioTestCase):
     async def test_mutations_are_audited(self) -> None:
         api = self.stack.api
         await api.accounts_add({"name": "alpha", "plugins": [ROLL]})
-        await api.accounts_plugin_assign("alpha", SOULCOPY)
-        await api.accounts_plugin_unassign("alpha", SOULCOPY)
+        await api.accounts_plugin_assign("alpha", EXPORTER)
+        await api.accounts_plugin_unassign("alpha", EXPORTER)
         await api.accounts_plugins_set("alpha", ["echo"])
         actions = _actions(self.stack.h.audit)
         for expected in (

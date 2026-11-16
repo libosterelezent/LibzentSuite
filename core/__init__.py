@@ -1,6 +1,6 @@
 """LibzentSuite core framework.
 
-Component layout (see INTEGRATION.md and ARCHITECTURE.md):
+Component layout (see docs/architecture/integration.md and ARCHITECTURE.md):
   core.account_manager    Account (first-class), AccountManager, DiscordCache
   core.plugin_manager     plugin discovery/lifecycle/dispatch (+ core.plugin_base)
   core.profile_manager    profile bookkeeping (retained infra — capabilities

@@ -7,13 +7,11 @@ from types import SimpleNamespace as NS
 
 from core.account_manager.lifecycle import (
     OUTCOME_RATE_LIMITED,
-    LifecycleDecision,
     LifecycleGovernor,
     LifecyclePolicy,
     _TokenBucket,
 )
 from core.errors import AccountError
-
 from tests.unit.helpers import make_manager
 
 

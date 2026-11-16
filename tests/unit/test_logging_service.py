@@ -96,12 +96,12 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
     def test_raw_stdlib_records_still_flow_in(self) -> None:
         service = LogService()
         attach_stdlib_bridge(service)
-        logging.getLogger("libzent.alpha.soulcopy").info(
-            "soulcopy loaded (trigger=%s)", "slcopy")
+        logging.getLogger("libzent.alpha.exporter").info(
+            "exporter loaded (trigger=%s)", "export")
         tail = service.tail(10)
         self.assertEqual(len(tail), 1)
-        self.assertEqual(tail[0]["source"], "alpha:soulcopy")
-        self.assertIn("soulcopy loaded", tail[0]["message"])
+        self.assertEqual(tail[0]["source"], "alpha:exporter")
+        self.assertIn("exporter loaded", tail[0]["message"])
 
     def test_bridge_attach_is_idempotent(self) -> None:
         service = LogService()
@@ -481,6 +481,7 @@ class StderrPipelineClaims(unittest.TestCase):
 
     def test_last_release_stops_first_does_not(self):
         import logging
+
         from core import logging_service as m
         # snapshot + restore the process-global state (the pipeline AND
         # the stdlib logger it touches — configure_stderr flips

@@ -1,4 +1,4 @@
-"""Shared unit-test fixtures (any agent may extend — see INTEGRATION.md).
+"""Shared unit-test fixtures (any agent may extend — see docs/architecture/integration.md).
 
 Currently provides the A6 account-manager test doubles:
 
@@ -13,11 +13,12 @@ tests never import the parallel-built real packages.
 from __future__ import annotations
 
 import asyncio
+import builtins
 import copy
 import logging
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from adapters.base import DiscordMessage
 from core.account_manager import AccountManager
@@ -34,15 +35,15 @@ class FakeAccountsRepo:
     """Dict-backed AccountsRepository with injectable failures (async)."""
 
     def __init__(self) -> None:
-        self.records: Dict[str, AccountRecord] = {}
+        self.records: dict[str, AccountRecord] = {}
         self.next_id = 1
-        self.fail_on: Optional[str] = None  # method name that raises
+        self.fail_on: str | None = None  # method name that raises
 
     def _maybe_fail(self, what: str) -> None:
         if self.fail_on == what:
             raise RuntimeError(f"injected repository failure: {what}")
 
-    async def add(self, name, *, token_ref=None, enabled=True, sync_group=None):
+    async def add(self, name, *, token_ref=None, enabled=True, workspace=None):
         self._maybe_fail("add")
         # parity with the real AccountsRepository (database/repositories/
         # accounts.py): empty/whitespace and duplicate names are
@@ -53,18 +54,18 @@ class FakeAccountsRepo:
             raise DatabaseError(f"account {name!r} already exists")
         record = AccountRecord(
             id=self.next_id, name=name, token_ref=token_ref,
-            enabled=enabled, sync_group=sync_group,
+            enabled=enabled, workspace=workspace,
         )
         self.next_id += 1
         self.records[name] = record
         return self._copy(record)
 
-    async def get(self, name) -> Optional[AccountRecord]:
+    async def get(self, name) -> AccountRecord | None:
         self._maybe_fail("get")
         record = self.records.get(name)
         return self._copy(record) if record is not None else None
 
-    async def list(self) -> List[AccountRecord]:
+    async def list(self) -> builtins.list[AccountRecord]:
         return [self._copy(r) for _, r in sorted(self.records.items())]
 
     async def set_enabled(self, name, enabled) -> None:
@@ -74,7 +75,7 @@ class FakeAccountsRepo:
             raise RuntimeError(f"unknown account {name!r}")
         record.enabled = bool(enabled)
 
-    async def set_settings(self, name, settings: Dict[str, Any]) -> None:
+    async def set_settings(self, name, settings: dict[str, Any]) -> None:
         record = self.records.get(name)
         if record is None:
             raise RuntimeError(f"unknown account {name!r}")
@@ -102,10 +103,10 @@ class FakeAccountPluginsRepo:
     """
 
     def __init__(self) -> None:
-        self.rows: Dict[str, List[str]] = {}
+        self.rows: dict[str, list[str]] = {}
         #: (account, plugin) -> bound profile name or None
-        self.profile_of: Dict[tuple, Optional[str]] = {}
-        self.fail_on: Optional[str] = None  # method name that raises
+        self.profile_of: dict[tuple, str | None] = {}
+        self.fail_on: str | None = None  # method name that raises
 
     def _maybe_fail(self, what: str) -> None:
         if self.fail_on == what:
@@ -124,11 +125,11 @@ class FakeAccountPluginsRepo:
         self.rows[account] = sorted(plugins)
         self.profile_of.pop((account, plugin), None)
 
-    async def plugins_of(self, account) -> List[str]:
+    async def plugins_of(self, account) -> list[str]:
         self._maybe_fail("plugins_of")
         return list(self.rows.get(account, []))
 
-    async def set_plugins(self, account, plugins) -> List[str]:
+    async def set_plugins(self, account, plugins) -> list[str]:
         self._maybe_fail("set_plugins")
         cleaned = sorted({p for p in (plugins or [])})
         kept = set(cleaned)
@@ -138,7 +139,7 @@ class FakeAccountPluginsRepo:
         self.rows[account] = cleaned
         return list(cleaned)
 
-    async def all_assignments(self) -> Dict[str, List[str]]:
+    async def all_assignments(self) -> dict[str, list[str]]:
         self._maybe_fail("all_assignments")
         return {a: list(ps) for a, ps in sorted(self.rows.items()) if ps}
 
@@ -149,12 +150,12 @@ class FakeAccountPluginsRepo:
         self.profile_of[(account, plugin)] = profile
         return True
 
-    async def bindings(self, account) -> Dict[str, Optional[str]]:
+    async def bindings(self, account) -> dict[str, str | None]:
         self._maybe_fail("bindings")
         return {plugin: self.profile_of.get((account, plugin))
                 for plugin in self.rows.get(account, [])}
 
-    async def all_bindings(self) -> Dict[str, Dict[str, Optional[str]]]:
+    async def all_bindings(self) -> dict[str, dict[str, str | None]]:
         self._maybe_fail("all_bindings")
         return {
             account: {plugin: self.profile_of.get((account, plugin))
@@ -173,16 +174,16 @@ class FakePluginManager:
     ``names()`` surface the ControlAPI validates plugin names against.
     """
 
-    def __init__(self, known_names: Optional[List[str]] = None) -> None:
-        self.attached: List[Any] = []       # (account, allowed)
-        self.detached: List[str] = []
-        self.activated: List[Any] = []      # (account, services_factory)
-        self.deactivated: List[str] = []
-        self.states_map: Dict[str, List[Dict[str, Any]]] = {}
+    def __init__(self, known_names: list[str] | None = None) -> None:
+        self.attached: list[Any] = []       # (account, allowed)
+        self.detached: list[str] = []
+        self.activated: list[Any] = []      # (account, services_factory)
+        self.deactivated: list[str] = []
+        self.states_map: dict[str, list[dict[str, Any]]] = {}
         self.fail_states = False
-        self.known_names: List[str] = list(known_names or [])
+        self.known_names: list[str] = list(known_names or [])
 
-    def names(self) -> List[str]:
+    def names(self) -> list[str]:
         """Discovered-plugin surface (ControlAPI typo trap)."""
         return list(self.known_names)
 
@@ -198,7 +199,7 @@ class FakePluginManager:
     async def deactivate_account(self, account) -> None:
         self.deactivated.append(account)
 
-    def states(self, account) -> List[Dict[str, Any]]:
+    def states(self, account) -> list[dict[str, Any]]:
         if self.fail_states:
             raise RuntimeError("states() boom")
         return [dict(s) for s in self.states_map.get(account, [])]
@@ -214,8 +215,8 @@ class FakeScheduler:
     """Records submits + cancel_matching calls; returns fake task objects."""
 
     def __init__(self) -> None:
-        self.submitted: List[Any] = []
-        self.cancel_calls: List[Dict[str, Any]] = []
+        self.submitted: list[Any] = []
+        self.cancel_calls: list[dict[str, Any]] = []
         self.next_id = 1
         self.fail_submit = False
 
@@ -255,16 +256,16 @@ class FakeSettings:
     """account_settings() with per-account overrides."""
 
     def __init__(self, **defaults) -> None:
-        self.defaults: Dict[str, Any] = {
+        self.defaults: dict[str, Any] = {
             "reconnect_enabled": True,
             "reconnect_initial_delay": 1.0,
             "reconnect_max_delay": 60.0,
             "reconnect_multiplier": 2.0,
         }
         self.defaults.update(defaults)
-        self.overrides: Dict[str, Dict[str, Any]] = {}
+        self.overrides: dict[str, dict[str, Any]] = {}
 
-    def account_settings(self, account) -> Dict[str, Any]:
+    def account_settings(self, account) -> dict[str, Any]:
         merged = dict(self.defaults)
         merged.update(self.overrides.get(account, {}))
         return merged
@@ -274,9 +275,9 @@ class FakeAudit:
     """Captures every recorded interaction entry."""
 
     def __init__(self) -> None:
-        self.entries: List[Dict[str, Any]] = []
+        self.entries: list[dict[str, Any]] = []
 
-    def record(self, **kwargs) -> Dict[str, Any]:
+    def record(self, **kwargs) -> dict[str, Any]:
         self.entries.append(kwargs)
         return kwargs
 
@@ -285,12 +286,12 @@ class FakeDetailsLimiter:
     """policies()/effective() shaped for AccountManager.details()."""
 
     def __init__(self) -> None:
-        self.policies_list: List[Dict[str, Any]] = []
+        self.policies_list: list[dict[str, Any]] = []
 
-    def policies(self) -> List[Dict[str, Any]]:
+    def policies(self) -> list[dict[str, Any]]:
         return [dict(p) for p in self.policies_list]
 
-    def effective(self, action, account=None, plugin=None) -> Dict[str, Any]:
+    def effective(self, action, account=None, plugin=None) -> dict[str, Any]:
         applicable = [
             p for p in self.policies_list
             if p["action"] == action
@@ -310,7 +311,7 @@ class FakeDetailsLimiter:
 
 
 # ------------------------------------------------------------------ clients
-def default_snapshot() -> Dict[str, Any]:
+def default_snapshot() -> dict[str, Any]:
     """Canned READY snapshot: 1 guild, 2 channels, 1 DM, user 555."""
     return {
         "available": True,
@@ -338,14 +339,14 @@ class FakeClient:
         self.fail_message = fail_message  # G8: default matches NONE of the
         # auth markers; pass an auth-shaped message to exercise the
         # INVALID_CREDENTIAL classification (see _AUTH_ERROR_MARKERS)
-        self.user_id: Optional[int] = None
+        self.user_id: int | None = None
         self._user_id = user_id
         self.latency_ms = latency_ms
         self.on_message = None
         self.on_disconnect = None
-        self.sent: List[Any] = []          # (kind, channel_id, content)
-        self.open_dm_calls: List[int] = []
-        self.dm_channels: Dict[int, int] = {}
+        self.sent: list[Any] = []          # (kind, channel_id, content)
+        self.open_dm_calls: list[int] = []
+        self.dm_channels: dict[int, int] = {}
         self._snapshot = snapshot if snapshot is not None else default_snapshot()
         self._next_msg_id = 1000
 
@@ -386,7 +387,7 @@ class FakeClient:
     async def fetch_user(self, user_id: int) -> Any:
         return {"id": int(user_id)}
 
-    def cached_snapshot(self) -> Dict[str, Any]:
+    def cached_snapshot(self) -> dict[str, Any]:
         return copy.deepcopy(self._snapshot)
 
     # test helpers ---------------------------------------------------------
@@ -406,7 +407,7 @@ class FakeClientFactory:
     """Builds FakeClients and records every client it handed out."""
 
     def __init__(self, **client_kwargs) -> None:
-        self.clients: List[FakeClient] = []
+        self.clients: list[FakeClient] = []
         self.client_kwargs = client_kwargs
 
     def __call__(self, name: str, token: str) -> FakeClient:
@@ -422,8 +423,8 @@ class EventCollector:
 
     def __init__(self, bus: EventBus) -> None:
         self.bus = bus
-        self.events: List[Any] = []
-        self._unsubs: List[Any] = []
+        self.events: list[Any] = []
+        self._unsubs: list[Any] = []
 
     def subscribe(self, *event_types) -> None:
         for event_type in event_types:
@@ -432,11 +433,11 @@ class EventCollector:
     def _append(self, event: Any) -> None:
         self.events.append(event)
 
-    def of(self, event_type) -> List[Any]:
+    def of(self, event_type) -> list[Any]:
         return [e for e in self.events if isinstance(e, event_type)]
 
     async def wait_for(self, event_type, count: int = 1,
-                       timeout: float = 2.0) -> List[Any]:
+                       timeout: float = 2.0) -> list[Any]:
         """Poll until `count` events of the type arrived (bounded)."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
@@ -474,12 +475,12 @@ class ManagerHarness:
 
 def make_manager(
     *,
-    token_values: Optional[Dict[str, str]] = None,
-    settings: Optional[FakeSettings] = None,
+    token_values: dict[str, str] | None = None,
+    settings: FakeSettings | None = None,
     limiter: Any = None,
-    client_kwargs: Optional[Dict[str, Any]] = None,
+    client_kwargs: dict[str, Any] | None = None,
     supervisor_tick: float = 0.02,
-    account_plugins: Optional[FakeAccountPluginsRepo] = None,
+    account_plugins: FakeAccountPluginsRepo | None = None,
 ) -> ManagerHarness:
     """Build an AccountManager wired to fakes (fresh bus/repos per call)."""
     bus = EventBus()
@@ -539,7 +540,10 @@ def make_manager(
     )
     collector = EventCollector(bus)
     from core.event_bus import (
-        AccountConnected, AccountDisconnected, AccountFailed, MessageReceived,
+        AccountConnected,
+        AccountDisconnected,
+        AccountFailed,
+        MessageReceived,
     )
     collector.subscribe(
         AccountConnected, AccountDisconnected, AccountFailed, MessageReceived,
@@ -555,7 +559,7 @@ def make_manager(
 def make_task(**overrides: Any) -> SimpleNamespace:
     """A scheduler-task lookalike for send_hook tests."""
     task = SimpleNamespace(
-        id=1, name="t", account="alpha", plugin="soulcopy", action="message",
+        id=1, name="t", account="alpha", plugin="exporter", action="message",
         channel_id=100, user_id=None, content="hi",
         grant_wait_ms=12.0, grant_jitter_ms=5.0,
     )
@@ -565,8 +569,18 @@ def make_task(**overrides: Any) -> SimpleNamespace:
 
 
 __all__ = [
-"FakeAccountsRepo", "FakeAccountPluginsRepo",
-    "FakePluginManager", "FakeScheduler", "FakeSettings", "FakeAudit",
-    "FakeDetailsLimiter", "FakeClient", "FakeClientFactory", "EventCollector",
-    "ManagerHarness", "make_manager", "make_task", "default_snapshot",
+    "EventCollector",
+    "FakeAccountPluginsRepo",
+    "FakeAccountsRepo",
+    "FakeAudit",
+    "FakeClient",
+    "FakeClientFactory",
+    "FakeDetailsLimiter",
+    "FakePluginManager",
+    "FakeScheduler",
+    "FakeSettings",
+    "ManagerHarness",
+    "default_snapshot",
+    "make_manager",
+    "make_task",
 ]

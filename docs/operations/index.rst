@@ -6,5 +6,4 @@ Operations
 
    configuration
    cli
-   dashboard
    testing

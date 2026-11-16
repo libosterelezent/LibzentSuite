@@ -6,7 +6,7 @@ OWNER_USER_IDS model (see the migration note in credentials.py).
 Storage: single kv row per concern under the ``access:`` prefix —
 
   access:admins          -> [discord user id, ...]
-  access:mudae_bot_id    -> int
+  access:primary_bot_id    -> int
   access:account:<name>  -> {"is_admin": bool,
                              "prefix_mode": "mention"|"symbol"|"both",
                              "prefix_symbol": str,
@@ -22,15 +22,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .errors import CredentialsError
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from core.credentials import Credentials
+    from database.repositories.kv import KvRepository
 
 LOG = logging.getLogger("libzent.access")
 
 #: kv keys (single source of truth for the row names)
 KEY_ADMINS = "access:admins"
-KEY_MUDAE_ID = "access:mudae_bot_id"
+KEY_PRIMARY_BOT_ID = "access:primary_bot_id"
 
 
 def account_key(name: str) -> str:
@@ -59,7 +65,11 @@ class AccessManager:
     """
 
     def __init__(
-        self, kv: Any, logger: logging.Logger | None = None, *, credentials: Any = None
+        self,
+        kv: KvRepository,
+        logger: logging.Logger | None = None,
+        *,
+        credentials: Credentials | None = None,
     ) -> None:
         self._kv = kv
         self._log = logger or LOG
@@ -214,7 +224,7 @@ class AccessManager:
         (:meth:`prefix_config`) serves every later rebuild."""
         return self._prefix_cache.get(name)
 
-    async def warm_prefix_cache(self, names=None) -> None:
+    async def warm_prefix_cache(self, names: Sequence[str] | None = None) -> None:
         """Load prefix rows for the given accounts (all when None)."""
         if names is None:
             rows = await self._kv.prefix("access:account:") or {}
@@ -253,10 +263,10 @@ class AccessManager:
         self._log.info("account %s prefix -> mode=%s symbol=%r", name, mode, symbol)
         return {"prefix_mode": mode, "prefix_symbol": symbol}
 
-    # ---------------------------------------------------------- mudae id
-    async def mudae_bot_id(self) -> int | None:
-        """DB value first; the env MUDAE_BOT_ID is the fallback."""
-        raw = await self._kv.get(KEY_MUDAE_ID)
+    # ---------------------------------------------------------- primary bot id
+    async def primary_bot_id(self) -> int | None:
+        """DB value first; the env PRIMARY_BOT_ID is the fallback."""
+        raw = await self._kv.get(KEY_PRIMARY_BOT_ID)
         if raw is not None:
             try:
                 return int(raw)
@@ -264,18 +274,18 @@ class AccessManager:
                 pass
         if self._credentials is not None:
             try:
-                return self._credentials.mudae_bot_id
+                return self._credentials.primary_bot_id
             except Exception:
                 return None
         return None
 
-    async def set_mudae_bot_id(self, user_id: int | None) -> None:
+    async def set_primary_bot_id(self, user_id: int | None) -> None:
         if user_id is None:
-            await self._kv.delete(KEY_MUDAE_ID)
-            self._log.info("mudae bot id cleared (env fallback applies)")
+            await self._kv.delete(KEY_PRIMARY_BOT_ID)
+            self._log.info("primary bot id cleared (env fallback applies)")
             return
-        await self._kv.set(KEY_MUDAE_ID, int(user_id))
-        self._log.info("mudae bot id set to %d", int(user_id))
+        await self._kv.set(KEY_PRIMARY_BOT_ID, int(user_id))
+        self._log.info("primary bot id set to %d", int(user_id))
 
     # ---------------------------------------------------------- overview
     async def all_account_rows(self) -> dict[str, dict[str, Any]]:
@@ -350,7 +360,7 @@ class AccessManager:
 __all__ = [
     "DEFAULT_ACCOUNT_ROW",
     "KEY_ADMINS",
-    "KEY_MUDAE_ID",
+    "KEY_PRIMARY_BOT_ID",
     "PREFIX_MODES",
     "AccessManager",
     "account_key",

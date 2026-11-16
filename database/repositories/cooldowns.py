@@ -25,6 +25,7 @@ class CooldownRepository(BaseRepository):
         account: str,
         plugin: str,
         cooldown_key: str,
+        profile: str = "",
         started_at: float,
         expires_at: float,
         source: str = "",
@@ -46,11 +47,11 @@ class CooldownRepository(BaseRepository):
             ) from exc
         async with self._tx(f"upsert cooldown {account}/{plugin}/{cooldown_key}") as conn:
             await conn.execute(
-                """INSERT INTO cooldowns (account, plugin, cooldown_key,
+                """INSERT INTO cooldowns (account, plugin, profile, cooldown_key,
                      started_at, expires_at, source, reason, metadata_json,
                      created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(account, plugin, cooldown_key) DO UPDATE SET
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(account, plugin, profile, cooldown_key) DO UPDATE SET
                      started_at=excluded.started_at,
                      expires_at=excluded.expires_at,
                      source=excluded.source, reason=excluded.reason,
@@ -59,6 +60,7 @@ class CooldownRepository(BaseRepository):
                 (
                     account,
                     plugin,
+                    profile,
                     cooldown_key,
                     float(started_at),
                     float(expires_at),
@@ -71,15 +73,24 @@ class CooldownRepository(BaseRepository):
             )
 
     async def active_for(
-        self, account: str, plugin: str | None = None, now: float | None = None
+        self,
+        account: str,
+        plugin: str | None = None,
+        now: float | None = None,
+        *,
+        profile: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Non-expired cooldowns for an account (optionally one plugin)."""
+        """Non-expired cooldowns for an account (optionally one plugin,
+        optionally one profile — None means every profile)."""
         now = time.time() if now is None else now
         sql = "SELECT * FROM cooldowns WHERE account=? AND expires_at>? ORDER BY expires_at"
-        params: list = [account, now]
+        params: list[str | float] = [account, now]
         if plugin is not None:
             sql = sql.replace("ORDER BY", "AND plugin=? ORDER BY")
             params.append(plugin)
+        if profile is not None:
+            sql = sql.replace("ORDER BY", "AND profile=? ORDER BY")
+            params.append(profile)
         rows = await self._fetch_all(sql, params)
         return [self._row_dict(row) for row in rows]
 
@@ -94,30 +105,39 @@ class CooldownRepository(BaseRepository):
         return [self._row_dict(row) for row in rows]
 
     async def get(
-        self, account: str, plugin: str, cooldown_key: str, now: float | None = None
+        self,
+        account: str,
+        plugin: str,
+        cooldown_key: str,
+        now: float | None = None,
+        *,
+        profile: str = "",
     ) -> dict[str, Any] | None:
         """One cooldown (None when absent or already expired)."""
         now = time.time() if now is None else now
         row = await self._fetch_one(
             """SELECT * FROM cooldowns WHERE account=? AND plugin=?
-               AND cooldown_key=? AND expires_at>?""",
-            (account, plugin, cooldown_key, now),
+               AND profile=? AND cooldown_key=? AND expires_at>?""",
+            (account, plugin, profile, cooldown_key, now),
         )
         return None if row is None else self._row_dict(row)
 
-    async def clear(self, account: str, plugin: str, cooldown_key: str) -> bool:
-        """Remove one cooldown; True when it existed."""
+    async def clear(
+        self, account: str, plugin: str, cooldown_key: str, *, profile: str = ""
+    ) -> bool:
+        """Remove one cooldown (profile-scoped); True when it existed."""
         async with (
-            self._tx(f"clear cooldown {account}/{plugin}/{cooldown_key}") as conn,
+            self._tx(f"clear cooldown {account}/{plugin}/{profile}/{cooldown_key}") as conn,
             conn.execute(
-                "DELETE FROM cooldowns WHERE account=? AND plugin=? AND cooldown_key=?",
-                (account, plugin, cooldown_key),
+                "DELETE FROM cooldowns WHERE account=? AND plugin=? "
+                "AND profile=? AND cooldown_key=?",
+                (account, plugin, profile, cooldown_key),
             ) as cur,
         ):
             return cur.rowcount > 0
 
     async def clear_expired_for(
-        self, account: str, plugin: str, cooldown_key: str, now: float
+        self, account: str, plugin: str, cooldown_key: str, now: float, *, profile: str = ""
     ) -> bool:
         """Delete one cooldown ONLY when still expired at ``now``.
 
@@ -129,8 +149,8 @@ class CooldownRepository(BaseRepository):
             self._tx("lazy clear cooldown") as conn,
             conn.execute(
                 "DELETE FROM cooldowns WHERE account=? AND plugin=? "
-                "AND cooldown_key=? AND expires_at<=?",
-                (account, plugin, cooldown_key, now),
+                "AND profile=? AND cooldown_key=? AND expires_at<=?",
+                (account, plugin, profile, cooldown_key, now),
             ) as cur,
         ):
             return cur.rowcount > 0
@@ -166,6 +186,22 @@ class CooldownRepository(BaseRepository):
         )
         out["metadata"] = meta if isinstance(meta, dict) else {}
         return out
+
+    async def delete_all_for_accounts(self, accounts: list[str]) -> int:
+        """Sweep every cooldown of the named accounts (orphan recovery).
+
+        The boot restore's backstop: rows a write-racing-deletion left
+        behind for accounts that no longer exist.
+        """
+        if not accounts:
+            return 0
+        marks = ",".join("?" * len(accounts))
+        async with self._tx("sweep orphan cooldowns") as conn:
+            cur = await conn.execute(
+                f"DELETE FROM cooldowns WHERE account IN ({marks})",  # nosec B608 — placeholder marks only
+                tuple(accounts),
+            )
+            return cur.rowcount
 
 
 __all__ = ["CooldownRepository"]

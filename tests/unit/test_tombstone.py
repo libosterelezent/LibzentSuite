@@ -14,7 +14,6 @@ import unittest
 import weakref
 
 from core.event_bus import AccountConnected
-
 from tests.unit.helpers import make_manager
 
 NAME = "churn"
@@ -80,7 +79,7 @@ class TombstoneChurnTests(unittest.IsolatedAsyncioTestCase):
             name = f"churn{i}"
             await h.manager.add_account(name)
             # exactly what PluginManager._context creates per activation
-            for plugin in ("roll", "soulcopy"):
+            for plugin in ("exporter", "roll"):
                 logging.getLogger(f"libzent.{name}.{plugin}")
             logging.getLogger(f"libzent.adapter.{name}")
             await h.manager._credential_service.store(name, "tok")
@@ -105,12 +104,12 @@ class TombstoneChurnTests(unittest.IsolatedAsyncioTestCase):
             await h.manager.add_account(name)
             await h.manager._credential_service.store(name, "tok")
             await h.manager.start(name)
-        logging.getLogger(f"libzent.alpha.roll").info("alive")
+        logging.getLogger("libzent.alpha.roll").info("alive")
         await h.manager.stop("beta")
         await h.manager.remove_account("beta")
         # alpha's logger still works and is still registered
-        logger = logging.getLogger(f"libzent.alpha.roll")
-        self.assertIn(f"libzent.alpha.roll",
+        logger = logging.getLogger("libzent.alpha.roll")
+        self.assertIn("libzent.alpha.roll",
                       logging.Logger.manager.loggerDict)
         logger.info("still alive after beta removal")
         await h.manager.stop_all()

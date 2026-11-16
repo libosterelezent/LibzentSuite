@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.event_bus import EventBus, MessageReceived, PluginEnabledChanged
 from core.errors import PluginError, SettingsValidationError
+from core.event_bus import EventBus, MessageReceived, PluginEnabledChanged
 from core.plugin_manager import PluginLoader, PluginManager
 from core.settings_manager import SettingsManager
 
@@ -138,7 +138,6 @@ class TestLoader(unittest.TestCase):
 
 class TestLifecycle(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        import sys
         self.spy_module = None
 
     async def test_attach_activate_deactivate_order(self) -> None:
@@ -383,7 +382,7 @@ class TestLoaderHardening(unittest.TestCase):
             self.assertIn("import-time death", str(ctx.exception))
             # no half-executed module residue under any synthetic prefix
             residue = [m for m in sys.modules
-                       if m.startswith("_mudae_plugroot") and "kaboom" in m]
+                       if m.startswith("_plugin_root") and "kaboom" in m]
             self.assertEqual(residue, [])
 
     def test_rescan_purges_previous_synthetic_modules(self) -> None:
@@ -391,10 +390,10 @@ class TestLoaderHardening(unittest.TestCase):
         loader.discover()
         stale_parent = loader._parent_names[0]
         stale_cls = loader.record("spy").cls
-        baseline = len([m for m in sys.modules if m.startswith("_mudae_plugroot")])
+        baseline = len([m for m in sys.modules if m.startswith("_plugin_root")])
         loader.discover()
         loader.discover()
-        current = [m for m in sys.modules if m.startswith("_mudae_plugroot")]
+        current = [m for m in sys.modules if m.startswith("_plugin_root")]
         self.assertLessEqual(len(current), baseline)  # bounded, not accumulating
         self.assertNotIn(stale_parent, sys.modules)
         self.assertNotIn(stale_cls.__module__, sys.modules)

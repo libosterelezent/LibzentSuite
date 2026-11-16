@@ -20,12 +20,12 @@ DB-backed store for
   * per-account COMMAND PERMISSIONS (the Discord user ids allowed to
     invoke that one account's self-commands),
   * per-account ADMIN flags and PREFIX configurations,
-  * the framework-level ``MUDAE_BOT_ID`` setting (DB value with the env
+  * the framework-level ``PRIMARY_BOT_ID`` setting (DB value with the env
     value as a read-only fallback),
 
 and :class:`FrameworkCredentials` is the DB-first view handed to plugin
 services as ``services.credentials`` (plugins keep reading
-``.owner_user_ids`` / ``.mudae_bot_id``; the values now come from the
+``.owner_user_ids`` / ``.primary_bot_id``; the values now come from the
 admin-managed store, falling back to env when the DB value is unset).
 """
 
@@ -51,7 +51,6 @@ TOKEN_PREFIX = "DISCORD_TOKEN_"
 
 #: guards the one-time unrecognized-REMOTE_CONTROL warning (module logger,
 #: once per process — the gate itself stays non-raising on every read)
-_remote_control_warned = False
 
 
 class Credentials:
@@ -60,7 +59,7 @@ class Credentials:
     def __init__(self, values: Mapping[str, str], path: Path | None = None) -> None:
         self._values: dict[str, str] = {k: v for k, v in values.items() if v is not None}
         self._path = path
-        self._owner_ids: frozenset | None = None  # parsed once, lazily
+        self._owner_ids: frozenset[int] | None = None  # parsed once, lazily
 
     # ------------------------------------------------------------------ load
     @staticmethod
@@ -155,23 +154,23 @@ class Credentials:
 
     # ------------------------------------------------------------- aggregates
     @property
-    def mudae_bot_id(self) -> int:
-        """Mudae bot user id (env value — LEGACY fallback).
+    def primary_bot_id(self) -> int:
+        """the primary bot bot user id (env value — LEGACY fallback).
 
         The authoritative source is the admin-panel setting served by
-        :class:`AccessManager.mudae_bot_id` (DB first, this env value as
+        :class:`AccessManager.primary_bot_id` (DB first, this env value as
         the fallback when the DB value is unset). Plugins never read this
         property directly — they see the DB-first view through
         ``services.credentials`` (:class:`FrameworkCredentials`).
         """
-        raw = self.require("MUDAE_BOT_ID")
+        raw = self.require("PRIMARY_BOT_ID")
         try:
             return int(raw)
         except ValueError as exc:
             # truncated repr: the raw value can be arbitrarily long and
             # must not be echoed wholesale into logs/errors
             shown = raw if len(raw) <= 40 else raw[:37] + "..."
-            raise CredentialsError(f"MUDAE_BOT_ID is not an integer: {shown!r}") from exc
+            raise CredentialsError(f"PRIMARY_BOT_ID is not an integer: {shown!r}") from exc
 
     @property
     def owner_user_ids(self) -> frozenset[int]:
@@ -233,33 +232,6 @@ class Credentials:
         OWNER_USER_IDS for the triggers to pass the owner check.
         """
         return (self._values.get("SELF_COMMAND_PREFIX") or "").strip()
-
-    @property
-    def remote_control_enabled(self) -> bool:
-        """Mention-prefix management from Discord (REMOTE_CONTROL=0 opts out).
-
-        FAIL CLOSED: an absent key keeps the documented default (on);
-        a present-but-empty or unrecognized value DISABLES the gate —
-        the old parse failed OPEN (anything unrecognized meant enabled).
-        """
-        global _remote_control_warned
-        raw = self._values.get("REMOTE_CONTROL")
-        if raw is None:
-            return True  # documented default: enabled
-        value = raw.strip().lower()
-        if value in ("1", "true", "yes", "on"):
-            return True
-        if value in ("0", "false", "no", "off", ""):
-            return False
-        if not _remote_control_warned:
-            _remote_control_warned = True
-            LOG.warning(
-                "REMOTE_CONTROL=%r is not a recognized value (expected "
-                "1/true/yes/on or 0/false/no/off) — remote control is "
-                "DISABLED (fail closed)",
-                raw[:40],
-            )
-        return False
 
     # ---------------------------------------------------------------- display
     def redacted(self) -> dict[str, str]:

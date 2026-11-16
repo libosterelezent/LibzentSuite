@@ -67,6 +67,14 @@ from .cache import DiscordCache, resolve_dm_channel
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from core.cooldowns import CooldownService
+    from core.plugin_state import PluginStateService
+    from core.workspace.signals import SignalOutbox
+    from database.plugin_data import PluginDataStore
+    from database.repositories.account_plugin_profiles import (
+        AccountPluginProfilesRepository,
+    )
+
 LOG = logging.getLogger("libzent.services")
 
 
@@ -228,7 +236,7 @@ class MessageWaiterRegistry:
 
     def __init__(self, bus: EventBus) -> None:
         self._by_account: dict[str, list[Callable[[MessageReceived], None]]] = {}
-        self._unsub = bus.subscribe(MessageReceived, self._on_message)
+        self._unsub: Callable[[], None] | None = bus.subscribe(MessageReceived, self._on_message)
 
     def _on_message(self, event: Event) -> None:
         if not isinstance(event, MessageReceived):
@@ -296,9 +304,11 @@ class AccountPluginServices:
         waiter_registry: MessageWaiterRegistry | None = None,
         client_getter: Callable[[], Any] | None = None,
         api_cache_repo: Any = None,
-        cooldowns: Any = None,
-        plugin_state: Any = None,
-        plugin_data: Any = None,
+        cooldowns: CooldownService | None = None,
+        plugin_state: PluginStateService | None = None,
+        plugin_data: PluginDataStore | None = None,
+        signals: SignalOutbox | None = None,  # core.workspace.signals (W4)
+        profile_store: AccountPluginProfilesRepository | None = None,  # P3 profiles
     ) -> None:
         self._account = account
         self._plugin = plugin
@@ -322,6 +332,8 @@ class AccountPluginServices:
         #: PHASE 10 (B3): shared PluginDataStore (None = data API
         #: unavailable here); exposes the pair+scope-scoped data_* API
         self._plugin_data = plugin_data
+        self._signals = signals
+        self._profile_store = profile_store
         #: bounded wait for a task completion ack (seconds; configurable)
         self.task_ack_timeout: float = 30.0
 
@@ -343,7 +355,7 @@ class AccountPluginServices:
     def account_username(self) -> str | None:
         """The account's own Discord username (None offline/pre-connect).
 
-        Used to attribute Mudae's per-user limit messages ("**name**,
+        Used to attribute the primary bot's per-user limit messages ("**name**,
         the roulette is limited...") — a shared channel must not park OUR
         rolling on ANOTHER user's limit. Read defensively through the
         adapter's underlying library client.
@@ -446,7 +458,7 @@ class AccountPluginServices:
         )
         await self._acks.wait_for_task(task.id, self.task_ack_timeout)
 
-    async def fetch_user(self, user_id: int):
+    async def fetch_user(self, user_id: int) -> Any:
         """Resolve a user, cached per account in the database.
 
         Resolution order: the account's persistent api_cache 'user' row ->
@@ -490,7 +502,7 @@ class AccountPluginServices:
         return user
 
     # ------------------------------------------------------------- cooldowns
-    def _require_cooldowns(self) -> Any:
+    def _require_cooldowns(self) -> CooldownService:
         """The shared CooldownService, or a clear error when unwired."""
         if self._cooldowns is None:
             raise PluginError(
@@ -542,7 +554,7 @@ class AccountPluginServices:
         return await self._require_cooldowns().active_for(self._account, plugin=self._plugin)
 
     # ----------------------------------------------------------- plugin state
-    def _require_plugin_state(self) -> Any:
+    def _require_plugin_state(self) -> PluginStateService:
         """The shared PluginStateService, or a clear error when unwired."""
         if self._plugin_state is None:
             raise PluginError(
@@ -568,7 +580,130 @@ class AccountPluginServices:
         return await self._require_plugin_state().delete_pair(self._account, self._plugin, key)
 
     # -------------------------------------------- plugin data (PHASE 10/B3)
-    def _require_plugin_data(self) -> Any:
+
+    # ------------------------------------------------- plugin profiles (P3)
+    # The profile lifecycle is PLUGIN-MANAGED by construction: these
+    # methods carry no account/plugin parameters — every operation is
+    # bound to THIS facade's (account, plugin), so a plugin cannot even
+    # express a cross-scope access. Defaults and validation are the
+    # plugin's own code (its cog commands call these store methods with
+    # values the plugin itself computed and checked); the core never
+    # interprets the settings body.
+    def _require_profiles(self) -> AccountPluginProfilesRepository:
+        """The account-owned profile store, or an honest error unwired."""
+        if self._profile_store is None:
+            raise RuntimeError(f"profile store is not wired for {self._account}/{self._plugin}")
+        return self._profile_store
+
+    async def profile_create(
+        self,
+        name: str,
+        description: str = "",
+        settings: dict[str, Any] | None = None,
+        *,
+        schema_version: int = 1,
+    ) -> dict[str, Any]:
+        """Create THIS plugin's profile on THIS account (opaque body).
+
+        Raises:
+            PluginError: the name already exists in this scope.
+        """
+        from core.api import _account_profile_dict
+        from core.errors import DatabaseError
+
+        try:
+            record = await self._require_profiles().create(
+                self._account,
+                self._plugin,
+                name,
+                description,
+                settings,
+                schema_version=schema_version,
+            )
+        except DatabaseError as exc:
+            raise PluginError(str(exc)) from exc  # the store's duplicate report
+        return _account_profile_dict(record)
+
+    async def profile_get(self, name: str) -> dict[str, Any] | None:
+        """One of THIS scope's profiles (None when absent)."""
+        from core.api import _account_profile_dict
+
+        record = await self._require_profiles().get(self._account, self._plugin, name)
+        return _account_profile_dict(record) if record is not None else None
+
+    async def profile_update(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        settings: dict[str, Any] | None = None,
+        schema_version: int | None = None,
+    ) -> dict[str, Any]:
+        """Update named fields of THIS scope's profile.
+
+        Raises:
+            PluginError: the profile does not exist (update never creates).
+        """
+        from core.api import _account_profile_dict
+
+        updated = await self._require_profiles().update(
+            self._account,
+            self._plugin,
+            name,
+            description=description,
+            settings=settings,
+            schema_version=schema_version,
+        )
+        if updated is None:
+            raise PluginError(f"no profile {name!r} for {self._plugin!r} on {self._account!r}")
+        return _account_profile_dict(updated)
+
+    async def profile_delete(self, name: str) -> bool:
+        """Delete THIS scope's profile; True when it existed.
+
+        A pointer at it clears atomically with the delete.
+        """
+        return await self._require_profiles().delete(self._account, self._plugin, name)
+
+    async def profile_list(self) -> list[dict[str, Any]]:
+        """Every profile of THIS scope (name order)."""
+        from core.api import _account_profile_dict
+
+        records = await self._require_profiles().list_for(self._account, self._plugin)
+        return [_account_profile_dict(r) for r in records]
+
+    async def profile_set_active(self, name: str) -> None:
+        """Point THIS scope at one of ITS profiles (fail-closed)."""
+        store = self._require_profiles()
+        if not await store.exists(self._account, self._plugin, name):
+            raise PluginError(
+                f"cannot activate unknown profile {name!r}"
+                f" for {self._plugin!r} on {self._account!r}"
+            )
+        await store.set_active(self._account, self._plugin, name)
+
+    async def profile_active(self) -> str | None:
+        """THIS scope's active profile name (None when unset)."""
+        return await self._require_profiles().get_active(self._account, self._plugin)
+
+    async def profile_settings(self) -> dict[str, Any] | None:
+        """THE runtime resolution seam (P4): the ACTIVE profile's body.
+
+        The documented task-start pattern — resolve BEFORE the work:
+
+            settings = await ctx.services.profile_settings() or {}
+
+        Returns None when no profile is active (the caller's own
+        defaults apply). Switching the active profile changes what the
+        NEXT resolution returns; running work keeps what it resolved.
+        """
+        name = await self.profile_active()
+        if name is None:
+            return None
+        record = await self._require_profiles().get(self._account, self._plugin, name)
+        return dict(record.settings) if record is not None else None
+
+    def _require_plugin_data(self) -> PluginDataStore:
         """The shared PluginDataStore, or an honest error when unwired."""
         if self._plugin_data is None:
             raise PluginError(
@@ -681,7 +816,8 @@ class AccountPluginServices:
         """
         if not isinstance(idle_timeout, (int, float)) or idle_timeout <= 0:
             raise AccountError(f"collect_messages idle_timeout must be > 0, got {idle_timeout!r}")
-        queue: asyncio.Queue[MessageReceived] = asyncio.Queue()
+        # MessageReceived | None: the teardown sentinel wakes parked getters
+        queue: asyncio.Queue[MessageReceived | None] = asyncio.Queue()
         failure: list[BaseException] = []
 
         def _handler(event: Event) -> None:
@@ -719,6 +855,8 @@ class AccountPluginServices:
                     break
                 if failure:
                     break  # woken by the failure sentinel, not a match
+                if event is None:
+                    break  # the sentinel itself (its failure flag races us)
                 collected.append(event)
             if failure:
                 exc = failure[0]
@@ -736,6 +874,22 @@ class AccountPluginServices:
         """Fire-and-forget publish on the shared bus (safe from sync code in a loop)."""
         self._bus.publish_nowait(event)
 
+    async def emit_signal(self, name: str, payload: dict[str, Any] | None = None) -> str:
+        """Emit a workspace chain signal (W4, decision 12).
+
+        DURABLE BEFORE RETURN: the outbox row persists first, then this
+        acknowledges with the stable ``signal_id`` (consumers dedupe by
+        it). The name is BARE — ``<plugin>:<name>`` namespacing is
+        added at consumption, so one plugin cannot spoof another's
+        signal. Unwired stacks raise honestly (a lost trigger is worse
+        than a loud error)."""
+        if self._signals is None:
+            raise RuntimeError(
+                f"signal emission is not configured (plugin {self._plugin!r}"
+                " on this stack) — chain triggers need the outbox"
+            )
+        return await self._signals.accept(self._account, self._plugin, name, payload or {})
+
     def validate_channel(self, channel_id: int) -> None:
         """Raise :class:`core.errors.TargetGone` when the channel is unusable."""
         self._cache.validate_channel(int(channel_id))
@@ -747,7 +901,7 @@ class AccountPluginServices:
     # ------------------------------------------------------------ properties
     @property
     def credentials(self) -> Any:
-        """Fleet credentials (mudae id, owner ids) — never hardcoded."""
+        """Fleet credentials (primary bot id, owner ids) — never hardcoded."""
         return self._credentials
 
     @property

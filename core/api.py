@@ -1,11 +1,12 @@
 """CoreAPI — the ONE application surface both interfaces call (spec §13/§14).
 
-CLI and dashboard are thin wrappers over these methods and NOTHING else, so
-they can never drift apart in capability (parity by construction). This
-facade is intentionally duck-typed over the managers: it stores whatever it
-is given and delegates. Managers are constructed by core/bootstrap.py.
+The CLI (and the future wired interfaces) are thin wrappers over these
+methods, so they can never drift apart in capability (parity by
+construction). This facade is intentionally duck-typed over the managers:
+it stores whatever it is given and delegates. Managers are constructed by
+core/bootstrap.py.
 
-Method map (grouped like the dashboard navigation, spec §12):
+Method map (grouped by area, spec §12):
   status            overview: accounts (+credential status, cooldown count)
                     + limits + tasks + warnings
   accounts_*        list/add/remove/info/enable/start/stop/emergency-stop
@@ -34,10 +35,6 @@ Method map (grouped like the dashboard navigation, spec §12):
                       infrastructure — bookkeeping only, NO effect on which
                     plugins an account runs; capability assignment lives
                     in accounts_plugin_*)
-  groups_*          sync groups: list/get/create/update/delete + membership
-                    (add/remove account, set/clear account) + snapshot;
-                    membership persists through SyncGroupManager and the
-                    runtime pacing scope through RateLimitManager
   ratelimit_*       policies/set/clear/effective/stats/warnings/set-floor
                     (+lane; every mutation persists through the db repos)
   tasks_*           list/cancel/cancel-matching/history
@@ -62,12 +59,10 @@ import asyncio
 import inspect
 import logging
 import time as _time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from . import plugin_scopes
-from .dashboard_ui.context import ActionContext, CheckContext
-from .dashboard_ui.errors import UIError
-from .errors import DatabaseError, PluginError, SyncGroupError
+from .errors import DatabaseError, PluginError
 from .rate_limit_manager import (
     KV_FLOOR_KEY,
     KV_LANE_KEY,
@@ -76,30 +71,72 @@ from .rate_limit_manager import (
 from .rate_limit_manager.policies import parse_scope
 
 if TYPE_CHECKING:  # duck-typed at runtime — no manager imports here
+    from collections.abc import Coroutine
+
+    from adapters.simulator.runner import SimulationRunner
+    from database.models import AccountPluginProfileRecord
+    from database.plugin_data import PluginDataStore
+    from database.repositories.account_plugin_profiles import (
+        AccountPluginProfilesRepository,
+    )
+    from database.repositories.account_plugins import AccountPluginsRepository
+    from database.repositories.plugin_profiles import PluginProfilesRepository
+
+    from .access_manager import AccessManager
     from .account_manager import AccountManager
     from .audit import AuditRecorder
     from .cooldowns import CooldownService
-    from .credential_service import CredentialService
+    from .credential_service import CredentialService, EnvImportReport
     from .credentials import Credentials
     from .logging_service import LogService
     from .plugin_manager import PluginManager
     from .rate_limit_manager import RateLimitManager
-    from .settings_manager import SettingsManager
+    from .settings_manager import Setting, SettingsManager
     from .task_scheduler import TaskScheduler
+    from .workspace.service import WorkspaceService
 
 LOG = logging.getLogger("libzent.api")
+
+T = TypeVar("T")
 
 #: back-compat alias for the kv key persisting the send-lane configuration
 #: (the canonical constants live in core.rate_limit_manager)
 LANE_KV_KEY = KV_LANE_KEY
 
 
+def _validate_profile_name(name: str) -> None:
+    """The one profile-name check every account-owned profile entry shares."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("profile name must be a non-empty string")
+
+
+def _account_profile_dict(record: AccountPluginProfileRecord) -> dict[str, Any]:
+    """The JSON-safe shape every account-profile surface returns."""
+    return {
+        "id": record.id,
+        "account": record.account,
+        "plugin": record.plugin,
+        "name": record.name,
+        "description": record.description,
+        "settings": record.settings,
+        "schema_version": record.schema_version,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+    }
+
+
+@overload
+async def _resolved(outcome: Coroutine[Any, Any, T]) -> T: ...
+@overload
+async def _resolved(outcome: T) -> T: ...
 async def _resolved(outcome: Any) -> Any:
     """Await manager results when the manager went async (migration shim).
 
     Same tolerance pattern AccountManager uses for its collaborators: a
     method may return a plain value today and a coroutine after the async
-    persistence switch — both shapes work through here.
+    persistence switch — both shapes work through here. The overloads keep
+    the caller's declared type: coroutines unwrap to their result type,
+    plain values pass through unchanged.
     """
     if inspect.iscoroutine(outcome):
         return await outcome
@@ -132,15 +169,14 @@ class ControlAPI:
         scheduler: TaskScheduler,
         logs: LogService,
         audit: AuditRecorder | None = None,
-        simulation: Any = None,  # adapters.simulator.runner.SimulationRunner
+        simulation: SimulationRunner | None = None,
         credentials: Credentials | None = None,
         database: Any = None,
         credentials_svc: CredentialService | None = None,
         cooldowns: CooldownService | None = None,
-        sync_groups: Any = None,
-        fleet: Any = None,  # core.fleet.FleetService (PHASE 9)
-        plugin_data: Any = None,  # database.plugin_data.PluginDataStore (PHASE 10)
-        access: Any = None,  # core.access_manager.AccessManager
+        workspaces: WorkspaceService | None = None,  # (W3)
+        plugin_data: PluginDataStore | None = None,  # (PHASE 10)
+        access: AccessManager | None = None,
         started_at: float = 0.0,
         reconcile_interval_s: float = 30.0,
     ) -> None:
@@ -156,8 +192,7 @@ class ControlAPI:
         self._database = database
         self._credentials_svc = credentials_svc
         self._cooldowns = cooldowns
-        self._sync_groups = sync_groups
-        self._fleet = fleet
+        self._workspaces = workspaces
         self._plugin_data = plugin_data
         self._access = access
         # NOTE: started_at is accepted (core/bootstrap passes it) but the
@@ -217,10 +252,8 @@ class ControlAPI:
 
     async def _enrich_accounts(self, accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Add 'credential' + 'cooldowns' to manager status dicts (in place)."""
-        if not isinstance(accounts, list):
-            return accounts
         for account in accounts:
-            if not isinstance(account, dict) or not account.get("name"):
+            if not account.get("name"):
                 continue
             name = account["name"]
             if "credential" not in account:
@@ -262,7 +295,7 @@ class ControlAPI:
     async def accounts_add(self, payload: dict[str, Any], surface: str = "api") -> dict[str, Any]:
         """Register + persist an account; optionally store its credential.
 
-        payload: {name (required), token_ref?, sync_group?, enabled?,
+        payload: {name (required), token_ref?, workspace?, enabled?,
                   plugins?: [names], credential?: str}. Unknown keys are
         rejected (typo trap) — ``profiles`` is no longer accepted: profile
         assignment stopped controlling account capabilities, so the key is
@@ -274,9 +307,12 @@ class ControlAPI:
         performs NO network activity (saving is always separate from
         connecting, spec §16).
         """
-        if not isinstance(payload, dict) or not payload.get("name"):
-            raise ValueError("account payload needs at least {'name': ...}")
-        allowed = {"name", "token_ref", "sync_group", "enabled", "plugins", "credential"}
+        if not isinstance(payload, dict):
+            raise ValueError("account payload needs a dict")
+        name = payload.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("account payload needs at least {'name': <non-empty str>}")
+        allowed = {"name", "token_ref", "workspace", "enabled", "plugins", "credential"}
         unknown = set(payload) - allowed
         if unknown:
             raise ValueError(f"unknown account payload keys: {sorted(unknown)}")
@@ -298,24 +334,27 @@ class ControlAPI:
                 )
         out = await _resolved(
             self._accounts.add_account(
-                payload["name"],
+                name,
                 token_ref=payload.get("token_ref"),
                 enabled=enabled,
-                sync_group=payload.get("sync_group"),
+                workspace=payload.get("workspace"),
                 plugins=plugins or None,
             )
         )
-        name = out.get("name", payload["name"]) if isinstance(out, dict) else payload["name"]
-        self._audit_mgmt(name, "mgmt:account.created", surface)
+        echoed = out.get("name") if isinstance(out, dict) else None
+        account_name = echoed if isinstance(echoed, str) and echoed else name
+        self._audit_mgmt(account_name, "mgmt:account.created", surface)
         if credential is not None:
             # TOCTOU: an interleaved remove_account between the add above
             # and the store below would re-create an orphan credential row
             # for a dead account — re-check the registration first
-            await _resolved(self._accounts.get(name))  # AccountError if gone
-            await self._credentials_svc.store(name, credential)
-            self._audit_mgmt(name, "mgmt:credential.stored", surface)
+            await _resolved(self._accounts.get(account_name))  # AccountError if gone
+            svc = self._credentials_svc
+            assert svc is not None  # the fail-fast check above raised otherwise
+            await svc.store(account_name, credential)
+            self._audit_mgmt(account_name, "mgmt:credential.stored", surface)
             if isinstance(out, dict):
-                out["credential"] = self._credential_state(name)
+                out["credential"] = self._credential_state(account_name)
         return out
 
     async def accounts_remove(self, name: str, surface: str = "api") -> dict[str, Any]:
@@ -337,6 +376,15 @@ class ControlAPI:
             self._audit_mgmt(name, "mgmt:account.remove-aborted", surface, extra="recreated=true")
             return out
         self._audit_mgmt(name, "mgmt:account.removed", surface)
+        # Workspace cleanup (decision 18's cross-store workflow): the
+        # account's channel rows die, live workspace tasks cancel, and
+        # the separate documents store drops the account — guarded, so
+        # an unwired workspace service never fails the removal cascade.
+        if self._workspaces is not None:
+            try:
+                await self._workspaces.forget_account(name)
+            except Exception as exc:
+                LOG.warning("workspace cleanup for %s failed: %s", name, exc)
         # Access row cascade: clear the admin/perms/prefix row so the
         # Admin page doesn't show deleted accounts
         access = getattr(self, "_access", None)
@@ -477,16 +525,16 @@ class ControlAPI:
                 return sorted(set(names() or []))
             return sorted(
                 {
-                    m.get("name")
+                    name
                     for m in self._plugins.manifests()
-                    if isinstance(m, dict) and m.get("name")
+                    if isinstance(m, dict) and isinstance((name := m.get("name")), str) and name
                 }
             )
         except Exception:
             LOG.exception("could not list discovered plugins")
             return []
 
-    def _plugin_schema(self, plugin: str) -> tuple:
+    def _plugin_schema(self, plugin: str) -> tuple[Setting, ...]:
         """Setting schema of one plugin, duck-typed over the manager.
 
         Prefers the plugin manager's ``_schema_for`` (the SAME source the
@@ -556,20 +604,29 @@ class ControlAPI:
     # bindings. Persistence is schema-agnostic; THIS layer validates
     # settings against the plugin's Setting schema (plugin_profiles_*)
     # and enforces "binding requires assignment" (accounts_plugin_profile).
-    def _profile_repo(self) -> Any:
+    def _profile_repo(self) -> PluginProfilesRepository | None:
         """PluginProfilesRepository, or None on stacks without a database."""
         return (
             getattr(self._database, "plugin_profiles", None) if self._database is not None else None
         )
 
-    def _require_profile_repo(self) -> Any:
+    def _require_profile_repo(self) -> PluginProfilesRepository:
         """Honest failure on stacks built without profile storage."""
         repo = self._profile_repo()
         if repo is None:
             raise RuntimeError("plugin profiles are not configured on this api")
         return repo
 
-    def _binding_repo(self) -> Any:
+    def _account_profile_repo(self) -> AccountPluginProfilesRepository:
+        """The account-owned profile store (P2); honest error unwired."""
+        repo: AccountPluginProfilesRepository | None = getattr(
+            self._database, "account_plugin_profiles", None
+        )
+        if repo is None:
+            raise RuntimeError("account plugin profiles are not configured on this api")
+        return repo
+
+    def _binding_repo(self) -> AccountPluginsRepository | None:
         """AccountPluginsRepository (bindings), or None without a database."""
         return (
             getattr(self._database, "account_plugins", None) if self._database is not None else None
@@ -585,6 +642,171 @@ class ControlAPI:
         if repo is None:
             return []
         return [record.to_dict() for record in await _resolved(repo.list(plugin))]
+
+    # ------------------------------------ account-owned profiles (P2, v12)
+    async def account_plugin_profiles(self, account: str, plugin: str) -> list[dict[str, Any]]:
+        """The account's profile INSTANCES for one plugin (name order).
+
+        The two-level model's execution layer: each row is owned by the
+        full (account, plugin, name) triple; ``settings`` is opaque —
+        the plugin owns its schema (schema_version travels with it).
+        """
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        repo = self._account_profile_repo()
+        records = await _resolved(repo.list_for(account, plugin))
+        return [_account_profile_dict(r) for r in records]
+
+    async def account_plugin_profile_create(
+        self,
+        account: str,
+        plugin: str,
+        name: str,
+        description: str = "",
+        settings: dict[str, Any] | None = None,
+        schema_version: int = 1,
+        surface: str = "api",
+    ) -> dict[str, Any]:
+        """Create one account-owned profile instance.
+
+        Raises:
+            ValueError: unknown account/plugin, or a non-string/empty name.
+            DatabaseError: the (account, plugin, name) triple exists.
+        """
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        _validate_profile_name(name)
+        repo = self._account_profile_repo()
+        record = await _resolved(
+            repo.create(account, plugin, name, description, settings, schema_version=schema_version)
+        )
+        self._audit_mgmt(
+            account,
+            "mgmt:account_plugin_profile.created",
+            surface,
+            extra=f"plugin={plugin} profile={name} v{schema_version}",
+        )
+        return _account_profile_dict(record)
+
+    async def account_plugin_profile_get(
+        self, account: str, plugin: str, name: str
+    ) -> dict[str, Any] | None:
+        """One profile instance (None when the triple does not exist)."""
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        repo = self._account_profile_repo()
+        record = await _resolved(repo.get(account, plugin, name))
+        return _account_profile_dict(record) if record is not None else None
+
+    async def account_plugin_profile_update(
+        self,
+        account: str,
+        plugin: str,
+        name: str,
+        *,
+        description: str | None = None,
+        settings: dict[str, Any] | None = None,
+        schema_version: int | None = None,
+        surface: str = "api",
+    ) -> dict[str, Any]:
+        """Update named fields of the account's profile (None keeps them).
+
+        Raises:
+            ValueError: unknown account/plugin, or bad name.
+            KeyError: the (account, plugin, name) triple does not exist.
+        """
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        _validate_profile_name(name)
+        repo = self._account_profile_repo()
+        updated = await _resolved(
+            repo.update(
+                account,
+                plugin,
+                name,
+                description=description,
+                settings=settings,
+                schema_version=schema_version,
+            )
+        )
+        if updated is None:
+            raise KeyError(f"no profile {name!r} for {plugin!r} on {account!r}")
+        self._audit_mgmt(
+            account,
+            "mgmt:account_plugin_profile.updated",
+            surface,
+            extra=f"plugin={plugin} profile={name}",
+        )
+        return _account_profile_dict(updated)
+
+    async def account_plugin_profile_delete(
+        self, account: str, plugin: str, name: str, surface: str = "api"
+    ) -> dict[str, Any]:
+        """Delete the account's exact profile; ``existed`` says whether it did.
+
+        Raises:
+            ValueError: unknown account/plugin, or bad name.
+        """
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        _validate_profile_name(name)
+        repo = self._account_profile_repo()
+        existed = await _resolved(repo.delete(account, plugin, name))
+        self._audit_mgmt(
+            account,
+            "mgmt:account_plugin_profile.deleted",
+            surface,
+            extra=f"plugin={plugin} profile={name} existed={existed}",
+        )
+        return {"account": account, "plugin": plugin, "profile": name, "existed": existed}
+
+    async def account_plugin_profile_set_active(
+        self, account: str, plugin: str, name: str, surface: str = "api"
+    ) -> dict[str, Any]:
+        """Activate one of the account's profiles (fail-closed).
+
+        Raises:
+            ValueError: unknown account/plugin, bad name, or the profile
+                does not exist in this scope.
+        """
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        _validate_profile_name(name)
+        repo = self._account_profile_repo()
+        if not await _resolved(repo.exists(account, plugin, name)):
+            raise ValueError(f"no profile {name!r} for {plugin!r} on {account!r}")
+        await _resolved(repo.set_active(account, plugin, name))
+        self._audit_mgmt(
+            account,
+            "mgmt:account_plugin_profile.activated",
+            surface,
+            extra=f"plugin={plugin} profile={name}",
+        )
+        return {"account": account, "plugin": plugin, "active": name}
+
+    async def account_plugin_profile_active(self, account: str, plugin: str) -> dict[str, Any]:
+        """The scope's active profile name (``active`` is None when unset)."""
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        repo = self._account_profile_repo()
+        name = await _resolved(repo.get_active(account, plugin))
+        return {"account": account, "plugin": plugin, "active": name}
+
+    async def account_plugin_profile_clear_active(
+        self, account: str, plugin: str, surface: str = "api"
+    ) -> dict[str, Any]:
+        """Drop the scope's active pointer (fail-open to no profile)."""
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        repo = self._account_profile_repo()
+        existed = await _resolved(repo.clear_active(account, plugin))
+        self._audit_mgmt(
+            account,
+            "mgmt:account_plugin_profile.deactivated",
+            surface,
+            extra=f"plugin={plugin} existed={existed}",
+        )
+        return {"account": account, "plugin": plugin, "cleared": existed}
 
     async def plugin_profile_create(
         self,
@@ -739,7 +961,9 @@ class ControlAPI:
                 raise ValueError(
                     f"unknown profile {profile!r} for plugin {plugin!r} (known: {known})"
                 )
-        await self._binding_repo().set_profile(account, plugin, profile)
+        binding_repo = self._binding_repo()
+        assert binding_repo is not None  # the require path above raised
+        await binding_repo.set_profile(account, plugin, profile)
         self._set_account_plugin_profile(account, plugin, profile)
         await self._refresh_live_settings(account, plugin)
         self._audit_mgmt(
@@ -839,7 +1063,7 @@ class ControlAPI:
             return []
 
     # -------------------------------------------------- plugin data (PHASE 10, B3)
-    def _require_plugin_data(self) -> Any:
+    def _require_plugin_data(self) -> PluginDataStore:
         """The shared PluginDataStore, or an honest error."""
         if self._plugin_data is None:
             raise RuntimeError("plugin-data store is not configured on this api")
@@ -1040,7 +1264,7 @@ class ControlAPI:
 
     async def credentials_import_env(
         self, overwrite: bool = False, surface: str = "api"
-    ) -> dict[str, Any]:
+    ) -> EnvImportReport:
         """MIGRATION-ONLY: explicit one-shot import of legacy .env tokens.
 
         Reads each registered account's ``DISCORD_TOKEN_<NAME>`` value from
@@ -1120,8 +1344,9 @@ class ControlAPI:
             names: list[str] = [account]
         else:
             names = [
-                row.get("name")
+                name
                 for row in await self._accounts.accounts()
+                if isinstance((name := row.get("name")), str)
                 if isinstance(row, dict) and row.get("name")
             ]
         now = _time.time()
@@ -1200,9 +1425,7 @@ class ControlAPI:
         # set yet must stay reloadable; the manager re-scans and rejects
         # genuinely unknown names itself
         try:
-            out = self._plugins.reload_plugin(plugin)
-            if inspect.iscoroutine(out):
-                out = await out
+            out = await self._plugins.reload_plugin(plugin)
         except PluginError as exc:
             if str(exc).startswith("unknown plugin"):
                 raise ValueError(f"unknown plugin {plugin!r}") from exc
@@ -1213,9 +1436,7 @@ class ControlAPI:
     async def plugins_unload(self, plugin: str, surface: str = "api") -> dict[str, Any]:
         """Unload a plugin (detach everywhere, unregister UI; assignments
         stay in the DB so reload restores them)."""
-        out = self._plugins.unload_plugin(plugin)
-        if inspect.iscoroutine(out):
-            out = await out
+        out = await self._plugins.unload_plugin(plugin)
         self._audit_mgmt("system", "mgmt:plugin.unloaded", surface, extra=f"plugin={plugin}")
         return out
 
@@ -1269,471 +1490,260 @@ class ControlAPI:
         }
 
     # ------------------------------------------------------------ sync groups
-    async def groups_list(self) -> list[dict[str, Any]]:
-        """Every sync group with its member count (sorted by name)."""
-        if self._sync_groups is None:
+    # ----------------------------------------------------------- workspaces
+    async def workspaces_list(self) -> list[dict[str, Any]]:
+        """Every workspace with its member count (sorted by name)."""
+        if self._workspaces is None:
             return []
-        return await _resolved(self._sync_groups.list_groups())
+        return await _resolved(self._workspaces.workspaces())
 
-    async def groups_get(self, group: Any) -> dict[str, Any]:
-        """One group by id or name (SyncGroupError when unknown)."""
-        self._require_groups()
-        out = await _resolved(self._sync_groups.get_group(group))
+    async def workspaces_get(self, workspace: str) -> dict[str, Any]:
+        """One workspace: state + members (RuntimeError when unwired)."""
+        ws = self._require_workspaces()
+        out = await ws.workspace(str(workspace))
         if out is None:
-            raise SyncGroupError(f"unknown sync group {group!r}")
+            raise ValueError(f"unknown workspace {workspace!r}")
         return out
 
-    async def groups_create(self, payload: dict[str, Any], surface: str = "api") -> dict[str, Any]:
-        """Create a group (may have zero members).
-
-        payload: {name (required), description?, enabled?}. Unknown keys are
-        rejected (typo trap, same convention as accounts_add).
-        """
-        self._require_groups()
-        if not isinstance(payload, dict) or not payload.get("name"):
-            raise ValueError("group payload needs at least {'name': ...}")
-        allowed = {"name", "description", "enabled"}
-        unknown = set(payload) - allowed
-        if unknown:
-            raise ValueError(f"unknown group payload keys: {sorted(unknown)}")
-        description = payload.get("description", "")
-        if not isinstance(description, str):
-            raise ValueError("field 'description' must be a string")
-        enabled = payload.get("enabled", True)
-        if not isinstance(enabled, bool):
-            raise ValueError("field 'enabled' must be a boolean")
-        out = await _resolved(
-            self._sync_groups.create_group(payload["name"], description, enabled=enabled)
-        )
-        self._audit_mgmt("system", "mgmt:group.created", surface, extra=f"group={out.get('name')}")
-        return out
-
-    async def groups_update(
-        self, group: Any, payload: dict[str, Any], surface: str = "api"
+    async def workspaces_create(
+        self, payload: dict[str, Any], surface: str = "api"
     ) -> dict[str, Any]:
-        """Update name/description/enabled; a rename moves every member's
-        runtime pacing scope with it (no stale group:<old> mapping)."""
-        self._require_groups()
-        if not isinstance(payload, dict) or not payload:
-            raise ValueError(
-                "group update payload needs at least one of {'name', 'description', 'enabled'}"
-            )
-        allowed = {"name", "description", "enabled"}
-        unknown = set(payload) - allowed
-        if unknown:
-            raise ValueError(f"unknown group payload keys: {sorted(unknown)}")
-        if "description" in payload and not isinstance(payload["description"], str):
-            raise ValueError("field 'description' must be a string")
-        if "enabled" in payload:
-            payload = dict(payload)
-            payload["enabled"] = parse_bool(payload["enabled"], "enabled")
-        out = await _resolved(self._sync_groups.update_group(group, **payload))
-        # A rename rewrites every member's pointer in the repository AND the
-        # limiter, but never Account.record — propagate the new name into
-        # the memory records the 1 Hz poll serves (same F3 pattern as the
-        # membership endpoints below; idempotent for non-rename updates).
-        for member in await _resolved(self._sync_groups.get_group_members(out["name"])):
-            self._refresh_account_group(member, out.get("name"))
-        self._audit_mgmt("system", "mgmt:group.updated", surface, extra=f"group={out.get('name')}")
+        """Create a workspace (name, description). Membership is separate."""
+        ws = self._require_workspaces()
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise ValueError("workspace name must be a non-empty string")
+        out = await ws.create_workspace(name, str(payload.get("description") or ""))
+        self._audit_mgmt(name, "mgmt:workspace.create", surface)
         return out
 
-    async def groups_delete(
-        self, group: Any, detach_members: bool = False, surface: str = "api"
+    async def workspaces_pause(self, workspace: str, surface: str = "api") -> dict[str, Any]:
+        """Pause: bumps the generation (fences approved-not-dispatched work)."""
+        ws = self._require_workspaces()
+        out = await ws.pause(str(workspace))
+        self._audit_mgmt(str(workspace), "mgmt:workspace.pause", surface)
+        return out
+
+    async def workspaces_resume(self, workspace: str, surface: str = "api") -> dict[str, Any]:
+        ws = self._require_workspaces()
+        out = await ws.resume(str(workspace))
+        self._audit_mgmt(str(workspace), "mgmt:workspace.resume", surface)
+        return out
+
+    async def workspaces_delete(
+        self,
+        workspace: str,
+        detach_members: bool = False,
+        surface: str = "api",
     ) -> dict[str, Any]:
-        """Delete a group (accounts are NEVER deleted). Refuses while
-        members remain unless detach_members is explicitly True."""
-        self._require_groups()
-        detach_members = parse_bool(detach_members, "detach_members")
-        out = await _resolved(self._sync_groups.delete_group(group, detach_members=detach_members))
-        # Detached members' Account.records still name the deleted group —
-        # clear them (the repo + limiter are already clean) so the account
-        # cards / group picker show Independent, not a dangling group name.
-        for member in out.get("detached") or []:
-            self._refresh_account_group(member, None)
+        """Delete a workspace (accounts never die; refused while members
+        remain unless detach_members is explicit)."""
+        ws = self._require_workspaces()
+        out = await ws.delete_workspace(str(workspace), detach_members=bool(detach_members))
+        self._audit_mgmt(str(workspace), "mgmt:workspace.delete", surface)
+        return out
+
+    async def workspaces_add_account(
+        self, account: str, workspace: str, surface: str = "api"
+    ) -> dict[str, Any]:
+        """Put an account in a workspace (join or move; at-most-one)."""
+        ws = self._require_workspaces()
+        out = await ws.join(str(account), str(workspace))
+        self._refresh_account_workspace(str(account), out.get("workspace"))
         self._audit_mgmt(
-            "system",
-            "mgmt:group.deleted",
-            surface,
-            extra=f"group={out.get('deleted')} detached={len(out.get('detached') or [])}",
+            str(workspace), "mgmt:workspace.add-member", surface, extra=f"account={account}"
         )
         return out
 
-    async def groups_add_account(
-        self, group: Any, account: str, surface: str = "api"
+    async def workspaces_remove_account(self, account: str, surface: str = "api") -> dict[str, Any]:
+        """Remove the account from any workspace (config untouched)."""
+        ws = self._require_workspaces()
+        out = await ws.leave(str(account))
+        self._refresh_account_workspace(str(account), None)
+        self._audit_mgmt(str(account), "mgmt:workspace.remove-member", surface)
+        return out
+
+    async def workspaces_set_account(
+        self, account: str, workspace: str | None, surface: str = "api"
     ) -> dict[str, Any]:
-        """Put an account in a group (replaces any previous membership)."""
-        self._require_groups()
-        out = await _resolved(self._sync_groups.add_account_to_group(group, account))
-        self._refresh_account_group(account, out.get("group"))
-        self._audit_mgmt(
-            account, "mgmt:group.member_added", surface, extra=f"group={out.get('group')}"
-        )
-        return out
+        """THE membership transition primitive: None -> W, W1 -> W2,
+        W -> None — all one call."""
+        if workspace is None:
+            return await self.workspaces_remove_account(account, surface)
+        return await self.workspaces_add_account(account, workspace, surface)
 
-    async def groups_remove_account(
-        self, group: Any, account: str, surface: str = "api"
-    ) -> dict[str, Any]:
-        """Remove an account from one group (back to per-account pacing)."""
-        self._require_groups()
-        out = await _resolved(self._sync_groups.remove_account_from_group(group, account))
-        if out.get("existed"):
-            self._refresh_account_group(account, None)
-        self._audit_mgmt(
-            account, "mgmt:group.member_removed", surface, extra=f"group={out.get('group')}"
-        )
-        return out
+    async def workspaces_tasks(
+        self,
+        workspace: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Workspace tasks (filterable); pure read over the projection."""
+        if self._workspaces is None:
+            return []
+        return await _resolved(self._workspaces.tasks(workspace=workspace, status=status))
 
-    async def groups_set_account(
-        self, account: str, group: Any, surface: str = "api"
-    ) -> dict[str, Any]:
-        """Set/replace an account's group (None -> G and G1 -> G2)."""
-        self._require_groups()
-        out = await _resolved(self._sync_groups.set_account_group(account, group))
-        self._refresh_account_group(account, out.get("group"))
-        self._audit_mgmt(
-            account, "mgmt:group.member_set", surface, extra=f"group={out.get('group')}"
-        )
-        return out
-
-    async def groups_clear_account(self, account: str, surface: str = "api") -> dict[str, Any]:
-        """Remove the account from any group (group -> None)."""
-        self._require_groups()
-        out = await _resolved(self._sync_groups.clear_account_group(account))
-        self._refresh_account_group(account, None)
-        self._audit_mgmt(account, "mgmt:group.member_cleared", surface)
-        return out
-
-    async def groups_snapshot(self, group: Any) -> dict[str, Any]:
-        """Group snapshot: identity/metadata + members + runtime pacing
-        info. Member rows are enriched with the account manager's live
-        status (derived — no duplicate runtime registry)."""
-        self._require_groups()
-        snapshot = await _resolved(self._sync_groups.snapshot(group))
-        members = snapshot.pop("members", [])
-        by_name = {
-            row.get("name"): row
-            for row in await self._accounts.accounts()
-            if isinstance(row, dict) and row.get("name")
-        }
-        snapshot["members"] = [
-            {
-                "name": name,
-                "status": (by_name.get(name) or {}).get("status"),
-                "enabled": (by_name.get(name) or {}).get("enabled"),
-            }
-            for name in members
-        ]
-        return snapshot
-
-    def _require_groups(self) -> None:
-        """Honest failure on stacks built without the group manager."""
-        if self._sync_groups is None:
-            raise RuntimeError("sync group manager is not configured on this api")
-
-    # ---------------------------------------------------------------- fleet
-    def _require_fleet(self) -> None:
-        """Honest failure on stacks built without the fleet service."""
-        if self._fleet is None:
-            raise RuntimeError("fleet service is not configured on this api")
-
-    async def fleet_groups(self) -> list[dict[str, Any]]:
-        """Fleet Hub list: one overview bundle per group (union of sync
-        groups and live fleet state — a group with state but no sync row
-        or vice versa still shows). Pure reads over the projection."""
-        self._require_fleet()
-        fleet = self._fleet
-        names: list[str] = []
-        if self._sync_groups is not None:
-            try:
-                names = [
-                    str(g.get("name"))
-                    for g in await self._sync_groups.list_groups()
-                    if g.get("name")
-                ]
-            except Exception:
-                names = []
-        for state in [fleet.group_state(n) for n in list(fleet._groups)]:
-            if state is not None and state.group_name not in names:
-                names.append(state.group_name)
-        bundles = []
-        for name in sorted(set(names)):
-            state = fleet.group_state(name)
-            members = fleet.members(name)
-            assignments = fleet.assignments(group_name=name)
-            counts: dict[str, int] = {}
-            for rec in assignments:
-                counts[rec.status] = counts.get(rec.status, 0) + 1
-            cooldowns = await fleet.cooldowns(scope_type="group", scope_id=name, active_only=True)
-            transitions = await fleet.transitions(group_name=name, limit=1)
-            bundles.append(
-                {
-                    "group": name,
-                    "exists": state is not None,
-                    "paused": bool(state.paused) if state else False,
-                    "generation": state.generation if state else None,
-                    "member_count": len(members),
-                    "members": [m.to_dict() for m in members],
-                    "assignment_counts": counts,
-                    "active_cooldowns": len(cooldowns),
-                    "last_transition": (transitions[0].to_dict() if transitions else None),
-                }
-            )
-        return bundles
-
-    async def fleet_group(self, group: str) -> dict[str, Any]:
-        """One group's FULL hub bundle: members, assignments, active
-        cooldowns (with source), transition history (newest first)."""
-        self._require_fleet()
-        fleet = self._fleet
-        state = fleet.group_state(group)
-        if state is None:
-            # a SYNC group with no fleet state yet (freshly created, or
-            # never joined to management): provision the projection row
-            # so the hub works for it — orchestration simply shows empty.
-            # Genuinely-unknown names still 400 (no sync row, no fleet).
-            if (
-                self._sync_groups is None
-                or await self._sync_groups.get_group_by_name(group) is None
-            ):
-                raise ValueError(f"unknown fleet group {group!r}")
-            state = await fleet.provision_group(group)
-        assignments = fleet.assignments(group_name=group)
-        return {
-            "group": group,
-            "paused": bool(state.paused),
-            "generation": state.generation,
-            "members": [m.to_dict() for m in fleet.members(group)],
-            "assignments": [r.to_dict() for r in assignments],
-            "cooldowns": [c.to_dict() for c in await fleet.cooldowns(active_only=True)],
-            "transitions": [
-                t.to_dict() for t in await fleet.transitions(group_name=group, limit=50)
-            ],
-        }
-
-    async def fleet_op(self, op: str, **params: Any) -> dict[str, Any]:
-        """The hub's ONE mutation dispatch: every operation flows
-        through FleetService (rollout B's single-service rule); the op
-        table is explicit, params validated by the service itself."""
-        self._require_fleet()
-        fleet = self._fleet
+    async def workspaces_op(self, op: str, **params: Any) -> dict[str, Any]:
+        """The ONE mutation dispatch (explicit op table): pause/resume/
+        task ops/cooldowns/eligibility."""
+        ws = self._require_workspaces()
         op = str(op or "")
-        if op == "join":
-            event = await fleet.join_group(str(params.get("account")), str(params.get("group")))
-        elif op == "leave":
-            event = await fleet.leave_group(str(params.get("account")))
-        elif op == "group_pause":
-            event = await fleet.pause_group(str(params.get("group")))
-        elif op == "group_resume":
-            event = await fleet.resume_group(str(params.get("group")))
-        elif op == "member_pause":
-            event = await fleet.pause_member(str(params.get("account")))
-        elif op == "member_resume":
-            event = await fleet.resume_member(str(params.get("account")))
-        elif op == "assign":
-            rec = await fleet.assign_task(str(params.get("assignment")), str(params.get("account")))
-            return rec.to_dict()
-        elif op == "withdraw":
-            rec = await fleet.withdraw_task(str(params.get("assignment")))
-            return rec.to_dict()
-        elif op == "suspend":
-            rec = await fleet.suspend_task(
-                str(params.get("assignment")), str(params.get("reason") or "operator suspend")
+        if op == "pause":
+            return await ws.pause(str(params.get("workspace")))
+        if op == "resume":
+            return await ws.resume(str(params.get("workspace")))
+        if op == "bump_generation":
+            generation = await ws.bump_generation(str(params.get("workspace")))
+            return {"workspace": str(params.get("workspace")), "generation": generation}
+        if op == "create_task":
+            row_id = await ws.create_task(
+                str(params.get("workspace")),
+                str(params.get("task_id")),
+                priority=int(params.get("priority") or 0),
             )
-            return rec.to_dict()
-        elif op == "resume_task":
-            rec = await fleet.resume_task(str(params.get("assignment")))
-            return rec.to_dict()
-        elif op == "cancel":
-            rec = await fleet.cancel_task(
-                str(params.get("assignment")), str(params.get("reason") or "operator cancel")
+            return {"id": row_id}
+        if op == "assign_task":
+            return dict(await ws.assign_task(str(params.get("id")), str(params.get("account"))))
+        if op == "task_status":
+            return await ws.report_task_status(
+                str(params.get("id")),
+                str(params.get("status")),
+                error=params.get("error"),
+                retry_allowed=bool(params.get("retry_allowed")),
             )
-            return rec.to_dict()
-        elif op == "handoff":
-            rec = await fleet.handoff(
-                str(params.get("assignment")),
-                str(params.get("account")),
-                str(params.get("reason") or "operator handoff"),
+        if op == "eligibility":
+            return await ws.set_member_eligibility(
+                str(params.get("account")), str(params.get("eligibility"))
             )
-            return rec.to_dict()
-        elif op == "cooldown":
-            rec = await fleet.apply_cooldown(
+        if op == "cooldown":
+            return await ws.start_cooldown(
                 str(params.get("scope_type")),
                 str(params.get("scope_id")),
                 str(params.get("reason") or "operator cooldown"),
-                params.get("duration_s"),
+                float(params.get("duration_s") or 0),
             )
-            return rec.to_dict()
-        elif op == "cooldown_clear":
-            rec = await fleet.clear_cooldown(int(params.get("id")))
-            return rec.to_dict()
-        else:
-            raise ValueError(f"unknown fleet op {op!r}")
-        return event.__dict__ if hasattr(event, "__dict__") else {"kind": str(event)}
+        if op == "cooldown_clear":
+            try:
+                clear_id = int(params["id"])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("op 'cooldown_clear' needs an integer 'id'") from None
+            return await ws.clear_cooldown(clear_id)
+        raise ValueError(f"unknown workspace op {op!r}")
 
-    def _refresh_account_group(self, account: str, group: str | None) -> None:
-        """Propagate a membership change into the account manager's memory
-        record (FINAL-PHASE F3 pattern, same as _refresh_account_profiles):
-        the 1 Hz dashboard poll reads record.sync_group, and the sync-group
-        manager owns the persisted value but never touches Account.record.
-        """
-        try:
-            account_obj = getattr(self._accounts, "_accounts", {}).get(account)
-            if account_obj is not None:
-                account_obj.record.sync_group = group
-        except Exception:
-            LOG.debug("group memory refresh failed for %r", account, exc_info=True)
-
-    # ------------------------------------------------------- UI extension
-    async def ui_stats(self, account: str) -> list[dict[str, Any]]:
-        """Per-account Home-tab stat cards from every enabled plugin."""
-        return await _resolved(self._plugins.ui_stats(account))
-
-    async def ui_panels(self) -> list[dict[str, Any]]:
-        """Plugin-contributed sidebar panels (framework-level)."""
-        return await _resolved(self._plugins.ui_panels())
-
-    # ------------------------------------------- dashboard UI extension (D)
-    async def dashboard_ui_navigation(self) -> list[dict[str, Any]]:
-        """Plugin pages for the sidebar, VISIBILITY-CHECKED.
-
-        Same fail-closed contract as page retrieval: a page whose check
-        (or an ancestor's) denies is excluded from the sidebar, not just
-        from direct reads. Checks run with account=None here (the nav
-        exists before any account is selected); page checks that depend
-        on an account should allow None to stay reachable, and gate the
-        account-dependent parts with component checks instead.
-        """
-        registry = self._plugins.ui_registry
-        nav: list[dict[str, Any]] = []
-        for plugin_name in registry.list_plugins():
-            layout = registry.get_layout(plugin_name)
-            if not layout:
-                continue
-            for page in layout.get("children") or []:
-                if page.get("type") != "page":
-                    continue
-                page_id = page.get("id", "")
-                if not await registry.check_visibility(
-                    plugin_name,
-                    page_id,
-                    CheckContext(plugin=plugin_name, component_id=page_id, component_type="page"),
-                ):
-                    continue
-                nav.append(
-                    {
-                        "plugin": plugin_name,
-                        "page_id": page_id,
-                        "title": page.get("title", plugin_name),
-                        "icon": page.get("icon", ""),
-                        "order": page.get("order", 0),
-                        "account_scoped": page.get("account_scoped", False),
-                    }
-                )
-        return sorted(nav, key=lambda n: (n.get("order", 0), n["plugin"]))
-
-    async def dashboard_ui_page(
-        self, plugin: str, page_id: str, account: str | None = None
-    ) -> dict[str, Any] | None:
-        """One page's full serialized component tree; None when the
-        plugin has no UI or the page id is unknown (route -> 404).
-
-        Visibility is applied to the RENDERED definition: subtrees
-        whose (own or ancestor) check denies are pruned from the tree
-        before it crosses the wire — the same fail-closed verdicts the
-        dispatch/data surfaces enforce server-side. ``account`` (the
-        validated dashboard selection) reaches account-dependent checks.
-        """
-        registry = self._plugins.ui_registry
-        if account is not None:
-            account, _services = await self._ui_account_context(plugin, account)
-        layout = registry.get_layout(plugin)
-        if not layout:
-            return None
-        for page in layout.get("children") or []:
-            if page.get("id") == page_id:
-                return await registry.visible_tree(plugin, page, account=account)
-        return None
-
-    async def _ui_account_context(self, plugin: str, account: str | None):
-        """Validate a browser-supplied account for UI dispatch.
-
-        Returns (account, services) — services is None only for
-        account-less (plugin-wide) dispatch. The account is validated
-        against the plugin manager (known, assigned, enabled, active);
-        the services facade comes from the account's own wiring. Never
-        guessed, never fabricated.
-        """
-        if account is None:
-            return None, None
-        from core.errors import PluginError
-
-        try:
-            self._plugins.active_instance_for(plugin, account)
-        except PluginError as exc:
-            raise UIError(f"invalid account context for plugin {plugin!r}: {exc}") from exc
-        services = self._plugins.services_for(account, plugin)
-        if services is None:
-            raise UIError(
-                f"account {account!r} has no active services wiring — "
-                f"start the account before account-scoped UI actions"
-            )
-        return account, services
-
-    async def dashboard_ui_action(
+    async def workspaces_cooldowns(
         self,
+        scope_type: str | None = None,
+        scope_id: str | None = None,
+        active_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        if self._workspaces is None:
+            return []
+        return await _resolved(
+            self._workspaces.cooldowns(
+                scope_type=scope_type, scope_id=scope_id, active_only=active_only
+            )
+        )
+
+    async def workspaces_channels(self, account: str) -> list[dict[str, Any]]:
+        """The account's channel registry + assignments."""
+        if self._workspaces is None:
+            return []
+        return await _resolved(self._workspaces.account_channels(str(account)))
+
+    async def workspaces_bind_plugin_channels(self, account: str, plugin: str) -> dict[str, Any]:
+        """Initialize the plugin's channel bindings BY COPY from the
+        account's assignments (then they diverge freely)."""
+        ws = self._require_workspaces()
+        count = await ws.bind_plugin_channels_from_assignments(str(account), str(plugin))
+        self._audit_mgmt(
+            str(account),
+            "mgmt:workspace.bind-channels",
+            surface="api",
+            extra=f"plugin={plugin} count={count}",
+        )
+        return {"account": account, "plugin": plugin, "bound": count}
+
+    async def workspaces_preset_apply(
+        self,
+        account: str,
         plugin: str,
-        component_id: str,
-        payload: dict[str, Any],
+        preset_id: int,
+        *,
+        preview_revision: str,
+        version: int | None = None,
         surface: str = "api",
-        account: str | None = None,
     ) -> dict[str, Any]:
-        """Dispatch a registered component action (visibility-checked).
-
-        Raises UIError (a ValueError -> honest 400 at the interface) for
-        unknown plugin/component, hidden components, missing actions and
-        callback failures. ``surface`` names the calling interface in the
-        audit vocabulary (api/dashboard) — reserved for mgmt audit wiring.
-        """
-        registry = self._plugins.ui_registry
-        account, services = await self._ui_account_context(plugin, account)
-        context = ActionContext(
-            plugin=plugin, component_id=component_id, account=account, services=services
+        """COPY-ON-APPLY with the stale-preview guard (decisions 9/16)."""
+        ws = self._require_workspaces()
+        out = await ws.preset_apply(
+            str(account),
+            str(plugin),
+            int(preset_id),
+            preview_revision=str(preview_revision),
+            version=version,
         )
-        result = await registry.dispatch_action(plugin, component_id, payload, context)
-        return {
-            "success": result.success,
-            "message": result.message,
-            "data": result.data,
-            "field_errors": result.field_errors,
-            "refresh": result.refresh,
-            "modal": result.modal,
-        }
-
-    async def dashboard_ui_data(
-        self, plugin: str, component_id: str, account: str | None = None
-    ) -> Any:
-        """Fetch a data-provider result (visibility-checked, JSON-safe).
-
-        Raises UIError when the plugin/component is unknown, hidden, or
-        declares no provider (the interface distinguishes that from a
-        payload fault: it maps to 404, not 400). ``account`` is the
-        validated dashboard selection for account-scoped pages."""
-        registry = self._plugins.ui_registry
-        account, _services = await self._ui_account_context(plugin, account)
-        # the outer context carries the validated account; the registry
-        # pins a precise per-component CheckContext per provider call
-        context = CheckContext(
-            plugin=plugin,
-            component_id=component_id,
-            component_type="",
-            account=account,
-            services=_services,
+        self._audit_mgmt(
+            str(account),
+            "mgmt:workspace.preset-apply",
+            surface,
+            extra=f"plugin={plugin} preset={preset_id} v={version}",
         )
-        return await registry.get_data(plugin, component_id, context)
+        return out
 
-    # ------------------------------------------------------ admin access
+    async def workspaces_preset_preview(
+        self, account: str, plugin: str, preset_id: int, version: int | None = None
+    ) -> dict[str, Any]:
+        if self._workspaces is None:
+            return {}
+        return await _resolved(
+            self._workspaces.preset_preview(
+                str(account), str(plugin), int(preset_id), version=version
+            )
+        )
+
+    async def workspaces_preset_detach(
+        self, account: str, plugin: str, surface: str = "api"
+    ) -> dict[str, Any]:
+        """Detach: the account KEEPS its values; the provenance link drops."""
+        ws = self._require_workspaces()
+        out = await ws.preset_detach(str(account), str(plugin))
+        self._audit_mgmt(
+            str(account), "mgmt:workspace.preset-detach", surface, extra=f"plugin={plugin}"
+        )
+        return out
+
+    def _require_workspaces(self) -> WorkspaceService:
+        """Honest failure on stacks built without the workspace service."""
+        if self._workspaces is None:
+            raise RuntimeError("workspace service is not configured on this api")
+        return self._workspaces
+
+    def _refresh_account_workspace(self, account: str, workspace: str | None) -> None:
+        """Propagate a membership change into the account manager's
+        memory record (FINAL-PHASE F3 pattern): status snapshots read
+        record.workspace; the service owns the persisted value but never
+        touches Account.record."""
+        manager = getattr(self, "_accounts", None)
+        refresh = getattr(manager, "refresh_workspace", None)
+        if callable(refresh):
+            refresh(account, workspace)
+
+    async def system_cache_stats(self) -> list[dict[str, Any]]:
+        """Per-account cache snapshots (member/thread counts, hit ratios,
+        dispatch backlog, event loop lag) from the fork's cache_stats().
+        The future System page aggregates these."""
+        out: list[dict[str, Any]] = []
+        for row in await self._accounts.accounts():
+            name = row.get("name", "")
+            stats = (
+                await self._accounts.cache_stats(name)
+                if hasattr(self._accounts, "cache_stats")
+                else None
+            )
+            out.append({"account": name, **(stats or {})})
+        return out
+
     async def admin_overview(self) -> dict[str, Any]:
-        """The admin panel's full view: admin ids, mudae bot id, and every
+        """The admin panel's full view: admin ids, primary bot id, and every
         account's access row.
 
         Ids serialize as STRINGS: Discord snowflakes exceed JavaScript
@@ -1743,8 +1753,8 @@ class ControlAPI:
         rows = await access.all_account_rows()
         return {
             "admins": [str(i) for i in await access.admin_ids()],
-            "mudae_bot_id": str(await access.mudae_bot_id())
-            if await access.mudae_bot_id() is not None
+            "primary_bot_id": str(await access.primary_bot_id())
+            if await access.primary_bot_id() is not None
             else None,
             "accounts": rows,
         }
@@ -1772,8 +1782,8 @@ class ControlAPI:
     async def admin_account_flag(
         self, account: str, is_admin: bool, surface: str = "api"
     ) -> dict[str, Any]:
-        self._require_access()
-        out = await _resolved(self._access.set_admin_flag(account, is_admin))
+        access = self._require_access()
+        out = await _resolved(access.set_admin_flag(account, is_admin))
         self._audit_mgmt(account, "mgmt:admin.flag_set", surface, extra=f"is_admin={is_admin}")
         return out
 
@@ -1841,22 +1851,26 @@ class ControlAPI:
         )
         return out
 
-    async def admin_mudae_id(self, surface: str = "api") -> dict[str, Any]:
-        """Read the framework-level Mudae bot id.
+    async def admin_primary_bot_id(self, surface: str = "api") -> dict[str, Any]:
+        """Read the framework-level Primary bot id.
 
         ``surface`` is reserved (mgmt audit vocabulary): reads are not
-        audited — only admin_mudae_id_set is.
+        audited — only admin_primary_bot_id_set is.
         """
         access = self._require_access()
-        return {"mudae_bot_id": await access.mudae_bot_id()}
+        return {"primary_bot_id": await access.primary_bot_id()}
 
-    async def admin_mudae_id_set(self, user_id, surface: str = "api") -> dict[str, Any]:
+    async def admin_primary_bot_id_set(
+        self, user_id: int | None, surface: str = "api"
+    ) -> dict[str, Any]:
         access = self._require_access()
         if user_id is not None and not str(user_id).strip().lstrip("-").isdigit():
-            raise ValueError("mudae bot id must be an integer (or null)")
-        await access.set_mudae_bot_id(int(user_id) if user_id is not None else None)
-        self._audit_mgmt("system", "mgmt:admin.mudae_id_set", surface, extra=f"value={user_id}")
-        return {"mudae_bot_id": await access.mudae_bot_id()}
+            raise ValueError("primary bot id must be an integer (or null)")
+        await access.set_primary_bot_id(int(user_id) if user_id is not None else None)
+        self._audit_mgmt(
+            "system", "mgmt:admin.primary_bot_id_set", surface, extra=f"value={user_id}"
+        )
+        return {"primary_bot_id": await access.primary_bot_id()}
 
     async def admin_forget_account(self, account: str, surface: str = "api") -> dict[str, Any]:
         """Remove an account's access row (admin/perms/prefix) — cleanup
@@ -1866,11 +1880,10 @@ class ControlAPI:
         self._audit_mgmt(account, "mgmt:admin.forgot", surface)
         return {"forgotten": account}
 
-    def _require_access(self) -> Any:
-        access = getattr(self, "_access", None)
-        if access is None:
+    def _require_access(self) -> AccessManager:
+        if self._access is None:
             raise RuntimeError("admin access store not wired on this api")
-        return access
+        return self._access
 
     # ------------------------------------------------------------- rate limits
     async def ratelimit_policies(self) -> list[dict[str, Any]]:
@@ -2052,6 +2065,7 @@ class ControlAPI:
     async def tasks_history(
         self, limit: int = 50, account: str | None = None
     ) -> list[dict[str, Any]]:
+        """Bounded history of finished tasks (newest last)."""
         # scheduler.history() is async now (aiosqlite repo reads)
         return await _resolved(self._scheduler.history(limit=limit, account=account))
 
@@ -2089,10 +2103,6 @@ class ControlAPI:
         return await _resolved(self._audit.history(limit=n, account=account))
 
     # ---------------------------------------------------------------- system
-    @property
-    def dashboard_token(self) -> str | None:
-        return self._credentials.dashboard_token if self._credentials else None
-
     async def emergency_stop_all(self, surface: str = "api") -> dict[str, Any]:
         """GLOBAL emergency stop: cancel all tasks, stop all accounts, halt."""
         cancelled = self._scheduler.cancel_matching()

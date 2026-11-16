@@ -13,9 +13,7 @@ import asyncio
 import unittest
 
 from core.event_bus import EventBus
-from core.rate_limit_manager import RateLimitManager
-
-from tests.unit.test_rate_engine import SleepAdvanceManager, StubLogger, make_manager
+from tests.unit.test_rate_engine import SleepAdvanceManager, StubLogger
 
 ACTION = "poke"  # no learned default — floor semantics testable
 
@@ -165,8 +163,8 @@ class TestGroupScope(unittest.IsolatedAsyncioTestCase):
         """Chaos variant: three members racing with one cancellation —
         every shared-clock grant stamp stays >= interval apart (measured on
         exact stamps, not task-resume times)."""
-        from tests.unit.test_rate_engine import GrantRecorderManager
         from core.rate_limit_manager.engine import ManualClock
+        from tests.unit.test_rate_engine import GrantRecorderManager
 
         interval = 1.5
         manager = GrantRecorderManager(

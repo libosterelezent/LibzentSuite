@@ -16,9 +16,8 @@ import unittest
 from pathlib import Path
 
 from core.errors import AccountError
-from core.event_bus import AccountConnected, AccountFailed, MessageReceived
+from core.event_bus import AccountConnected, MessageReceived
 from database.db import Database
-
 from tests.unit.helpers import FakeClientFactory, make_manager
 from tests.unit.test_account_manager import _fast_reconnect_settings
 
@@ -82,8 +81,7 @@ class FleetChaosTests(unittest.IsolatedAsyncioTestCase):
                 if round_no == 1:  # AUTH-FAIL injection + recovery
                     await h.manager.stop("delta")
                     factory2 = FakeClientFactory(
-                        **{"fail_connect": True,
-                           "fail_message": "401 Unauthorized: improper token"})
+                        fail_connect=True, fail_message="401 Unauthorized: improper token")
                     factory2.clients = factory.clients
                     h.manager._client_factory = factory2
                     with self.assertRaises(AccountError):
@@ -144,6 +142,7 @@ class ProfilingChaosTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tracemalloc_stops_after_suite(self) -> None:
         import tracemalloc
+
         from benchmark.cli import build_parser, run_suite
 
         self.assertFalse(tracemalloc.is_tracing())
@@ -158,6 +157,7 @@ class ProfilingChaosTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tracemalloc_stops_even_when_scenario_fails(self) -> None:
         import tracemalloc
+
         from benchmark import scenarios as scen_mod
         from benchmark.cli import build_parser, run_suite
 

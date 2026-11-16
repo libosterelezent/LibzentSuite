@@ -15,13 +15,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from core.api import ControlAPI
 from core.errors import AccountError, SettingsValidationError
 from core.plugin_scopes import validate as validate_scope
 from core.settings_manager import Setting
-
 from database.db import Database
 
 LOG = logging.getLogger("test.plugin_profiles_surfaces")
@@ -42,22 +41,22 @@ class _StubAudit:
     """AuditRecorder double: records every _audit_mgmt write."""
 
     def __init__(self) -> None:
-        self.rows: List[Dict[str, Any]] = []
+        self.rows: list[dict[str, Any]] = []
 
     def record(self, **kwargs) -> None:
         self.rows.append(kwargs)
 
-    def actions(self) -> List[str]:
+    def actions(self) -> list[str]:
         return [row.get("action") for row in self.rows]
 
 
 class _StubClient:
     """Duck-typed client wrapper with a channels_snapshot."""
 
-    def __init__(self, snapshot: List[Dict[str, Any]]) -> None:
+    def __init__(self, snapshot: list[dict[str, Any]]) -> None:
         self._snapshot = snapshot
 
-    def channels_snapshot(self) -> List[Dict[str, Any]]:
+    def channels_snapshot(self) -> list[dict[str, Any]]:
         return self._snapshot
 
 
@@ -65,9 +64,9 @@ class _StubAccount:
     """Account-shaped stub: assigned plugins, binding mirror, runtime."""
 
     def __init__(self, name: str, client: Any = None) -> None:
-        self.record = SimpleNamespace(name=name, sync_group=None)
-        self.assigned_plugins: List[str] = []
-        self.plugin_profiles: Dict[str, Optional[str]] = {}
+        self.record = SimpleNamespace(name=name, workspace=None)
+        self.assigned_plugins: list[str] = []
+        self.plugin_profiles: dict[str, str | None] = {}
         self.runtime = SimpleNamespace(client=client)
 
 
@@ -75,7 +74,7 @@ class _StubAccountsManager:
     """Duck-typed AccountManager: the surfaces ControlAPI touches."""
 
     def __init__(self) -> None:
-        self._accounts: Dict[str, _StubAccount] = {}
+        self._accounts: dict[str, _StubAccount] = {}
 
     def add(self, name: str, client: Any = None) -> _StubAccount:
         account = _StubAccount(name, client)
@@ -88,20 +87,20 @@ class _StubAccountsManager:
         except KeyError:
             raise AccountError(f"unknown account {name!r}") from None
 
-    async def assigned_plugins(self, name: str) -> List[str]:
+    async def assigned_plugins(self, name: str) -> list[str]:
         return sorted(self.get(name).assigned_plugins)
 
-    async def channels_snapshot(self, name: str) -> List[Dict[str, Any]]:
+    async def channels_snapshot(self, name: str) -> list[dict[str, Any]]:
         return self.get(name).runtime.client.channels_snapshot()
 
 
 class _StubPluginManager:
     """Duck-typed PluginManager: names() + _schema_for()."""
 
-    def __init__(self, names: List[str]) -> None:
+    def __init__(self, names: list[str]) -> None:
         self._names = list(names)
 
-    def names(self) -> List[str]:
+    def names(self) -> list[str]:
         return list(self._names)
 
     def _schema_for(self, plugin: str) -> tuple:

@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.abspath(".."))
 
 project = "LibzentSuite"
 author = "LibzentSuite contributors"
-copyright = "2026, LibzentSuite contributors"  # noqa: A001
+copyright = "2026, LibzentSuite contributors"
 release = "1.0.0"
 
 extensions = [

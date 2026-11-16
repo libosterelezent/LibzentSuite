@@ -67,6 +67,8 @@ from ..errors import RatePolicyError
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from .engine import Clock
+
 #: same sanity cap as policies.MAX_INTERVAL — one day of spacing is plenty
 MAX_PREFIXRATE = 86400.0
 
@@ -112,7 +114,7 @@ class GlobalSendLane:
     def __init__(
         self,
         *,
-        clock: Any,
+        clock: Clock,
         wait_either: Callable[[float], Awaitable[None]],
         on_change: Callable[[], None] | None = None,
         log: Callable[[str, str], None] | None = None,
@@ -182,7 +184,7 @@ class GlobalSendLane:
         """True when the lane is enabled with prefixrate 0 (everything holds)."""
         return self.enabled and self.prefixrate <= 0
 
-    def status(self) -> dict:
+    def status(self) -> dict[str, Any]:
         """JSON-safe lane state for stats()/CLI/dashboard."""
         now = self._clock.now()
         waiting = sum(1 for e in self._heap if not e.cancelled and not e.future.done())

@@ -20,7 +20,10 @@ from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
+
+    #: stage-exit allocation hook: (label, before/after tracemalloc snapshots)
+    AllocHook = Callable[[str, tracemalloc.Snapshot, tracemalloc.Snapshot], None]
 
 
 @contextmanager
@@ -41,12 +44,16 @@ def cprofile_scope(dump_path: str) -> Iterator[cProfile.Profile]:
             pass
 
 
-def pstats_top(prof: cProfile.Profile, n: int) -> dict[str, list[dict]]:
+def pstats_top(prof: cProfile.Profile, n: int) -> dict[str, list[dict[str, Any]]]:
     """Top-N functions by cumulative and by own time (value-free)."""
     stream = io.StringIO()
     stats = pstats.Stats(prof, stream=stream)
-    rows = []
-    for (filename, lineno, funcname), (_cc, nc, tt, ct, _callers) in stats.stats.items():
+    # Stats.stats is the raw per-function dict at runtime; typeshed does
+    # not declare it (its typed get_stats_profile() reformats ncalls as
+    # "prim/total" strings, which would change the report data).
+    raw = stats.stats  # type: ignore[attr-defined]
+    rows: list[dict[str, Any]] = []
+    for (filename, lineno, funcname), (_cc, nc, tt, ct, _callers) in raw.items():
         rows.append(
             {
                 "site": f"{_short_path(filename)}:{lineno}({funcname})",
@@ -69,9 +76,9 @@ def _short_path(path: str) -> str:
     return path
 
 
-def top_sites(diffs: list[Any], n: int) -> list[dict]:
+def top_sites(diffs: list[tracemalloc.StatisticDiff], n: int) -> list[dict[str, Any]]:
     """Top allocation sites from snapshot diffs (file:lineno + bytes)."""
-    rows = []
+    rows: list[dict[str, Any]] = []
     for stat in diffs:
         frame = stat.traceback[0]
         filename = frame.filename
@@ -90,11 +97,11 @@ def top_sites(diffs: list[Any], n: int) -> list[dict]:
     return rows[:n]
 
 
-def make_alloc_hook(trace_top: int) -> tuple[Any, dict[str, list[dict]]]:
+def make_alloc_hook(trace_top: int) -> tuple[AllocHook, dict[str, list[dict[str, Any]]]]:
     """A stage-exit snapshot hook + its accumulation dict."""
-    stage_allocs: dict[str, list[dict]] = {}
+    stage_allocs: dict[str, list[dict[str, Any]]] = {}
 
-    def hook(label: str, before: Any, after: Any) -> None:
+    def hook(label: str, before: tracemalloc.Snapshot, after: tracemalloc.Snapshot) -> None:
         with suppress(Exception):
             stage_allocs[label] = top_sites(after.compare_to(before, "lineno"), trace_top)
 

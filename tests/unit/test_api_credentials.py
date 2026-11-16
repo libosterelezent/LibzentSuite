@@ -11,21 +11,21 @@ any response payload, audit entry or error message the facade produces.
 """
 from __future__ import annotations
 
+import os
 import tempfile
 import time
-import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from core.api import ControlAPI, LANE_KV_KEY
+from core.api import ControlAPI
 from core.cooldowns import CooldownService
 from core.credential_service import CredentialService
 from core.credentials import Credentials
 from core.errors import AccountError, SettingsValidationError
 from core.event_bus import EventBus
-from core.settings_manager import SettingsManager, Setting
+from core.settings_manager import Setting, SettingsManager
 
 SECRET = "tok-SECRET-5f3a91c2"      # the value that must never leak
 OTHER_SECRET = "tok-OTHER-9b7d31e4"
@@ -36,18 +36,18 @@ class FakeCredentialsRepo:
     """In-memory credentials repository (ciphertext in, ciphertext out)."""
 
     def __init__(self) -> None:
-        self.rows: Dict[str, bytes] = {}
+        self.rows: dict[str, bytes] = {}
 
     async def store(self, account: str, ciphertext: bytes) -> None:
         self.rows[account] = ciphertext
 
-    async def load(self, account: str) -> Optional[bytes]:
+    async def load(self, account: str) -> bytes | None:
         return self.rows.get(account)
 
     async def delete(self, account: str) -> bool:
         return self.rows.pop(account, None) is not None
 
-    async def accounts_with_credential(self) -> List[str]:
+    async def accounts_with_credential(self) -> list[str]:
         return sorted(self.rows)
 
 
@@ -55,31 +55,34 @@ class FakeCooldownRepo:
     """In-memory cooldown rows with absolute expiry (CooldownService shape)."""
 
     def __init__(self) -> None:
-        self.rows: Dict[tuple, Dict[str, Any]] = {}
-        self.deleted_accounts: List[str] = []
+        self.rows: dict[tuple, dict[str, Any]] = {}
+        self.deleted_accounts: list[str] = []
 
     async def upsert(self, account, plugin, cooldown_key, started_at,
-                     expires_at, source="plugin", reason="", metadata=None):
-        self.rows[(account, plugin, cooldown_key)] = {
-            "account": account, "plugin": plugin, "cooldown_key": cooldown_key,
+                     expires_at, source="plugin", reason="", metadata=None,
+                     profile=""):
+        self.rows[(account, plugin, profile, cooldown_key)] = {
+            "account": account, "plugin": plugin, "profile": profile,
+            "cooldown_key": cooldown_key,
             "started_at": started_at, "expires_at": expires_at,
             "source": source, "reason": reason, "metadata": metadata or {},
         }
 
-    async def get(self, account, plugin, cooldown_key, now=None):
-        row = self.rows.get((account, plugin, cooldown_key))
+    async def get(self, account, plugin, cooldown_key, now=None, profile=""):
+        row = self.rows.get((account, plugin, profile, cooldown_key))
         if row and row["expires_at"] > (now or time.time()):
             return dict(row)
         return None
 
-    async def active_for(self, account, plugin=None, now=None):
+    async def active_for(self, account, plugin=None, now=None, profile=None):
         now = now or time.time()
         return [dict(r) for r in self.rows.values()
                 if r["account"] == account and r["expires_at"] > now
-                and (plugin is None or r["plugin"] == plugin)]
+                and (plugin is None or r["plugin"] == plugin)
+                and (profile is None or r.get("profile", "") == profile)]
 
-    async def clear(self, account, plugin, cooldown_key) -> bool:
-        return self.rows.pop((account, plugin, cooldown_key), None) is not None
+    async def clear(self, account, plugin, cooldown_key, profile="") -> bool:
+        return self.rows.pop((account, plugin, profile, cooldown_key), None) is not None
 
     async def clear_expired(self, now=None) -> int:
         now = now or time.time()
@@ -101,20 +104,20 @@ class FakeAccountsManager:
 
     def __init__(self, names=("alpha", "beta")) -> None:
         self._names = list(names)
-        self.added: List[Dict[str, Any]] = []
-        self.removed: List[str] = []
+        self.added: list[dict[str, Any]] = []
+        self.removed: list[str] = []
 
-    async def accounts(self) -> List[Dict[str, Any]]:
+    async def accounts(self) -> list[dict[str, Any]]:
         return [{"name": n, "status": "stopped", "enabled": True,
                  "profiles": []} for n in self._names]
 
     async def add_account(self, name, *, token_ref=None, enabled=True,
-                          sync_group=None, plugins=None):
+                          workspace=None, plugins=None):
         if name in self._names:
             raise AccountError(f"account {name!r} already exists")
         self._names.append(name)
         payload = {"name": name, "status": "created", "enabled": enabled,
-                   "sync_group": sync_group, "plugins": plugins or []}
+                   "workspace": workspace, "plugins": plugins or []}
         self.added.append(payload)
         return dict(payload)
 
@@ -166,7 +169,7 @@ class FakeSyncCollaborators:
     """plugins/settings/scheduler/logs minimal duck-typed stand-ins."""
 
     def __init__(self) -> None:
-        self.entries: List[Dict[str, Any]] = []
+        self.entries: list[dict[str, Any]] = []
 
     # ---- plugin manager surface used by the facade
     def manifests(self):
@@ -226,7 +229,7 @@ class FakeLimiter:
     """Sync memory-only engine per the pinned contract."""
 
     def __init__(self) -> None:
-        self.policies: Dict[tuple, Any] = {}
+        self.policies: dict[tuple, Any] = {}
         self.lane = {"enabled": False, "prefixrate": 1.5, "paused": False,
                      "waiting": 0, "grants": 0, "last_grant_age_s": None}
 
@@ -269,8 +272,8 @@ class FakeLimiter:
 
 class FakePoliciesRepo:
     def __init__(self) -> None:
-        self.sets: List[tuple] = []
-        self.deletes: List[tuple] = []
+        self.sets: list[tuple] = []
+        self.deletes: list[tuple] = []
 
     async def set(self, level, owner, action, interval, jitter_min, jitter_max):
         self.sets.append((level, owner, action, interval, jitter_min, jitter_max))
@@ -282,7 +285,7 @@ class FakePoliciesRepo:
 
 class FakeKvRepo:
     def __init__(self) -> None:
-        self.values: Dict[str, Any] = {}
+        self.values: dict[str, Any] = {}
 
     async def set(self, key, value):
         self.values[key] = value
@@ -307,7 +310,7 @@ class SettingsStack:
         self.plugin_repo = FakeDeletablePluginRepo()
         self.settings = SettingsManager(
             self.bus, plugin_repo=self.plugin_repo,
-            global_layer={"soulcopy": {"trigger": "global-trigger"}})
+            global_layer={"exporter": {"trigger": "global-trigger"}})
         self.plugins = FakePluginManager(self.settings)
         self.limiter = FakeLimiter()
         self.database = FakeDatabase()
@@ -329,11 +332,11 @@ class FakeDeletablePluginRepo:
     """Plugin repo with the round-3 delete_setting (F9's repo shape)."""
 
     def __init__(self) -> None:
-        self.rows: Dict[tuple, Any] = {}
+        self.rows: dict[tuple, Any] = {}
         self.deletes: list = []
 
     async def all_account_settings(self):
-        out: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        out: dict[str, dict[str, dict[str, Any]]] = {}
         for (account, plugin, key), value in self.rows.items():
             out.setdefault(account, {}).setdefault(plugin, {})[key] = value
         return out
@@ -352,11 +355,11 @@ class FakePluginManager:
 
     def __init__(self, settings: SettingsManager) -> None:
         self._settings = settings
-        self.live: Dict[tuple, Any] = {}
+        self.live: dict[tuple, Any] = {}
 
     async def set_setting(self, account, plugin, key, value):
         validated = await self._settings.set_plugin_setting(
-            account, plugin, key, value, _SOULCOPY_SCHEMA)
+            account, plugin, key, value, _EXPORTER_SCHEMA)
         self.live[(account, plugin, key)] = validated
         return validated
 
@@ -372,7 +375,7 @@ class FakeDatabase:
 
 class FakeAuditRecorder:
     def __init__(self) -> None:
-        self.entries: List[Dict[str, Any]] = []
+        self.entries: list[dict[str, Any]] = []
 
     def record(self, account, direction, action, channel_id=None, content="",
                wait_ms=0.0, jitter_ms=0.0, note=""):
@@ -392,14 +395,14 @@ class FakeAuditRecorder:
         return lambda: None
 
 
-def actions(recorded: List[Dict[str, Any]]) -> List[str]:
+def actions(recorded: list[dict[str, Any]]) -> list[str]:
     return [e["action"] for e in recorded]
 
 
 class ApiStack:
     """One fully wired ControlAPI over the fakes (+ real services)."""
 
-    def __init__(self, env: Optional[Dict[str, str]] = None,
+    def __init__(self, env: dict[str, str] | None = None,
                  names: tuple = ("alpha", "beta")) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.cred_repo = FakeCredentialsRepo()
@@ -564,10 +567,10 @@ class TestRemoveCascadeAndCooldowns(unittest.IsolatedAsyncioTestCase):
 
     async def test_cooldowns_list_per_account_and_all(self) -> None:
         await self.stack.cooldowns.set("alpha", "roll", "vote", 90)
-        await self.stack.cooldowns.set("beta", "soulcopy", "export", 45)
+        await self.stack.cooldowns.set("beta", "exporter", "export", 45)
         rows = await self.stack.api.cooldowns_list()
         self.assertEqual([r["account"] for r in rows], ["beta", "alpha"])  # by expiry
-        self.assertEqual(rows[0]["plugin"], "soulcopy")
+        self.assertEqual(rows[0]["plugin"], "exporter")
         self.assertEqual(rows[0]["cooldown_key"], "export")
         self.assertGreater(rows[0]["remaining_s"], 30)
         just_alpha = await self.stack.api.cooldowns_list("alpha")
@@ -659,20 +662,20 @@ class TestPluginSettingClear(unittest.IsolatedAsyncioTestCase):
 
     async def test_null_resets_by_deleting_the_override(self) -> None:
         api, stack = self.stack.api, self.stack
-        await api.plugins_set_setting("alpha", "soulcopy", "trigger", "acct")
+        await api.plugins_set_setting("alpha", "exporter", "trigger", "acct")
         self.assertEqual(
-            stack.settings.resolve("soulcopy", _SOULCOPY_SCHEMA,
+            stack.settings.resolve("exporter", _EXPORTER_SCHEMA,
                                    account="alpha")["trigger"], "acct")
         out = await api.plugins_set_setting(
-            "alpha", "soulcopy", "trigger", None)
+            "alpha", "exporter", "trigger", None)
         self.assertTrue(out["cleared"])
         # fallback path has no schema: value is None (no override); the
         # manager-path (F8) returns the effective value instead
         self.assertIsNone(out["value"])
         self.assertEqual(
-            stack.plugin_repo.deletes, [("alpha", "soulcopy", "trigger")])
+            stack.plugin_repo.deletes, [("alpha", "exporter", "trigger")])
         self.assertEqual(
-            stack.settings.resolve("soulcopy", _SOULCOPY_SCHEMA,
+            stack.settings.resolve("exporter", _EXPORTER_SCHEMA,
                                    account="alpha")["trigger"],
             "global-trigger")
 
@@ -687,13 +690,13 @@ class TestPluginSettingClear(unittest.IsolatedAsyncioTestCase):
         stack = self.stack
         stack.api._plugins = WithClear(stack.settings)
         out = await stack.api.plugins_set_setting(
-            "alpha", "soulcopy", "trigger", None)
-        self.assertEqual(calls, [("alpha", "soulcopy", "trigger")])
+            "alpha", "exporter", "trigger", None)
+        self.assertEqual(calls, [("alpha", "exporter", "trigger")])
         self.assertEqual(out["value"], "from-manager")
         self.assertEqual(stack.plugin_repo.deletes, [])  # manager owns it
 
 
-_SOULCOPY_SCHEMA = (Setting("trigger", "str", "default-trigger"),)
+_EXPORTER_SCHEMA = (Setting("trigger", "str", "default-trigger"),)
 
 
 class TestAccountSettingFacades(unittest.IsolatedAsyncioTestCase):
@@ -799,7 +802,7 @@ class TestPluginStateSingleEncoding(unittest.IsolatedAsyncioTestCase):
             tolerant-decode on get (raw string when not valid JSON)."""
 
             def __init__(self) -> None:
-                self.rows: Dict[str, str] = {}
+                self.rows: dict[str, str] = {}
 
             async def set(self, key, value):
                 self.rows[key] = _json.dumps(value)

@@ -8,11 +8,11 @@ from __future__ import annotations
 import unittest
 
 from core.event_bus import EventBus
-from core.rate_limit_manager import MIN_ACTION_INTERVAL, RatePolicy, RateLimitManager
+from core.rate_limit_manager import MIN_ACTION_INTERVAL, RateLimitManager, RatePolicy
 from core.rate_limit_manager.warnings import (
     describe_scope,
-    evaluate_policy,
     evaluate_policies,
+    evaluate_policy,
     floor_warning,
     sort_warnings,
 )
@@ -106,15 +106,15 @@ class TestFloorAndSorting(unittest.TestCase):
         entry = floor_warning(MIN_ACTION_INTERVAL)
         self.assertEqual(entry["level"], "info")
         self.assertEqual(entry["code"], "floor")
-        self.assertIn("0.05s", entry["message"])
+        self.assertIn("1.50s", entry["message"])
 
     def test_floor_not_prepended_to_evaluation(self):
         """No residual always-on entries: a clean configuration evaluates
         to an EMPTY list (the floor lives in the Safety Floor card)."""
-        self.assertEqual(evaluate_policies([], 0.05), [])
+        self.assertEqual(evaluate_policies([], 1.5), [])
         self.assertEqual(
             evaluate_policies(
-                [(RatePolicy("m", 1.0, 0.5, 2.0), "global", None)], 0.05), [])
+                [(RatePolicy("m", 2.0, 0.5, 2.0), "global", None)], 1.5), [])
 
     def test_sort_warnings_danger_first(self):
         entries = [
@@ -166,7 +166,7 @@ class TestManagerWarnings(unittest.TestCase):
 
     def test_hand_edited_below_floor_surfaces_as_danger(self):
         manager = make_manager()
-        manager.set_policy_values("message", 1.0, 0.5, 2.0)   # legal at the 0.05s floor
+        manager.set_policy_values("message", 2.0, 0.5, 2.0)   # legal at the 1.5s floor
         manager.set_floor(2.5)                                 # then the floor rises above it
         warnings = manager.warnings()
         self.assertEqual(codes(warnings), ["below_floor", "faster_than_learned"])

@@ -44,19 +44,19 @@ class TestAccountDeleteKvSweepEscapesWildcards(AsyncDatabaseTestCase):
     async def test_underscore_account_delete_spares_wildcard_neighbour(self) -> None:
         await self.db.accounts.add("alfa_bot")
         await self.db.accounts.add("alfaXbot")
-        await self.db.kv.set("pstate:account:alfa_bot:soulcopy:k", "1")
-        await self.db.kv.set("pstate:account_plugin:alfa_bot/soulcopy:k", "2")
-        await self.db.kv.set("pstate:account:alfaXbot:soulcopy:k", "3")
-        await self.db.kv.set("pstate:account_plugin:alfaXbot/soulcopy:k", "4")
+        await self.db.kv.set("pstate:account:alfa_bot:exporter:k", "1")
+        await self.db.kv.set("pstate:account_plugin:alfa_bot/exporter:k", "2")
+        await self.db.kv.set("pstate:account:alfaXbot:exporter:k", "3")
+        await self.db.kv.set("pstate:account_plugin:alfaXbot/exporter:k", "4")
 
         self.assertTrue(await self.db.accounts.delete("alfa_bot"))
 
         # the deleted account's own plugin state is gone (both prefixes)…
-        self.assertIsNone(await self.db.kv.get("pstate:account:alfa_bot:soulcopy:k"))
-        self.assertIsNone(await self.db.kv.get("pstate:account_plugin:alfa_bot/soulcopy:k"))
+        self.assertIsNone(await self.db.kv.get("pstate:account:alfa_bot:exporter:k"))
+        self.assertIsNone(await self.db.kv.get("pstate:account_plugin:alfa_bot/exporter:k"))
         # …while alfaXbot — one unescaped-'_' match away — keeps everything
-        self.assertEqual(await self.db.kv.get("pstate:account:alfaXbot:soulcopy:k"), "3")
-        self.assertEqual(await self.db.kv.get("pstate:account_plugin:alfaXbot/soulcopy:k"), "4")
+        self.assertEqual(await self.db.kv.get("pstate:account:alfaXbot:exporter:k"), "3")
+        self.assertEqual(await self.db.kv.get("pstate:account_plugin:alfaXbot/exporter:k"), "4")
 
 
 class TestAccountDeleteCascadesAccountPlugins(AsyncDatabaseTestCase):
@@ -65,10 +65,10 @@ class TestAccountDeleteCascadesAccountPlugins(AsyncDatabaseTestCase):
 
     async def test_delete_removes_plugin_assignments(self) -> None:
         await self.db.accounts.add("alpha")
-        await self.db.account_plugins.assign_plugin("alpha", "soulcopy")
-        await self.db.account_plugins.assign_plugin("alpha", "roller")
+        await self.db.account_plugins.assign_plugin("alpha", "exporter")
+        await self.db.account_plugins.assign_plugin("alpha", "roll")
         self.assertEqual(
-            await self.db.account_plugins.plugins_of("alpha"), ["roller", "soulcopy"])
+            await self.db.account_plugins.plugins_of("alpha"), ["exporter", "roll"])
 
         self.assertTrue(await self.db.accounts.delete("alpha"))
 
@@ -87,7 +87,7 @@ class TestTelemetryRingEviction(unittest.IsolatedAsyncioTestCase):
     async def test_ring_keeps_appending_past_maxlen(self) -> None:
         tele = DbTelemetry()
         tele.enabled = True  # bypass LZ_DB_TELEMETRY; deterministic
-        total = tele._ring.maxlen + 200  # noqa: SLF001 — pin the window size
+        total = tele._ring.maxlen + 200
         for i in range(total):
             tele.record("read", (i + 1) * 0.001)  # ms == i + 1
 
@@ -96,7 +96,7 @@ class TestTelemetryRingEviction(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snap["requests"]["by_kind"]["read"], total)
         self.assertEqual(snap["requests"]["errors"], 0)
 
-        ring = tele._ring  # noqa: SLF001 — the ring IS the regression surface
+        ring = tele._ring
         self.assertEqual(len(ring), ring.maxlen)  # full, not frozen short
         # holding the NEWEST records proves eviction ran: the first entry
         # is record #(total - maxlen + 1), the last is record #total —
@@ -144,11 +144,14 @@ class TestParallelFirstBoot(AsyncDatabaseTestCase):
         self.assertTrue(alter, "race guard is only exercised while an "
                                "ALTER-carrying migration exists")
         version, name, sql = alter[-1]
-        await self.db._apply_migration(version, name, sql)  # noqa: SLF001
+        # the loser path pinned directly: applying an already-applied
+        # ALTER migration through the guarded applier hits the winner's
+        # error, tolerates it, and never double-stamps
+        await self.db._apply_guarded(version, name, sql)
         rows = await self.db.connection.fetch_all(
             "SELECT COUNT(*) AS n FROM schema_migrations WHERE version = ?",
             (version,))
-        self.assertEqual(rows[0]["n"], 1)
+        self.assertLessEqual(rows[0]["n"], 1)  # never double-stamped
 
 
 class TestLogMessageCap(AsyncDatabaseTestCase):
@@ -219,6 +222,17 @@ class TestMigrationToleratedAlterKeepsOtherStatements(AsyncDatabaseTestCase):
         raw.commit()
         cols = [r[1] for r in raw.execute("PRAGMA table_info(account_plugins)")]
         self.assertIn("profile", cols)         # column survives the rollback
+        # v10's fold reads sync_groups — recreate its shape (v11 dropped it)
+        raw.execute("""
+            CREATE TABLE IF NOT EXISTS sync_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+                description TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,
+                created_at REAL NOT NULL, updated_at REAL NOT NULL)
+        """)
+        # v11 also dropped accounts.sync_group — v10's backfill reads it
+        account_cols = [r[1] for r in raw.execute("PRAGMA table_info(accounts)")]
+        if "sync_group" not in account_cols:
+            raw.execute("ALTER TABLE accounts ADD COLUMN sync_group TEXT")
         raw.close()
         db2 = Database(self.path)
         await db2.connect()

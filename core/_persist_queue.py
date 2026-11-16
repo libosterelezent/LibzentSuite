@@ -46,7 +46,7 @@ class PersistQueue:
         self._max = int(max_inflight)
         self._q: queue.SimpleQueue[dict[str, Any]] = queue.SimpleQueue()
         self._lock = threading.Lock()
-        self._worker: asyncio.Task | None = None
+        self._worker: asyncio.Task[None] | None = None
         self._stopping = False
         self._stopped = False
         self._draining: asyncio.Future[None] | None = None
@@ -90,7 +90,7 @@ class PersistQueue:
     # ----------------------------------------------------------- lifecycle
     async def start(
         self, repo: Any, *, batch: int = 50, interval: float = 0.25
-    ) -> asyncio.Task | None:
+    ) -> asyncio.Task[None] | None:
         """Spawn the worker (idempotent: a live worker is returned as-is)."""
         if repo is None:
             return self._worker
@@ -205,7 +205,7 @@ class PersistQueue:
             if leftover:
                 self._drain_counted()
 
-    async def _drain_inline(self, loop, deadline) -> None:
+    async def _drain_inline(self, loop: asyncio.AbstractEventLoop, deadline: float) -> None:
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:

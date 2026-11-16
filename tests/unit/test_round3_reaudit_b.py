@@ -10,7 +10,6 @@ the decorator when the corresponding fix lands):
 
   * test_null_reset_refreshes_live_plugin_view — ControlAPI null reset
     leaves the running plugin's live settings view stale.
-  * test_remote_control_masks_internal_runtime_errors — remote control
     still leaks internal RuntimeError text into the channel reply
     (mirrors the in-tree failing test_broken_api_replies_with_error).
 """
@@ -24,19 +23,18 @@ import tempfile
 import time
 import unittest
 from types import SimpleNamespace
-from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.api import ControlAPI
-from core.errors import SchedulerError, SettingsValidationError, TargetGone
-from core.event_bus import EventBus, MessageReceived
-from core.settings_manager import Setting, SettingsManager
-from core.task_scheduler.scheduler import TaskScheduler
 from core.account_manager.services import (
     AccountPluginServices,
     TaskAckRegistry,
 )
+from core.api import ControlAPI
+from core.errors import SchedulerError, TargetGone
+from core.event_bus import EventBus, MessageReceived
+from core.settings_manager import Setting, SettingsManager
+from core.task_scheduler.scheduler import TaskScheduler
 
 LOG = logging.getLogger("reaudit-b")
 FIXTURES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -437,27 +435,6 @@ class TestDocumentedRegressions(unittest.IsolatedAsyncioTestCase):
             live.get("count"), resolved,
             f"live view stale: plugin keeps {live.get('count')} "
             f"while resolution says {resolved}")
-
-    async def test_remote_control_masks_internal_runtime_errors(self):
-        """FIXED (round-3 re-audit): bare RuntimeError left _DOMAIN_ERRORS —
-        non-domain internals ESCAPE _execute so _handle masks them; domain
-        errors come back rendered as strings."""
-        from core.remote_control import RemoteControl
-
-        rc = RemoteControl.__new__(RemoteControl)  # only _execute's contract
-        rc._handlers = {}
-        rc._api_provider = lambda: None
-
-        async def boom(api, args):
-            raise RuntimeError("boom")
-
-        rc._handlers["status"] = boom
-        rc._logger = LOG
-        with self.assertRaises(RuntimeError):
-            # non-domain internals must ESCAPE _execute so _handle masks
-            # them; domain errors come back rendered as strings
-            await rc._execute("status")
-
 
 if __name__ == "__main__":
     unittest.main()

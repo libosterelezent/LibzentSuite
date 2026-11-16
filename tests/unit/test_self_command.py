@@ -8,16 +8,14 @@ This test suite pins the adapter's integration without needing the real
 library: the factory wiring, the prefix routing and the isolation
 invariants (commands never become events).
 
-(The legacy slcopy trigger bridge — ``_publish_self_trigger`` — was
-removed together with the soulcopy plugin; every verb now dispatches
+(The legacy export trigger bridge — ``_publish_self_trigger`` — was
+removed together with the exporter plugin; every verb now dispatches
 through the registry path covered by AdapterLayerTests in
 tests/unit/test_plugin_commands.py.)
 """
 from __future__ import annotations
 
-import asyncio
 import unittest
-from types import SimpleNamespace as NS
 
 from adapters.discord.client import RealClientFactory, RealDiscordClient
 

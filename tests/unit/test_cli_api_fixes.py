@@ -21,7 +21,7 @@ import logging
 import sys
 import time
 import unittest
-from typing import Any, List
+from typing import Any
 
 from core.api import ControlAPI
 from core.audit import format_audit
@@ -45,7 +45,7 @@ class RecordingService:
     """Records every call; raises nothing (deletes must be observable)."""
 
     def __init__(self, *method_names: str) -> None:
-        self.calls: List[tuple] = []
+        self.calls: list[tuple] = []
         for method in method_names:
             async def stub(*args, _m=method, **kwargs):
                 self.calls.append((_m, args, kwargs))
@@ -56,7 +56,7 @@ class RecordingAudit:
     """Duck-typed AuditRecorder recording record() calls."""
 
     def __init__(self) -> None:
-        self.entries: List[dict] = []
+        self.entries: list[dict] = []
 
     def record(self, **kwargs: Any) -> dict:
         self.entries.append(kwargs)
@@ -88,7 +88,7 @@ class FakeClearApi:
     """Tiny ControlAPI double for the 'plugins clear' verb test."""
 
     def __init__(self) -> None:
-        self.calls: List[tuple] = []
+        self.calls: list[tuple] = []
 
     async def plugins_clear_setting(self, account, plugin, key):
         self.calls.append((account, plugin, key))
@@ -147,9 +147,9 @@ class TestAccountsRemoveRecreated(unittest.IsolatedAsyncioTestCase):
 class TestPluginsClearVerb(unittest.IsolatedAsyncioTestCase):
     async def test_clear_reaches_plugins_clear_setting(self) -> None:
         api = FakeClearApi()
-        text = await run_command(api, "plugins clear alpha soulcopy trigger")
+        text = await run_command(api, "plugins clear alpha exporter trigger")
         self.assertEqual(
-            api.calls, [("alpha", "soulcopy", "trigger")])
+            api.calls, [("alpha", "exporter", "trigger")])
         self.assertIn("cleared", text)
 
     async def test_clear_usage_errors(self) -> None:
@@ -157,9 +157,8 @@ class TestPluginsClearVerb(unittest.IsolatedAsyncioTestCase):
 
         for line in ("plugins clear a p", "plugins clear a p k extra",
                      "plugins clear"):
-            with self.subTest(line=line):
-                with self.assertRaises(UsageError):
-                    await run_command(FakeClearApi(), line)
+            with self.subTest(line=line), self.assertRaises(UsageError):
+                await run_command(FakeClearApi(), line)
 
     async def test_help_advertises_clear(self) -> None:
         from interfaces.cli.commands import help_text

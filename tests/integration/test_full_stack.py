@@ -8,34 +8,33 @@ audit, logging) is the real production code.
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from adapters.simulator.client import SimClient
 from adapters.simulator.world import SimWorld
 from core.bootstrap import build
 from core.credentials import Credentials
-from core.event_bus import MessageReceived
 from database.db import Database
 
 OWNER_ID = 1001
-MUDAE_ID = 999_999
+PRIMARY_BOT_ID = 999_999
 ALPHA_ID = 2001
 GUILD_CHANNEL = 500
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 #: framework fixture plugins (probe/spy/echo) — the framework bundles none
 FIXTURE_PLUGINS = REPO_ROOT / "tests" / "fixtures" / "plugins"
-#: the full-stack WORKLOAD fixture (a soulcopy-like paced flow) driving
+#: the full-stack WORKLOAD fixture (a exporter-like paced flow) driving
 #: the pacing/estop e2e scenarios below
 SIM_PLUGINS = REPO_ROOT / "tests" / "fixtures" / "sim_plugins"
 PROBE = "probe"
 
 FAST_SETTINGS = {
-    "soulcopy": {
+    "exporter": {
         "inter_chunk_delay": 0.0,
         "dm_read_timeout": 0.6,
     }
@@ -64,22 +63,22 @@ class Stack:
     def __init__(self, db_path: str | None = None, extra_accounts: list = (),
                  plugin_dir: Path = FIXTURE_PLUGINS) -> None:
         self.world = SimWorld(
-            responder_id=MUDAE_ID,
-            responses={"$slud-s": [
+            responder_id=PRIMARY_BOT_ID,
+            responses={"$dump": [
                 "Soulmates\n---------\nAlice\nBob\nCharlie",
                 "Dana\nEve\nFinn",
             ]},
             reply_delay=0.01,
         )
         self.world.add_user(OWNER_ID, "owner")
-        self.world.add_user(MUDAE_ID, "mudae")
+        self.world.add_user(PRIMARY_BOT_ID, "bot")
         self.world.add_user(ALPHA_ID, "alpha")
         self.world.add_user(2002, "beta")
         self.world.add_channel(GUILD_CHANNEL, "grind-channel")
         self.user_ids = {"alpha": ALPHA_ID, "beta": 2002}
         self.config_dir = make_config_dir()
         self.credentials = Credentials.from_values({
-            "MUDAE_BOT_ID": str(MUDAE_ID),
+            "PRIMARY_BOT_ID": str(PRIMARY_BOT_ID),
             "OWNER_USER_IDS": str(OWNER_ID),
             "DISCORD_TOKEN_ALPHA": "sim-alpha",
             "DISCORD_TOKEN_BETA": "sim-beta",
@@ -89,7 +88,7 @@ class Stack:
         self._extra = extra_accounts
         self._plugin_dir = plugin_dir
 
-    async def boot(self) -> "Stack":
+    async def boot(self) -> Stack:
         """``build()`` is async now (aiosqlite database layer)."""
         self.framework = await build(
             config_dir=str(self.config_dir),
@@ -142,12 +141,12 @@ class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
         stack = await Stack(plugin_dir=SIM_PLUGINS).boot()
         await stack.start()
         try:
-            await stack.owner_says("slcopy")
+            await stack.owner_says("export")
             await stack.world.wait_for_quiet(GUILD_CHANNEL, quiet=2.2, limit=30.0)
             history = stack.world.messages_of(GUILD_CHANNEL)
             # export request + one chunk (pages fit a single chunk)
-            self.assertIn("slcopy", history[0])
-            chunks = [m for m in history if m.startswith("$soulcopy ")]
+            self.assertIn("export", history[0])
+            chunks = [m for m in history if m.startswith("$exporter ")]
             self.assertEqual(len(chunks), 1)
             self.assertIn("Alice", chunks[0])
 
@@ -162,7 +161,7 @@ class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
             outs = [e for e in audit if e.get("direction") == "out"
                     and e.get("action") in ("message", "dm")]
             self.assertGreaterEqual(len(outs), 2)
-            self.assertTrue(all("plugin=soulcopy" in (e.get("note") or "")
+            self.assertTrue(all("plugin=exporter" in (e.get("note") or "")
                                 for e in outs))
             # task history persisted with statuses
             hist = await stack.framework.api.tasks_history(limit=10)
@@ -181,7 +180,7 @@ class TestFullStackWorkloadFlow(unittest.IsolatedAsyncioTestCase):
         stack = await Stack(plugin_dir=SIM_PLUGINS).boot()
         await stack.start()
         try:
-            await stack.owner_says("slcopy")
+            await stack.owner_says("export")
             await stack.world.wait_for_quiet(GUILD_CHANNEL, quiet=2.2, limit=30.0)
             # config policy: 1.5s interval (+50ms jitter max) -> every gap
             # between the account's outbound messages >= 1.45. Measured on
@@ -275,13 +274,13 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
             await api.accounts_add({"name": "alpha"})
             await api.accounts_start()
             try:
-                # resolve the Mudae DM twice in this boot: ONE client call
+                # resolve the primary bot DM twice in this boot: ONE client call
                 services = stack.framework.accounts.services_for("alpha", PROBE)
-                cid1 = await services.open_dm(MUDAE_ID)
-                cid2 = await services.open_dm(MUDAE_ID)
+                cid1 = await services.open_dm(PRIMARY_BOT_ID)
+                cid2 = await services.open_dm(PRIMARY_BOT_ID)
                 self.assertEqual(cid1, cid2)
                 client = stack.framework.accounts.get("alpha").runtime.client
-                self.assertEqual(client.open_dm_calls, [MUDAE_ID])
+                self.assertEqual(client.open_dm_calls, [PRIMARY_BOT_ID])
             finally:
                 await stack.stop()
 
@@ -294,7 +293,7 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
             await api2.accounts_start()
             try:
                 services2 = stack2.framework.accounts.services_for("alpha", PROBE)
-                cid3 = await services2.open_dm(MUDAE_ID)
+                cid3 = await services2.open_dm(PRIMARY_BOT_ID)
                 self.assertEqual(cid3, cid1)
                 client2 = stack2.framework.accounts.get("alpha").runtime.client
                 self.assertEqual(client2.open_dm_calls, [])  # DB-served
@@ -320,29 +319,6 @@ class TestApiCallTrimming(unittest.IsolatedAsyncioTestCase):
                 SimpleNamespace(account="alpha", action="message",
                                 channel_id=GUILD_CHANNEL, content="y"))
             self.assertEqual(len(client.typing_calls), 1)
-        finally:
-            await stack.stop()
-
-    async def test_remote_control_end_to_end(self) -> None:
-        """The retired RemoteControl mention bridge's verbs now ride the
-        self-command hub: the production bootstrap registers the
-        api_provider bridge, so a hub invocation runs the ported
-        Framework command against the ONE ControlAPI and replies through
-        the paced pipeline into the channel (the adapter's mention→Bot
-        parse is covered in tests/unit/test_plugin_commands.py)."""
-        from core.plugin_manager.commands import COMMAND_HUB
-
-        stack = await Stack().boot()
-        api = stack.framework.api
-        await api.accounts_add({"name": "alpha"})
-        await stack.framework.accounts.start("alpha")
-        try:
-            await COMMAND_HUB.invoke("alpha", "lane", [], GUILD_CHANNEL,
-                                     invoker_id=OWNER_ID)
-            await stack.world.wait_for_quiet(GUILD_CHANNEL, quiet=1.2, limit=20.0)
-            replies = [m for m in stack.world.messages_of(GUILD_CHANNEL)
-                       if "send lane" in m]
-            self.assertTrue(replies, "expected a framework-command reply in-channel")
         finally:
             await stack.stop()
 
@@ -388,8 +364,8 @@ class TestGroupRateScope(unittest.IsolatedAsyncioTestCase):
     async def test_group_members_serialize(self) -> None:
         stack = await Stack().boot()
         api = stack.framework.api
-        await api.accounts_add({"name": "alpha", "sync_group": "grinders"})
-        await api.accounts_add({"name": "beta", "sync_group": "grinders"})
+        await api.accounts_add({"name": "alpha", "workspace": "grinders"})
+        await api.accounts_add({"name": "beta", "workspace": "grinders"})
         self.assertEqual(
             (await api.ratelimit_stats())["groups"],
             {"alpha": "grinders", "beta": "grinders"},

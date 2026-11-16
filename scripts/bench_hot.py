@@ -46,11 +46,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import statistics
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -62,7 +64,6 @@ from core.rate_limit_manager.engine import (  # noqa: E402
     ManualClock,
     RateLimitManager,
 )
-from interfaces.dashboard.server import _dumps  # noqa: E402
 
 N_EVENTS = 1_000
 N_SUBSCRIBERS = 10
@@ -70,6 +71,9 @@ N_ACQUIRES = 1_000
 N_RECORDS = 10_000
 N_DUMPS = 200
 N_CONVERTS = 1_000
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 # --------------------------------------------------------------- helpers
@@ -103,7 +107,7 @@ class BenchResult:
         )
 
 
-def timed(fn) -> float:
+def timed(fn: Callable[[], object]) -> float:
     t0 = time.perf_counter()
     fn()
     return time.perf_counter() - t0
@@ -113,7 +117,7 @@ def timed(fn) -> float:
 def bench_bus(repeat: int) -> BenchResult:
     hits = [0]
 
-    def handler(event) -> None:
+    def handler(event: MessageReceived) -> None:
         hits[0] += 1
 
     bus = EventBus()
@@ -151,11 +155,12 @@ async def _rate_once() -> float:
     # time per acquire under the frozen ManualClock. Route the documented
     # _sleep seam at the clock instead: every timed wait becomes an
     # instant clock advance, so the bench measures pure engine overhead.
+    # (Deliberate monkeypatch of the seam — mypy cannot see it is intended.)
     async def _clock_sleep(seconds: float) -> None:
         if seconds > 0:
             clock.advance(seconds)
 
-    mgr._sleep = _clock_sleep
+    mgr._sleep = _clock_sleep  # type: ignore[method-assign]
 
     async def run() -> None:
         # learned default for "message" (no stored policy) is 2.6s — a
@@ -184,11 +189,11 @@ class NullRepo:
     def __init__(self) -> None:
         self.rows = 0
 
-    async def add_many(self, entries: list[dict]) -> int:
+    async def add_many(self, entries: list[dict[str, object]]) -> int:
         self.rows += len(entries)
         return len(entries)
 
-    async def add(self, entry: dict) -> int:
+    async def add(self, entry: dict[str, object]) -> int:
         self.rows += 1
         return 1
 
@@ -219,7 +224,7 @@ def bench_persist(repeat: int) -> BenchResult:
 
 
 # ---------------------------------------------- 4. dashboard _dumps
-def _big_stats_payload() -> dict:
+def _big_stats_payload() -> dict[str, object]:
     accounts = [
         {
             "name": f"account-{i:03d}",
@@ -229,7 +234,7 @@ def _big_stats_payload() -> dict:
             "cached_guilds": 12,
             "cached_channels": 340 + i,
             "cached_dms": 27,
-            "plugins": [{"name": "soulcopy", "enabled": True}, {"name": "roll", "enabled": False}],
+            "plugins": [{"name": "exporter", "enabled": True}, {"name": "roll", "enabled": False}],
             "profiles": ["collector"],
         }
         for i in range(100)
@@ -239,7 +244,7 @@ def _big_stats_payload() -> dict:
             "id": i,
             "name": f"task-{i}",
             "account": f"account-{i % 100:03d}",
-            "plugin": "soulcopy",
+            "plugin": "exporter",
             "action": "message",
             "status": "completed",
             "duration_s": 2.5,
@@ -267,7 +272,7 @@ def _big_stats_payload() -> dict:
             "severity": "INFO",
             "source": "scheduler",
             "account": f"account-{i % 100:03d}",
-            "plugin": "soulcopy",
+            "plugin": "exporter",
             "task_id": i,
             "event": "task.completed",
             "message": f"task {i} completed after pacing wait (chunk 1/3)",
@@ -291,12 +296,15 @@ def _big_stats_payload() -> dict:
 def bench_dumps(repeat: int) -> BenchResult:
     payload = _big_stats_payload()
     # sanity: the payload must serialize (NaN/inf would crash _dumps)
-    assert isinstance(_dumps(payload), str)
+    assert isinstance(json.dumps(payload), str)
     times = []
     for _ in range(repeat):
-        times.append(timed(lambda: [_dumps(payload) for _ in range(N_DUMPS)]))
+        times.append(timed(lambda: [json.dumps(payload) for _ in range(N_DUMPS)]))
     return BenchResult(
-        "dashboard-dumps", N_DUMPS, times, note=f"(payload ~{len(_dumps(payload)) // 1024} KB JSON)"
+        "dashboard-dumps",
+        N_DUMPS,
+        times,
+        note=f"(payload ~{len(json.dumps(payload)) // 1024} KB JSON)",
     )
 
 
@@ -304,20 +312,20 @@ def bench_dumps(repeat: int) -> BenchResult:
 class _NS:
     """Attribute bag standing in for a library object."""
 
-    def __init__(self, **kw):
+    def __init__(self, **kw: object) -> None:
         self.__dict__.update(kw)
 
 
-def _fat_message():
+def _fat_message() -> _NS:
     author = _NS(id=111222333, name="benchuser", bot=False)
     channel = _NS(id=444555666, name="general", type="text")
     guild = _NS(id=777888999, name="bench guild", member_count=500)
     embeds = [
         _NS(
-            title="Mudae character",
+            title="Bot character",
             description="claims: 1",
             url="https://example.invalid/x",
-            author=_NS(name="mudae", url="https://example.invalid/a"),
+            author=_NS(name="primary_bot", url="https://example.invalid/a"),
             footer=_NS(text=f"footer text {i}", icon_url="https://e.invalid/f.png"),
             fields=[_NS(name=f"field{k}", value=f"value {k}" * 4, inline=True) for k in range(6)],
             color=0x7289DA,

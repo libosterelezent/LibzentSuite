@@ -1,0 +1,11 @@
+# gitleaks configuration — extends the default ruleset with narrow,
+# documented allowlists. Keep entries surgical: path+reason, never a
+# blanket regex.
+
+[allowlist]
+description = "LibzentSuite deliberate false positives"
+paths = [
+  # Synthetic Discord-token-shaped fixture (PHASE 10 tests): fabricated
+  # snowflake + filler HMAC, never a live credential.
+  '''tests/unit/test_plugin_data\.py''',
+]

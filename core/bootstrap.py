@@ -57,12 +57,84 @@ from .logging_service import (
     detach_stdlib_bridge,
     release_stderr_pipeline,
 )
-from .plugin_manager import PluginManager
+from .plugin_manager import COMMAND_HUB, PluginManager
 from .plugin_state import PluginStateService
 from .rate_limit_manager import RateLimitManager
 from .settings_manager import SettingsManager
-from .sync_group_manager import SyncGroupManager
 from .task_scheduler import TaskScheduler
+from .workspace.service import WorkspaceService
+from .workspace.signals import SignalOutbox
+
+
+class _LatePluginsInvoker:
+    """Resolves the plugin manager at CALL time: the W4 assembly runs
+    before the manager is constructed, and handlers only ever invoke
+    long after boot completed."""
+
+    def __init__(self, resolve: Any) -> None:
+        self._resolve = resolve
+
+    async def __call__(
+        self, account: str, plugin: str, handler: str, payload: dict[str, Any]
+    ) -> Any:
+        return await self._resolve().invoke_handler(account, plugin, handler, payload)
+
+
+class _WorkspaceGateReader:
+    """Check-7 facts: plugin assigned/enabled on the account, the
+    step's gate condition against the LIVE settings view, channel
+    binding usability from the registry (only available resolves)."""
+
+    def __init__(self, database: Any) -> None:
+        self._db = database
+        self._plugins: Any = None
+
+    def bind_plugins(self, plugins: Any) -> None:
+        self._plugins = plugins
+
+    async def plugin_gate_facts(
+        self, account: str, plugin: str, gate: dict[str, Any]
+    ) -> dict[str, Any]:
+        assigned = plugin in set(await self._db.account_plugins.plugins_of(account))
+        enabled = True
+        if assigned:
+            row = await self._db.connection.fetch_one(
+                "SELECT enabled FROM plugin_states WHERE account=? AND plugin=?",
+                (account, plugin),
+            )
+            enabled = bool(row["enabled"]) if row is not None else True
+        gate_passed = True
+        setting = str(gate.get("setting") or "")
+        if setting and self._plugins is not None:
+            live = getattr(self._plugins, "live_settings", None)
+            if callable(live):
+                values = live(account, plugin) or {}
+                expected = gate.get("equals")
+                gate_passed = setting in values and values[setting] == expected
+        binding_usable = True
+        binding_reason = ""
+        if assigned:
+            bindings = await self._db.account_channels.plugin_bindings(account, plugin)
+            if bindings:
+                usable = []
+                for binding in bindings:
+                    row = await self._db.connection.fetch_one(
+                        "SELECT validity FROM account_channels WHERE account=? AND channel_id=?",
+                        (account, binding.channel_id),
+                    )
+                    validity = row["validity"] if row is not None else "unknown"
+                    usable.append(validity == "available")
+                binding_usable = any(usable)
+                if not binding_usable:
+                    binding_reason = "no binding resolves to an available channel"
+        return {
+            "plugin_assigned": assigned,
+            "plugin_enabled": enabled,
+            "gate_passed": gate_passed,
+            "channel_binding_usable": binding_usable,
+            "channel_binding_reason": binding_reason,
+        }
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -135,7 +207,7 @@ async def _seed_config_defaults(
     if not callable(removed):  # vintage manager shape (attr/property):
         removed = None  # no tombstone knowledge -> seed normally
 
-    def _seed(action, spec, level, owner, where):
+    def _seed(action: str, spec: dict[str, Any], level: str, owner: str | None, where: str) -> None:
         if (level, owner, action) in stored:
             return  # DB owns this key already
         if removed is not None and removed(level, owner, action):
@@ -175,7 +247,7 @@ async def _seed_config_defaults(
             _seed(action, spec, "account", account, f"account {account}")
 
 
-def _policy_triple(action: str, spec: dict[str, Any], where: str) -> tuple:
+def _policy_triple(action: str, spec: dict[str, Any], where: str) -> tuple[float, float, float]:
     """{'interval': 2.0, 'jitter': [0.1, 0.5]} -> (2.0, 0.1, 0.5)."""
     try:
         interval = float(spec["interval"])
@@ -209,11 +281,9 @@ class Framework:
         credential_service: Any = None,
         cooldowns: Any = None,
         plugin_state: Any = None,
-        sync_groups: Any = None,
-        fleet: Any = None,
+        workspaces: Any = None,
         plugin_data: Any = None,
         cooldown_resync_stop: Callable[[], Any] | None = None,
-        fleet_reconciler_stop: Callable[[], Any] | None = None,
         claims_stderr: bool = False,
     ) -> None:
         self.api = api
@@ -232,15 +302,13 @@ class Framework:
         self.credential_service = credential_service
         self.cooldowns = cooldowns
         self.plugin_state = plugin_state
-        self.sync_groups = sync_groups
-        #: PHASE 9 fleet orchestration (service + policy gate)
-        self.fleet = fleet
+        #: W3 workspace orchestration (the one writer)
+        self.workspaces = workspaces
         #: PHASE 10 AccountPluginData store (B3)
         self.plugin_data = plugin_data
         #: stops the periodic cooldown-resync task (set by _assemble)
         self._cooldown_resync_stop = cooldown_resync_stop
-        #: stops the periodic fleet-reconciler task (set by _assemble)
-        self._fleet_reconciler_stop = fleet_reconciler_stop
+
         # this framework holds one CLAIM on the process-global stderr
         # pipeline — shutdown releases it (the last release stops)
         self._claims_stderr = claims_stderr
@@ -269,8 +337,6 @@ class Framework:
             ("scheduler", lambda: self.scheduler.stop(drain=True)),
             ("cooldown resync", self._stop_cooldown_resync),
             # stop the reconciler's periodic pass BEFORE the drains so its
-            # tail fleet events still reach subscribers mid-teardown
-            ("fleet reconciler", self._stop_fleet_reconciler),
             ("bus drain", self.bus.drain),
             ("accounts", self.accounts.stop_all),
             # SECOND drain: stop_all emits AccountDisconnected (and plugin
@@ -294,9 +360,9 @@ class Framework:
             # pipeline (the LAST release stops it) — placing it after the
             # steps above keeps their final warnings on the console
             steps.append(("stderr pipeline", release_stderr_pipeline))
-        steps = tuple(steps)
+        ordered = tuple(steps)
         interrupted: BaseException | None = None
-        for label, step in steps:
+        for label, step in ordered:
             try:
                 outcome = step()
                 if inspect.iscoroutine(outcome):
@@ -338,20 +404,6 @@ class Framework:
             raise
         except Exception as exc:
             ROOT_LOGGER.warning("cooldown resync shutdown failed: %s: %s", type(exc).__name__, exc)
-
-    async def _stop_fleet_reconciler(self) -> None:
-        stop = self._fleet_reconciler_stop
-        if stop is None:
-            return
-        self._fleet_reconciler_stop = None  # idempotent
-        try:
-            outcome = stop()
-            if inspect.iscoroutine(outcome):
-                await outcome
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            ROOT_LOGGER.warning("fleet reconciler shutdown failed: %s: %s", type(exc).__name__, exc)
 
     async def _close_plugin_data(self) -> None:
         if self.plugin_data is not None:
@@ -436,7 +488,7 @@ async def build(
     # a borrower increment the count and never release it), and the
     # release is registered BEFORE any fallible step so an early boot
     # failure cannot leak the claim.
-    cleanups: list = []
+    cleanups: list[tuple[str, Any]] = []
     if not quiet:
         claim_stderr_pipeline()
         cleanups.append(("stderr pipeline", release_stderr_pipeline))
@@ -487,7 +539,7 @@ async def _safe_close(database: Any) -> None:
 
 
 async def _assemble(
-    cleanups: list,
+    cleanups: list[tuple[str, Any]],
     _time: Any,
     credentials: Credentials,
     config: ProjectConfig,
@@ -577,17 +629,117 @@ async def _assemble(
     # is the sole source of truth — the config file never re-adds it.
     await _seed_config_defaults(limiter, config, database)
 
-    # Sync groups: persistent membership owner, sits BETWEEN the accounts
-    # and the limiter (AccountManager -> SyncGroupManager -> RateLimitManager).
-    # Runtime pacing itself stays in the limiter; this manager only keeps
-    # the engine's account->group metadata in sync with persistence.
-    sync_groups = SyncGroupManager(
-        database.sync_groups,
-        ServiceLogger(logs, "sync-groups"),
-        accounts_repo=database.accounts,
-        limiter=limiter,
+    # W3: the workspace service replaces SyncGroupManager + FleetService
+    # (one writer, no seam closures — WORKSPACE_DESIGN). The v9 modules
+    # stay importable and tested until W5 deletes them.
+    # W4: the durable signal outbox — acceptance persists BEFORE the
+    # emission acknowledges; delivery sweeps ride the reconciler loop
+    # (the chain runtime consumes matched signals idempotently by id)
+    signals_outbox = SignalOutbox(
+        database.signals,
+        deliver=None,  # the chain runtime's intake wires in below
     )
-    await sync_groups.load()
+
+    # C2: the cog host — the converged plugin command face. The
+    # toolbox seams: to_rich is the adapter's converter (imported at
+    # composition — plugins never import adapters), audit publishes the
+    # typed MessageReceived on the bus (the identical row the intake
+    # records), the inbound factory is the event itself.
+    from adapters.model import convert_message
+    from core.event_bus import MessageReceived
+    from core.plugin_manager.cog_host import PluginCogHost
+
+    def _publish_inbound(event: Any) -> None:
+        bus.publish_nowait(event)
+
+    def _to_rich(message: Any) -> Any:
+        """The C1 to_rich seam, wired the way the client's own intake
+        derives the flag: convert_message REQUIRES ``dm`` — passing the
+        bare function would TypeError on every call (found by the
+        mypy-strict pass, 2026-11-15)."""
+        import discord
+
+        channel = getattr(message, "channel", None)
+        return convert_message(message, dm=isinstance(channel, discord.DMChannel))
+
+    cog_host = PluginCogHost(
+        to_rich=_to_rich,
+        audit_publisher=_publish_inbound,
+        inbound_factory=lambda **kw: MessageReceived(**kw),
+    )
+
+    workspaces = WorkspaceService(
+        database.workspaces,
+        preset_defs=database.workspace_presets,  # P8: definitions + executions
+        profiles=database.account_plugin_profiles,  # P8: profile references
+        accounts=database.accounts,
+        channels_repo=database.account_channels,
+        presets_repo=database.presets,
+        provenance=database.account_plugins,
+        plugin_data=plugin_data_store,
+        settings_writer=database.plugins,
+        limiter=limiter,
+        publisher=lambda ev: ROOT_LOGGER.debug("workspace event: %s %s", ev.kind, ev.workspace),
+    )
+    await workspaces.load()
+    await workspaces.sync_runtime()
+
+    # W4: the chain runtime (trigger intake + run engine) and the
+    # dispatch guard. Terminal events flow from the bus; handler
+    # invocation rides the plugin manager's per-account contexts; the
+    # check-7 reader answers plugin-assigned/gate/binding facts.
+    from core.event_bus import TaskCompleted, TaskFailed
+    from core.workspace.guard import WorkspaceDispatchGuard, WorkspaceReconciler
+    from core.workspace.runtime import ChainRuntime, TerminalTrigger
+
+    # (the plugin manager binds below, once constructed — gate
+    # resolution needs its live settings view)
+    _workspace_gate_reader = _WorkspaceGateReader(database)
+
+    chain_runtime = ChainRuntime(
+        database.workspaces,
+        service=workspaces,
+        outbox=signals_outbox,
+        signal_reader=database.signals,
+        invoker=_LatePluginsInvoker(lambda: plugins),  # resolved at call time
+        gate_reader=_workspace_gate_reader,
+    )
+
+    async def _on_task_completed(event: TaskCompleted) -> None:
+        with contextlib.suppress(Exception):
+            await chain_runtime.on_terminal(
+                TerminalTrigger(
+                    account=event.account,
+                    plugin=event.plugin,
+                    action=str(getattr(event, "action", "") or ""),
+                    kind="task_completed",
+                )
+            )
+
+    async def _on_task_failed(event: TaskFailed) -> None:
+        with contextlib.suppress(Exception):
+            await chain_runtime.on_terminal(
+                TerminalTrigger(
+                    account=event.account,
+                    plugin=event.plugin,
+                    action=str(getattr(event, "action", "") or ""),
+                    kind="task_failed",
+                )
+            )
+
+    bus.subscribe(TaskCompleted, _on_task_completed)
+    bus.subscribe(TaskFailed, _on_task_failed)
+
+    workspace_reconciler = WorkspaceReconciler(
+        workspaces,
+        runtime=chain_runtime,
+        outbox=signals_outbox,
+        plugin_data=plugin_data_store,
+        channels_repo=database.account_channels,
+    )
+    await workspace_reconciler.reconcile()
+    workspace_reconciler.start()
+    cleanups.append(("workspace reconciler", workspace_reconciler.stop))
 
     settings = SettingsManager(
         bus,
@@ -617,13 +769,11 @@ async def _assemble(
         audit=audit,
         history_repo=database.tasks,
     )
-    # prefixrate command bridge: the hub needs the limiter for get/set of
-    # an account's send pacing (registered once; tests may stub it)
-    from .plugin_manager.commands import COMMAND_HUB, PacingBackend
-
-    COMMAND_HUB.pacing = PacingBackend(limiter)
+    #: forward declaration — the late-plugins invoker below closes over
+    # ``plugins`` before the manager is constructed (resolved at call time)
+    plugins: PluginManager
     # AccessManager: the admin panel's store (admins, per-account command
-    # perms, prefixes, mudae id) over the kv repo; one-time env migration
+    # perms, prefixes, primary bot id) over the kv repo; one-time env migration
     # seeds admins from OWNER_USER_IDS when the stored list is empty.
     from .access_manager import AccessManager
 
@@ -647,6 +797,9 @@ async def _assemble(
         cooldowns=cooldowns,
         plugin_state=plugin_state,
     )
+    # C2: the cog host rides the plugin manager (host_cog/unhost_cog
+    # drive add_cog/remove_cog per (account, plugin))
+    plugins.cog_host = cog_host
     # the self-command executor's command gate reads this attribute; it
     # was never set here, so framework verbs fell back to the RETIRED env
     # OWNER_USER_IDS grant instead of the DB admin panel
@@ -656,8 +809,13 @@ async def _assemble(
     # Plugin dashboard UIs register at BOOT (discovery time) so plugin
     # pages are visible in the dashboard immediately — not only after an
     # account connects. Class-level instantiation, no account needed.
-    plugins.init_boot_dashboard_uis()
     await plugins.persist_metadata()
+    # W4: the gate reader resolves chain-step gates through the live
+    # settings view — bound now that the manager exists
+    _workspace_gate_reader.bind_plugins(plugins)
+    # the dispatch guard needs the scheduler (and its halt state) —
+    # wired here, after both sides of the seam exist
+    scheduler.set_dispatch_guard(WorkspaceDispatchGuard(workspaces))
 
     if client_factory is None:
         from adapters.discord import RealClientFactory
@@ -666,6 +824,7 @@ async def _assemble(
             credentials,
             command_prefix=getattr(credentials, "self_command_prefix", ""),
             access_manager=access,
+            audit_recorder=audit,
         )
 
     accounts = AccountManager(
@@ -685,7 +844,8 @@ async def _assemble(
         plugin_state=plugin_state,
         plugin_data=plugin_data_store,  # PHASE 10: data_* plugin API
         lifecycle=LifecycleGovernor(),  # PHASE-4 (S4): anti-thrash defaults
-        sync_groups=sync_groups,
+        signals=signals_outbox,
+        profile_store=database.account_plugin_profiles,  # P3: profile lifecycle
         account_plugins=database.account_plugins,  # capability source
     )
     cleanups.append(("accounts", accounts.stop_all))
@@ -703,7 +863,11 @@ async def _assemble(
             exc,
         )
     await _security_audit(database, credential_service, env_file)
-    await cooldowns.restore()
+    # lifecycle-safe restore: the account registry is the ownership
+    # metadata — a write that raced an account's deletion cascade left
+    # an orphan row, and it is swept here rather than resurrected
+    _known = {a.name for a in await database.accounts.list()}
+    await cooldowns.restore(known_accounts=_known)
 
     # lightweight periodic cooldown resync (30s): external edits (a second
     # process or a manual DB change) heal within one period even in
@@ -766,7 +930,7 @@ async def _assemble(
                 payload["name"],
                 token_ref=payload.get("token_ref"),
                 enabled=bool(raw_enabled),
-                sync_group=payload.get("sync_group"),
+                workspace=payload.get("workspace"),
                 plugins=config_plugins,
             )
         except Exception:
@@ -775,92 +939,6 @@ async def _assemble(
             )
 
     scheduler.start()
-
-    # PHASE 9 (rollout C, spec §4): the fleet gate — one policy check
-    # before the scheduler dispatches, revalidated after the limiter
-    # grant. A paused group cannot start new work; policy changes never
-    # bypass pacing (the limiter still gates every dispatch AFTER the
-    # guard). Membership itself stays with SyncGroupManager — the fleet
-    # service layers mode/eligibility/assignments on top through seams.
-    from core.event_bus import AccountConnected, AccountDisconnected, FleetStateChanged
-    from core.fleet import (
-        OBS_ACCOUNT_CONNECTED,
-        OBS_ACCOUNT_DISCONNECTED,
-        FleetObservations,
-        FleetPolicy,
-        FleetService,
-        Observation,
-    )
-
-    async def _fleet_group_exists(name: str) -> bool:
-        return await sync_groups.get_group_by_name(name) is not None
-
-    async def _fleet_join(account: str, group: str) -> None:
-        await sync_groups.sync_membership(account, group)
-
-    async def _fleet_leave(account: str) -> None:
-        await sync_groups.sync_membership(account, None)
-
-    fleet = FleetService(
-        database.fleet,
-        group_exists=_fleet_group_exists,
-        membership_join=_fleet_join,
-        membership_leave=_fleet_leave,
-        # PHASE 9 §3: persisted first (service), then published — the
-        # dashboard forwards these to WS clients as "fleet" frames so
-        # the Fleet Hub converges without polling
-        publisher=lambda ev: bus.publish_nowait(
-            FleetStateChanged(
-                account=ev.account_id or "",
-                kind=ev.kind,
-                group=ev.group_id,
-                reason=ev.reason,
-                generation=ev.generation,
-            )
-        ),
-    )
-    await fleet.load()
-    scheduler.set_dispatch_guard(FleetPolicy(fleet).scheduler_guard())
-
-    # rollout D: the observation intake — bus connectivity events flow
-    # in as generic observations (account-scoped, deduped); parser-side
-    # observations arrive through plugin handlers calling the intake
-    fleet_observations = FleetObservations(fleet)
-
-    async def _on_account_event(event) -> None:
-        kind = (
-            OBS_ACCOUNT_CONNECTED
-            if isinstance(event, AccountConnected)
-            else OBS_ACCOUNT_DISCONNECTED
-        )
-        await fleet_observations.observe(
-            Observation(
-                source_account=str(event.account or ""),
-                observation_type=kind,
-                message_id=f"{kind}@{event.ts}",
-                observed_at=float(event.ts),
-                reason=str(getattr(event, "reason", "") or kind),
-            )
-        )
-
-    bus.subscribe(AccountConnected, _on_account_event)
-    bus.subscribe(AccountDisconnected, _on_account_event)
-
-    # rollout G (§9): the reconciler — boot pass + 30s loop; repairs
-    # crash leftovers and drift through the service's transition checks
-    from core.fleet import FleetReconciler
-
-    async def _fleet_account_exists(name: str) -> bool:
-        return await database.accounts.get(name) is not None
-
-    fleet_reconciler = FleetReconciler(
-        fleet,
-        account_exists=_fleet_account_exists,
-        group_exists=_fleet_group_exists,
-    )
-    await fleet_reconciler.reconcile()
-    fleet_reconciler.start()
-    cleanups.append(("fleet reconciler", fleet_reconciler.stop))
 
     if simulation_runner is None:
         try:
@@ -884,33 +962,17 @@ async def _assemble(
         database=database,
         credentials_svc=credential_service,
         cooldowns=cooldowns,
-        sync_groups=sync_groups,
-        fleet=fleet,
+        workspaces=workspaces,
         plugin_data=plugin_data_store,
         started_at=_time.time(),
     )
 
     # Framework management from chat (status/accounts/plugins/ratelimit/
-    # lane/tasks/estop/simulation) rides the SELF-COMMAND layer now: the
-    # hub's api_provider bridges the ported Framework verbs to the ONE
-    # ControlAPI — same commands, same replies, one dispatch path and one
-    # authorization gate with the plugin commands. The separate
-    # RemoteControl bus handler is retired (class kept for compat; the
-    # simulator stack still exercises it for its control_mention scenario).
+    # lane/tasks/estop/simulation) rides FrameworkVerbsCog: the hub's
+    # api_provider bridges the verbs to the ONE ControlAPI. The mention
+    # bridge (RemoteControl) retired with the hub's registry — see dump/.
     COMMAND_HUB.api_provider = lambda: api
 
-    # The dashboard's MAIN TABS are framework UI pages built with the same
-    # builder API plugins use — registered here so they exist from boot
-    # (the SPA routes the home/plugins/activity/policies/admin/tools views
-    # through the generic renderer).
-    from core.framework_ui import attach_framework_ui
-
-    try:
-        attach_framework_ui(plugins.ui_registry, api)
-    except Exception:
-        logging.getLogger("libzent.bootstrap").exception(
-            "framework UI attach failed — dashboard falls back to the legacy panels"
-        )
     return Framework(
         api=api,
         bus=bus,
@@ -924,13 +986,11 @@ async def _assemble(
         database=database,
         credentials=credentials,
         config=config,
-        fleet=fleet,
+        workspaces=workspaces,
         plugin_data=plugin_data_store,
         credential_service=credential_service,
         cooldowns=cooldowns,
         plugin_state=plugin_state,
-        sync_groups=sync_groups,
         cooldown_resync_stop=_stop_cooldown_resync_task,
-        fleet_reconciler_stop=fleet_reconciler.stop,
         claims_stderr=stderr_claimed,
     )

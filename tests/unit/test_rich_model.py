@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 import sys
 import unittest
 from datetime import datetime, timezone
@@ -24,15 +25,11 @@ from adapters.model import (
     DiscordEmbed,
     DiscordEmbedField,
     DiscordMessage,
-    DiscordReaction,
     convert_component,
-    convert_embed,
     convert_message,
 )
 from core.event_bus import (
     EventBus,
-    MessageDeleted,
-    MessageEdited,
     MessageReceived,
     ReactionAdded,
 )
@@ -43,13 +40,13 @@ def library_message(**overrides) -> NS:
     base = dict(
         id=1000,
         content="$mu",
-        author=NS(id=999999, name="Mudae", display_name="Mudae", bot=True),
+        author=NS(id=999999, name="the_bot", display_name="the_bot", bot=True),
         channel=NS(id=500, name="grind", type=NS(name="text"), guild=NS(id=42)),
         guild=NS(id=42),
         embeds=[NS(
             title="Character", description="Rarity: ★★★", url="http://x",
             type="rich", color=0xFF00AA, timestamp="2026-01-01T00:00:00",
-            author=NS(name="Mudae", url="http://a", icon_url="http://i"),
+            author=NS(name="the_bot", url="http://a", icon_url="http://i"),
             footer=NS(text="page 1/2", icon_url="http://f"),
             fields=[NS(name="Rank", value="1", inline=True),
                     NS(name="Kakera", value="500", inline=True)],
@@ -80,7 +77,7 @@ class TestConversion(unittest.TestCase):
                          (1000, 500, 999999, "$mu"))
         self.assertFalse(dto.dm)
         self.assertEqual(dto.guild_id, 42)
-        self.assertEqual(dto.author.name, "Mudae")
+        self.assertEqual(dto.author.name, "the_bot")
         self.assertTrue(dto.author.bot)
         self.assertEqual(dto.channel.name, "grind")
         self.assertEqual(dto.channel.guild_id, 42)
@@ -231,7 +228,7 @@ class TestIsolationAndRaw(unittest.TestCase):
         lib = library_message()
         dto = convert_message(lib, dm=False)
         self.assertNotIn("raw", repr(dto))
-        self.assertNotIn("Mudae", dto.summary())  # no payload leakage
+        self.assertNotIn("the_bot", dto.summary())  # no payload leakage
 
     def test_raw_not_serialized_by_dataclass(self) -> None:
         lib = library_message()
@@ -250,7 +247,7 @@ class TestSimulatorRichBoundary(unittest.IsolatedAsyncioTestCase):
 
         world = SimWorld(responder_id=None)
         world.add_user(1001, "owner")
-        world.add_user(999999, "mudae")
+        world.add_user(999999, "bot")
         world.add_channel(500, "grind")
         return world
 
@@ -276,7 +273,7 @@ class TestSimulatorRichBoundary(unittest.IsolatedAsyncioTestCase):
         embed = DiscordEmbed(title="Character", description="★",
                              fields=(DiscordEmbedField("Rank", "1"),))
         message = world.deliver(
-            500, 999999, "$mu", author_name="Mudae", guild_id=42,
+            500, 999999, "$mu", author_name="the_bot", guild_id=42,
             embeds=(embed,), components=(row,), reference_message_id=9)
         self.assertEqual(len(seen), 1)
         rich = seen[0]
@@ -302,7 +299,6 @@ class TestSimulatorRichBoundary(unittest.IsolatedAsyncioTestCase):
         from core.audit import AuditRecorder
         from core.event_bus import EventBus
         from core.priority import Priority
-        from core.rate_limit_manager import RateLimitManager
         from core.task_scheduler import TaskScheduler
 
         world = self._world()
@@ -413,7 +409,7 @@ class TestEventBusTypedEvents(unittest.IsolatedAsyncioTestCase):
 
 class TestFuturePluginShapes(unittest.TestCase):
     """§22: demonstrate snipe / kakerareact / kakeraloot / soulmate-farm /
-    soulcopy needs are met WITHOUT another core rewrite (shapes only)."""
+    exporter needs are met WITHOUT another core rewrite (shapes only)."""
 
     def test_snipe_shape(self) -> None:
         lib = library_message(content="caught!", reference=NS(
@@ -438,7 +434,7 @@ class TestFuturePluginShapes(unittest.TestCase):
         self.assertEqual(dto.embeds[0].description, "Rarity: ★★★")
         self.assertEqual(len(dto.buttons), 2)
 
-    def test_soulcopy_shape_dm(self) -> None:
+    def test_exporter_shape_dm(self) -> None:
         lib = library_message(content="Soulmates\n---\nAlice",
                               channel=NS(id=9001, name=None,
                                          type=NS(name="private"),
@@ -809,14 +805,14 @@ class TestConnectedFlagRound2(unittest.IsolatedAsyncioTestCase):
 
             def lib_message(mid):
                 return NS(id=mid, content="$mu",
-                          author=NS(id=999999, name="Mudae"),
+                          author=NS(id=999999, name="the_bot"),
                           channel=NS(id=500, name="grind",
                                      type=NS(name="text"), guild=NS(id=42)),
                           guild=NS(id=42), embeds=[], components=[],
                           attachments=[], reactions=[], reference=None,
                           created_at=None)
 
-            handler = getattr(client._client, "on_message")
+            handler = client._client.on_message
             await handler(lib_message(1001))
             await handler(lib_message(1001))  # gateway RESUME replay
             await handler(lib_message(1002))
@@ -1080,9 +1076,24 @@ class TestClientConstructorRound3(unittest.IsolatedAsyncioTestCase):
         with self._patch_discord(LibClient):
             client = RealDiscordClient("tok")
             await client.connect()
-        self.assertEqual(captured, {"max_ratelimit_timeout": MAX_RATELIMIT_TIMEOUT_S})
+        # better.py-self memory/persistence options ride along with the
+        # pinned timeout (caps, gc freeze, backlog warning; persistence
+        # itself is keyed to the account name and omitted without one)
+        self.assertEqual(
+            captured,
+            {
+                "max_ratelimit_timeout": MAX_RATELIMIT_TIMEOUT_S,
+                "max_member_cache": 500,
+                "max_total_member_cache": 5000,
+                "max_thread_cache": 200,
+                "max_total_thread_cache": 1000,
+                "gc_freeze": True,
+                "dispatch_backlog_warning": 500,
+            },
+        )
         self.assertEqual(captured["max_ratelimit_timeout"], 30.0)
         self.assertNotIn("intents", captured)  # dead fallback dropped
+        self.assertNotIn("persistence_path", captured)  # no account name
 
     async def test_layout_without_kwarg_still_connects(self) -> None:
         from adapters.discord.client import RealDiscordClient
@@ -1097,6 +1108,37 @@ class TestClientConstructorRound3(unittest.IsolatedAsyncioTestCase):
             client = RealDiscordClient("tok")
             await client.connect()  # degraded (uncapped), never broken
         self.assertTrue(client.connected)
+
+    async def test_fork_persistence_keyed_to_account(self) -> None:
+        """With an account name, the fork's cache persistence points at
+        state/<account>-cache.bin (owner-only snapshot for fast warm
+        restarts) and the directory is ensured for the atomic writer."""
+        import tempfile
+        from pathlib import Path
+
+        from adapters.discord.client import RealDiscordClient
+
+        captured: dict = {}
+
+        class LibClient(TestLiveClientBoundary._ReadyLibClient):
+            def __init__(self, **kwargs) -> None:
+                captured.update(kwargs)
+                super().__init__(**kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            sys.modules, {"discord": NS(Client=LibClient)}
+        ):
+            cwd = Path.cwd()
+            os.chdir(tmp)
+            try:
+                client = RealDiscordClient("tok")
+                client.account = "bravo"
+                await client.connect()
+                self.assertTrue(Path(tmp, "state").is_dir())
+            finally:
+                os.chdir(cwd)
+        self.assertEqual(captured["persistence_path"], Path("state/bravo-cache.bin"))
+        self.assertEqual(captured["persistence_max_age"], 86400.0)
 
 
 class _RawEventLibClient(_HangingLibClient):
@@ -1187,7 +1229,7 @@ class TestRawEventMappingRound3(unittest.IsolatedAsyncioTestCase):
         edits: list = []
         client.on_message_edit = edits.append
         updated = NS(id=5, content="edited late",
-                     author=NS(id=999999, name="Mudae"),
+                     author=NS(id=999999, name="the_bot"),
                      channel=NS(id=500, name="grind", type=NS(name="text"),
                                 guild=NS(id=42)),
                      guild=NS(id=42), embeds=[], components=[],

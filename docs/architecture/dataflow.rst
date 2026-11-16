@@ -29,7 +29,7 @@ Outbound action (message / dm / reaction / button)
 Management
 ----------
 
-CLI ``run_command`` / dashboard route / Discord ``@account <cmd>`` all
+CLI ``run_command`` / Discord ``@account <cmd>`` (mention prefix) all
 resolve to the same :class:`core.api.ControlAPI` methods; persistence and
 validation happen once, below the facade.
 

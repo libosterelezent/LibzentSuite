@@ -37,7 +37,6 @@ class TestReloadPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["restored_accounts"], 1)
         self.assertIn("probe", mgr._accounts["alpha"])
         # UI re-registered
-        self.assertIn("probe", mgr.ui_registry.list_plugins())
 
     async def test_reload_unknown_plugin_raises(self):
         mgr = make_manager()
@@ -99,7 +98,6 @@ class TestReloadPlugin(unittest.IsolatedAsyncioTestCase):
             bad.write_text(good)
         rt = mgr._accounts["alpha"]["probe"]
         self.assertTrue(rt.active, "failed rescan must not deactivate")
-        self.assertIn("probe", mgr.ui_registry.list_plugins())
 
 
 class TestUnloadPlugin(unittest.IsolatedAsyncioTestCase):
@@ -121,7 +119,6 @@ class TestUnloadPlugin(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(rt_a.instance)
         self.assertFalse(rt_b.loaded)
         # UI unregistered
-        self.assertNotIn("probe", mgr.ui_registry.list_plugins())
 
     async def test_unload_fires_teardown_hooks(self):
         mgr = make_manager()
@@ -363,6 +360,7 @@ class TestPassFourFenceSemantics(unittest.IsolatedAsyncioTestCase):
 
     async def test_fenced_activation_does_not_start_remaining(self):
         import asyncio
+
         from core.plugin_manager.manager import PluginRuntime
         mgr = self._two_runtime_mgr()
         mgr._activation_settle_timeout_s = 0.05
@@ -407,6 +405,7 @@ class TestPassFourFenceSemantics(unittest.IsolatedAsyncioTestCase):
 
     async def test_reload_timeout_does_not_fence_running_account(self):
         import asyncio
+
         from core.plugin_manager.manager import PluginRuntime
         mgr = self._two_runtime_mgr()
         mgr._activation_settle_timeout_s = 0.05
@@ -583,7 +582,6 @@ class TestPassSevenTeardownTakeover(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls["on_unload"], 1)
 
     async def test_completed_teardown_is_not_redone(self):
-        import asyncio
         mgr = make_manager()
         mgr.discover()
         await mgr.attach_account("alpha", allowed={"probe"})
@@ -744,6 +742,7 @@ class TestPassEightClaimLoop(unittest.IsolatedAsyncioTestCase):
 class TestLoaderRollback(unittest.TestCase):
     def test_failed_discover_keeps_records_and_old_modules(self):
         import tempfile
+
         from core.errors import PluginError
         from core.plugin_manager.loader import PluginLoader
         loader = PluginLoader(Path("tests/fixtures/plugins"))

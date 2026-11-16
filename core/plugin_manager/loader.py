@@ -37,10 +37,12 @@ import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ..errors import PluginError
 from ..names import PLUGIN_NAME_RE as _NAME_RE
-from ..plugin_base import ArgSpec, CommandSpec, PluginBase
+from ..plugin_base import PluginBase
+from ..workspace.models import validate_plugin_declarations
 
 LOG = logging.getLogger("libzent.loader")
 
@@ -128,12 +130,12 @@ class PluginLoader:
         self._records = {}
         # synthetic parent package so '<dir>/<name>/__init__.py' plugins can
         # use relative imports ('from .plugin import X') without sys.path
-        parent_name = f"_mudae_plugroot_{next(_PARENT_SEQ)}"
+        parent_name = f"_plugin_root_{next(_PARENT_SEQ)}"
         self._parent_names.append(parent_name)
         parent = types.ModuleType(parent_name)
         parent.__path__ = [str(self._dir)]
         sys.modules[parent_name] = parent
-        candidates: list[tuple] = []
+        candidates: list[tuple[str, str, Path]] = []
         for entry in entries:
             if entry.name.startswith(("_", ".")):
                 continue
@@ -229,70 +231,58 @@ class PluginLoader:
                     f"plugin {name!r} declares duplicate setting key {setting.name!r}"
                 )
             seen_keys.add(setting.name)
-        self._validate_commands(cls, name, path)
+        self._validate_chain_declarations(cls, name, path)
+        self._validate_cog_declaration(cls, name, path)
         if name in self._records:
             raise PluginError(
                 f"duplicate plugin name {name!r} ({path} vs {self._records[name].source})"
             )
         self._records[name] = PluginRecord(name=name, cls=cls, source=path)
 
-    def _validate_commands(self, cls: type[PluginBase], name: str, path: Path) -> None:
-        """Validate a plugin's declared self-commands at discovery.
+    def _validate_cog_declaration(self, cls: type[PluginBase], name: str, path: Path) -> None:
+        """Validate the CONVERGED command declaration (C2): ``COG`` is
+        a discord.ext.commands.Cog SUBCLASS (not an instance — the host
+        builds one per (account, plugin) with the toolbox injected).
+        The fail-fast convention carries: a broken declaration never
+        boots. Absent COG means the plugin simply has no command face
+        (event-only plugins are valid)."""
+        cog = getattr(cls, "COG", None)
+        if cog is None:
+            return  # migration window: the plugin has not flipped yet
+        import inspect
 
-        Fail-fast (same convention as duplicate setting keys): an invalid
-        command name, a missing handler, a missing/blank help line or a
-        duplicate name WITHIN one plugin is a PluginError — a broken
-        declaration must never boot. Cross-plugin collisions are NOT
-        checked here (the plugin manager resolves them at collection with
-        first-registered-wins, deterministic manifest order).
-        """
-        commands = getattr(cls, "COMMANDS", ()) or ()
-        if not isinstance(commands, tuple):
+        if not inspect.isclass(cog):
             raise PluginError(
-                f"plugin {name!r}: COMMANDS must be a tuple of CommandSpec"
-                f" (got {type(commands).__name__}) in {path}"
+                f"plugin {name!r}: COG must be a Cog subclass, got {type(cog).__name__} in {path}"
             )
-        seen: set = set()
-        for spec in commands:
-            if not isinstance(spec, CommandSpec):
-                raise PluginError(
-                    f"plugin {name!r}: COMMANDS entries must be CommandSpec"
-                    f" (got {type(spec).__name__}) in {path}"
-                )
-            if not COMMAND_NAME_RE.fullmatch(spec.name or ""):
-                raise PluginError(
-                    f"plugin {name!r}: command name {spec.name!r} must be"
-                    f" lowercase [a-z0-9_] (max 32) in {path}"
-                )
-            if spec.name in seen:
-                raise PluginError(
-                    f"plugin {name!r} declares duplicate command {spec.name!r} in {path}"
-                )
-            if not callable(spec.handler):
-                raise PluginError(
-                    f"plugin {name!r}: command {spec.name!r} has no callable handler in {path}"
-                )
-            if not (spec.help or "").strip():
-                raise PluginError(
-                    f"plugin {name!r}: command {spec.name!r} needs a help line in {path}"
-                )
-            for arg in spec.args:
-                if not isinstance(arg, ArgSpec):
-                    raise PluginError(
-                        f"plugin {name!r}: command {spec.name!r} args must"
-                        f" be ArgSpec (got {type(arg).__name__}) in {path}"
-                    )
-                if not (arg.name or "").strip():
-                    raise PluginError(
-                        f"plugin {name!r}: command {spec.name!r} declares"
-                        f" an ArgSpec with an empty name in {path}"
-                    )
-                if arg.greedy and arg is not spec.args[-1]:
-                    raise PluginError(
-                        f"plugin {name!r}: command {spec.name!r} greedy"
-                        f" ArgSpec {arg.name!r} must be LAST in {path}"
-                    )
-            seen.add(spec.name)
+        from discord.ext import commands as ext_commands
+
+        if not issubclass(cog, ext_commands.Cog):
+            raise PluginError(
+                f"plugin {name!r}: COG must subclass commands.Cog (got {cog!r}) in {path}"
+            )
+        if not hasattr(cog, "__cog_name__") or not cog.__cog_name__:
+            raise PluginError(
+                f"plugin {name!r}: COG class {cog.__name__!r} has no cog "
+                f"name (the library derives it from the class name) in {path}"
+            )
+
+    def _validate_chain_declarations(self, cls: type[PluginBase], name: str, path: Path) -> None:
+        """Validate a plugin's EMITS/FOLLOWS declarations at discovery
+        (workspace chains, decision 2 — the loader's fail-fast
+        convention: a broken declaration must never boot).
+
+        Structural problems (wrong container types, a missing handler,
+        a namespaced EMIT name the plugin cannot emit as) are
+        PluginErrors; ``validate_plugin_declarations`` reports them
+        with the exact why and this wrapper adds the plugin/path
+        context the loader convention carries.
+        """
+        problems = validate_plugin_declarations(cls)
+        if problems:
+            raise PluginError(
+                f"plugin {name!r} has invalid chain declarations in {path}: " + "; ".join(problems)
+            )
 
     # ------------------------------------------------------------- accessors
     def names(self) -> list[str]:
@@ -314,7 +304,7 @@ class PluginLoader:
         """Fresh instance of a plugin (one per account/plugin pair)."""
         return self.record(name).cls()
 
-    def manifests(self) -> list[dict]:
+    def manifests(self) -> list[dict[str, Any]]:
         """JSON-safe manifests (metadata + settings schema) for CLI/UI."""
         if not self._discovered:
             self.discover()

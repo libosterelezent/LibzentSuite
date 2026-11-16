@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import unittest
-from typing import Any, Dict, Optional
+from typing import Any
 
 from core.errors import SettingsValidationError
 from core.event_bus import EventBus, SettingChanged
@@ -25,11 +25,11 @@ SCHEMA = (
 
 
 class FakePluginRepo:
-    def __init__(self, layers: Optional[Dict[str, Dict]] = None) -> None:
+    def __init__(self, layers: dict[str, dict] | None = None) -> None:
         self.layers = layers or {}
         self.writes: list = []
 
-    async def all_account_settings(self) -> Dict:
+    async def all_account_settings(self) -> dict:
         return {a: {p: dict(v) for p, v in pl.items()}
                 for a, pl in self.layers.items()}
 
@@ -51,7 +51,7 @@ class DeletablePluginRepo(FakePluginRepo):
 
 
 class BoomPluginRepo:
-    async def all_account_settings(self) -> Dict:
+    async def all_account_settings(self) -> dict:
         return {}
 
     async def set_setting(self, *args: Any, **kwargs: Any) -> None:
@@ -59,14 +59,14 @@ class BoomPluginRepo:
 
 
 class FakeAccountRepo:
-    def __init__(self, rows: Optional[Dict[str, Dict]] = None) -> None:
+    def __init__(self, rows: dict[str, dict] | None = None) -> None:
         self.rows = rows or {}
         self.writes: list = []
 
     async def list_accounts(self):
         return sorted(self.rows)
 
-    async def get(self, account: str) -> Dict:
+    async def get(self, account: str) -> dict:
         return dict(self.rows.get(account, {}))
 
     async def set(self, account: str, key: str, value: Any) -> None:
@@ -418,7 +418,7 @@ class TestAccountSettingsLayer(unittest.IsolatedAsyncioTestCase):
 
     async def test_per_account_read_failure_logs_and_defaults(self):
         class LockedRepo(FakeAccountRepo):
-            async def get(self, account: str) -> Dict:
+            async def get(self, account: str) -> dict:
                 raise RuntimeError("db locked")
 
         bus = EventBus()

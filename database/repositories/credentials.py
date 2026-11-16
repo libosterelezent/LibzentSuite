@@ -48,7 +48,7 @@ class CredentialsRepository(BaseRepository):
         ):
             return cur.rowcount > 0
 
-    async def accounts_with_credential(self) -> list:
+    async def accounts_with_credential(self) -> list[str]:
         """Account names that have a stored credential (status display)."""
         rows = await self._fetch_all("SELECT account FROM credentials ORDER BY account")
         return [row["account"] for row in rows]

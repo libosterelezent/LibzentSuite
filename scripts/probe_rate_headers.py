@@ -152,7 +152,9 @@ async def probe(
 
                 except discord.HTTPException as exc:
                     elapsed = (time.monotonic() - t0) * 1000
-                    entry: dict[str, Any] = {
+                    # same shape as the success-path entry above (the
+                    # annotation on the first binding covers this one)
+                    entry = {
                         "route": label,
                         "url": url,
                         "attempt": attempt + 1,
@@ -240,9 +242,9 @@ def print_report(results: list[dict[str, Any]]) -> None:
     # bucket grouping
     buckets: dict[str, list[str]] = {}
     for r in results:
-        bucket = r.get("bucket")
-        if bucket and "error" not in r:
-            buckets.setdefault(bucket, []).append(r["route"])
+        bucket_key = r.get("bucket")
+        if bucket_key and "error" not in r:
+            buckets.setdefault(bucket_key, []).append(r["route"])
 
     if buckets:
         print(f"\n{'─' * 92}")

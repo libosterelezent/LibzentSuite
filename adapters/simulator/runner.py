@@ -63,7 +63,7 @@ Manager modules from A3/A5/A6 are imported INSIDE run(): when one is still
 pending integration, run() raises SimulationError with a human-readable
 message instead of an ImportError traceback.
 
-Documented contract decisions (ambiguous seams — see INTEGRATION.md
+Documented contract decisions (ambiguous seams — see docs/architecture/integration.md
 ground rules; the lead reconciles at integration):
 
 - LOGGER SHAPE: the spine SettingsManager and the A3/A6 managers call the
@@ -105,8 +105,8 @@ from adapters.simulator.scenarios import (
 )
 from adapters.simulator.world import (
     SYNTHETIC_ALPHA_ID,
+    SYNTHETIC_BOT_ID,
     SYNTHETIC_GUILD_CHANNEL,
-    SYNTHETIC_MUDAE_ID,
     SYNTHETIC_OWNER_ID,
     SimWorld,
 )
@@ -145,7 +145,7 @@ _LOG_LINES_CAP = 2000
 #: prefix of the plugin loader's synthetic parent module names (see
 #: core.plugin_manager.loader). The runner purges the ones ITS discover
 #: created so repeated sim runs do not grow sys.modules forever.
-_PLUGIN_MODULE_PREFIX = "_mudae_plugroot"
+_PLUGIN_MODULE_PREFIX = "_plugin_root"
 
 
 def _reap_scenario_task(task: asyncio.Task[None]) -> None:
@@ -159,7 +159,7 @@ def _purge_plugin_modules(names: set[str]) -> None:
 
     The sim's single-use PluginLoader never rescans, so its own
     stale-parent purge never fires — every run leaked one generation of
-    ``_mudae_plugroot_N`` modules (~21KB measured). The runner diffs
+    ``_plugin_root_N`` modules (~21KB measured). The runner diffs
     sys.modules around ITS discover call and pops exactly those entries
     (loader-private state is never touched). Classes and instances stay
     functional — only the import registry entries go, the same contract
@@ -169,7 +169,7 @@ def _purge_plugin_modules(names: set[str]) -> None:
         sys.modules.pop(name, None)
 
 
-def _entry_dict(entry: Any) -> dict:
+def _entry_dict(entry: Any) -> dict[str, Any]:
     """Normalize one audit/log entry to a plain dict (A5 shape-agnostic)."""
     if isinstance(entry, dict):
         return dict(entry)
@@ -199,8 +199,8 @@ def _load_stack_modules() -> SimpleNamespace:
         from core.plugin_manager import PluginManager
         from core.plugin_state import PluginStateService
         from core.rate_limit_manager import MIN_ACTION_INTERVAL, RateLimitManager
-        from core.sync_group_manager import SyncGroupManager
         from core.task_scheduler import TaskScheduler
+        from core.workspace.service import WorkspaceService
         from database.db import Database
     except (ImportError, AttributeError) as exc:
         # AttributeError covers half-landed namespace packages (a directory
@@ -216,7 +216,7 @@ def _load_stack_modules() -> SimpleNamespace:
         PluginManager=PluginManager,
         PluginStateService=PluginStateService,
         RateLimitManager=RateLimitManager,
-        SyncGroupManager=SyncGroupManager,
+        WorkspaceService=WorkspaceService,
         TaskScheduler=TaskScheduler,
         Database=Database,
         floor=float(MIN_ACTION_INTERVAL),
@@ -241,7 +241,7 @@ class SimulationRunner:
         self._credentials = credentials
 
     # ------------------------------------------------------------- listing
-    def list(self) -> builtins.list[dict]:
+    def list(self) -> builtins.list[dict[str, Any]]:
         """[{name, description}] for every registered scenario."""
         return [
             {"name": scenario.name, "description": scenario.description}
@@ -257,7 +257,7 @@ class SimulationRunner:
         return scenario
 
     # ----------------------------------------------------------------- run
-    async def run(self, name: str) -> dict:
+    async def run(self, name: str) -> dict[str, Any]:
         """Run one scenario on a fresh ephemeral stack; returns the report.
 
         The report: {"name", "passed", "duration_s", "failures",
@@ -312,7 +312,6 @@ class SimulationRunner:
         log_scheduler = ServiceLogger(logger, "scheduler")
         log_plugins = ServiceLogger(logger, "plugins")
         log_accounts = ServiceLogger(logger, "accounts")
-        log_sync_groups = ServiceLogger(logger, "sync-groups")
         settings = SettingsManager(
             bus,
             log_settings,
@@ -320,7 +319,6 @@ class SimulationRunner:
             account_settings_repo=db.account_settings,
             global_layer=DEMO_PLUGIN_SETTINGS,
         )
-        remote = None
         audit = None  # bound inside the assembly try (partial-failure teardown)
         #: loader modules created by THIS run's discover (sys.modules purge
         #: set — see _purge_plugin_modules)
@@ -332,7 +330,7 @@ class SimulationRunner:
         # every live self-command died after one dashboard simulation.
         # Save the current binding and restore it on EVERY exit path.
         saved_hub_manager = COMMAND_HUB.bound_manager
-        plugins_mgr = None
+        plugins_mgr: Any = None  # None until assembly binds the ephemeral manager
 
         def _restore_command_hub() -> None:
             """Put the production manager back behind the process hub."""
@@ -360,15 +358,58 @@ class SimulationRunner:
                 lane_prefixrate=_SIM_LANE_PREFIXRATE,
             )
             await limiter.load_persisted()
-            # sync groups: membership owner between accounts and the
-            # limiter, exactly as the production bootstrap wires it
-            sync_groups = mods.SyncGroupManager(
-                db.sync_groups,
-                log_sync_groups,
-                accounts_repo=db.accounts,
+            # W3: the workspace service replaces sync groups + fleet in
+            # the production bootstrap; the sim stack mirrors it (the
+            # scenarios' control_mention path rides the API surface)
+            workspaces = mods.WorkspaceService(
+                db.workspaces,
+                accounts=db.accounts,
+                channels_repo=db.account_channels,
+                presets_repo=db.presets,
+                provenance=db.account_plugins,
                 limiter=limiter,
             )
-            await sync_groups.load()
+            await workspaces.load()
+            await workspaces.sync_runtime()
+
+            # W4: the chain runtime rides the sim stack too — terminal
+            # events flow from the same bus, handlers invoke through
+            # the real plugin manager, and scenarios can exercise the
+            # A-acts-B-follows flow against the SAME production path
+            from core.event_bus import TaskCompleted, TaskFailed
+            from core.workspace.runtime import ChainRuntime, TerminalTrigger
+            from core.workspace.signals import SignalOutbox
+
+            chain_runtime = ChainRuntime(
+                db.workspaces,
+                service=workspaces,
+                outbox=SignalOutbox(db.signals),
+                signal_reader=db.signals,
+                invoker=lambda *a, **k: plugins_mgr.invoke_handler(*a, **k),
+            )
+
+            async def _on_task_completed(event: TaskCompleted) -> None:
+                await chain_runtime.on_terminal(
+                    TerminalTrigger(
+                        account=event.account,
+                        plugin=event.plugin,
+                        action=str(getattr(event, "action", "") or ""),
+                        kind="task_completed",
+                    )
+                )
+
+            async def _on_task_failed(event: TaskFailed) -> None:
+                await chain_runtime.on_terminal(
+                    TerminalTrigger(
+                        account=event.account,
+                        plugin=event.plugin,
+                        action=str(getattr(event, "action", "") or ""),
+                        kind="task_failed",
+                    )
+                )
+
+            bus.subscribe(TaskCompleted, _on_task_completed)
+            bus.subscribe(TaskFailed, _on_task_failed)
             audit = mods.AuditRecorder(db.audit)
             # QUEUED PERSISTENCE (production parity): drain workers for the
             # log/audit rows BEFORE any traffic; stopped in teardown BEFORE
@@ -432,11 +473,11 @@ class SimulationRunner:
 
             if self._credentials is not None:
                 # overlay the SYNTHETIC ids the scenarios script against: fleet
-                # credentials carry real OWNER/MUDAE ids, which would silently
-                # break owner-gating and Mudae-page matching in every scenario
+                # credentials carry real OWNER/bot ids, which would silently
+                # break owner-gating and the primary bot-page matching in every scenario
                 merged = {
                     **self._credentials.snapshot(),
-                    "MUDAE_BOT_ID": str(SYNTHETIC_MUDAE_ID),
+                    "PRIMARY_BOT_ID": str(SYNTHETIC_BOT_ID),
                     "OWNER_USER_IDS": str(SYNTHETIC_OWNER_ID),
                     f"DISCORD_TOKEN_{ACCOUNT_NAME.upper()}": f"sim-token-{ACCOUNT_NAME}",
                 }
@@ -444,7 +485,7 @@ class SimulationRunner:
             else:
                 credentials = Credentials.from_values(
                     {
-                        "MUDAE_BOT_ID": str(SYNTHETIC_MUDAE_ID),
+                        "PRIMARY_BOT_ID": str(SYNTHETIC_BOT_ID),
                         "OWNER_USER_IDS": str(SYNTHETIC_OWNER_ID),
                         f"DISCORD_TOKEN_{ACCOUNT_NAME.upper()}": f"sim-token-{ACCOUNT_NAME}",
                     }
@@ -469,7 +510,6 @@ class SimulationRunner:
                 credential_service=credential_service,
                 cooldowns=cooldowns,
                 plugin_state=plugin_state,
-                sync_groups=sync_groups,
             )
             await accounts.load()
             box["send"] = accounts.send_hook  # fill the seam BEFORE start()
@@ -487,21 +527,8 @@ class SimulationRunner:
                 logs=logger,
                 audit=audit,
                 credentials=credentials,
-                sync_groups=sync_groups,
+                workspaces=workspaces,
             )
-            from core.remote_control import RemoteControl
-
-            if not getattr(credentials, "remote_control_enabled", True):
-                remote = None  # REMOTE_CONTROL=0: opt out here too, not
-            else:  # just in production — parity with bootstrap wiring
-                remote = RemoteControl(
-                    bus,
-                    scheduler,
-                    accounts,
-                    lambda: api,
-                    credentials,
-                    ServiceLogger(logger, "remote-control"),
-                ).start()
         except BaseException as exc:
             # partial-assembly teardown (mirrors the main finally's steps
             # for everything that can exist at this point)
@@ -541,7 +568,7 @@ class SimulationRunner:
                 line += f" [{event}]"
             log_lines.append(line)
 
-        interactions: list[dict] = []
+        interactions: list[dict[str, Any]] = []
 
         def _on_audit(entry: Any) -> None:
             interactions.append(_entry_dict(entry))
@@ -605,7 +632,7 @@ class SimulationRunner:
                     channel_id=SYNTHETIC_GUILD_CHANNEL,
                     owner_id=SYNTHETIC_OWNER_ID,
                     account_user_id=SYNTHETIC_ALPHA_ID,
-                    mudae_id=SYNTHETIC_MUDAE_ID,
+                    bot_id=SYNTHETIC_BOT_ID,
                     owner_says=(
                         lambda channel_id, content, author_id: world.deliver(
                             channel_id, author_id, content
@@ -613,7 +640,6 @@ class SimulationRunner:
                     ),
                     audit_entries=lambda: list(interactions),
                     settings_overrides=DEMO_PLUGIN_SETTINGS,
-                    remote=remote,
                     limiter=limiter,
                     scheduler=scheduler,
                     control=api,
@@ -671,11 +697,6 @@ class SimulationRunner:
             # account can still send), THEN the accounts stop. The old
             # order killed the senders before the queued work, so a drain
             # could never deliver what it waited for.
-            try:
-                if remote is not None:
-                    remote.stop()
-            except Exception:
-                pass
             if scheduler_started:
                 try:
                     await scheduler.stop(drain=True)
@@ -769,7 +790,7 @@ class SimulationRunner:
     def _build_account_manager(
         mods: SimpleNamespace,
         bus: EventBus,
-        logger: LogService,
+        logger: ServiceLogger,
         db: Any,
         plugins_mgr: Any,
         scheduler: Any,
@@ -782,7 +803,6 @@ class SimulationRunner:
         credential_service: Any = None,
         cooldowns: Any = None,
         plugin_state: Any = None,
-        sync_groups: Any = None,
     ) -> Any:
         """AccountManager with the pinned positional arguments.
 
@@ -807,7 +827,6 @@ class SimulationRunner:
                 credential_service=credential_service,
                 cooldowns=cooldowns,
                 plugin_state=plugin_state,
-                sync_groups=sync_groups,
                 account_plugins=db.account_plugins,
             )
         except TypeError:

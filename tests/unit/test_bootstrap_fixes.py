@@ -9,7 +9,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 from unittest import mock
 
 from core.access_manager import AccessManager
@@ -41,11 +41,11 @@ class RaceRepo:
     """Credential repo double whose store() PARKS after the repo write."""
 
     def __init__(self) -> None:
-        self.rows: Dict[str, bytes] = {}
+        self.rows: dict[str, bytes] = {}
         self.parked = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def accounts_with_credential(self) -> List[str]:
+    async def accounts_with_credential(self) -> list[str]:
         return list(self.rows)
 
     async def store(self, account: str, ciphertext: bytes) -> None:
@@ -53,7 +53,7 @@ class RaceRepo:
         self.parked.set()
         await self.release.wait()
 
-    async def load(self, account: str) -> Optional[bytes]:
+    async def load(self, account: str) -> bytes | None:
         return self.rows.get(account)
 
     async def delete(self, account: str) -> bool:
@@ -115,30 +115,13 @@ class TestFromFileSymlink(unittest.TestCase):
             self.assertEqual(Credentials.from_file(real).get("A"), "1")
 
 
-class TestMudaeBotIdTruncation(unittest.TestCase):
+class TestPrimaryBotIdTruncation(unittest.TestCase):
     def test_malformed_value_truncated_in_error(self):
-        creds = Credentials({"MUDAE_BOT_ID": "x" * 100})
+        creds = Credentials({"PRIMARY_BOT_ID": "x" * 100})
         with self.assertRaises(CredentialsError) as ctx:
-            _ = creds.mudae_bot_id
+            _ = creds.primary_bot_id
         self.assertIn("...", str(ctx.exception))
         self.assertNotIn("x" * 41, str(ctx.exception))
-
-
-# --------------------------------------------------- REMOTE_CONTROL matrix
-class TestRemoteControlMatrix(unittest.TestCase):
-    def test_absent_key_defaults_on(self):
-        self.assertIs(Credentials({}).remote_control_enabled, True)
-
-    def test_matrix(self):
-        cases = {
-            "0": False, "disable": False, "": False,
-            "false": False, "OFF": False,
-            "1": True, "on": True, "yes": True,
-        }
-        for raw, expected in cases.items():
-            creds = Credentials({"REMOTE_CONTROL": raw})
-            self.assertIs(creds.remote_control_enabled, expected,
-                          f"REMOTE_CONTROL={raw!r}")
 
 
 # ------------------------------------------- access-manager concurrency
@@ -146,7 +129,7 @@ class SlowKv:
     """kv double that YIELDS on every await so tasks really interleave."""
 
     def __init__(self) -> None:
-        self.rows: Dict[str, Any] = {}
+        self.rows: dict[str, Any] = {}
 
     async def get(self, key: str, default: Any = None) -> Any:
         await asyncio.sleep(0)
@@ -160,7 +143,7 @@ class SlowKv:
         await asyncio.sleep(0)
         return self.rows.pop(key, None) is not None
 
-    async def prefix(self, p: str) -> Dict[str, Any]:
+    async def prefix(self, p: str) -> dict[str, Any]:
         await asyncio.sleep(0)
         return {k: v for k, v in self.rows.items() if k.startswith(p)}
 
@@ -234,26 +217,26 @@ class SlowCooldownRepo:
     """Cooldown repo double whose upsert() PARKS after the repo write."""
 
     def __init__(self) -> None:
-        self.rows: Dict[tuple, Dict[str, Any]] = {}
+        self.rows: dict[tuple, dict[str, Any]] = {}
         self.parked = asyncio.Event()
         self.release = asyncio.Event()
 
     async def upsert(self, **kw: Any) -> None:
-        key = (kw["account"], kw["plugin"], kw["cooldown_key"])
+        key = (kw["account"], kw["plugin"], kw.get("profile", ""), kw["cooldown_key"])
         self.rows[key] = kw
         self.parked.set()
         await self.release.wait()
 
     async def get(self, account: str, plugin: str, cooldown_key: str,
-                  now: float = None) -> Optional[Dict[str, Any]]:
-        row = self.rows.get((account, plugin, cooldown_key))
+                  now: float = None, profile: str = "") -> dict[str, Any] | None:
+        row = self.rows.get((account, plugin, profile, cooldown_key))
         if row is None or (now is not None and row["expires_at"] <= now):
             return None
         return dict(row)
 
     async def clear(self, account: str, plugin: str,
-                    cooldown_key: str) -> bool:
-        return self.rows.pop((account, plugin, cooldown_key), None) is not None
+                    cooldown_key: str, profile: str = "") -> bool:
+        return self.rows.pop((account, plugin, profile, cooldown_key), None) is not None
 
 
 class TestCooldownSetClearRace(_TmpCase):
@@ -319,6 +302,7 @@ class StderrClaimWiringTests(unittest.IsolatedAsyncioTestCase):
         import logging
         import tempfile
         from pathlib import Path
+
         from core import logging_service as m
         self._m = m
         self.tmp = tempfile.TemporaryDirectory(prefix="sm-claims-")

@@ -27,25 +27,52 @@ import time
 from typing import TYPE_CHECKING
 
 from .connection import DatabaseConnection, DatabaseError
+from .repositories.account_channels import AccountChannelsRepository
+from .repositories.account_plugin_profiles import AccountPluginProfilesRepository
 from .repositories.account_plugins import AccountPluginsRepository
 from .repositories.accounts import AccountsRepository
 from .repositories.cache import CacheRepository
 from .repositories.cooldowns import CooldownRepository
 from .repositories.credentials import CredentialsRepository
-from .repositories.fleet import FleetRepository
 from .repositories.kv import KvRepository
 from .repositories.logs import AuditRepository, LogRepository
 from .repositories.plugin_profiles import PluginProfilesRepository
 from .repositories.plugins import PluginRepository
+from .repositories.presets import PresetsRepository
 from .repositories.rate_policies import RatePolicyRepository
 from .repositories.settings import AccountSettingsRepository
-from .repositories.sync_groups import SyncGroupsRepository
+from .repositories.signals import SignalsRepository
 from .repositories.tasks import TaskHistoryRepository
+from .repositories.workspace_presets import WorkspacePresetsRepository
+from .repositories.workspaces import WorkspaceRepository
 from .schema import MIGRATIONS, latest_version
 
 LOG = logging.getLogger("libzent.database")
 
+
+def _split_statements(script: str) -> Iterator[str]:
+    """Split a SQL script on complete statements (the sqlite3
+    `complete_statement` rule) — executescript would COMMIT the
+    surrounding transaction, and the migration pass now owns it."""
+    buffer = ""
+    for line in script.splitlines(keepends=True):
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            statement = buffer.strip()
+            buffer = ""
+            if statement:
+                # a statement may open with a -- comment line before its
+                # SQL; sqlite3.execute accepts that. Comment-ONLY
+                # statements (complete on their own line) are no-ops —
+                # executing them is harmless, so nothing is filtered.
+                yield statement
+    tail = buffer.strip()
+    if tail:
+        yield tail
+
+
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 
@@ -68,9 +95,10 @@ class Database:
         self.accounts = AccountsRepository(self)
         self.account_plugins = AccountPluginsRepository(self)
         self.account_settings = AccountSettingsRepository(self)
-        self.sync_groups = SyncGroupsRepository(self)
         self.plugins = PluginRepository(self)
         self.plugin_profiles = PluginProfilesRepository(self)
+        self.account_plugin_profiles = AccountPluginProfilesRepository(self)
+        self.workspace_presets = WorkspacePresetsRepository(self)
         self.policies = RatePolicyRepository(self)
         self.audit = AuditRepository(self, keep=self._audit_keep)
         self.logs = LogRepository(self, keep=self._log_keep)
@@ -79,7 +107,13 @@ class Database:
         self.cache = CacheRepository(self)
         self.credentials = CredentialsRepository(self)
         self.cooldowns = CooldownRepository(self)
-        self.fleet = FleetRepository(self)
+        # workspace unification (W2): the new projection + template +
+        # channel layers, wired alongside their v9 predecessors until
+        # W3 swaps the surfaces and v11 drops the old tables
+        self.workspaces = WorkspaceRepository(self)
+        self.presets = PresetsRepository(self)
+        self.account_channels = AccountChannelsRepository(self)
+        self.signals = SignalsRepository(self)
 
     @property
     def path(self) -> str:
@@ -110,7 +144,17 @@ class Database:
             raise
 
     async def migrate(self) -> int:
-        """Apply pending migrations in order (idempotent, recorded)."""
+        """Apply pending migrations in order (idempotent, recorded).
+
+        Each migration runs as ONE serialized transaction on the RAW
+        connection (the wrapper's execute() auto-commits outermost
+        callers — savepoints and multi-statement atomicity need raw).
+        The stamp is re-checked INSIDE the transaction's write lock: a
+        racing connect either wins the version or observes it stamped
+        and skips — interleaving between a winner's versions (a v10
+        fold reading v9 tables a racing v11 already dropped) is
+        impossible because the loser never applies a stamped version.
+        """
         versions = [version for version, _, _ in MIGRATIONS]
         if versions != sorted(versions) or len(set(versions)) != len(versions):
             raise DatabaseError(
@@ -137,62 +181,62 @@ class Database:
         for version, name, sql in MIGRATIONS:
             if version in done:
                 continue
-            await self._apply_migration(version, name, sql)
-            applied += 1
+            if await self._apply_guarded(version, name, sql):
+                applied += 1
         return applied
 
-    async def _apply_migration(self, version: int, name: str, sql: str) -> None:
-        """Run ONE migration and its bookkeeping row as a single unit.
-
-        ``executescript`` auto-commits before it runs and gives no
-        rollback of its own, so the script is wrapped in an explicit
-        BEGIN..COMMIT together with the schema_migrations insert: a failing
-        statement leaves NOTHING half-applied and no bookkeeping row.
-
-        PARALLEL-FIRST-BOOT: ALTER TABLE ... ADD COLUMN has no IF NOT
-        EXISTS form, so when two Database objects first-boot the same
-        file the migration race's LOSER fails with 'duplicate column
-        name' — the winner already committed that column. Exactly that
-        error is tolerated for ALTER-carrying migrations: the aborted
-        script rolls back, then the same WHERE NOT EXISTS-guarded stamp
-        runs (a no-op when the winner's stamp committed together with
-        its column, which the visible column implies).
-        """
+    async def _apply_guarded(self, version: int, name: str, sql: str) -> bool:
+        """One migration as a self-contained serialized transaction on
+        the raw connection. Returns False when a racing connect already
+        applied it (the in-lock stamp check). The two tolerated-loser
+        classes roll back to a SAVEPOINT and re-run without the ALTERs:
+        duplicate-column ALTER races, and DROP COLUMN finding the
+        column already dropped."""
         safe_name = name.replace("'", "''")
-        # stamp only when absent: two Database objects first-booting the
-        # same file in parallel both reach here (each saw an empty
-        # schema_migrations); the loser's DDL no-ops (IF NOT EXISTS) and
-        # stamps nothing instead of failing the boot.
+        # Bandit B608: version/name come from the in-repo migration
+        # registry, not user input; name is quote-escaped above and the
+        # version is int-coerced.
         stamp = (
-            f"INSERT INTO schema_migrations (version, name, applied_at) "
-            f"SELECT {int(version)}, '{safe_name}', {time.time()!r} "
-            f"WHERE NOT EXISTS (SELECT 1 FROM schema_migrations "
-            f"WHERE version = {int(version)});"
+            f"INSERT INTO schema_migrations (version, name, applied_at) "  # nosec B608
+            f"VALUES ({int(version)}, '{safe_name}', {time.time()!r})"
         )
-        script = f"BEGIN IMMEDIATE;\n{sql}\n{stamp}\nCOMMIT;"
-        async with self.connection.serialized() as db:
-            await db.rollback()  # no stray open transaction before BEGIN
+        savepoint = f"mig_{int(version)}"
+        async with self.connection.serialized() as raw:
+            await raw.execute("BEGIN IMMEDIATE")
             try:
-                await db.executescript(script)
-            except BaseException as exc:
-                tolerated = (
-                    isinstance(exc, sqlite3.OperationalError)
-                    and "duplicate column name" in str(exc).lower()
-                    and "ALTER TABLE" in sql.upper()
+                cursor = await raw.execute(
+                    "SELECT 1 FROM schema_migrations WHERE version = ?",
+                    (int(version),),
                 )
-                with contextlib.suppress(Exception):
-                    await db.rollback()
-                if tolerated:
-                    # the column already exists, but the failed script
-                    # rolled back EVERYTHING in it — re-run the remaining
-                    # (idempotent) statements without the ALTERs, or the
-                    # tables created next to them would silently never
-                    # exist while the version is stamped applied
+                if await cursor.fetchone() is not None:
+                    await raw.execute("COMMIT")
+                    return False  # the racing winner stamped it
+                await raw.execute(f"SAVEPOINT {savepoint}")
+                try:
+                    for statement in _split_statements(sql):
+                        await raw.execute(statement)
+                    await raw.execute(stamp)
+                except sqlite3.OperationalError as exc:
+                    sql_upper = sql.upper()
+                    message = str(exc).lower()
+                    tolerated = (
+                        "duplicate column name" in message and "ALTER TABLE" in sql_upper
+                    ) or ("no such column" in message and "DROP COLUMN" in sql_upper)
+                    if not tolerated:
+                        raise DatabaseError(f"migration {version} ({name}) failed: {exc}") from exc
+                    await raw.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
                     rest = re.sub(r"ALTER\s+TABLE\b[^;]*;", "", sql, flags=re.IGNORECASE)
-                    await db.executescript(f"BEGIN IMMEDIATE;\n{rest}\n{stamp}\nCOMMIT;")
-                    return
-                if isinstance(exc, Exception):
-                    raise DatabaseError(f"migration {version} ({name}) failed: {exc}") from exc
+                    for statement in _split_statements(rest):
+                        await raw.execute(statement)
+                    await raw.execute(stamp)
+                finally:
+                    with contextlib.suppress(Exception):
+                        await raw.execute(f"RELEASE SAVEPOINT {savepoint}")
+                await raw.execute("COMMIT")
+                return True
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    await raw.execute("ROLLBACK")
                 raise
 
     async def close(self) -> None:

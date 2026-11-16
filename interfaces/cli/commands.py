@@ -65,8 +65,6 @@ __all__ = [
     "format_cooldowns",
     "format_credential_status",
     "format_effective",
-    "format_group_snapshot",
-    "format_groups",
     "format_history",
     "format_import_report",
     "format_logs",
@@ -124,12 +122,18 @@ HELP: dict[str, tuple[str, str]] = {
         "plugin management ('clear' resets one setting to its lower"
         " layer/default, unmasking profile + plugin defaults)",
     ),
-    "groups": (
-        "list|show <group>|create <name> [description]"
-        "|update <group> <field> <value>|delete <group> [--detach-members]"
-        "|add-member <group> <account>|remove-member <group> <account>"
-        "|set-account <account> <group>|clear-account <account>",
-        "sync groups (shared pacing membership; update fields: name, description, enabled)",
+    "profiles": (
+        "<account> <plugin> list|show <profile>|active|set-active <profile>"
+        "|clear-active|delete <profile>",
+        "account-owned plugin profiles (the two-level model: each account"
+        " keeps its own instances; the body is plugin-defined)",
+    ),
+    "workspaces": (
+        "list|show <workspace>|create <name> [description]"
+        "|delete <workspace> [--detach-members]"
+        "|add-member <workspace> <account>|remove-member <account>"
+        "|pause <workspace>|resume <workspace>|tasks [workspace [status]]",
+        "workspaces (membership + orchestration; the shared pacing clock rides membership)",
     ),
     "ratelimit": (
         "show|stats|set <action> <interval> [jitter_min jitter_max] [level owner]"
@@ -232,8 +236,10 @@ async def run_command(api: Any, line: str) -> str | None:
         return await _cooldowns_group(api, args)
     if cmd == "plugins":
         return await _plugins_group(api, args)
-    if cmd == "groups":
-        return await _groups_group(api, args)
+    if cmd == "profiles":
+        return await _profiles_group(api, args)
+    if cmd == "workspaces":
+        return await _workspaces_group(api, args)
     if cmd == "ratelimit":
         return await _ratelimit_group(api, args)
     if cmd == "tasks":
@@ -299,16 +305,16 @@ _PLUGINS_USAGE = {
     "set": "plugins set <account> <plugin> <key> <value>",
     "clear": "plugins clear <account> <plugin> <key>",
 }
-_GROUPS_USAGE = {
-    "list": "groups list",
-    "show": "groups show <group>",
-    "create": "groups create <name> [description]",
-    "update": "groups update <group> <field> <value>",
-    "delete": "groups delete <group> [--detach-members]",
-    "add-member": "groups add-member <group> <account>",
-    "remove-member": "groups remove-member <group> <account>",
-    "set-account": "groups set-account <account> <group>",
-    "clear-account": "groups clear-account <account>",
+_WORKSPACES_USAGE = {
+    "list": "workspaces list",
+    "show": "workspaces show <workspace>",
+    "create": "workspaces create <name> [description]",
+    "delete": "workspaces delete <workspace> [--detach-members]",
+    "add-member": "workspaces add-member <workspace> <account>",
+    "remove-member": "workspaces remove-member <account>",
+    "pause": "workspaces pause <workspace>",
+    "resume": "workspaces resume <workspace>",
+    "tasks": "workspaces tasks [workspace [status]]",
 }
 _RATELIMIT_USAGE = {
     "show": "ratelimit show",
@@ -357,7 +363,7 @@ def _usage_for(ctx: str) -> str:
     table = {
         "accounts": _ACCOUNTS_USAGE,
         "plugins": _PLUGINS_USAGE,
-        "groups": _GROUPS_USAGE,
+        "workspaces": _WORKSPACES_USAGE,
         "ratelimit": _RATELIMIT_USAGE,
         "tasks": _TASKS_USAGE,
         "credentials": _CREDENTIALS_USAGE,
@@ -411,7 +417,7 @@ def _check_level_owner(level: str, owner: str | None, ctx: str) -> None:
         raise UsageError(f"{ctx}: level 'global' takes no owner")
     if level != "global" and owner is None:
         raise UsageError(f"{ctx}: level {level!r} needs an owner")
-    if level == "account_plugin" and "/" not in owner:
+    if level == "account_plugin" and owner is not None and "/" not in owner:
         raise UsageError(f"{ctx}: account_plugin owner must be '<account>/<plugin>', got {owner!r}")
 
 
@@ -486,16 +492,18 @@ async def _accounts_group(api: Any, args: list[str]) -> str:
     if sub in ("start", "stop"):
         if len(rest) > 1:
             raise UsageError(f"usage: {_ACCOUNTS_USAGE[sub]}")
-        name: str | None = None
+        # 'target' (not reusing 'name' from the credential/remove branches
+        # above): None means "all accounts" — start/stop accept both
+        target: str | None = None
         if rest and rest[0].lower() != "all":
             if not rest[0]:  # a quoted empty token must never mean "all"
                 raise UsageError(
                     f"account name cannot be empty — use 'all' for every account "
                     f"(usage: {_ACCOUNTS_USAGE[sub]})"
                 )
-            name = rest[0]
+            target = rest[0]
         method = api.accounts_start if sub == "start" else api.accounts_stop
-        return _result(await method(name, surface="cli"), verb=sub)
+        return _result(await method(target, surface="cli"), verb=sub)
     if sub == "estop":
         name = _exact(rest, 1, ctx)
         return _result(
@@ -575,67 +583,140 @@ async def _plugins_group(api: Any, args: list[str]) -> str:
     raise UsageError(f"plugins: unknown subcommand {sub!r}")  # pragma: no cover
 
 
-async def _groups_group(api: Any, args: list[str]) -> str:
-    """groups list|show|create|update|delete|add-member|remove-member|
-    set-account|clear-account (thin wrappers over ControlAPI)."""
-    sub, rest = _sub(_GROUPS_USAGE, args, "groups")
-    ctx = f"groups {sub}"
+_PROFILES_USAGE = {
+    "list": "profiles <account> <plugin> list",
+    "show": "profiles <account> <plugin> show <profile>",
+    "active": "profiles <account> <plugin> active",
+    "set-active": "profiles <account> <plugin> set-active <profile>",
+    "clear-active": "profiles <account> <plugin> clear-active",
+    "delete": "profiles <account> <plugin> delete <profile>",
+}
+
+
+async def _profiles_group(api: Any, args: list[str]) -> str:
+    """profiles <account> <plugin> list|show|active|set-active|clear|delete.
+
+    The two-level model's account-owned instances (P5): the CLI is a
+    thin view over the facade verbs — settings bodies are plugin-defined
+    JSON, rendered as-is.
+    """
+    if len(args) < 3 or args[2] not in _PROFILES_USAGE:
+        lines = [
+            "usage: profiles <account> <plugin> <command>",
+            "commands:",
+        ]
+        lines += [f"  {name:<12} {how}" for name, how in _PROFILES_USAGE.items()]
+        raise UsageError("\n".join(lines))
+    account, plugin, sub = args[0], args[1], args[2]
+    rest = args[3:]
+    ctx = f"profiles {sub}"
     if sub == "list":
         _exact(rest, 0, ctx)
-        return format_groups(await api.groups_list())
+        rows = await api.account_plugin_profiles(account, plugin)
+        if not rows:
+            return f"no profiles for {plugin} on {account}"
+        return "\n".join(
+            f"{r['name']:<24} v{r['schema_version']}  {r['description'] or '-'}" for r in rows
+        )
     if sub == "show":
-        return format_group_snapshot(await api.groups_snapshot(_exact(rest, 1, ctx)))
+        name = _exact(rest, 1, ctx)[0]
+        row = await api.account_plugin_profile_get(account, plugin, name)
+        if row is None:
+            return f"no profile {name!r} for {plugin} on {account}"
+        import json as _json
+
+        return _json.dumps(row["settings"], indent=2, sort_keys=True)
+    if sub == "active":
+        _exact(rest, 0, ctx)
+        out = await api.account_plugin_profile_active(account, plugin)
+        return f"active profile: {out['active']}" if out["active"] else "no active profile"
+    if sub == "set-active":
+        name = _exact(rest, 1, ctx)[0]
+        return _result(
+            await api.account_plugin_profile_set_active(account, plugin, name),
+            verb="activated",
+        )
+    if sub == "clear-active":
+        _exact(rest, 0, ctx)
+        return _result(
+            await api.account_plugin_profile_clear_active(account, plugin),
+            verb="cleared",
+        )
+    if sub == "delete":
+        name = _exact(rest, 1, ctx)[0]
+        return _result(
+            await api.account_plugin_profile_delete(account, plugin, name),
+            verb="deleted",
+        )
+    raise UsageError(f"profiles: unknown subcommand {sub!r}")  # pragma: no cover
+
+
+async def _workspaces_group(api: Any, args: list[str]) -> str:
+    """workspaces list|show|create|delete|add-member|remove-member|
+    pause|resume|tasks (thin wrappers over ControlAPI)."""
+    sub, rest = _sub(_WORKSPACES_USAGE, args, "workspaces")
+    ctx = f"workspaces {sub}"
+    if sub == "list":
+        _exact(rest, 0, ctx)
+        rows = await api.workspaces_list()
+        if not rows:
+            return "no workspaces"
+        return "\n".join(
+            f"{row['name']:<24} members={row.get('member_count', 0)}"
+            f" paused={'yes' if row.get('paused') else 'no'}"
+            f" gen={row.get('generation', 1)}"
+            for row in rows
+        )
+    if sub == "show":
+        workspace = _exact(rest, 1, ctx)
+        return _result(await api.workspaces_get(workspace), verb="workspace")
     if sub == "create":
         if not rest:
-            raise UsageError(f"groups create: needs a name — usage: {_GROUPS_USAGE['create']}")
+            raise UsageError(
+                f"workspaces create: needs a name — usage: {_WORKSPACES_USAGE['create']}"
+            )
         payload: dict[str, Any] = {"name": rest[0]}
         if rest[1:]:
             payload["description"] = " ".join(rest[1:])
-        return _result(await api.groups_create(payload, surface="cli"), verb="created")
-    if sub == "update":
-        group, field, value = _exact(rest, 3, ctx)
-        if field not in ("name", "description", "enabled"):
-            raise UsageError(
-                f"groups update: unknown field {field!r} — expected name|description|enabled"
-            )
-        payload = {"enabled": _on_off(value, ctx)} if field == "enabled" else {field: value}
-        return _result(
-            await api.groups_update(group, payload, surface="cli"),
-            verb="updated",
-        )
+        return _result(await api.workspaces_create(payload, surface="cli"), verb="created")
     if sub == "delete":
         detach = "--detach-members" in rest
         rest = [token for token in rest if token != "--detach-members"]
-        group = _exact(rest, 1, ctx)
+        workspace = _exact(rest, 1, ctx)
         return _result(
-            await api.groups_delete(group, detach_members=detach, surface="cli"),
+            await api.workspaces_delete(workspace, detach_members=detach, surface="cli"),
             verb="deleted",
         )
     if sub == "add-member":
-        group, account = _exact(rest, 2, ctx)
+        workspace, account = _exact(rest, 2, ctx)
         return _result(
-            await api.groups_add_account(group, account, surface="cli"),
+            await api.workspaces_add_account(account, workspace, surface="cli"),
             verb="member added",
         )
     if sub == "remove-member":
-        group, account = _exact(rest, 2, ctx)
-        return _result(
-            await api.groups_remove_account(group, account, surface="cli"),
-            verb="member removed",
-        )
-    if sub == "set-account":
-        account, group = _exact(rest, 2, ctx)
-        return _result(
-            await api.groups_set_account(account, group, surface="cli"),
-            verb="group set",
-        )
-    if sub == "clear-account":
         account = _exact(rest, 1, ctx)
         return _result(
-            await api.groups_clear_account(account, surface="cli"),
-            verb="group cleared",
+            await api.workspaces_remove_account(account, surface="cli"),
+            verb="member removed",
         )
-    raise UsageError(f"groups: unknown subcommand {sub!r}")  # pragma: no cover
+    if sub == "pause":
+        workspace = _exact(rest, 1, ctx)
+        return _result(await api.workspaces_pause(workspace, surface="cli"), verb="paused")
+    if sub == "resume":
+        workspace = _exact(rest, 1, ctx)
+        return _result(await api.workspaces_resume(workspace, surface="cli"), verb="resumed")
+    if sub == "tasks":
+        workspace = rest[0] if rest else None
+        status = rest[1] if len(rest) > 1 else None
+        rows = await api.workspaces_tasks(workspace=workspace, status=status)
+        if not rows:
+            return "no workspace tasks"
+        return "\n".join(
+            f"{row['id']:<14} {row['workspace']:<16} {row['status']:<10}"
+            f" task={row['task_id']} account={row.get('account') or '-'}"
+            for row in rows
+        )
+    raise UsageError(f"unknown workspaces sub-command {sub!r}")  # pragma: no cover
 
 
 async def _ratelimit_group(api: Any, args: list[str]) -> str:
@@ -782,7 +863,7 @@ async def _simulation_group(api: Any, args: list[str]) -> str:
 
 
 # ---------------------------------------------------------------- formatters
-def format_status(status: dict) -> str:
+def format_status(status: dict[str, Any]) -> str:
     """Overview payload (api.status) -> aligned text: uptime/tasks/accounts/
     policies + the safety-warning block."""
     lines: list[str] = []
@@ -804,7 +885,7 @@ def format_status(status: dict) -> str:
     return "\n".join(lines)
 
 
-def format_accounts(accounts: list[dict]) -> str:
+def format_accounts(accounts: list[dict[str, Any]]) -> str:
     """Account list payload (api.accounts_list) -> one block per account.
 
     Capabilities render from ``assigned_plugins`` (the direct account→plugin
@@ -831,7 +912,7 @@ def format_accounts(accounts: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_account_info(details: dict) -> str:
+def format_account_info(details: dict[str, Any]) -> str:
     """Account details payload (api.accounts_info) -> the spec §8 page.
 
     Sections: Status / Identity / Runtime (clearly marked as CLIENT CACHE —
@@ -903,7 +984,7 @@ def format_account_plugins(account: str, plugins: Sequence[str]) -> str:
     return "\n".join(f"  {name}" for name in names)
 
 
-def format_plugins(manifests: list[dict]) -> str:
+def format_plugins(manifests: list[dict[str, Any]]) -> str:
     """Plugin manifests (api.plugins_manifests) -> metadata + settings schema."""
     if not manifests:
         return "  (no plugins discovered)"
@@ -925,7 +1006,7 @@ def format_plugins(manifests: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_plugin_state(states: list[dict]) -> str:
+def format_plugin_state(states: list[dict[str, Any]]) -> str:
     """Per-account plugin state (api.plugins_state / plugins_settings).
 
     Renders '[+]' enabled / '[-]' disabled / '[*]' unknown (the settings-only
@@ -949,47 +1030,7 @@ def format_plugin_state(states: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_groups(groups: list[dict]) -> str:
-    """Sync groups payload (api.groups_list) -> name, members, description."""
-    if not groups:
-        return "  (no sync groups — 'groups create <name>')"
-    lines: list[str] = []
-    for group in groups:
-        count = group.get("member_count", 0)
-        flag = "" if group.get("enabled", True) else " [disabled]"
-        desc = group.get("description") or ""
-        lines.append(
-            f"  {_col(str(group.get('name', '?')), 18)}{count} member(s){flag}"
-            + (f" — {desc}" if desc else "")
-        )
-    return "\n".join(lines)
-
-
-def format_group_snapshot(snapshot: dict) -> str:
-    """Group snapshot (api.groups_snapshot) -> the full group page."""
-    lines = [
-        f"Group: {snapshot.get('name', '?')}  (id={snapshot.get('id', '?')})",
-        f"  Members: {snapshot.get('member_count', 0)}"
-        f"  pacing key: {snapshot.get('pacing_key', '-')}",
-    ]
-    desc = snapshot.get("description") or ""
-    if desc:
-        lines.append(f"  Description: {desc}")
-    lines.append("  Enabled: " + ("yes" if snapshot.get("enabled", True) else "no"))
-    members = snapshot.get("members") or []
-    if members:
-        for member in members:
-            if isinstance(member, dict):
-                status = member.get("status") or "-"
-                lines.append(f"    {_col(str(member.get('name', '?')), 18)}{status}")
-            else:
-                lines.append(f"    {member}")
-    else:
-        lines.append("    (none — accounts join with 'groups add-member')")
-    return "\n".join(lines)
-
-
-def format_lane(lane: dict) -> str:
+def format_lane(lane: dict[str, Any]) -> str:
     """Lane state -> display lines (the send lane is REMOVED).
 
     The backend keeps ratelimit_lane/ratelimit_set_lane as documented
@@ -1017,7 +1058,7 @@ def format_lane(lane: dict) -> str:
     )
 
 
-def format_policies(policies: list[dict]) -> str:
+def format_policies(policies: list[dict[str, Any]]) -> str:
     """Stored policies (api.ratelimit_policies) -> scope/action/policy table."""
     if not policies:
         return "  (no policies set — 'ratelimit set <action> <interval>')"
@@ -1040,7 +1081,7 @@ def format_policies(policies: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_effective(effective: dict) -> str:
+def format_effective(effective: dict[str, Any]) -> str:
     """Effective pacing (api.ratelimit_effective) -> interval + source stack.
 
     The effective interval is the MAX across every applicable level; the
@@ -1069,7 +1110,7 @@ def format_effective(effective: dict) -> str:
     return "\n".join(lines)
 
 
-def format_tasks(tasks: list[dict]) -> str:
+def format_tasks(tasks: list[dict[str, Any]]) -> str:
     """Queued/running tasks (api.tasks_list) -> a compact table."""
     if not tasks:
         return "  (no tasks — 'tasks list [status]')"
@@ -1085,7 +1126,7 @@ def format_tasks(tasks: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_history(tasks: list[dict]) -> str:
+def format_history(tasks: list[dict[str, Any]]) -> str:
     """Finished tasks (api.tasks_history) -> outcome + duration per task."""
     if not tasks:
         return "  (no history yet)"
@@ -1110,7 +1151,7 @@ def format_history(tasks: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_logs(entries: list[dict]) -> str:
+def format_logs(entries: list[dict[str, Any]]) -> str:
     """Structured log entries (api.logs_tail) -> 'HH:MM:SS SEVERITY source msg'."""
     if not entries:
         return "  (no log entries)"
@@ -1133,7 +1174,7 @@ def format_logs(entries: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_audit(entries: list[dict]) -> str:
+def format_audit(entries: list[dict[str, Any]]) -> str:
     """Audit entries (api.audit_tail) -> compact interaction lines.
 
     Format: ``HH:MM:SS -> account action ch=... content (wait Xms, jitter Yms)``
@@ -1157,7 +1198,7 @@ def format_audit(entries: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_warnings(warnings: list[dict]) -> str:
+def format_warnings(warnings: list[dict[str, Any]]) -> str:
     """Safety warnings (api.ratelimit_warnings) -> icon lines.
 
     Icons: ``[i]`` informational, ``[!]`` worth a look, ``[X]`` dangerous.
@@ -1175,7 +1216,7 @@ def format_warnings(warnings: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_simulation_report(report: dict) -> str:
+def format_simulation_report(report: dict[str, Any]) -> str:
     """Simulation report (api.simulation_run) -> verdict + first 30 log lines.
 
     Long transcripts are capped at 30 timed lines with a '(+N more lines)'
@@ -1206,7 +1247,7 @@ def format_simulation_report(report: dict) -> str:
     return "\n".join(lines)
 
 
-def format_credential_status(rows: list[dict]) -> str:
+def format_credential_status(rows: list[dict[str, Any]]) -> str:
     """Credential status payload (api.accounts_credential_status) -> table.
 
     One line per account: name + db/env/missing chip. NEVER a value — the
@@ -1217,13 +1258,14 @@ def format_credential_status(rows: list[dict]) -> str:
     labels = {"db": "db (encrypted)", "env": "env (.env fallback)"}
     lines: list[str] = []
     for row in rows:
-        state = row.get("credential")
+        # unvalidated API JSON: the chip is "db"/"env" or missing (None)
+        state: Any = row.get("credential")
         state_text = labels.get(state, str(state or "missing"))
         lines.append(f"  {_col(str(row.get('name', '?')), 20)}credential: {state_text}")
     return "\n".join(lines)
 
 
-def format_import_report(report: dict) -> str:
+def format_import_report(report: dict[str, Any]) -> str:
     """Import report (api.credentials_import_env) -> names-only summary."""
     imported = report.get("imported") or []
     skipped = report.get("skipped") or []
@@ -1241,7 +1283,7 @@ def format_import_report(report: dict) -> str:
     return "\n".join(lines)
 
 
-def format_cooldowns(rows: list[dict]) -> str:
+def format_cooldowns(rows: list[dict[str, Any]]) -> str:
     """Active cooldowns (api.cooldowns_list) -> account/plugin/key table."""
     if not rows:
         return "  (no active cooldowns)"

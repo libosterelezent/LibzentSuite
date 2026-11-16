@@ -1,16 +1,17 @@
 # AGENTS.md — LibzentSuite Engineering Standards
 
-These instructions apply to the whole repository. They describe how to make changes that are correct, readable, maintainable, and consistent with LibzentSuite's architecture. They are not a substitute for the current source code, tests, `ARCHITECTURE.md`, or `INTEGRATION.md`.
+These instructions apply to the whole repository. They describe how to make changes that are correct, readable, maintainable, and consistent with LibzentSuite's architecture. They are not a substitute for the current source code, tests, `docs/architecture/architecture.md`, or `docs/architecture/integration.md`.
 
 ## 1. Working principles
 
 1. **Understand before changing.** Read the relevant implementation, callers, tests, data models, and current architecture/integration contracts before editing. Trace a behavior end to end when it crosses layers. Do not infer current behavior from stale comments or old plans alone.
 2. **Solve the requested problem completely.** Make the smallest coherent change that fixes the root cause. Include the tests and documentation needed to make the change understandable and verifiable. Do not make unrelated refactors while fixing a defect.
-3. **Preserve architecture boundaries.** `core.api.ControlAPI` is the shared application facade for the CLI and dashboard. Both interfaces must use the same application behavior. Extend the shared facade and its tests when a legitimate feature requires it; do not add a second business-logic path to avoid modifying the API.
-4. **Keep plugins UI-independent.** Plugins use framework-provided services and contracts. They must not depend on dashboard state, CLI implementation details, or internal database connections.
+3. **Preserve architecture boundaries.** `core.api.ControlAPI` is the shared application facade for the CLI and dashboard. Both interfaces must use the same application behavior. Extend the shared facade and its tests when a legitimate feature requires it; do not add a second business-logic path to avoid modifying the API. (this api facade will be transformed into a full API with FastAPI.)
+4. **Keep plugins Modular.** Plugins uses the provided services and methods from the framework, and therefore cannot directly control and have access to any client, our provided services are the middleware and is authoratative for security reasons, the most descriptic way to describe the structure is: Core Engine (framework) -> Driver (Plugins) in which case core engine provides the ability and plugins utilize them live.
 5. **Preserve safety and data semantics.** Do not bypass validation, authorization, persistence, task scheduling, rate limiting, audit logging, generation/version checks, or server-provided limits in order to simplify a feature or its UI.
 6. **Prefer verified behavior to assumptions.** Distinguish confirmed facts, intended behavior, and hypotheses. When requirements conflict materially, surface the conflict instead of silently inventing a product decision. Resolve minor technical details independently when they do not change product behavior or public contracts.
 7. **Respect the task boundary, not an arbitrary file list.** A cross-cutting fix may need coordinated updates to source, tests, contracts, and documentation. Change the smallest set of related files needed; preserve unrelated work and never rewrite unrelated user changes.
+8. **Keep docs always updated and synced.** Reflect the changes that happens in project, evaluate the type of change and respectively update the most relative file/folder the change is subjected to, be either README.md, ROADMAP.md files and `docs/`, `knowledgebase/` folders, once any roadmap item is marked completed migrate it into knowledgebase and docs as a historical record.
 
 ## 2. Readability and maintainability
 
@@ -66,9 +67,9 @@ Use `@dataclass` when a class primarily represents structured data with named fi
 
 ## 5. Documentation and knowledgebase policy
 
-The root `AGENTS.md`, `ARCHITECTURE.md`, and `INTEGRATION.md` are the places for agent guidance and binding engineering/architecture contracts. **Do not put coding rules, agent instructions, linting policy, or behavioral mandates inside `knowledgebase/`.**
+The root `AGENTS.md` plus `docs/architecture/architecture.md` and `docs/architecture/integration.md` are the places for agent guidance and binding engineering/architecture contracts. **Do not put coding rules, agent instructions, linting policy, or behavioral mandates inside `knowledgebase/` or `docs/`.**
 
-`knowledgebase/` exists to preserve project knowledge and technical reference material, not to govern agents.
+`knowledgebase/` exists to preserve project knowledge and technical reference material, not to govern agents. It is LOCAL-ONLY: gitignored, never in a fresh clone (same for the `dump/` retirement wing — only its README stays tracked as the pointer).
 
 - Treat existing knowledgebase entries as read-only historical knowledge during ordinary implementation work. Do not rewrite, delete, reorder, or silently “clean up” existing material.
 - The knowledgebase is append-only: add knowledge as a new focused document or a clearly dated/attributed addendum. Never replace earlier observations; correct a previous statement by adding a traceable correction that explains what superseded it.
@@ -77,9 +78,19 @@ The root `AGENTS.md`, `ARCHITECTURE.md`, and `INTEGRATION.md` are the places for
 - Do not put secrets, tokens, personal data, or live account credentials in docs, fixtures, examples, logs, or knowledgebase entries. Use synthetic identifiers and redacted examples.
 - If the project later restores generated knowledgebase areas, follow their generator's ownership: never hand-edit generated/read-only output. Regenerate only through the documented generator after source changes and review the generated diff. Do not claim the knowledgebase currently has tooling or protections unless verified.
 
+`docs/` exists to describe the projects structure in a user-friendly way and how to use its available commands and the entire LibzentSuite.
+
+- Future plans and direction of design also lives in docs.
+- Treat existing docs as a copy of what is available in the codebase and its functionalities rather then considering it as the source of truth.
+- The docs folder exists just to keep the functionalities, commmands and their uses in a user readable format entirely separate to the knowledgebase folder.
+- If there is any new addition or removal of feature or command and functionality note down it in the related files inside docs folder if available and always keep the docs updated of any changes in commands or functionalities to avoid keeping stale dumps.
+- Docs mostly covers the `Plugin` and `API` related endpoints or settings available to them, to streamline the process for users that want to create plugins they should read it and get to know the available functions they could use to make them.
+- The docs must provide the full knowledge of running and working with this app both from dashboard and cli interface, with clear detailed instructions from installations to the running suite and important envs or data that user need to fill in before running it.
+- Note the runtime enviornment and lack of tests in other devices explicitly as the project was entirely made in linux hence wasn't tested in other platforms (this line subjected to be changed when required tests and full suite runs green in other devices aswell and will be updated in docs).
+
 ## 6. Public contracts, architecture, and UI
 
-- Read `ARCHITECTURE.md` for ownership and architectural boundaries and `INTEGRATION.md` for the current inter-module contract. Verify those documents against current code when they appear stale; do not perpetuate a known contradiction. Propose corrections to the root contract docs when necessary.
+- Read `docs/architecture/architecture.md` for ownership and architectural boundaries and `docs/architecture/integration.md` for the current inter-module contract. Verify those documents against current code when they appear stale; do not perpetuate a known contradiction. Propose corrections to the contract docs when necessary.
 - Keep `core.api.ControlAPI` the shared application facade for CLI and dashboard. Add or modify methods there when a feature legitimately requires a shared operation, and update implementations, both interfaces, and tests consistently.
 - The dashboard may change its layout, navigation, component structure, and interaction flow without changing backend behavior. An old page list or prior implementation is not automatically a permanent UI requirement unless reaffirmed in the current task or a current binding contract.
 - For UI work, specify a component's purpose, inputs/outputs, interaction states, disabled/loading states, success/failure feedback, validation, focus/keyboard behavior, responsive behavior, and accessible name/state. Judge acceptance by observable behavior and user outcomes, not by a required markup trick or presence of a comment.
@@ -95,6 +106,7 @@ The root `AGENTS.md`, `ARCHITECTURE.md`, and `INTEGRATION.md` are the places for
 - For API or model changes, test serialization and compatibility at the boundary. For UI changes, test interaction states, stale-data/loading/error flows, accessibility-relevant keyboard behavior, responsive layout where tooling supports it, and backend persistence where relevant.
 - Run the narrowest relevant tests first. Then run the adjacent unit/integration tests. Run the full suite before claiming repository-wide correctness when practical; if it cannot be run, state exactly what was and was not run.
 - Do not weaken tests, delete assertions, skip failures, or loosen validation just to achieve a green run. Fix the cause or document a genuinely pre-existing failure with reproducible evidence.
+- Do not run tests without cleaning up the residual cached data that was produced and kept on the previous run, start tests with fresh point.
 
 ## 8. Formatting, linting, and type checking
 
@@ -108,9 +120,13 @@ check through `uv run --frozen` (ruff's `F` rules superseded the former
 pyflakes step). `requirements.txt` is a generated pip-compat export of the
 lock (`uv export --format requirements-txt --no-hashes --no-dev
 --no-emit-project -o requirements.txt`) — regenerate it, never hand-edit.
-The mypy strict run is an advisory CI step until the legacy error baseline
-reaches zero — fix strictness in modules as they are touched and ratchet
-coverage outward; never add a blanket ignore or a blanket suppression to
+The export-sync and lock-integrity gates in CI enforce this mechanically.
+The mypy strict run is a ratchet gate (`.github/mypy-baseline`): CI fails
+when the error count grows past the baseline, and the baseline is only
+lowered after errors are fixed. The baseline reached ZERO on 2026-11-15
+(485 legacy errors fixed across all 108 source files) — strict mode is
+now a hard floor: any new strict error fails CI, and the baseline must
+stay at zero. Never add a blanket ignore or a blanket suppression to
 shrink the count.
 
 ### Ruff baseline
@@ -209,3 +225,69 @@ Choose names that are **creative, expressive, memorable, and informative**. Clas
 - **Creative, not confusing:** Memorable names are encouraged when they improve understanding, but avoid forced cleverness, unexplained metaphors, misleading names, and unnecessary abbreviations.
 
 Every name should help another developer understand the code without having to reverse-engineer its intent.
+
+## 12. Commit Discipline
+
+Onwards commit discipline will be reside in agents.md and there won't be a separate file for it.
+
+Before committing:
+
+- Work happens on a **feature branch** — verify it is active before the
+  first edit (`git branch --show-current`). Never commit on `dev`/`main`.
+- **Stop running services** that host the changed code (dashboard,
+  bots) so the committed state is the tested state.
+- Run the relevant test suites and record the outcome. **A red suite
+  blocks the commit series** — fix first, then commit.
+- Review the full diff (`git diff` + `git status --porcelain`). Never
+  commit a file you cannot describe.
+
+Commit granularity — one logical unit per commit:
+
+- **One file = one commit** when the file carries its own concern
+  (13 files → 13 commits, each describing that
+  file's changes).
+- A cohesive new feature may group its own package files into ONE
+  PR, with its tests and docs as separate follow-up in pr-commits.
+- Commit in **dependency order**: foundation → feature → tests → docs.
+
+Commit messages:
+
+- Format: `type(scope): what changed — and the user-visible why`
+  (`feat parsers:`, `fix dashboard:`, `test`, `docs`, `chore` — repo
+  convention).
+- The message describes **the changes in the committed files
+  specifically** — not a vague round summary.
+- Every behavioral fix names its trigger (user report, audit finding,
+  ticket) in the body when useful.
+
+Scope & safety:
+
+- **Never** `git push`, `reset`, `clean`, or switch branches unless
+  explicitly authorized in the same breath as the work.
+- **Never** discard unrelated user changes. Unrelated modified files
+  stay uncommitted (or are committed separately with an accurate
+  message if the user asked for "all changes").
+- Commit only after the final diff review. The working tree ends
+  **clean** — everything relevant committed, nothing extra.
+- Push to remote only when there are five or more commits have been committed.
+- **Never** push committed series to the remote without owner's explicit approval.
+
+After the series:
+
+- Show `git log --oneline` for the new commits + final `git status`.
+- State what was intentionally left uncommitted and why.
+
+## 13. Skills & Tools.
+
+notable mentions of skills that worth using for more efficiency and speed.
+other skills related to the project resides in `.agents/`.
+
+[FAST-EDIT]
+
+When you need to edit, create, write, or save files:
+
+1. Load the fast-edit skill first: skill("fast-edit")
+2. Use fast-edit commands (show/replace/insert/delete/batch/paste/write/generate) instead of the built-in Edit/Write tools.
+3. For batch edits or multi-file writes, prefer fast-batch and fast-write.
+4. For user-pasted content, prefer save-pasted (zero token, zero escaping).
+

@@ -29,6 +29,10 @@ if TYPE_CHECKING:
     from benchmark.collector import PerfCollector
     from benchmark.sampler import SamplerSession
 
+    #: scenario entrypoint shape (BenchScenario.run): the harness pins
+    #: per-run leak series onto these module-level function objects
+    ScenarioRun = Callable[..., Awaitable[dict[str, Any]]]
+
 OWNER = 1001
 CHANNEL = 500
 
@@ -43,12 +47,36 @@ class BenchScenario:
     name: str
     description: str
     default_cycles: int
-    run: Callable[..., Awaitable[dict[str, Any]]]
+    run: ScenarioRun
 
 
 # ------------------------------------------------------------------ shared
+def _run_series(run: ScenarioRun) -> tuple[list[float], list[int]]:
+    """Return (creating when absent) the per-run leak series on a runner.
+
+    cli.py resets ``_rss_series``/``_task_series`` on the scenario
+    function objects between repeats; a Callable cannot declare such
+    attributes, so they live in each function's attribute dict.
+    """
+    state = vars(run)
+    rss = state.get("_rss_series")
+    tasks = state.get("_task_series")
+    if not isinstance(rss, list) or not isinstance(tasks, list):
+        rss, tasks = [], []
+        state["_rss_series"] = rss
+        state["_task_series"] = tasks
+    return rss, tasks
+
+
+def reset_run_series(run: ScenarioRun) -> None:
+    """Zero the per-run leak trackers (owned by the cli harness)."""
+    state = vars(run)
+    state["_rss_series"] = []
+    state["_task_series"] = []
+
+
 async def _cycle_report(
-    scenario,
+    scenario: ScenarioRun,
     session: SamplerSession,
     perf: PerfCollector,
     cycles: int,
@@ -65,6 +93,7 @@ async def _cycle_report(
         "cpu_pct",
         "fd_peak",
     )
+    rss_series, task_series = _run_series(scenario)
     out: dict[str, Any] = {
         "process": {k: summary[k] for k in process_keys if k in summary},
         "loop_lag_ms": summary.get("loop_lag_ms", {}),
@@ -72,20 +101,17 @@ async def _cycle_report(
         "threads": summary.get("threads", {}),
         "stages": perf.snapshot(),
         "custom": custom,
-        "leak": leak_verdict(
-            getattr(scenario, "_rss_series", []), getattr(scenario, "_task_series", [])
-        ),
+        "leak": leak_verdict(rss_series, task_series),
     }
     out["passed"] = bool(teardown_ok and out["leak"]["verdict"] != "suspected-leak")
     return out
 
 
-def _track_cycle(scenario, session: SamplerSession) -> None:
-    if not hasattr(scenario, "_rss_series"):
-        scenario._rss_series, scenario._task_series = [], []
+def _track_cycle(scenario: ScenarioRun, session: SamplerSession) -> None:
+    rss_series, task_series = _run_series(scenario)
     proc = session.process.summary()
-    scenario._rss_series.append(proc["rss_end_kb"])
-    scenario._task_series.append(session.tasks.live_tasks())
+    rss_series.append(proc["rss_end_kb"])
+    task_series.append(session.tasks.live_tasks())
 
 
 # ------------------------------------------------------------- scenarios
@@ -98,7 +124,7 @@ async def cold_boot(
     **_: Any,
 ) -> dict[str, Any]:
     """Full real bootstrap (migrations, seeding, wiring) + shutdown."""
-    for _ in range(cycles):
+    for _i in range(cycles):
         with TemporaryWorkspace() as ws:
             session.start()
             stack = await BenchStack.build(ws, perf=perf)
@@ -128,7 +154,7 @@ async def accounts_startstop(
         stack.framework.accounts._lifecycle = None
         for name in names:
             await stack.add_account(name)
-        for _ in range(cycles):
+        for _i in range(cycles):
             session.start()
             with perf.stage("accounts.start"):
                 for name in names:
@@ -338,7 +364,7 @@ async def message_burst(
         lambda plugin: NS(
             account="bench",
             plugin=plugin,
-            credentials=NS(mudae_bot_id=999, owner_user_ids=frozenset({OWNER})),
+            credentials=NS(bot_id=999, owner_user_ids=frozenset({OWNER})),
             settings={},
             logger=__import__("logging").getLogger("bench"),
             send_message=_noop_send,
@@ -355,7 +381,7 @@ async def message_burst(
     )
     # the C1 cost model: unfiltered waiter subscriptions × event flood
     waiter_subs = []
-    for _ in range(waiters):
+    for _i in range(waiters):
         waiter_subs.append(bus.subscribe(MessageReceived, lambda event: None))
 
     session.start()

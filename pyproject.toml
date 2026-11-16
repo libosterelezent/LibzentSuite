@@ -5,18 +5,48 @@
 name = "libzentsuite"
 version = "0.0.0"
 description = "Game-agnostic, multi-account Discord flow-orchestration framework"
+license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
     "aiosqlite>=0.20",
     "cryptography>=42",
-    "discord.py-self>=2.1.0",
+    "discord.py-self @ git+https://github.com/Demonic1594/better.py-self.git",
+    "fastapi>=0.162.5",
+    "httpx>=0.28.1",
+]
+
+[build-system]
+# The app normally runs from the checkout (`python main.py`, uv-managed
+# env), but `pip install -e .` / `uv build` must also work. Explicit
+# inventory: setuptools' flat-layout auto-discovery sees seven top-level
+# folders and aborts ("multiple parent folders ... including unwanted
+# folders"). tests/ are test-only; plugins/ are runtime-DISCOVERED from
+# the plugins dir (never importable packages) — both stay out of the wheel.
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+include = [
+    "core*",
+    "adapters*",
+    "database*",
+    "interfaces*",
+    "benchmark*",
+    "parsers*",
+    "scripts*",
 ]
 
 [dependency-groups]
 # Dev/CI tooling (AGENTS.md §8) — installed by `uv sync` alongside the
 # runtime lock; NOT runtime dependencies.
 dev = [
+    "bandit>=1.9.4",
+    "coverage>=7.16.2",
     "mypy==2.4.0",
+    "pip-audit>=2.10.1",
     "ruff==0.17.2",
 ]
 
@@ -24,6 +54,7 @@ dev = [
 # Engineering standards: AGENTS.md §8 — Ruff owns linting, import sorting,
 # and formatting for this repository (one canonical config; no competing
 # Black/isort/pyflakes setups).
+exclude = ["knowledgebase", "tests"]
 target-version = "py310"
 line-length = 100
 
@@ -73,3 +104,35 @@ warn_unused_configs = true
 show_error_codes = true
 pretty = true
 files = ["core", "adapters", "database", "interfaces", "plugins", "benchmark", "scripts"]
+
+# narrow per-module exception: flet is deliberately absent from the
+# dev/CI environment (interfaces/ui imports it lazily — the API-client
+# core and tests run without the GUI dependency installed)
+[[tool.mypy.overrides]]
+module = "flet"
+ignore_missing_imports = true
+
+[tool.coverage.run]
+# the production tree only — tests measure the shipped code, not
+# themselves; main.py is the interactive entry point (never imported
+# by the suite) so it stays out of the measured set
+source = [
+    "core",
+    "adapters",
+    "database",
+    "interfaces",
+    "plugins",
+    "benchmark",
+    "parsers",
+    "scripts",
+]
+branch = true
+
+[tool.coverage.report]
+# floor set just under the first full measured level (77.0% branch
+# coverage, 2026-11-15); raise it as coverage grows — never lower it
+# without recording why
+fail_under = 76.0
+precision = 1
+show_missing = false
+skip_covered = true

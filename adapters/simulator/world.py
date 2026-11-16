@@ -11,7 +11,7 @@ The world owns:
   * per-channel history plus an append-only journal that survives channel
     deletion (scenario checks need post-mortem evidence),
   * a configurable scripted responder: an exact command string (e.g.
-    ``"$slud-s"``) triggers a list of pages delivered via DM to the
+    ``"$dump"``) triggers a list of pages delivered via DM to the
     requesting user, one page at a time with a configurable per-page delay,
   * ``wait_for_quiet`` with REAL quiet-window semantics (audit fix: return
     once `quiet` seconds of silence passed, `limit` is only a hard cap),
@@ -32,9 +32,13 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from core.errors import ServerRateLimit
+
+if TYPE_CHECKING:
+    from adapters.base import DiscordMessage
+    from adapters.model import DiscordAttachment, DiscordComponent, DiscordEmbed, DiscordReaction
 
 LOG = logging.getLogger("libzent.simulator")
 
@@ -43,7 +47,7 @@ SYNTHETIC_OWNER_ID = 1001
 SYNTHETIC_ALPHA_ID = 2001
 SYNTHETIC_BETA_ID = 2002
 SYNTHETIC_GUILD_CHANNEL = 500
-SYNTHETIC_MUDAE_ID = 999_999
+SYNTHETIC_BOT_ID = 999_999
 
 #: custom-emoji repr "<:name:id>" / "<a:name:id>" -> (bare name, id); the
 #: inverse of adapters.model._emoji_repr (unicode emoji pass through)
@@ -58,7 +62,7 @@ def _parse_emoji(text: str) -> tuple[str, int | None]:
     return text, None
 
 
-def to_discord_message(world: SimWorld, message: WorldMessage):
+def to_discord_message(world: SimWorld, message: WorldMessage) -> DiscordMessage:
     """WorldMessage -> rich frozen DTO (the sim's convert_message).
 
     ONE builder for every crossing — live deliveries (SimClient.receive)
@@ -132,10 +136,10 @@ class WorldMessage:
     ts: float = field(default_factory=time.time)
     author_name: str = ""
     guild_id: int | None = None
-    embeds: tuple = ()
-    components: tuple = ()
-    attachments: tuple = ()
-    reactions: tuple = ()
+    embeds: tuple[DiscordEmbed, ...] = ()
+    components: tuple[DiscordComponent, ...] = ()
+    attachments: tuple[DiscordAttachment, ...] = ()
+    reactions: tuple[DiscordReaction, ...] = ()
     reference_message_id: int | None = None
 
 
@@ -173,7 +177,7 @@ class SimWorld:
         #: append-only record of every DELIVERED message (survives deletion)
         self.journal: list[WorldMessage] = []
         #: observability for consumed one-shot server limits (ts + details)
-        self.blocked_sends: list[dict] = []
+        self.blocked_sends: list[dict[str, float | int | bool | None]] = []
         #: channel_id -> deletion timestamp (evidence for abort checks)
         self.gone_channels: dict[int, float] = {}
         self._dm_pairs: dict[tuple[int, int], int] = {}
@@ -184,7 +188,7 @@ class SimWorld:
         self.responder_id = responder_id
         self.responses: dict[str, list[str]] = dict(responses or {})
         self.reply_delay = reply_delay
-        self._responder_tasks: set = set()  # strong refs (create_task hazard)
+        self._responder_tasks: set[asyncio.Task[None]] = set()  # strong refs (create_task hazard)
         #: queued one-shot server limits (world-owned, per-client intake)
         self._pending_limits: list[_PendingLimit] = []
 
@@ -332,10 +336,10 @@ class SimWorld:
         *,
         author_name: str = "",
         guild_id: int | None = None,
-        embeds: tuple = (),
-        components: tuple = (),
-        attachments: tuple = (),
-        reactions: tuple = (),
+        embeds: tuple[DiscordEmbed, ...] = (),
+        components: tuple[DiscordComponent, ...] = (),
+        attachments: tuple[DiscordAttachment, ...] = (),
+        reactions: tuple[DiscordReaction, ...] = (),
         reference_message_id: int | None = None,
     ) -> WorldMessage:
         """Append a message to the channel and push it to every subscriber.
@@ -498,7 +502,7 @@ class SimWorld:
                     return message
         raise KeyError(f"unknown message {message_id}")
 
-    def _to_dto(self, message: WorldMessage):
+    def _to_dto(self, message: WorldMessage) -> DiscordMessage:
         """WorldMessage -> rich frozen adapters.base DTO (edit-event parity).
 
         EDIT PARITY (audit round 3): live edit events carry the FULL
@@ -612,8 +616,8 @@ class SimWorld:
 __all__ = [
     "SYNTHETIC_ALPHA_ID",
     "SYNTHETIC_BETA_ID",
+    "SYNTHETIC_BOT_ID",
     "SYNTHETIC_GUILD_CHANNEL",
-    "SYNTHETIC_MUDAE_ID",
     "SYNTHETIC_OWNER_ID",
     "SimWorld",
     "WorldMessage",

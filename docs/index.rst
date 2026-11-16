@@ -5,7 +5,8 @@ Multi-account Discord automation framework: plugins that request services
 from a central core, first-class accounts with direct account→plugin
 assignments (the capability model), a
 four-scope rate-limiting stack, a centralized task pipeline, SQLite
-persistence, and two parity'd management surfaces (CLI + dashboard) over
+persistence, and the CLI management surface (a FastAPI core API + Flet UI
+is the planned next interface) over
 ONE Core API.
 
 .. warning::
@@ -19,10 +20,13 @@ ONE Core API.
    :caption: Site
 
    architecture/index
+   design/index
+   plans/index
    plugins/index
    operations/index
    api/index
    reference/index
+   roadmap
 
 Indices
 -------
@@ -33,13 +37,15 @@ Indices
 Where the knowledge lives
 -------------------------
 
-* ``knowledgebase/`` — the deep knowledge base, committed with the
-  repository: handwritten ``*.md`` deep-dive guides (the WHY — start at
-  ``knowledgebase/README.md``; the complete surface reference is
-  ``knowledgebase/API_ENDPOINTS.md``) plus generated artifacts.
+* ``knowledgebase/`` — the deep knowledge base, LOCAL-ONLY (gitignored,
+  not in a fresh clone): handwritten ``*.md`` deep-dive guides (the WHY)
+  plus generated artifacts. It lives on the machines that built it; the
+  repository itself carries ``docs/`` as the shared record.
 * ``knowledgebase/read_only/`` — generated READ-ONLY symbol snapshot
   (regenerate with ``python3 scripts/gen_knowledgebase.py``).
 * ``knowledgebase/generated/`` — machine-readable indexes
-  (``symbol_index.json``, coverage, drift baseline) — gitignored.
+  (``symbol_index.json``, coverage, drift baseline).
+* ``dump/`` — the retirement wing (also local-only): stale code
+  preserved verbatim; its README stays tracked as the pointer.
 * This Sphinx site — navigable API reference (autodoc from the real
   docstrings) + condensed architecture/operations pages.

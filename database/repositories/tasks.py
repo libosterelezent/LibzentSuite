@@ -18,7 +18,7 @@ from typing import Any
 
 from core.errors import DatabaseError
 
-from .base import BaseRepository
+from .base import BaseRepository, inserted_rowid
 
 __all__ = ["TaskHistoryRepository"]
 
@@ -79,11 +79,13 @@ class TaskHistoryRepository(BaseRepository):
         placeholders = ", ".join("?" for _ in row)
         async with self._tx("append task history") as conn:
             try:
+                # Bandit B608: column names come from the internal
+                # history-row shape; every value is parameter-bound.
                 async with conn.execute(
-                    f"INSERT INTO task_history ({columns}) VALUES ({placeholders})",
+                    f"INSERT INTO task_history ({columns}) VALUES ({placeholders})",  # nosec B608
                     tuple(row.values()),
                 ) as cur:
-                    lastrowid = int(cur.lastrowid)
+                    lastrowid = inserted_rowid(cur)
             except sqlite3.IntegrityError as exc:
                 raise DatabaseError(
                     f"task history row for id {row.get('id')!r} already exists"
@@ -123,8 +125,10 @@ class TaskHistoryRepository(BaseRepository):
         assignments = ", ".join(f"{col} = ?" for col in updates)
         async with (
             self._tx(f"update task history {task_id}") as conn,
+            # Bandit B608: assignments expand only whitelisted column
+            # names; values ride the parameter tuple.
             conn.execute(
-                f"UPDATE task_history SET {assignments} WHERE id = ?",
+                f"UPDATE task_history SET {assignments} WHERE id = ?",  # nosec B608
                 (*updates.values(), task_id),
             ) as cur,
         ):

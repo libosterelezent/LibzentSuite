@@ -19,9 +19,12 @@ this service through PluginServices (approved plugin API), not directly.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .errors import PluginError
+
+if TYPE_CHECKING:
+    from database.repositories.kv import KvRepository
 
 
 class PluginStateService:
@@ -29,8 +32,19 @@ class PluginStateService:
 
     SCOPE_SEPARATOR = ":"
 
-    def __init__(self, kv_repository: Any | None = None) -> None:
+    def __init__(self, kv_repository: KvRepository | None = None) -> None:
         self._kv = kv_repository
+
+    def _require_kv(self) -> KvRepository:
+        """The wired kv repository — get/set paths need one, period.
+
+        Only the bulk-delete paths tolerate an unwired service (they
+        return 0 rows); state access without a repository is a wiring
+        bug and fails loud instead of AttributeError-ing deeper down.
+        """
+        if self._kv is None:
+            raise PluginError("plugin-state service has no kv repository wired")
+        return self._kv
 
     # -------------------------------------------------------------- scoping
     def _key(self, scope: str, owner: str | None, key: str) -> str:
@@ -137,7 +151,7 @@ class PluginStateService:
 
     # ------------------------------------------------------------ internals
     async def _get(self, stored_key: str, default: Any) -> Any:
-        raw = await self._kv.get(stored_key)
+        raw = await self._require_kv().get(stored_key)
         if raw is None:
             return default
         if isinstance(raw, dict) and len(raw) == 1 and self._STR_TAG in raw:
@@ -167,10 +181,10 @@ class PluginStateService:
         # pre-encoded here, double-encoding every row — and rows written
         # via raw kv.set then read back as the caller's default, silently)
         payload = {self._STR_TAG: value} if isinstance(value, str) else value
-        await self._kv.set(stored_key, payload)
+        await self._require_kv().set(stored_key, payload)
 
     async def _delete(self, stored_key: str) -> bool:
-        return await self._kv.delete(stored_key)
+        return await self._require_kv().delete(stored_key)
 
 
 __all__ = ["PluginStateService"]

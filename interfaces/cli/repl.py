@@ -178,7 +178,7 @@ class Repl:
         print(text, end=end, file=self._out, flush=True)
 
 
-async def run_once(api: Any, argv: list, stdout: TextIO | None = None) -> int:
+async def run_once(api: Any, argv: list[str], stdout: TextIO | None = None) -> int:
     """One-shot mode: run a single command line built from ``argv``.
 
     ``argv == []`` prints the help text and returns 0. Returns 0 on success

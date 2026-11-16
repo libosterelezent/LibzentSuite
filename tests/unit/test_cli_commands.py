@@ -1,10 +1,11 @@
 """CLI command-engine + REPL tests (fake ControlAPI; no real managers)."""
+
 from __future__ import annotations
 
 import asyncio
 import io
 import unittest
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 from interfaces.cli.commands import (
     HELP,
@@ -14,26 +15,23 @@ from interfaces.cli.commands import (
     format_account_plugins,
     format_accounts,
     format_audit,
-    format_effective,
     format_history,
     format_lane,
     format_logs,
-    format_plugins,
-    format_plugin_state,
     format_policies,
     format_simulation_report,
-    format_tasks,
     format_warnings,
     help_text,
     run_command,
 )
 from interfaces.cli.repl import Repl, render_error, run_once
 
+
 class FakeApi:
     """Duck-typed ControlAPI recording every call; canned payloads."""
 
     def __init__(self) -> None:
-        self.calls: List[Tuple[str, Tuple, dict]] = []
+        self.calls: list[tuple[str, tuple, dict]] = []
 
     def _record(self, name: str, *args: Any, **kwargs: Any) -> None:
         self.calls.append((name, args, kwargs))
@@ -42,33 +40,58 @@ class FakeApi:
     async def status(self):
         self._record("status")
         return {
-            "uptime_s": 12.5, "tasks": {"queued": 1, "running": 0, "completed": 3},
-            "accounts": [{"name": "alpha", "status": "running", "user_id": 42,
-                          "enabled": True,
-                          "assigned_plugins": ["roll"]}],
-            "ratelimit": {"policies": [{"level": "global", "owner": None,
-                                        "action": "message", "interval": 2.0,
-                                        "jitter": [0.1, 0.5]}]},
+            "uptime_s": 12.5,
+            "tasks": {"queued": 1, "running": 0, "completed": 3},
+            "accounts": [
+                {
+                    "name": "alpha",
+                    "status": "running",
+                    "user_id": 42,
+                    "enabled": True,
+                    "assigned_plugins": ["roll"],
+                }
+            ],
+            "ratelimit": {
+                "policies": [
+                    {
+                        "level": "global",
+                        "owner": None,
+                        "action": "message",
+                        "interval": 2.0,
+                        "jitter": [0.1, 0.5],
+                    }
+                ]
+            },
             "warnings": [{"level": "warn", "code": "aggressive", "message": "fast"}],
         }
 
     # ---- accounts
     async def accounts_list(self):
         self._record("accounts_list")
-        return [{"name": "alpha", "status": "running", "user_id": 42, "enabled": True,
-                 "assigned_plugins": ["roll", "soulcopy"],
-                 "latency_ms": 83.0, "uptime_s": 100.0}]
+        return [
+            {
+                "name": "alpha",
+                "status": "running",
+                "user_id": 42,
+                "enabled": True,
+                "assigned_plugins": ["exporter", "roll"],
+                "latency_ms": 83.0,
+                "uptime_s": 100.0,
+            }
+        ]
 
     async def accounts_add(self, payload, surface="api"):
         self._record("accounts_add", payload, surface=surface)
-        return {"added": payload["name"],
-                "plugins": sorted(payload.get("plugins", [])),
-                "credential": "db" if payload.get("credential") else None}
+        return {
+            "added": payload["name"],
+            "plugins": sorted(payload.get("plugins", [])),
+            "credential": "db" if payload.get("credential") else None,
+        }
 
     # ---- account plugin assignments (direct account→plugin capabilities)
     async def accounts_plugins_list(self, account):
         self._record("accounts_plugins_list", account)
-        return ["roll", "soulcopy"]
+        return ["exporter", "roll"]
 
     async def accounts_plugin_assign(self, account, plugin, surface="api"):
         self._record("accounts_plugin_assign", account, plugin, surface=surface)
@@ -88,8 +111,7 @@ class FakeApi:
 
     async def accounts_credential_status(self):
         self._record("accounts_credential_status")
-        return [{"name": "alpha", "credential": "db"},
-                {"name": "beta", "credential": "missing"}]
+        return [{"name": "alpha", "credential": "db"}, {"name": "beta", "credential": "missing"}]
 
     async def credentials_import_env(self, overwrite=False, surface="api"):
         self._record("credentials_import_env", overwrite=overwrite, surface=surface)
@@ -97,30 +119,46 @@ class FakeApi:
 
     async def cooldowns_list(self, account=None):
         self._record("cooldowns_list", account)
-        return [{"account": "alpha", "plugin": "roll", "cooldown_key": "vote",
-                  "remaining_s": 90.0, "source": "plugin", "reason": ""}]
+        return [
+            {
+                "account": "alpha",
+                "plugin": "roll",
+                "cooldown_key": "vote",
+                "remaining_s": 90.0,
+                "source": "plugin",
+                "reason": "",
+            }
+        ]
 
-    async def cooldowns_clear(self, account, plugin, cooldown_key=None,
-                              surface="api"):
-        self._record("cooldowns_clear", account, plugin, cooldown_key,
-                     surface=surface)
-        return {"account": account, "plugin": plugin,
-                "cooldown_key": cooldown_key, "cleared": 1}
+    async def cooldowns_clear(self, account, plugin, cooldown_key=None, surface="api"):
+        self._record("cooldowns_clear", account, plugin, cooldown_key, surface=surface)
+        return {"account": account, "plugin": plugin, "cooldown_key": cooldown_key, "cleared": 1}
 
     async def accounts_info(self, name):
         self._record("accounts_info", name)
         return {
             "name": name,
-            "status": {"connected": True, "state": "running", "latency_ms": 83.0,
-                       "uptime_s": 8040.0},
+            "status": {
+                "connected": True,
+                "state": "running",
+                "latency_ms": 83.0,
+                "uptime_s": 8040.0,
+            },
             "identity": {"name": "Alpha#0", "discord_id": 42},
-            "runtime": {"cached_guilds": 3, "cached_channels": 12, "cached_dms": 2,
-                        "cache_source": "client cache (READY)"},
-            "plugins": [{"name": "soulcopy", "enabled": True},
-                        {"name": "roll", "enabled": False}],
-            
-            "rate_limit": {"message": {"interval": 2.0, "jitter": [0.1, 0.5],
-                                       "source": "inherited from global"}},
+            "runtime": {
+                "cached_guilds": 3,
+                "cached_channels": 12,
+                "cached_dms": 2,
+                "cache_source": "client cache (READY)",
+            },
+            "plugins": [{"name": "exporter", "enabled": True}, {"name": "roll", "enabled": False}],
+            "rate_limit": {
+                "message": {
+                    "interval": 2.0,
+                    "jitter": [0.1, 0.5],
+                    "source": "inherited from global",
+                }
+            },
         }
 
     async def accounts_enable(self, name, enabled):
@@ -142,14 +180,36 @@ class FakeApi:
     # ---- plugins
     async def plugins_manifests(self):
         self._record("plugins_manifests")
-        return [{"name": "soulcopy", "version": "2.0.0", "description": "export",
-                 "settings": [{"name": "trigger", "type": "str", "default": "slcopy",
-                               "description": "word", "min": None, "max": None}]}]
+        return [
+            {
+                "name": "exporter",
+                "version": "2.0.0",
+                "description": "export",
+                "settings": [
+                    {
+                        "name": "trigger",
+                        "type": "str",
+                        "default": "export",
+                        "description": "word",
+                        "min": None,
+                        "max": None,
+                    }
+                ],
+            }
+        ]
 
     async def plugins_state(self, account):
         self._record("plugins_state", account)
-        return [{"name": "soulcopy", "enabled": True, "loaded": True,
-                 "settings": {"trigger": "slcopy"}, "last_error": None, "error_count": 0}]
+        return [
+            {
+                "name": "exporter",
+                "enabled": True,
+                "loaded": True,
+                "settings": {"trigger": "export"},
+                "last_error": None,
+                "error_count": 0,
+            }
+        ]
 
     async def plugins_set_enabled(self, account, plugin, enabled):
         self._record("plugins_set_enabled", account, plugin, enabled)
@@ -157,7 +217,7 @@ class FakeApi:
 
     async def plugins_settings(self, account):
         self._record("plugins_settings", account)
-        return [{"name": "soulcopy", "settings": {"trigger": "slcopy"}}]
+        return [{"name": "exporter", "settings": {"trigger": "export"}}]
 
     async def plugins_set_setting(self, account, plugin, key, value):
         self._record("plugins_set_setting", account, plugin, key, value)
@@ -166,13 +226,20 @@ class FakeApi:
     # ---- ratelimit
     async def ratelimit_policies(self):
         self._record("ratelimit_policies")
-        return [{"level": "global", "owner": None, "action": "message",
-                 "interval": 2.0, "jitter": [0.1, 0.5]}]
+        return [
+            {
+                "level": "global",
+                "owner": None,
+                "action": "message",
+                "interval": 2.0,
+                "jitter": [0.1, 0.5],
+            }
+        ]
 
-    async def ratelimit_set(self, action, interval, jitter_min=0.0, jitter_max=0.0,
-                            level="global", owner=None):
-        self._record("ratelimit_set", action, interval, jitter_min, jitter_max,
-                     level, owner)
+    async def ratelimit_set(
+        self, action, interval, jitter_min=0.0, jitter_max=0.0, level="global", owner=None
+    ):
+        self._record("ratelimit_set", action, interval, jitter_min, jitter_max, level, owner)
         return {"action": action, "level": level, "owner": owner, "policy": "2.00s"}
 
     async def ratelimit_clear(self, level, owner, action):
@@ -181,8 +248,12 @@ class FakeApi:
 
     async def ratelimit_effective(self, action, account=None, plugin=None):
         self._record("ratelimit_effective", action, account, plugin)
-        return {"action": action, "interval": 3.0, "jitter": [0.0, 1.0],
-                "sources": [{"level": "account", "owner": "alpha", "interval": 3.0}]}
+        return {
+            "action": action,
+            "interval": 3.0,
+            "jitter": [0.0, 1.0],
+            "sources": [{"level": "account", "owner": "alpha", "interval": 3.0}],
+        }
 
     async def ratelimit_stats(self):
         self._record("ratelimit_stats")
@@ -198,22 +269,42 @@ class FakeApi:
 
     async def ratelimit_lane(self):
         self._record("ratelimit_lane")
-        return {"enabled": True, "prefixrate": 1.5, "paused": False,
-                "waiting": 2, "grants": 9, "last_grant_age_s": 0.4,
-                "held_off_seconds": 0.0}
+        return {
+            "enabled": True,
+            "prefixrate": 1.5,
+            "paused": False,
+            "waiting": 2,
+            "grants": 9,
+            "last_grant_age_s": 0.4,
+            "held_off_seconds": 0.0,
+        }
 
     async def ratelimit_set_lane(self, enabled=None, prefixrate=None):
         self._record("ratelimit_set_lane", enabled, prefixrate)
-        return {"enabled": bool(enabled) if enabled is not None else True,
-                "prefixrate": prefixrate if prefixrate is not None else 1.5,
-                "paused": False, "waiting": 0, "grants": 9,
-                "last_grant_age_s": None, "held_off_seconds": 0.0}
+        return {
+            "enabled": bool(enabled) if enabled is not None else True,
+            "prefixrate": prefixrate if prefixrate is not None else 1.5,
+            "paused": False,
+            "waiting": 0,
+            "grants": 9,
+            "last_grant_age_s": None,
+            "held_off_seconds": 0.0,
+        }
 
     # ---- tasks
     async def tasks_list(self, status=None, account=None):
         self._record("tasks_list", status=status, account=account)
-        return [{"id": 7, "account": "alpha", "plugin": "soulcopy", "action": "message",
-                 "priority": 2, "status": "queued", "age_s": 1.2}]
+        return [
+            {
+                "id": 7,
+                "account": "alpha",
+                "plugin": "exporter",
+                "action": "message",
+                "priority": 2,
+                "status": "queued",
+                "age_s": 1.2,
+            }
+        ]
 
     async def tasks_cancel(self, task_id):
         self._record("tasks_cancel", task_id)
@@ -225,32 +316,64 @@ class FakeApi:
 
     async def tasks_history(self, limit=50, account=None):
         self._record("tasks_history", limit, account)
-        return [{"id": 7, "account": "alpha", "action": "message",
-                 "status": "completed", "duration_s": 0.4}]
+        return [
+            {
+                "id": 7,
+                "account": "alpha",
+                "action": "message",
+                "status": "completed",
+                "duration_s": 0.4,
+            }
+        ]
 
     # ---- simulation
     async def simulation_list(self):
         self._record("simulation_list")
-        return [{"name": "soulcopy_basic", "description": "two pages"}]
+        return [{"name": "export_basic", "description": "two pages"}]
 
     async def simulation_run(self, name):
         self._record("simulation_run", name)
-        return {"name": name, "passed": True, "duration_s": 1.2, "failures": [],
-                "log_lines": ["00:00.100 INFO core ready"],
-                "interactions": [], "summary": "ok"}
+        return {
+            "name": name,
+            "passed": True,
+            "duration_s": 1.2,
+            "failures": [],
+            "log_lines": ["00:00.100 INFO core ready"],
+            "interactions": [],
+            "summary": "ok",
+        }
 
     # ---- logs/audit
     async def logs_tail(self, n=100, account=None, severity=None):
         self._record("logs_tail", n, account, severity)
-        return [{"ts": 1700000000.5, "severity": "INFO", "source": "core",
-                 "message": "ready", "account": None, "plugin": None,
-                 "task_id": None, "event": None}]
+        return [
+            {
+                "ts": 1700000000.5,
+                "severity": "INFO",
+                "source": "core",
+                "message": "ready",
+                "account": None,
+                "plugin": None,
+                "task_id": None,
+                "event": None,
+            }
+        ]
 
     async def audit_tail(self, n=100, account=None):
         self._record("audit_tail", n, account)
-        return [{"ts": 1700000000.5, "account": "alpha", "direction": "out",
-                 "action": "message", "channel_id": 500, "content": "$slud-s",
-                 "wait_ms": 150.0, "jitter_ms": 300.0, "note": "plugin=soulcopy"}]
+        return [
+            {
+                "ts": 1700000000.5,
+                "account": "alpha",
+                "direction": "out",
+                "action": "message",
+                "channel_id": 500,
+                "content": "$dump",
+                "wait_ms": 150.0,
+                "jitter_ms": 300.0,
+                "note": "plugin=exporter",
+            }
+        ]
 
     # ---- system
     async def emergency_stop_all(self, surface="api"):
@@ -264,13 +387,15 @@ class FakeApi:
     async def shutdown(self):
         self._record("shutdown")
 
-def called(api: FakeApi, name: str) -> Optional[Tuple[Tuple, dict]]:
+
+def called(api: FakeApi, name: str) -> tuple[tuple, dict] | None:
     """Args/kwargs of the MOST RECENT call with this method name."""
-    result: Optional[Tuple[Tuple, dict]] = None
+    result: tuple[tuple, dict] | None = None
     for cname, args, kwargs in api.calls:
         if cname == name:
             result = (args, kwargs)
     return result
+
 
 class TestBasics(unittest.IsolatedAsyncioTestCase):
     async def test_help(self) -> None:
@@ -297,6 +422,7 @@ class TestBasics(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), 'accounts add "bob')
 
+
 class TestAccountsGroup(unittest.IsolatedAsyncioTestCase):
     async def test_list(self) -> None:
         api = FakeApi()
@@ -304,15 +430,16 @@ class TestAccountsGroup(unittest.IsolatedAsyncioTestCase):
         self.assertIn("alpha", text)
         self.assertIn("42", text)
         # capabilities render from assigned_plugins (not legacy profiles)
-        self.assertIn("plugins: roll, soulcopy", text)
+        self.assertIn("plugins: exporter, roll", text)
         self.assertNotIn("profiles:", text)
         self.assertTrue(called(api, "accounts_list"))
 
     async def test_add_with_plugins(self) -> None:
         api = FakeApi()
-        await run_command(api, "accounts add bob roll soulcopy")
+        await run_command(api, "accounts add bob roll exporter")
         args, _ = called(api, "accounts_add")
-        self.assertEqual(args[0], {"name": "bob", "plugins": ["roll", "soulcopy"]})
+        # the CLI preserves the caller's order (sorted on display only)
+        self.assertEqual(args[0], {"name": "bob", "plugins": ["roll", "exporter"]})
 
     async def test_add_bare(self) -> None:
         api = FakeApi()
@@ -333,8 +460,15 @@ class TestAccountsGroup(unittest.IsolatedAsyncioTestCase):
         api = FakeApi()
         text = await run_command(api, "accounts info alpha")
         self.assertTrue(called(api, "accounts_info"))
-        for needle in ("Status", "Identity", "Runtime", "client cache", "Plugins",
-                                      "Rate Limit", "inherited from global"):
+        for needle in (
+            "Status",
+            "Identity",
+            "Runtime",
+            "client cache",
+            "Plugins",
+            "Rate Limit",
+            "inherited from global",
+        ):
             self.assertIn(needle, text)
 
     async def test_enable_on_off(self) -> None:
@@ -372,6 +506,7 @@ class TestAccountsGroup(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), "accounts frobnicate")
 
+
 class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
     """accounts plugins|plugin-add|plugin-remove (direct capabilities)."""
 
@@ -380,9 +515,9 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
         text = await run_command(api, "accounts plugins alpha")
         self.assertEqual(called(api, "accounts_plugins_list")[0], ("alpha",))
         self.assertIn("roll", text)
-        self.assertIn("soulcopy", text)
+        self.assertIn("exporter", text)
         # sorted rendering
-        self.assertLess(text.index("roll"), text.index("soulcopy"))
+        self.assertLess(text.index("exporter"), text.index("roll"))
 
     async def test_plugins_list_empty(self) -> None:
         class EmptyApi(FakeApi):
@@ -405,8 +540,7 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AccountError):
             await run_command(GhostApi(), "accounts plugins ghost")
         out = io.StringIO()
-        code = await run_once(GhostApi(), ["accounts", "plugins", "ghost"],
-                              stdout=out)
+        code = await run_once(GhostApi(), ["accounts", "plugins", "ghost"], stdout=out)
         self.assertEqual(code, 1)
         self.assertIn("error: unknown account 'ghost'", out.getvalue())
         self.assertNotIn("Traceback", out.getvalue())
@@ -423,15 +557,13 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
     async def test_plugin_add_unknown_plugin_error(self) -> None:
         class TypoApi(FakeApi):
             async def accounts_plugin_assign(self, account, plugin, surface="api"):
-                raise ValueError(
-                    f"unknown plugin(s) [{plugin!r}] (known plugins: ['roll'])")
+                raise ValueError(f"unknown plugin(s) [{plugin!r}] (known plugins: ['roll'])")
 
         with self.assertRaises(ValueError) as ctx:
             await run_command(TypoApi(), "accounts plugin-add alpha nosuch")
         self.assertIn("known plugins", str(ctx.exception))
         out = io.StringIO()
-        code = await run_once(TypoApi(), ["accounts", "plugin-add", "alpha",
-                                          "nosuch"], stdout=out)
+        code = await run_once(TypoApi(), ["accounts", "plugin-add", "alpha", "nosuch"], stdout=out)
         self.assertEqual(code, 1)
         self.assertIn("error: unknown plugin", out.getvalue())
 
@@ -447,8 +579,7 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
     async def test_plugin_remove_idempotent_message(self) -> None:
         class GoneApi(FakeApi):
             async def accounts_plugin_unassign(self, account, plugin, surface="api"):
-                self._record("accounts_plugin_unassign", account, plugin,
-                             surface=surface)
+                self._record("accounts_plugin_unassign", account, plugin, surface=surface)
                 return {"account": account, "plugin": plugin, "existed": False}
 
         api = GoneApi()
@@ -459,10 +590,14 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("existed=false", text)
 
     async def test_usage_errors(self) -> None:
-        for line in ("accounts plugins", "accounts plugins a b",
-                     "accounts plugin-add alpha", "accounts plugin-add a b c",
-                     "accounts plugin-remove alpha",
-                     "accounts plugin-remove a b c"):
+        for line in (
+            "accounts plugins",
+            "accounts plugins a b",
+            "accounts plugin-add alpha",
+            "accounts plugin-add a b c",
+            "accounts plugin-remove alpha",
+            "accounts plugin-remove a b c",
+        ):
             with self.subTest(line=line):
                 with self.assertRaises(UsageError) as ctx:
                     await run_command(FakeApi(), line)
@@ -477,40 +612,43 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
         focused = await run_command(FakeApi(), "help accounts")
         self.assertIn("plugin-add", focused)
 
+
 class TestPluginsGroup(unittest.IsolatedAsyncioTestCase):
     async def test_list(self) -> None:
         api = FakeApi()
         text = await run_command(api, "plugins list")
-        self.assertIn("soulcopy", text)
+        self.assertIn("exporter", text)
         self.assertIn("trigger", text)
 
     async def test_enable_disable(self) -> None:
         api = FakeApi()
-        await run_command(api, "plugins enable alpha soulcopy")
-        self.assertEqual(called(api, "plugins_set_enabled")[0],
-                         ("alpha", "soulcopy", True))
-        await run_command(api, "plugins disable alpha soulcopy")
-        self.assertEqual(called(api, "plugins_set_enabled")[0],
-                         ("alpha", "soulcopy", False))
+        await run_command(api, "plugins enable alpha exporter")
+        self.assertEqual(called(api, "plugins_set_enabled")[0], ("alpha", "exporter", True))
+        await run_command(api, "plugins disable alpha exporter")
+        self.assertEqual(called(api, "plugins_set_enabled")[0], ("alpha", "exporter", False))
 
     async def test_set(self) -> None:
         api = FakeApi()
-        await run_command(api, "plugins set alpha soulcopy trigger go")
-        self.assertEqual(called(api, "plugins_set_setting")[0],
-                         ("alpha", "soulcopy", "trigger", "go"))
+        await run_command(api, "plugins set alpha exporter trigger go")
+        self.assertEqual(
+            called(api, "plugins_set_setting")[0], ("alpha", "exporter", "trigger", "go")
+        )
+
 
 class TestRateLimitGroup(unittest.IsolatedAsyncioTestCase):
     async def test_set_global(self) -> None:
         api = FakeApi()
         await run_command(api, "ratelimit set message 2.5")
-        self.assertEqual(called(api, "ratelimit_set")[0],
-                         ("message", 2.5, 0.0, 0.0, "global", None))
+        self.assertEqual(
+            called(api, "ratelimit_set")[0], ("message", 2.5, 0.0, 0.0, "global", None)
+        )
 
     async def test_set_jitter_and_level(self) -> None:
         api = FakeApi()
         await run_command(api, "ratelimit set message 2.5 0.2 0.8 account alpha")
-        self.assertEqual(called(api, "ratelimit_set")[0],
-                         ("message", 2.5, 0.2, 0.8, "account", "alpha"))
+        self.assertEqual(
+            called(api, "ratelimit_set")[0], ("message", 2.5, 0.2, 0.8, "account", "alpha")
+        )
 
     async def test_set_bad_number(self) -> None:
         with self.assertRaises(UsageError) as ctx:
@@ -527,12 +665,11 @@ class TestRateLimitGroup(unittest.IsolatedAsyncioTestCase):
 
     async def test_set_account_plugin_owner(self) -> None:
         api = FakeApi()
-        await run_command(api, "ratelimit set dm 4 0 0 account_plugin alpha/soulcopy")
+        await run_command(api, "ratelimit set dm 4 0 0 account_plugin alpha/exporter")
         self.assertEqual(called(api, "ratelimit_set")[0][4], "account_plugin")
-        self.assertEqual(called(api, "ratelimit_set")[0][5], "alpha/soulcopy")
+        self.assertEqual(called(api, "ratelimit_set")[0][5], "alpha/exporter")
         with self.assertRaises(UsageError):
-            await run_command(FakeApi(),
-                              "ratelimit set dm 4 0 0 account_plugin alpha")
+            await run_command(FakeApi(), "ratelimit set dm 4 0 0 account_plugin alpha")
 
     async def test_clear_global_dash_owner(self) -> None:
         api = FakeApi()
@@ -541,9 +678,8 @@ class TestRateLimitGroup(unittest.IsolatedAsyncioTestCase):
 
     async def test_effective_and_warnings(self) -> None:
         api = FakeApi()
-        text = await run_command(api, "ratelimit effective message alpha soulcopy")
-        self.assertEqual(called(api, "ratelimit_effective")[0],
-                         ("message", "alpha", "soulcopy"))
+        text = await run_command(api, "ratelimit effective message alpha exporter")
+        self.assertEqual(called(api, "ratelimit_effective")[0], ("message", "alpha", "exporter"))
         self.assertIn("account", text)
         await run_command(api, "ratelimit warnings")
         self.assertTrue(called(api, "ratelimit_warnings"))
@@ -585,12 +721,13 @@ class TestRateLimitGroup(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), "ratelimit lane rate")
 
+
 class TestTasksGroup(unittest.IsolatedAsyncioTestCase):
     async def test_list(self) -> None:
         api = FakeApi()
         text = await run_command(api, "tasks list")
         self.assertTrue(called(api, "tasks_list"))
-        self.assertIn("soulcopy", text)
+        self.assertIn("exporter", text)
 
     async def test_cancel(self) -> None:
         api = FakeApi()
@@ -604,23 +741,23 @@ class TestTasksGroup(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_matching(self) -> None:
         api = FakeApi()
-        await run_command(api, "tasks cancel-matching alpha soulcopy")
-        self.assertEqual(called(api, "tasks_cancel_matching")[0],
-                         ("alpha", "soulcopy"))
+        await run_command(api, "tasks cancel-matching alpha exporter")
+        self.assertEqual(called(api, "tasks_cancel_matching")[0], ("alpha", "exporter"))
+
 
 class TestSimulationLogsAudit(unittest.IsolatedAsyncioTestCase):
     async def test_simulation_list_and_run(self) -> None:
         api = FakeApi()
         text = await run_command(api, "simulation list")
-        self.assertIn("soulcopy_basic", text)
-        text = await run_command(api, "simulation run soulcopy_basic")
+        self.assertIn("export_basic", text)
+        text = await run_command(api, "simulation run export_basic")
         self.assertTrue(called(api, "simulation_run"))
         self.assertIn("PASS", text.upper())
 
     async def test_simulation_run_needs_name(self) -> None:
         with self.assertRaises(UsageError) as ctx:
             await run_command(FakeApi(), "simulation run")
-        self.assertIn("soulcopy_basic", str(ctx.exception))  # lists available
+        self.assertIn("export_basic", str(ctx.exception))  # lists available
 
     async def test_logs_and_audit(self) -> None:
         api = FakeApi()
@@ -629,7 +766,7 @@ class TestSimulationLogsAudit(unittest.IsolatedAsyncioTestCase):
         self.assertIn("core", text)
         text = await run_command(api, "audit 5 alpha")
         self.assertEqual(called(api, "audit_tail")[0], (5, "alpha"))
-        self.assertIn("$slud-s", text)
+        self.assertIn("$dump", text)
         self.assertIn("wait", text)
 
     async def test_estop_global(self) -> None:
@@ -643,6 +780,7 @@ class TestSimulationLogsAudit(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(called(api, "system_resume"))
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), "estop sideways")
+
 
 class TestCredentialsAndCooldowns(unittest.IsolatedAsyncioTestCase):
     """accounts credential / credentials [status|import-env] / cooldowns."""
@@ -684,13 +822,11 @@ class TestCredentialsAndCooldowns(unittest.IsolatedAsyncioTestCase):
         api = FakeApi()
         text = await run_command(api, "credentials import-env")
         self.assertEqual(called(api, "credentials_import_env")[0], ())
-        self.assertEqual(
-            called(api, "credentials_import_env")[1].get("overwrite"), False)
+        self.assertEqual(called(api, "credentials_import_env")[1].get("overwrite"), False)
         self.assertIn("imported: alpha", text)
         self.assertIn("skipped : beta", text)
         text = await run_command(api, "credentials import-env --overwrite")
-        self.assertEqual(
-            called(api, "credentials_import_env")[1].get("overwrite"), True)
+        self.assertEqual(called(api, "credentials_import_env")[1].get("overwrite"), True)
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), "credentials import-env --force")
         with self.assertRaises(UsageError):
@@ -713,12 +849,10 @@ class TestCredentialsAndCooldowns(unittest.IsolatedAsyncioTestCase):
     async def test_cooldowns_clear_one_and_all(self) -> None:
         api = FakeApi()
         await run_command(api, "cooldowns clear alpha roll vote")
-        self.assertEqual(called(api, "cooldowns_clear")[0],
-                         ("alpha", "roll", "vote"))
+        self.assertEqual(called(api, "cooldowns_clear")[0], ("alpha", "roll", "vote"))
         self.assertEqual(called(api, "cooldowns_clear")[1].get("surface"), "cli")
         await run_command(api, "cooldowns clear alpha roll")
-        self.assertEqual(called(api, "cooldowns_clear")[0],
-                         ("alpha", "roll", None))
+        self.assertEqual(called(api, "cooldowns_clear")[0], ("alpha", "roll", None))
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), "cooldowns clear alpha")
         with self.assertRaises(UsageError):
@@ -735,38 +869,63 @@ class TestCredentialsAndCooldowns(unittest.IsolatedAsyncioTestCase):
         await run_command(api, "estop")
         self.assertEqual(called(api, "emergency_stop_all")[1].get("surface"), "cli")
 
+
 class TestFormatters(unittest.TestCase):
     def test_format_accounts_empty(self) -> None:
         self.assertIn("no accounts", format_accounts([]))
 
     def test_format_accounts_renders_assigned_plugins(self) -> None:
-        text = format_accounts([{"name": "alpha", "status": "running",
-                                 "user_id": 42, "enabled": True,
-                                 "assigned_plugins": ["roll", "soulcopy"],
-                                 "profiles": ["roller"]}])
-        self.assertIn("plugins: roll, soulcopy", text)
+        text = format_accounts(
+            [
+                {
+                    "name": "alpha",
+                    "status": "running",
+                    "user_id": 42,
+                    "enabled": True,
+                    "assigned_plugins": ["exporter", "roll"],
+                    "profiles": ["roller"],
+                }
+            ]
+        )
+        self.assertIn("plugins: exporter, roll", text)
         self.assertNotIn("profiles:", text)  # legacy profiles stay out
 
     def test_format_account_plugins_sorted_and_empty(self) -> None:
-        text = format_account_plugins("alpha", ["soulcopy", "roll"])
-        self.assertEqual(text.splitlines(), ["  roll", "  soulcopy"])
+        text = format_account_plugins("alpha", ["exporter", "roll"])
+        self.assertEqual(text.splitlines(), ["  exporter", "  roll"])
         empty = format_account_plugins("alpha", [])
         self.assertIn("no plugins assigned", empty)
         self.assertIn("accounts plugin-add alpha", empty)
 
     def test_format_account_info_marks_runtime_cache(self) -> None:
-        text = format_account_info(FakeApi().accounts_info.__wrapped__ if False else {
-            "name": "alpha",
-            "status": {"connected": True, "state": "running", "latency_ms": 83.0,
-                       "uptime_s": 8040.0},
-            "identity": {"name": "Alpha#0", "discord_id": 42},
-            "runtime": {"cached_guilds": 3, "cached_channels": 12, "cached_dms": 2,
-                        "cache_source": "client cache (READY)"},
-            "plugins": [{"name": "soulcopy", "enabled": True}],
-            
-            "rate_limit": {"message": {"interval": 2.0, "jitter": [0.1, 0.5],
-                                       "source": "inherited from global"}},
-        })
+        text = format_account_info(
+            FakeApi().accounts_info.__wrapped__
+            if False
+            else {
+                "name": "alpha",
+                "status": {
+                    "connected": True,
+                    "state": "running",
+                    "latency_ms": 83.0,
+                    "uptime_s": 8040.0,
+                },
+                "identity": {"name": "Alpha#0", "discord_id": 42},
+                "runtime": {
+                    "cached_guilds": 3,
+                    "cached_channels": 12,
+                    "cached_dms": 2,
+                    "cache_source": "client cache (READY)",
+                },
+                "plugins": [{"name": "exporter", "enabled": True}],
+                "rate_limit": {
+                    "message": {
+                        "interval": 2.0,
+                        "jitter": [0.1, 0.5],
+                        "source": "inherited from global",
+                    }
+                },
+            }
+        )
         self.assertIn("client cache", text)
         self.assertIn("inherited from global", text)
 
@@ -776,13 +935,20 @@ class TestFormatters(unittest.TestCase):
         self.assertIn("aggressive", text)
 
     def test_format_simulation_report_failure(self) -> None:
-        text = format_simulation_report({
-            "name": "x", "passed": False, "duration_s": 1.0,
-            "failures": ["chunk missing"], "log_lines": ["00:00.001 INFO core go"],
-            "interactions": [], "summary": "failed",
-        })
+        text = format_simulation_report(
+            {
+                "name": "x",
+                "passed": False,
+                "duration_s": 1.0,
+                "failures": ["chunk missing"],
+                "log_lines": ["00:00.001 INFO core go"],
+                "interactions": [],
+                "summary": "failed",
+            }
+        )
         self.assertIn("FAIL", text.upper())
         self.assertIn("chunk missing", text)
+
 
 class TestRepl(unittest.IsolatedAsyncioTestCase):
     async def test_quit_calls_shutdown_every_path(self) -> None:
@@ -809,8 +975,7 @@ class TestRepl(unittest.IsolatedAsyncioTestCase):
         # bare RuntimeError is NOT a domain error (it would mask internal
         # failures): the type name stays, the message is collapsed to
         # ONE line and no traceback leaks
-        self.assertIn("error: RuntimeError: boom with newline",
-                      out.getvalue())
+        self.assertIn("error: RuntimeError: boom with newline", out.getvalue())
         self.assertNotIn("Traceback", out.getvalue())
         self.assertNotIn("\nboom", out.getvalue())
 
@@ -834,8 +999,7 @@ class TestRepl(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_once_quotes_argv(self) -> None:
         api = FakeApi()
-        code = await run_once(api, ["accounts", "add", "bob two"],
-                              stdout=io.StringIO())
+        code = await run_once(api, ["accounts", "add", "bob two"], stdout=io.StringIO())
         self.assertEqual(code, 0)
         args, _ = called(api, "accounts_add")
         self.assertEqual(args[0], {"name": "bob two"})
@@ -848,8 +1012,7 @@ class TestRepl(unittest.IsolatedAsyncioTestCase):
         read_fd, write_fd = os.pipe()  # never delivers a line: blocks
         try:
             stop = asyncio.Event()
-            repl = Repl(api, stdin=os.fdopen(read_fd, "r"), stdout=out,
-                        stop_event=stop)
+            repl = Repl(api, stdin=os.fdopen(read_fd, "r"), stdout=out, stop_event=stop)
             asyncio.get_running_loop().call_later(0.1, stop.set)
             await asyncio.wait_for(repl.run(), timeout=5)
         finally:
@@ -880,6 +1043,7 @@ class TestRepl(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(repl.run(), timeout=5)
         self.assertIn("bye.", out.getvalue())
         self.assertTrue(called(api, "shutdown"))
+
 
 class TestHelpCommand(unittest.IsolatedAsyncioTestCase):
     """'help <cmd>' focus, alias handling, and registry drift checks."""
@@ -914,57 +1078,145 @@ class TestHelpCommand(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(UsageError):
             await run_command(FakeApi(), "help accounts list")
 
+    async def test_profiles_group(self) -> None:
+        class ProfilesApi(FakeApi):
+            async def account_plugin_profiles(self, account, plugin):
+                return [
+                    {"name": "main", "schema_version": 2, "description": "primary"},
+                    {"name": "alt", "schema_version": 1, "description": ""},
+                ]
+
+            async def account_plugin_profile_active(self, account, plugin):
+                return {"account": account, "plugin": plugin, "active": "main"}
+
+        out = await run_command(ProfilesApi(), "profiles alpha exporter list")
+        self.assertIn("main", out)
+        self.assertIn("alt", out)
+        out = await run_command(ProfilesApi(), "profiles alpha exporter active")
+        self.assertEqual(out, "active profile: main")
+        with self.assertRaises(UsageError):
+            await run_command(ProfilesApi(), "profiles alpha exporter frobnicate")
+
     def test_help_registry_no_drift(self) -> None:
         self.assertEqual(
             set(HELP),
-            {"help", "status", "accounts", "credentials", "cooldowns",
-             "plugins", "groups", "ratelimit", "tasks",
-             "simulation", "logs", "audit", "estop", "quit"},
+            {
+                "help",
+                "status",
+                "accounts",
+                "credentials",
+                "cooldowns",
+                "plugins",
+                "profiles",
+                "workspaces",
+                "ratelimit",
+                "tasks",
+                "simulation",
+                "logs",
+                "audit",
+                "estop",
+                "quit",
+            },
         )
         for name, (sig, desc) in HELP.items():
             self.assertTrue(desc, f"HELP[{name!r}] has no description")
             self.assertIsInstance(sig, str)
+
 
 class TestHostileParsing(unittest.IsolatedAsyncioTestCase):
     """Fuzz: hostile argument shapes only ever produce text, None,
     QuitRequested or UsageError — never another exception, never a
     traceback at the REPL."""
 
-    HOSTILE: List[str] = [
-        "accounts add", "accounts add '' extra", 'accounts add "my acc"',
-        "accounts add 泥棒#42", "accounts add ' spaced '",
-        "accounts remove", "accounts info a b", "accounts credential a",
-        "accounts credential a b c", "accounts enable a",
-        "accounts enable a on extra", "accounts enable a maybe",
-        "accounts start a b", "accounts estop", "accounts frobnicate",
-        "accounts plugins", "accounts plugins a b", "accounts plugin-add a",
-        "accounts plugin-add a b c", "accounts plugin-remove",
+    HOSTILE: list[str] = [
+        "accounts add",
+        "accounts add '' extra",
+        'accounts add "my acc"',
+        "accounts add 泥棒#42",
+        "accounts add ' spaced '",
+        "accounts remove",
+        "accounts info a b",
+        "accounts credential a",
+        "accounts credential a b c",
+        "accounts enable a",
+        "accounts enable a on extra",
+        "accounts enable a maybe",
+        "accounts start a b",
+        "accounts estop",
+        "accounts frobnicate",
+        "accounts plugins",
+        "accounts plugins a b",
+        "accounts plugin-add a",
+        "accounts plugin-add a b c",
+        "accounts plugin-remove",
         "accounts plugin-remove a b c d",
-        "ratelimit set message abc", "ratelimit set message 2.5 0.2",
-        "ratelimit set message nan", "ratelimit set message inf",
-        "ratelimit set message 1e999", "ratelimit set message -inf",
-        "ratelimit set message 2.5 nan nan", "ratelimit set message 2.5 0.2 0.8",
-        "ratelimit clear global", "ratelimit clear account - message",
-        "ratelimit clear weird x y", "ratelimit floor abc", "ratelimit floor nan",
-        "ratelimit floor", "ratelimit floor 1e999",
-        "ratelimit lane on 2.5 extra", "ratelimit lane off now",
-        "ratelimit lane rate", "ratelimit lane on x", "ratelimit lane sideways",
-        "ratelimit effective", "ratelimit effective a b c d",
-        "ratelimit warnings extra", "ratelimit show extra",
-        "tasks cancel notanumber", "tasks cancel 7 extra", "tasks cancel ''",
-        "tasks history -3", "tasks history abc", "tasks history 5 extra",
+        "ratelimit set message abc",
+        "ratelimit set message 2.5 0.2",
+        "ratelimit set message nan",
+        "ratelimit set message inf",
+        "ratelimit set message 1e999",
+        "ratelimit set message -inf",
+        "ratelimit set message 2.5 nan nan",
+        "ratelimit set message 2.5 0.2 0.8",
+        "ratelimit clear global",
+        "ratelimit clear account - message",
+        "ratelimit clear weird x y",
+        "ratelimit floor abc",
+        "ratelimit floor nan",
+        "ratelimit floor",
+        "ratelimit floor 1e999",
+        "ratelimit lane on 2.5 extra",
+        "ratelimit lane off now",
+        "ratelimit lane rate",
+        "ratelimit lane on x",
+        "ratelimit lane sideways",
+        "ratelimit effective",
+        "ratelimit effective a b c d",
+        "ratelimit warnings extra",
+        "ratelimit show extra",
+        "tasks cancel notanumber",
+        "tasks cancel 7 extra",
+        "tasks cancel ''",
+        "tasks history -3",
+        "tasks history abc",
+        "tasks history 5 extra",
         "tasks history 999999999999999999999",
-        "tasks list a b", "tasks cancel-matching a b c",
-        "logs -5", "logs --5", "logs 5 a b", "logs 0x10", "audit -1",
-        "plugins state", "plugins set a p k", "plugins enable a",
-        "credentials", "credentials import-env --force",
+        "tasks list a b",
+        "tasks cancel-matching a b c",
+        "logs -5",
+        "logs --5",
+        "logs 5 a b",
+        "logs 0x10",
+        "audit -1",
+        "plugins state",
+        "plugins set a p k",
+        "plugins enable a",
+        "credentials",
+        "credentials import-env --force",
         "credentials import-env --overwrite --overwrite",
-        "cooldowns a b", "cooldowns clear a", "cooldowns clear a b c d",
-        "cooldowns ''", "cooldowns clear '' roll",
-        "simulation run", "simulation run a b", "simulation list extra",
-        "estop resume now", "estop sideways", "status extra", "help a b",
-        "", "   ", "\t", "\x00", "\x01\x02", "accounts\x01add bob",
-        "'unclosed", '"unclosed', "HELP", "Accounts LIST", "frobnicate",
+        "cooldowns a b",
+        "cooldowns clear a",
+        "cooldowns clear a b c d",
+        "cooldowns ''",
+        "cooldowns clear '' roll",
+        "simulation run",
+        "simulation run a b",
+        "simulation list extra",
+        "estop resume now",
+        "estop sideways",
+        "status extra",
+        "help a b",
+        "",
+        "   ",
+        "\t",
+        "\x00",
+        "\x01\x02",
+        "accounts\x01add bob",
+        "'unclosed",
+        '"unclosed',
+        "HELP",
+        "Accounts LIST",
+        "frobnicate",
         "ACCOUNTS ADD bob",
     ]
 
@@ -981,8 +1233,7 @@ class TestHostileParsing(unittest.IsolatedAsyncioTestCase):
     async def test_hostile_lines_through_repl_no_traceback(self) -> None:
         lines = [ln for ln in self.HOSTILE if ln.strip()] + [""]
         out = io.StringIO()
-        repl = Repl(FakeApi(), stdin=io.StringIO("\n".join(lines) + "\n"),
-                    stdout=out)
+        repl = Repl(FakeApi(), stdin=io.StringIO("\n".join(lines) + "\n"), stdout=out)
         await asyncio.wait_for(repl.run(), timeout=15)
         text = out.getvalue()
         self.assertNotIn("Traceback", text)
@@ -1016,6 +1267,7 @@ class TestHostileParsing(unittest.IsolatedAsyncioTestCase):
         await run_command(api, "logs 0")
         self.assertEqual(called(api, "logs_tail")[0], (0, None, None))
 
+
 class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):
     """Round-2: the stop event vs long commands, EOF, and pending input."""
 
@@ -1028,8 +1280,7 @@ class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):
         api = SlowStatusApi()
         out = io.StringIO()
         stop = asyncio.Event()
-        repl = Repl(api, stdin=io.StringIO("status\n"), stdout=out,
-                    stop_event=stop)
+        repl = Repl(api, stdin=io.StringIO("status\n"), stdout=out, stop_event=stop)
         asyncio.get_running_loop().call_later(0.02, stop.set)
         await asyncio.wait_for(repl.run(), timeout=5)
         text = out.getvalue()
@@ -1044,8 +1295,7 @@ class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):
         out = io.StringIO()
         stop = asyncio.Event()
         stop.set()
-        repl = Repl(api, stdin=io.StringIO("status\nhelp\n"), stdout=out,
-                    stop_event=stop)
+        repl = Repl(api, stdin=io.StringIO("status\nhelp\n"), stdout=out, stop_event=stop)
         await asyncio.wait_for(repl.run(), timeout=5)
         text = out.getvalue()
         self.assertFalse(called(api, "status"))
@@ -1057,7 +1307,7 @@ class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):
         class StopSignalApi(FakeApi):
             def __init__(self) -> None:
                 super().__init__()
-                self.stop: Optional[asyncio.Event] = None
+                self.stop: asyncio.Event | None = None
 
             async def status(self):
                 result = await super().status()
@@ -1069,8 +1319,7 @@ class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):
         out = io.StringIO()
         stop = asyncio.Event()
         api.stop = stop
-        repl = Repl(api, stdin=io.StringIO("status\n"), stdout=out,
-                    stop_event=stop)
+        repl = Repl(api, stdin=io.StringIO("status\n"), stdout=out, stop_event=stop)
         await asyncio.wait_for(repl.run(), timeout=5)
         text = out.getvalue()
         self.assertTrue(called(api, "shutdown"))
@@ -1092,6 +1341,7 @@ class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(called(api, "shutdown"))
         self.assertFalse(repl.running)
 
+
 class TestRunOnceExitCodes(unittest.IsolatedAsyncioTestCase):
     """Every failure mode maps to the right process exit code."""
 
@@ -1105,8 +1355,7 @@ class TestRunOnceExitCodes(unittest.IsolatedAsyncioTestCase):
 
     async def test_bad_args_exit_one(self) -> None:
         out = io.StringIO()
-        code = await run_once(FakeApi(), ["ratelimit", "set", "message", "abc"],
-                              stdout=out)
+        code = await run_once(FakeApi(), ["ratelimit", "set", "message", "abc"], stdout=out)
         self.assertEqual(code, 1)
         self.assertIn("error:", out.getvalue())
 
@@ -1143,22 +1392,21 @@ class TestRunOnceExitCodes(unittest.IsolatedAsyncioTestCase):
         api = FakeApi()
         out = io.StringIO()
         code = await run_once(
-            api, ["ratelimit", "set", "message", "2.5", "0.2", "0.8",
-                  "account", "alpha"],
-            stdout=out)
-        self.assertEqual(code, 0)
-        self.assertEqual(called(api, "ratelimit_set")[0],
-                         ("message", 2.5, 0.2, 0.8, "account", "alpha"))
-        code = await run_once(api, ["credentials", "import-env", "--overwrite"],
-                              stdout=out)
+            api,
+            ["ratelimit", "set", "message", "2.5", "0.2", "0.8", "account", "alpha"],
+            stdout=out,
+        )
         self.assertEqual(code, 0)
         self.assertEqual(
-            called(api, "credentials_import_env")[1].get("overwrite"), True)
+            called(api, "ratelimit_set")[0], ("message", 2.5, 0.2, 0.8, "account", "alpha")
+        )
+        code = await run_once(api, ["credentials", "import-env", "--overwrite"], stdout=out)
+        self.assertEqual(code, 0)
+        self.assertEqual(called(api, "credentials_import_env")[1].get("overwrite"), True)
 
     async def test_shell_metachar_tokens_survive(self) -> None:
         api = FakeApi()
-        code = await run_once(api, ["accounts", "add", "bob;rm -rf /"],
-                              stdout=io.StringIO())
+        code = await run_once(api, ["accounts", "add", "bob;rm -rf /"], stdout=io.StringIO())
         self.assertEqual(code, 0)
         args, _ = called(api, "accounts_add")
         self.assertEqual(args[0], {"name": "bob;rm -rf /"})
@@ -1172,13 +1420,22 @@ class TestRunOnceExitCodes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outs[0], outs[1])
         self.assertNotIn("\x1b", outs[0])
 
+
 class TestOutputVolumeAndFormatting(unittest.TestCase):
     """Huge payloads render bounded, deterministic, ANSI-free text."""
 
-    def _history_rows(self, count: int) -> List[dict]:
-        return [{"id": i, "status": "completed", "account": "alpha",
-                 "plugin": "soulcopy", "action": "message", "duration_s": 0.25}
-                for i in range(count)]
+    def _history_rows(self, count: int) -> list[dict]:
+        return [
+            {
+                "id": i,
+                "status": "completed",
+                "account": "alpha",
+                "plugin": "exporter",
+                "action": "message",
+                "duration_s": 0.25,
+            }
+            for i in range(count)
+        ]
 
     def test_format_history_ten_thousand_rows(self) -> None:
         text = format_history(self._history_rows(10_000))
@@ -1187,32 +1444,66 @@ class TestOutputVolumeAndFormatting(unittest.TestCase):
     def test_pure_formatters_emit_no_ansi(self) -> None:
         text = format_history(self._history_rows(3))
         self.assertNotIn("\x1b", text)
-        text = format_logs([{"ts": 1700000000.5, "severity": "INFO",
-                             "source": "core", "message": "ready"}])
+        text = format_logs(
+            [{"ts": 1700000000.5, "severity": "INFO", "source": "core", "message": "ready"}]
+        )
         self.assertNotIn("\x1b", text)
-        text = format_audit([{
-            "ts": 1700000000.5, "account": "alpha", "direction": "out",
-            "action": "message", "channel_id": 5, "content": "$sl",
-            "wait_ms": 10.0, "jitter_ms": 20.0}])
+        text = format_audit(
+            [
+                {
+                    "ts": 1700000000.5,
+                    "account": "alpha",
+                    "direction": "out",
+                    "action": "message",
+                    "channel_id": 5,
+                    "content": "$sl",
+                    "wait_ms": 10.0,
+                    "jitter_ms": 20.0,
+                }
+            ]
+        )
         self.assertNotIn("\x1b", text)
 
     def test_format_lane_paused_and_caps(self) -> None:
-        paused = format_lane({"enabled": True, "paused": True,
-                              "prefixrate": 0.0, "waiting": 3, "grants": 1,
-                              "last_grant_age_s": None})
+        paused = format_lane(
+            {
+                "enabled": True,
+                "paused": True,
+                "prefixrate": 0.0,
+                "waiting": 3,
+                "grants": 1,
+                "last_grant_age_s": None,
+            }
+        )
         self.assertIn("PAUSED", paused)
         self.assertIn("never", paused)
-        capped = format_lane({"enabled": True, "paused": False,
-                              "prefixrate": 86400.0, "waiting": 0,
-                              "grants": 2, "last_grant_age_s": 4.0})
+        capped = format_lane(
+            {
+                "enabled": True,
+                "paused": False,
+                "prefixrate": 86400.0,
+                "waiting": 0,
+                "grants": 2,
+                "last_grant_age_s": 4.0,
+            }
+        )
         self.assertIn("86400s", capped)
         self.assertNotIn("86400.0s", capped)
 
     def test_format_policies_jitter_rendering(self) -> None:
-        text = format_policies([{"level": "global", "owner": None,
-                                 "action": "message", "interval": 2.0,
-                                 "jitter": [0.1, 0.5]}])
+        text = format_policies(
+            [
+                {
+                    "level": "global",
+                    "owner": None,
+                    "action": "message",
+                    "interval": 2.0,
+                    "jitter": [0.1, 0.5],
+                }
+            ]
+        )
         self.assertIn("2.00s +0.10..0.50s", text)
+
 
 class TestFloorCapDisplay(unittest.IsolatedAsyncioTestCase):
     """'ratelimit floor' round-1 cap (86400) renders correctly end to end."""
@@ -1223,8 +1514,7 @@ class TestFloorCapDisplay(unittest.IsolatedAsyncioTestCase):
         class CappedFloorApi(FakeApi):
             async def ratelimit_set_floor(self, seconds):
                 if seconds > 86400.0:
-                    raise RatePolicyError(
-                        "safety floor exceeds the one-day cap (86400s)")
+                    raise RatePolicyError("safety floor exceeds the one-day cap (86400s)")
                 return {"floor": min(float(seconds), 86400.0)}
 
         api = CappedFloorApi()
@@ -1238,12 +1528,14 @@ class TestFloorCapDisplay(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(UsageError):  # non-finite rejected at the CLI
             await run_command(api, "ratelimit floor nan")
 
+
 if __name__ == "__main__":
     unittest.main()
+
 
 class ColumnSeparationTests(unittest.TestCase):
     def test_overlong_cell_never_runs_into_the_next_column(self):
         from interfaces.cli.commands import _col
+
         self.assertEqual(_col("ab", 5), "ab   ")
-        self.assertEqual(_col("a-very-long-account-name", 8),
-                         "a-very-long-account-name ")
+        self.assertEqual(_col("a-very-long-account-name", 8), "a-very-long-account-name ")

@@ -26,7 +26,7 @@ purposes. The COMPLETE inventory of client touches (each demand-driven):
 There is NO prefetching, NO "just in case" fetching, and NO API-derived
 state beyond what a live send/flow actually consumed. ``details()`` reads
 exclusively from the ingested READY snapshot + repos. Rate-scope metadata
-(``_sync_group_apply`` / ``_sync_group_scope``) is pure plumbing — no API
+(``_workspace_apply`` / ``_workspace_scope``) is pure plumbing — no API
 involved.
 ════════════════════════════════════════════════════════════════════════
 
@@ -253,6 +253,16 @@ class AccountRuntime:
     # a newer generation's client.
     generation: int = 0
 
+    def require_cache(self) -> DiscordCache:
+        """The per-account cache. ``Account.__post_init__`` guarantees it
+        exists for every constructed account; a None here means a
+        hand-built runtime bypassed Account — a programming error, not
+        a state to tolerate."""
+        cache = self.cache
+        if cache is None:
+            raise RuntimeError("AccountRuntime.cache is missing — runtime built outside Account")
+        return cache
+
 
 @dataclass
 class Account:
@@ -302,7 +312,7 @@ class Account:
             "status": rt.status.value,
             "user_id": rt.user_id,
             "enabled": self.record.enabled,
-            "sync_group": self.record.sync_group,
+            "workspace": self.record.workspace,
             "assigned_plugins": list(self.assigned_plugins),
             "plugin_profiles": dict(self.plugin_profiles),
             "latency_ms": latency,
@@ -355,8 +365,9 @@ class AccountManager:
         cooldowns: Any = None,
         plugin_state: Any = None,
         plugin_data: Any = None,
+        signals: Any = None,  # core.workspace.signals.SignalOutbox (W4)
+        profile_store: Any = None,  # account-owned plugin profiles (P3)
         lifecycle: Any = None,
-        sync_groups: Any = None,
         account_plugins: Any = None,
     ) -> None:
         """``limiter`` (optional) enriches details() with effective rate data;
@@ -371,10 +382,6 @@ class AccountManager:
         ``lifecycle`` (optional LifecycleGovernor, PHASE-4) rate-limits
         start/stop thrashing per account and fleet-wide — None disables
         limiting (tests/simulators construct managers without it);
-        ``sync_groups`` (optional SyncGroupManager) owns group membership:
-        when wired, the group-scope plumbing of add/remove/restore is
-        delegated to it (AccountManager -> SyncGroupManager ->
-        RateLimitManager); unwired stacks keep the legacy direct plumbing;
         ``account_plugins`` (optional AccountPluginsRepository,
         ``db.account_plugins``) is the CAPABILITY source of truth: the
         account_plugins table rows decide which plugins an account runs
@@ -405,6 +412,8 @@ class AccountManager:
         #: PHASE 10 (B3): the shared PluginDataStore; enables the
         #: pair+scope-scoped ``data_*`` plugin API
         self._plugin_data = plugin_data
+        self._signals = signals
+        self._profile_store = profile_store
         # typing-indicator RNG (anti-flag: humans trigger typing; disabled
         # by default via the typing_probability account setting = 0.0)
         import random as _random
@@ -421,7 +430,7 @@ class AccountManager:
         #: have the account" (keep the last known view) apart from "attached
         #: but with ZERO plugins" (fail-closed re-attach: the stale view
         #: must be cleared, not kept)
-        self._plugin_attached: set = set()
+        self._plugin_attached: set[str] = set()
         #: ONE task-ack registry per manager (single bus subscription set)
         self._ack_registry = TaskAckRegistry(bus)
         # FINAL-PHASE (F1-b′): one per-account waiter index per manager —
@@ -429,21 +438,20 @@ class AccountManager:
         # fan-out is per-account (M/A), not fleet-wide (M×E).
         self._waiter_registry = MessageWaiterRegistry(bus)
         #: (account, plugin) -> services; rebuilt on each activation
-        self._services: dict[tuple, AccountPluginServices] = {}
+        self._services: dict[tuple[str, str], AccountPluginServices] = {}
         #: strong refs for fire-and-forget tasks (documented create_task hazard)
-        self._background: set = set()
+        self._background: set[asyncio.Task[Any]] = set()
         # FINAL-PHASE (F4): single-flight bulk start (a second start_all
         # joins the running sweep) + the sweep's concurrency width
-        self._start_all_flight: asyncio.Future | None = None
+        self._start_all_flight: asyncio.Future[dict[str, Any]] | None = None
         # PHASE-4 (S2 #5): cancelled-but-still-unwinding supervisors —
         # strong refs so they can never be GC'd mid-teardown
-        self._dying_supervisors: set = set()
+        self._dying_supervisors: set[asyncio.Task[None]] = set()
         # PHASE-4 (S4): lifecycle rate governor (None = unlimited)
         self._lifecycle = lifecycle
         # SyncGroupManager (optional): the application-level owner of group
         # membership. When present, every group-scope touch below delegates
         # to it; when absent, the legacy direct limiter plumbing runs.
-        self._sync_groups = sync_groups
         # AccountPluginsRepository (optional): direct account→plugin
         # assignments — THE capability source. None (unwired test stacks)
         # behaves like "no assignments": zero plugins, never unrestricted.
@@ -453,48 +461,27 @@ class AccountManager:
         bus.subscribe(MessageReceived, self._audit_inbound)
 
     # ------------------------------------------------------- rate-scope sync
-    def _sync_group_scope(self, name: str, group: str | None) -> None:
-        """Feed the account's group membership to the limiter (per-account/
-        group rate scope). Pure metadata plumbing — NO Discord API is
-        involved; tolerant of limiters without group support (tests).
-
-        LEGACY path: only used when no SyncGroupManager is wired (unwired
-        test/sim stacks) — the wired path goes through _sync_group_apply.
-        """
+    def _workspace_scope(self, name: str, workspace: str | None) -> None:
+        """Feed the account's workspace membership to the limiter (the
+        shared-clock rate scope). Pure metadata plumbing — NO Discord API
+        involved; tolerant of limiters without the mapping (tests). The
+        WorkspaceService registers pacing on membership moves; this is
+        the boot/add-time path from the persisted pointer."""
         register = getattr(self._limiter, "set_account_group", None)
         if register is None:
             return
         try:
-            register(name, group)
+            register(name, workspace)
         except Exception:
-            self._logger.exception("group scope registration failed for %s", name)
+            self._logger.exception("workspace scope registration failed for %s", name)
 
-    async def _sync_group_apply(
-        self, name: str, group: str | None, *, forget: bool = False
-    ) -> None:
-        """One membership -> runtime sync, through the owning manager.
-
-        With SyncGroupManager wired this is the AccountManager ->
-        SyncGroupManager -> RateLimitManager path (the wired manager also
-        adopts the group row for legacy names). Without it, the legacy
-        direct plumbing keeps unwired stacks behaving exactly as before.
-        Never raises: group plumbing must not break account lifecycle.
-        """
-        if self._sync_groups is not None:
-            try:
-                if forget:
-                    outcome = self._sync_groups.forget_account(name)
-                else:
-                    outcome = self._sync_groups.sync_membership(name, group)
-                if inspect.iscoroutine(outcome):
-                    await outcome
-            except Exception:
-                self._logger.exception("sync-group sync failed for account %s", name)
-            return
-        if forget:
-            self._sync_group_scope(name, None)
-        else:
-            self._sync_group_scope(name, group)
+    async def _workspace_apply(self, name: str, workspace: str | None) -> None:
+        """Boot/add-time membership -> pacing registration from the
+        persisted pointer. The WorkspaceService owns membership MOVES
+        (and registers pacing itself); this path only restores what the
+        pointer says at boot and after add. Never raises: membership
+        plumbing must not break account lifecycle."""
+        self._workspace_scope(name, workspace)
 
     # ------------------------------------------------------------------ boot
     async def load(self) -> None:
@@ -534,17 +521,9 @@ class AccountManager:
                 self._refresh_credential_source(account)
                 self._accounts[record.name] = account
                 await self._attach_plugins(record.name)
-                if self._sync_groups is None:  # legacy path (see docstring)
-                    self._sync_group_scope(record.name, record.sync_group)
+                self._workspace_scope(record.name, record.workspace)
             except Exception:
                 self._logger.exception("could not restore account %r", record.name)
-        if self._sync_groups is not None:
-            try:
-                outcome = self._sync_groups.sync_runtime()
-                if inspect.iscoroutine(outcome):
-                    await outcome
-            except Exception:
-                self._logger.exception("sync-group runtime restore failed")
 
     # ------------------------------------------------------------ registry
     async def add_account(
@@ -553,7 +532,7 @@ class AccountManager:
         *,
         token_ref: str | None = None,
         enabled: bool = True,
-        sync_group: str | None = None,
+        workspace: str | None = None,
         plugins: list[str] | None = None,
         profiles: Any = None,
     ) -> dict[str, Any]:
@@ -596,7 +575,7 @@ class AccountManager:
         ):
             raise AccountError("'plugins' must be a list of plugin names")
         record = await self._accounts_repo.add(
-            name, token_ref=token_ref, enabled=bool(enabled), sync_group=sync_group
+            name, token_ref=token_ref, enabled=bool(enabled), workspace=workspace
         )
         account = Account(record=record)
         self._refresh_credential_source(account)
@@ -621,12 +600,12 @@ class AccountManager:
         if fresh is not None:
             account.record = fresh
         await self._attach_plugins(name)
-        await self._sync_group_apply(name, sync_group)
+        await self._workspace_apply(name, workspace)
         self._logger.info(
-            "account %s added (enabled=%s sync_group=%s plugins=%s)",
+            "account %s added (enabled=%s workspace=%s plugins=%s)",
             name,
             enabled,
-            sync_group,
+            workspace,
             account.assigned_plugins or "-",
         )
         return account.status_dict()
@@ -780,7 +759,7 @@ class AccountManager:
             except Exception:  # inherit the old one's DM channel ids
                 self._logger.exception("api-cache cascade failed for %s", name)
         self._drop_services(name)
-        await self._sync_group_apply(name, None, forget=True)
+        await self._workspace_apply(name, None)
         if self._credential_service is not None:
             try:
                 await self._credential_service.delete(name)
@@ -804,15 +783,16 @@ class AccountManager:
         # K14/K15: in-memory mirrors and engine residue must not outlive the
         # account either, or a re-created same-named account silently
         # inherits its settings, profile grants, pacing stamps and 429
-        # cooldowns. Tolerant lookups keep partial test doubles working.
-        settings_mgr = getattr(self, "_settings", None)
+        # cooldowns. Tolerant lookups keep partial test doubles working
+        # (Any-typed locals: the doubles are a genuine dynamic boundary).
+        settings_mgr: Any = getattr(self, "_settings", None)
         if hasattr(settings_mgr, "forget_account"):
             try:
                 settings_mgr.forget_account(name)
             except Exception:
                 self._logger.exception("settings mirror cascade failed for %s", name)
 
-        limiter = getattr(self, "_limiter", None)
+        limiter: Any = getattr(self, "_limiter", None)
         if hasattr(limiter, "prune_account"):
             try:
                 resolved = limiter.prune_account(name)
@@ -1202,7 +1182,7 @@ class AccountManager:
         # plugins: re-attach with the CURRENT profile grants (assignments
         # take effect on the next start — ported semantics), then activate
         attach_activated = await self._attach_plugins(name)
-        if rt.stop_requested:
+        if self._stop_landed(rt):
             # PHASE-4 (S1-F1): stop landed during the attach await — the
             # NEW runtimes must not be activated on a stopped account.
             self._abort_stale_start(name, rt)
@@ -1227,7 +1207,7 @@ class AccountManager:
                 self._logger.exception(
                     "plugin activation failed for %s (account keeps running)", name
                 )
-        if rt.stop_requested:
+        if self._stop_landed(rt):
             # PHASE-4 (S1-F1): stop() raced the ACTIVATION await. Without
             # this, freshly activated plugins (their background loops!)
             # keep running on a stopped, supervisor-less account. Clean up
@@ -1243,7 +1223,7 @@ class AccountManager:
             return account.status_dict()
         self._bus.publish_nowait(AccountConnected(account=name))
         self._lifecycle_commit("start", name, ok=True)
-        if rt.stop_requested:
+        if self._stop_landed(rt):
             self._abort_stale_start(name, rt)
             return account.status_dict()
         if rt.generation != gen:
@@ -1266,13 +1246,27 @@ class AccountManager:
                 self._supervise(name, rt),
                 name=f"supervise-{name}#g{gen}",
             )
+
             # PHASE-4 (S2 #4): an unexpected supervisor death must never
             # wedge the account in RECONNECTING forever — log it and settle
             # FAILED so automation/start() can recover.
-            rt.supervisor.add_done_callback(
-                lambda task, _name=name, _rt=rt: self._supervisor_done(_name, _rt, task)
-            )
+            def _on_supervisor_done(
+                task: asyncio.Task[None], _name: str = name, _rt: AccountRuntime = rt
+            ) -> None:
+                self._supervisor_done(_name, _rt, task)
+
+            rt.supervisor.add_done_callback(_on_supervisor_done)
         return account.status_dict()
+
+    def _stop_landed(self, rt: AccountRuntime) -> bool:
+        """Live read of ``stop_requested`` WITHOUT mypy attribute-narrowing.
+
+        The flag is mutated by OTHER tasks (stop/estop/remove) while this
+        task is parked on an await, so a check that mypy narrowed earlier
+        in the flow stays a live re-read here — calling through a method
+        keeps every post-await check reachable to the checker instead of
+        being mis-flagged as dead code."""
+        return bool(rt.stop_requested)
 
     def _supervisor_done(self, name: str, rt: AccountRuntime, task: asyncio.Task[None]) -> None:
         """Done-callback for supervisor tasks: surface unexpected deaths."""
@@ -1883,7 +1877,7 @@ class AccountManager:
                 rt.last_error = f"{type(exc).__name__}: {exc}"
                 self._logger.warning("reconnect attempt failed for %s: %s", name, rt.last_error)
                 continue
-            if rt.stop_requested:
+            if self._stop_landed(rt):
                 # K3 (S1-C2): a stop() completed WHILE we were inside
                 # connect() — its disconnect may have raced past this fresh
                 # client. Do not resurrect the account: tear the client down
@@ -1970,7 +1964,23 @@ class AccountManager:
         if getattr(client, "connected", None) is False:  # protocol extra, tolerant
             raise AccountError(f"client for account {name!r} did not connect")
         rt.user_id = getattr(client, "user_id", None)
-        rt.cache.ingest_snapshot(client.cached_snapshot())
+        rt.require_cache().ingest_snapshot(client.cached_snapshot())
+        # C2: live cog hosting — the bot exists now; host every
+        # COG-declaring plugin attached to this account (best-effort:
+        # the hub path keeps serving COMMANDS-only plugins)
+        plugins_mgr = getattr(self, "_plugin_manager", None)
+        cog_host = getattr(plugins_mgr, "cog_host", None) if plugins_mgr else None
+        if cog_host is not None and plugins_mgr is not None:
+            bot = getattr(client, "_client", None)
+            if bot is not None and hasattr(bot, "add_cog"):
+                runtimes = getattr(plugins_mgr, "_accounts", {}).get(name, {})
+                for plugin_name in list(runtimes):
+                    try:
+                        await plugins_mgr.host_cog(name, plugin_name, bot)
+                    except Exception as exc:
+                        self._logger.debug(
+                            "cog hosting failed for %s/%s: %s", name, plugin_name, exc
+                        )
         await self._record_access_user_id(name, rt.user_id)
 
     async def _record_access_user_id(self, name: str, user_id: Any) -> None:
@@ -2028,7 +2038,13 @@ class AccountManager:
             )
 
         def _on_reaction(
-            kind: str, message_id: int, channel_id: int, guild_id, user_id: int, emoji, raw
+            kind: str,
+            message_id: int,
+            channel_id: int,
+            guild_id: int | None,
+            user_id: int,
+            emoji: Any,
+            raw: Any,
         ) -> None:
             """Client callback -> ReactionAdded/Removed-shaped bus events.
 
@@ -2042,6 +2058,7 @@ class AccountManager:
             if kind != "add":  # removal events: reserved for future plugins
                 return
             text = emoji if isinstance(emoji, str) else getattr(emoji, "name", str(emoji))
+            channel = rt.require_cache().channels.get(channel_id)
             self._bus.publish_nowait(
                 ReactionAdded(
                     account=name,
@@ -2050,9 +2067,7 @@ class AccountManager:
                     guild_id=guild_id,
                     user_id=int(user_id),
                     emoji=text,
-                    dm=rt.cache.channels.get(channel_id).dm
-                    if rt.cache.channels.get(channel_id) is not None
-                    else False,
+                    dm=channel.dm if channel is not None else False,
                     raw=raw,
                 )
             )
@@ -2072,7 +2087,9 @@ class AccountManager:
                 )
             )
 
-        def _on_message_delete(message_id: int, channel_id: int, guild_id, raw) -> None:
+        def _on_message_delete(
+            message_id: int, channel_id: int, guild_id: int | None, raw: Any
+        ) -> None:
             from ..event_bus import MessageDeleted
 
             if rt.client is not client:
@@ -2194,7 +2211,7 @@ class AccountManager:
         with contextlib.suppress(Exception):
             await rt.client.send_typing(channel_id)
 
-    async def send_hook(self, task: Any) -> DiscordMessage:
+    async def send_hook(self, task: Any) -> DiscordMessage | None:
         """Scheduler sender: one task -> one validated, audited Discord send.
 
         Raises:
@@ -2206,19 +2223,21 @@ class AccountManager:
             SchedulerError: unsupported task action.
         """
         name = getattr(task, "account", None)
-        account = self._accounts.get(name) if isinstance(name, str) else None
-        if account is None:
+        if not isinstance(name, str) or name not in self._accounts:
             raise AccountError(f"task targets unknown account {name!r}")
+        account = self._accounts[name]
         rt = account.runtime
         if rt.status != AccountStatus.RUNNING or rt.client is None:
             raise ConnectionError(f"account {name!r} is not running (status: {rt.status.value})")
         action = getattr(task, "action", None)
         client = rt.client
+        cache = rt.require_cache()
+        message: DiscordMessage
         if action == "dm":
             # resolution order: memory cache -> persistent api_cache -> ONE
             # client.open_dm (recorded in both, never fetched again)
             channel_id = await resolve_dm_channel(
-                rt.cache, client, int(task.user_id), name, self._api_cache
+                cache, client, int(task.user_id), name, self._api_cache
             )
             # send through the RESOLVED channel: client.send_dm(user_id)
             # would re-fetch the user + re-open the DM (2 redundant REST
@@ -2227,10 +2246,10 @@ class AccountManager:
                 message = await client.send_message(channel_id, task.content)
             except Exception as exc:
                 if type(exc).__name__ == "TargetGone":
-                    await invalidate_dm_channel(rt.cache, self._api_cache, int(task.user_id), name)
+                    await invalidate_dm_channel(cache, self._api_cache, int(task.user_id), name)
                 raise
         elif action == "message":
-            rt.cache.validate_channel(int(task.channel_id))  # TargetGone propagates
+            cache.validate_channel(int(task.channel_id))  # TargetGone propagates
             channel_id = int(task.channel_id)
             await self._maybe_typing(name, rt, channel_id)
             try:
@@ -2241,31 +2260,31 @@ class AccountManager:
                     # revoked access / left guild): without this the cache
                     # keeps passing validate_channel and every future send
                     # re-fails forever (only a restart healed it)
-                    rt.cache.invalidate_channel(channel_id, str(exc) or "send failed")
+                    cache.invalidate_channel(channel_id, str(exc) or "send failed")
                 raise
         elif action == "reaction":
             # kakerareact capability: emoji rides in task.content; target
             # channel validated like a send, message id is opaque to us
-            rt.cache.validate_channel(int(task.channel_id))
+            cache.validate_channel(int(task.channel_id))
             channel_id = int(task.channel_id)
             try:
                 await client.add_reaction(channel_id, int(task.message_id), task.content)
             except Exception as exc:
                 if type(exc).__name__ == "TargetGone":
-                    rt.cache.invalidate_channel(channel_id, str(exc) or "reaction failed")
+                    cache.invalidate_channel(channel_id, str(exc) or "reaction failed")
                 raise
             return None  # no DiscordMessage shape for reactions
         elif action == "button":
             # kakeraloot capability: custom_id rides in task.content; the
             # adapter resolves the live message ON DEMAND (plugin-requested
             # fetch — the only fetch this action performs)
-            rt.cache.validate_channel(int(task.channel_id))
+            cache.validate_channel(int(task.channel_id))
             channel_id = int(task.channel_id)
             try:
                 await client.click_button(channel_id, int(task.message_id), task.content)
             except Exception as exc:
                 if type(exc).__name__ == "TargetGone":
-                    rt.cache.invalidate_channel(channel_id, str(exc) or "button failed")
+                    cache.invalidate_channel(channel_id, str(exc) or "button failed")
                 raise
             return None
         else:
@@ -2304,6 +2323,7 @@ class AccountManager:
         record = account.record
         client = rt.client
         state = rt.status.value
+        cache = rt.require_cache()
         latency = getattr(client, "latency_ms", None) if client is not None else None
         uptime = None
         if rt.started_at is not None and rt.status == AccountStatus.RUNNING:
@@ -2317,13 +2337,13 @@ class AccountManager:
                 "uptime_s": uptime,
             },
             "identity": {
-                "name": rt.cache.user_name or record.name,
-                "discord_id": rt.cache.user_id if rt.cache.user_id is not None else rt.user_id,
+                "name": cache.user_name or record.name,
+                "discord_id": cache.user_id if cache.user_id is not None else rt.user_id,
             },
             "runtime": {
-                "cached_guilds": len(rt.cache.guilds),
-                "cached_channels": len(rt.cache.channels),
-                "cached_dms": rt.cache.dms(),
+                "cached_guilds": len(cache.guilds),
+                "cached_channels": len(cache.channels),
+                "cached_dms": cache.dms(),
                 "cache_source": "client cache (READY)",
             },
             "plugins": self._plugin_rows(account),
@@ -2404,15 +2424,19 @@ class AccountManager:
         if key in self._services:
             return self._services[key]
         account = self._accounts.get(account_name)
-        cache = account.runtime.cache if account is not None else DiscordCache(account_name)
+        cache = (
+            account.runtime.require_cache() if account is not None else DiscordCache(account_name)
+        )
         settings_dict: dict[str, Any] = {}
         try:
             # LIVE view first (set_setting mutates this dict in place, so
             # services.settings and ctx.settings can never diverge); the
             # states() copy is only a fallback for duck-typed collaborators
-            live = getattr(self._plugin_manager, "live_settings", None)
-            settings_dict = live(account_name, plugin_name) if callable(live) else None
-            if not isinstance(settings_dict, dict):
+            live: Any = getattr(self._plugin_manager, "live_settings", None)
+            live_view = live(account_name, plugin_name) if callable(live) else None
+            if isinstance(live_view, dict):
+                settings_dict = live_view
+            else:
                 settings_dict = {}
                 for state in self._plugin_manager.states(account_name) or []:
                     if isinstance(state, dict) and state.get("name") == plugin_name:
@@ -2435,6 +2459,8 @@ class AccountManager:
             cooldowns=self._cooldowns,
             plugin_state=self._plugin_state,
             plugin_data=self._plugin_data,
+            signals=self._signals,
+            profile_store=self._profile_store,
         )
         self._services[key] = services
         return services
@@ -2501,7 +2527,7 @@ class AccountManager:
                     "(plugins stay inactive until the next start)",
                     name,
                 )
-            if rt.runtime.stop_requested:
+            if self._stop_landed(rt.runtime):
                 # a stop() completed DURING the activation await (review
                 # finding #3): its teardown ran before these hooks fired —
                 # deactivate again so no active plugin outlives the stop
@@ -2521,7 +2547,7 @@ class AccountManager:
                     )
         return activated
 
-    def _allowed_plugins(self, name: str) -> set:
+    def _allowed_plugins(self, name: str) -> set[str]:
         """The account's DIRECT plugin assignments — NEVER None.
 
         Source of truth: ``Account.assigned_plugins`` (the in-memory mirror
@@ -2535,6 +2561,16 @@ class AccountManager:
         if account is None:
             return set()
         return {p for p in (account.assigned_plugins or []) if isinstance(p, str)}
+
+    def refresh_workspace(self, name: str, workspace: str | None) -> None:
+        """Mirror a workspace-membership change into the in-memory
+        record (FINAL-PHASE F3 pattern): status snapshots read
+        record.workspace. The WorkspaceService owns the persisted
+        pointer (and the pacing registration); this keeps the account
+        manager's view honest without a second writer."""
+        account = self._accounts.get(name)
+        if account is not None:
+            account.record.workspace = workspace or None
 
     def _refresh_plugins(self, account: Account) -> None:
         """Refresh Account.plugins from plugin_manager.states (keep last known).
@@ -2646,7 +2682,10 @@ class AccountManager:
     async def _repo_get(self, name: str) -> AccountRecord | None:
         """Fresh record from the repository (None on failure/unknown)."""
         try:
-            return await self._accounts_repo.get(name)
+            # boundary annotation: the repo seam is Any (duck-typed doubles
+            # in tests); AccountRecord is the contract every real repo returns
+            record: AccountRecord | None = await self._accounts_repo.get(name)
+            return record
         except Exception:
             self._logger.exception("could not read account %r from repository", name)
             return None
@@ -2678,7 +2717,9 @@ class AccountManager:
             CredentialsError: actionable message when nothing resolves.
         """
         if self._credential_service is not None:
-            token = await self._credential_service.resolve(record.name)
+            # boundary annotation: the credential seam is Any (duck-typed
+            # doubles in tests); a resolved token is the str contract
+            token: str = await self._credential_service.resolve(record.name)
             if not token:
                 raise CredentialsError(
                     f"account {record.name!r} has no stored credential — "

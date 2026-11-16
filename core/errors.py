@@ -120,9 +120,9 @@ class SimulationError(RuntimeError):
 #: surface must mask (``failed internally, see logs`` — logs carry the
 #: detail). NOTE: bare RuntimeError is deliberately NOT here — typed
 #: domain errors that subclass RuntimeError (AccountError etc.) still
-#: render. Shared by interfaces/cli/repl.py, core/remote_control.py and
-#: core/plugin_manager/commands.py (each may layer its own additions on
-#: top, but never a bare RuntimeError).
+#: render. Shared by interfaces/cli/repl.py and the hub command layer
+#: (each may layer its own additions on top, but never a bare
+#: RuntimeError).
 DOMAIN_ERRORS = (
     AccountError,
     CredentialsError,

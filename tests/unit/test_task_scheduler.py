@@ -90,10 +90,7 @@ class FakeSender:
         try:
             if self.hold is not None and not self.hold.is_set():
                 await self.hold.wait()
-            if self.outcomes:
-                outcome = self.outcomes.popleft()
-            else:
-                outcome = ("ok", None)
+            outcome = self.outcomes.popleft() if self.outcomes else ("ok", None)
             kind = outcome[0]
             if kind == "ok":
                 return outcome[1] if outcome[1] is not None else self._message(task)
@@ -234,7 +231,7 @@ class SchedulerTestBase(unittest.IsolatedAsyncioTestCase):
 class TestLifecycle(SchedulerTestBase):
     async def test_submit_lifecycle_events_in_order(self) -> None:
         task = self.scheduler.submit(
-            "alpha", "soulcopy", "message", channel_id=123, content="hello"
+            "alpha", "exporter", "message", channel_id=123, content="hello"
         )
         await self.settle()
         self.assertEqual(task.status, "completed")
@@ -244,7 +241,7 @@ class TestLifecycle(SchedulerTestBase):
         )
         queued = self.recorder.of(TaskQueued)[0]
         self.assertEqual((queued.account, queued.task_id, queued.plugin, queued.action),
-                         ("alpha", task.id, "soulcopy", "message"))
+                         ("alpha", task.id, "exporter", "message"))
         completed = self.recorder.of(TaskCompleted)[0]
         self.assertEqual(completed.task_id, task.id)
         self.assertGreaterEqual(completed.duration_s, 0.0)
@@ -276,9 +273,9 @@ class TestLifecycle(SchedulerTestBase):
         self.assertEqual(call["note"], "plugin=p task=1")  # no attempts suffix on first-try success
 
     async def test_default_name_and_get(self) -> None:
-        task = self.scheduler.submit("alpha", "soulcopy", "dm", user_id=42, content="hi")
+        task = self.scheduler.submit("alpha", "exporter", "dm", user_id=42, content="hi")
         await self.settle()
-        self.assertEqual(task.name, "soulcopy:dm")
+        self.assertEqual(task.name, "exporter:dm")
         self.assertIs(self.scheduler.get(task.id), task)   # live
         self.assertIs(self.scheduler.get(task.id), task)   # finished fallback keeps the object
         self.assertIsNone(self.scheduler.get(9999))
@@ -326,9 +323,9 @@ class TestLanes(SchedulerTestBase):
         self.assertEqual(high.status, "completed")
 
     async def test_limiter_receives_full_context(self) -> None:
-        self.scheduler.submit("alpha", "soulcopy", "message", priority=Priority.HIGH)
+        self.scheduler.submit("alpha", "exporter", "message", priority=Priority.HIGH)
         await self.settle()
-        self.assertEqual(self.limiter.acquire_calls, [("message", "alpha", "soulcopy", 0)])
+        self.assertEqual(self.limiter.acquire_calls, [("message", "alpha", "exporter", 0)])
 
 
 # ------------------------------------------------------------------ cancel
@@ -533,7 +530,7 @@ class TestStop(SchedulerTestBase):
         await self.scheduler.stop(drain=False)  # idempotent
 
     async def test_stop_drain_false_cancels_everything(self) -> None:
-        gate = self.limiter.block_acquires()
+        self.limiter.block_acquires()  # block every acquire inside the limiter
         t1 = self.scheduler.submit("alpha", "p", "message")
         await self.settle(0.02)              # blocked inside acquire
         t2 = self.scheduler.submit("alpha", "p", "message")
@@ -676,7 +673,7 @@ class TestStopSingleFlight(SchedulerTestBase):
         self.assertTrue(task.is_terminal)
 
     async def test_start_rejected_while_stopping(self) -> None:
-        task = self.scheduler.submit("alpha", "p", "message")
+        self.scheduler.submit("alpha", "p", "message")
         self.sender.outcomes.append(("sleep", 0.08))
         owner = asyncio.create_task(self.scheduler.stop(drain=True, timeout=5.0))
         await asyncio.sleep(0.01)
@@ -1310,8 +1307,10 @@ class TestDelayFreeScheduling(unittest.TestCase):
     (429 counters instead)."""
 
     def test_scheduler_has_no_backoff_machinery(self) -> None:
-        from core.task_scheduler.scheduler import TaskScheduler
         import inspect
+
+        from core.task_scheduler.scheduler import TaskScheduler
+
         src = inspect.getsource(TaskScheduler)
         self.assertNotIn("_sleep_backoff", src)
         self.assertNotIn("_backoff_wakers", src)

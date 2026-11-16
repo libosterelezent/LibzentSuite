@@ -23,7 +23,7 @@ Waiting model (three stages inside ``acquire``, in order):
     how the draws differ (a post-grant-only draw let a smaller second jitter
     compress the wire gap to ``interval - jitter_max`` and even invert it).
 
-Determinism seams (all time flows through them — see INTEGRATION.md):
+Determinism seams (all time flows through them — see docs/architecture/integration.md):
 
 * ``clock``      — injected Clock; default is monotonic SystemClock; tests
                    pass a ManualClock and advance() it.
@@ -114,11 +114,12 @@ DEFAULT_ACTION_INTERVALS: dict[str, float] = {
 DEFAULT_JITTER: tuple[float, float] = (0.2, 0.8)
 
 #: default interval for actions with NO learned default AND no stored
-#: policy: they used to pace at the bare floor (0.05 s — up to 20
-#: sends/s/account, perfectly metronomic). A stored policy at ANY scope
+#: policy: unstudied actions pace AT the safety floor (1.5 s — the floor
+#: was raised 2026-10-26 from the former 0.05 s anti-loop minimum, which
+#: made the old 1.2 s fallback unreachable). A stored policy at ANY scope
 #: still REPLACES this fallback entirely (it composes with the floor
 #: alone, exactly like the learned defaults).
-UNSTUDIED_ACTION_INTERVAL = 1.2
+UNSTUDIED_ACTION_INTERVAL = 1.5
 
 _LEVEL_RANK: dict[str, int] = {name: i for i, name in enumerate(POLICY_LEVELS)}
 
@@ -142,6 +143,20 @@ KV_REMOVED_KEY = "ratelimit:removed"
 #: global mutations wake every key event, so a short poll just burned a
 #: full policy recomputation per waiter 4x/second)
 POLL_INTERVAL = 2.0
+
+#: EWMA smoothing factor for the per-route latency monitor (the fork's
+#: http_route_latencies() — queuing inflation, not 429s, is how the
+#: send ceiling manifests). 0.2 = ~5-sample memory.
+ROUTE_LATENCY_ALPHA = 0.2
+
+#: threshold (seconds) at which the send route's EWMA triggers a
+#: congestion warning — queuing is visible WELL before the 429
+SEND_ROUTE_LATENCY_WARNING_S = 2.0
+
+#: probe-down recovery: after this many seconds without a server
+#: cooldown, the backoff decays by this factor per recovery tick
+PROBE_DOWN_CLEAN_WINDOW_S = 120.0
+PROBE_DOWN_DECAY = 0.90  # ≤10% per tick, never below the base interval
 
 #: single-task concurrency is guaranteed by the heap; grant order is
 #: (priority, seq) — seq comes from this counter (FIFO within a priority).
@@ -259,7 +274,7 @@ class RateLimitManager:
         self._repo = policy_repo
         self._kv = kv_repo
         self._floor = self._validated_floor(floor)
-        self._removed_defaults: set = set()  # 'level|owner|action' cleared by the user
+        self._removed_defaults: set[str] = set()  # 'level|owner|action' cleared by the user
         if lane_enabled is not _UNSET or lane_prefixrate is not _UNSET:
             self._log(
                 "warning",
@@ -468,11 +483,11 @@ class RateLimitManager:
             self._wake_all()
         return existed
 
-    def policies(self) -> list[dict]:
+    def policies(self) -> list[dict[str, Any]]:
         """Every stored policy as ``{level, owner, action, interval, jitter}``,
         sorted by (action, level, owner) — deterministic for CLI/UI."""
         level_rank = _LEVEL_RANK
-        rows = [
+        rows: list[dict[str, Any]] = [
             {
                 "level": level,
                 "owner": owner,
@@ -491,7 +506,9 @@ class RateLimitManager:
         )
         return rows
 
-    def effective(self, action: str, account: str | None = None, plugin: str | None = None) -> dict:
+    def effective(
+        self, action: str, account: str | None = None, plugin: str | None = None
+    ) -> dict[str, Any]:
         """Compose all applicable policy levels for one action.
 
         Returns ``{"action", "interval", "jitter": [min, max], "sources": [...]}``
@@ -632,11 +649,11 @@ class RateLimitManager:
         """Current safety floor (seconds)."""
         return float(self._floor)
 
-    def set_removed_defaults(self, entries: list) -> None:
+    def set_removed_defaults(self, entries: list[str]) -> None:
         """Sync the cleared-policy tombstones (ControlAPI persist path)."""
         self._removed_defaults = {str(e) for e in entries or []}
 
-    def removed_default(self, level: str, owner, action: str) -> bool:
+    def removed_default(self, level: str, owner: str | None, action: str) -> bool:
         """True when the user explicitly CLEARED this key (seed must skip)."""
         return f"{level}|{owner or ''}|{action}" in self._removed_defaults
 
@@ -693,13 +710,14 @@ class RateLimitManager:
                         )
                     )
         prefix = f"{account}/"
-        for key in [
+        stale: list[tuple[str, str | None, str]] = [
             k
             for k in self._policies
             if k[0] in ("account", "account_plugin")
             and (k[1] == account or (k[0] == "account_plugin" and str(k[1]).startswith(prefix)))
-        ]:
-            del self._policies[key]
+        ]
+        for stale_key in stale:
+            del self._policies[stale_key]
         self._drop_group_stamps(group)
         # FINAL-PHASE (F2): always invalidate — the cache may hold entries
         # for this account even when no policy rows were (the table can be
@@ -1070,8 +1088,11 @@ class RateLimitManager:
                 raise RatePolicyError(f"{what} must be a non-empty string, got {value!r}")
             return value.strip()
 
+        action_name = _name(action, "action", allow_none=False)
+        if action_name is None:  # allow_none=False already raised; keep the
+            raise RatePolicyError("action must not be None")  # checker honest
         return (
-            _name(action, "action", allow_none=False),
+            action_name,
             _name(account, "account", allow_none=True),
             _name(plugin, "plugin", allow_none=True),
         )
@@ -1107,10 +1128,11 @@ class RateLimitManager:
                 f"retry_after {wait:g}s exceeds the {MAX_INTERVAL:g}s cap; "
                 f"clamping the cooldown to {MAX_INTERVAL:g}s",
             )
-            wait = MAX_INTERVAL
-        action, account = self._validate_acquire_args(action, account, None)[:2]
-        if account is None:
+            wait = float(MAX_INTERVAL)
+        action, account_opt, _plugin = self._validate_acquire_args(action, account, None)
+        if account_opt is None:
             raise RatePolicyError("account must not be None")
+        account = account_opt
         # 429 telemetry (the ONLY observable throttle signal on user
         # accounts — successes carry no rate headers)
         self._hits_429[account] = self._hits_429.get(account, 0) + 1
@@ -1176,7 +1198,7 @@ class RateLimitManager:
             del self._last_fire[key]
 
     # -------------------------------------------------------------- reporting
-    def stats(self) -> dict:
+    def stats(self) -> dict[str, Any]:
         """JSON-safe snapshot for the UI: floor, policies, active cooldowns,
         last-fire ages per pacing key, and grant/wait counters."""
         self._sweep_expired_cooldowns()  # the 1s dashboard poll owns expiry
@@ -1211,7 +1233,7 @@ class RateLimitManager:
             "avg_wait_s": avg,
         }
 
-    def warnings(self) -> list[dict]:
+    def warnings(self) -> list[dict[str, Any]]:
         """Advisory safety review of the configuration.
 
         Entries are ``{"level", "code", "message"}`` sorted danger > warn >
@@ -1229,9 +1251,9 @@ class RateLimitManager:
         items.extend(self._learned_default_warnings())
         return sort_warnings(items)
 
-    def _learned_default_warnings(self) -> list[dict]:
+    def _learned_default_warnings(self) -> list[dict[str, Any]]:
         """Engine-level verdicts around the learned-default displacement."""
-        out: list[dict] = []
+        out: list[dict[str, Any]] = []
         stored_actions = {action for (_level, _owner, action) in self._policies}
         for (level, owner, action), policy in self._policies.items():
             learned = DEFAULT_ACTION_INTERVALS.get(action)
