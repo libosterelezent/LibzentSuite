@@ -1,0 +1,98 @@
+# yaml-language-server: $schema=https://www.coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit review configuration — tuned for LibzentSuite (2026-11-16,
+# per the V2 configuration reference). The binding engineering standards
+# live in AGENTS.md; these instructions point the reviewer at what a
+# diff must preserve.
+
+language: en-US
+tone_instructions: >-
+  Be direct and technical. The gates already catch lint/types (mypy
+  zero floor, ruff, coverage floor, 3.10-3.13 matrix) — do not restate
+  those. Focus on logic, contracts, and account isolation.
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  review_details: true
+
+  merge_risk_instructions: >-
+    Database migrations (database/schema.py) are the highest-risk
+    changes: every migration is append-only, numbered, and must keep
+    the chain restart-safe and idempotent. Changes to core/api.py (the
+    ONE facade both interfaces call) and core/plugin_base.py (the
+    plugin contract) are high risk. Docs-only and test-only changes
+    are low risk.
+
+  security_risk_instructions: >-
+    Account isolation is the core security boundary: every
+    account-scoped read/write must carry its full ownership scope in
+    the SQL predicate. Credential handling (core/credential_service,
+    core/credentials) and the FastAPI auth gate (interfaces/api) are
+    sensitive. The paced send pipeline is the safety floor — a raw
+    client send bypassing ctx.services is a blocker.
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - ".*"
+  path_filters:
+    - "!dump/**"
+    - "!knowledgebase/**"
+    - "!docs/plans/**"
+  path_instructions:
+    - path: "database/schema.py"
+      instructions: >-
+        Migrations are append-only, numbered, and run inside the
+        guarded serialized transaction. Flag: renumbering existing
+        versions, destructive ops without a fold path, non-idempotent
+        SQL (a racing second connect must converge, not corrupt).
+    - path: "core/api.py"
+      instructions: >-
+        ControlAPI is the ONE application facade — new shared behavior
+        extends it, never a parallel path. Fail closed on unknown
+        account/plugin; audit rows ride the mgmt trail.
+    - path: "database/repositories/**"
+      instructions: >-
+        All SQL stays in repositories; values always parameter-bound.
+        The canonical helpers live in repositories/base.py (row_to_dict,
+        inserted_rowid, typed _tx/_fetch_*). Every predicate carries the
+        complete ownership scope.
+    - path: "adapters/**"
+      instructions: >-
+        Plugins never see adapter types — the boundary is the DTO layer
+        and the PluginServices protocol. Flag anything leaking
+        client/limiter/bus internals outward.
+    - path: "plugins/**"
+      instructions: >-
+        The plugin contract: COG is the command face, settings are
+        Setting manifests. Sends go ONLY through ctx.services (the
+        paced pipeline) — a raw client send is a review blocker.
+    - path: "tests/**"
+      instructions: >-
+        Tests assert externally observable contracts. Flag weakened
+        assertions, deleted regression coverage, wall-clock sleeps
+        where a deterministic seam exists.
+    - path: ".github/**"
+      instructions: >-
+        Actions must be pinned and recorded in actions.lock; workflow
+        tokens stay read-only.
+
+  tools:
+    ruff:
+      enabled: true
+      config_file: "pyproject.toml"
+    pylint:
+      enabled: false # ruff is the canonical linter (AGENTS.md §8)
+    flake8:
+      enabled: false # ruff superseded it (AGENTS.md §8)
+
+knowledge_base:
+  opt_out: false
+  learnings:
+    repository: true
+  issues:
+    repository: true
