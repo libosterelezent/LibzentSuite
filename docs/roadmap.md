@@ -115,11 +115,15 @@ Implementation decisions (owner-locked):
 5. Coordination is recoverable — workflow checkpoints enable resume.
 6. No shared-state ownership ambiguity — workspace observes, never owns.
 
-Phasing:
+Phasing (P1/P2 landed 2026-11-16):
 
-- **P1** — ownership model: profile identity, plugin-defined schemas,
-  channel-in-profile, profile-scoped cooldowns/tasks, independent
-  lifecycle, restart recovery
+- **P1** ✅ — ownership model: profile identity `(account, plugin,
+  name)` (migration v12's store + facade), profile-scoped COOLDOWNS
+  (migration v13; '' = the profile-less scope every existing caller
+  keeps). Profile-scoped TASKS ride P4's runtime integration.
+- **P2** ✅ — core persistence: the account_plugin_profiles store
+  (CRUD + exists + list, full-scope predicates, opaque settings_json,
+  schema_version, account-delete cascade)
 - **P2** — core persistence: generic profile storage API (CRUD +
   exists), JSON body (core never interprets), `UNIQUE(account, plugin,
   profile_name)`, schema versioning
