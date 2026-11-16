@@ -287,22 +287,22 @@ class FlakyCooldownRepo:
         self.clear_calls = 0
 
     async def upsert(self, **kw):
-        key = (kw["account"], kw["plugin"], kw["cooldown_key"])
+        key = (kw["account"], kw["plugin"], kw.get("profile", ""), kw["cooldown_key"])
         self.rows[key] = dict(kw)
 
-    async def clear(self, a, p, k):
+    async def clear(self, a, p, k, profile=""):
         self.clear_calls += 1
         if self.fail_clear:
             raise RuntimeError("db locked")
-        return self.rows.pop((a, p, k), None) is not None
+        return self.rows.pop((a, p, profile, k), None) is not None
 
-    async def clear_expired_for(self, a, p, k, now):
+    async def clear_expired_for(self, a, p, k, now, profile=""):
         self.clear_expired_for_calls += 1
         if self.fail_clear:
             raise RuntimeError("db locked")
-        row = self.rows.get((a, p, k))
+        row = self.rows.get((a, p, profile, k))
         if row and row["expires_at"] <= now:
-            del self.rows[(a, p, k)]
+            del self.rows[(a, p, profile, k)]
             return True
         return False
 
@@ -315,8 +315,8 @@ class FlakyCooldownRepo:
     async def active_for(self, account, plugin=None, now=None):
         return [r for r in self.rows.values() if r["account"] == account]
 
-    async def get(self, a, p, k, now=None):
-        row = self.rows.get((a, p, k))
+    async def get(self, a, p, k, now=None, profile=""):
+        row = self.rows.get((a, p, profile, k))
         return row if row and row["expires_at"] > now else None
 
     async def delete_account(self, account):
@@ -360,9 +360,9 @@ class TestCooldownServiceFixes(unittest.IsolatedAsyncioTestCase):
         clock["now"] += 999  # expired everywhere
 
         self.assertIsNone(await svc.get("beta", "p", "k"))
-        self.assertNotIn(("beta", "p", "k"), svc._active)  # popped, not looming
+        self.assertNotIn(("beta", "p", "", "k"), svc._active)  # popped, not looming
         self.assertEqual(repo.clear_expired_for_calls, 1)
-        self.assertNotIn(("beta", "p", "k"), repo.rows)  # lazily cleared
+        self.assertNotIn(("beta", "p", "", "k"), repo.rows)  # lazily cleared
 
         # subsequent gets: plain memory miss -> one repo get, NO repeat of
         # the clear_expired_for round-trip on every call
@@ -379,12 +379,12 @@ class TestCooldownServiceFixes(unittest.IsolatedAsyncioTestCase):
         await svc.set("beta", "p", "k", 10)
         clock["now"] += 999  # memory copy expired...
         # ...but another process EXTENDED the persisted row meanwhile
-        repo.rows[("beta", "p", "k")]["expires_at"] = clock["now"] + 500
+        repo.rows[("beta", "p", "", "k")]["expires_at"] = clock["now"] + 500
 
         row = await svc.get("beta", "p", "k")
         self.assertIsNotNone(row)  # the extension wins over stale memory
         self.assertEqual(row["expires_at"], clock["now"] + 500)
-        self.assertIn(("beta", "p", "k"), repo.rows)  # still persisted
+        self.assertIn(("beta", "p", "", "k"), repo.rows)  # still persisted
         self.assertEqual(repo.clear_expired_for_calls, 1)  # scoped delete
         # and the adopted row serves subsequent gets from memory
         self.assertIsNotNone(await svc.get("beta", "p", "k"))

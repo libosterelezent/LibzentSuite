@@ -752,6 +752,42 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             ON account_plugin_profiles(account, plugin);
         """,
     ),
+    (
+        13,
+        "two-level model P1 — cooldowns gain the profile dimension",
+        """
+        -- (account, plugin, PROFILE, cooldown_key) becomes the cooldown
+        -- identity (docs/design/data-management-adoption.md): one
+        -- profile's cooldown never blocks another profile's. '' is the
+        -- documented profile-less scope — exactly the pre-P1 behavior,
+        -- so existing rows migrate verbatim and every existing caller
+        -- keeps its semantics. SQLite cannot ALTER a UNIQUE constraint,
+        -- so this is the classic rebuild: new table, copy, drop, rename.
+        CREATE TABLE cooldowns_v13 (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            account       TEXT NOT NULL,
+            plugin        TEXT NOT NULL,
+            profile       TEXT NOT NULL DEFAULT '',
+            cooldown_key  TEXT NOT NULL,
+            started_at    REAL NOT NULL,
+            expires_at    REAL NOT NULL,
+            source        TEXT NOT NULL DEFAULT '',
+            reason        TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at    REAL NOT NULL,
+            updated_at    REAL NOT NULL,
+            UNIQUE (account, plugin, profile, cooldown_key)
+        );
+        INSERT INTO cooldowns_v13 (account, plugin, profile, cooldown_key,
+            started_at, expires_at, source, reason, metadata_json,
+            created_at, updated_at)
+            SELECT account, plugin, '', cooldown_key, started_at, expires_at,
+                   source, reason, metadata_json, created_at, updated_at
+            FROM cooldowns;
+        DROP TABLE cooldowns;
+        ALTER TABLE cooldowns_v13 RENAME TO cooldowns;
+        """,
+    ),
 ]
 
 

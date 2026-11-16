@@ -177,9 +177,9 @@ class MemoryFirstStatusTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self): self.rows = {}
             async def upsert(self, **kw):
                 self.rows[(kw["account"], kw["plugin"],
-                           kw["cooldown_key"])] = dict(kw)
-            async def get(self, *a, now=None, **k):
-                row = self.rows.get(tuple(a))
+                           kw.get("profile", ""), kw["cooldown_key"])] = dict(kw)
+            async def get(self, *a, now=None, profile="", **k):
+                row = self.rows.get((a[0], a[1], profile, a[2]))
                 if row is None or (now is not None
                                    and row["expires_at"] <= now):
                     return None

@@ -156,10 +156,11 @@ class Lifecycle(_Base):
         self.assertFalse(await self.repo.exists("alpha", "exporter", "main"))
         self.assertTrue(await self.repo.exists("beta", "exporter", "main"))
 
-    async def test_migration_version_is_twelve(self) -> None:
+    async def test_migration_version_is_current(self) -> None:
         from database.schema import latest_version
 
-        self.assertEqual(latest_version(), 12)
+        # 12 = account-owned profiles, 13 = cooldowns' profile dimension
+        self.assertEqual(latest_version(), 13)
 
 
 if __name__ == "__main__":

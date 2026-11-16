@@ -35,8 +35,9 @@ class CooldownService:
     ) -> None:
         self._repo = repository
         self._now = time_fn or time.time
-        # (account, plugin, key) -> {"expires_at":..., ...} restored at boot
-        self._active: dict[tuple[str, str, str], dict[str, Any]] = {}
+        # (account, plugin, profile, key) -> {"expires_at":..., ...} restored at
+        # boot; profile "" is the documented profile-less scope (pre-P1 identity)
+        self._active: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 
     # ---------------------------------------------------------------- boot
     async def restore(self) -> dict[str, int]:
@@ -59,7 +60,9 @@ class CooldownService:
                 LOG.exception("cooldown restore failed (starting empty)")
                 active = []
             for row in active:
-                self._active[(row["account"], row["plugin"], row["cooldown_key"])] = row
+                self._active[
+                    (row["account"], row["plugin"], row.get("profile", ""), row["cooldown_key"])
+                ] = row
                 restored += 1
         if restored or expired:
             LOG.info("cooldowns restored=%d expired_cleared=%d", restored, expired)
@@ -73,6 +76,7 @@ class CooldownService:
         cooldown_key: str,
         duration_seconds: float,
         *,
+        profile: str | None = None,
         source: str = "plugin",
         reason: str = "",
         metadata: dict[str, Any] | None = None,
@@ -92,9 +96,11 @@ class CooldownService:
             raise ValueError(f"cooldown duration must be finite, got {duration_seconds!r}")
         now = self._now()
         expires_at = now + max(0.0, duration)
+        scope = profile or ""
         row = {
             "account": account,
             "plugin": plugin,
+            "profile": scope,
             "cooldown_key": cooldown_key,
             "started_at": now,
             "expires_at": expires_at,
@@ -102,11 +108,12 @@ class CooldownService:
             "reason": reason,
             "metadata": metadata or {},
         }
-        key = (account, plugin, cooldown_key)
+        key = (account, plugin, scope, cooldown_key)
         if self._repo is not None:
             await self._repo.upsert(
                 account=account,
                 plugin=plugin,
+                profile=scope,
                 cooldown_key=cooldown_key,
                 started_at=now,
                 expires_at=expires_at,
@@ -122,7 +129,9 @@ class CooldownService:
             # fresh row also picks up same-key extensions by other
             # processes, matching resync()'s DB-wins rule.
             try:
-                fresh = await self._repo.get(account, plugin, cooldown_key, now=self._now())
+                fresh = await self._repo.get(
+                    account, plugin, cooldown_key, now=self._now(), profile=profile or ""
+                )
             except Exception:
                 LOG.debug("cooldown post-upsert re-read failed", exc_info=True)
                 fresh = row  # repo unreachable: keep the pre-race behavior
@@ -150,7 +159,9 @@ class CooldownService:
         )
         return dict(row)
 
-    async def get(self, account: str, plugin: str, cooldown_key: str) -> dict[str, Any] | None:
+    async def get(
+        self, account: str, plugin: str, cooldown_key: str, *, profile: str | None = None
+    ) -> dict[str, Any] | None:
         """The ACTIVE cooldown row, or None when absent/expired.
 
         Memory-first; consults the repository only on a miss — or ONCE
@@ -159,7 +170,7 @@ class CooldownService:
         expired one is lazily cleared and its memory copy dropped, so the
         round-trip is not repeated on every subsequent get).
         """
-        key = (account, plugin, cooldown_key)
+        key = (account, plugin, profile or "", cooldown_key)
         row = self._active.get(key)
         now = self._now()
         if row is not None and row["expires_at"] > now:
@@ -173,35 +184,47 @@ class CooldownService:
             if self._repo is not None:
                 # expiry-scoped delete: only clears what is still expired
                 try:
-                    await self._repo.clear_expired_for(account, plugin, cooldown_key, self._now())
+                    await self._repo.clear_expired_for(
+                        account, plugin, cooldown_key, self._now(), profile=profile or ""
+                    )
                 except Exception:
                     LOG.debug("lazy cooldown clear failed", exc_info=True)
                 # one-shot re-check: adopts rows EXTENDED by another
                 # process (FINAL-PHASE F8 gap 1 + round-3 — same fix from
                 # both sides); a truly-expired row is gone for good now
-                fresh = await self._repo.get(account, plugin, cooldown_key, now=self._now())
+                fresh = await self._repo.get(
+                    account, plugin, cooldown_key, now=self._now(), profile=profile or ""
+                )
                 if fresh is not None:
                     self._active[key] = fresh
                     return dict(fresh)
             return None
         if self._repo is not None:
-            fresh = await self._repo.get(account, plugin, cooldown_key, now=now)
+            fresh = await self._repo.get(
+                account, plugin, cooldown_key, now=now, profile=profile or ""
+            )
             if fresh is not None:
                 self._active[key] = fresh
                 return dict(fresh)
         return None
 
-    async def remaining(self, account: str, plugin: str, cooldown_key: str) -> float:
+    async def remaining(
+        self, account: str, plugin: str, cooldown_key: str, *, profile: str | None = None
+    ) -> float:
         """Seconds left on a cooldown (0.0 when none/expired)."""
-        row = await self.get(account, plugin, cooldown_key)
+        row = await self.get(account, plugin, cooldown_key, profile=profile)
         if row is None:
             return 0.0
         return max(0.0, float(row["expires_at"]) - self._now())
 
-    async def is_active(self, account: str, plugin: str, cooldown_key: str) -> bool:
-        return await self.get(account, plugin, cooldown_key) is not None
+    async def is_active(
+        self, account: str, plugin: str, cooldown_key: str, *, profile: str | None = None
+    ) -> bool:
+        return await self.get(account, plugin, cooldown_key, profile=profile) is not None
 
-    async def clear(self, account: str, plugin: str, cooldown_key: str) -> bool:
+    async def clear(
+        self, account: str, plugin: str, cooldown_key: str, *, profile: str | None = None
+    ) -> bool:
         """Remove one cooldown (memory + DB).
 
         The repository delete runs FIRST and memory is popped only on
@@ -210,12 +233,15 @@ class CooldownService:
         which still held the row the failed delete never removed).
         """
         existed = False
+        scope = profile or ""
         if self._repo is not None:
-            existed = await self._repo.clear(account, plugin, cooldown_key)
-        popped = self._active.pop((account, plugin, cooldown_key), None)
+            existed = await self._repo.clear(account, plugin, cooldown_key, profile=scope)
+        popped = self._active.pop((account, plugin, scope, cooldown_key), None)
         return existed or popped is not None
 
-    async def active_for(self, account: str, plugin: str | None = None) -> list[dict[str, Any]]:
+    async def active_for(
+        self, account: str, plugin: str | None = None, *, profile: str | None = None
+    ) -> list[dict[str, Any]]:
         """Every active cooldown of one account (optionally one plugin).
 
         AUTHORITATIVE view (repo merge) — used by the cooldowns panel and
@@ -230,11 +256,17 @@ class CooldownService:
             if r["account"] == account
             and r["expires_at"] > now
             and (plugin is None or r["plugin"] == plugin)
+            and (profile is None or r.get("profile", "") == profile)
         ]
         if self._repo is not None:
-            by_key = {(r["account"], r["plugin"], r["cooldown_key"]): i for i, r in enumerate(rows)}
-            for row in await self._repo.active_for(account, plugin=plugin, now=now):
-                key = (account, row["plugin"], row["cooldown_key"])
+            by_key = {
+                (r["account"], r["plugin"], r.get("profile", ""), r["cooldown_key"]): i
+                for i, r in enumerate(rows)
+            }
+            for row in await self._repo.active_for(
+                account, plugin=plugin, now=now, profile=profile
+            ):
+                key = (account, row["plugin"], row.get("profile", ""), row["cooldown_key"])
                 at = by_key.get(key)
                 if at is None:
                     rows.append(row)
@@ -278,7 +310,9 @@ class CooldownService:
         if self._repo is None:
             return 0
         rows = await self._repo.active_all(now=self._now())
-        fresh = {(r["account"], r["plugin"], r["cooldown_key"]): r for r in rows}
+        fresh = {
+            (r["account"], r["plugin"], r.get("profile", ""), r["cooldown_key"]): r for r in rows
+        }
         self._active = fresh
         return len(fresh)
 

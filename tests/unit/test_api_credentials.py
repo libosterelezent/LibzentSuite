@@ -59,27 +59,30 @@ class FakeCooldownRepo:
         self.deleted_accounts: list[str] = []
 
     async def upsert(self, account, plugin, cooldown_key, started_at,
-                     expires_at, source="plugin", reason="", metadata=None):
-        self.rows[(account, plugin, cooldown_key)] = {
-            "account": account, "plugin": plugin, "cooldown_key": cooldown_key,
+                     expires_at, source="plugin", reason="", metadata=None,
+                     profile=""):
+        self.rows[(account, plugin, profile, cooldown_key)] = {
+            "account": account, "plugin": plugin, "profile": profile,
+            "cooldown_key": cooldown_key,
             "started_at": started_at, "expires_at": expires_at,
             "source": source, "reason": reason, "metadata": metadata or {},
         }
 
-    async def get(self, account, plugin, cooldown_key, now=None):
-        row = self.rows.get((account, plugin, cooldown_key))
+    async def get(self, account, plugin, cooldown_key, now=None, profile=""):
+        row = self.rows.get((account, plugin, profile, cooldown_key))
         if row and row["expires_at"] > (now or time.time()):
             return dict(row)
         return None
 
-    async def active_for(self, account, plugin=None, now=None):
+    async def active_for(self, account, plugin=None, now=None, profile=None):
         now = now or time.time()
         return [dict(r) for r in self.rows.values()
                 if r["account"] == account and r["expires_at"] > now
-                and (plugin is None or r["plugin"] == plugin)]
+                and (plugin is None or r["plugin"] == plugin)
+                and (profile is None or r.get("profile", "") == profile)]
 
-    async def clear(self, account, plugin, cooldown_key) -> bool:
-        return self.rows.pop((account, plugin, cooldown_key), None) is not None
+    async def clear(self, account, plugin, cooldown_key, profile="") -> bool:
+        return self.rows.pop((account, plugin, profile, cooldown_key), None) is not None
 
     async def clear_expired(self, now=None) -> int:
         now = now or time.time()

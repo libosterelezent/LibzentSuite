@@ -222,21 +222,21 @@ class SlowCooldownRepo:
         self.release = asyncio.Event()
 
     async def upsert(self, **kw: Any) -> None:
-        key = (kw["account"], kw["plugin"], kw["cooldown_key"])
+        key = (kw["account"], kw["plugin"], kw.get("profile", ""), kw["cooldown_key"])
         self.rows[key] = kw
         self.parked.set()
         await self.release.wait()
 
     async def get(self, account: str, plugin: str, cooldown_key: str,
-                  now: float = None) -> dict[str, Any] | None:
-        row = self.rows.get((account, plugin, cooldown_key))
+                  now: float = None, profile: str = "") -> dict[str, Any] | None:
+        row = self.rows.get((account, plugin, profile, cooldown_key))
         if row is None or (now is not None and row["expires_at"] <= now):
             return None
         return dict(row)
 
     async def clear(self, account: str, plugin: str,
-                    cooldown_key: str) -> bool:
-        return self.rows.pop((account, plugin, cooldown_key), None) is not None
+                    cooldown_key: str, profile: str = "") -> bool:
+        return self.rows.pop((account, plugin, profile, cooldown_key), None) is not None
 
 
 class TestCooldownSetClearRace(_TmpCase):
