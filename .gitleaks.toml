@@ -4,7 +4,8 @@
 
 [allowlist]
 description = "LibzentSuite deliberate false positives"
-
-  [[allowlist.paths]]
-  description = "Synthetic Discord-token-shaped fixture (PHASE 10 tests): fabricated snowflake + filler HMAC, never a live credential"
-  path = '''tests/unit/test_plugin_data\.py'''
+paths = [
+  # Synthetic Discord-token-shaped fixture (PHASE 10 tests): fabricated
+  # snowflake + filler HMAC, never a live credential.
+  '''tests/unit/test_plugin_data\.py''',
+]
