@@ -808,6 +808,43 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         );
         """,
     ),
+    (
+        15,
+        "two-level model P7 — the legacy template fold",
+        """
+        -- The migration contract's one-time fold: every legacy
+        -- (account, plugin, template-name) binding becomes ONE
+        -- account-owned instance, the template body copied verbatim,
+        -- the active pointer landing on it. Dangling bindings (template
+        -- deleted) fold to EMPTY instances — identity preserved, the
+        -- pointer never dangles. Unbound templates fold to nothing.
+        -- Idempotent via NOT EXISTS on the target instance.
+        INSERT INTO account_plugin_profiles
+            (account, plugin, name, description, settings_json,
+             schema_version, created_at, updated_at)
+        SELECT ap.account, ap.plugin, ap.profile,
+               'folded from the legacy template',
+               COALESCE(pp.settings_json, '{}'), 1,
+               strftime('%s','now'), strftime('%s','now')
+        FROM account_plugins ap
+        LEFT JOIN plugin_profiles pp
+               ON pp.plugin = ap.plugin AND pp.name = ap.profile
+        WHERE ap.profile IS NOT NULL AND ap.profile != ''
+          AND NOT EXISTS (
+              SELECT 1 FROM account_plugin_profiles t
+               WHERE t.account = ap.account
+                 AND t.plugin = ap.plugin
+                 AND t.name = ap.profile
+          );
+        INSERT INTO account_plugin_active_profile (account, plugin, profile, updated_at)
+        SELECT ap.account, ap.plugin, ap.profile, strftime('%s','now')
+        FROM account_plugins ap
+        WHERE ap.profile IS NOT NULL AND ap.profile != ''
+        ON CONFLICT(account, plugin) DO UPDATE SET
+            profile = excluded.profile,
+            updated_at = excluded.updated_at;
+        """,
+    ),
 ]
 
 

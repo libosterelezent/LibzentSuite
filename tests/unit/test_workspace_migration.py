@@ -257,7 +257,7 @@ class MigrationV10Tests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(fresh_tmp.cleanup)
         fresh = Database(Path(fresh_tmp.name) / "fresh.db")
         applied = await fresh.connect()
-        self.assertGreaterEqual(applied, 13)
+        self.assertGreaterEqual(applied, 14)
         conn = fresh.connection
         for table in ("workspaces", "workspace_members", "workspace_tasks",
                       "workspace_chains", "chain_runs", "step_executions",
@@ -270,7 +270,7 @@ class MigrationV10Tests(unittest.IsolatedAsyncioTestCase):
 
     async def test_migration_is_idempotent_and_restart_safe(self) -> None:
         applied = await self._migrate()
-        self.assertEqual(applied, 5)  # v10..v14: fold, drops, profiles, cooldown profile, pointer
+        self.assertEqual(applied, 6)  # v10..v15: fold, drops, profiles, cooldown profile, pointer, legacy fold
         again = await self._migrate()  # re-run: nothing new applies
         self.assertEqual(again, 0)
 
