@@ -843,6 +843,7 @@ async def _assemble(
         plugin_data=plugin_data_store,  # PHASE 10: data_* plugin API
         lifecycle=LifecycleGovernor(),  # PHASE-4 (S4): anti-thrash defaults
         signals=signals_outbox,
+        profile_store=database.account_plugin_profiles,  # P3: profile lifecycle
         account_plugins=database.account_plugins,  # capability source
     )
     cleanups.append(("accounts", accounts.stop_all))

@@ -71,6 +71,9 @@ if TYPE_CHECKING:
     from core.plugin_state import PluginStateService
     from core.workspace.signals import SignalOutbox
     from database.plugin_data import PluginDataStore
+    from database.repositories.account_plugin_profiles import (
+        AccountPluginProfilesRepository,
+    )
 
 LOG = logging.getLogger("libzent.services")
 
@@ -305,6 +308,7 @@ class AccountPluginServices:
         plugin_state: PluginStateService | None = None,
         plugin_data: PluginDataStore | None = None,
         signals: SignalOutbox | None = None,  # core.workspace.signals (W4)
+        profile_store: AccountPluginProfilesRepository | None = None,  # P3 profiles
     ) -> None:
         self._account = account
         self._plugin = plugin
@@ -329,6 +333,7 @@ class AccountPluginServices:
         #: unavailable here); exposes the pair+scope-scoped data_* API
         self._plugin_data = plugin_data
         self._signals = signals
+        self._profile_store = profile_store
         #: bounded wait for a task completion ack (seconds; configurable)
         self.task_ack_timeout: float = 30.0
 
@@ -575,6 +580,112 @@ class AccountPluginServices:
         return await self._require_plugin_state().delete_pair(self._account, self._plugin, key)
 
     # -------------------------------------------- plugin data (PHASE 10/B3)
+
+    # ------------------------------------------------- plugin profiles (P3)
+    # The profile lifecycle is PLUGIN-MANAGED by construction: these
+    # methods carry no account/plugin parameters — every operation is
+    # bound to THIS facade's (account, plugin), so a plugin cannot even
+    # express a cross-scope access. Defaults and validation are the
+    # plugin's own code (its cog commands call these store methods with
+    # values the plugin itself computed and checked); the core never
+    # interprets the settings body.
+    def _require_profiles(self) -> AccountPluginProfilesRepository:
+        """The account-owned profile store, or an honest error unwired."""
+        if self._profile_store is None:
+            raise RuntimeError(f"profile store is not wired for {self._account}/{self._plugin}")
+        return self._profile_store
+
+    async def profile_create(
+        self,
+        name: str,
+        description: str = "",
+        settings: dict[str, Any] | None = None,
+        *,
+        schema_version: int = 1,
+    ) -> dict[str, Any]:
+        """Create THIS plugin's profile on THIS account (opaque body).
+
+        Raises:
+            PluginError: the name already exists in this scope.
+        """
+        from core.api import _account_profile_dict
+        from core.errors import DatabaseError
+
+        try:
+            record = await self._require_profiles().create(
+                self._account,
+                self._plugin,
+                name,
+                description,
+                settings,
+                schema_version=schema_version,
+            )
+        except DatabaseError as exc:
+            raise PluginError(str(exc)) from exc  # the store's duplicate report
+        return _account_profile_dict(record)
+
+    async def profile_get(self, name: str) -> dict[str, Any] | None:
+        """One of THIS scope's profiles (None when absent)."""
+        from core.api import _account_profile_dict
+
+        record = await self._require_profiles().get(self._account, self._plugin, name)
+        return _account_profile_dict(record) if record is not None else None
+
+    async def profile_update(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        settings: dict[str, Any] | None = None,
+        schema_version: int | None = None,
+    ) -> dict[str, Any]:
+        """Update named fields of THIS scope's profile.
+
+        Raises:
+            PluginError: the profile does not exist (update never creates).
+        """
+        from core.api import _account_profile_dict
+
+        updated = await self._require_profiles().update(
+            self._account,
+            self._plugin,
+            name,
+            description=description,
+            settings=settings,
+            schema_version=schema_version,
+        )
+        if updated is None:
+            raise PluginError(f"no profile {name!r} for {self._plugin!r} on {self._account!r}")
+        return _account_profile_dict(updated)
+
+    async def profile_delete(self, name: str) -> bool:
+        """Delete THIS scope's profile; True when it existed.
+
+        A pointer at it clears atomically with the delete.
+        """
+        return await self._require_profiles().delete(self._account, self._plugin, name)
+
+    async def profile_list(self) -> list[dict[str, Any]]:
+        """Every profile of THIS scope (name order)."""
+        from core.api import _account_profile_dict
+
+        records = await self._require_profiles().list_for(self._account, self._plugin)
+        return [_account_profile_dict(r) for r in records]
+
+    async def profile_set_active(self, name: str) -> None:
+        """Point THIS scope at one of ITS profiles (fail-closed)."""
+        store = self._require_profiles()
+        if not await store.exists(self._account, self._plugin, name):
+            raise PluginError(
+                f"cannot activate unknown profile {name!r}"
+                f" for {self._plugin!r} on {self._account!r}"
+            )
+        await store.set_active(self._account, self._plugin, name)
+
+    async def profile_active(self) -> str | None:
+        """THIS scope's active profile name (None when unset)."""
+        return await self._require_profiles().get_active(self._account, self._plugin)
+
     def _require_plugin_data(self) -> PluginDataStore:
         """The shared PluginDataStore, or an honest error when unwired."""
         if self._plugin_data is None:

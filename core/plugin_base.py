@@ -245,6 +245,39 @@ class PluginServices(Protocol):
         """Collect matching inbound messages until ``idle_timeout`` passes
         with no new match (port of the audited container semantics)."""
 
+    # ------------------------------------------------ plugin profiles (P3)
+    # The profile lifecycle: bound to THIS (account, plugin) by the
+    # facade — no scope parameters exist, so no cross-scope access can
+    # be expressed. settings bodies are opaque to the core; defaults
+    # and validation are the plugin's own code.
+    async def profile_create(
+        self,
+        name: str,
+        description: str = "",
+        settings: dict[str, Any] | None = None,
+        *,
+        schema_version: int = 1,
+    ) -> dict[str, Any]: ...
+
+    async def profile_get(self, name: str) -> dict[str, Any] | None: ...
+
+    async def profile_update(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        settings: dict[str, Any] | None = None,
+        schema_version: int | None = None,
+    ) -> dict[str, Any]: ...
+
+    async def profile_delete(self, name: str) -> bool: ...
+
+    async def profile_list(self) -> list[dict[str, Any]]: ...
+
+    async def profile_set_active(self, name: str) -> None: ...
+
+    async def profile_active(self) -> str | None: ...
+
     def publish(self, event: Event) -> None:
         """Publish an event on the shared bus (fire-and-forget safe)."""
 

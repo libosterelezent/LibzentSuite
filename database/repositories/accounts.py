@@ -46,6 +46,7 @@ _DEPENDENT_TABLES = (
     "cooldowns",
     "account_plugins",
     "account_plugin_profiles",
+    "account_plugin_active_profile",
 )
 #: kv rows keyed by PREFIX (PHASE-4 S3-G5 defense-in-depth): plugin state
 #: lives in kv under these prefixes; the service-level cascade is primary,

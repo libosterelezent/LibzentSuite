@@ -366,6 +366,7 @@ class AccountManager:
         plugin_state: Any = None,
         plugin_data: Any = None,
         signals: Any = None,  # core.workspace.signals.SignalOutbox (W4)
+        profile_store: Any = None,  # account-owned plugin profiles (P3)
         lifecycle: Any = None,
         account_plugins: Any = None,
     ) -> None:
@@ -412,6 +413,7 @@ class AccountManager:
         #: pair+scope-scoped ``data_*`` plugin API
         self._plugin_data = plugin_data
         self._signals = signals
+        self._profile_store = profile_store
         # typing-indicator RNG (anti-flag: humans trigger typing; disabled
         # by default via the typing_probability account setting = 0.0)
         import random as _random
@@ -2458,6 +2460,7 @@ class AccountManager:
             plugin_state=self._plugin_state,
             plugin_data=self._plugin_data,
             signals=self._signals,
+            profile_store=self._profile_store,
         )
         self._services[key] = services
         return services

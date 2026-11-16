@@ -169,13 +169,24 @@ class AccountPluginProfilesRepository(BaseRepository):
         )
 
     async def delete(self, account: str, plugin: str, name: str) -> bool:
-        """Remove the exact full-scope profile; True when it existed."""
+        """Remove the exact full-scope profile; True when it existed.
+
+        A pointer at the deleted profile clears in the SAME transaction
+        (a dangling active-profile name would fail every resolution).
+        """
         async with self._tx(f"delete profile {account}/{plugin}/{name}") as conn:
             cur = await conn.execute(
                 "DELETE FROM account_plugin_profiles WHERE account=? AND plugin=? AND name=?",
                 (account, plugin, name),
             )
-            return cur.rowcount > 0
+            existed = cur.rowcount > 0
+            if existed:
+                await conn.execute(
+                    "DELETE FROM account_plugin_active_profile"
+                    " WHERE account=? AND plugin=? AND profile=?",
+                    (account, plugin, name),
+                )
+            return existed
 
     async def list_for(self, account: str, plugin: str) -> list[AccountPluginProfileRecord]:
         """Every profile of one (account, plugin) — name order, newest first
@@ -185,3 +196,36 @@ class AccountPluginProfilesRepository(BaseRepository):
             (account, plugin),
         )
         return [_record(row) for row in rows]
+
+    # ------------------------------------------------- active-profile pointer
+    async def set_active(self, account: str, plugin: str, profile: str) -> None:
+        """Point (account, plugin) at one of ITS profiles (upsert).
+
+        Existence is the SERVICE layer's check; this is persistence.
+        """
+        now = time.time()
+        async with self._tx(f"active profile {account}/{plugin} -> {profile}") as conn:
+            await conn.execute(
+                "INSERT INTO account_plugin_active_profile"
+                " (account, plugin, profile, updated_at) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(account, plugin) DO UPDATE SET"
+                " profile=excluded.profile, updated_at=excluded.updated_at",
+                (account, plugin, profile, now),
+            )
+
+    async def get_active(self, account: str, plugin: str) -> str | None:
+        """The active profile name (None when no pointer exists)."""
+        row = await self._fetch_one(
+            "SELECT profile FROM account_plugin_active_profile WHERE account=? AND plugin=?",
+            (account, plugin),
+        )
+        return str(row["profile"]) if row is not None else None
+
+    async def clear_active(self, account: str, plugin: str) -> bool:
+        """Drop the pointer; True when one existed."""
+        async with self._tx(f"clear active profile {account}/{plugin}") as conn:
+            cur = await conn.execute(
+                "DELETE FROM account_plugin_active_profile WHERE account=? AND plugin=?",
+                (account, plugin),
+            )
+            return cur.rowcount > 0

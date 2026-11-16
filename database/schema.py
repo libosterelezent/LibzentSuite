@@ -788,6 +788,26 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         ALTER TABLE cooldowns_v13 RENAME TO cooldowns;
         """,
     ),
+    (
+        14,
+        "two-level model P3 — the active-profile pointer",
+        """
+        -- Which account-owned profile is ACTIVE for one (account, plugin)
+        -- (docs/design/data-management-adoption.md P3). One row per pair,
+        -- updated in place; deleting the pointed-at profile clears the
+        -- pointer (the repository coordinates both tables in one tx).
+        -- Deliberately NOT the legacy account_plugins.profile column:
+        -- that column names LEGACY template profiles until P7 folds
+        -- them into account_plugin_profiles and repoints everything.
+        CREATE TABLE IF NOT EXISTS account_plugin_active_profile (
+            account    TEXT NOT NULL,
+            plugin     TEXT NOT NULL,
+            profile    TEXT NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (account, plugin)
+        );
+        """,
+    ),
 ]
 
 
