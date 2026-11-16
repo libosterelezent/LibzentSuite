@@ -6,7 +6,7 @@ status convergence, bounded task growth, no zombie clients, and a loop
 lag ceiling (the phase-3 limiter-burn regression class becomes a hard
 assertion). Tagged via env var so the default suite stays fast:
 
-    SM_SOAK=1 python -m unittest tests.stress.test_fleet_soak
+    LZ_SOAK=1 python -m unittest tests.stress.test_fleet_soak
 """
 from __future__ import annotations
 
@@ -20,10 +20,10 @@ from core.event_bus import AccountConnected
 from tests.unit.helpers import make_manager
 from tests.unit.test_account_manager import _fast_reconnect_settings
 
-SOAK_ENABLED = bool(os.environ.get("SM_SOAK"))
+SOAK_ENABLED = bool(os.environ.get("LZ_SOAK"))
 
 
-@unittest.skipUnless(SOAK_ENABLED, "set SM_SOAK=1 to run the fleet soak")
+@unittest.skipUnless(SOAK_ENABLED, "set LZ_SOAK=1 to run the fleet soak")
 class FleetSoakTests(unittest.IsolatedAsyncioTestCase):
     async def test_chaos_soak(self) -> None:
         h = make_manager(token_values={

@@ -12,7 +12,7 @@
 #   * is idempotent: restart|stop|status subcommands.
 set -u
 
-PORT="${SM_DASH_PORT:-8070}"
+PORT="${LZ_DASH_PORT:-8070}"
 PIDFILE="/tmp/opencode/sm-dashboard.pid"
 LOG="/tmp/opencode/sm-dashboard.log"
 URL="http://127.0.0.1:${PORT}/"

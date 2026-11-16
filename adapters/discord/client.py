@@ -21,23 +21,24 @@ New in the rewrite:
 
 NOTE: selfbots violate Discord ToS; the framework keeps pacing conservative.
 """
+
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import copy
 import json
 import logging
 import math
 import sys
+import time
 import uuid
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 
 from adapters.base import DiscordMessage
-from adapters.model import _emoji_repr
-from adapters.model import convert_message
+from adapters.model import _emoji_repr, convert_message
 from core._asyncutil import outer_cancel_pending
-from core.credentials import Credentials
 from core.errors import (
     AccessDenied,
     AccountError,
@@ -45,8 +46,14 @@ from core.errors import (
     ServerRateLimit,
     TargetGone,
 )
+from core.plugin_manager.commands import COMMAND_HUB
 
-LOG = logging.getLogger("slaughtermudae.adapter")
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from core.credentials import Credentials
+
+LOG = logging.getLogger("libzent.adapter")
 
 #: how long connect() waits for READY before failing (the library's own
 #: connect loop retries forever — a black-holed gateway must not hang boot)
@@ -86,9 +93,9 @@ _HEADERS_CACHE_TTL = 600.0
 #: keys in super_properties that identify ONE client instance (fork:
 #: utils.py:1804-1806)
 _HEADERS_IDENTITY_KEYS = ("client_launch_id", "client_heartbeat_session_id")
-_headers_cache: dict = {}          # (proxy, proxy_auth) -> (monotonic, result)
-_headers_cache_lock: Optional[asyncio.Lock] = None
-_headers_cache_loop: Any = None    # the loop _headers_cache_lock is bound to
+_headers_cache: dict = {}  # (proxy, proxy_auth) -> (monotonic, result)
+_headers_cache_lock: asyncio.Lock | None = None
+_headers_cache_loop: Any = None  # the loop _headers_cache_lock is bound to
 _headers_patch_installed = False
 
 
@@ -106,8 +113,7 @@ def _headers_lock_for(loop: Any) -> asyncio.Lock:
     return _headers_cache_lock
 
 
-def _encode_super_properties(properties: dict, fallback: str,
-                             discord: Any) -> str:
+def _encode_super_properties(properties: dict, fallback: str, discord: Any) -> str:
     """b64(JSON) exactly like the fork (utils.py:1813 b64encode(_to_json)).
 
     Falls back to the cached encoding when anything unexpected happens —
@@ -115,11 +121,12 @@ def _encode_super_properties(properties: dict, fallback: str,
     """
     to_json = getattr(getattr(discord, "utils", None), "_to_json", None)
     if to_json is None:
+
         def to_json(obj: Any) -> str:  # type: ignore[misc]
             return json.dumps(obj, separators=(",", ":"), ensure_ascii=True)
+
     try:
-        return base64.b64encode(
-            to_json(properties).encode("utf-8")).decode("utf-8")
+        return base64.b64encode(to_json(properties).encode("utf-8")).decode("utf-8")
     except Exception:
         return fallback
 
@@ -170,8 +177,7 @@ def _install_headers_fetch_cache(discord: Any, ttl: float = _HEADERS_CACHE_TTL) 
     original = getattr(original, "_sm_original", original)
     _headers_patch_installed = True
 
-    async def cached_get_api_properties(cls, session, type_, *, proxy=None,
-                                         proxy_auth=None):
+    async def cached_get_api_properties(cls, session, type_, *, proxy=None, proxy_auth=None):
         key = (proxy, proxy_auth)
         loop = asyncio.get_running_loop()
         try:
@@ -194,13 +200,10 @@ def _install_headers_fetch_cache(discord: Any, ttl: float = _HEADERS_CACHE_TTL) 
                 hit = _headers_cache.get(key)
                 if hit is not None and loop.time() - hit[0] < ttl:
                     return _reidentified_copy(hit[1], discord)
-                result = await original(session, type_, proxy=proxy,
-                                        proxy_auth=proxy_auth)
-                _headers_cache[key] = (
-                    loop.time(), _reidentified_copy(result, discord))
+                result = await original(session, type_, proxy=proxy, proxy_auth=proxy_auth)
+                _headers_cache[key] = (loop.time(), _reidentified_copy(result, discord))
                 return result
-        result = await original(session, type_, proxy=proxy,
-                                proxy_auth=proxy_auth)
+        result = await original(session, type_, proxy=proxy, proxy_auth=proxy_auth)
         return result
 
     cached_get_api_properties._sm_original = original  # unwrap marker
@@ -222,8 +225,26 @@ _MESSAGE_DEDUP_MAX = 512
 #: 5s is generous and never suppresses distinct rapid gateway bursts).
 _RICH_EVENT_DEDUP_WINDOW_S = 5.0
 
+#: the fork dispatches 'disconnect' BEFORE its own backoff+RESUME retry —
+#: forwarding those verbatim tears the account down (and burns IDENTIFYs)
+#: for drops the library survives seconds later. A disconnect is only
+#: forwarded to the manager when no on_resumed landed inside this window
+#: (fatal close codes bypass the debounce entirely).
+_DISCONNECT_FORWARD_DELAY_S = 5.0
 
-def _header(headers: Any, name: str) -> Optional[str]:
+#: gateway close codes that make reconnecting pointless (auth/intent
+#: class): 4004 authentication failed, 4010/4011/4012 disqualified
+#: intents/bot, 4013 invalid API version, 4014 disallowed intents.
+#: Revoked-token accounts must stand down instead of reconnect-looping.
+_FATAL_CLOSE_CODES = frozenset({4004, 4010, 4011, 4012, 4013, 4014})
+
+#: ChannelType names (lowercased) that count as TEXT channels for the
+#: picker snapshot: regular text + announcement/news channels (both are
+#: message surfaces); categories/voice/stage/forum are skipped.
+_TEXT_CHANNEL_TYPES = ("text", "news")
+
+
+def _header(headers: Any, name: str) -> str | None:
     """Case-tolerant header lookup (library header dicts vary in casing)."""
     if not headers:
         return None
@@ -243,46 +264,71 @@ class RealDiscordClient:
         # the token lives in self._token; the default object repr is safe
         # today, but a dataclass refactor or vars()-style debugging would
         # leak it into tracebacks/benchmark output.
-        return (f"<RealDiscordClient account={self._account!r}"
-                f" user_id={self.user_id!r} connected="
-                f"{bool(getattr(self._client, 'ws', None))}>")
+        return (
+            f"<RealDiscordClient account={self._account!r}"
+            f" user_id={self.user_id!r} connected="
+            f"{bool(getattr(self._client, 'ws', None))}>"
+        )
 
     def __init__(
         self,
         token: str,
-        logger: Optional[logging.Logger] = None,
-        identify_gate: Optional["IdentifyGate"] = None,
-        command_prefix: Optional[str] = None,
+        logger: logging.Logger | None = None,
+        identify_gate: IdentifyGate | None = None,
+        command_prefix: str | None = None,
+        owner_ids: frozenset[int] = frozenset(),
+        prefix_mode: str = "mention",
+        prefix_symbol: str = "",
+        access_checker: Any | None = None,
     ) -> None:
         self._token = token
-        self._discord: Any = None          # the discord module (set in connect)
-        self._client: Any = None           # the live Client instance
+        self._discord: Any = None  # the discord module (set in connect)
+        self._client: Any = None  # the live Client instance
         self._ready = asyncio.Event()
-        self._startup_error: Optional[Exception] = None
+        self._startup_error: Exception | None = None
         self._connect_aborted = False  # stop()/disconnect raced a pending connect
         self._zombie_tasks: set = set()  # un-reaped run tasks (strong refs)
-        self._run_task: Optional["asyncio.Task"] = None  # strong ref (see connect)
+        self._run_task: asyncio.Task | None = None  # strong ref (see connect)
         self._logger = logger or LOG
         #: self-command prefix ("" = disabled; "@me" = when_mentioned).
         #: When set, the adapter builds an ext.commands Bot in self_bot
         #: mode: the account's OWN messages become invocable commands,
         #: other users' messages are skipped by the library's check.
         self._command_prefix = command_prefix or ""
+        #: owner gate for self-commands (LEGACY env path — kept for
+        #: unwired stacks; the authoritative gate is access_checker)
+        self._owner_ids = frozenset(owner_ids or ())
+        #: per-account prefix configuration from the admin panel:
+        #: mode "mention" | "symbol" | "both" (default mention). Resolved
+        #: against the env default: symbol/both REQUIRE a symbol; when
+        #: the mode is mention (or unset) the env/@me default applies.
+        self._prefix_mode = prefix_mode or "mention"
+        self._prefix_symbol = prefix_symbol or ""
+        #: async (account, invoker_id) -> bool — the AccessManager's
+        #: can_invoke (per-account list + admin bypass, fail-closed).
+        #: When wired it REPLACES the env owner-ids gate entirely.
+        self._access_checker = access_checker
         self._identify_gate = identify_gate  # shared per process (factory-owned)
         #: best-effort account label for domain error messages (set by factory)
         self._account = ""
+        #: self-command registry state: name -> spec (latest published set)
+        #: and the names currently registered on the Bot (rebuild diffing)
+        self._self_command_specs: dict = {}
+        self._self_command_names: set = set()
+        #: wall-clock anchor for the `pg` uptime stat (set at READY)
+        self._connected_since: float | None = None
         #: callbacks assigned by the account manager BEFORE connect()
-        self.on_message: Optional[Callable[[DiscordMessage], None]] = None
-        self.on_disconnect: Optional[Callable[[str], None]] = None
+        self.on_message: Callable[[DiscordMessage], None] | None = None
+        self.on_disconnect: Callable[[str], None] | None = None
         # declared here so the adapter satisfies its own protocol contract
         # (adapters/base.py) even when wired by someone other than the
         # account manager — reading an undeclared attr would raise inside
         # library dispatch, which logs-and-swallows => silently dropped
         # edit/delete/reaction events (isolation audit K17)
-        self.on_message_edit: Optional[Callable[..., None]] = None
-        self.on_message_delete: Optional[Callable[..., None]] = None
-        self.on_reaction: Optional[Callable[..., None]] = None
-        self.user_id: Optional[int] = None
+        self.on_message_edit: Callable[..., None] | None = None
+        self.on_message_delete: Callable[..., None] | None = None
+        self.on_reaction: Callable[..., None] | None = None
+        self.user_id: int | None = None
         #: session liveness (SimClient parity): True only between a
         #: successful connect() and the terminal exit of the client run /
         #: disconnect() — gateway drops do NOT flip it (the library
@@ -292,6 +338,25 @@ class RealDiscordClient:
         #: raw/rich double-dispatch suppression keys (see
         #: _RICH_EVENT_DEDUP_WINDOW_S) — key -> loop-monotonic timestamp
         self._seen_event_keys: dict = {}
+        #: structured gateway close code of the LAST disconnect dispatch
+        #: (int or None) — the parallel-attribute exposure of item 4: the
+        #: reason string stays human text plus a 'close=NNNN' sentinel,
+        #: while this attribute carries the code for future manager
+        #: classification without string parsing
+        self.last_close_code: int | None = None
+        #: True once a close code in _FATAL_CLOSE_CODES was observed: the
+        #: credential/intent class is broken, the account must stand down
+        #: instead of reconnect-looping (manager reads this later)
+        self.fatal_close: bool = False
+        #: debounced disconnect forwarding (see _DISCONNECT_FORWARD_DELAY_S):
+        #: the pending reason and the debounce task (strong ref — the loop
+        #: only weak-references tasks; cancelled by on_resumed/disconnect())
+        self._disconnect_pending_reason: str | None = None
+        self._disconnect_debounce: asyncio.Task | None = None
+        #: identify-gate slot accounting: counted once at connect(),
+        #: released once at permanent teardown (release-once guard — see
+        #: IdentifyGate.release)
+        self._gate_counted = False
 
     def _message_already_seen(self, message_id: Any) -> bool:
         """True when this inbound id arrived recently (gateway RESUME replay).
@@ -310,7 +375,13 @@ class RealDiscordClient:
             for mid in [m for m, t in seen.items() if t < cutoff]:
                 del seen[mid]
             if len(seen) >= _MESSAGE_DEDUP_MAX:
-                seen.clear()
+                # capacity with all entries still young: evict
+                # OLDEST-BY-TIMESTAMP (keep the newest half). Clearing the
+                # whole window re-published every replayed dispatch after a
+                # >512-message burst RESUME — exactly the burst the window
+                # exists to absorb (audit fix).
+                for mid in sorted(seen, key=seen.get)[: len(seen) // 2]:
+                    del seen[mid]
         if message_id in seen:
             seen[message_id] = now
             return True
@@ -353,11 +424,13 @@ class RealDiscordClient:
             getattr(payload, "message_id", None),
             getattr(payload, "channel_id", None),
             getattr(payload, "guild_id", None),
-            user_id, emoji_text, payload,
+            user_id,
+            emoji_text,
+            payload,
         )
         self._mark_event_key(
-            ("reaction", kind, getattr(payload, "message_id", None),
-             user_id, emoji_text))
+            ("reaction", kind, getattr(payload, "message_id", None), user_id, emoji_text)
+        )
 
     # ------------------------------------------------------------ labelling
     @property
@@ -369,7 +442,35 @@ class RealDiscordClient:
     def account(self, name: str) -> None:
         self._account = str(name or "")
 
+    @property
+    def _commands_on(self) -> bool:
+        """Is the self-command layer built for this client?
+
+        On when the env-level prefix is set OR the admin panel's access
+        gate is wired — the panel's per-account prefix mode/symbol is
+        the real configuration surface, and keying on the (usually
+        commented-out) env prefix alone left the whole layer dead on a
+        default install. Still fail-closed: the invoker gate rejects
+        everyone not allow-listed or admin.
+        """
+        return bool(self._command_prefix) or self._access_checker is not None
+
     # ------------------------------------------------------------- lifecycle
+    def _resolve_prefix(self, _ext_commands: Any):
+        """Resolve THIS account's command prefix from the admin-panel
+        config (mode mention/symbol/both) over the env default."""
+        mode = (self._prefix_mode or "mention").lower()
+        env_prefix = self._command_prefix
+        when_mentioned = _ext_commands.when_mentioned
+        if mode == "symbol" and self._prefix_symbol:
+            return self._prefix_symbol
+        if mode == "both" and self._prefix_symbol:
+            return _ext_commands.when_mentioned_or(self._prefix_symbol)
+        # mention (default) or unresolvable custom -> mentionable form
+        if env_prefix == "@me":
+            return when_mentioned
+        return env_prefix if env_prefix else when_mentioned
+
     async def connect(self) -> None:
         """Import the library, wire callbacks, start the client, await ready.
 
@@ -377,6 +478,16 @@ class RealDiscordClient:
             AccountError: library missing, client failed to start, or the
                 client connected without a user id (bad token).
         """
+        # idempotency (audit fix): a second invocation while a first is
+        # pending (live _run_task) or a client is already built would
+        # silently orphan the first run task — its finally then sets the
+        # NEW ready event while the orphan gets garbage-collected mid-run
+        # with unclosed sessions.
+        if (self._run_task is not None and not self._run_task.done()) or self._client is not None:
+            raise AccountError(
+                "live client already connected/connecting — disconnect() "
+                "before starting another session"
+            )
         try:
             import discord  # type: ignore[import-untyped]  # discord.py-self fork
         except ImportError as exc:
@@ -393,41 +504,51 @@ class RealDiscordClient:
         # retry_after in-request (http.py:991-1018) and our
         # RateLimited→ServerRateLimit mapping can never fire — the pinned
         # discord.py-self 2.1.0 accepts the kwarg (min-clamped at 30 by
-        # http.py:637); the TypeError fallback covers only exotic/test
-        # layouts without it.
+        # http.py:637); the plain-Client TypeError fallback below covers
+        # only exotic/test layouts without it, while the Bot construction
+        # is fully contained (TypeError -> AccountError, no blind retry).
+        # placeholder — replaced below
         # SELF-COMMAND layer (upstream): with a prefix configured,
-        # construct the ext.commands Bot (self_bot=True) instead of a
-        # plain Client — own messages become invocable commands, other
-        # users' are skipped by the library's own check. With no prefix,
+        # construct the ext.commands Bot (user_bot=True) instead of a
+        # plain Client. user_bot is the correct mode for this framework:
+        # ANY owner in OWNER_USER_IDS may command the account (the
+        # multi-account model — one owner typing, every framework account
+        # responding), whereas self_bot=True would dispatch only the
+        # account's OWN messages. user_bot's _skip_check lets every
+        # message reach dispatch, so ownership is enforced by OUR
+        # invoker gate (allowed_invoker) — fail-closed. With no prefix,
         # behavior is exactly today's (plain Client, no command
         # machinery).
-        if self._command_prefix:
+        if self._commands_on:
             from discord.ext import commands as _ext_commands
-            prefix = self._command_prefix
-            if prefix == "@me":
-                prefix = _ext_commands.when_mentioned
+
+            prefix = self._resolve_prefix(_ext_commands)
+            # ONE contained construction (audit fix): the old blind retry
+            # without max_ratelimit_timeout assumed THAT kwarg was the
+            # offender — any other TypeError (prefix resolver, layout
+            # drift) re-raised uncaught and violated the AccountError
+            # contract connect() promises.
             try:
                 self._client = _ext_commands.Bot(
-                    command_prefix=prefix, self_bot=True,
+                    command_prefix=prefix,
+                    user_bot=True,
+                    owner_ids=set(self._owner_ids),
                     help_command=None,
                     max_ratelimit_timeout=MAX_RATELIMIT_TIMEOUT_S,
                 )
-            except TypeError:
-                self._logger.warning(
-                    "discord client library ignores max_ratelimit_timeout — "
-                    "in-request 429 sleeps are UNBOUNDED on this layout")
-                self._client = _ext_commands.Bot(
-                    command_prefix=prefix, self_bot=True,
-                    help_command=None,
-                )
+            except TypeError as exc:
+                raise AccountError(
+                    f"discord client library rejected the Bot construction "
+                    f"({exc!r}) — incompatible layout or configuration"
+                ) from exc
         else:
             try:
-                self._client = discord.Client(
-                    max_ratelimit_timeout=MAX_RATELIMIT_TIMEOUT_S)
+                self._client = discord.Client(max_ratelimit_timeout=MAX_RATELIMIT_TIMEOUT_S)
             except TypeError:
                 self._logger.warning(
                     "discord client library ignores max_ratelimit_timeout — "
-                    "in-request 429 sleeps are UNBOUNDED on this layout")
+                    "in-request 429 sleeps are UNBOUNDED on this layout"
+                )
                 self._client = discord.Client()
         if self._identify_gate is not None:
             # K8: shadowing the instance method is the library-sanctioned
@@ -436,16 +557,26 @@ class RealDiscordClient:
             self._client.before_identify_hook = self._identify_gate.acquire
         _install_headers_fetch_cache(discord)
         # SELF-COMMAND layer: when a prefix is configured, use the
-        # library's ext.commands Bot in self_bot mode — the account's OWN
-        # messages become invocable commands (typed by the user logged in
-        # as this account), while every other user's messages are skipped
-        # by the library's own _skip_check. The plugin EVENT path keeps
-        # the self-echo filter below: a command never becomes a plugin
+        # library's ext.commands Bot in user_bot mode — ANY owner from
+        # OWNER_USER_IDS (including a different framework account's
+        # user) can invoke commands on this account; the adapter's
+        # allowed_invoker gate enforces ownership fail-closed (non-owners
+        # get no reply at all). The plugin EVENT path keeps the
+        # self-echo filter below: a command never becomes a plugin
         # event, and a plugin's own output never re-triggers anything.
-        if self._command_prefix:
+        if self._commands_on:
             self._install_command_layer(discord)
         self._ready = asyncio.Event()
         self._startup_error = None
+        # fresh-session close-code state (a reconnecting client instance
+        # never re-enters connect(), but reset defensively anyway)
+        self.last_close_code = None
+        self.fatal_close = False
+        self._cancel_disconnect_debounce()
+        if self._identify_gate is not None:
+            # this client now occupies one identify-gate slot (released
+            # once at permanent teardown — see _run/disconnect)
+            self._gate_counted = True
 
         @self._client.event
         async def on_ready() -> None:
@@ -458,9 +589,11 @@ class RealDiscordClient:
             # logger (raw stderr) — invisible to LogService/the dashboard
             try:
                 import traceback
+
                 self._logger.error(
                     "discord event handler %s failed: %s",
-                    event_method, traceback.format_exception_only(*sys.exc_info()[:2])[-1].strip(),
+                    event_method,
+                    traceback.format_exception_only(*sys.exc_info()[:2])[-1].strip(),
                 )
                 self._logger.debug("handler traceback:", exc_info=True)
             except Exception:
@@ -468,40 +601,35 @@ class RealDiscordClient:
 
         @self._client.event
         async def on_disconnect() -> None:
-            if self.on_disconnect is not None:
-                # M1/S2-M1 (observability): surface the gateway close code so
-                # "gateway closed" can be told apart (1000 = server-initiated
-                # close, 4007/4015-style = session limits, None = abnormal).
-                # discord.py-self only sets ws._close_code when IT closes;
-                # a remote CLOSE frame lands on the underlying socket —
-                # check that too or Discord-side culls show no code at all.
-                ws = getattr(self._client, "ws", None)
-                code = getattr(ws, "close_code", None)
-                if code is None:
-                    code = getattr(ws, "_close_code", None)
-                if code is None:
-                    code = getattr(getattr(ws, "socket", None),
-                                   "close_code", None)
-                reason = ("gateway closed" if code is None
-                          else f"gateway closed (code={code})")
-                self.on_disconnect(reason)
+            # Debounced + close-code-aware loss handling (audit fixes):
+            # the fork dispatches 'disconnect' BEFORE its own backoff +
+            # RESUME retry, so a verbatim forward tore the manager down
+            # for drops the library itself survives. See
+            # _handle_gateway_disconnect for the classification.
+            self._handle_gateway_disconnect()
+
+        @self._client.event
+        async def on_resumed() -> None:
+            # the fork RESUMED the session inside THIS client: any pending
+            # debounced loss forward is moot (the replay window survived)
+            self._cancel_disconnect_debounce()
 
         @self._client.event
         async def on_message(message: Any) -> None:
             # SELF-COMMAND path: when the command layer is active, route
-            # every message through process_commands — with self_bot=True,
-            # the library's _skip_check means ONLY the account's OWN
-            # messages reach command dispatch (other users' are silently
-            # dropped by get_context, so random users can't fire commands).
+            # every message through process_commands — user_bot mode lets
+            # the library hand EVERY message to dispatch (its _skip_check
+            # never skips), and ownership is enforced per-invocation by
+            # _dispatch_self_command's allowed_invoker gate, so random
+            # users can never fire a command (fail-closed).
             # This runs BEFORE the self-echo filter: commands and events
             # are SEPARATE paths (a command never becomes a plugin event,
             # and the account's own output never re-triggers plugins).
-            if self._command_prefix:
+            if self._commands_on:
                 try:
                     await self._client.process_commands(message)
                 except Exception:
-                    self._logger.debug(
-                        "self-command dispatch failed", exc_info=True)
+                    self._logger.debug("self-command dispatch failed", exc_info=True)
             if self.on_message is None or message.author.id == self.user_id:
                 return
             if self._message_already_seen(message.id):
@@ -520,57 +648,76 @@ class RealDiscordClient:
 
         @self._client.event
         async def on_message_edit(before: Any, after: Any) -> None:
-            if self.on_message_edit is None or after.author.id != self.user_id:
+            # others-only (audit fix, raw-path parity): self-authored
+            # edits never echo back — the INVERTED old filter published
+            # ONLY self-authored events, leaving the _mark_event_key
+            # dedup guard below dead code (the raw handler already
+            # skips self-authored dispatches).
+            if self.on_message_edit is None or after.author.id == self.user_id:
                 return
             if self._mark_event_key(("edit", after.id)):
                 return  # the raw handler already published this dispatch
-            self.on_message_edit(convert_message(
-                after, dm=isinstance(after.channel, self._discord.DMChannel)))
+            self.on_message_edit(
+                convert_message(after, dm=isinstance(after.channel, self._discord.DMChannel))
+            )
 
         @self._client.event
         async def on_message_delete(message: Any) -> None:
-            if self.on_message_delete is None or message.author.id != self.user_id:
+            # others-only (audit fix — see on_message_edit)
+            if self.on_message_delete is None or message.author.id == self.user_id:
                 return
             if self._mark_event_key(("delete", message.id)):
                 return  # the raw handler already published this dispatch
             guild = getattr(message, "guild", None)
             self.on_message_delete(
-                message.id, message.channel.id,
-                getattr(guild, "id", None) if guild else None, message,
+                message.id,
+                message.channel.id,
+                getattr(guild, "id", None) if guild else None,
+                message,
             )
 
         @self._client.event
         async def on_reaction_add(reaction: Any, user: Any) -> None:
-            if self.on_reaction is None or user.id != self.user_id:
+            # others-only (audit fix — see on_message_edit)
+            if self.on_reaction is None or user.id == self.user_id:
                 return
             message = reaction.message
             emoji_text = _emoji_repr(reaction.emoji)
-            if self._mark_event_key(
-                    ("reaction", "add", message.id, user.id, emoji_text)):
+            if self._mark_event_key(("reaction", "add", message.id, user.id, emoji_text)):
                 return  # the raw handler already published this dispatch
-            guild = (getattr(message, "guild", None)
-                     or getattr(getattr(message, "channel", None), "guild", None))
+            guild = getattr(message, "guild", None) or getattr(
+                getattr(message, "channel", None), "guild", None
+            )
             self.on_reaction(
-                "add", message.id, message.channel.id,
+                "add",
+                message.id,
+                message.channel.id,
                 getattr(guild, "id", None) if guild else None,
-                user.id, emoji_text, (reaction, user),
+                user.id,
+                emoji_text,
+                (reaction, user),
             )
 
         @self._client.event
         async def on_reaction_remove(reaction: Any, user: Any) -> None:
-            if self.on_reaction is None or user.id != self.user_id:
+            # others-only (audit fix — see on_message_edit)
+            if self.on_reaction is None or user.id == self.user_id:
                 return
             message = reaction.message
             emoji_text = _emoji_repr(reaction.emoji)
-            if self._mark_event_key(
-                    ("reaction", "remove", message.id, user.id, emoji_text)):
+            if self._mark_event_key(("reaction", "remove", message.id, user.id, emoji_text)):
                 return  # the raw handler already published this dispatch
-            guild = (getattr(message, "guild", None)
-                     or getattr(getattr(message, "channel", None), "guild", None))
+            guild = getattr(message, "guild", None) or getattr(
+                getattr(message, "channel", None), "guild", None
+            )
             self.on_reaction(
-                "remove", message.id, message.channel.id,
+                "remove",
+                message.id,
+                message.channel.id,
                 getattr(guild, "id", None) if guild else None,
-                user.id, emoji_text, (reaction, user),
+                user.id,
+                emoji_text,
+                (reaction, user),
             )
 
         # ------------------------------------------------ raw (uncached) events
@@ -592,11 +739,12 @@ class RealDiscordClient:
             author = getattr(message, "author", None)
             if author is not None and getattr(author, "id", None) == self.user_id:
                 return
-            self.on_message_edit(convert_message(
-                message,
-                dm=isinstance(getattr(message, "channel", None),
-                              self._discord.DMChannel),
-            ))
+            self.on_message_edit(
+                convert_message(
+                    message,
+                    dm=isinstance(getattr(message, "channel", None), self._discord.DMChannel),
+                )
+            )
             self._mark_event_key(("edit", payload.message_id))
 
         @self._client.event
@@ -611,8 +759,10 @@ class RealDiscordClient:
             if author is not None and getattr(author, "id", None) == self.user_id:
                 return
             self.on_message_delete(
-                payload.message_id, payload.channel_id,
-                getattr(payload, "guild_id", None), cached,
+                payload.message_id,
+                payload.channel_id,
+                getattr(payload, "guild_id", None),
+                cached,
             )
             self._mark_event_key(("delete", payload.message_id))
 
@@ -635,14 +785,13 @@ class RealDiscordClient:
             # AUDIT FIX (ported): startup failures must FAIL the connect
             # instead of silently yielding a session with user_id=None
             if self._startup_error is not None:
-                raise AccountError(
-                    f"live client failed to start: {self._startup_error}")
+                raise AccountError(f"live client failed to start: {self._startup_error}")
             if self.user_id is None:
                 if self._connect_aborted:  # stop()/disconnect raced us:
                     raise ConnectionError(  # NOT an auth-shaped failure
-                        "live client connect aborted by a concurrent stop")
-                raise AccountError(
-                    "live client connected without a user (bad token?)")
+                        "live client connect aborted by a concurrent stop"
+                    )
+                raise AccountError("live client connected without a user (bad token?)")
         except asyncio.TimeoutError:
             await self._cancel_run_task()
             await self._close_library_client()
@@ -655,15 +804,15 @@ class RealDiscordClient:
             # close the LIBRARY client too — reaping only the _run task
             # leaves the aiohttp/curl sessions (and any half-open gateway)
             # unreaped; Client.close() is the sanctioned teardown.
-            try:
+            # half-open clients can throw on close
+            with contextlib.suppress(Exception):
                 await self._client.close()
-            except Exception:  # half-open clients can throw on close
-                pass
             await self._cancel_run_task()  # no orphaned client task
             await self._close_library_client()  # aiohttp/curl session leak
             raise
         self._connect_aborted = False
         self.connected = True
+        self._connected_since = time.monotonic()  # `pg` uptime anchor
         self._logger.info("live client connected as user %s", self.user_id)
 
     async def _close_library_client(self) -> None:
@@ -676,6 +825,109 @@ class RealDiscordClient:
         except Exception as exc:
             self._logger.debug("library client close raised %s", exc)
 
+    def _handle_gateway_disconnect(self) -> None:
+        """Classify one gateway 'disconnect' dispatch and route it.
+
+        * the close code is sniffed off the websocket (discord.py-self
+          only sets ws._close_code when IT closes; a remote CLOSE frame
+          lands on the underlying socket) and exposed STRUCTURED on
+          ``self.last_close_code`` (the reason string also carries a
+          machine-parseable ``close=NNNN`` sentinel);
+        * fatal codes (4004/4010-4014, the auth/intent class) set
+          ``self.fatal_close`` and forward IMMEDIATELY — the account
+          must stand down, not reconnect-loop a revoked token;
+        * a dispatch while ``not self.connected`` (startup) is dropped:
+          connect()'s AccountError owns reporting startup failures;
+        * everything else is DEBOUNCED: the fork dispatches 'disconnect'
+          before its own backoff+RESUME retry, so the forward only
+          happens when no on_resumed lands inside
+          ``_DISCONNECT_FORWARD_DELAY_S``.
+        """
+        ws = getattr(self._client, "ws", None)
+        code = getattr(ws, "close_code", None)
+        if code is None:
+            code = getattr(ws, "_close_code", None)
+        if code is None:
+            code = getattr(getattr(ws, "socket", None), "close_code", None)
+        self.last_close_code = code if isinstance(code, int) else None
+        fatal = self.last_close_code in _FATAL_CLOSE_CODES
+        if fatal:
+            self.fatal_close = True
+        reason = (
+            "gateway closed"
+            if self.last_close_code is None
+            else f"gateway closed (close={self.last_close_code})"
+        )
+        if fatal:
+            reason += " fatal"
+        if not self.connected:
+            return  # startup failure: connect()'s AccountError reports it
+        if fatal:
+            self._cancel_disconnect_debounce()
+            self._forward_disconnect(reason)
+            return
+        self._schedule_disconnect_debounce(reason)
+
+    def _cancel_disconnect_debounce(self) -> None:
+        """Drop any pending debounced forward (resume landed / teardown)."""
+        task, self._disconnect_debounce = self._disconnect_debounce, None
+        self._disconnect_pending_reason = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _schedule_disconnect_debounce(self, reason: str) -> None:
+        """Arm the loss forward: fire only if no resume lands in time."""
+        self._cancel_disconnect_debounce()
+        self._disconnect_pending_reason = reason
+        # strong ref on self (the loop only weak-references tasks) — the
+        # same discipline as _run_task/_zombie_tasks
+        self._disconnect_debounce = asyncio.get_running_loop().create_task(
+            self._disconnect_debounce_run()
+        )
+
+    async def _disconnect_debounce_run(self) -> None:
+        try:
+            await asyncio.sleep(_DISCONNECT_FORWARD_DELAY_S)
+        except asyncio.CancelledError:
+            raise
+        reason, self._disconnect_pending_reason = self._disconnect_pending_reason, None
+        self._disconnect_debounce = None
+        if reason is not None:
+            self._forward_disconnect(reason)
+
+    def _forward_disconnect(self, reason: str) -> None:
+        if self.on_disconnect is None:
+            return
+        try:
+            self.on_disconnect(reason)
+        except Exception:
+            # a manager-side callback bug must never kill the debounce task
+            self._logger.exception("on_disconnect callback failed")
+
+    def _flush_pending_disconnect(self) -> None:
+        """Forward a pending debounced loss NOW — the client run exited,
+        so no RESUME can land anymore (prompt terminal reporting)."""
+        reason = self._disconnect_pending_reason
+        self._cancel_disconnect_debounce()
+        if reason is not None:
+            self._forward_disconnect(reason)
+
+    def _release_identify_slot(self) -> None:
+        """Return this client's identify-gate slot (permanent teardown).
+
+        Counted once per client in connect(); the guard flag makes the
+        release idempotent across _run's exit and disconnect() so a
+        reconnect cycle (fresh client per attempt) never ratchets the
+        gate's ``expected`` down below the live fleet.
+        """
+        if self._identify_gate is None or not self._gate_counted:
+            return
+        self._gate_counted = False
+        try:
+            self._identify_gate.release()
+        except Exception:
+            self._logger.debug("identify gate release failed", exc_info=True)
+
     async def _run(self) -> None:
         """Run the client until it exits; capture startup errors for connect()."""
         try:
@@ -684,10 +936,18 @@ class RealDiscordClient:
             raise
         except Exception as exc:  # startup failures must surface via connect()
             self._logger.error("live client terminated: %s", exc)
+            if self.fatal_close:
+                self._logger.error(
+                    "terminal gateway close code %s (fatal auth/intent "
+                    "class) — the account must stand down",
+                    self.last_close_code,
+                )
             self._startup_error = exc
         finally:
             self.connected = False  # start() returned: the session is over
             self._ready.set()
+            self._release_identify_slot()
+            self._flush_pending_disconnect()
 
     async def _cancel_run_task(self) -> None:
         """Cancel + reap the background client task (idempotent)."""
@@ -710,84 +970,221 @@ class RealDiscordClient:
     def _install_command_layer(self, discord: Any) -> None:
         """Register the self-command surface on the ext.commands Bot.
 
-        Commands run ONLY for the account's OWN messages (self_bot=True +
-        the library's _skip_check). Each command is a thin pass-through:
-        it re-publishes its stripped content as a synthetic MessageReceived
-        through the adapter's normal event callback, so the ROLL/STOP/SOULCOPY
-        trigger words work exactly as if an owner had typed them — same
-        plugin path, same owner check (the account's own Discord user id
-        must be in OWNER_USER_IDS in .env), same paced pipeline.
+        The Bot runs in user_bot mode: dispatch receives messages from
+        EVERYONE, and each invocation is gated on the actual TYPER being
+        an OWNER_USER_IDS owner (allowed_invoker — fail-closed on an
+        empty owner set or an unknown invoker). Any owner can command
+        any framework account; non-owners get no reply at all.
 
-        Unknown commands (anything after the prefix that isn't registered
-        below) are silently ignored — they do NOT reach the event bus.
+        The concrete verb set comes from the process-wide self-command
+        registry (:data:`core.plugin_manager.commands.COMMAND_HUB`): the
+        plugin manager publishes an account's (assigned ∧ enabled)
+        commands there and this layer rebuilds its Bot registrations from
+        whatever is current — framework verbs (help/pg/say) plus every
+        plugin-declared command (a one-liner ``COMMANDS`` entry). There
+        are no legacy trigger pass-throughs: every verb is a registry
+        command.
+
+        Unknown commands (anything after the prefix that isn't registered)
+        are silently ignored — they do NOT reach the event bus.
         """
         from discord.ext import commands as ext_commands
+
         bot = self._client
         adapter = self
-
-        @bot.command(name="roll")
-        async def _roll(ctx):
-            adapter._publish_self_trigger(ctx, "roll")
-
-        @bot.command(name="rollstop")
-        async def _rollstop(ctx):
-            adapter._publish_self_trigger(ctx, "rollstop")
-
-        @bot.command(name="slcopy")
-        async def _slcopy(ctx):
-            adapter._publish_self_trigger(ctx, "slcopy")
 
         @bot.event
         async def on_command_error(ctx, error):
             # unknown commands are NOT pass-throughs — silently drop them
             # (a typo'd prefix must not leak content into the event bus)
             if not isinstance(error, ext_commands.errors.CommandNotFound):
-                adapter._logger.debug(
-                    "self-command error: %s", error, exc_info=True)
+                adapter._logger.debug("self-command error: %s", error, exc_info=True)
 
-    def _publish_self_trigger(self, ctx: Any, trigger: str) -> None:
-        """Re-publish a self-command as a synthetic MessageReceived event.
+        # registry-driven verbs: subscribe delivers the CURRENT set and
+        # every later publish (assignment/enable mutations) rebuilds us
+        COMMAND_HUB.subscribe(
+            self._account,
+            self.set_plugin_commands,
+            stats_provider=self._self_command_stats,
+        )
 
-        Routes through ``self.on_message`` (the account-manager callback),
-        which publishes to the bus with the account's identity. The plugin
-        owner check then applies normally: the framework account's own
-        Discord user id must be in OWNER_USER_IDS (documented requirement).
+    # ------------------------------------------------------- self-commands
+    def set_plugin_commands(self, specs: Any) -> None:
+        """Adopt a newly published command set (hub → client).
+
+        Stores the specs and (once the Bot + command layer exist) rebuilds
+        the Bot registrations by DIFF: names that disappeared are removed,
+        names that appeared are registered — assignment/enable mutations
+        take effect on the live account without a reconnect.
         """
-        if self.on_message is None:
-            return
+        self._self_command_specs = {
+            getattr(spec, "name", ""): spec for spec in (specs or ()) if getattr(spec, "name", "")
+        }
+        self._rebuild_self_commands()
+
+    def _rebuild_self_commands(self) -> None:
+        """Sync the Bot's registered registry commands with the stored set."""
+        bot = self._client
+        register = getattr(bot, "command", None)
+        if bot is None or not callable(register):
+            return  # no Bot (no prefix / pre-connect): specs stay stored
+        wanted = set(self._self_command_specs)
+        for stale in sorted(self._self_command_names - wanted):
+            with contextlib.suppress(Exception):
+                bot.remove_command(stale)
+        for fresh in sorted(wanted - self._self_command_names):
+            self._register_self_command(fresh)
+        self._self_command_names = wanted
+
+    def _register_self_command(self, name: str) -> None:
+        """Register ONE registry command as a thin Bot pass-through."""
+        bot = self._client
+        adapter = self
+
+        async def _invoke(ctx):
+            await adapter._dispatch_self_command(ctx, name)
+
         try:
+            bot.command(name=name)(_invoke)
+        except Exception:
+            self._logger.exception("self-command registration failed: %s", name)
+
+    def allowed_invoker(self, invoker_id: int | None) -> bool:
+        """The gate for one invocation (LEGACY sync view).
+
+        The AUTHORITATIVE gate is :meth:`allowed_invoker_async`: the
+        AccessManager's per-account list + admin bypass (fail-closed on
+        an empty list). This sync view exists for paths that cannot
+        await; when an access_checker is wired it returns the env-set
+        answer ONLY as a pre-filter — dispatch always re-checks async.
+        """
+        if invoker_id is None:
+            return False
+        return invoker_id in self._owner_ids
+
+    async def allowed_invoker_async(self, invoker_id: int | None) -> bool:
+        """THE command gate: AccessManager.can_invoke (per-account
+        permission list, admin bypass, fail-closed). Falls back to the
+        legacy env owner-ids view only on stacks with no access
+        manager wired (direct-construction tests)."""
+        if self._access_checker is not None:
+            try:
+                return bool(await self._access_checker(self._account or "", invoker_id))
+            except Exception:
+                self._logger.exception("access check failed for %r — failing closed", invoker_id)
+                return False
+        return self.allowed_invoker(invoker_id)
+
+    def self_command_allowed(self) -> bool:
+        """Account-level view of the gate: is the ACCOUNT'S OWN user id
+        an owner? Kept for callers that ask whether the account may
+        command ITSELF (typing as this account) — actual dispatch gates
+        on the real invoker via allowed_invoker(ctx.author.id).
+        """
+        return self.allowed_invoker(self.user_id)
+
+    def _self_command_stats(self) -> dict:
+        """Runtime stats for the framework ``pg`` verb (hub-pulled)."""
+        uptime = (
+            (time.monotonic() - self._connected_since)
+            if self._connected_since is not None
+            else None
+        )
+        return {"latency_ms": self.latency_ms, "uptime_s": uptime}
+
+    @staticmethod
+    def _parse_invocation(content: Any, name: str, *, prefix: Any = None) -> tuple:
+        """``"sm!rollstart 123"`` + ``rollstart`` + prefix ``"sm!"`` ->
+        ``(["123"], "123")``.
+
+        Re-tokenizes on the content FOLLOWING the parsed prefix (the
+        library-parsed ``ctx.prefix`` — the mention form, a symbol, or
+        whatever when_mentioned_or matched) and takes the first token
+        EQUAL to the command name (case-insensitive) as the invocation
+        word; everything after it is the argument list
+        (whitespace-normalized raw). Matching a token that merely ENDS
+        WITH the name (the old rule) mis-anchors on the mention token
+        itself when a numeric command name is a suffix of the account's
+        own user id — the raw content still contains the mention, so
+        argument parsing shifted by one token (audit fix). Library-parsed
+        views are avoided on purpose so this helper stays unit-testable
+        without the library.
+        """
+        text = content or ""
+        if prefix:
+            prefix = str(prefix)
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+        tokens = text.split()
+        lowered = name.lower()
+        for index, token in enumerate(tokens):
+            if token.lower() == lowered:
+                args = tokens[index + 1 :]
+                return args, " ".join(args)
+        return [], ""
+
+    async def _dispatch_self_command(self, ctx: Any, name: str) -> None:
+        """One invocation: owner gate, parse, hub dispatch (contained)."""
+        try:
+            # user_bot mode delivers every message — gate on the REAL
+            # typer (any owner may command this account; the account's
+            # own id passes too when the account itself is an owner)
+            invoker = getattr(getattr(ctx, "author", None), "id", None)
+            if not await self.allowed_invoker_async(invoker):
+                self._logger.debug(
+                    "self-command %s ignored: invoker %s is not an owner", name, invoker
+                )
+                return
+            message = getattr(ctx, "message", None)
+            # re-parse on the content FOLLOWING the library-parsed prefix
+            # (ctx.prefix) — see _parse_invocation for the boundary fix
+            args, raw = self._parse_invocation(
+                getattr(message, "content", None), name, prefix=getattr(ctx, "prefix", None)
+            )
             channel = ctx.channel
             guild = getattr(channel, "guild", None)
-            guild_id = getattr(guild, "id", None) if guild else None
-            # DM = no guild on the channel (works before connect() too,
-            # where self._discord is not yet imported)
-            # synthetic DTO: the account's own id as author, the real
-            # channel, the trigger as content — indistinguishable from a
-            # real owner-typed message to every downstream consumer
-            dto = DiscordMessage(
-                id=getattr(ctx.message, "id", 0),
-                channel_id=channel.id,
-                author_id=self.user_id,
-                content=trigger,
-                dm=guild_id is None,
+            guild_id = getattr(guild, "id", None) if guild is not None else None
+            await COMMAND_HUB.invoke(
+                self._account,
+                name,
+                args,
+                channel.id,
                 guild_id=guild_id,
+                invoker_id=invoker,
+                raw=raw,
             )
-            self.on_message(dto)
-            self._logger.info(
-                "self-command %r dispatched in channel %s", trigger,
-                channel.id)
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            self._logger.exception("self-command dispatch failed")
+            # a broken dispatch must never kill the Bot's command task
+            self._logger.exception("self-command dispatch failed: %s", name)
 
     async def disconnect(self) -> None:
         """Close the underlying client; safe when never started."""
+        # drop the debounced loss forward and mark the session dead BEFORE
+        # closing: the close itself dispatches on_disconnect, and a
+        # deliberate teardown must not schedule (let alone forward) a
+        # "loss" the caller is causing
+        self._cancel_disconnect_debounce()
+        self.connected = False
+        self._connected_since = None
         if self._client is not None:
             try:
                 await self._client.close()
             except Exception as exc:  # closing a half-open client can throw
                 self._logger.warning("live client close raised %s", exc)
-        self.connected = False
+        if self._commands_on:
+            # drop this client's registry subscription (a reconnect's fresh
+            # client re-subscribes with its own rebuild callback)
+            with contextlib.suppress(Exception):
+                COMMAND_HUB.unsubscribe(self._account, self.set_plugin_commands)
         await self._cancel_run_task()
+        self._release_identify_slot()
+        # allow a later connect() on the same instance — the client
+        # object was single-use otherwise ('disconnect() before starting
+        # another session' on a fresh connect after a clean disconnect)
+        self._client = None
+        self._discord = None
 
     # ------------------------------------------------------------- messaging
     def _require_client(self) -> Any:
@@ -796,7 +1193,7 @@ class RealDiscordClient:
             raise ConnectionError("live client is not connected")
         return self._client
 
-    def _map_send_error(self, exc: Exception, channel_id: int) -> Optional[Exception]:
+    def _map_send_error(self, exc: Exception, channel_id: int) -> Exception | None:
         """Translate one library send error into a domain error (or None).
 
         * RateLimited     -> ServerRateLimit (fork errors.RateLimited is NOT
@@ -826,8 +1223,7 @@ class RealDiscordClient:
                 f"discord captcha challenge on channel {channel_id}: {exc}",
             )
         if name == "DiscordServerError" or (
-            getattr(exc, "status", None) is not None
-            and getattr(exc, "status", 0) >= 500
+            getattr(exc, "status", None) is not None and getattr(exc, "status", 0) >= 500
         ):
             return ConnectionError(f"discord server error ({exc})")
         discord = self._discord
@@ -856,46 +1252,6 @@ class RealDiscordClient:
             return TargetGone("", f"channel {channel_id} is gone: {exc}")
         return None
 
-    def _harvest_bucket_state(self) -> None:
-        """Read the library's per-route bucket state after a send.
-
-        discord.py-self's HTTPClient maintains `Ratelimit` objects keyed by
-        `{bucket_hash}:{major_parameters}` — updated from X-RateLimit-*
-        headers on every response. For write routes (message sends,
-        reactions) Discord DOES send these headers; the library tracks
-        limit/remaining/reset_after per route+channel.
-
-        We store the LATEST state per action for the engine to read via
-        `get_bucket_state()`. This is the data that lets the engine pace
-        by Discord's ACTUAL budget instead of fixed intervals.
-        """
-        http = getattr(self._client, "http", None)
-        if http is None:
-            return
-        buckets = getattr(http, "_buckets", None)
-        if not buckets:
-            return
-        now = getattr(self._client, "loop", None)
-        now = now.time() if now else __import__("time").monotonic()
-        harvested: Dict[str, dict] = {}
-        for key, rl in buckets.items():
-            if not hasattr(rl, "remaining"):
-                continue
-            harvested[key] = {
-                "limit": getattr(rl, "limit", 0),
-                "remaining": getattr(rl, "remaining", 0),
-                "reset_after_s": getattr(rl, "reset_after", 0.0),
-                "expires": getattr(rl, "expires", None),
-                "outgoing": getattr(rl, "outgoing", 0),
-            }
-        if harvested:
-            self._bucket_state = harvested
-            self._bucket_state_at = now
-
-    def get_bucket_state(self) -> Dict[str, dict]:
-        """The latest per-route bucket state from the library (may be {})."""
-        return getattr(self, "_bucket_state", {})
-
     async def _send_to_channel(
         self, channel: Any, channel_id: int, content: str, *, dm: bool
     ) -> DiscordMessage:
@@ -907,14 +1263,6 @@ class RealDiscordClient:
             if mapped is not None:
                 raise mapped from exc
             raise
-        self._harvest_bucket_state()  # feed Discord's limits to the engine
-        # BUCKET-AWARE PACING: harvest Discord's per-route limits after the
-        # send so the engine can read them before the NEXT acquire().
-        # Only write routes carry headers; GET-only routes harvest nothing
-        # and the engine falls back to policy pacing.
-        harvest = getattr(self, "_harvest_bucket_state", None)
-        if callable(harvest):
-            harvest()
         return DiscordMessage(
             id=getattr(sent, "id", 0),
             channel_id=channel_id,
@@ -991,11 +1339,21 @@ class RealDiscordClient:
         """Message object by ids — cache first, fetch on miss (the ONE
         plugin-demanded fetch for button/reaction actions; §15)."""
         client = self._require_client()
+        # the library's own message cache (public ``cached_messages``):
+        # a hit costs ZERO API calls. (``channel.get_message`` does not
+        # exist on discord.py channels, so the old guard never matched
+        # and every action paid a REST fetch.)
+        try:
+            for cached in reversed(list(getattr(client, "cached_messages", ()) or ())):
+                if getattr(cached, "id", None) == message_id:
+                    return cached
+        except Exception:
+            pass
         channel = client.get_channel(channel_id)
         if channel is None:
             channel = await client.fetch_channel(channel_id)
-        message = channel.get_message(message_id) if hasattr(
-            channel, "get_message") else None
+        getter = getattr(channel, "get_message", None)  # forks/test doubles
+        message = getter(message_id) if callable(getter) else None
         if message is None:
             message = await channel.fetch_message(message_id)
         return message
@@ -1003,7 +1361,13 @@ class RealDiscordClient:
     async def add_reaction(self, channel_id: int, message_id: int, emoji: str) -> Any:
         """React to a message (kakerareact capability; pipeline-paced)."""
         try:
-            message = await self._resolve_message(channel_id, message_id)
+            channel = self._require_client().get_channel(channel_id)
+            partial = getattr(channel, "get_partial_message", None)
+            if callable(partial):
+                # reacting needs only the ids — no fetch at all
+                message = partial(message_id)
+            else:
+                message = await self._resolve_message(channel_id, message_id)
             await message.add_reaction(emoji)
         except Exception as exc:
             mapped = self._map_send_error(exc, channel_id)
@@ -1011,7 +1375,7 @@ class RealDiscordClient:
                 raise mapped from exc
             raise
 
-    async def _reap_click_task(self, task: "asyncio.Task") -> None:
+    async def _reap_click_task(self, task: asyncio.Task) -> None:
         """Await a cancelled click task, swallowing its death exceptions —
         unless OUR caller's cancellation is pending (never eat that)."""
         try:
@@ -1038,9 +1402,12 @@ class RealDiscordClient:
         """
         task = asyncio.get_running_loop().create_task(component.click())
         try:
-            return await asyncio.wait_for(
-                asyncio.shield(task), CLICK_TIMEOUT_S)
-        except TimeoutError:
+            return await asyncio.wait_for(asyncio.shield(task), CLICK_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            # asyncio.TimeoutError — NOT the bare builtin: on Python 3.10
+            # the two only alias on 3.11+, and the bare except let the
+            # raw asyncio.TimeoutError escape past the transient
+            # ConnectionError mapping below
             task.cancel()
             await self._reap_click_task(task)
             raise ConnectionError(
@@ -1049,8 +1416,7 @@ class RealDiscordClient:
                 "or stalled gateway)"
             ) from None
         except Exception as exc:
-            if (type(exc).__name__ == "InvalidData"
-                    and outer_cancel_pending()):
+            if type(exc).__name__ == "InvalidData" and outer_cancel_pending():
                 task.cancel()
                 await self._reap_click_task(task)
                 raise asyncio.CancelledError from exc
@@ -1098,14 +1464,13 @@ class RealDiscordClient:
         except Exception as exc:
             if type(exc).__name__ == "NotFound":
                 return None
-            if (type(exc).__name__ == "Forbidden"
-                    and "unknown user" in str(exc).lower()):
+            if type(exc).__name__ == "Forbidden" and "unknown user" in str(exc).lower():
                 return None
             raise
 
     # ---------------------------------------------------------- observability
     @property
-    def latency_ms(self) -> Optional[float]:
+    def latency_ms(self) -> float | None:
         """Gateway heartbeat latency in ms (None before READY / when NaN/inf).
 
         Note (round-3 F4-9): once connected the library's ``latency`` is
@@ -1170,6 +1535,46 @@ class RealDiscordClient:
             "latency_ms": self.latency_ms,
         }
 
+    def channels_snapshot(self) -> list:
+        """Picker-shaped text-channel snapshot — memory only, NO fetches.
+
+        ``[{"guild_id": str, "guild_name": str, "channels": [{"id": str,
+        "name": str, "type": str}]}]`` — TEXT channels only (text/news;
+        categories, voice, stage and forum rows are skipped), sorted by
+        guild name then channel name, ids as STRINGS. [] before connect.
+        Source of :meth:`ControlAPI.accounts_channels` (the Phase-2
+        channel picker); read-only over exactly what the live client
+        holds after READY, same discipline as cached_snapshot.
+        """
+        client = self._client
+        if client is None or not self.connected:
+            return []
+        out: list = []
+        for guild in getattr(client, "guilds", []) or []:
+            channels: list = []
+            for channel in getattr(guild, "channels", []) or []:
+                ctype = getattr(channel, "type", None)
+                type_name = (getattr(ctype, "name", None) or str(ctype)).lower()
+                if type_name not in _TEXT_CHANNEL_TYPES:
+                    continue
+                channels.append(
+                    {
+                        "id": str(getattr(channel, "id", "")),
+                        "name": getattr(channel, "name", None) or "",
+                        "type": type_name,
+                    }
+                )
+            channels.sort(key=lambda c: c["name"])
+            out.append(
+                {
+                    "guild_id": str(getattr(guild, "id", "")),
+                    "guild_name": getattr(guild, "name", None) or "",
+                    "channels": channels,
+                }
+            )
+        out.sort(key=lambda g: g["guild_name"])
+        return out
+
 
 class IdentifyGate:
     """Fleet-wide IDENTIFY pacer (Discord's identify limit is per-IP).
@@ -1189,32 +1594,51 @@ class IdentifyGate:
     1020; the hook runs inside DiscordWebSocket.from_client), so a waiter
     queued >= 60s is cancelled into a disconnect dispatch → reconnect
     livelock once a synchronized (re)identify wave exceeds ~60s of
-    queueing (>= ~13 accounts at a flat 5s interval). The gate instead
-    derives its spacing from the EXPECTED fleet size::
+    queueing. The gate therefore derives its spacing from the EXPECTED
+    fleet size::
 
-        effective_interval = min(interval,
-                                 max(min_interval, wait_budget / expected))
+        effective_interval = min(interval, max(min_interval, wait_budget / expected))
 
-    with ``wait_budget`` 50s (margin under the 60s library ceiling), so
-    the LAST waiter of an N-account wave still clears the hook in <= ~50s.
-    ``expected`` is a settable count (the factory raises it as it builds
-    DISTINCT accounts — reconnects rebuild already-counted accounts and
-    never inflate it; the account manager may also set it directly when
-    the fleet size is known ahead of boot). It is re-read on every
-    release, so a fleet that grows mid-wave tightens spacing dynamically.
+    with ``wait_budget`` 50s (margin under the 60s library ceiling).
+    AUDIT FIX: ``min_interval`` now defaults to 5.0s (MIN_INTERVAL_S) —
+    Discord's per-IP IDENTIFY budget is ~1 identify / 5s, so tightening
+    below that for fleets >= 13 trades a sub-60s wave for per-IP
+    throttling; giant waves are instead handled by the fast-fail
+    projection (> ``wait_budget``). ``expected`` is a settable count
+    (the factory raises it as it builds DISTINCT accounts — reconnects
+    rebuild already-counted accounts and never inflate it) and is
+    PRUNED by :meth:`release` when a client tears down permanently, so
+    a shrinking fleet does not keep production spacing forever. It is
+    re-read on every release, so a fleet that grows mid-wave tightens
+    spacing dynamically (down to the floor).
     """
 
     #: total seconds a synchronized wave may spend inside the hook (< 60)
     WAIT_BUDGET_S = 50.0
-    #: never pace IDENTIFYs tighter than this (Discord per-IP friendliness)
-    MIN_INTERVAL_S = 1.0
+    #: never pace IDENTIFYs tighter than this: Discord's per-IP identify
+    #: budget is ~1/5s — fleets >= 13 must NOT outpace it (the fast-fail
+    #: >50s projection covers genuinely giant waves instead)
+    MIN_INTERVAL_S = 5.0
 
-    __slots__ = ("interval", "expected", "min_interval", "wait_budget",
-                 "_lock", "_last", "_depth")
+    __slots__ = (
+        "_depth",
+        "_last",
+        "_lock",
+        "_lock_loop",
+        "expected",
+        "interval",
+        "min_interval",
+        "wait_budget",
+    )
 
-    def __init__(self, interval: float = 5.0, *, min_interval: float = MIN_INTERVAL_S,
-                 wait_budget: float = WAIT_BUDGET_S,
-                 max_wait: Optional[float] = None) -> None:
+    def __init__(
+        self,
+        interval: float = 5.0,
+        *,
+        min_interval: float = MIN_INTERVAL_S,
+        wait_budget: float = WAIT_BUDGET_S,
+        max_wait: float | None = None,
+    ) -> None:
         self.interval = float(interval)
         if max_wait is not None:  # upstream phase-4 alias (tests/config)
             wait_budget = max_wait
@@ -1222,9 +1646,37 @@ class IdentifyGate:
         self.expected = 1
         self.min_interval = float(min_interval)
         self.wait_budget = float(wait_budget)
-        self._lock: Optional[asyncio.Lock] = None  # bound lazily to the loop
+        self._lock: asyncio.Lock | None = None  # bound lazily to the loop
+        self._lock_loop: Any = None  # the loop self._lock is bound to
         self._last: float = float("-inf")
         self._depth: int = 0  # FINAL-PHASE (F4): FIFO waiters ahead-of-lock
+
+    def _lock_for(self, loop: Any) -> asyncio.Lock:
+        """A gate lock bound to the CURRENT loop (see _headers_lock_for).
+
+        An asyncio.Lock binds to the first loop that uses it; a gate
+        shared across ``asyncio.run`` boundaries (tests, manager
+        restarts) would raise RuntimeError — or, worse, fast-fail off a
+        stale ``_last`` from the previous loop's monotonic clock. Recreate
+        the primitive (and reset ``_last`` with it) whenever the running
+        loop changes.
+        """
+        if self._lock is None or self._lock_loop is not loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = loop
+            self._last = float("-inf")
+        return self._lock
+
+    def release(self) -> None:
+        """Return one fleet slot (a client's PERMANENT teardown).
+
+        Adapters call this exactly once per client (guarded by their
+        ``_gate_counted`` flag) when their run exits terminally, so
+        removed accounts stop inflating ``expected`` — production
+        spacing recovers as the fleet shrinks. Floors at 1.
+        """
+        if self.expected > 1:
+            self.expected -= 1
 
     async def acquire(self, shard_id=None, *, initial: bool = False) -> None:
         """Space consecutive IDENTIFYs by ``effective_interval`` seconds.
@@ -1235,28 +1687,29 @@ class IdentifyGate:
         the gate into a TypeError). Fast-fails with a retryable
         ConnectionError when the PROJECTED total wait (residual spacing
         + waiters already queued ahead × interval) exceeds the wave
-        budget (FINAL-PHASE F4 + round-3: the effective interval scales
-        with the expected fleet size so a synchronized wave of ANY size
-        clears under the library's 60s identify ceiling — the fast-fail
-        now covers only genuinely pathological saturation, e.g. a
-        min_interval floor met with a huge fleet).
+        budget (FINAL-PHASE F4 + round-3: the effective interval floors
+        at Discord's per-IP budget, so the fast-fail now covers giant
+        synchronized waves the floor alone cannot clear).
         """
-        if self._lock is None:
-            self._lock = asyncio.Lock()
+        loop = asyncio.get_running_loop()
+        lock = self._lock_for(loop)
         interval = self.effective_interval
         # projected wait BEFORE queueing: residual + the queue depth ahead
         # of us each costs a full interval (FIFO under the held lock)
-        loop = asyncio.get_running_loop()
-        projected = (self._last + interval * (self._depth + 1)
-                     - loop.time()) if self._last != float("-inf") else 0.0
+        projected = (
+            (self._last + interval * (self._depth + 1) - loop.time())
+            if self._last != float("-inf")
+            else 0.0
+        )
         if projected > self.wait_budget:
             raise ConnectionError(
                 f"identify gate saturated: projected wait {projected:.0f}s "
                 f"exceeds {self.wait_budget:.0f}s ({self._depth} queued) — "
-                "retrying with backoff is cheaper than parking a built client")
+                "retrying with backoff is cheaper than parking a built client"
+            )
         self._depth += 1
         try:
-            async with self._lock:  # FIFO: hold while sleeping so waiters queue
+            async with lock:  # FIFO: hold while sleeping so waiters queue
                 now = loop.time()
                 wait = self._last + self.effective_interval - now
                 if wait > 0:
@@ -1268,10 +1721,14 @@ class IdentifyGate:
 
     @property
     def effective_interval(self) -> float:
-        """Current spacing, derived from the expected fleet size."""
+        """Current spacing, derived from the expected fleet size.
+
+        Never below ``min_interval`` (5.0s by default — Discord's per-IP
+        IDENTIFY budget; explicitly smaller values exist only for the
+        scaled-down unit-test harnesses).
+        """
         expected = max(1, int(self.expected))
-        return min(self.interval,
-                   max(self.min_interval, self.wait_budget / expected))
+        return min(self.interval, max(self.min_interval, self.wait_budget / expected))
 
 
 class RealClientFactory:
@@ -1286,18 +1743,23 @@ class RealClientFactory:
 
     def __init__(
         self,
-        credentials: Optional[Credentials] = None,
-        logger: Optional[logging.Logger] = None,
+        credentials: Credentials | None = None,
+        logger: logging.Logger | None = None,
         identify_interval: float = 5.0,
         command_prefix: str = "",
+        access_manager: Any = None,
     ) -> None:
         self._credentials = credentials  # kept for metadata only (mudae id, owner ids)
         self._logger = logger or LOG
         # ONE gate per process (the factory is built once in bootstrap):
         # every client this factory produces IDENTIFYs through it.
         self._identify_gate = IdentifyGate(identify_interval)
-        #: self-command prefix shared by every client (from SELF_COMMAND_PREFIX)
+        #: self-command prefix shared by every client (from SELF_COMMAND_PREFIX;
+        #: the DEFAULT — each account's admin-panel prefix config overrides)
         self._command_prefix = command_prefix or ""
+        #: AccessManager (admin panel store) — per-account prefix +
+        #: command-permission wiring; None = legacy env-only stack
+        self._access_manager = access_manager
         #: distinct accounts this factory has EVER built a client for —
         #: reconnects rebuild already-counted accounts, so the gate's
         #: ``expected`` never ratchets down through reconnect cycles
@@ -1321,13 +1783,38 @@ class RealClientFactory:
             self._identify_gate.expected = len(self._gate_accounts)
         # K13 (S9-C1): a per-account child logger keeps adapter lines
         # (connected/terminated/close-failed) attributable — the bridge
-        # maps slaughtermudae.adapter.<name> to source "adapter:<name>".
+        # maps libzent.adapter.<name> to source "adapter:<name>".
         logger = self._logger.getChild(name) if name else self._logger
+        # per-account access configuration (admin panel; defaults when
+        # no manager is wired: mention mode + legacy env owner ids)
+        prefix_mode, prefix_symbol = "mention", ""
+        if self._access_manager is not None:
+            try:
+                cfg = self._access_manager.prefix_config_sync(name)
+            except AttributeError:
+                cfg = None
+            if cfg:
+                prefix_mode = cfg.get("prefix_mode", "mention")
+                prefix_symbol = cfg.get("prefix_symbol", "")
+        checker = None
+        if self._access_manager is not None:
+
+            async def _checker(acct: str, invoker_id):
+                return await self._access_manager.can_invoke(acct, invoker_id)
+
+            checker = _checker
         client = RealDiscordClient(
-            token=token, logger=logger, identify_gate=self._identify_gate,
-            command_prefix=self._command_prefix)
+            token=token,
+            logger=logger,
+            identify_gate=self._identify_gate,
+            command_prefix=self._command_prefix,
+            owner_ids=frozenset(getattr(self._credentials, "owner_user_ids", ()) or ()),
+            prefix_mode=prefix_mode,
+            prefix_symbol=prefix_symbol,
+            access_checker=checker,
+        )
         client.account = name  # enrich AccessDenied reasons, best effort
         return client
 
 
-__all__ = ["IdentifyGate", "RealDiscordClient", "RealClientFactory"]
+__all__ = ["IdentifyGate", "RealClientFactory", "RealDiscordClient"]

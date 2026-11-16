@@ -29,9 +29,9 @@ LOG = logging.getLogger("test.sync_groups_surfaces")
 
 ACCOUNT_ROWS = [
     {"name": "alpha", "status": "running", "enabled": True,
-     "sync_group": None, "profiles": []},
+     "sync_group": None},
     {"name": "beta", "status": "stopped", "enabled": True,
-     "sync_group": None, "profiles": []},
+     "sync_group": None},
 ]
 
 
@@ -75,8 +75,7 @@ class ControlApiGroupsTestBase(unittest.IsolatedAsyncioTestCase):
         self.api = ControlAPI(
             accounts=self.accounts_mgr,
             plugins=SimpleNamespace(),
-            profiles=SimpleNamespace(),
-            settings=SimpleNamespace(),
+                        settings=SimpleNamespace(),
             limiter=self.limiter,
             scheduler=SimpleNamespace(),
             logs=SimpleNamespace(),
@@ -184,8 +183,7 @@ class ControlApiGroupsTests(ControlApiGroupsTestBase):
     async def test_unwired_api_fails_loudly(self) -> None:
         api = ControlAPI(
             accounts=_StubAccountsManager(),
-            plugins=SimpleNamespace(), profiles=SimpleNamespace(),
-            settings=SimpleNamespace(), limiter=SimpleNamespace(),
+            plugins=SimpleNamespace(),             settings=SimpleNamespace(), limiter=SimpleNamespace(),
             scheduler=SimpleNamespace(), logs=SimpleNamespace(),
         )
         self.assertEqual(await api.groups_list(), [])  # reads degrade

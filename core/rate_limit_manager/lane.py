@@ -53,14 +53,19 @@ SEMANTICS (precise)
     fleet share of the API, not one account's action rate) but it is
     validated: finite, >= 0, <= one day.
 """
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import heapq
 import itertools
-from typing import Any, Awaitable, Callable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 
 from ..errors import RatePolicyError
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 #: same sanity cap as policies.MAX_INTERVAL — one day of spacing is plenty
 MAX_PREFIXRATE = 86400.0
@@ -83,16 +88,16 @@ class _LaneEntry:
     the cross-account wire gap (probe P2/P7).
     """
 
-    __slots__ = ("priority", "seq", "jitter", "future", "cancelled")
+    __slots__ = ("cancelled", "future", "jitter", "priority", "seq")
 
     def __init__(self, priority: int, seq: int, jitter: float = 0.0) -> None:
         self.priority = priority
         self.seq = seq
         self.jitter = max(0.0, float(jitter))
-        self.future: "asyncio.Future[None]" = asyncio.get_running_loop().create_future()
+        self.future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self.cancelled = False
 
-    def __lt__(self, other: "_LaneEntry") -> bool:
+    def __lt__(self, other: _LaneEntry) -> bool:
         return (self.priority, self.seq) < (other.priority, other.seq)
 
 
@@ -109,8 +114,8 @@ class GlobalSendLane:
         *,
         clock: Any,
         wait_either: Callable[[float], Awaitable[None]],
-        on_change: Optional[Callable[[], None]] = None,
-        log: Optional[Callable[[str, str], None]] = None,
+        on_change: Callable[[], None] | None = None,
+        log: Callable[[str, str], None] | None = None,
     ) -> None:
         """Wire the lane onto its host engine.
 
@@ -131,9 +136,9 @@ class GlobalSendLane:
         self._log = log or (lambda level, message: None)
         self.enabled = False
         self.prefixrate = 1.5
-        self._heap: List[_LaneEntry] = []
+        self._heap: list[_LaneEntry] = []
         self._seq = itertools.count()
-        self._last_grant: Optional[float] = None  # last admission + jitter
+        self._last_grant: float | None = None  # last admission + jitter
         # stats
         self.grants = 0
         self.held_off_seconds = 0.0  # total time waiters spent holding (paused)
@@ -165,9 +170,7 @@ class GlobalSendLane:
         if value < 0:
             raise RatePolicyError(f"prefixrate must be >= 0, got {value:g}s")
         if value > MAX_PREFIXRATE:
-            raise RatePolicyError(
-                f"prefixrate {value:g}s exceeds the {MAX_PREFIXRATE:g}s cap"
-            )
+            raise RatePolicyError(f"prefixrate {value:g}s exceeds the {MAX_PREFIXRATE:g}s cap")
         self.prefixrate = value
         self._notify(
             f"lane prefixrate set to {value:g}s"
@@ -190,8 +193,7 @@ class GlobalSendLane:
             "waiting": waiting,
             "grants": self.grants,
             "last_grant_age_s": (
-                round(max(0.0, now - self._last_grant), 3)
-                if self._last_grant is not None else None
+                round(max(0.0, now - self._last_grant), 3) if self._last_grant is not None else None
             ),
             "held_off_seconds": round(self.held_off_seconds, 3),
         }
@@ -315,9 +317,7 @@ class GlobalSendLane:
         """Drop dead waiters so a cancelled head can never block the queue."""
         if not self._heap:
             return
-        self._heap[:] = [
-            e for e in self._heap if not e.cancelled and not e.future.done()
-        ]
+        self._heap[:] = [e for e in self._heap if not e.cancelled and not e.future.done()]
         heapq.heapify(self._heap)
 
     def _notify(self, message: str) -> None:
@@ -325,17 +325,14 @@ class GlobalSendLane:
         self._log("info", message)
         self._wake()
         if self._on_change is not None:
-            try:
+            # a notification callback must never break configuration
+            with contextlib.suppress(Exception):
                 self._on_change()
-            except Exception:
-                pass  # a notification callback must never break configuration
 
     def _wake(self) -> None:
         if self._on_change is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._on_change()
-            except Exception:
-                pass
 
 
-__all__ = ["GlobalSendLane", "MAX_PREFIXRATE", "LANE_POLL_INTERVAL"]
+__all__ = ["LANE_POLL_INTERVAL", "MAX_PREFIXRATE", "GlobalSendLane"]

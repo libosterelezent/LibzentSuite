@@ -1,5 +1,323 @@
 Discord Automation Framework — Project Ideas & TODO
 
+Reorganized 2026-10-24: order only — every section's wording is preserved
+verbatim (history in git). Layout: ACTIVE QUEUE (the working surface) ->
+OPEN IDEAS (unscheduled) -> SHIPPED ARCHIVE -> ARCHITECTURE & DESIGN
+REFERENCE -> DEPRECATED. The one honestly-open checkbox lives in the queue.
+
+
+CORE DESIGN GOAL
+
+The most important architectural goal is:
+
+    One Core API
+          |
+      +---+---+
+      |       |
+     CLI     GUI
+
+Both interfaces should manipulate the exact same underlying:
+- Accounts
+- Plugins
+- Settings profiles
+- Tasks
+- Rate-limit policies
+- Logs
+- Simulation system
+
+Plugins should remain independent from the interface layer.
+
+
+
+ACTIVE QUEUE  (2026-10-24, ordered)
+
+[x] PHASE A-11 refactor queue — DONE (2026-10-23). Tabbed ability
+    dialog, state-kv strip, theme Layout tab, contract tests, AND the
+    channel-scope editor: positive channel-set (plugin_scopes) with a
+    dropdown channel-tree picker in the profiles editor. Live-verified
+    on bravo: 6 real guilds render, selection stores the positive set,
+    library/tiles reflect it. Also fixed in the pass: builder
+    tile-view renderer, records-shape tables, dynamic-field refresh in
+    modals (commits 7db9752, 2542822).
+[x] Legacy permission-bundle manager REMOVAL — DONE (PR #16 merged
+    into feat/ui-rebuild).
+[ ] PHASE C LIVE DEBUG — resumed 2026-10-23: bravo re-credentialed
+    (new token) and RUNNING; profiles editor round-trip verified live.
+    Blocked: alpha still needs a fresh credential. Remaining:
+    admin-command flow B -> A, ordered full walkthrough.
+[x] PHASE 9 ROLLOUT — COMPLETE (A-G shipped 2026-10-23; design: docs/design/
+    fleet-orchestration-hub.md). Progress:
+    A. DONE (2026-10-23, d640cec): core/fleet/ models + transition
+       tables (46 pure tests) — member eligibility, assignment states
+       with leave/retry guards, scoped cooldown records (most-
+       restrictive-wins), task definitions (channel scope, field
+       classes, metric hints), generation fence, event envelope.
+    B. DONE (2026-10-23, f1e99d8): FleetService — the ONE writer of
+       the fleet projection (join/leave, pauses, full assignment
+       lifecycle, handoff with destination-first validation, cooldown
+       apply/clear), migration v9 + FleetRepository, write-ahead
+       history + event seam, generation bumping; 33 service tests on
+       real in-memory SQLite (79 fleet tests total).
+    C. DONE (2026-10-23, 84ddbc7): FleetPolicy (§4 check order,
+       cooldown retry_at, generation fence, D1 boundary) + the
+       scheduler dispatch_guard (pre-dispatch park + post-grant
+       revalidation, fail-open on guard error); bootstrap wires the
+       service+guard live. Acceptance proven end-to-end: paused group
+       parks work with zero sender calls/grants; resume dispatches
+       paced; independents unaffected. Scheduler suite de-flaked
+       first (d32ee99). NOTE: the live dashboard process predates the
+       fleet wiring — restart picks it up.
+    D. DONE (2026-10-23, f485670): FleetObservations intake (dedup
+       (account, message_id, type); observations authorize NOTHING —
+       only restrictions through the service: observed/server cooldowns,
+       connectivity -> eligibility with operator-pause outranking it),
+       relay (D3: suspend -> requeue (binding dropped) -> next eligible
+       member, never forced onto the restricted account), and the
+       FleetTaskHandler plugin capability (§5, default OFF, ping
+       untouched; core still imports nothing from parsers/).
+     E. DONE (2026-10-23, d98c696): ownership transitions — Task
+        fleet_assignment linkage; D1's fence (group-managed members run
+        ONLY linked dispatches; the independent flow parks, never
+        fails); leave restores Independent (parked work FLOWS on
+        leave); in-flight sends drain through a leave; stale-generation
+        linked dispatches fenced end-to-end.
+     F. DONE (2026-10-23, 0dc74ec): the Fleet Hub — REST surface
+        (GET /api/fleet/groups|group, POST /api/fleet/op with an
+        explicit op table) + views/groups.js (#/groups list + the
+        #/groups/:name hub: overview/members/queue/cooldowns/history,
+        confirmed destructive ops) + the Fleet sidebar tab;
+        live-verified on jj (bravo+alpha joined).
+     G. DONE (2026-10-23, 61f3a32): FleetReconciler — boot + 30s
+        idempotent passes (running-at-reboot requeue + generation bump
+        = zombie fencing, stale-generation withdrawal, orphan release,
+        ghost-member retirement; ghost groups SURFACED), concurrent
+        admin ops converge, end-to-end zombie never reaches the sender.
+     PHASE 9 COMPLETE: A-G shipped 2026-10-23; 223 tests green across
+     the fleet + scheduler + dashboard suites.
+[x] PHASE 10 ROLLOUT — DONE (2026-10-24, f98ef96): the B3
+    AccountPluginData store, end to end: state/plugin-data.db (own WAL
+    SQLite, self-initializing schema, separate database flow), scope
+    lattice account->plugin->guild->channel ('0' sentinels), STANDALONE
+    copies, optimistic version writes (conflict-refusing, incl.
+    put-over-deleted), digit-string snowflakes; ctx.services.data_*
+    facade (pair-scoped structurally); REST GET /api/accounts/data
+    (+doc) + POST put/delete; the MEMORY section's per-plugin
+    per-channel Data view (numeric keys as stat pills, rest as kv — the
+    LOCAL view; rollup stays opt-in via metric hints). 16 tests +
+    live-verified.
+
+
+═══════════════════════════════════════════════════════════════════════════
+OPEN IDEAS — UNSCHEDULED (from the PHASE 9/10 design notes)
+═══════════════════════════════════════════════════════════════════════════
+
+Not promised, not scheduled — the genuinely-open wishlist. Note what the
+shipped orchestrator already covers: the RELAY STRATEGY itself is live
+(rollout D: limit observation -> suspend -> scoped cooldown -> reassign),
+the strategy SLOT admits new rotation policies without schema change (D3),
+and the reconciler (rollout G) keeps state converged. What remains below
+is the game-side sensing and turn-state surfacing.
+
+--- from the PHASE 9 notes (preserved verbatim) ---
+
+[ ] RELAY / TURN-TAKING (the real flow):
+      A rolls -> Mudae limit message lands on A
+      -> A marked SPENT for the window
+      -> B becomes ACTIVE and starts rolling
+      -> (all members spent) -> group cooldown -> reset -> A active again
+[ ] RotationController: thin coordinator ABOVE SyncGroupManager — subscribes
+    to parser events, owns queue state (ACTIVE / WAITING / SPENT / COOLING),
+    gates which account may act. Modularity rule: the limiter stays pure
+    pacing (safety floor); the relay decides WHO may go, the limiter still
+    decides HOW FAST. One being wrong must never violate the other.
+[ ] Handoff sensor: MudaeParser rule family for per-locale limit markers
+    (roulette / roll variants)
+[ ] Reset semantics: event-based (Mudae's own reset message) preferred,
+    window-based fallback
+[ ] PACING BETWEEN GROUPED ACCOUNTS: shared-clock middle pacing is NOT
+    necessarily desirable under relay — but it stays EDITABLE, never removed
+    (per-group pacing mode: shared-clock | relay | off; floor always applies)
+[ ] Stats frame carries per-group rotation state (whose turn, spent-since,
+    resets-in) so the dashboard shows the flow live
+[ ] Group detail view in the dashboard: member queue with live turn state,
+    handoff history
+[ ] Account hero shows group turn state (e.g. "grp farm-a · waiting, turn: B")
+[ ] Room for more group strategies later — the coordinator is a strategy
+    slot, relay is only the first strategy
+PHASE 10 — PLUGIN METRICS & FLOWS  (planned)
+    (the AccountPluginData STORE shipped 2026-10-24 — see the queue;
+     what remains under this heading is the metrics/flows wishlist)
+[ ] Plugins supply metrics INTO the dashboard: ui_stats StatCards already
+    surface per-account in the account detail LIVE STATS section — keep
+    growing what plugins report (roll counts, claims, hits, streaks)
+[ ] Plugin-authored FLOWS: the operator will build real behaviors inside
+    plugins (rolling, claiming, reactions) that emit events + telemetry
+    through the event bus — the dashboard reads, plugins speak
+[ ] Plugin flows must ride the SAME paced pipeline (ctx.services), never
+    raw clients — the plugin contract holds as flows grow
+[ ] Metrics feed the group relay: per-account plugin counters make the
+    rotation numerically visible (A: 8 rolls this window, B: 0)
+
+--- PHASE 10 follow-ups (genuinely open, small) ---
+
+[ ] Metric rollup wiring: declared metric hints (sum|last) surfaced on
+    the Fleet Hub — the opt-in GLOBAL view over AccountPluginData
+    (the store + LOCAL view shipped 2026-10-24; only the aggregation
+    surface is missing).
+[ ] cooldown_key policy mapping: TaskDefinition.cooldown_key read through
+    to FleetPolicy so a task's pacing key can live in its per-channel
+    data document (B3 'one store' decision; the field exists, the
+    mapping is unwired).
+
+
+═══════════════════════════════════════════════════════════════════════════
+SHIPPED — ARCHIVE (phases as delivered; details verbatim)
+═══════════════════════════════════════════════════════════════════════════
+
+Highlights: PHASE 1-8 (2026-10-22) · dashboard v3 rebuild (6b, 2026-10-22)
+· ProfileManager REMOVAL (2026-10-22) · A-11 + channel-scope editor
+(2026-10-23) · PHASE 9 A-G COMPLETE (2026-10-23) · PHASE 10 AccountPluginData
+(2026-10-24). Per-phase detail below, unchanged.
+
+PHASE 1 — CORE  ✅ DONE
+
+[x] Account manager
+[x] Plugin manager
+[x] Settings system
+[x] Event bus
+[x] Task scheduler
+[x] Centralized logging
+[x] Database layer
+
+
+PHASE 2 — ACCOUNT MANAGEMENT  ✅ DONE
+
+[x] Add account
+[x] Remove account
+[x] Account list
+[x] Account runtime state
+[x] Account details
+[x] Enable/disable account
+
+
+PHASE 3 — PLUGIN SYSTEM  ✅ DONE
+
+[x] Plugin discovery
+[x] Plugin metadata
+[x] Plugin settings schema
+[x] Plugin lifecycle
+[x] Enable/disable plugins
+[x] Plugin settings API
+
+
+PHASE 4 — PROFILES / CAPABILITIES  ✅ DONE
+
+[x] Create profile
+[x] Assign plugins to profile
+[x] Assign profile to account
+[x] Profile settings
+[x] Multiple accounts sharing profile
+
+
+PHASE 5 — RATE MANAGEMENT  ✅ DONE
+
+[x] Global policy
+[x] Account policy
+[x] Plugin policy
+[x] Randomized pacing/jitter
+[x] Server-provided rate-limit handling
+[x] Configuration validation
+[x] Dangerous-setting warnings
+[x] Rate-limit visualization
+
+
+PHASE 6 — INTERFACES  ✅ DONE
+
+[x] CLI API
+[x] Dashboard API
+[x] Account pages
+[x] Plugin pages
+[x] Profile pages
+[x] Rate-limit pages
+[x] Live logs
+
+
+PHASE 7 — SIMULATION  ✅ DONE
+
+[x] Mock Discord adapter
+[x] Event generator
+[x] Scenario system
+[x] Simulation runner
+[x] Detailed execution logs
+[x] Regression tests
+
+
+PHASE 8 — SAFETY / VALIDATION  ✅ DONE
+
+[x] Dangerous-setting warnings
+[x] Configuration validation
+[x] Minimum pacing constraints
+[x] Global emergency stop
+[x] Account emergency stop
+[x] Plugin emergency stop
+[x] Graceful shutdown
+
+
+PHASE 6b — DASHBOARD UI v3 REBUILD  ✅ DONE
+
+[x] Hash-routed SPA (Carbon design system, tokens + canonical classes)
+[x] Bespoke account-as-object view (hero / abilities / memory / pacing / live stats)
+[x] Generic builder-tree renderer for plugin pages (render.js)
+[x] Theme engine (presets, accent, radius, density, fonts, custom CSS)
+[x] Contract tests pinning endpoints, classes, tokens (test_dashboard_static.py)
+
+Architecture decision (locked): plugins build UI through the SAFE BUILDER
+(core/dashboard_ui -> render.js); the framework's own flagship views stay
+BESPOKE (js/views/*). Modular split — the design system (tokens + canonical
+classes) is the single shared contract; static tests are the drift police.
+Decision rule: could a plugin own the surface? -> builder. Needs routing
+params / selection state / WS-diffed live data / multi-step flows? -> bespoke.
+
+
+
+PHASE 9 foundation (shipped with A-G):
+[x] Group CRUD + membership (exists — SyncGroupManager)
+[x] Grouped accounts serialize on the shared limiter clock (exists)
+
+The PHASE 9 design notes (context for the open ideas above):
+PHASE 9 — GROUP RELAY: CENTRALIZED ACTION CONTROL  (SHIPPED 2026-10-23 — see
+ACTIVE QUEUE "PHASE 9 COMPLETE"; this section is the original design notes)
+The entire point of Groups: control the actions of MULTIPLE accounts
+CENTRALLY — not merely share a pacing clock.
+DESIGN SPEC: docs/design/fleet-orchestration-hub.md (decisions locked
+2026-10-22: scheduling ownership + INDEPENDENT|GROUP_MANAGED mode flag,
+db-authoritative state, operator-assign + strategy slot with relay as
+strategy #1, drain-default transitions, channel-scoped tasks day one,
+dedicated Fleet Hub route). Consult sources: GPT (repo-connected) +
+Gemini plans in state/ui-rebuild-2026-10-22/.
+
+
+DEPRECATED CORE PARTS — REMOVED 2026-10-22
+
+ProfileManager (core/profile_manager/) — the named permission-bundle
+system. It gated nothing (capabilities are direct account->plugin
+assignments) and was removed completely: package, ControlAPI
+profiles_* facade, /api/profiles* routes, CLI profiles group,
+AccountsRepository assignment methods, ProfileRecord, and migration 8
+dropping the profiles / profile_plugins / account_profiles tables.
+Superseded by: account_plugins (capabilities), plugin_profiles (v7
+settings presets), and plugin-data.db (per-channel operational data).
+See section 4 above and docs/design/fleet-orchestration-hub.md.
+
+
+ORIGINAL TODO ITEMS TO PRESERVE — all shipped (2026-10-22); the section is
+retired. History lives in git.
+
+
+═══════════════════════════════════════════════════════════════════════════
+ARCHITECTURE & DESIGN REFERENCE (stable — unchanged)
+═══════════════════════════════════════════════════════════════════════════
+
 ARCHITECTURE
 
 The project can be structured as a multi-account automation framework with:
@@ -135,33 +453,21 @@ Example:
 The CLI and GUI both consume the same schema.
 
 
-4. PROFILES / CAPABILITIES
+4. PROFILES / CAPABILITIES  — SUPERSEDED (2026-10-22)
 
-The original "Role" concept should preferably be represented as an internal framework profile/capability rather than a Discord server role.
+The original "Role"/Profile concept (Roller/Sniper/Collector bundles) was
+built as ProfileManager and FAILED — it gated nothing and its bookkeeping
+outlived its purpose (full removal plan: consult-B1-profilemanager.md).
 
-Example:
+What replaced it:
+- Capabilities are DIRECT account -> plugin assignments (account_plugins)
+- Named settings presets live as per-plugin profiles (plugin_profiles,
+  ALIVE — bound per account from the account MEMORY view)
+- Per-channel operational data is the AccountPluginData store
+  (plugin-data.db — see docs/design/fleet-orchestration-hub.md §7)
 
-    Profile: Roller
-        Plugins:
-            Roll
-
-    Profile: Sniper
-        Plugins:
-            Snipe
-
-    Profile: Collector
-        Plugins:
-            Roll
-            Snipe
-            Collector
-
-Then:
-
-    Account A -> Roller
-    Account B -> Sniper
-    Account C -> Sniper
-
-This makes the system easier to expand.
+Do not reintroduce permission bundles. Accounts, plugins, and scopes are
+the axes; profiles were the wrong abstraction.
 
 
 5. RATE LIMIT MANAGER
@@ -240,17 +546,12 @@ Concept:
 
 Use a proper database instead of storing everything in one large JSON file.
 
-Possible SQLite tables:
+    libzent.db (SQLite, versioned migrations):
+    accounts, account_settings, plugins, plugin_settings,
+    plugin_profiles, rate_limit_policies, audit_logs, tasks
 
-    accounts
-    account_settings
-    plugins
-    plugin_settings
-    profiles
-    profile_plugins
-    account_profiles
-    rate_limit_policies
-    audit_logs
+    plugin-data.db (SQLite, self-initializing — PHASE 9/B3):
+    plugin_data(account, plugin, guild_id, channel_id, data_json, ...)
 
 Secrets should not be treated as automatically secure simply because they are stored in SQLite. Use an OS credential/keyring mechanism where appropriate.
 
@@ -282,10 +583,6 @@ Example:
     ----------------
     Roll       Enabled
     Snipe      Disabled
-
-    Profile
-    ----------------
-    Collector
 
     Rate Limit
     ----------------
@@ -440,9 +737,6 @@ Suggested commands:
     app plugins disable <plugin>
     app plugins settings <plugin>
 
-    app profiles list
-    app profiles assign <account> <profile>
-
     app ratelimit global
     app ratelimit account <account>
 
@@ -462,9 +756,9 @@ RECOMMENDED PROJECT STRUCTURE
     +-- core/
     |    +-- account_manager
     |    +-- plugin_manager
-    |    +-- profile_manager
     |    +-- settings_manager
     |    +-- rate_limit_manager
+    |    +-- sync_group_manager
     |    +-- task_scheduler
     |    +-- event_bus
     |    +-- logging
@@ -496,129 +790,3 @@ RECOMMENDED PROJECT STRUCTURE
     |
     +-- main.py
 
-
-TODO LIST
-
-PHASE 1 — CORE  ✅ DONE
-
-[x] Account manager
-[x] Plugin manager
-[x] Settings system
-[x] Event bus
-[x] Task scheduler
-[x] Centralized logging
-[x] Database layer
-
-
-PHASE 2 — ACCOUNT MANAGEMENT  ✅ DONE
-
-[x] Add account
-[x] Remove account
-[x] Account list
-[x] Account runtime state
-[x] Account details
-[x] Enable/disable account
-
-
-PHASE 3 — PLUGIN SYSTEM  ✅ DONE
-
-[x] Plugin discovery
-[x] Plugin metadata
-[x] Plugin settings schema
-[x] Plugin lifecycle
-[x] Enable/disable plugins
-[x] Plugin settings API
-
-
-PHASE 4 — PROFILES / CAPABILITIES  ✅ DONE
-
-[x] Create profile
-[x] Assign plugins to profile
-[x] Assign profile to account
-[x] Profile settings
-[x] Multiple accounts sharing profile
-
-
-PHASE 5 — RATE MANAGEMENT  ✅ DONE
-
-[x] Global policy
-[x] Account policy
-[x] Plugin policy
-[x] Randomized pacing/jitter
-[x] Server-provided rate-limit handling
-[x] Configuration validation
-[x] Dangerous-setting warnings
-[x] Rate-limit visualization
-
-
-PHASE 6 — INTERFACES  ✅ DONE
-
-[x] CLI API
-[x] Dashboard API
-[x] Account pages
-[x] Plugin pages
-[x] Profile pages
-[x] Rate-limit pages
-[x] Live logs
-
-
-PHASE 7 — SIMULATION  ✅ DONE
-
-[x] Mock Discord adapter
-[x] Event generator
-[x] Scenario system
-[x] Simulation runner
-[x] Detailed execution logs
-[x] Regression tests
-
-
-PHASE 8 — SAFETY / VALIDATION  ✅ DONE
-
-[x] Dangerous-setting warnings
-[x] Configuration validation
-[x] Minimum pacing constraints
-[x] Global emergency stop
-[x] Account emergency stop
-[x] Plugin emergency stop
-[x] Graceful shutdown
-
-
-ORIGINAL TODO ITEMS TO PRESERVE
-
-- Add Plugin settings page.
-- Add Account add/remove handling.
-- Add account list showing account names and IDs.
-- Add account details button.
-- Show runtime information from cached client memory where available.
-- Add database for persistence and protection of sensitive configuration.
-- Add internal role/profile-style assignment system.
-- Add global and per-account rate-limit settings.
-- Allow selecting an account from the account list when configuring account-specific rate limits.
-- Add advanced delay configuration using float ranges.
-- Add live simulation testing.
-- Add detailed logging for simulation and runtime interactions.
-- Warn users when configured pacing/settings may be unsafe.
-- Require a configurable minimum pacing value, with the current proposed minimum being 1.5 seconds plus optional jitter.
-
-
-CORE DESIGN GOAL
-
-The most important architectural goal is:
-
-    One Core API
-          |
-      +---+---+
-      |       |
-     CLI     GUI
-
-Both interfaces should manipulate the exact same underlying:
-- Accounts
-- Plugins
-- Profiles
-- Settings
-- Tasks
-- Rate-limit policies
-- Logs
-- Simulation system
-
-Plugins should remain independent from the interface layer.

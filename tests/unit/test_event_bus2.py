@@ -163,7 +163,8 @@ class TestDrainAndTyping(unittest.IsolatedAsyncioTestCase):
         await bus.drain(timeout=2.0)
         self.assertEqual(len(done), 5)
         self.assertTrue(all(t.done() for t in tasks))
-        self.assertEqual(bus._background, set())     # strong refs released
+        stats = bus.stats()  # both queues fully drained (no leftover refs)
+        self.assertEqual(stats["queued"] + stats["control_queued"], 0)
 
     async def test_typed_mismatch_no_delivery(self) -> None:
         bus = EventBus()

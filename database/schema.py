@@ -4,6 +4,7 @@ Each entry: (version, name, sql). The runner (database/db.py) records applied
 versions in `schema_migrations` and applies pending ones in order inside a
 transaction per migration.
 """
+
 from __future__ import annotations
 
 MIGRATIONS: list[tuple[int, str, str]] = [
@@ -141,7 +142,7 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         """
         -- Encrypted account credentials (spec §12): Fernet ciphertext ONLY;
         -- the key lives OUTSIDE the database (state/credentials.key 0600 or
-        -- SM_MASTER_KEY env) — a stolen DB never yields usable tokens.
+        -- LZ_MASTER_KEY env) — a stolen DB never yields usable tokens.
         CREATE TABLE IF NOT EXISTS credentials (
             account    TEXT PRIMARY KEY,
             ciphertext BLOB NOT NULL,
@@ -232,6 +233,123 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             plugin  TEXT NOT NULL,
             PRIMARY KEY (account, plugin)
         );
+        """,
+    ),
+    (
+        7,
+        "plugin profiles",
+        """
+        -- Per-plugin named setting profiles: a reusable bundle of setting
+        -- values (validated against the plugin's Setting schema by the
+        -- ControlAPI layer, NEVER by the repository) that an account can
+        -- bind to per plugin. settings_json may carry the RESERVED
+        -- top-level key "channels" (the channel-scope convention
+        -- documented in core/plugin_scopes.py); every other key must be
+        -- a plugin setting name.
+        CREATE TABLE IF NOT EXISTS plugin_profiles (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            plugin       TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            description  TEXT NOT NULL DEFAULT '',
+            settings_json TEXT NOT NULL DEFAULT '{}',
+            created_at   REAL NOT NULL,
+            updated_at   REAL NOT NULL,
+            UNIQUE (plugin, name)
+        );
+        -- The binding lives ON the assignment row: NULL (or absent) =
+        -- plugin defaults, no profile in between. ALTER (not a table
+        -- rebuild): the column is appended like the migration-runner
+        -- convention — plain ADD COLUMN inside the per-migration
+        -- transaction, run exactly once (schema_migrations guards it).
+        ALTER TABLE account_plugins ADD COLUMN profile TEXT;
+        """,
+    ),
+    (
+        8,
+        "drop legacy profile tables",
+        """
+        -- ProfileManager removal (2026-10-22): the legacy named
+        -- permission-bundle tables gated nothing and their accessor
+        -- layer is deleted. Capabilities live in account_plugins;
+        -- per-plugin settings presets live in plugin_profiles.
+        DROP TABLE IF EXISTS account_profiles;
+        DROP TABLE IF EXISTS profile_plugins;
+        DROP TABLE IF EXISTS profiles;
+        """,
+    ),
+    (
+        9,
+        "fleet orchestration state",
+        """
+        -- PHASE 9 (spec §1/§2, D2 database-authoritative): the fleet's
+        -- OWN projection. Membership itself stays with sync_groups +
+        -- accounts.sync_group (SyncGroupManager's UNCHANGED job); these
+        -- tables hold what the orchestrator adds on top: execution mode
+        -- + eligibility per member, task assignments (the fleet work
+        -- unit — NOT the scheduler's per-action tasks), scoped fleet
+        -- cooldowns, and the modest transition history D2 requires.
+        -- Keyed by group NAME (the unique pointer) and account NAME,
+        -- matching the name-keyed convention of the other per-account
+        -- tables; Discord snowflakes that appear in scopes are STRINGS.
+        CREATE TABLE IF NOT EXISTS fleet_groups (
+            group_name  TEXT PRIMARY KEY,
+            paused      INTEGER NOT NULL DEFAULT 0,
+            generation  INTEGER NOT NULL DEFAULT 1,
+            updated_at  REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS fleet_members (
+            account     TEXT PRIMARY KEY,
+            group_name  TEXT NOT NULL,
+            mode        TEXT NOT NULL,
+            eligibility TEXT NOT NULL,
+            since       REAL NOT NULL,
+            version     INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_fleet_members_group
+            ON fleet_members(group_name);
+        CREATE TABLE IF NOT EXISTS fleet_assignments (
+            id            TEXT PRIMARY KEY,
+            group_name    TEXT NOT NULL,
+            task_id       TEXT NOT NULL,
+            account       TEXT,
+            status        TEXT NOT NULL,
+            priority      INTEGER NOT NULL DEFAULT 0,
+            created_at    REAL NOT NULL,
+            started_at    REAL,
+            stopped_at    REAL,
+            resume_policy TEXT NOT NULL DEFAULT '',
+            version       INTEGER NOT NULL DEFAULT 1,
+            generation    INTEGER NOT NULL DEFAULT 1,
+            error         TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_fleet_assignments_group_status
+            ON fleet_assignments(group_name, status);
+        CREATE TABLE IF NOT EXISTS fleet_cooldowns (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_type  TEXT NOT NULL,
+            scope_id    TEXT NOT NULL,
+            reason      TEXT NOT NULL,
+            started_at  REAL NOT NULL,
+            expires_at  REAL NOT NULL,
+            source      TEXT NOT NULL DEFAULT 'manual',
+            cleared_at  REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_fleet_cooldowns_scope
+            ON fleet_cooldowns(scope_type, scope_id);
+        CREATE TABLE IF NOT EXISTS fleet_transitions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind            TEXT NOT NULL,
+            group_name      TEXT NOT NULL,
+            generation      INTEGER NOT NULL,
+            reason          TEXT NOT NULL,
+            correlation_id  TEXT NOT NULL,
+            occurred_at     REAL NOT NULL,
+            task_id         TEXT,
+            assignment_id   TEXT,
+            account         TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_fleet_transitions_group
+            ON fleet_transitions(group_name, id);
         """,
     ),
 ]

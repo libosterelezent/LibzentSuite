@@ -10,17 +10,20 @@ the 1.5s safety floor is NOT checked here — that is
 core.rate_limit_manager's job (UnsafePolicyError), because the floor is a
 policy decision, not a storage invariant.
 """
+
 from __future__ import annotations
 
 import math
-import sqlite3
-from typing import List, Optional
+from typing import TYPE_CHECKING
 
 from core.errors import DatabaseError
-
-from database.models import POLICY_LEVELS, RatePolicyRecord
+from database.models import RatePolicyRecord
 
 from .base import BaseRepository
+
+if TYPE_CHECKING:
+    import builtins
+    import sqlite3
 
 __all__ = ["RatePolicyRepository"]
 
@@ -30,7 +33,7 @@ class RatePolicyRepository(BaseRepository):
 
     # ------------------------------------------------------------ helpers
     @staticmethod
-    def _owner_key(level: str, owner: Optional[str]) -> str:
+    def _owner_key(level: str, owner: str | None) -> str:
         """Normalize an owner to its storage form ('' for global).
 
         Raises DatabaseError for a valid level with a missing owner (that
@@ -45,7 +48,7 @@ class RatePolicyRepository(BaseRepository):
     def _validated(
         self,
         level: str,
-        owner: Optional[str],
+        owner: str | None,
         action: str,
         interval: float,
         jitter_min: float,
@@ -69,9 +72,7 @@ class RatePolicyRepository(BaseRepository):
         if jmin < 0 or jmax < 0:
             raise DatabaseError(f"rate policy jitter values must be >= 0 (got {jmin}, {jmax})")
         if jmin > jmax:
-            raise DatabaseError(
-                f"rate policy jitter_min ({jmin}) must be <= jitter_max ({jmax})"
-            )
+            raise DatabaseError(f"rate policy jitter_min ({jmin}) must be <= jitter_max ({jmax})")
         if not isinstance(action, str) or not action:
             raise DatabaseError("rate policy action must be a non-empty string")
         try:
@@ -102,7 +103,7 @@ class RatePolicyRepository(BaseRepository):
     async def set(
         self,
         level: str,
-        owner: Optional[str],
+        owner: str | None,
         action: str,
         interval: float,
         jitter_min: float,
@@ -125,11 +126,17 @@ class RatePolicyRepository(BaseRepository):
                      interval = excluded.interval,
                      jitter_min = excluded.jitter_min,
                      jitter_max = excluded.jitter_max""",
-                (record.level, owner_key, record.action,
-                 record.interval, record.jitter_min, record.jitter_max),
+                (
+                    record.level,
+                    owner_key,
+                    record.action,
+                    record.interval,
+                    record.jitter_min,
+                    record.jitter_max,
+                ),
             )
 
-    async def delete(self, level: str, owner: Optional[str], action: str) -> bool:
+    async def delete(self, level: str, owner: str | None, action: str) -> bool:
         """Remove one policy; True when a row was deleted.
 
         Lenient by design (writes strict, reads/deletes forgiving): an
@@ -137,12 +144,14 @@ class RatePolicyRepository(BaseRepository):
         clear_policy surfaces that as "nothing to clear".
         """
         owner_key = "" if level == "global" else (owner or "")
-        async with self._tx(f"delete policy {level}/{owner_key}/{action}") as conn:
-            async with conn.execute(
+        async with (
+            self._tx(f"delete policy {level}/{owner_key}/{action}") as conn,
+            conn.execute(
                 "DELETE FROM rate_limit_policies WHERE level = ? AND owner = ? AND action = ?",
                 (level, owner_key, action),
-            ) as cur:
-                return cur.rowcount > 0
+            ) as cur,
+        ):
+            return cur.rowcount > 0
 
     async def delete_account(self, account: str) -> int:
         """Delete every account-scoped policy row for one account name.
@@ -154,10 +163,7 @@ class RatePolicyRepository(BaseRepository):
         the number of rows removed.
         """
         removed = 0
-        pattern = (
-            account.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            + "/%"
-        )
+        pattern = account.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "/%"
         async with self._tx(f"delete policies for account {account!r}") as conn:
             async with conn.execute(
                 "DELETE FROM rate_limit_policies WHERE level = ? AND owner = ?",
@@ -165,15 +171,14 @@ class RatePolicyRepository(BaseRepository):
             ) as cur:
                 removed += cur.rowcount
             async with conn.execute(
-                "DELETE FROM rate_limit_policies WHERE level = ? "
-                "AND owner LIKE ? ESCAPE '\\'",
+                "DELETE FROM rate_limit_policies WHERE level = ? AND owner LIKE ? ESCAPE '\\'",
                 ("account_plugin", pattern),
             ) as cur:
                 removed += cur.rowcount
         return removed
 
     # ---------------------------------------------------------------- read
-    async def get(self, level: str, owner: Optional[str], action: str) -> Optional[RatePolicyRecord]:
+    async def get(self, level: str, owner: str | None, action: str) -> RatePolicyRecord | None:
         """One policy by exact scope (None when nothing stored there).
 
         Owner forms are normalized on lookup: None and '' both address the
@@ -186,14 +191,16 @@ class RatePolicyRepository(BaseRepository):
         )
         return None if row is None else self._record_from_row(row)
 
-    async def list(self) -> List[RatePolicyRecord]:
+    async def list(self) -> builtins.list[RatePolicyRecord]:
         """Every stored policy (level, owner, action order).
 
         A row whose level/owner no longer constructs a valid record (corrupt
         row, future rename) is skipped with a warning instead of crashing.
         """
-        records: List[RatePolicyRecord] = []
-        for row in await self._fetch_all("SELECT * FROM rate_limit_policies ORDER BY level, owner, action"):
+        records: list[RatePolicyRecord] = []
+        for row in await self._fetch_all(
+            "SELECT * FROM rate_limit_policies ORDER BY level, owner, action"
+        ):
             try:
                 records.append(self._record_from_row(row))
             except ValueError as exc:

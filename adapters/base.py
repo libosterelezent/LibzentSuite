@@ -22,29 +22,49 @@ Server-provided rate limits: when Discord answers 429 the client raises
 to the rate limit manager and retries after backoff — the framework always
 respects server-provided rate-limit information.
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 # RICH MODEL (adapters/model.py) — the full stable projection (embeds,
 # components, attachments, reactions, reference, author/channel/guild,
 # created_at, runtime-only raw escape hatch). Re-exported here so every
 # existing ``from adapters.base import DiscordMessage`` keeps working.
-from .model import (  # noqa: F401 — compatibility re-exports
-    DiscordAttachment,
-    DiscordChannel,
-    DiscordComponent,
-    DiscordEmbed,
-    DiscordEmbedField,
-    DiscordMessage,
-    DiscordMessageReference,
-    DiscordReaction,
-    DiscordUser,
-    convert_message,
+from .model import (  # compatibility re-exports (``as``-alias = PEP 484
+    # re-export convention; pyflakes, unlike flake8, ignores ``noqa``)
+    DiscordAttachment as DiscordAttachment,
+)
+from .model import (
+    DiscordChannel as DiscordChannel,
+)
+from .model import (
+    DiscordComponent as DiscordComponent,
+)
+from .model import (
+    DiscordEmbed as DiscordEmbed,
+)
+from .model import (
+    DiscordEmbedField as DiscordEmbedField,
+)
+from .model import (
+    DiscordMessage as DiscordMessage,
+)
+from .model import (
+    DiscordMessageReference as DiscordMessageReference,
+)
+from .model import (
+    DiscordReaction as DiscordReaction,
+)
+from .model import (
+    DiscordUser as DiscordUser,
+)
+from .model import (
+    convert_message as convert_message,
 )
 
-
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @runtime_checkable
@@ -52,19 +72,19 @@ class DiscordClient(Protocol):
     """The minimal surface every adapter must implement."""
 
     #: Discord user id of the logged-in account (None until connected)
-    user_id: Optional[int]
+    user_id: int | None
     #: gateway heartbeat latency in milliseconds (None when unknown)
-    latency_ms: Optional[float]
+    latency_ms: float | None
     #: callbacks assigned by the account manager BEFORE connect()
-    on_message: Optional[Callable[[DiscordMessage], None]]
-    on_disconnect: Optional[Callable[[str], None]]
+    on_message: Callable[[DiscordMessage], None] | None
+    on_disconnect: Callable[[str], None] | None
     #: OPTIONAL rich-event callbacks (None on clients that lack the
     #: event): ``on_reaction(kind, message_id, channel_id, guild_id,
     #: user_id, emoji, raw)``, ``on_message_edit(message)``,
     #: ``on_message_delete(message_id, channel_id, guild_id, raw)``.
-    on_reaction: Optional[Callable[..., None]]
-    on_message_edit: Optional[Callable[[DiscordMessage], None]]
-    on_message_delete: Optional[Callable[..., None]]
+    on_reaction: Callable[..., None] | None
+    on_message_edit: Callable[[DiscordMessage], None] | None
+    on_message_delete: Callable[..., None] | None
 
     async def connect(self) -> None: ...
 
@@ -106,4 +126,17 @@ class ClientFactory(Protocol):
     def __call__(self, name: str, token: str) -> Any: ...
 
 
-__all__ = ["DiscordClient", "DiscordMessage", "ClientFactory"]
+__all__ = [
+    "ClientFactory",
+    "DiscordAttachment",
+    "DiscordChannel",
+    "DiscordClient",
+    "DiscordComponent",
+    "DiscordEmbed",
+    "DiscordEmbedField",
+    "DiscordMessage",
+    "DiscordMessageReference",
+    "DiscordReaction",
+    "DiscordUser",
+    "convert_message",
+]

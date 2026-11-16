@@ -13,7 +13,7 @@ of the layers:
      - Applies to
    * - ``.env``
      - ``MUDAE_BOT_ID``, ``OWNER_USER_IDS``, ``DASHBOARD_TOKEN``,
-       ``REMOTE_CONTROL`` (+ ``SM_MASTER_KEY`` via process env only) —
+       ``REMOTE_CONTROL`` (+ ``LZ_MASTER_KEY`` via process env only) —
        account tokens live ENCRYPTED in the DB, imported from ``.env``
        only via ``credentials import-env``
      - secrets & ids (never in the DB)

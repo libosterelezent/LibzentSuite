@@ -7,10 +7,13 @@ file; never tokens — only the ``.env`` key reference).
 
 Policy file shape::
 
-    {"global":    {action: {"interval": 2.0, "jitter": [0.1, 0.5]}},
-     "accounts": {name: {action: {...}}},
-     "lane":      {"enabled": true, "prefixrate": 1.5}}
+    {
+        "global": {action: {"interval": 2.0, "jitter": [0.1, 0.5]}},
+        "accounts": {name: {action: {...}}},
+        "lane": {"enabled": true, "prefixrate": 1.5},
+    }
 """
+
 from __future__ import annotations
 
 import json
@@ -18,9 +21,9 @@ import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
-LOG = logging.getLogger("slaughtermudae.config")
+LOG = logging.getLogger("libzent.config")
 
 #: actions a rate policy can pace (spec §5) — used to warn about typo keys
 #: in flat-mode policy files (unknown keys would otherwise silently become
@@ -29,7 +32,7 @@ KNOWN_ACTIONS = ("message", "dm", "reaction", "button")
 
 #: conservative defaults when rate_limits.json is absent (spec example:
 #: base interval 2.0s, random jitter 0.0-0.5s; floor is 1.5s everywhere)
-DEFAULT_POLICIES: Dict[str, Dict[str, Any]] = {
+DEFAULT_POLICIES: dict[str, dict[str, Any]] = {
     "global": {
         "message": {"interval": 2.0, "jitter": [0.0, 0.5]},
         "dm": {"interval": 2.0, "jitter": [0.0, 0.5]},
@@ -42,9 +45,9 @@ DEFAULT_POLICIES: Dict[str, Dict[str, Any]] = {
 class ProjectConfig:
     """Everything the framework needs besides credentials + the database."""
 
-    global_settings: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    policies: Dict[str, Any] = field(default_factory=lambda: _deep_copy(DEFAULT_POLICIES))
-    accounts: List[Dict[str, Any]] = field(default_factory=list)
+    global_settings: dict[str, dict[str, Any]] = field(default_factory=dict)
+    policies: dict[str, Any] = field(default_factory=lambda: _deep_copy(DEFAULT_POLICIES))
+    accounts: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _deep_copy(value: Any) -> Any:
@@ -80,25 +83,26 @@ def load_config(config_dir: str | Path) -> ProjectConfig:
     lane = raw_policies.pop("lane", None) or {}
     if lane and not isinstance(lane, dict):
         raise ValueError(
-            "config/rate_limits.json: 'lane' must be a JSON object "
-            f"(got {type(lane).__name__})")
+            f"config/rate_limits.json: 'lane' must be a JSON object (got {type(lane).__name__})"
+        )
     if "global" in raw_policies or "accounts" in raw_policies:
         for key in raw_policies:
             if key not in ("global", "accounts", "lane"):
                 LOG.warning(
                     "rate_limits.json: ignoring unknown top-level key %r "
-                    "(expected 'global', 'accounts' or 'lane')", key)
+                    "(expected 'global', 'accounts' or 'lane')",
+                    key,
+                )
         glob = raw_policies.get("global") or {}
         accts = raw_policies.get("accounts") or {}
         if not isinstance(glob, dict) or not isinstance(accts, dict):
-            raise ValueError(
-                "rate_limits.json: 'global' and 'accounts' must be JSON objects")
+            raise ValueError("rate_limits.json: 'global' and 'accounts' must be JSON objects")
         policies["global"].update(glob)
         for account, actions in accts.items():
             if actions is not None and not isinstance(actions, dict):
                 raise ValueError(
-                    f"rate_limits.json: policies for account {account!r} "
-                    "must be a JSON object")
+                    f"rate_limits.json: policies for account {account!r} must be a JSON object"
+                )
             policies["accounts"].setdefault(account, {}).update(actions or {})
     else:  # tolerate a flat {action: {...}} file -> global level
         for key in raw_policies:
@@ -106,8 +110,10 @@ def load_config(config_dir: str | Path) -> ProjectConfig:
                 LOG.warning(
                     "rate_limits.json: flat-mode key %r is not a known "
                     "action %s — a typo would define a policy that never "
-                    "matches anything (keeping it as written)", key,
-                    list(KNOWN_ACTIONS))
+                    "matches anything (keeping it as written)",
+                    key,
+                    list(KNOWN_ACTIONS),
+                )
         policies["global"].update(raw_policies)
     if isinstance(lane, dict) and lane:
         # server-wide sequential send lane config (kv runtime state wins on
@@ -119,29 +125,30 @@ def load_config(config_dir: str | Path) -> ProjectConfig:
             # bool("false") is True: a string here would silently ARM the
             # fleet-serializing lane against the writer's intent
             raise ValueError(
-                "rate_limits.json: lane.enabled must be true or false, "
-                f"got {enabled!r}")
+                f"rate_limits.json: lane.enabled must be true or false, got {enabled!r}"
+            )
         raw_rate = lane.get("prefixrate", 1.5)
         if isinstance(raw_rate, bool) or not isinstance(raw_rate, (int, float)):
             raise ValueError(
-                f"rate_limits.json: lane.prefixrate must be a number, "
-                f"got {raw_rate!r}")
+                f"rate_limits.json: lane.prefixrate must be a number, got {raw_rate!r}"
+            )
         try:
             prefixrate = float(raw_rate)
         except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError(
-                f"rate_limits.json: lane.prefixrate must be a number, "
-                f"got {raw_rate!r}") from exc
+                f"rate_limits.json: lane.prefixrate must be a number, got {raw_rate!r}"
+            ) from exc
         if not math.isfinite(prefixrate) or prefixrate < 0:
             raise ValueError(
                 "rate_limits.json: lane.prefixrate must be a finite number "
-                f">= 0 (0 pauses the lane), got {raw_rate!r}")
+                f">= 0 (0 pauses the lane), got {raw_rate!r}"
+            )
         policies["lane"] = {
             "enabled": enabled,
             "prefixrate": prefixrate,
         }
 
-    accounts: List[Dict[str, Any]] = []
+    accounts: list[dict[str, Any]] = []
     accounts_dir = base / "accounts"
     if accounts_dir.is_dir():
         seen = set()
@@ -161,11 +168,9 @@ def load_config(config_dir: str | Path) -> ProjectConfig:
                 continue
             seen.add(data["name"])
             accounts.append(_skip_doc_keys(data))
-    config = ProjectConfig(
-        global_settings=global_settings, policies=policies, accounts=accounts
-    )
+    config = ProjectConfig(global_settings=global_settings, policies=policies, accounts=accounts)
     LOG.info("config loaded: %d account file(s)", len(accounts))
     return config
 
 
-__all__ = ["ProjectConfig", "load_config", "DEFAULT_POLICIES"]
+__all__ = ["DEFAULT_POLICIES", "ProjectConfig", "load_config"]

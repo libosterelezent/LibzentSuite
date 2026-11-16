@@ -454,7 +454,11 @@ class TestRichEventParity(unittest.IsolatedAsyncioTestCase):
         })()
         world.subscribers.append(subscriber)  # the author's own client
         world.edit_message(1, "self edit")
-        self.assertEqual(seen, [])  # own edits never echo back (live parity)
+        # own edits never echo back — AUDIT FIX: the live adapter's rich
+        # edit/delete/reaction handlers were flipped to this same
+        # others-only polarity (raw+sim parity); previously they were
+        # inverted and published ONLY self-authored cached events.
+        self.assertEqual(seen, [])
 
     async def test_reaction_raw_is_handle_tuple_like_live(self) -> None:
         """Live pushes ``(reaction, user)`` library handles — never None."""
@@ -524,7 +528,7 @@ class TestChannelGone(unittest.IsolatedAsyncioTestCase):
         resurrects DM channels; the sim deliberately does not)."""
         world = _basic_world()
         dm = world.dm_channel_for(SYNTHETIC_ALPHA_ID, SYNTHETIC_MUDAE_ID)
-        with self.assertLogs("slaughtermudae.simulator", level="WARNING") as logs:
+        with self.assertLogs("libzent.simulator", level="WARNING") as logs:
             self.assertTrue(world.channel_gone(dm))
         self.assertTrue(
             any("deliberate sim divergence" in line for line in logs.output),
@@ -538,7 +542,7 @@ class TestChannelGone(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(dm, world.channels)
         # a guild channel deletion stays QUIET (no divergence there)
         guild = _basic_world()
-        with self.assertNoLogs("slaughtermudae.simulator"):
+        with self.assertNoLogs("libzent.simulator"):
             guild.channel_gone(SYNTHETIC_GUILD_CHANNEL)
 
 

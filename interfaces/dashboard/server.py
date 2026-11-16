@@ -54,10 +54,12 @@ server therefore accepts an optional ``bus=`` argument (any object with the
 attribute names on the api object (``bus``/``event_bus``). Bootstrap should
 pass the real bus explicitly.
 """
+
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import hmac
 import ipaddress
 import json
@@ -72,14 +74,17 @@ import time as _time
 from dataclasses import asdict, is_dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
-from core.api import ControlAPI
+from core import theme_store
+from core.dashboard_ui.context import _VIEW_ID, clean_view_id
+from core.dashboard_ui.errors import UIError
 from core.errors import AccountError, DatabaseError
 from core.event_bus import (
     Event,
     EventBus,
+    FleetStateChanged,
     TaskCancelled,
     TaskCompleted,
     TaskFailed,
@@ -88,7 +93,10 @@ from core.event_bus import (
 
 from . import ws as wsproto
 
-LOG = logging.getLogger("slaughtermudae.dashboard")
+if TYPE_CHECKING:
+    from core.api import ControlAPI
+
+LOG = logging.getLogger("libzent.dashboard")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 BROADCAST_INTERVAL = 1.0
@@ -97,6 +105,10 @@ MAX_BODY_BYTES = 1_000_000
 #: per-connection socket timeout for plain HTTP requests (slow-loris guard);
 #: an upgraded WebSocket detaches the socket and manages its own timeouts
 HTTP_SOCKET_TIMEOUT_S = 30.0
+# TOTAL deadline for reading one request body: per-recv timeouts reset on
+# every byte, so a 1-byte-per-29s trickle could otherwise pin a handler
+# slot for length × timeout ( defeating the slow-loris guard ).
+HTTP_BODY_DEADLINE_S = 30.0
 #: hostnames a loopback-bound dashboard accepts in the Host header
 LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
 #: response headers for every reply (clickjacking / sniffing / caching hardening)
@@ -107,7 +119,10 @@ SECURITY_HEADERS = (
     ("Cache-Control", "no-store"),
 )
 #: how long a route coroutine may take on the main loop before we 504
-ROUTE_TIMEOUT_S = 10.0
+# strictly greater than the UI registry's SYNC_TIMEOUT_S (10.0) + queue
+# margin: an equal budget phantom-504'd actions that queued behind other
+# sync callbacks and STILL succeeded (retry = double-apply)
+ROUTE_TIMEOUT_S = 13.0
 #: wall-clock budget for ONE partially-arrived websocket frame to complete
 #: (slow-dribble guard: a frame header that starts arriving must finish)
 WS_FRAME_DEADLINE_S = 30.0
@@ -130,7 +145,7 @@ def _split_host(value: str) -> str:
     """Hostname part of a Host header / URL netloc (port and [] stripped)."""
     value = (value or "").strip().lower()
     if value.startswith("["):  # [::1]:8070
-        return value[1:value.find("]")] if "]" in value else value[1:]
+        return value[1 : value.find("]")] if "]" in value else value[1:]
     return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
 
 
@@ -144,8 +159,14 @@ def _is_loopback_host(host: str) -> bool:
     except ValueError:
         return False
 
+
 #: task event types forwarded to WS clients (JSON-safe payloads)
 TASK_EVENT_TYPES = (TaskStarted, TaskCompleted, TaskFailed, TaskCancelled)
+
+#: fleet transition events forwarded to WS clients (PHASE 9 §3: the
+#: Fleet Hub converges on them; delivery is an optimization over the
+#: persisted fleet_transitions table)
+FLEET_EVENT_TYPES = (FleetStateChanged,)
 
 #: routes that carry credential MATERIAL (a token value, or the power to
 #: import/copy one). Beyond the normal token auth they REQUIRE a configured
@@ -173,19 +194,16 @@ def _dumps(payload: Any) -> str:
         return json.dumps(payload, allow_nan=False)
     except ValueError as exc:
         if "circular" in str(exc).lower():
-            return json.dumps({"type": "error",
-                               "error": "payload contained a circular reference"})
-        return json.dumps({"type": "error",
-                           "error": "payload contained a non-finite number"})
+            return json.dumps({"type": "error", "error": "payload contained a circular reference"})
+        return json.dumps({"type": "error", "error": "payload contained a non-finite number"})
     except TypeError:
-        return json.dumps({"type": "error",
-                           "error": "payload was not JSON-serializable"})
+        return json.dumps({"type": "error", "error": "payload was not JSON-serializable"})
     except RecursionError:
-        return json.dumps({"type": "error",
-                           "error": "payload nesting exceeded the serializer limit"})
+        return json.dumps(
+            {"type": "error", "error": "payload nesting exceeded the serializer limit"}
+        )
     except RuntimeError:
-        return json.dumps({"type": "error",
-                           "error": "payload changed during serialization"})
+        return json.dumps({"type": "error", "error": "payload changed during serialization"})
 
 
 def parse_json_bool(value: Any, field: str) -> bool:
@@ -200,7 +218,7 @@ def parse_json_bool(value: Any, field: str) -> bool:
     raise ValueError(f"field '{field}' must be a boolean (true/false), got {value!r}")
 
 
-def require_field(body: Dict[str, Any], key: str, route: str) -> Any:
+def require_field(body: dict[str, Any], key: str, route: str) -> Any:
     """Fetch a required body field with an actionable 400 message.
 
     ERROR AUDIT FIX: missing keys previously leaked bare KeyError text
@@ -211,7 +229,7 @@ def require_field(body: Dict[str, Any], key: str, route: str) -> Any:
     return body[key]
 
 
-def require_str(body: Dict[str, Any], key: str, route: str) -> str:
+def require_str(body: dict[str, Any], key: str, route: str) -> str:
     """Required non-empty string field (actionable 400 on missing/empty/wrong type)."""
     value = require_field(body, key, route)
     if not isinstance(value, str) or not value:
@@ -219,7 +237,7 @@ def require_str(body: Dict[str, Any], key: str, route: str) -> str:
     return value
 
 
-def require_number(body: Dict[str, Any], key: str, route: str) -> float:
+def require_number(body: dict[str, Any], key: str, route: str) -> float:
     """Required numeric field; finite-ness is checked separately by callers.
 
     Bools are rejected (parity with require_int): ``float(True)`` would
@@ -241,8 +259,15 @@ def require_finite(value: float, key: str, route: str) -> float:
     return value
 
 
-def require_int(body: Dict[str, Any], key: str, route: str) -> int:
-    """Required integer field (bools excluded; integral floats tolerated)."""
+def require_int(body: dict[str, Any], key: str, route: str) -> int:
+    """Required integer field (bools excluded; integral floats tolerated).
+
+    Digit STRINGS are accepted and parsed exactly: Discord snowflakes
+    exceed JavaScript Number.MAX_SAFE_INTEGER, so browser clients that
+    send ids as strings (the only lossless way) must not be rejected —
+    while a JSON number that already lost precision is indistinguishable
+    from a legit int and passes through as-is.
+    """
     value = require_field(body, key, route)
     if isinstance(value, bool):
         raise ValueError(f"field '{key}' in POST {route} must be an integer, got {value!r}")
@@ -250,10 +275,40 @@ def require_int(body: Dict[str, Any], key: str, route: str) -> int:
         return value
     if isinstance(value, float) and value.is_integer():
         return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
     raise ValueError(f"field '{key}' in POST {route} must be an integer, got {value!r}")
 
 
-def q_str(query: Dict[str, List[str]], key: str, route: str) -> str:
+def require_json_list(body: dict[str, Any], key: str, route: str) -> list[Any]:
+    """Required list field whose items must all be integers.
+
+    AUDIT FIX: /api/admin/ids/set and /api/admin/perms/set referenced
+    this helper before it existed — both routes 500'd with a NameError.
+    Mirrors require_int's strictness per item (bools rejected, integral
+    floats tolerated) and produces an actionable 400 otherwise.
+    """
+    value = require_field(body, key, route)
+    if not isinstance(value, list):
+        raise ValueError(f"field '{key}' in POST {route} must be a list of integers")
+    out: list[int] = []
+    for item in value:
+        if isinstance(item, bool):
+            raise ValueError(f"field '{key}' in POST {route} must contain integers, got {item!r}")
+        if isinstance(item, int):
+            out.append(item)
+        elif isinstance(item, float) and item.is_integer():
+            out.append(int(item))
+        elif isinstance(item, str) and item.strip().isdigit():
+            # exact parse: snowflakes exceed JS Number.MAX_SAFE_INTEGER, so
+            # browser clients send ids as strings to avoid precision loss
+            out.append(int(item.strip()))
+        else:
+            raise ValueError(f"field '{key}' in POST {route} must contain integers, got {item!r}")
+    return out
+
+
+def q_str(query: dict[str, list[str]], key: str, route: str) -> str:
     """Required non-empty query-string parameter (actionable 400 when absent)."""
     value = (query.get(key) or [""])[0].strip()
     if not value:
@@ -261,13 +316,13 @@ def q_str(query: Dict[str, List[str]], key: str, route: str) -> str:
     return value
 
 
-def q_opt(query: Dict[str, List[str]], key: str) -> Optional[str]:
+def q_opt(query: dict[str, list[str]], key: str) -> str | None:
     """Optional query-string parameter; empty/absent becomes None."""
     value = (query.get(key) or [""])[0].strip()
     return value or None
 
 
-def q_int(query: Dict[str, List[str]], key: str, default: int, route: str) -> int:
+def q_int(query: dict[str, list[str]], key: str, default: int, route: str) -> int:
     """Integer query-string parameter with a default; 400 on garbage."""
     raw = (query.get(key) or [""])[0].strip()
     if not raw:
@@ -278,7 +333,7 @@ def q_int(query: Dict[str, List[str]], key: str, default: int, route: str) -> in
         raise ValueError(f"?{key}= in GET {route} must be an integer, got {raw!r}") from exc
 
 
-def body_opt_str(body: Dict[str, Any], key: str, route: str) -> Optional[str]:
+def body_opt_str(body: dict[str, Any], key: str, route: str) -> str | None:
     """Optional string body field; null/empty -> None; non-string -> 400."""
     value = body.get(key)
     if value is None or value == "":
@@ -288,19 +343,19 @@ def body_opt_str(body: Dict[str, Any], key: str, route: str) -> Optional[str]:
     return value
 
 
-def body_opt_number(body: Dict[str, Any], key: str, default: float, route: str) -> float:
+def body_opt_number(body: dict[str, Any], key: str, default: float, route: str) -> float:
     """Optional numeric body field (finite-checked); absent -> default."""
     if key not in body or body[key] is None:
         return default
     return require_finite(require_number(body, key, route), key, route)
 
 
-def body_opt_owner(body: Dict[str, Any], route: str) -> Optional[str]:
+def body_opt_owner(body: dict[str, Any], route: str) -> str | None:
     """Policy owner: null/"" means global scope; must be a string otherwise."""
     return body_opt_str(body, "owner", route)
 
 
-def entry_as_dict(entry: Any) -> Dict[str, Any]:
+def entry_as_dict(entry: Any) -> dict[str, Any]:
     """Normalize a log/audit entry (dict or dataclass-like) to a JSON dict."""
     if isinstance(entry, dict):
         return dict(entry)
@@ -312,24 +367,32 @@ def entry_as_dict(entry: Any) -> Dict[str, Any]:
     return {"message": str(entry)}
 
 
-def event_as_dict(event: Event) -> Dict[str, Any]:
+def event_as_dict(event: Event) -> dict[str, Any]:
     """JSON-safe dict of a bus event (dataclass fields; falls back to vars)."""
     if is_dataclass(event):
         return dict(asdict(event))
-    return {k: v for k, v in getattr(event, "__dict__", {}).items()
-            if isinstance(v, (str, int, float, bool, type(None)))}
+    return {
+        k: v
+        for k, v in getattr(event, "__dict__", {}).items()
+        if isinstance(v, (str, int, float, bool, type(None)))
+    }
 
 
 class WebSocketClient:
     """One browser connection: outbound queue drained by its reader thread."""
 
-    def __init__(self, sock: socket.socket, server: "DashboardServer") -> None:
+    def __init__(
+        self, sock: socket.socket, server: DashboardServer, initial_buffer: bytes = b""
+    ) -> None:
         self._sock = sock
         self._server = server
-        self._sendq: "thread_queue.SimpleQueue[Tuple[str, bytes]]" = thread_queue.SimpleQueue()
+        self._sendq: thread_queue.SimpleQueue[tuple[str, bytes]] = thread_queue.SimpleQueue()
         self.alive = True
         self._refresh_inflight = False
         self._last_refresh = 0.0
+        # bytes read past the handshake while still in the buffered reader —
+        # pipelined first frames the upgrade must not lose
+        self._initial_buffer = bytes(initial_buffer)
 
     def push_text(self, text: str) -> None:
         """Queue a text frame (thread-safe; sent by the owning reader loop).
@@ -343,27 +406,28 @@ class WebSocketClient:
             return
         if self._sendq.qsize() >= 256:
             self.alive = False
-            try:
+            with contextlib.suppress(OSError):
                 self._sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
             return
         self._sendq.put(("text", wsproto.encode_text_frame(text)))
 
-    def push_json(self, payload: Dict[str, Any]) -> None:
+    def push_json(self, payload: dict[str, Any]) -> None:
         self.push_text(_dumps(payload))
 
     def serve(self) -> None:
         """Reader loop (runs in the handler thread that did the upgrade)."""
         self._sock.settimeout(0.25)
-        buffer = b""
-        partial_since: Optional[float] = None  # arrival clock of a partial frame
+        buffer = self._initial_buffer
+        self._initial_buffer = b""
+        partial_since: float | None = None  # arrival clock of a partial frame
         try:
-            while self.alive:
+            while self.alive and not self._server._clients_closed:
+                # AUDIT: a client stranded by a stop()-race registration must
+                # not idle in recv ticks forever holding a handler slot.
                 self._drain()
                 try:
                     chunk = self._sock.recv(4096)
-                except socket.timeout:
+                except TimeoutError:
                     chunk = None
                 except OSError:
                     break
@@ -408,11 +472,12 @@ class WebSocketClient:
                             # peer-initiated close: echo its status code
                             # (codeless when it carried none, 1002 when
                             # malformed — see ws.echo_close_code)
-                            self._sendq.put((
-                                "raw",
-                                wsproto.encode_close_frame(
-                                    wsproto.echo_close_code(payload)),
-                            ))
+                            self._sendq.put(
+                                (
+                                    "raw",
+                                    wsproto.encode_close_frame(wsproto.echo_close_code(payload)),
+                                )
+                            )
                             self._drain()
                             return
                         self._sendq.put(("raw", wsproto.encode_pong(payload)))
@@ -459,10 +524,8 @@ class WebSocketClient:
         finally:
             self.alive = False
             self._server.unregister_threadsafe(self)
-            try:
+            with contextlib.suppress(OSError):
                 self._sock.close()
-            except OSError:
-                pass
 
     def _handle_text(self, text: str) -> None:
         """Minimal app-level protocol: 'refresh' forces an immediate push.
@@ -473,6 +536,7 @@ class WebSocketClient:
         if text.strip() != "refresh":
             return
         import time as _time
+
         now = _time.monotonic()
         if self._refresh_inflight or now - self._last_refresh < 0.1:
             return
@@ -511,36 +575,36 @@ class DashboardServer:
     def __init__(
         self,
         api: ControlAPI,
-        token: Optional[str] = None,
+        token: str | None = None,
         host: str = "127.0.0.1",
         port: int = 8070,
-        bus: Optional[EventBus] = None,
+        bus: EventBus | None = None,
         exit_signal: bool = False,
     ) -> None:
         self._api = api
         self._token = token or None  # "" behaves like "no token" everywhere
-                                        # (WS + REST parity)
+        # (WS + REST parity)
         self._exit_signal = bool(exit_signal)  # /api/shutdown may signal the
         # host process to exit (main.py only — never in tests/embedded use)
         self._host, self._port = host, port
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._httpd: Optional[ThreadingHTTPServer] = None
-        self._thread: Optional[threading.Thread] = None
-        self._clients: List[WebSocketClient] = []
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._httpd: ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+        self._clients: list[WebSocketClient] = []
         # FINAL-PHASE (F3): shared per-tick stats snapshot (one API build
         # per broadcast second, reused by per-client refreshes)
-        self._stats_snapshot: Optional[str] = None
+        self._stats_snapshot: str | None = None
         self._stats_ts: float = 0.0
         self._clients_closed = False
         self._stop_lock = threading.Lock()  # stop() is idempotent + concurrent-safe
-        self._broadcaster: Optional[asyncio.Task] = None
-        self._log_unsub: Optional[Any] = None
-        self._audit_unsub: Optional[Any] = None
+        self._broadcaster: asyncio.Task | None = None
+        self._log_unsub: Any | None = None
+        self._audit_unsub: Any | None = None
         self._audit_recorder: Any = None  # idempotent attach_audit guard
-        self._task_unsubs: List[Any] = []
+        self._task_unsubs: list[Any] = []
         # ControlAPI has no bus accessor (documented gap) — accept one
         # explicitly or probe the usual attribute names, duck-typed.
-        self._bus: Optional[Any] = bus
+        self._bus: Any | None = bus
         if self._bus is None:
             for attr in ("bus", "event_bus", "_bus"):
                 candidate = getattr(api, attr, None)
@@ -560,7 +624,7 @@ class DashboardServer:
         return f"http://{self._host}:{self.bound_port}"
 
     # ------------------------------------------------------------- lifecycle
-    def start(self) -> "DashboardServer":
+    def start(self) -> DashboardServer:
         """Start serving (call from inside the running asyncio loop)."""
         self._loop = asyncio.get_running_loop()
         handler = _make_handler(self)
@@ -573,6 +637,7 @@ class DashboardServer:
         self._broadcaster = self._loop.create_task(self._broadcast_loop())
         self._attach_audit_recorder()
         self._attach_task_events()
+        self._attach_fleet_events()
         LOG.info(
             "dashboard listening on %s (auth=%s)",
             self.url,
@@ -596,10 +661,8 @@ class DashboardServer:
             clients, self._clients = list(self._clients), []
             for client in clients:
                 client.alive = False
-                try:
-                    client._sock.shutdown(socket.SHUT_RDWR)  # noqa: SLF001 — own class
-                except OSError:
-                    pass
+                with contextlib.suppress(OSError):
+                    client._sock.shutdown(socket.SHUT_RDWR)
             broadcaster, self._broadcaster = self._broadcaster, None
             log_unsub, self._log_unsub = self._log_unsub, None
             audit_unsub, self._audit_unsub = self._audit_unsub, None
@@ -607,33 +670,33 @@ class DashboardServer:
             httpd, self._httpd = self._httpd, None
             thread, self._thread = self._thread, None
         if broadcaster is not None:
-            try:
-                # ROUND-2 AUDIT: Task.cancel() is NOT thread-safe — a stop()
-                # from a non-loop thread could wedge the task in 'cancelling'
-                # forever and hang loop teardown. Hop through the loop.
+            # ROUND-2 AUDIT: Task.cancel() is NOT thread-safe — a stop()
+            # from a non-loop thread could wedge the task in 'cancelling'
+            # forever and hang loop teardown. Hop through the loop.
+            with contextlib.suppress(RuntimeError):
+                # ERROR AUDIT: loop already closed
                 broadcaster.get_loop().call_soon_threadsafe(broadcaster.cancel)
-            except RuntimeError:  # ERROR AUDIT: loop already closed
-                pass
-            self._broadcaster = None
-        if self._log_unsub is not None:
-            self._log_unsub()
-            self._log_unsub = None
-        if self._audit_unsub is not None:
-            self._audit_unsub()
-            self._audit_unsub = None
+        # AUDIT FIX: the handles above were swapped into locals under the
+        # lock — unsubscribe via THOSE. (The previous code re-read the
+        # already-nulled attributes, so the unsubs were dead code and the
+        # log/audit/bus subscriptions leaked past stop().)
+        if log_unsub is not None:
+            with contextlib.suppress(Exception):
+                log_unsub()
+        if audit_unsub is not None:
+            with contextlib.suppress(Exception):
+                audit_unsub()
         self._audit_recorder = None
-        for unsub in self._task_unsubs:
-            try:
+        for unsub in task_unsubs:
+            with contextlib.suppress(Exception):
                 unsub()
-            except Exception:
-                pass
         if httpd is not None:
             httpd.shutdown()
             httpd.server_close()  # AUDIT FIX: release the listening socket
         if thread is not None:
             thread.join(timeout=2.0)  # shutdown() already signalled it
 
-    def attach_logs(self, log_service: Any) -> "DashboardServer":
+    def attach_logs(self, log_service: Any) -> DashboardServer:
         """Stream every new log entry from a LogService to WS clients.
 
         Entries arrive as dicts or LogEntry-like objects; either way the
@@ -649,7 +712,7 @@ class DashboardServer:
         self._log_unsub = log_service.subscribe(_on_entry)
         return self
 
-    def attach_audit(self, recorder: Any) -> "DashboardServer":
+    def attach_audit(self, recorder: Any) -> DashboardServer:
         """Stream every audited interaction to WS clients (manual form).
 
         IDEMPOTENT: ``start()`` auto-attaches the api's recorder, and
@@ -663,10 +726,8 @@ class DashboardServer:
         if self._audit_recorder is recorder and self._audit_unsub is not None:
             return self  # already attached: never double-subscribe
         if self._audit_unsub is not None:  # different recorder: swap cleanly
-            try:
+            with contextlib.suppress(Exception):
                 self._audit_unsub()
-            except Exception:
-                pass
             self._audit_unsub = None
         self._audit_recorder = recorder
 
@@ -693,14 +754,25 @@ class DashboardServer:
             return
 
         def _on_task_event(event: Event) -> None:
-            self._broadcast_payload(
-                {"type": "task", "event": event.name, **event_as_dict(event)}
-            )
+            self._broadcast_payload({"type": "task", "event": event.name, **event_as_dict(event)})
 
         for event_type in TASK_EVENT_TYPES:
             self._task_unsubs.append(bus.subscribe(event_type, _on_task_event))
 
-    def _broadcast_payload(self, payload: Dict[str, Any]) -> None:
+    def _attach_fleet_events(self) -> None:
+        """Subscribe fleet transition events (same forwarding shape as
+        task events: bus -> {"type": "fleet"} WS frame)."""
+        bus = self._bus
+        if bus is None:
+            return
+
+        def _on_fleet_event(event: Event) -> None:
+            self._broadcast_payload({"type": "fleet", "event": event.name, **event_as_dict(event)})
+
+        for event_type in FLEET_EVENT_TYPES:
+            self._task_unsubs.append(bus.subscribe(event_type, _on_fleet_event))
+
+    def _broadcast_payload(self, payload: dict[str, Any]) -> None:
         """Hop to the main loop, then queue one JSON payload on every client.
 
         Safe from any thread AND from the loop itself (call_soon_threadsafe
@@ -709,16 +781,23 @@ class DashboardServer:
         loop = self._loop
         if loop is None or loop.is_closed():
             return
+        # PERF: the zero-clients check must happen on the LOOP side (inside
+        # _push), not here — checking the roster from the firing thread
+        # drops events that race a just-landing registration (the loop-side
+        # re-check preserves FIFO ordering and still skips the per-event
+        # JSON serialization when nobody is attached).
 
         def _push() -> None:
+            clients = list(self._clients)
+            if not clients:
+                return
             text = _dumps(payload)
-            for client in list(self._clients):
+            for client in clients:
                 client.push_text(text)
 
-        try:
+        # loop closed between check and call
+        with contextlib.suppress(RuntimeError):
             loop.call_soon_threadsafe(_push)
-        except RuntimeError:  # loop closed between check and call
-            pass
 
     # ---------------------------------------------------------- registration
     def register_threadsafe(self, client: WebSocketClient) -> None:
@@ -728,6 +807,14 @@ class DashboardServer:
 
     async def _register(self, client: WebSocketClient) -> None:
         if not client.alive or self._clients_closed:  # no ghosts, and none
+            # after stop() tore the sockets down
+            if client.alive:
+                # AUDIT: a client that upgraded right as stop() flipped the
+                # flag would otherwise park its handler thread in recv ticks
+                # forever — kill the socket so serve() unblocks.
+                client.alive = False
+                with contextlib.suppress(OSError):
+                    client._sock.shutdown(socket.SHUT_RDWR)
             return  # after stop() tore the sockets down
         self._clients.append(client)
         LOG.info("websocket client connected (%d online)", len(self._clients))
@@ -736,10 +823,8 @@ class DashboardServer:
     def unregister_threadsafe(self, client: WebSocketClient) -> None:
         if self._loop is None or self._loop.is_closed():
             return
-        try:
+        with contextlib.suppress(Exception):
             asyncio.run_coroutine_threadsafe(self._unregister(client), self._loop).result(timeout=2)
-        except Exception:
-            pass
 
     async def _unregister(self, client: WebSocketClient) -> None:
         if client in self._clients:
@@ -747,7 +832,7 @@ class DashboardServer:
         LOG.info("websocket client gone (%d online)", len(self._clients))
 
     # ------------------------------------------------------------ broadcast
-    def push_stats_to(self, client: WebSocketClient) -> Optional["concurrent.futures.Future[None]"]:
+    def push_stats_to(self, client: WebSocketClient) -> concurrent.futures.Future[None] | None:
         """Queue a stats snapshot for one client (async fetch, thread-safe).
 
         Returns the completion future (None when no loop is available) so
@@ -771,7 +856,8 @@ class DashboardServer:
                     self._stats_ts = _time.monotonic()
                 client.push_text(snapshot)
             except Exception as exc:  # never kill anything downstream
-                client.push_json({"type": "error", "error": str(exc)})
+                LOG.warning("stats snapshot push failed: %s", exc)
+                client.push_json({"type": "error", "error": "status snapshot failed"})
 
         try:
             return asyncio.run_coroutine_threadsafe(_fetch_and_push(), self._loop)
@@ -817,9 +903,10 @@ class DashboardServer:
         self,
         method: str,
         path: str,
-        body: Dict[str, Any],
-        query: Optional[Dict[str, List[str]]] = None,
-    ) -> Tuple[int, Dict[str, Any]]:
+        body: dict[str, Any],
+        query: dict[str, list[str]] | None = None,
+        view_id: str | None = None,
+    ) -> tuple[int, dict[str, Any]]:
         """Execute an API call on the main loop; returns (http_status, payload).
 
         ERROR AUDIT FIX: timeouts now return 504 with a real message (was an
@@ -829,15 +916,13 @@ class DashboardServer:
         if self._loop is None or self._loop.is_closed():
             return 503, {"ok": False, "error": "main loop unavailable"}
         future = asyncio.run_coroutine_threadsafe(
-            self._route(method, path, body, query or {}), self._loop
+            self._route_in_view(method, path, body, query or {}, view_id),
+            self._loop,
         )
         # scenario runs outlive the generic route budget (the runner itself
         # bounds them at ~185s incl. teardown) — a 10s 504 would drop the
         # report while the run still completes server-side
-        timeout = (
-            200.0 if (method, path) == ("POST", "/api/simulation/run")
-            else ROUTE_TIMEOUT_S
-        )
+        timeout = 200.0 if (method, path) == ("POST", "/api/simulation/run") else ROUTE_TIMEOUT_S
         try:
             return future.result(timeout=timeout)
         except (concurrent.futures.TimeoutError, asyncio.TimeoutError, TimeoutError):
@@ -846,13 +931,34 @@ class DashboardServer:
                 "ok": False,
                 "error": f"{method} {path} timed out after {timeout:.0f}s (may still complete)",
             }
+        except concurrent.futures.CancelledError:
+            # loop shutdown racing a request — CancelledError is a
+            # BaseException and used to escape into handle_error as a
+            # raw traceback with no response
+            return 503, {"ok": False, "error": "server shutting down"}
         except Exception as exc:
             LOG.exception("dashboard API call failed: %s %s", method, path)
-            return 500, {"ok": False, "error": f"internal error: {exc}"}
+            return 500, {"ok": False, "error": f"internal error ({type(exc).__name__})"}
+
+    async def _route_in_view(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any],
+        query: dict[str, list[str]],
+        view_id: str | None,
+    ) -> tuple[int, dict[str, Any]]:
+        """Run :meth:`_route` with the request's dashboard view id bound
+        (per-tab modal state in the framework UI reads it)."""
+        token = _VIEW_ID.set(clean_view_id(view_id))
+        try:
+            return await self._route(method, path, body, query)
+        finally:
+            _VIEW_ID.reset(token)
 
     async def _route(
-        self, method: str, path: str, body: Dict[str, Any], query: Dict[str, List[str]]
-    ) -> Tuple[int, Dict[str, Any]]:
+        self, method: str, path: str, body: dict[str, Any], query: dict[str, list[str]]
+    ) -> tuple[int, dict[str, Any]]:
         """Map a request to one ControlAPI call. Runs ON the main loop.
 
         Every route returns ``{ok: true, data}``; domain errors
@@ -865,16 +971,19 @@ class DashboardServer:
             if (method, path) == ("GET", "/api/status"):
                 return 200, {"ok": True, "data": await api.status()}
             if (method, path) == ("POST", "/api/estop"):
-                return 200, {"ok": True, "data": await api.emergency_stop_all()}
+                return 200, {"ok": True, "data": await api.emergency_stop_all(surface="dashboard")}
             if (method, path) == ("POST", "/api/shutdown"):
+                data = await api.shutdown()
                 if self._exit_signal:
                     # scheduler + accounts stop now; the PROCESS exits through
                     # the graceful path — a delayed SIGINT (what Ctrl-C sends)
                     # unwinds run_app: REPL readline raises KeyboardInterrupt /
                     # headless's signal handler sets its stop event, and the
                     # finally-block owns the ordered teardown (persistence
-                    # drains, then db.close). The delay lets this response
-                    # reach the browser first. Opt-in (main.py) so embedded
+                    # drains, then db.close). The timer starts only AFTER the
+                    # shutdown above completes (it can take seconds: drains,
+                    # disconnects), and its delay lets this response reach
+                    # the browser first. Opt-in (main.py) so embedded
                     # servers (tests) never signal their host process.
                     def _request_exit() -> None:
                         os.kill(os.getpid(), signal.SIGINT)
@@ -882,7 +991,7 @@ class DashboardServer:
                     timer = threading.Timer(0.25, _request_exit)
                     timer.daemon = True  # never fire during interpreter exit
                     timer.start()
-                return 200, {"ok": True, "data": await api.shutdown()}
+                return 200, {"ok": True, "data": data}
             if (method, path) == ("POST", "/api/resume"):
                 return 200, {"ok": True, "data": await api.system_resume()}
             # -------------------------------------------------------------- accounts
@@ -897,7 +1006,10 @@ class DashboardServer:
                 # is the account status dict, never the value. A duplicate
                 # name is a conflict, not a bad request.
                 try:
-                    return 200, {"ok": True, "data": await api.accounts_add(body)}
+                    return 200, {
+                        "ok": True,
+                        "data": await api.accounts_add(body, surface="dashboard"),
+                    }
                 except AccountError as exc:
                     if "already exists" in str(exc):
                         return 409, {"ok": False, "error": str(exc)}
@@ -905,7 +1017,9 @@ class DashboardServer:
             if (method, path) == ("POST", "/api/accounts/remove"):
                 return 200, {
                     "ok": True,
-                    "data": await api.accounts_remove(require_str(body, "name", path)),
+                    "data": await api.accounts_remove(
+                        require_str(body, "name", path), surface="dashboard"
+                    ),
                 }
             if (method, path) == ("GET", "/api/accounts/info"):
                 return 200, {
@@ -923,17 +1037,23 @@ class DashboardServer:
             if (method, path) == ("POST", "/api/accounts/start"):
                 return 200, {
                     "ok": True,
-                    "data": await api.accounts_start(body_opt_str(body, "account", path)),
+                    "data": await api.accounts_start(
+                        body_opt_str(body, "account", path), surface="dashboard"
+                    ),
                 }
             if (method, path) == ("POST", "/api/accounts/stop"):
                 return 200, {
                     "ok": True,
-                    "data": await api.accounts_stop(body_opt_str(body, "account", path)),
+                    "data": await api.accounts_stop(
+                        body_opt_str(body, "account", path), surface="dashboard"
+                    ),
                 }
             if (method, path) == ("POST", "/api/accounts/emergency-stop"):
                 return 200, {
                     "ok": True,
-                    "data": await api.accounts_emergency_stop(require_str(body, "name", path)),
+                    "data": await api.accounts_emergency_stop(
+                        require_str(body, "name", path), surface="dashboard"
+                    ),
                 }
             if (method, path) == ("POST", "/api/accounts/credential"):
                 # credential VALUE: one-way (request -> CredentialService).
@@ -953,12 +1073,200 @@ class DashboardServer:
             # mediated model is gone from the UI; these are the surfaces
             # the dashboard drives). Unknown account/plugin names are
             # domain errors from the api -> honest 400s below.
+            # ------------------------------------------------------- UI extension
+            if (method, path) == ("POST", "/api/plugins/reload"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.plugins_reload(
+                        require_str(body, "plugin", path), surface="dashboard"
+                    ),
+                }
+            if (method, path) == ("POST", "/api/plugins/unload"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.plugins_unload(
+                        require_str(body, "plugin", path), surface="dashboard"
+                    ),
+                }
+
+            if (method, path) == ("GET", "/api/ui/stats"):
+                return 200, {"ok": True, "data": await api.ui_stats(q_str(query, "account", path))}
+            if (method, path) == ("GET", "/api/ui/panels"):
+                return 200, {"ok": True, "data": await api.ui_panels()}
+
+            # ───────────────────────────────── theme engine persistence ───
+            # Durable copy of the theme-engine state (presets, accent,
+            # fonts, custom CSS): localStorage is the instant per-browser
+            # cache, state/theme.json survives browser changes. Server-
+            # owned (a presentation concern, not ControlAPI/CLI surface).
+            if (method, path) == ("GET", "/api/theme"):
+                return 200, {"ok": True, "data": theme_store.load()}
+            if (method, path) == ("POST", "/api/theme"):
+                state = body.get("theme")
+                if not isinstance(state, dict):
+                    return 400, {"ok": False, "error": "field 'theme' (object) is required"}
+                try:
+                    theme_store.save(state)
+                except ValueError as exc:
+                    return 400, {"ok": False, "error": str(exc)}
+                return 200, {"ok": True, "data": {"saved": True}}
+
+            # ------------------------------------------- dashboard UI (Stage D)
+            # Builder-based plugin pages: navigation for the sidebar, one
+            # page's serialized component tree, action dispatch and data
+            # providers. Unknown plugin/page/provider is a MISSING READ
+            # (404), not a client payload fault — action dispatch errors
+            # stay UIError/ValueError -> 400 below (they are domain
+            # outcomes the frontend renders inline).
+            if (method, path) == ("GET", "/api/dashboard-ui/navigation"):
+                return 200, {"ok": True, "data": await api.dashboard_ui_navigation()}
+            if (method, path) == ("GET", "/api/dashboard-ui/page"):
+                page = await api.dashboard_ui_page(
+                    q_str(query, "plugin", path),
+                    q_str(query, "page_id", path),
+                    account=q_opt(query, "account"),
+                )
+                if page is None:
+                    return 404, {"ok": False, "error": "unknown plugin page"}
+                return 200, {"ok": True, "data": page}
+            if (method, path) == ("POST", "/api/dashboard-ui/action"):
+                payload = body.get("payload")
+                if payload is None:
+                    payload = {}
+                if not isinstance(payload, dict):
+                    return 400, {
+                        "ok": False,
+                        "error": "field 'payload' in POST "
+                        "/api/dashboard-ui/action must "
+                        "be an object",
+                    }
+                account = body.get("account")
+                if account is not None and not isinstance(account, str):
+                    return 400, {"ok": False, "error": "field 'account' must be a string"}
+                return 200, {
+                    "ok": True,
+                    "data": await api.dashboard_ui_action(
+                        require_str(body, "plugin", path),
+                        require_str(body, "component_id", path),
+                        payload,
+                        surface="dashboard",
+                        account=account,
+                    ),
+                }
+            if (method, path) == ("GET", "/api/dashboard-ui/data"):
+                try:
+                    data = await api.dashboard_ui_data(
+                        q_str(query, "plugin", path),
+                        q_str(query, "component_id", path),
+                        account=q_opt(query, "account"),
+                    )
+                except UIError as exc:
+                    # unknown plugin/component, hidden, or no provider:
+                    # the read cannot be served — 404, not a 400
+                    return 404, {"ok": False, "error": str(exc)}
+                return 200, {"ok": True, "data": data}
+
+            # ------------------------------------------------------------ admin access
+            if (method, path) == ("GET", "/api/admin/overview"):
+                return 200, {"ok": True, "data": await api.admin_overview()}
+            if (method, path) == ("POST", "/api/admin/ids/set"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.admin_set_ids(
+                        [int(x) for x in require_json_list(body, "admins", path)],
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("POST", "/api/admin/ids/add"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.admin_add_id(
+                        require_int(body, "user_id", path), surface="dashboard"
+                    ),
+                }
+            if (method, path) == ("POST", "/api/admin/ids/remove"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.admin_remove_id(
+                        require_int(body, "user_id", path), surface="dashboard"
+                    ),
+                }
+            if (method, path) == ("POST", "/api/admin/account-flag"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.admin_account_flag(
+                        require_str(body, "account", path),
+                        parse_json_bool(body.get("is_admin"), "is_admin"),
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("GET", "/api/admin/perms"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.admin_perms(q_str(query, "account", path)),
+                }
+            if (method, path) == ("POST", "/api/admin/perms/set"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.admin_perms_set(
+                        require_str(body, "account", path),
+                        [int(x) for x in require_json_list(body, "allowed_user_ids", path)],
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("POST", "/api/admin/perms/add"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.admin_perms_add(
+                        require_str(body, "account", path),
+                        require_int(body, "user_id", path),
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("POST", "/api/admin/perms/remove"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.admin_perms_remove(
+                        require_str(body, "account", path),
+                        require_int(body, "user_id", path),
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("GET", "/api/admin/prefix"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.admin_prefix(q_str(query, "account", path)),
+                }
+            if (method, path) == ("POST", "/api/admin/prefix/set"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.admin_prefix_set(
+                        require_str(body, "account", path),
+                        require_str(body, "mode", path),
+                        str(body.get("symbol") or ""),
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("POST", "/api/admin/forget-account"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.admin_forget_account(
+                        require_str(body, "account", path), surface="dashboard"
+                    ),
+                }
+            if (method, path) == ("GET", "/api/admin/mudae-id"):
+                return 200, {"ok": True, "data": await api.admin_mudae_id()}
+            if (method, path) == ("POST", "/api/admin/mudae-id/set"):
+                raw = body.get("mudae_bot_id")
+                return 200, {
+                    "ok": True,
+                    "data": await api.admin_mudae_id_set(raw, surface="dashboard"),
+                }
+
             if (method, path) == ("GET", "/api/accounts/plugins"):
                 return 200, {
                     "ok": True,
-                    "data": await api.accounts_plugins_list(
-                        q_str(query, "account", path)
-                    ),
+                    "data": await api.accounts_plugins_list(q_str(query, "account", path)),
                 }
             if (method, path) == ("POST", "/api/accounts/plugins/assign"):
                 return 200, {
@@ -980,11 +1288,9 @@ class DashboardServer:
                 }
             if (method, path) == ("POST", "/api/accounts/plugins/set"):
                 plugins = require_field(body, "plugins", path)
-                if not isinstance(plugins, list) or not all(
-                        isinstance(p, str) for p in plugins):
+                if not isinstance(plugins, list) or not all(isinstance(p, str) for p in plugins):
                     raise ValueError(
-                        f"field 'plugins' in POST {path} must be a list"
-                        " of plugin names"
+                        f"field 'plugins' in POST {path} must be a list of plugin names"
                     )
                 return 200, {
                     "ok": True,
@@ -993,6 +1299,44 @@ class DashboardServer:
                         plugins,
                         surface="dashboard",
                     ),
+                }
+
+            # -------------------------------------------- account plugin profiles
+            # Profile bindings + merged settings + the channel picker's
+            # data source (the profile CRUD lives under /api/plugins/*).
+            # 'profile' may be null = clear the binding (plugin defaults).
+            if (method, path) == ("GET", "/api/accounts/plugin-profiles"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_plugin_profiles(q_str(query, "account", path)),
+                }
+            if (method, path) == ("POST", "/api/accounts/plugin-profile"):
+                profile = body.get("profile")
+                if profile is not None and (not isinstance(profile, str) or not profile):
+                    raise ValueError(
+                        f"field 'profile' in POST {path} must be a non-empty string or null"
+                    )
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_plugin_profile(
+                        require_str(body, "account", path),
+                        require_str(body, "plugin", path),
+                        profile,
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("GET", "/api/accounts/effective-settings"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_effective_settings(
+                        q_str(query, "account", path),
+                        q_str(query, "plugin", path),
+                    ),
+                }
+            if (method, path) == ("GET", "/api/accounts/channels"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_channels(q_str(query, "account", path)),
                 }
 
             # ------------------------------------------------------- credentials
@@ -1062,46 +1406,56 @@ class DashboardServer:
                     ),
                 }
 
-            # -------------------------------------------------------------- profiles
-            if (method, path) == ("GET", "/api/profiles"):
-                return 200, {"ok": True, "data": await api.profiles_list()}
-            if (method, path) == ("POST", "/api/profiles/create"):
-                plugins = require_field(body, "plugins", path)
-                if not isinstance(plugins, list) or not all(isinstance(p, str) for p in plugins):
+            # -------------------------------------------------- plugin profiles
+            # Per-plugin named setting bundles (migration v7). 'settings'
+            # flows through raw: schema + channels-scope validation is the
+            # api's job and 400s with the offending field named.
+            if (method, path) == ("GET", "/api/plugins/profiles"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.plugin_profiles_list(q_opt(query, "plugin")),
+                }
+            if (method, path) == ("POST", "/api/plugins/profiles/create"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.plugin_profile_create(
+                        require_str(body, "plugin", path),
+                        require_str(body, "name", path),
+                        body.get("description", ""),
+                        body.get("settings"),
+                        surface="dashboard",
+                    ),
+                }
+            if (method, path) == ("POST", "/api/plugins/profiles/update"):
+                # at least one NON-null field (nulls mean "keep" below)
+                if not any(
+                    body.get(key) is not None for key in ("name_new", "description", "settings")
+                ):
                     raise ValueError(
-                        f"field 'plugins' in POST {path} must be a list of plugin names"
+                        f"POST {path} needs at least one of 'name_new', 'description', 'settings'"
                     )
                 return 200, {
                     "ok": True,
-                    "data": await api.profiles_create(
+                    "data": await api.plugin_profile_update(
+                        require_str(body, "plugin", path),
                         require_str(body, "name", path),
-                        plugins,
-                        body.get("description", ""),
+                        name_new=body_opt_str(body, "name_new", path),
+                        description=body.get("description") if "description" in body else None,
+                        settings=body.get("settings") if "settings" in body else None,
+                        surface="dashboard",
                     ),
                 }
-            if (method, path) == ("POST", "/api/profiles/delete"):
+            if (method, path) == ("POST", "/api/plugins/profiles/delete"):
                 return 200, {
                     "ok": True,
-                    "data": await api.profiles_delete(require_str(body, "name", path)),
-                }
-            if (method, path) == ("POST", "/api/profiles/assign"):
-                return 200, {
-                    "ok": True,
-                    "data": await api.profiles_assign(
-                        require_str(body, "account", path),
-                        require_str(body, "profile", path),
-                    ),
-                }
-            if (method, path) == ("POST", "/api/profiles/unassign"):
-                return 200, {
-                    "ok": True,
-                    "data": await api.profiles_unassign(
-                        require_str(body, "account", path),
-                        require_str(body, "profile", path),
+                    "data": await api.plugin_profile_delete(
+                        require_str(body, "plugin", path),
+                        require_str(body, "name", path),
+                        surface="dashboard",
                     ),
                 }
 
-            # ------------------------------------------------------------ sync groups
+            # -------------------------------------------------------------- profiles
             if (method, path) == ("GET", "/api/groups"):
                 return 200, {"ok": True, "data": await api.groups_list()}
             if (method, path) == ("GET", "/api/groups/info"):
@@ -1109,43 +1463,100 @@ class DashboardServer:
                     "ok": True,
                     "data": await api.groups_snapshot(q_str(query, "group", path)),
                 }
+
+            # ------------------------------------------------------------- fleet (PHASE 9)
+            if (method, path) == ("GET", "/api/fleet/groups"):
+                return 200, {"ok": True, "data": await api.fleet_groups()}
+            if (method, path) == ("GET", "/api/fleet/group"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.fleet_group(q_str(query, "group", path)),
+                }
+            if (method, path) == ("POST", "/api/fleet/op"):
+                op = require_str(body, "op", path)
+                params = body.get("params")
+                if params is None:
+                    params = {k: v for k, v in body.items() if k != "op"}
+                if not isinstance(params, dict):
+                    return 400, {"ok": False, "error": "field 'params' must be an object"}
+                return 200, {"ok": True, "data": await api.fleet_op(op, **params)}
+
+            # ------------------------------------------------------- plugin data (PHASE 10, B3)
+            if (method, path) == ("GET", "/api/accounts/data"):
+                return 200, {
+                    "ok": True,
+                    "data": await api.accounts_data_list(
+                        q_str(query, "account", path),
+                        plugin=q_opt(query, "plugin"),
+                        guild_id=q_opt(query, "guild_id"),
+                        channel_id=q_opt(query, "channel_id"),
+                    ),
+                }
+            if (method, path) == ("GET", "/api/accounts/data/doc"):
+                doc = await api.accounts_data_get(
+                    q_str(query, "account", path),
+                    q_str(query, "plugin", path),
+                    guild_id=q_opt(query, "guild_id") or "0",
+                    channel_id=q_opt(query, "channel_id") or "0",
+                )
+                return 200, {"ok": True, "data": doc}
+            if (method, path) == ("POST", "/api/accounts/data/put"):
+                expected = body.get("expected_version")
+                if expected is not None and (
+                    isinstance(expected, bool) or not isinstance(expected, int)
+                ):
+                    return 400, {"ok": False, "error": "field 'expected_version' must be an int"}
+                doc = await api.accounts_data_put(
+                    require_str(body, "account", path),
+                    require_str(body, "plugin", path),
+                    require_str(body, "guild_id", path),
+                    require_str(body, "channel_id", path),
+                    body.get("data"),
+                    expected_version=expected,
+                )
+                return 200, {"ok": True, "data": doc}
+            if (method, path) == ("POST", "/api/accounts/data/delete"):
+                deleted = await api.accounts_data_delete(
+                    require_str(body, "account", path),
+                    require_str(body, "plugin", path),
+                    guild_id=(body.get("guild_id") if body.get("guild_id") is not None else "0"),
+                    channel_id=(
+                        body.get("channel_id") if body.get("channel_id") is not None else "0"
+                    ),
+                )
+                return 200, {"ok": True, "data": {"deleted": deleted}}
+
             if (method, path) == ("POST", "/api/groups/create"):
                 payload = {"name": require_str(body, "name", path)}
                 if "description" in body and body["description"] is not None:
                     if not isinstance(body["description"], str):
-                        raise ValueError(
-                            f"field 'description' in POST {path} must be a string"
-                        )
+                        raise ValueError(f"field 'description' in POST {path} must be a string")
                     payload["description"] = body["description"]
                 if "enabled" in body and body["enabled"] is not None:
-                    payload["enabled"] = parse_json_bool(
-                        body["enabled"], "enabled")
+                    payload["enabled"] = parse_json_bool(body["enabled"], "enabled")
                 return 200, {
                     "ok": True,
                     "data": await api.groups_create(payload, surface="dashboard"),
                 }
             if (method, path) == ("POST", "/api/groups/update"):
-                payload: Dict[str, Any] = {}
+                payload: dict[str, Any] = {}
                 for field in ("name", "description"):
                     if field in body and body[field] is not None:
                         if not isinstance(body[field], str):
-                            raise ValueError(
-                                f"field {field!r} in POST {path} must be a string"
-                            )
+                            raise ValueError(f"field {field!r} in POST {path} must be a string")
                         payload[field] = body[field]
                 if "enabled" in body and body["enabled"] is not None:
-                    payload["enabled"] = parse_json_bool(
-                        body["enabled"], "enabled")
+                    payload["enabled"] = parse_json_bool(body["enabled"], "enabled")
                 if not payload:
                     return 400, {
                         "ok": False,
-                        "error": "provide at least one of 'name',"
-                                 " 'description', 'enabled'",
+                        "error": "provide at least one of 'name', 'description', 'enabled'",
                     }
                 return 200, {
                     "ok": True,
                     "data": await api.groups_update(
-                        require_str(body, "group", path), payload,
+                        require_str(body, "group", path),
+                        payload,
                         surface="dashboard",
                     ),
                 }
@@ -1158,7 +1569,8 @@ class DashboardServer:
                     "ok": True,
                     "data": await api.groups_delete(
                         require_str(body, "group", path),
-                        detach_members=detach, surface="dashboard",
+                        detach_members=detach,
+                        surface="dashboard",
                     ),
                 }
             if (method, path) == ("POST", "/api/groups/add-member"):
@@ -1211,7 +1623,11 @@ class DashboardServer:
                 return 200, {
                     "ok": True,
                     "data": await api.ratelimit_set(
-                        action, interval, jitter_min, jitter_max, level,
+                        action,
+                        interval,
+                        jitter_min,
+                        jitter_max,
+                        level,
                         body_opt_owner(body, path),
                     ),
                 }
@@ -1238,9 +1654,7 @@ class DashboardServer:
             if (method, path) == ("GET", "/api/ratelimit/warnings"):
                 return 200, {"ok": True, "data": await api.ratelimit_warnings()}
             if (method, path) == ("POST", "/api/ratelimit/floor"):
-                seconds = require_finite(
-                    require_number(body, "seconds", path), "seconds", path
-                )
+                seconds = require_finite(require_number(body, "seconds", path), "seconds", path)
                 return 200, {"ok": True, "data": await api.ratelimit_set_floor(seconds)}
             if (method, path) == ("GET", "/api/ratelimit/lane"):
                 return 200, {"ok": True, "data": await api.ratelimit_lane()}
@@ -1256,7 +1670,10 @@ class DashboardServer:
                         return 400, {"ok": False, "error": "field 'prefixrate' must be a number"}
                     prefixrate = require_finite(prefixrate, "prefixrate", path)
                     if prefixrate < 0:
-                        return 400, {"ok": False, "error": "prefixrate must be >= 0 (0 pauses the lane)"}
+                        return 400, {
+                            "ok": False,
+                            "error": "prefixrate must be >= 0 (0 pauses the lane)",
+                        }
                 if enabled is None and prefixrate is None:
                     return 400, {"ok": False, "error": "provide 'enabled' and/or 'prefixrate'"}
                 return 200, {
@@ -1324,15 +1741,17 @@ class DashboardServer:
 
             return 404, {"ok": False, "error": f"no route {method} {path}"}
         except DatabaseError as exc:
-            # server-side persistence fault: NOT the client's bad request
-            return 500, {"ok": False, "error": f"database error: {exc}"}
+            # server-side persistence fault: NOT the client's bad request.
+            # Detail goes to the log; the client gets the class only.
+            LOG.error("dashboard route database error: %s %s: %s", method, path, exc)
+            return 500, {"ok": False, "error": f"database error ({type(exc).__name__})"}
         except (ValueError, RuntimeError) as exc:
             # domain errors -> honest 400 (AccountError/SchedulerError are
             # RuntimeError; RatePolicy/Setting/Profile validation ValueError)
             return 400, {"ok": False, "error": str(exc)}
         except Exception as exc:  # unexpected -> honest 500 + traceback
             LOG.exception("dashboard route failed: %s %s", method, path)
-            return 500, {"ok": False, "error": f"internal error: {exc}"}
+            return 500, {"ok": False, "error": f"internal error ({type(exc).__name__})"}
 
 
 class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
@@ -1351,12 +1770,12 @@ class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
 
     def process_request(self, request: socket.socket, client_address: Any) -> None:
         if not self._slots.acquire(blocking=False):
-            LOG.warning("dashboard connection shed (over %d concurrent handlers)",
-                        MAX_CONCURRENT_CONNECTIONS)
-            try:
+            LOG.warning(
+                "dashboard connection shed (over %d concurrent handlers)",
+                MAX_CONCURRENT_CONNECTIONS,
+            )
+            with contextlib.suppress(OSError):
                 request.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
             request.close()
             return
         try:
@@ -1372,7 +1791,7 @@ class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
             self._slots.release()
 
 
-def _make_handler(server: "DashboardServer") -> type:
+def _make_handler(server: DashboardServer) -> type:
     """Build the request-handler class closing over the server instance."""
 
     class Handler(BaseHTTPRequestHandler):
@@ -1382,8 +1801,37 @@ def _make_handler(server: "DashboardServer") -> type:
         # body when ThreadingHTTPServer closed the connection mid-read)
         protocol_version = "HTTP/1.1"
         timeout = HTTP_SOCKET_TIMEOUT_S  # stalled requests free their thread
+        # AUDIT: unbuffered reads — nothing may sit in a userspace read
+        # buffer past the request headers, or bytes a WS client pipelined
+        # with its handshake would be lost when the socket is detached
+        # (they now stay in the kernel buffer, visible after detach).
+        rbufsize = 0
+        # AUDIT: the default banner leaks the stdlib/Python version on every
+        # response (incl. stdlib-generated error pages).
+        server_version = "LibzentSuite"
+        sys_version = ""
 
-        def _authorized(self, provided: Optional[str]) -> bool:
+        def end_headers(self) -> None:
+            # stdlib error pages (501 for unimplemented methods, malformed
+            # request 400s) bypass _respond — this override carries the
+            # security headers onto EVERY response, including them.
+            # (Appending after send_error() returned was a no-op: the
+            # headers had already been flushed.)
+            try:
+                for header, value in SECURITY_HEADERS:
+                    self.send_header(header, value)
+            except OSError:
+                pass
+            super().end_headers()
+
+        def send_error(
+            self, code: int, message: str | None = None, explain: str | None = None
+        ) -> None:
+            # peer vanished mid-error — nothing to answer
+            with contextlib.suppress(OSError):
+                super().send_error(code, message, explain)
+
+        def _authorized(self, provided: str | None) -> bool:
             """Accept the token via X-Dashboard-Token header OR ?token= query.
 
             Constant-time comparison (hmac): no timing side channel on the
@@ -1396,9 +1844,7 @@ def _make_handler(server: "DashboardServer") -> type:
             provided = provided.strip()
             if not provided:
                 return False
-            return hmac.compare_digest(
-                provided.encode("utf-8"), server._token.encode("utf-8")
-            )
+            return hmac.compare_digest(provided.encode("utf-8"), server._token.encode("utf-8"))
 
         def _origin_allowed(self) -> bool:
             """Reject cross-site requests (CSRF / DNS rebinding / WS hijacking).
@@ -1413,9 +1859,8 @@ def _make_handler(server: "DashboardServer") -> type:
             Non-browser clients (curl, tests) send no Origin and still work.
             """
             host_header = self.headers.get("Host", "")
-            if _is_loopback_host(server._host):
-                if not _is_loopback_host(_split_host(host_header)):
-                    return False
+            if _is_loopback_host(server._host) and not _is_loopback_host(_split_host(host_header)):
+                return False
             origin = self.headers.get("Origin")
             if origin is not None:
                 if origin.strip().lower() == "null":  # sandboxed iframe / file://
@@ -1426,8 +1871,12 @@ def _make_handler(server: "DashboardServer") -> type:
             return True
 
         def _respond(
-            self, status: int, payload: Dict[str, Any], content_type: str = "application/json",
-            *, close: bool = False,
+            self,
+            status: int,
+            payload: dict[str, Any],
+            content_type: str = "application/json",
+            *,
+            close: bool = False,
         ) -> None:
             if content_type == "application/json":
                 # allow_nan=False: a stored NaN must not serialize to the
@@ -1455,8 +1904,8 @@ def _make_handler(server: "DashboardServer") -> type:
                 data = payload if isinstance(payload, bytes) else str(payload).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", content_type)
-            for header, value in SECURITY_HEADERS:
-                self.send_header(header, value)
+            # security headers ride the end_headers() override — one
+            # source of truth covering _respond AND stdlib error pages
             if close or self.close_connection:
                 # tell the client the socket will not be reused (a drained
                 # GET body / rejected request leaves no parseable stream)
@@ -1483,15 +1932,13 @@ def _make_handler(server: "DashboardServer") -> type:
             values = [v for v in values if v]  # present-but-empty == absent
             distinct = set(values)
             if len(distinct) > 1:
-                raise _ConflictingContentLength(
-                    "conflicting duplicate Content-Length headers"
-                )
+                raise _ConflictingContentLength("conflicting duplicate Content-Length headers")
             if not distinct:
                 return 0
             return int(distinct.pop())  # ValueError on garbage -> caller answers
 
         def _reject(
-            self, status: int, payload: Dict[str, Any], content_type: str = "application/json"
+            self, status: int, payload: dict[str, Any], content_type: str = "application/json"
         ) -> None:
             """Respond + CLOSE the connection (keep-alive safety).
 
@@ -1521,16 +1968,25 @@ def _make_handler(server: "DashboardServer") -> type:
                         extra = self._content_length()
                     except _ConflictingContentLength:
                         # ROUND-3: smuggling family — refuse, do not guess
-                        self._reject(400, {
-                            "ok": False,
-                            "error": "conflicting duplicate Content-Length headers",
-                        })
+                        self._reject(
+                            400,
+                            {
+                                "ok": False,
+                                "error": "conflicting duplicate Content-Length headers",
+                            },
+                        )
                         return
                     except ValueError:
                         extra = -1
                     if extra:
                         remaining = extra
+                        deadline = _time.monotonic() + HTTP_BODY_DEADLINE_S
                         while remaining > 0 and remaining <= 16 * MAX_BODY_BYTES:
+                            if _time.monotonic() > deadline:
+                                # trickle-drain pinned a handler thread
+                                # for hours without this bound
+                                self.close_connection = True
+                                break
                             try:
                                 chunk = self.rfile.read(min(remaining, 65536))
                             except OSError:
@@ -1553,7 +2009,7 @@ def _make_handler(server: "DashboardServer") -> type:
                 else:
                     self._respond(404, {"ok": False, "error": "index.html missing"})
                 return
-            if method == "GET" and (path.startswith("/styles/") or path.startswith("/js/")):
+            if method == "GET" and (path.startswith(("/styles/", "/js/"))):
                 # Frontend assets (CSS/JS) of the SPA — same no-auth rule as
                 # the index: they must load before the token is known and
                 # contain no secrets. Resolved inside STATIC_DIR with a
@@ -1563,8 +2019,11 @@ def _make_handler(server: "DashboardServer") -> type:
                 if not asset.is_relative_to(STATIC_DIR.resolve()) or not asset.is_file():
                     self._reject(404, {"ok": False, "error": "not found"})
                     return
-                mime = ("text/css; charset=utf-8" if asset.suffix == ".css"
-                        else "text/javascript; charset=utf-8")
+                mime = (
+                    "text/css; charset=utf-8"
+                    if asset.suffix == ".css"
+                    else "text/javascript; charset=utf-8"
+                )
                 self._respond(200, asset.read_bytes(), mime)
                 return
             if not self._authorized(
@@ -1572,28 +2031,37 @@ def _make_handler(server: "DashboardServer") -> type:
             ):
                 self._reject(
                     401,
-                    {"ok": False, "error": "bad or missing token (X-Dashboard-Token header or ?token=)"},
+                    {
+                        "ok": False,
+                        "error": "bad or missing token (X-Dashboard-Token header or ?token=)",
+                    },
                 )
                 return
-            body: Dict[str, Any] = {}
+            body: dict[str, Any] = {}
             if method == "POST":
                 if self.headers.get("Transfer-Encoding"):
                     # chunked bodies are unsupported: answering without
                     # consuming them poisons the keep-alive stream
-                    self._reject(411, {
-                        "ok": False,
-                        "error": "Transfer-Encoding not supported — send Content-Length",
-                    })
+                    self._reject(
+                        411,
+                        {
+                            "ok": False,
+                            "error": "Transfer-Encoding not supported — send Content-Length",
+                        },
+                    )
                     return
                 try:
                     length = self._content_length()
                 except ValueError as exc:
                     # ROUND-3: covers BOTH garbage values and conflicting
                     # duplicates (smuggling family) — answer and close
-                    self._reject(400, {
-                        "ok": False,
-                        "error": str(exc) or "invalid Content-Length header",
-                    })
+                    self._reject(
+                        400,
+                        {
+                            "ok": False,
+                            "error": str(exc) or "invalid Content-Length header",
+                        },
+                    )
                     return
                 if length < 0:  # read(-1) would block until the peer closes
                     self._reject(400, {"ok": False, "error": "invalid Content-Length header"})
@@ -1602,7 +2070,11 @@ def _make_handler(server: "DashboardServer") -> type:
                     # drain a bounded amount so the client's send completes,
                     # then reject (a bare early-close breaks the client's write)
                     remaining = length
+                    deadline = _time.monotonic() + HTTP_BODY_DEADLINE_S
                     while remaining > 0 and remaining <= 16 * MAX_BODY_BYTES:
+                        if _time.monotonic() > deadline:
+                            self.close_connection = True
+                            break
                         try:
                             chunk = self.rfile.read(min(remaining, 65536))
                         except OSError:
@@ -1612,46 +2084,96 @@ def _make_handler(server: "DashboardServer") -> type:
                         remaining -= len(chunk)
                     self._reject(
                         413,
-                        {"ok": False, "error": f"request body too large (> {MAX_BODY_BYTES} bytes)"},
+                        {
+                            "ok": False,
+                            "error": f"request body too large (> {MAX_BODY_BYTES} bytes)",
+                        },
                     )
                     return
                 if length:
+                    deadline = _time.monotonic() + HTTP_BODY_DEADLINE_S
                     try:
-                        raw = self.rfile.read(length)
+                        # ROUND-3 AUDIT: read in chunks under a TOTAL deadline
+                        # — a peer trickling 1 byte per recv-timeout could
+                        # otherwise pin this handler slot for length×timeout.
+                        chunks = []
+                        remaining = length
+                        while remaining > 0:
+                            if _time.monotonic() > deadline:
+                                raise OSError("body deadline exceeded")
+                            chunk = self.rfile.read(min(remaining, 65536))
+                            if not chunk:
+                                # EOF with a short body: keep the pinned
+                                # contract — parse what arrived and let the
+                                # JSON layer reject it with 400
+                                break
+                            chunks.append(chunk)
+                            remaining -= len(chunk)
+                        raw = b"".join(chunks)
                     except OSError:
                         # ROUND-2 AUDIT: lying Content-Length (claim 5, send 3,
                         # hold the socket) pinned this thread for the full
                         # socket timeout and then crashed it with a traceback —
-                        # answer 408 and close instead
-                        self._reject(408, {
-                            "ok": False,
-                            "error": "request body incomplete (connection stalled)",
-                        })
+                        # answer 408 and close instead (also covers the
+                        # dribble deadline above)
+                        self._reject(
+                            408,
+                            {
+                                "ok": False,
+                                "error": "request body incomplete (connection stalled)",
+                            },
+                        )
+                        return
+                    ctype = (
+                        (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                    )
+                    if ctype not in ("", "application/json"):
+                        # AUDIT: classic JSON-CSRF enabler (text/plain forms);
+                        # origin checks already block browsers, this is
+                        # defense-in-depth for future non-loopback deploys.
+                        self._respond(
+                            415,
+                            {
+                                "ok": False,
+                                "error": "Content-Type must be application/json for API POSTs",
+                            },
+                        )
                         return
                     try:
                         body = json.loads(raw.decode("utf-8"))
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         self._respond(400, {"ok": False, "error": "invalid JSON body"})
                         return
+                    except RecursionError:
+                        # AUDIT: a deeply-nested [[[[… body raises this from
+                        # the JSON scanners — answer, don't crash the thread.
+                        self._respond(400, {"ok": False, "error": "JSON nesting too deep"})
+                        return
                     if not isinstance(body, dict):
-                        self._respond(400, {"ok": False, "error": "request body must be a JSON object"})
+                        self._respond(
+                            400, {"ok": False, "error": "request body must be a JSON object"}
+                        )
                         return
             # credential-material routes additionally require a CONFIGURED
             # token: with auth off entirely they are refused (403) instead of
             # silently writable. Runs after the general check above, so a
             # configured-but-wrong token has already been answered with 401.
-            if (method, path) in CREDENTIAL_GATED_ROUTES or (
-                (method, path) == ("POST", "/api/accounts/add")
-                and isinstance(body, dict)
-                and body.get("credential") not in (None, "")
-            ):
-                if server._token is None:
-                    self._respond(403, {"ok": False, "error": CREDENTIAL_GATE_MESSAGE})
-                    return
-            status, payload = server.call(method, path, body, query)
+            if (
+                (method, path) in CREDENTIAL_GATED_ROUTES
+                or (
+                    (method, path) == ("POST", "/api/accounts/add")
+                    and isinstance(body, dict)
+                    and body.get("credential") not in (None, "")
+                )
+            ) and server._token is None:
+                self._respond(403, {"ok": False, "error": CREDENTIAL_GATE_MESSAGE})
+                return
+            status, payload = server.call(
+                method, path, body, query, view_id=self.headers.get("X-Dashboard-View")
+            )
             self._respond(status, payload)
 
-        def _handle_websocket(self, query: Dict[str, List[str]]) -> None:
+        def _handle_websocket(self, query: dict[str, list[str]]) -> None:
             # ERROR AUDIT: validate the upgrade before hijacking the socket
             if self.command != "GET":
                 # ROUND-3 DESYNC AUDIT: a non-GET body is never consumed
@@ -1661,7 +2183,10 @@ def _make_handler(server: "DashboardServer") -> type:
                 # the NEXT request line on the keep-alive stream
                 self._reject(
                     400,
-                    {"ok": False, "error": "not a websocket upgrade request (need GET + Upgrade: websocket)"},
+                    {
+                        "ok": False,
+                        "error": "not a websocket upgrade request (need GET + Upgrade: websocket)",
+                    },
                 )
                 return
             if (
@@ -1672,7 +2197,10 @@ def _make_handler(server: "DashboardServer") -> type:
                 # the stream is clean — keep-alive reuse stays safe here
                 self._respond(
                     400,
-                    {"ok": False, "error": "not a websocket upgrade request (need GET + Upgrade: websocket)"},
+                    {
+                        "ok": False,
+                        "error": "not a websocket upgrade request (need GET + Upgrade: websocket)",
+                    },
                 )
                 return
             if self.headers.get("Sec-WebSocket-Version") != "13":
@@ -1695,20 +2223,30 @@ def _make_handler(server: "DashboardServer") -> type:
             ):
                 self._reject(
                     401,
-                    {"ok": False, "error": "bad or missing ws token (use ?token= or the X-Dashboard-Token header)"},
+                    {
+                        "ok": False,
+                        "error": "bad or missing ws token (use ?token= or the X-Dashboard-Token header)",
+                    },
                 )
                 return
             # the socket is about to be HIJACKED (detached from the handler):
             # the stdlib keep-alive loop must never try to read another
             # request from the detached file object after serve() returns
             self.close_connection = True
+            # AUDIT: bytes already buffered in rfile when the 101 is sent
+            # (client pipelined its first frames with the handshake) belong
+            # to the WS stream — hand them to the client instead of losing
+            # them with the detached reader. peek() would BLOCK waiting for
+            # more wire bytes, so the socket is flipped non-blocking for the
+            # harvest and restored afterwards.
+            leftover = b""
             try:
                 self.connection.sendall(handshake)
             except OSError:
                 return  # peer vanished before the 101 — nothing to serve
             fd = self.connection.detach()  # we own the socket now
             sock = socket.socket(fileno=fd)
-            client = WebSocketClient(sock, server)
+            client = WebSocketClient(sock, server, initial_buffer=leftover)
             try:
                 server.register_threadsafe(client)
             except Exception:
@@ -1719,17 +2257,15 @@ def _make_handler(server: "DashboardServer") -> type:
                 # mark dead (checked by _register) and schedule an explicit
                 # unregister so no ghost client keeps receiving pushes
                 server.unregister_threadsafe(client)
-                try:
+                with contextlib.suppress(OSError):
                     sock.close()
-                except OSError:
-                    pass
                 return
             client.serve()  # blocks this handler thread until the socket closes
 
-        def do_GET(self) -> None:  # noqa: N802 — stdlib naming
+        def do_GET(self) -> None:
             self._handle("GET")
 
-        def do_POST(self) -> None:  # noqa: N802 — stdlib naming
+        def do_POST(self) -> None:
             self._handle("POST")
 
         def log_message(self, fmt: str, *args: Any) -> None:  # route to our logger

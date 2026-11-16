@@ -1,584 +1,321 @@
-# SlaughterMudae — Integration Contract (READ FIRST)
+# LibzentSuite — Integration Contract
 
-This document is the **binding contract** between all modules of the rewrite.
-Every module MUST implement exactly the public API pinned here. When something
-is ambiguous, choose the **safest** option, document the decision in your
-module docstring, and move on — do not block on questions.
+Read this before changing module boundaries, cross-module behavior, or the dashboard integration. This document defines stable integration invariants and responsibilities. Current function signatures and detailed implementation behavior are defined by source code and its tests; do not copy old signatures forward if they no longer match the implementation.
 
-Spec source: `TODO + Ideas.md` (architecture, phases, safety rules).
+## 1. Authority, scope, and conflict resolution
 
-## Ground rules
+### What this document binds
 
-- Python **>= 3.10**. Runtime dependencies are exactly `aiosqlite` +
-  `cryptography` (see `requirements.txt`); everything else is standard
-  library. (`discord.py-self` is live-mode only, imported lazily.)
-- All paths below are relative to the repository root.
-- The old implementation was battle-tested through 3 audit rounds. It lived
-  in the PRE-REWRITE repository — the `git show HEAD:<old-path>` references
-  sprinkled through this document resolved against that project's HEAD at
-  contract time and do NOT resolve in this repo's history; treat them as
-  historical pointers to the ported logic, not runnable commands.
-- Every public function/class gets a docstring (what/why/raises).
-- Domain errors carry **human-readable messages**; validate inputs at the
-  boundary; never crash the process on bad input.
-- **Never** touch files outside your deliverables (except your own tests).
-- Secrets/tokens: account tokens live encrypted (Fernet) in the database;
-  `.env` holds ids/auth switches only.
-- Safety floor: **no rate policy faster than 1.5s/action can ever be set**
-  (`UnsafePolicyError`). Constant `MIN_ACTION_INTERVAL = 1.5` in
-  `core/rate_limit_manager` (intervals and the floor are also capped at
-  `MAX_INTERVAL = 86400.0`).
+This contract binds module boundaries and integration behavior. It does **not** freeze the dashboard's current page layout, every endpoint name forever, or the implementation strategy used by a previous phase.
 
-## API BOUNDARY (binding architecture contract)
+Use this conflict-resolution order:
 
-```
-Events ──► SlaughterMudae (routing/orchestration/lifecycle) ──► Plugins
-                                                                    │ on demand
-                                                                    ▼
-                                                       RateLimiter (scopes)
-                                                                    ▼
-                                                               API functions
-```
+1. **Explicitly approved task requirements** define the intended change.
+2. **Stable architecture invariants in `ARCHITECTURE.md` and this contract** define boundaries that the change must preserve unless the task explicitly changes them.
+3. **Current source code and current tests** establish how the system behaves today.
+4. **Current schemas/configuration and API responses** establish stored data and runtime contract details.
+5. **Historical plans, examples, stale comments, and prior-phase descriptions** are context only; they must not override current requirements or source evidence.
 
-- The FRAMEWORK never initiates a Discord API call for its own purposes. No
-  prefetching, no "just in case" fetches, no API-derived state beyond what a
-  live send/flow consumed. Its full client-touch inventory is audited in the
-  `core/account_manager` module docstring.
-- PLUGINS decide when an API call is needed and request it through
-  `PluginServices` (`send_message` / `send_dm` / `open_dm` / `fetch_user`) —
-  all on-demand; `fetch_user`/DM channels persist in the account-scoped
-  `api_cache` table so a resolved entity costs ONE call per account lifetime.
-- The RATE LIMITER owns execution timing, in three composing scopes:
-  per-task (`(account, action)` — one account's consecutive calls),
-  per-account/group (`(group:<name>, action)` shared clock registered via
-  `RateLimitManager.set_account_group(account, group)`; SyncGroupManager —
-  the persistent-membership owner — feeds it on add/remove/rename/restore,
-  and AccountManager delegates to it when wired), and the server-wide
-  lane (`set_lane_*`). `stats()` exposes `groups` + all pacing clocks.
+If a current test encodes behavior that conflicts with an approved requirement, update the test along with the implementation and explain the changed expectation. If two requirements materially conflict, do not silently pick whichever is easiest to implement. State the conflict and follow the approved product requirement; routine technical choices may be resolved independently and documented briefly.
 
-## Target structure
+### Ground rules
 
-```
-core/                    framework (managers + shared contracts)
-  __init__.py            (spine)
-  api.py                 (spine)  CoreAPI — the ONE facade both interfaces call
-  bootstrap.py           (lead)   composition root used by main.py
-  event_bus.py           (spine)  EventBus + all Event types
-  errors.py              (spine)  domain errors (FlowBlocked family etc.)
-  priority.py            (spine)  Priority enum (shared by limiter+scheduler)
-  logging_service.py     (spine)  structured LogService
-  settings_manager.py    (spine)  Setting schema + SettingsManager
-  account_manager/       (A6)     Account (first-class), AccountManager, DiscordCache
-  profile_manager/       (A6)     ProfileManager — RETAINED future infrastructure
-                                   (profile records; NOT the capability model:
-                                   accounts get plugins directly)
-  plugin_base.py         (A3)     PluginBase, PluginContext, PluginServices protocol
-  plugin_manager/        (A3)     discovery, per-account instances, dispatch
-  rate_limit_manager/    (A4)     policies (4 levels), pacing engine, server limits, warnings
-                          + lane.py GlobalSendLane (server-wide sequential sends)
-  task_scheduler/        (A5)     queue/priority/cancel/retry/timeout/history
-  audit.py               (A5)     AuditRecorder (interaction trail)
-database/                (A2 + spine models/schema)
-  models.py, schema.py   (spine)  dataclasses + SQL migrations
-  db.py, repositories/   (A2)
-adapters/
-  base.py                (spine)  DiscordClient protocol + DiscordMessage
-  discord/               (A7)     real client (lazy discord.py-self import)
-  simulator/             (A7)     SimWorld, SimClient, scenarios, runner
-interfaces/
-  cli/                   (A1)     REPL + one-shot command groups
-  dashboard/             (A8)     HTTP+WS server + SPA
-plugins/                 (A3: soulcopy migrated + roll example)
-tests/unit|integration|simulation/
-config/  main.py  scripts/ (run_tests.sh, gen_knowledgebase.py, bench_db.py, bench_hot.py)
+- Python runtime: Python 3.10 or newer. Production runtime dependencies are those declared in `requirements.txt`; `discord.py-self` is a live-mode dependency imported lazily.
+- Paths in this document are relative to the repository root.
+- Public functions/classes need docstrings describing purpose and important errors/side effects.
+- Validate untrusted input at boundaries. Domain/API errors should be human-readable; malformed input must not crash the process with an uncaught exception.
+- Keep work scoped to the requested change and files needed for its dependencies/tests/docs. Do not overwrite unrelated work. Do not push, reset, clean, or switch branches unless separately authorized.
+- Account tokens are encrypted in the database. `.env` is for IDs/auth switches and other appropriate configuration, not plaintext account tokens. Never return token values to the UI or logs.
+- No configured rate policy may go below `MIN_ACTION_INTERVAL = 1.5` seconds/action. Intervals and the floor are capped at `MAX_INTERVAL = 86400.0`. Server-provided rate limits are always respected.
+- A task may authorize changes across several related modules. Do not treat an initially mentioned file list as a ban on necessary contract, test, or frontend changes.
+
+## 2. Architectural boundary
+
+```text
+                         CLI                  Dashboard
+                          |                      |
+                          +----------+-----------+
+                                     |
+                                     v
+                            core.api.ControlAPI
+                                     |
+                   domain services / managers / repositories
+                                     |
+         +---------------------------+---------------------------+
+         |                           |                           |
+      EventBus                 TaskScheduler               FleetService
+         |                           |                           |
+         |                    RateLimitManager             FleetPolicy
+         |                           |                           |
+         +---------------------------+---------------------------+
+                                     |
+                           account sender / adapter
+                                     |
+                        Discord API or simulator
 ```
 
-## Send pipeline (THE core dataflow)
+`core/bootstrap.py` is the composition root. It constructs dependencies and supplies them to modules; business modules should not recreate composition logic or import interface internals to obtain dependencies.
 
-```
-Plugin -> PluginServices.send_message()
-        -> TaskScheduler.submit(account, plugin, 'message', ...)      [TaskQueued]
-        -> per-account worker lane (concurrency = 1 per account)
-        -> RateLimitManager.acquire(action, account, plugin, prio)    [pacing sleep + jitter]
-        -> AccountManager.send_hook(task)                             [cache validate]
-        -> DiscordClient.send_message / send_dm                       [adapter]
-        -> audit record (wait_ms, jitter_ms)                          [TaskCompleted]
-```
+### Shared application API
 
-- Scheduler retries ONLY on: `ConnectionError`, `TimeoutError`,
-  `core.errors.ServerRateLimit` (reported to limiter first). `FlowBlocked`
-  and everything else fail immediately with the reason.
-- Server 429: adapter raises `ServerRateLimit(retry_after, global_)`;
-  scheduler calls `limiter.report_server_limit(...)` then retries after
-  backoff. The framework ALWAYS respects server-provided limits.
+- `core.api.ControlAPI` is the shared facade used by CLI and dashboard.
+- Interface handlers parse transport input, call `ControlAPI`, and serialize its result. They must not reimplement business rules, reach into manager internals, or write to repositories directly.
+- If a legitimate feature needs an application operation that does not yet exist, **extend `ControlAPI` and its tests** and wire the operation through each required interface. The facade is not immutable. Do not work around the contract with a dashboard-only shortcut.
+- Keep business results transport-neutral. HTTP status codes, JSON envelopes, CLI strings, and visual state belong to their respective interface adapters.
 
-## Events (core/event_bus.py — already written, import from it)
+### Plugins and services
 
-`Event(ts)` base; concrete: `AccountConnected, AccountDisconnected(reason),
-AccountFailed(error), PluginLoaded, PluginUnloaded, PluginEnabledChanged(enabled),
-TaskQueued(task_id, plugin, action), TaskStarted(task_id, action),
-TaskCompleted(task_id, duration_s, summary), TaskFailed(task_id, error),
-TaskCancelled(task_id), RateLimitTriggered(action, wait_s, reason),
-SettingChanged(scope, key, old_value, new_value),
-MessageReceived(message_id, channel_id, author_id, content, dm),
-ScenarioStarted(name), ScenarioFinished(name, passed, duration_s)`.
-All carry `account: str` ("" when N/A).
+Plugins use `PluginContext` / `PluginServices` via `ctx.services`. They must not manipulate accounts, databases, dashboard/CLI state, shared rate limiting, or fleet membership directly. Their outbound capabilities go through supported services and the central scheduling/pacing pipeline. New supported plugin capabilities must be deliberately added to the plugin contract and tested.
 
-## Pinned constructors & APIs
+The framework core remains game-agnostic. Game-specific command strings, locales, and message-recognition rules belong in parser packs and plugin/workload code. Core imports must not depend on `parsers/`.
 
-### core/logging_service (spine — done)
-`LogService(capacity=4000)`; `.record(severity, source, message, *, account=None,
-plugin=None, task_id=None, event=None) -> dict`; `.info/.warning/.error(source,
-msg, **ctx)`; `.tail(n=100, *, account=None, plugin=None, severity=None,
-source=None) -> list[dict]`; `.subscribe(cb) -> unsub`; `.attach_db(repo)`.
-Severities: `"DEBUG"|"INFO"|"WARNING"|"ERROR"`.
+## 3. Current module ownership
 
-### core/settings_manager (spine — done)
-`Setting(name, type, default, description, min_value, max_value)` frozen;
-`.validate(value)`; `.as_manifest()`. Types: `str|int|float|bool`.
-`SettingsManager(bus, logger, *, plugin_repo=None, account_settings_repo=None,
-global_layer=None)`; `.resolve(plugin_name, schema, account=None) -> dict`;
-`.set_plugin_setting(account, plugin, key, value, schema) -> value`;
-`.account_settings(account) -> dict`; `.set_account_setting(account, key, value)`.
-Framework account schema: `ACCOUNT_SETTINGS` (reconnect_enabled,
-reconnect_initial_delay, reconnect_max_delay, reconnect_multiplier,
-typing_probability).
+| Area | Owns | Must not absorb |
+|---|---|---|
+| `core/bootstrap.py` | dependency construction, wiring, lifecycle composition | domain decisions that belong in services |
+| `core/api.py` | shared application operations and validation orchestration | HTTP/DOM details or interface-specific business logic |
+| `core/account_manager/` | account lifecycle, runtime client/cache, sender hook | persistent sync-group ownership or rate-policy calculation |
+| `core/plugin_base.py`, `core/plugin_manager/` | plugin contract, discovery, per-account attach/dispatch/state | dashboard state, direct DB access from plugins, pacing bypasses |
+| `core/settings_manager.py` | schema validation and settings resolution | UI rendering or component state |
+| `core/sync_group_manager/` | persistent sync-group rows and account membership | fleet task ownership or rate-limit execution timing |
+| `core/fleet/` | fleet membership projection, policy, task/member transitions, handoff, cooldown decisions, reconciliation | Discord API requests and execution pacing |
+| `core/task_scheduler/` | task queue, execution lanes, retries, cancellation, history lifecycle | choosing which fleet member is eligible or bypassing pacing |
+| `core/rate_limit_manager/` | action pacing, shared clocks, cooldowns/server 429s, warnings | choosing task ownership or interpreting game messages |
+| `core/event_bus.py` | in-process typed event delivery | durable state truth or authorization of commands |
+| `core/audit.py`, `core/logging_service.py` | audit trail and structured logs | secret disclosure or business-state ownership |
+| `database/` | schemas, migrations, repository persistence | interface behavior or UI-specific transformations |
+| `adapters/` | Discord/simulator boundary and data conversion | core policy decisions |
+| `interfaces/cli/` | command parsing, help, presentation, calls to `ControlAPI` | separate business rules |
+| `interfaces/dashboard/` | HTTP/WS transport, SPA, view state and presentation | direct manager/repository operations or Discord API calls from view code |
+| `core/dashboard_ui/` | safe plugin page/component contracts, visibility checks, data/action dispatch | arbitrary HTML/script injection or framework internals exposure |
 
-### core/rate_limit_manager (A4 + GlobalSendLane)
-```python
-RatePolicy(action, interval, jitter_min=0.0, jitter_max=0.0)   # frozen; __str__ "2.00s +0.10..0.50s"
-MIN_ACTION_INTERVAL = 1.5
-class RateLimitManager:
-    def __init__(self, bus, logger, policy_repo=None, *, floor=MIN_ACTION_INTERVAL,
-                 clock=None, jitter_seed=None, lane_enabled=False,
-                 lane_prefixrate=1.5, kv_repo=None): ...
-    def set_policy(self, policy: RatePolicy, level="global", owner=None) -> RatePolicy
-    def set_policy_values(self, action, interval, jitter_min=0.0, jitter_max=0.0,
-                          level="global", owner=None) -> RatePolicy   # convenience used by ControlAPI
-        # level in {"global","account","plugin","account_plugin"};
-        # owner: None | account name | plugin name | "account/plugin"
-        # validates: finite, jitter 0<=min<=max, interval >= floor (else UnsafePolicyError)
-    def clear_policy(self, level, owner, action) -> bool
-    def policies(self) -> list[dict]          # all stored, incl. level/owner
-    def effective(self, action, account=None, plugin=None) -> dict
-        # {"action","interval","jitter":[min,max],"sources":[{"level","owner","interval"}...]}
-        # interval = MAX across applicable levels (never faster than ANY level demands)
-    async def acquire(self, action, account=None, plugin=None, priority=Priority.NORMAL) -> Grant
-        # Grant(action, account, plugin, wait_s, jitter_s, reason) dataclass
-        # waits for: server cooldowns (account+global) THEN pacing (min interval since
-        # last fire of (account,action)) THEN applies random jitter sleep.
-        # Concurrent waiters granted in priority order (heap like old limiter).
-        # Publishes RateLimitTriggered when wait_s > 0 (reason "pacing"|"server"|"lane").
-    def report_server_limit(self, account, action, retry_after: float, global_=False) -> None
-        # account-scoped cooldown; global_=True ALSO cools down EVERY account (fleet-wide)
-    def cooldown_remaining(self, account=None, action=None) -> float
-    def stats(self) -> dict     # policies + cooldowns + last-fire ages + counters (UI page)
-    def warnings(self) -> list[dict]   # [{"level","code","message"}] aggressive(<3s), no_jitter, narrow_jitter
-    def set_floor(self, seconds) -> float  # may only raise, never below 1.5
-                                           # (floor/interval cap: 86400s)
-    # --- sequential send lane (FarmLite concept, robust port — lane.py) ---
-    def set_lane_enabled(self, enabled: bool) -> dict      # persisted (kv 'ratelimit:lane')
-    def set_lane_prefixrate(self, seconds: float) -> dict  # 0 PAUSES; persisted
-    def lane_status(self) -> dict  # {"enabled","prefixrate","paused","waiting",
-                                   #  "grants","last_grant_age_s","held_off_seconds"}
-```
-Port pacing/priority-waiter ideas from `git show HEAD:core/rate_limiter.py`
-and server-limit ideas from `git show HEAD:core/rest_buckets.py` +
-`git show HEAD:core/warnings.py`. Use injectable clock (`Clock` protocol,
-`ManualClock`) like the old code so pacing is deterministically testable;
-`jitter_seed` injectable too.
+## 4. API boundary, external calls, and cache
 
-### core/task_scheduler (A5)
-```python
-TaskStatus = "queued|running|completed|failed|cancelled|timed_out"
-@dataclass Task: id, name, account, plugin, action, channel_id, user_id, content,
-    message_id, priority, submitted_at, started_at, finished_at, attempts,
-    max_retries, timeout_s, status, error, result_summary, grant_wait_ms,
-    grant_jitter_ms
-    def as_dict(self) -> dict
-class TaskScheduler:
-    def __init__(self, bus, logger, limiter, sender, audit=None, *,
-                 default_timeout=30.0, retry_backoff=0.5, max_backoff=30.0,
-                 history_repo=None): ...
-        # sender: async Callable[[Task], Any] — supplied by AccountManager
-    def start(self) -> None                 # spawn dispatch loop (idempotent)
-    async def stop(self, *, drain=True, timeout=10.0) -> None
-    def submit(self, account, plugin, action, *, channel_id=None, user_id=None,
-                content=None, message_id=None, priority=Priority.NORMAL,
-                name=None, timeout=None, retries=0) -> Task      # raises SchedulerError when stopped
-    def cancel(self, task_id) -> bool
-    def cancel_matching(self, *, account=None, plugin=None, action=None) -> int
-    def get(self, task_id) -> Task | None
-    def tasks(self, *, status=None, account=None) -> list[dict]
-    def history(self, limit=50, account=None) -> list[dict]   # DB when repo present
-    def stats(self) -> dict   # {"queued":n,"running":n,"completed":n,"failed":n,
-                              #  "cancelled":n,"avg_duration_s":x,"workers":n}
-```
-Semantics: **one worker per account** (lazy spawn; concurrency=1 per account =
-never two in-flight requests for one account — port lane ideas from
-`git show HEAD:core/send_engine.py`), cross-account fairness by priority.
-Timeout via `asyncio.wait_for`. Retry backoff `retry_backoff * 2**(attempts-1)`
-capped at `max_backoff` (attempts counts retries used; the first retry
-waits exactly `retry_backoff`). Persist finished tasks to `history_repo`
-(`tasks.add` / see database section). Before calling sender, run
-`limiter.acquire(...)` and set `task.grant_wait_ms/grant_jitter_ms`.
-On `ServerRateLimit`: `limiter.report_server_limit(task.account, task.action,
-exc.retry_after, exc.global_)`, retry (counts as attempt). Emit
-Task* events throughout. Old refs: `git show HEAD:core/scheduler.py`.
+The framework does not make Discord API calls merely to prefetch or decorate its own UI. Discord calls are on-demand and belong to supported service/action flows. `PluginServices` includes supported messaging and other action methods; current exact methods and signatures are in `core/plugin_base.py` and its implementation.
 
-### core/audit.py (A5)
-`AuditRecorder(db_repo=None, capacity=2000)`; `.record(account, direction,
-action, channel_id=None, content="", wait_ms=0.0, jitter_ms=0.0, note="") ->
-dict`; `.tail(n=50, account=None)`; `.history(limit=200, account=None)`;
-`.subscribe(cb)`. Port from `git show HEAD:core/audit.py` (keep the
-best-effort DB write + subscriber isolation).
+This restriction concerns **Discord/external-platform API calls**. It does not prohibit the dashboard from requesting data from its own REST API, fetching a view's data on demand, refreshing after a mutation, or consuming WebSocket events.
 
-### core/plugin_base.py + core/plugin_manager (A3)
-```python
-class PluginBase(abc.ABC):
-    name: ClassVar[str]; version: ClassVar[str]; description: ClassVar[str]
-    settings: ClassVar[Sequence[Setting]] = ()
-    async def on_load/on_enable/on_disable/on_unload(self, ctx): ...
-    async def handle_event(self, ctx, event): ...
-@dataclass PluginContext: account: str, plugin: str, settings: dict,
-    services: "PluginServices", logger: logging.Logger
-class PluginServices(Protocol):        # implemented by account_manager (A6)
-    async def send_message(self, channel_id, content, *, priority=Priority.LOW) -> DiscordMessage
-    async def send_dm(self, user_id, content, *, priority=Priority.LOW) -> DiscordMessage
-    async def open_dm(self, user_id) -> int            # resolve (opening if needed) the DM channel id
-    async def add_reaction(self, channel_id, message_id, emoji, *, priority=Priority.NORMAL) -> None
-    async def click_button(self, channel_id, message_id, custom_id, *, priority=Priority.NORMAL) -> None
-    async def fetch_user(self, user_id) -> Any | None  # None when the client cannot resolve them
-    async def cooldown_set(self, key, duration_s, *, source="plugin", reason="", metadata=None) -> dict
-    async def cooldown_remaining(self, key) -> float   # 0.0 when none/expired
-    async def cooldown_active(self, key) -> bool
-    async def cooldown_clear(self, key) -> bool
-    async def cooldown_list(self) -> list[dict]        # ACTIVE cooldowns, soonest first
-    async def state_get(self, key, default=None) -> Any
-    async def state_set(self, key, value) -> None      # JSON-serializable value
-    async def state_delete(self, key) -> bool
-    async def wait_for_message(self, check, timeout) -> MessageReceived | None
-    async def collect_messages(self, check, idle_timeout) -> list[MessageReceived]
-    def publish(self, event: Event) -> None
-    def validate_channel(self, channel_id) -> None      # raises TargetGone
-    def describe_channel(self, channel_id) -> str
-    @property credentials, account, plugin, settings
-class PluginManager:
-    def __init__(self, bus, logger, settings: SettingsManager, plugin_repo=None,
-                 plugin_dir="plugins", *, credential_service=None,
-                 cooldowns=None, plugin_state=None): ...
-    def discover(self) -> dict                          # name -> record (port old loader)
-    def manifests(self) -> list[dict]                   # metadata + settings schema (UI)
-    def attach_account(self, account, allowed: set | None) -> None
-        # instantiate per-account plugins (allowed=None => all discovered)
-    def detach_account(self, account) -> None
-    def activate_account(self, account, services: PluginServices) -> None
-        # resolve settings, fire on_load+on_enable for enabled plugins (repo state)
-    def deactivate_account(self, account) -> None       # on_disable + on_unload
-    async def set_enabled(self, account, plugin, enabled: bool) -> None
-    def set_setting(self, account, plugin, key, value) -> dict   # via SettingsManager
-    def states(self, account) -> list[dict]             # [{name,enabled,settings,last_error,error_count}]
-```
-Internally subscribes to `MessageReceived` once and routes to the owning
-account's enabled plugin instances (error-isolated, per-plugin error counters
-visible in `states()`). Port loader from `git show HEAD:core/plugin_loader.py`
-(strict name validation, duplicate detection, synthetic module names) and
-plugin_base from `git show HEAD:core/plugin_base.py`.
+- Discord runtime status and cached guild/channel/user information should be drawn from the live client's cache snapshot when available.
+- Missing optional data stays absent until an operation explicitly needs and is authorized to fetch it. Do not add implicit fetch loops to improve visual completeness.
+- The adapter converts raw library events into framework DTOs once at the boundary. Raw runtime-only objects must not be persisted or logged.
+- `fetch_user` and DM-channel resolution use the existing account-scoped cache where applicable. Do not duplicate cache logic in views or plugins.
+- Discord snowflakes remain exact digit strings across browser state, JSON payloads, Python processing, persistence, and logs. Never use JavaScript `Number` to hold a Discord snowflake.
 
-Plugins to deliver (A3):
-- `plugins/soulcopy/` — migrate from `git show HEAD:plugins/soulcopy/plugin.py`
-  and `git show HEAD:plugins/soulcopy/textutils.py` (+ `__init__.py`). Same
-  behavior/flow-safety, but sends go through `ctx.services.send_message /
-  send_dm` (task pipeline) and collection through
-  `ctx.services.collect_messages`. Keep `FlowBlocked` catch-all contract.
-- `plugins/roll/` (v2.0.0) — Mudae roulette automation: an owner trigger
-  word (setting `trigger`, default `"roll"`) starts a paced send loop of the
-  configured roulette command (setting `command`, default `"$wa"` of
-  $wa/$wg/$wx/$w/$ha/$hg/$hx/$h/$ma/$mg/$mx/$m); the plugin parses Mudae's
-  responses for cooldowns ("**N** min"), userstack ("2 ROLLS LEFT" →
-  `$us 20`) and the key-per-hour limit (`$ru`), persists cooldowns via
-  `cooldown_*` and userstack availability via `state_*`. Stop word:
-  setting `stop_trigger`, default `"rollstop"`.
+## 5. Outbound task and pacing contract
 
-### core/profile_manager (A6)
-```python
-class ProfileManager:
-    def __init__(self, profiles_repo, logger, accounts_repo=None): ...
-    def set_profile(self, name, plugins, description="") -> dict   # persists
-    def delete_profile(self, name) -> dict
-    def profiles(self) -> list[dict]        # [{"name","description","plugins":[...]}]
-    def assign(self, account, profile) -> dict    # validates profile AND account exist
-    def unassign(self, account, profile) -> dict
-    def assigned(self, account) -> list[str]
-    def allowed_plugins(self, account) -> set | None   # retained; NOT consulted by attach
-```
-Port semantics from `git show HEAD:core/roles.py` (name regex, non-empty
-plugin list, unknown-role warning behavior).
-
-STATUS: retained future infrastructure. Profile CRUD and assignment
-bookkeeping persist, but profiles NO LONGER control which plugins an
-account runs — that is the direct account→plugin assignment
-(`account_plugins` table; `AccountManager.assign_plugin` /
-`unassign_plugin` / `set_account_plugins` via `ControlAPI.
-accounts_plugin_*`). Future (NOT implemented): plugin-specific profiles /
-multiple saved configurations.
-
-### core/account_manager (A6)
-```python
-class AccountStatus(str, Enum): created connecting running reconnecting stopped
-    failed missing_credential invalid_credential
-@dataclass Account:  # first-class object: persistent vs runtime split (spec §1)
-    record: AccountRecord          # persistent (database/models.py)
-    runtime: AccountRuntime        # client, status, cache, started_at, stats, last_error
-    plugins: dict                  # plugin name -> runtime info
-class AccountManager:
-    def __init__(self, bus, logger, accounts_repo, plugin_manager, profile_manager,
-                 scheduler, settings: SettingsManager, audit, client_factory,
-                 credentials, *, limiter=None, supervisor_tick=0.2,
-                 api_cache_repo=None, credential_service=None, cooldowns=None,
-                 plugin_state=None): ...
-    def add_account(self, name, *, token_ref=None, enabled=True, sync_group=None,
-                    plugins=None) -> dict       # validates + persists; 'profiles' REJECTED
-    def remove_account(self, name) -> dict          # must be stopped; cascades
-    def get(self, name) -> Account                  # AccountError when unknown
-    def accounts(self) -> list[dict]                # status list (names + ids + assigned plugins)
-    def set_enabled(self, name, enabled) -> dict
-    async def start(self, name) -> dict ; async def stop(self, name) -> dict
-    async def start_all(self, *, stagger=5.0) -> dict
-    async def stop_all(self) -> dict
-    def emergency_stop(self, name) -> dict          # cancel tasks + stop account NOW
-    def details(self, name) -> dict                 # spec §8 page (see below)
-    async def send_hook(self, task: Task) -> DiscordMessage   # scheduler sender
-    def names(self) -> list[str]
-```
-- `details(name)` returns EXACTLY these sections (spec §8):
-  `{"name", "status": {"connected": bool, "state": str, "latency_ms",
-  "uptime_s"}, "identity": {"name", "discord_id"}, "runtime": {"cached_guilds",
-  "cached_channels", "cached_dms", "cache_source": "client cache (READY)"},
-  "plugins": [{"name","enabled"}...], "profiles": [...],
-  "rate_limit": {action: {"interval","jitter","source":"inherited from global"|...}},
-  "credential": "db"|"env"|None}`
-  Everything runtime-y comes ONLY from the live client's cached state
-  (`client.cached_snapshot()`); mark it clearly.
-- `start()`: client = `client_factory(name, token)`; connect; ingest
-  `cached_snapshot()` into `runtime.cache`; publish `AccountConnected`;
-  `plugin_manager.activate_account(name, services)` with the account's
-  DIRECTLY assigned plugins (`account_plugins` rows — profiles are not
-  consulted); start reconnect supervisor (policy from
-  `settings.account_settings(name)`; exponential backoff; port from
-  `git show HEAD:core/container.py` supervise logic).
-- `send_hook`: resolve runtime; not running -> `ConnectionError("account ...
-  is not running")` (retryable-classified but will fail out); `action=="dm"` ->
-  cache-first `open_dm` then send; guild message -> `cache.validate_channel`
-  (TargetGone propagates, no retry); audit `direction="out"` with
-  `task.grant_wait_ms/grant_jitter_ms`.
-- Inbound audit: subscribe `MessageReceived` -> `audit.record(..., "in", ...)`.
-- `DiscordCache` in `core/account_manager/cache.py`: port from
-  `git show HEAD:core/discord_cache.py` (ingest_snapshot, validate_channel,
-  describe, invalidate_channel, snapshot).
-- `PluginServices` implementation (`AccountPluginServices`) lives in
-  `core/account_manager/services.py` and implements the pinned protocol:
-  sends via `scheduler.submit(...)` awaited to completion; wait/collect via
-  bus subscriptions (port `collect_messages` idle-timeout semantics from
-  `git show HEAD:core/container.py`); exposes credentials + cache helpers.
-  Priority default for plugin sends: `Priority.LOW`.
-
-### adapters (A7)
-`adapters/base.py` (spine — done): `DiscordMessage`, `DiscordClient` protocol
-(connect/disconnect/send_message/send_dm/open_dm/fetch_user/cached_snapshot/
-latency_ms/user_id/on_message/on_disconnect), `ClientFactory` protocol
-`__call__(name: str, token: str) -> DiscordClient`.
-
-- `adapters/discord/client.py` — `RealDiscordClient(token)`: lazy
-  `import discord` (discord.py-self; 2.x has no Intents — plain
-  `discord.Client()`, fall back to `Client(intents=None)` on TypeError).
-  Port from `git show HEAD:core/discord_adapter.py` (startup-error surfacing,
-  user_id check, cached_snapshot from client cache, DMChannel detection).
-  Convert library `HTTPException` with `status == 429` into
-  `core.errors.ServerRateLimit(retry_after, global_)` (retry_after from
-  `exc.response.headers.get("Retry-After")` when available, else 1.0).
-  `latency_ms` from `client.latency * 1000` (None-safe).
-  `adapters/discord/__init__.py` exports `RealDiscordClient` +
-  `RealClientFactory` (resolves token via `credentials.get(record token ref)`
-  — factory signature `(name, token)` per base.py).
-- `adapters/simulator/` — port `git show HEAD:core/simulator.py`:
-  `world.py` (`SimWorld`: users/channels/DM pairs/history/deliver/subscribers,
-  deterministic DM channel ids, configurable scripted responder with pages +
-  reply delay; PLUS `server_limit_next(channel_id, retry_after, global_=False)`
-  queueing a one-shot 429 on the next send, and `channel_gone(channel_id)`
-  simulating deletion), `client.py` (`SimClient`: protocol impl, synthetic
-  `latency_ms` 40-90, `drop(reason)` disconnects, `delete_channel`,
-  raises `ServerRateLimit`/`KeyError` per world state, per-account DM
-  filtering in cached_snapshot).
-  `scenarios.py`: registry `SCENARIOS: dict[str, Scenario]`;
-  `Scenario` dataclass(name, description, policies: dict[action, RatePolicy],
-  world_setup(world), script(api) -> awaitable, checks(audit, world) -> list[str])
-  with at least: `soulcopy_basic`, `soulcopy_multichunk`, `pacing_respected`
-  (tight-ish policy -> every outbound gap >= interval), `server_429_respected`
-  (simulated 429 -> retry happens AFTER retry_after), `channel_gone_aborts`
-  (target channel deleted -> flow aborts cleanly, no partial chunks).
-  `runner.py`: `SimulationRunner(plugin_dir, credentials=None)` builds a
-  COMPLETE
-  in-memory stack (Database(":memory:"), bus, LogService, RateLimitManager,
-  TaskScheduler, SettingsManager, ProfileManager, PluginManager,
-  AccountManager with SimClient factory, AuditRecorder) per run — wiring per
-  the pinned constructors; `run(name) -> report dict {name, passed,
-  duration_s, failures: [str], log_lines: ["00:02.017 INFO scheduler Task 3
-  completed"...], interactions: [audit dicts], summary: str}`; `list() ->
-  [{name, description}]`. Log lines are relative-timestamped structured
-  entries from LogService (spec §9 example format).
-
-### interfaces/cli (A1)
-- `interfaces/cli/commands.py`: `run_command(api, line) -> str | None`
-  (raises `QuitRequested`, `UsageError`), `HELP` registry, pure `format_*`
-  helpers.   Command groups (spec §13 — subcommand style):
-  `accounts list|add <name> [plugins...]|plugins <account>|
-  plugin-add <acct> <plugin>|plugin-remove <acct> <plugin>|remove <name>|
-  info <name>|credential <name> <token>|enable <name> <on|off>|
-  start [name|all]|stop [name|all]|estop <name>`,
-  `credentials status|import-env [--overwrite]`,
-  `cooldowns [account]|clear <account> <plugin> [key]`,
-  `plugins list|state <account>|enable <acct> <plugin>|disable <acct> <plugin>|
-  settings <account>|set <account> <plugin> <key> <value>`,
-  `profiles list|create <name> <plugin...>|delete <name>|assign <acct> <profile>|
-  unassign <acct> <profile>` (retained infrastructure — profile commands
-  are bookkeeping only, no capability effect),
-  `ratelimit show|stats|set <action> <interval> [jitter_min jitter_max] [level owner]|
-  clear <level> <owner> <action>|effective <action> [account] [plugin]|warnings|
-  floor <seconds>|lane [on [rate]|off|rate <s>]`,
-  `tasks list [status]|cancel <id>|history [n]|cancel-matching [account] [plugin]`,
-  `simulation list|run [name]`, `logs [n] [account] [severity]`, `audit [n] [account]`,
-  `estop [resume]` (global emergency stop), `status`, `help`, `quit`.
-  Strict arg validation with usage messages; strict bool parsing
-  (`parse_bool` from core.api). Port command-engine patterns from
-  `git show HEAD:cli/commands.py`.
-- `interfaces/cli/repl.py`: `Repl(api)` with injectable stdin/stdout
-  (`git show HEAD:cli/terminal.py` for the every-exit-path stop + error
-  rendering); `run_once(api, argv) -> int` for one-shot mode.
-- Both call ONLY `core.api.ControlAPI` methods.
-
-### interfaces/dashboard (A8)
-- `interfaces/dashboard/server.py`: stdlib `ThreadingHTTPServer` +
-  `DashboardServer(api, token=None, host="127.0.0.1", port=8070, bus=None,
-  exit_signal=False)` with `.start()/.stop()/.attach_logs(log_service)/
-  .attach_audit(recorder)`, JSON REST mapping 1:1 to
-  CoreAPI (`/api/status`, `/api/accounts`, `/api/accounts/add|remove|info|
-  enable|credential|start|stop|emergency-stop`, `/api/credentials/status|
-  import-env`, `/api/cooldowns`, `/api/cooldowns/clear`, `/api/plugins`,
-  `/api/plugins/state|set-enabled|settings|set-setting`, `/api/profiles`,
-  `/api/profiles/create|delete|assign|unassign`, `/api/ratelimit/policies|
-  set|clear|effective|stats|warnings|floor|lane`, `/api/tasks`,
-  `/api/tasks/cancel|cancel-matching|history`, `/api/simulation/list|run`,
-  `/api/logs`, `/api/audit`, `/api/estop`, `/api/resume`,
-  `/api/shutdown`). Strict bool parsing (`parse_json_bool`), field guards,
-  body-size caps, 400/401/404/413/500/504 semantics — port wholesale from
-  `git show HEAD:dashboard/server.py` (keep auth via `X-Dashboard-Token` or
-  `?token=`).
-- `interfaces/dashboard/ws.py`: port `git show HEAD:dashboard/ws.py` verbatim
-  (RFC 6455 subset with the protocol-violation hardening).
-- `interfaces/dashboard/static/index.html`: SPA with a **sidebar navigation**
-  exactly per spec §12: Overview, Accounts (list + details modal per §8),
-  Plugins (installed + auto-generated settings editors from the schema),
-  Profiles (list + assignments), Rate Limits (global + per-account editors +
-  visualization of stats/warnings), Cooldowns (active persistent cooldowns),
-  Tasks (running/queued/history + cancel),
-  Logs (live structured tail), Simulation (scenario list, run button,
-  results incl. timed log lines), Advanced (DB info, floor, emergency stop).
-  Live WS push: `{"type":"stats",...}` every second, `{"type":"log", entry}`,
-  `{"type":"audit", entry}`, `{"type":"task", entry}` on task events
-  (subscribe the bus). Port the proven SPA skeleton (esc helpers, error
-  accrual, token box, ws retry cap) from
-  `git show HEAD:dashboard/static/index.html`.
-
-## Rich message/event boundary (adapters/model.py)
-
-```
-discord.py-self / SimWorld event
-        ↓ one non-blocking conversion (no fetches)
-adapters.model.DiscordMessage  (frozen; 5 compat fields + rich additions:
-        guild_id/author/channel/embeds/components/attachments/reactions/
-        reference/created_at + runtime-only raw via .unwrap())
-        ↓
-EventBus: MessageReceived(.message = rich DTO)
-          MessageEdited / MessageDeleted / ReactionAdded (typed, additive)
-        ↓
-plugins (isolation: frozen DTOs; actions NEVER on the model)
-        ↓
-PluginServices: send_message/send_dm/add_reaction/click_button
-        ↓ scheduler action kinds message|dm|reaction|button → limiter → adapter
+```text
+PluginServices request
+    -> TaskScheduler.submit(...)
+    -> one in-flight action per account
+    -> RateLimitManager.acquire(action, account, plugin, priority)
+    -> final account/cache/policy validation
+    -> AccountManager sender hook
+    -> DiscordClient or SimClient
+    -> history + audit + event publication
 ```
 
-Rules: raw is runtime-only, repr=False, never persisted; missing optionals
-stay None (never fetched to populate §12); reaction/button payloads ride in
-Task.content with Task.message_id as target; audit notes carry counts only.
+### Task scheduling
 
-## Database (A2 implements; models+schema in spine)
+- Outbound supported actions use the scheduler rather than calling the Discord client directly from plugins or interfaces.
+- The scheduler has one active worker lane per account; cross-account scheduling may provide priority fairness.
+- Cancellation is cooperative where an action is already in flight. Terminal bookkeeping must not duplicate history/audit/event records.
+- Retries are limited to errors that the scheduler classifies as transient. A policy block or validation failure fails with the reason rather than retrying blindly.
+- When a task is admitted to a queue, it must be checked again when dispatching if current policy/state may have changed.
 
-`database/db.py`: `Database(path="state/slaughter.db", *, audit_keep=10000,
-log_keep=10000)` — one background-thread aiosqlite connection (async API;
-ops never run on the event loop), 0600 file perms, WAL, `.migrate()`
-runs pending migrations from `database/schema.py:MIGRATIONS` using a
-`schema_migrations` table, `.close()`, and repository properties:
-`.accounts .account_settings .profiles .plugins .policies .audit .logs .tasks .kv`.
+### Rate limiting
 
-Repository methods (exact — other modules call these):
-```python
-AccountsRepository:
-    add(name, *, token_ref=None, enabled=True, sync_group=None) -> AccountRecord
-    get(name) -> AccountRecord | None ; list() -> list[AccountRecord]
-    set_enabled(name, enabled) ; set_settings(name, settings: dict)
-    delete(name) -> bool        # cascades settings/plugin_settings/states/profiles
-    assign_profile(name, profile) ; unassign_profile(name, profile)
-    profiles_of(name) -> list[str]
-AccountSettingsRepository: get(name) -> dict ; set(name, key, value) ; delete(name, key)
-    list_accounts() -> list[str]
-ProfilesRepository: upsert(name, plugins, description="") ; delete(name) -> bool
-    get(name) -> ProfileRecord | None ; list() -> list[ProfileRecord]
-SyncGroupsRepository: create(name, description="", *, enabled=True) -> SyncGroupRecord
-    get(group_id) -> SyncGroupRecord | None ; get_by_name(name) ; list()
-    update(group_id, *, name=None, description=None, enabled=None)
-    delete(group_id) -> bool
-    members(group_name) -> list[str] ; membership_counts() -> dict[str, int]
-    account_group_name(account) -> str | None
-    set_account_group(account, group: str | None)   # None leaves every group
-    detach_members(group_name) -> list[str]         # names of the detached
-PluginRepository:
-    upsert_metadata(name, version, description, settings_manifest) 
-    metadata() -> list[dict] ; metadata_for(name) -> dict | None
-    state(account, plugin) -> bool | None ; set_state(account, plugin, enabled)
-    setting(account, plugin, key) -> value | None
-    settings(account, plugin) -> dict ; set_setting(account, plugin, key, value)
-    all_account_settings() -> dict[account][plugin][key] = value
-RatePolicyRepository: get(level, owner, action) -> RatePolicyRecord | None
-    set(level, owner, action, interval, jitter_min, jitter_max)
-    delete(level, owner, action) -> bool ; delete_account(account) -> int
-    list() -> list[RatePolicyRecord]
-AuditRepository: add(entry: dict) ; add_many(entries) -> int ;
-    recent(limit=100, account=None) -> list[dict]
-LogRepository: add(entry: dict) ; add_many(entries) -> int ; recent(limit=100,
-    *, account=None, severity=None, source=None) -> list[dict]
-TaskHistoryRepository: add(entry: dict) -> int ; update(task_id, **fields)
-    max_id() -> int ; recent(limit=50, account=None) -> list[dict]
-KvRepository: get(key, default=None) ; set(key, value) ; delete(key) ; prefix(p) -> dict
-    delete_prefix(p) -> int
-```
-`Database(":memory:")` must work (simulations). Port robustness from
-`git show HEAD:core/database.py` (pruning, chmod, thread-safety).
+- `RateLimitManager` is the only authority for execution timing, pacing intervals, jitter, and server cooldowns.
+- Applicable policies compose by taking the most restrictive interval. Preserve the supported global, account, plugin, and account+plugin scopes.
+- SyncGroupManager feeds account-to-group membership to the limiter. Persistent membership remains owned by SyncGroupManager; runtime timing remains owned by the limiter.
+- A Discord 429 is reported to the limiter, including retry-after and whether the limit is global, before retrying.
+- The safety floor cannot be bypassed by UI settings, plugins, fleet policy, or simulation shortcuts.
+- Fleet policy may allow, block, or defer an action. It cannot alter the action's rate-limit grant.
 
-## CoreAPI (spine — done, in core/api.py)
+## 6. Event and fleet contracts
 
-Pure facade, duck-typed over the managers (no runtime imports of manager
-modules). CLI + dashboard call ONLY this. If you need a method it doesn't
-have, note it in your module docstring — do NOT edit core/api.py.
+`core/event_bus.py` provides typed in-process events. Events communicate observations and state changes, but an event by itself does not authorize a requested operation. Durable domain changes must go through the owner service/repository path and be validated before being published as authoritative state.
 
-## Tests
+### Fleet
 
-- Each agent writes `tests/unit/test_<module>.py` (or several) for its own
-  modules; they must pass via
-  `python3 -m unittest tests.unit.test_<module> -v` from repo root.
-  `tests/__init__.py`, `tests/unit/__init__.py` etc. already exist.
-- Use `tests/unit/helpers.py` for shared fixtures (any agent may CREATE it if
-  missing; if it exists, extend — coordinate via the file itself).
-- Determinism: inject ManualClock/seeds where the module supports it.
-- Do NOT run the whole suite (other modules may not exist yet) — run only
-  your own tests.
+- `FleetService` is the authoritative writer for supported fleet operations.
+- `core/fleet/transitions.py` is the transition-validation source. Do not reimplement transition tables in the dashboard.
+- `FleetPolicy` checks whether the action is eligible at dispatch time. The scheduler integrates the dispatch guard; the limiter remains responsible for timing.
+- Parser or message observations cannot directly grant work. An observation can trigger a restriction through validated service operations.
+- Generation/version checks reject stale assignments. Reconciliation must be idempotent and repair only safe states; ambiguous cases should be surfaced.
+- Handoff validates the destination before revoking the source. A failed destination check must never destroy the source assignment.
+- Sync-group membership and fleet membership are distinct concepts. Do not merge their persistence responsibilities.
+
+The API operation named `resume_task` requeues a suspended task to `QUEUED`; UI copy should say “Requeue” or “Return to queue” where that better represents the actual effect. Labels should be determined by real state transitions, not by method names alone.
+
+## 7. Persistence and schema changes
+
+- Use repository APIs for persistent writes. Do not let plugins or interface handlers open database connections or issue direct SQL.
+- Applied migrations are append-only; create a new migration for a schema change. Do not rewrite applied migration history.
+- Distinguish settings presets from operational plugin data. `plugin_profiles` is for named per-plugin settings bundles; `state/plugin-data.db` stores AccountPluginData documents.
+- AccountPluginData has a fixed scope lattice: account → plugin → guild → channel. Documents are standalone copies, not inherited overlays. Writes use optimistic versions and must report conflicts rather than silently overwriting newer data.
+- Scope/permission settings must be preserved when editing unrelated fields. If a complete settings object is sent to an API, it must include all reserved fields that the caller is responsible for preserving or explicitly editing. A UI must not turn a restricted scope into an unrestricted one through omission.
+- Preserve valid unknown fields when a contract explicitly requires forward compatibility. Do not casually discard unrecognized stored data in a read-modify-write flow.
+- Validate input types at API boundaries. Boolean fields must not accept arbitrary truthy values; IDs that are strings must not be silently converted to imprecise numeric values.
+
+## 8. Current dashboard integration
+
+The dashboard lives in `interfaces/dashboard/` and consists of the HTTP/WebSocket server plus a no-build SPA under `interfaces/dashboard/static/`. REST operations map to `ControlAPI`; live state is propagated to the SPA through the shared store and WebSocket frames.
+
+### Navigation and page ownership
+
+The shipped v3 interface currently includes Home, Accounts, Activity, Fleet, Policies, Admin, Tools, and plugin-related registry/builder surfaces. This is a **current inventory only**, not a mandatory navigation blueprint. A UI task may regroup or rename screens, change navigation hierarchy, or introduce a new view when required by the approved design. It must preserve the underlying operations and state semantics unless the task explicitly changes them.
+
+- Bespoke framework views live in `interfaces/dashboard/static/js/views/`.
+- Shared app shell/navigation lives in `shell.js`; routing and mounting live in the shared router; view state uses the common store and API layer.
+- Shared low-level UI utilities are in `ui.js`; generic builder rendering lives in `render.js` and the dashboard UI client module. Inspect current code before declaring helpers duplicated or proposing a consolidation.
+- The server's actual route table and `core/api.py` are the current endpoint evidence. Old route lists in historical plans are not binding if the implementation has since evolved.
+- Do not remove or rename public routes merely to fit a new screen layout. When an API change is required, update the application facade, server route, frontend caller, tests, and documentation together.
+
+### Theme and token contract
+
+The theme engine is a supported product feature, not optional decoration. It supports presets, accent, radius, density, font choices, layout preferences, page token overrides, and custom CSS under its current validation and allowlist boundaries.
+
+- Reusable components consume the runtime CSS variables and shared classes wherever practical. Avoid hard-coded colors/dimensions in reusable UI that bypass the theme.
+- A design reference may propose a target palette or dimensions, but it does not become the runtime token contract until the tokens are reconciled and implemented. There must be one coherent mapping between the design specification, CSS tokens, and theme engine.
+- Do not silently remove theme settings or reduce them to one fixed palette because a mockup shows one visual state.
+- If a token file is consumed as JSON, it must be valid JSON with unique keys. Validate it with a parser; duplicate-key JSON objects are not acceptable.
+
+### Component and interaction contract
+
+Every reusable component or important view interaction should be designed as behavior plus appearance. Before declaring it complete, define applicable states and test them:
+
+- Inputs: label/help, parsing/validation, disabled state, invalid state, preserved value on failure, and correct value collection.
+- Buttons/actions: enabled/disabled, loading/busy without destructive child replacement or layout jump, success/error feedback, and repeat submission behavior.
+- Dialogs/drawers: labelled semantics, open/close lifecycle, Escape behavior where appropriate, focus movement/restoration, keyboard containment when applicable, and narrow viewport fit. Prefer correct native semantics when available; do not add a custom focus trap solely because a helper lacks a particular code pattern.
+- Tabs/menus: selected state, keyboard navigation, focus, and lazy loading when data is expensive.
+- Tables/lists: empty/loading/error states, stable identity, overflow strategy, accessible headers/labels, and available row actions consistent with the backend state machine.
+- Async views: cancellation/superseded-navigation protection, loading/empty/error/retry behavior, server-confirmed save semantics, and clean subscription disposal.
+- Feedback: inline errors for fields/actions where actionable, persistent/banner errors for conditions that remain, and live-region announcements for status changes where necessary. A transient toast must not be the only carrier of an important persistent error.
+- Text overflow: do not truncate critical IDs, statuses, error messages, or links without a way to reveal the full value; avoid hover-only disclosures for keyboard users.
+
+Only require states that make sense for a component's responsibility. The acceptance requirement is observable behavior, not a source comment or a specific helper name.
+
+### Responsive and accessible by default
+
+- Responsive behavior must be considered during component design, not postponed until after desktop styling.
+- Verify realistic desktop, tablet, and narrow mobile widths; no unintended horizontal overflow, clipped primary actions, or unusable dialogs.
+- Preserve visible keyboard focus, semantic controls, accessible names, correct expanded/selected/busy states, reduced-motion support, and contrast appropriate to the active theme.
+- Hit areas should meet the agreed accessible target even when the visible icon/control is smaller. Distinguish visual size from interactive hit area.
+- Use live regions for state changes that otherwise would be invisible to assistive technology; avoid making the entire page a noisy announcement region for high-frequency telemetry.
+
+### UI/backend behavior
+
+- Use the existing API client and store. Do not call managers or repositories directly from JavaScript.
+- Show loading, empty, failure, and retry/recovery states for async data.
+- Consider a mutation successful only after the backend confirms it. Render returned server state or re-fetch the relevant data after mutation.
+- Keep user input on failed submissions and display the cause near the relevant control when possible.
+- Avoid rebuilding entire views at telemetry frequency when small in-place updates suffice.
+- Do not drop `settings.channels`, account/plugin associations, permission/scope fields, or other reserved data simply because an editor is displaying only a subset of settings.
+- Ensure multiple editors of the same domain object uphold the same data-preservation rules, even if their layout differs.
+
+## 9. Current public integration surfaces
+
+This section records the stable responsibilities and key method families. Exact signatures should be verified against source before changing call sites; a signature shown in old documentation does not override live source.
+
+### Logging and audit
+
+- `core/logging_service.py` provides structured records, recent tails, subscriptions, and optional persistence attachment.
+- `core/audit.py` records interaction/action history and the timing/attempt information associated with scheduled outbound work.
+- Never log plaintext tokens or raw runtime-only Discord objects. Redact sensitive fields before rendering raw settings or diagnostic views.
+
+### Settings and plugins
+
+- `core/settings_manager.py` owns setting schemas, validation, default/global/account layering, effective resolution, and mutation semantics.
+- `core/plugin_base.py` defines `PluginBase`, context, services, and lifecycle hooks. `plugins/` may be empty in production; fixtures under `tests/fixtures/` are test-only.
+- `core/plugin_manager/` owns discovery, per-account plugin instances, dispatch, activation/deactivation, enabled state, and manifest generation. A plugin setting mutation goes through the settings/application APIs.
+- The supported plugin API is the documented `PluginServices` surface and other explicitly exported types. Internal core helpers are not implicitly supported just because they are importable.
+
+### Rate limiting
+
+`core/rate_limit_manager/` owns policy storage integration, effective-policy calculation, pacing, shared group clocks, server cooldowns, the floor, warnings, statistics, and the sequential lane where that feature is supported. Policy precedence is restrictive: the effective interval must not be faster than any applicable policy demands. Do not move fleet ownership or parser interpretation into this module.
+
+### Scheduler
+
+`core/task_scheduler/` owns task submission, execution lanes, priority, cancellation, retry/backoff, timeouts, and history. `AccountManager` supplies the sender hook. Keep the scheduler and limiter separate: the scheduler determines when work is dispatched; the limiter grants timing permission for the outbound action.
+
+### Account management
+
+`core/account_manager/` owns account lifecycle, connection supervisors, runtime state, cache snapshots, plugin services implementations, and the final sender hook. Runtime details should be sourced from the live client/cache. Account plugin assignment is direct; do not reintroduce removed account-profile indirection.
+
+### Adapters
+
+`adapters/base.py` defines the client boundary. `adapters/discord/` supplies the live client and imports the Discord library lazily. `adapters/simulator/` provides the in-memory world/client and scenario runner. Raw adapter event data is converted to framework DTOs once and should not leak beyond the adapter boundary.
+
+### CLI
+
+`interfaces/cli/` parses subcommands and formats output. It calls `ControlAPI` only. The command surface may evolve; keep strict argument parsing, useful help/error messages, and parity with application operations.
+
+### Dashboard server and REST/WS
+
+`interfaces/dashboard/server.py` maps REST requests to `ControlAPI`; `interfaces/dashboard/ws.py` transports live updates. Preserve authentication, validation, request-body limits, explicit error/status semantics, and safe serialization. A new route needs a defined request shape, response/error contract, and tests. Route changes must not smuggle business logic into the server.
+
+### Database
+
+`database/schema.py` owns ordered migrations; `database/repositories/` (plus the dedicated plugin data store) owns persistence APIs. `Database(":memory:")` must remain usable by simulation/testing. Operations must not block the event loop with synchronous database work.
+
+## 10. Data model notes
+
+- `account_plugins` is the direct account→plugin assignment record set.
+- `plugin_states` represents per-account enabled/disabled plugin state; assignment is not enablement.
+- `plugin_profiles` contains named plugin settings presets and account bindings.
+- `state/plugin-data.db` contains AccountPluginData operational documents, separate from settings presets.
+- `sync_groups` owns persistent sync group records; `accounts.sync_group` expresses one-group membership.
+- Fleet group/task assignment, eligibility, cooldown, and history concepts are stored through the fleet repositories/service. They are not the same thing as sync groups or rate-limit policies.
+- Never assume data is available merely because an object is absent from the UI. Use the source API contract to determine whether the value is unknown, empty, disabled, or missing.
+
+## 11. Testing and acceptance
+
+### Expected validation
+
+1. Add/update unit tests for changed domain logic and input validation.
+2. Add/update integration tests for cross-module behavior when APIs, persistence, scheduling, or events change.
+3. Add/update dashboard acceptance tests for user-visible behavior: API payloads, server-persisted results, error preservation, loading/empty/retry states, component state changes, and relevant accessibility/responsive behavior.
+4. Run the focused tests first, then affected integration tests and broader relevant suites when feasible. Record failures honestly; distinguish a pre-existing unrelated failure from one introduced by the change.
+
+Do not use a structural grep alone as proof of user-visible behavior. Do not assert that focus containment works merely because a focus-trap helper exists; test keyboard behavior. Do not add a brittle requirement that a comment or particular implementation name must be present if equivalent behavior is correct.
+
+### Simulator and determinism
+
+Use `adapters/simulator/` for tests that need the application stack without a live Discord connection. Inject clocks/seeds where the code supports it. Tests should avoid real credentials and network access unless a specific live acceptance test is deliberately being performed.
+
+### Definition of done
+
+A cross-module/UI change is done when:
+
+- behavior matches the approved requirement;
+- the proper owner module enforces its invariants;
+- CLI and dashboard use the same application capability where applicable;
+- error, empty, loading, and recovery cases are covered where they apply;
+- tests cover relevant regressions and report any skipped validation;
+- documentation reflects the current behavior rather than a previous phase;
+- the diff contains only task-related changes and has been reviewed.
+
+## 12. Current implementation map
+
+| Concern | Primary location |
+|---|---|
+| Composition root | `core/bootstrap.py` |
+| Shared application facade | `core/api.py` (`ControlAPI`) |
+| Account lifecycle/runtime/cache | `core/account_manager/` |
+| Plugin contract and dispatch | `core/plugin_base.py`, `core/plugin_manager/` |
+| Settings schema/resolution | `core/settings_manager.py` |
+| Persistent sync group membership | `core/sync_group_manager/` |
+| Fleet model/service/policy/reconciliation | `core/fleet/` |
+| Pacing and server limits | `core/rate_limit_manager/` |
+| Task queue/execution | `core/task_scheduler/` |
+| Event delivery | `core/event_bus.py` |
+| Adapter boundary and rich message DTOs | `adapters/` |
+| Database schemas/repositories | `database/` |
+| Operational plugin data | `database/plugin_data.py`, `state/plugin-data.db`, `ctx.services.data_*` |
+| CLI | `interfaces/cli/` |
+| Dashboard server and SPA | `interfaces/dashboard/` |
+| Safe plugin UI builder | `core/dashboard_ui/`, `interfaces/dashboard/static/js/render.js` |
+| Shared frontend utilities/theme/router/store | `interfaces/dashboard/static/js/` and `static/styles/` |
+
+This map is an entry point, not an exhaustive dependency specification. Verify the actual source tree before adding, renaming, or removing a module.

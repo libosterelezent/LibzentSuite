@@ -88,7 +88,7 @@ class DbTelemetryTests(unittest.IsolatedAsyncioTestCase):
                 # assertNoLogs on the ROOT logger flags ANY debug record;
                 # scope to the framework tree (aiosqlite's own debug lines
                 # are third-party and not ours to police)
-                with self.assertNoLogs(logger="slaughtermudae",
+                with self.assertNoLogs(logger="libzent",
                                        level="DEBUG"):
                     for i in range(50):
                         await db.kv.set(f"x{i}", i)
@@ -134,9 +134,32 @@ class SchedulerPressureTests(unittest.IsolatedAsyncioTestCase):
             gate = scheduler._limiter.block_acquires()
             task = scheduler.submit("alpha", "roll", "message",
                                     channel_id=1, content="x")
-            task.submitted_at = _time.time() - 25.0  # backdate: age axis
+            # backdate: age axis — BOTH clocks (age math reads the
+            # monotonic twin; the wall stamp is display/history only and
+            # an NTP step must not latch the level high)
+            task.submitted_at = _time.time() - 25.0
+            task.submitted_mono = _time.monotonic() - 25.0
             await asyncio.sleep(0.05)
             self.assertEqual(scheduler.pressure()["level"], "CRITICAL")
+            gate.set()
+            await asyncio.sleep(0.2)
+        finally:
+            await scheduler.stop(drain=False)
+
+    async def test_stats_survives_pressure_warning_and_reads_floor_property(self) -> None:
+        import time as _time
+        scheduler = self._scheduler()
+        scheduler._limiter.floor_value = 10.0       # property, not a method
+        scheduler.start()
+        try:
+            gate = scheduler._limiter.block_acquires()
+            task = scheduler.submit("alpha", "roll", "message",
+                                    channel_id=1, content="x")
+            task.submitted_mono = _time.monotonic() - 25.0
+            await asyncio.sleep(0.05)
+            self.assertEqual(scheduler.pressure()["pacing_floor_s"], 10.0)
+            scheduler._last_pressure_warn = 0.0
+            scheduler.stats()                       # used to raise TypeError
             gate.set()
             await asyncio.sleep(0.2)
         finally:
@@ -302,7 +325,8 @@ class ArtifactSecurityTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "scan.json")
             to_json(report, path)
-            text = open(path).read()
+            with open(path) as fh:
+                text = fh.read()
         self.assertNotIn("bench-tok", text)
         key = Path("state/credentials.key")
         if key.is_file():

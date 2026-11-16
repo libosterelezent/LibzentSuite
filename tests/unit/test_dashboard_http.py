@@ -27,12 +27,12 @@ ACCOUNTS = [
     {
         "name": "alpha", "status": "running", "enabled": True, "sync_group": None,
         "discord_id": "111000222", "user_id": "111000222", "latency_ms": 62.0,
-        "uptime_s": 300.0, "profiles": ["roll"], "assigned_plugins": ["roll"],
+        "uptime_s": 300.0, "assigned_plugins": ["roll"],
     },
     {
         "name": "beta", "status": "stopped", "enabled": True, "sync_group": "farm",
         "discord_id": None, "user_id": None, "latency_ms": None,
-        "uptime_s": 0.0, "profiles": [], "assigned_plugins": [],
+        "uptime_s": 0.0, "assigned_plugins": [],
     },
 ]
 
@@ -106,7 +106,6 @@ ACCOUNT_INFO = {
                 "cache_source": "client cache (READY)"},
     "plugins": [{"name": "soulcopy", "enabled": True},
                 {"name": "roll", "enabled": False}],
-    "profiles": ["roll"],
     "rate_limit": {
         "message": {"interval": 7.0, "jitter": [0.5, 2.0], "source": "account:alpha"},
         "dm": {"interval": 5.0, "jitter": [0.5, 2.0],
@@ -114,7 +113,17 @@ ACCOUNT_INFO = {
     },
 }
 
-PROFILES = [{"name": "roll", "description": "roll only", "plugins": ["roll"]}]
+PLUGIN_PROFILES = [
+    {"plugin": "roll", "name": "grind", "description": "fast rolls",
+     "settings": {"command": "$m"}, "created_at": 1.0, "updated_at": 1.0},
+    {"plugin": "roll", "name": "idle", "description": "",
+     "settings": {}, "created_at": 1.0, "updated_at": 1.0},
+]
+
+ACCOUNT_CHANNELS = [
+    {"guild_id": "111", "guild_name": "Alpha Guild",
+     "channels": [{"id": "aaa", "name": "general", "type": "text"}]},
+]
 
 POLICIES = RATE_STATS["policies"]
 
@@ -289,8 +298,8 @@ class FakeControlAPI:
         self._record("status")
         return STATUS
 
-    async def emergency_stop_all(self):
-        self._record("emergency_stop_all")
+    async def emergency_stop_all(self, surface: str = "api"):
+        self._record("emergency_stop_all", surface=surface)
         return {"cancelled_tasks": 3, "accounts": {"stopped": 2}, "halted": True}
 
     async def shutdown(self):
@@ -302,11 +311,11 @@ class FakeControlAPI:
         self._record("accounts_list")
         return ACCOUNTS
 
-    async def accounts_add(self, payload):
+    async def accounts_add(self, payload, surface="api"):
         self._record("accounts_add", payload)
         return {"name": payload["name"], "enabled": True, "sync_group": payload.get("sync_group")}
 
-    async def accounts_remove(self, name):
+    async def accounts_remove(self, name, surface="api"):
         self._record("accounts_remove", name)
         return {"removed": name}
 
@@ -318,15 +327,15 @@ class FakeControlAPI:
         self._record("accounts_enable", name, enabled)
         return {"name": name, "enabled": enabled}
 
-    async def accounts_start(self, name=None):
+    async def accounts_start(self, name=None, surface="api"):
         self._record("accounts_start", name)
         return {"started": [name] if name else ["alpha", "beta"]}
 
-    async def accounts_stop(self, name=None):
+    async def accounts_stop(self, name=None, surface="api"):
         self._record("accounts_stop", name)
         return {"stopped": [name] if name else ["alpha", "beta"]}
 
-    async def accounts_emergency_stop(self, name):
+    async def accounts_emergency_stop(self, name, surface="api"):
         self._record("accounts_emergency_stop", name)
         return {"account": name, "cancelled": 2, "stopped": True}
 
@@ -368,26 +377,51 @@ class FakeControlAPI:
         self._record("plugins_set_setting", account, plugin, key, value)
         return {"account": account, "plugin": plugin, "key": key, "value": value}
 
-    # -------------------------------------------------------------- profiles
-    async def profiles_list(self):
-        self._record("profiles_list")
-        return PROFILES
+    # ------------------------------------------------- plugin profiles
+    async def plugin_profiles_list(self, plugin=None):
+        self._record("plugin_profiles_list", plugin)
+        return PLUGIN_PROFILES
 
-    async def profiles_create(self, name, plugins, description=""):
-        self._record("profiles_create", name, plugins, description)
-        return {"name": name, "plugins": plugins, "description": description}
+    async def plugin_profile_create(self, plugin, name, description="",
+                                    settings=None, surface="api"):
+        self._record("plugin_profile_create", plugin, name, description,
+                     settings, surface=surface)
+        return {"plugin": plugin, "name": name, "description": description,
+                "settings": settings or {}, "created_at": 1.0,
+                "updated_at": 1.0}
 
-    async def profiles_delete(self, name):
-        self._record("profiles_delete", name)
-        return {"deleted": name}
+    async def plugin_profile_update(self, plugin, name, *, name_new=None,
+                                    description=None, settings=None,
+                                    surface="api"):
+        self._record("plugin_profile_update", plugin, name,
+                     surface=surface, name_new=name_new,
+                     description=description, settings=settings)
+        return {"plugin": plugin, "name": name_new or name,
+                "description": description or "",
+                "settings": settings or {}, "created_at": 1.0,
+                "updated_at": 2.0}
 
-    async def profiles_assign(self, account, profile):
-        self._record("profiles_assign", account, profile)
-        return {"account": account, "profile": profile}
+    async def plugin_profile_delete(self, plugin, name, surface="api"):
+        self._record("plugin_profile_delete", plugin, name, surface=surface)
+        return {"plugin": plugin, "profile": name, "existed": True}
 
-    async def profiles_unassign(self, account, profile):
-        self._record("profiles_unassign", account, profile)
-        return {"account": account, "profile": profile}
+    async def accounts_plugin_profiles(self, account):
+        self._record("accounts_plugin_profiles", account)
+        return {"roll": "grind", "soulcopy": None}
+
+    async def accounts_plugin_profile(self, account, plugin, profile,
+                                      surface="api"):
+        self._record("accounts_plugin_profile", account, plugin, profile,
+                     surface=surface)
+        return {"account": account, "plugin": plugin, "profile": profile}
+
+    async def accounts_effective_settings(self, account, plugin):
+        self._record("accounts_effective_settings", account, plugin)
+        return {"command": "$m", "channels": None}
+
+    async def accounts_channels(self, account):
+        self._record("accounts_channels", account)
+        return ACCOUNT_CHANNELS
 
     # ------------------------------------------------------------ rate limits
     async def ratelimit_policies(self):
@@ -490,7 +524,8 @@ def http_get(url: str, token: str | None = TOKEN) -> tuple[int, str]:
         with urllib.request.urlopen(request, timeout=5) as response:
             return response.status, response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8")
+        with exc:
+            return exc.code, exc.read().decode("utf-8")
 
 
 def http_post(url: str, payload, token: str | None = TOKEN,
@@ -504,7 +539,8 @@ def http_post(url: str, payload, token: str | None = TOKEN,
         with urllib.request.urlopen(request, timeout=10) as response:
             return response.status, response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8")
+        with exc:
+            return exc.code, exc.read().decode("utf-8")
 
 
 def http_post_h(url: str, payload, token: str | None = TOKEN,
@@ -580,7 +616,7 @@ class TestDashboardHTTP(unittest.IsolatedAsyncioTestCase):
     async def test_index_served_without_auth(self) -> None:
         status, body = await asyncio.to_thread(http_get, self.url("/"), None)
         self.assertEqual(status, 200)
-        self.assertIn("SlaughterMudae", body)
+        self.assertIn("LibzentSuite", body)
 
     async def test_api_requires_token(self) -> None:
         status, body = await asyncio.to_thread(http_get, self.url("/api/status"), None)
@@ -679,6 +715,10 @@ class TestDashboardHTTP(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertTrue(get_json(body)["data"]["halted"])
         self.assertEqual(self.fake.called("emergency_stop_all"), ())
+        # AUDIT: a dashboard-triggered estop must be audited as such, not
+        # attributed to the default 'api' surface
+        self.assertEqual(self.fake.called_kwargs("emergency_stop_all"),
+                         {"surface": "dashboard"})
 
     async def test_shutdown(self) -> None:
         status, _ = await asyncio.to_thread(http_post, self.url("/api/shutdown"), {})
@@ -886,39 +926,133 @@ class TestDashboardHTTP(unittest.IsolatedAsyncioTestCase):
         )
 
     # ---------------------------------------------------------------- profiles
-    async def test_profiles_create(self) -> None:
+    async def test_legacy_profiles_routes_are_removed(self) -> None:
+        for path, payload in (
+            ("/api/profiles/create", {"name": "farmer", "plugins": []}),
+            ("/api/profiles/assign", {"account": "alpha", "profile": "roll"}),
+            ("/api/profiles/unassign", {"account": "alpha", "profile": "roll"}),
+        ):
+            status, _ = await asyncio.to_thread(http_post, self.url(path), payload)
+            self.assertEqual(status, 404)
+
+    # -------------------------------------------------------- plugin profiles
+    async def test_plugin_profiles_list_and_filter(self) -> None:
+        status, body = await asyncio.to_thread(
+            http_get, self.url("/api/plugins/profiles"))
+        self.assertEqual(status, 200)
+        self.assertEqual(get_json(body)["data"], PLUGIN_PROFILES)
+        self.assertEqual(self.fake.called("plugin_profiles_list"), (None,))
         status, _ = await asyncio.to_thread(
-            http_post, self.url("/api/profiles/create"),
-            {"name": "farmer", "plugins": ["roll", "soulcopy"],
-             "description": "farm duty"},
+            http_get, self.url("/api/plugins/profiles?plugin=roll"))
+        self.assertEqual(status, 200)
+        self.assertEqual(self.fake.called("plugin_profiles_list"), ("roll",))
+
+    async def test_plugin_profile_create_happy_and_validation(self) -> None:
+        status, body = await asyncio.to_thread(
+            http_post, self.url("/api/plugins/profiles/create"),
+            {"plugin": "roll", "name": "grind", "description": "d",
+             "settings": {"command": "$m"}},
+        )
+        self.assertEqual(status, 200)
+        data = get_json(body)["data"]
+        self.assertEqual(data["name"], "grind")
+        self.assertEqual(
+            self.fake.calls[-1],
+            ("plugin_profile_create", ("roll", "grind", "d",
+                                       {"command": "$m"}),
+             {"surface": "dashboard"}),
+        )
+        status, body = await asyncio.to_thread(  # missing name -> 400
+            http_post, self.url("/api/plugins/profiles/create"),
+            {"plugin": "roll"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("name", get_json(body)["error"])
+
+    async def test_plugin_profile_update_requires_one_field(self) -> None:
+        status, _ = await asyncio.to_thread(
+            http_post, self.url("/api/plugins/profiles/update"),
+            {"plugin": "roll", "name": "grind", "name_new": "farm"},
         )
         self.assertEqual(status, 200)
         self.assertEqual(
-            self.fake.called("profiles_create"),
-            ("farmer", ["roll", "soulcopy"], "farm duty"),
-        )
-
-    async def test_profiles_assign_and_unassign(self) -> None:
-        status, _ = await asyncio.to_thread(
-            http_post, self.url("/api/profiles/assign"),
-            {"account": "alpha", "profile": "roll"},
-        )
-        self.assertEqual(status, 200)
-        self.assertEqual(self.fake.called("profiles_assign"), ("alpha", "roll"))
-        status, _ = await asyncio.to_thread(
-            http_post, self.url("/api/profiles/unassign"),
-            {"account": "alpha", "profile": "roll"},
-        )
-        self.assertEqual(status, 200)
-        self.assertEqual(self.fake.called("profiles_unassign"), ("alpha", "roll"))
-
-    async def test_profiles_create_rejects_non_list(self) -> None:
-        status, body = await asyncio.to_thread(
-            http_post, self.url("/api/profiles/create"),
-            {"name": "bad", "plugins": "roll"},
+            self.fake.called_kwargs("plugin_profile_update"),
+            {"surface": "dashboard", "name_new": "farm",
+             "description": None, "settings": None})
+        status, body = await asyncio.to_thread(  # nothing to update
+            http_post, self.url("/api/plugins/profiles/update"),
+            {"plugin": "roll", "name": "grind"},
         )
         self.assertEqual(status, 400)
-        self.assertIn("list of plugin names", get_json(body)["error"])
+        self.assertIn("at least one", get_json(body)["error"])
+
+    async def test_plugin_profile_delete_happy_and_validation(self) -> None:
+        status, body = await asyncio.to_thread(
+            http_post, self.url("/api/plugins/profiles/delete"),
+            {"plugin": "roll", "name": "grind"},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(get_json(body)["data"]["existed"])
+        status, _ = await asyncio.to_thread(  # missing plugin -> 400
+            http_post, self.url("/api/plugins/profiles/delete"),
+            {"name": "grind"},
+        )
+        self.assertEqual(status, 400)
+
+    async def test_account_plugin_profiles_get(self) -> None:
+        status, body = await asyncio.to_thread(
+            http_get, self.url("/api/accounts/plugin-profiles?account=alpha"))
+        self.assertEqual(status, 200)
+        self.assertEqual(get_json(body)["data"],
+                         {"roll": "grind", "soulcopy": None})
+        status, _ = await asyncio.to_thread(  # missing query -> 400
+            http_get, self.url("/api/accounts/plugin-profiles"))
+        self.assertEqual(status, 400)
+
+    async def test_account_plugin_profile_bind_and_clear(self) -> None:
+        status, _ = await asyncio.to_thread(
+            http_post, self.url("/api/accounts/plugin-profile"),
+            {"account": "alpha", "plugin": "roll", "profile": "grind"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.fake.called("accounts_plugin_profile"),
+            ("alpha", "roll", "grind"))
+        self.assertEqual(
+            self.fake.called_kwargs("accounts_plugin_profile"),
+            {"surface": "dashboard"})
+        status, _ = await asyncio.to_thread(  # null profile = clear
+            http_post, self.url("/api/accounts/plugin-profile"),
+            {"account": "alpha", "plugin": "roll", "profile": None},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.fake.called("accounts_plugin_profile"), ("alpha", "roll", None))
+        status, _ = await asyncio.to_thread(  # non-string profile -> 400
+            http_post, self.url("/api/accounts/plugin-profile"),
+            {"account": "alpha", "plugin": "roll", "profile": 7},
+        )
+        self.assertEqual(status, 400)
+
+    async def test_account_effective_settings(self) -> None:
+        status, body = await asyncio.to_thread(
+            http_get,
+            self.url("/api/accounts/effective-settings?account=alpha&plugin=roll"))
+        self.assertEqual(status, 200)
+        self.assertEqual(get_json(body)["data"],
+                         {"command": "$m", "channels": None})
+        status, _ = await asyncio.to_thread(  # missing plugin -> 400
+            http_get, self.url("/api/accounts/effective-settings?account=alpha"))
+        self.assertEqual(status, 400)
+
+    async def test_account_channels(self) -> None:
+        status, body = await asyncio.to_thread(
+            http_get, self.url("/api/accounts/channels?account=alpha"))
+        self.assertEqual(status, 200)
+        self.assertEqual(get_json(body)["data"], ACCOUNT_CHANNELS)
+        status, _ = await asyncio.to_thread(  # missing account -> 400
+            http_get, self.url("/api/accounts/channels"))
+        self.assertEqual(status, 400)
 
     # ------------------------------------------------------------- rate limits
     async def test_ratelimit_set_full_args(self) -> None:

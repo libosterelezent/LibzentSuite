@@ -4,19 +4,18 @@ Every scenario runs N cycles inside the leak-protocol wrapper: per cycle
 the harness records the post-quiesce end-state; the report renders the
 series and a trend verdict (no arbitrary thresholds).
 """
+
 from __future__ import annotations
 
 import asyncio
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace as NS
-from typing import Any, Awaitable, Callable, Dict, List
+from typing import TYPE_CHECKING, Any
 
-from benchmark.collector import PerfCollector
 from benchmark.report import leak_verdict
-from benchmark.sampler import SamplerSession
 from benchmark.stack import BenchStack, TemporaryWorkspace
-
 from core.cooldowns import CooldownService
 from core.event_bus import EventBus, MessageReceived
 from core.logging_service import LogService
@@ -24,8 +23,19 @@ from core.plugin_manager import PluginManager
 from core.settings_manager import SettingsManager
 from database.db import Database
 
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from benchmark.collector import PerfCollector
+    from benchmark.sampler import SamplerSession
+
 OWNER = 1001
 CHANNEL = 500
+
+#: fixture plugins for the dispatch benchmark (the framework itself ships
+#: with no bundled plugins, so the production plugins/ dir would attach
+#: nothing and the fan-out measurement would lose its plugin leg)
+FIXTURE_PLUGINS = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "plugins"
 
 
 @dataclass
@@ -33,17 +43,29 @@ class BenchScenario:
     name: str
     description: str
     default_cycles: int
-    run: Callable[..., Awaitable[Dict[str, Any]]]
+    run: Callable[..., Awaitable[dict[str, Any]]]
 
 
 # ------------------------------------------------------------------ shared
-async def _cycle_report(scenario, session: SamplerSession, perf: PerfCollector,
-                        cycles: int, custom: Dict[str, Any],
-                        teardown_ok: bool) -> Dict[str, Any]:
+async def _cycle_report(
+    scenario,
+    session: SamplerSession,
+    perf: PerfCollector,
+    cycles: int,
+    custom: dict[str, Any],
+    teardown_ok: bool,
+) -> dict[str, Any]:
     summary = session.summary()
-    process_keys = ("rss_base_kb", "rss_peak_kb", "rss_end_kb",
-                    "cpu_user_s", "cpu_sys_s", "cpu_pct", "fd_peak")
-    out: Dict[str, Any] = {
+    process_keys = (
+        "rss_base_kb",
+        "rss_peak_kb",
+        "rss_end_kb",
+        "cpu_user_s",
+        "cpu_sys_s",
+        "cpu_pct",
+        "fd_peak",
+    )
+    out: dict[str, Any] = {
         "process": {k: summary[k] for k in process_keys if k in summary},
         "loop_lag_ms": summary.get("loop_lag_ms", {}),
         "tasks": summary.get("tasks", {}),
@@ -51,11 +73,10 @@ async def _cycle_report(scenario, session: SamplerSession, perf: PerfCollector,
         "stages": perf.snapshot(),
         "custom": custom,
         "leak": leak_verdict(
-            getattr(scenario, "_rss_series", []),
-            getattr(scenario, "_task_series", [])),
+            getattr(scenario, "_rss_series", []), getattr(scenario, "_task_series", [])
+        ),
     }
-    out["passed"] = bool(
-        teardown_ok and out["leak"]["verdict"] != "suspected-leak")
+    out["passed"] = bool(teardown_ok and out["leak"]["verdict"] != "suspected-leak")
     return out
 
 
@@ -68,15 +89,20 @@ def _track_cycle(scenario, session: SamplerSession) -> None:
 
 
 # ------------------------------------------------------------- scenarios
-async def cold_boot(session: SamplerSession, perf: PerfCollector,
-                    *, duration: float = 2.0, cycles: int = 3,
-                    **_: Any) -> Dict[str, Any]:
+async def cold_boot(
+    session: SamplerSession,
+    perf: PerfCollector,
+    *,
+    duration: float = 2.0,
+    cycles: int = 3,
+    **_: Any,
+) -> dict[str, Any]:
     """Full real bootstrap (migrations, seeding, wiring) + shutdown."""
     for _ in range(cycles):
         with TemporaryWorkspace() as ws:
             session.start()
             stack = await BenchStack.build(ws, perf=perf)
-            await asyncio.sleep(duration)      # idle steady-state sample
+            await asyncio.sleep(duration)  # idle steady-state sample
             await stack.shutdown(perf=perf)
             await session.stop()
             await session.quiesce()
@@ -85,9 +111,15 @@ async def cold_boot(session: SamplerSession, perf: PerfCollector,
     return await _cycle_report(cold_boot, session, perf, cycles, custom, True)
 
 
-async def accounts_startstop(session: SamplerSession, perf: PerfCollector,
-                             *, accounts: int = 5, duration: float = 2.0,
-                             cycles: int = 3, **_: Any) -> Dict[str, Any]:
+async def accounts_startstop(
+    session: SamplerSession,
+    perf: PerfCollector,
+    *,
+    accounts: int = 5,
+    duration: float = 2.0,
+    cycles: int = 3,
+    **_: Any,
+) -> dict[str, Any]:
     """Per-account start & stop cost at N accounts through the real stack."""
     names = [f"bench{i}" for i in range(accounts)]
     with TemporaryWorkspace() as ws:
@@ -117,12 +149,13 @@ async def accounts_startstop(session: SamplerSession, perf: PerfCollector,
             "clients_disconnected": len(stack.factory.clients) - live,
         }
         return await _cycle_report(
-            accounts_startstop, session, perf, cycles, custom,
-            teardown_ok=live == 0)
+            accounts_startstop, session, perf, cycles, custom, teardown_ok=live == 0
+        )
 
 
-async def restart_churn(session: SamplerSession, perf: PerfCollector,
-                        *, cycles: int = 8, **_: Any) -> Dict[str, Any]:
+async def restart_churn(
+    session: SamplerSession, perf: PerfCollector, *, cycles: int = 8, **_: Any
+) -> dict[str, Any]:
     """Leak-per-restart: start→settle→stop churn on one account."""
     with TemporaryWorkspace() as ws:
         stack = await BenchStack.build(ws)
@@ -130,7 +163,7 @@ async def restart_churn(session: SamplerSession, perf: PerfCollector,
         # lifecycle governor OFF for churn measurement (we WANT the churn)
         stack.framework.accounts._lifecycle = None
         session.start()
-        for i in range(cycles):
+        for _i in range(cycles):
             with perf.stage("restart"):
                 await stack.framework.accounts.start("churn")
                 await asyncio.sleep(0.05)
@@ -141,15 +174,20 @@ async def restart_churn(session: SamplerSession, perf: PerfCollector,
         live = sum(1 for c in stack.factory.clients if c.connected)
         with perf.stage("shutdown"):
             await stack.shutdown()
-        custom = {"restarts": cycles,
-                  "clients_built": len(stack.factory.clients)}
+        custom = {"restarts": cycles, "clients_built": len(stack.factory.clients)}
         return await _cycle_report(
-            restart_churn, session, perf, cycles, custom, teardown_ok=live == 0)
+            restart_churn, session, perf, cycles, custom, teardown_ok=live == 0
+        )
 
 
-async def log_burst(session: SamplerSession, perf: PerfCollector,
-                    *, records: int = 10_000, severity: str = "INFO",
-                    **_: Any) -> Dict[str, Any]:
+async def log_burst(
+    session: SamplerSession,
+    perf: PerfCollector,
+    *,
+    records: int = 10_000,
+    severity: str = "INFO",
+    **_: Any,
+) -> dict[str, Any]:
     """LogService throughput + persistence drain health."""
     with TemporaryWorkspace() as ws:
         database = Database(ws.db_path)
@@ -161,9 +199,12 @@ async def log_burst(session: SamplerSession, perf: PerfCollector,
         t0 = time.perf_counter()
         with perf.stage("log.records"):
             for i in range(records):
-                logs.record(severity, "bench",
-                            f"benchmark record {i} " + "x" * 40,
-                            account="bench" if i % 2 else None)
+                logs.record(
+                    severity,
+                    "bench",
+                    f"benchmark record {i} " + "x" * 40,
+                    account="bench" if i % 2 else None,
+                )
         # drain-wait poll (bench_db technique): the persist queue must
         # actually empty — the tight record loop has no awaits, so the
         # loop-lag monitor also gets its first scheduling window here.
@@ -189,8 +230,8 @@ async def log_burst(session: SamplerSession, perf: PerfCollector,
             "dropped": stats.get("dropped", 0),
         }
         return await _cycle_report(
-            log_burst, session, perf, 1, custom,
-            teardown_ok=stats.get("db_failures", 0) == 0)
+            log_burst, session, perf, 1, custom, teardown_ok=stats.get("db_failures", 0) == 0
+        )
 
 
 def _queue_depth(logs: LogService) -> int:
@@ -201,8 +242,9 @@ def _queue_depth(logs: LogService) -> int:
     return int(inner.qsize())
 
 
-async def db_writes(session: SamplerSession, perf: PerfCollector,
-                    *, ops: int = 2000, **_: Any) -> Dict[str, Any]:
+async def db_writes(
+    session: SamplerSession, perf: PerfCollector, *, ops: int = 2000, **_: Any
+) -> dict[str, Any]:
     """Per-repo write cost + loop stall under sustained persistence."""
     with TemporaryWorkspace() as ws:
         database = Database(ws.db_path)
@@ -215,14 +257,24 @@ async def db_writes(session: SamplerSession, perf: PerfCollector,
             now = 1_000_000.0
             for i in range(ops):
                 await database.cooldowns.upsert(
-                    account="bench", plugin="plug", cooldown_key=f"k{i}",
-                    started_at=now + i, expires_at=now + i + 3600.0,
-                    source="bench")
+                    account="bench",
+                    plugin="plug",
+                    cooldown_key=f"k{i}",
+                    started_at=now + i,
+                    expires_at=now + i + 3600.0,
+                    source="bench",
+                )
         with perf.stage("db.log_add_many"):
             for batch in range(ops // 50):
-                rows = [{"ts": now + batch, "severity": "INFO",
-                         "source": "bench", "message": "x" * 40,
-                         "account": "bench"}] * 50
+                rows = [
+                    {
+                        "ts": now + batch,
+                        "severity": "INFO",
+                        "source": "bench",
+                        "message": "x" * 40,
+                        "account": "bench",
+                    }
+                ] * 50
                 await database.logs.add_many(rows)
         await session.stop()
         await database.close()
@@ -232,8 +284,9 @@ async def db_writes(session: SamplerSession, perf: PerfCollector,
         return await _cycle_report(db_writes, session, perf, 1, custom, True)
 
 
-async def cooldown_heavy(session: SamplerSession, perf: PerfCollector,
-                         *, keys: int = 2000, **_: Any) -> Dict[str, Any]:
+async def cooldown_heavy(
+    session: SamplerSession, perf: PerfCollector, *, keys: int = 2000, **_: Any
+) -> dict[str, Any]:
     """CooldownService hot path + persistence restore."""
     with TemporaryWorkspace() as ws:
         database = Database(ws.db_path)
@@ -242,8 +295,7 @@ async def cooldown_heavy(session: SamplerSession, perf: PerfCollector,
         session.start()
         with perf.stage("cooldown.set"):
             for i in range(keys):
-                await cooldowns.set("bench", "plug", f"k{i}",
-                                    60.0 + (i % 600))
+                await cooldowns.set("bench", "plug", f"k{i}", 60.0 + (i % 600))
         with perf.stage("cooldown.reads"):
             for i in range(keys * 2):
                 await cooldowns.remaining("bench", "plug", f"k{i % keys}")
@@ -255,50 +307,71 @@ async def cooldown_heavy(session: SamplerSession, perf: PerfCollector,
         await database.close()
         await session.quiesce()
         _track_cycle(cooldown_heavy, session)
-        custom = {"keys": keys,
-                  "restored_rows": int(restored.get("restored", 0))
-                  if isinstance(restored, dict) else 0}
-        return await _cycle_report(cooldown_heavy, session, perf, 1, custom,
-                                   True)
+        custom = {
+            "keys": keys,
+            "restored_rows": int(restored.get("restored", 0)) if isinstance(restored, dict) else 0,
+        }
+        return await _cycle_report(cooldown_heavy, session, perf, 1, custom, True)
 
 
-async def message_burst(session: SamplerSession, perf: PerfCollector,
-                        *, messages: int = 5000, burst: int = 200,
-                        waiters: int = 4, **_: Any) -> Dict[str, Any]:
+async def message_burst(
+    session: SamplerSession,
+    perf: PerfCollector,
+    *,
+    messages: int = 5000,
+    burst: int = 200,
+    waiters: int = 4,
+    **_: Any,
+) -> dict[str, Any]:
     """Inbound event volume: bus fan-out × plugin dispatch × waiters."""
     bus = EventBus()
     plugins = PluginManager(
-        bus, __import__("logging").getLogger("bench"),
+        bus,
+        __import__("logging").getLogger("bench"),
         SettingsManager(bus, __import__("logging").getLogger("bench")),
-        plugin_dir="plugins",
+        plugin_dir=str(FIXTURE_PLUGINS),
     )
     plugins.discover()
     await plugins.attach_account("bench", allowed=None)
-    await plugins.activate_account("bench", lambda plugin: NS(
-        account="bench", plugin=plugin, credentials=NS(
-            mudae_bot_id=999, owner_user_ids=frozenset({OWNER})),
-        settings={}, logger=__import__("logging").getLogger("bench"),
-        send_message=_noop_send, send_dm=_noop_send, publish=lambda e: None,
-        state_get=_noop_state, state_set=_noop_state, cooldown_remaining=(
-            lambda *a, **k: _noop_async(0.0)),
-        validate_channel=lambda c: None, wait_for_message=_noop_wait,
-        collect_messages=_noop_collect, describe_channel=lambda c: "#c",
-    ))
+    await plugins.activate_account(
+        "bench",
+        lambda plugin: NS(
+            account="bench",
+            plugin=plugin,
+            credentials=NS(mudae_bot_id=999, owner_user_ids=frozenset({OWNER})),
+            settings={},
+            logger=__import__("logging").getLogger("bench"),
+            send_message=_noop_send,
+            send_dm=_noop_send,
+            publish=lambda e: None,
+            state_get=_noop_state,
+            state_set=_noop_state,
+            cooldown_remaining=(lambda *a, **k: _noop_async(0.0)),
+            validate_channel=lambda c: None,
+            wait_for_message=_noop_wait,
+            collect_messages=_noop_collect,
+            describe_channel=lambda c: "#c",
+        ),
+    )
     # the C1 cost model: unfiltered waiter subscriptions × event flood
     waiter_subs = []
     for _ in range(waiters):
-        waiter_subs.append(bus.subscribe(
-            MessageReceived, lambda event: None))
+        waiter_subs.append(bus.subscribe(MessageReceived, lambda event: None))
 
     session.start()
     t0 = time.perf_counter()
     delivered = 0
     with perf.stage("messages.publish"):
         for i in range(messages):
-            bus.publish_nowait(MessageReceived(
-                account="bench", message_id=i, channel_id=CHANNEL,
-                author_id=OWNER + 1, content=f"chatter {i}",
-            ))
+            bus.publish_nowait(
+                MessageReceived(
+                    account="bench",
+                    message_id=i,
+                    channel_id=CHANNEL,
+                    author_id=OWNER + 1,
+                    content=f"chatter {i}",
+                )
+            )
             delivered += 1
             if delivered % burst == 0:
                 await asyncio.sleep(0)  # let dispatch breathe
@@ -308,9 +381,11 @@ async def message_burst(session: SamplerSession, perf: PerfCollector,
     await session.stop()
     await session.quiesce()
     _track_cycle(message_burst, session)
-    custom = {"messages": messages,
-              "messages_per_s": round(messages / max(elapsed, 1e-9), 1),
-              "waiters": waiters}
+    custom = {
+        "messages": messages,
+        "messages_per_s": round(messages / max(elapsed, 1e-9), 1),
+        "waiters": waiters,
+    }
     return await _cycle_report(message_burst, session, perf, 1, custom, True)
 
 
@@ -326,33 +401,33 @@ async def _noop_wait(*a: Any, **k: Any) -> None:
     await asyncio.sleep(3600)
 
 
-async def _noop_collect(*a: Any, **k: Any) -> List[Any]:
+async def _noop_collect(*a: Any, **k: Any) -> list[Any]:
     return []
 
 
 def _noop_async(value: Any) -> Any:
     async def inner() -> Any:
         return value
+
     return inner()
 
 
-BENCH_SCENARIOS: Dict[str, BenchScenario] = {
-    "cold_boot": BenchScenario(
-        "cold_boot", "real bootstrap.build + shutdown", 3, cold_boot),
+BENCH_SCENARIOS: dict[str, BenchScenario] = {
+    "cold_boot": BenchScenario("cold_boot", "real bootstrap.build + shutdown", 3, cold_boot),
     "accounts_startstop": BenchScenario(
-        "accounts_startstop", "N-account start/stop through the real stack",
-        3, accounts_startstop),
+        "accounts_startstop", "N-account start/stop through the real stack", 3, accounts_startstop
+    ),
     "restart_churn": BenchScenario(
-        "restart_churn", "repeated start/stop churn (leak series)", 8,
-        restart_churn),
+        "restart_churn", "repeated start/stop churn (leak series)", 8, restart_churn
+    ),
     "log_burst": BenchScenario(
-        "log_burst", "LogService record flood + persistence drain", 1,
-        log_burst),
-    "db_writes": BenchScenario(
-        "db_writes", "kv/cooldown/log sustained writes", 1, db_writes),
+        "log_burst", "LogService record flood + persistence drain", 1, log_burst
+    ),
+    "db_writes": BenchScenario("db_writes", "kv/cooldown/log sustained writes", 1, db_writes),
     "cooldown_heavy": BenchScenario(
-        "cooldown_heavy", "cooldown set/read/restore", 1, cooldown_heavy),
+        "cooldown_heavy", "cooldown set/read/restore", 1, cooldown_heavy
+    ),
     "message_burst": BenchScenario(
-        "message_burst", "bus fan-out + plugin dispatch flood", 1,
-        message_burst),
+        "message_burst", "bus fan-out + plugin dispatch flood", 1, message_burst
+    ),
 }

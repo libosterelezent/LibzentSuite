@@ -18,7 +18,7 @@ from unittest import mock
 from database.connection import DatabaseError as ConnectionDatabaseError
 from core.errors import DatabaseError as CoreDatabaseError
 from database.db import Database
-from database.models import AccountRecord, ProfileRecord, RatePolicyRecord
+from database.models import AccountRecord, RatePolicyRecord
 from database.schema import MIGRATIONS, latest_version
 
 #: both flavors are RuntimeError subclasses raised by different layers
@@ -164,7 +164,7 @@ class TestMigrations(AsyncDatabaseTestCase):
         await self.db.connection.execute(
             "INSERT INTO schema_migrations (version, name, applied_at) "
             "VALUES (99999, 'from the future', 0)")
-        with self.assertLogs("slaughtermudae.database", level="WARNING") as logs:
+        with self.assertLogs("libzent.database", level="WARNING") as logs:
             self.assertEqual(await self.db.migrate(), 0)
         self.assertTrue(any("NEWER" in m for m in logs.output))
 
@@ -206,19 +206,8 @@ class TestAccounts(AsyncDatabaseTestCase):
         with self.assertRaises(ANY_DB_ERROR):
             await self.db.accounts.set_enabled("ghost", True)
 
-    async def test_profiles_assign_unassign(self) -> None:
-        await self.db.accounts.add("alpha")
-        await self.db.accounts.assign_profile("alpha", "roller")
-        await self.db.accounts.assign_profile("alpha", "sniper")
-        self.assertEqual(await self.db.accounts.profiles_of("alpha"), ["roller", "sniper"])
-        await self.db.accounts.unassign_profile("alpha", "roller")
-        self.assertEqual(await self.db.accounts.profiles_of("alpha"), ["sniper"])
-        with self.assertRaises(ANY_DB_ERROR):
-            await self.db.accounts.assign_profile("ghost", "roller")
-
     async def test_delete_cascades(self) -> None:
         await self.db.accounts.add("alpha")
-        await self.db.accounts.assign_profile("alpha", "roller")
         await self.db.plugins.set_state("alpha", "soulcopy", False)
         await self.db.plugins.set_setting("alpha", "soulcopy", "trigger", "x")
         await self.db.account_settings.set("alpha", "reconnect_enabled", False)
@@ -228,7 +217,6 @@ class TestAccounts(AsyncDatabaseTestCase):
         self.assertEqual(await self.db.plugins.settings("alpha", "soulcopy"), {})
         self.assertIsNone(await self.db.plugins.state("alpha", "soulcopy"))
         self.assertEqual(await self.db.account_settings.get("alpha"), {})
-        self.assertEqual(await self.db.accounts.profiles_of("alpha"), [])
         self.assertIsNone(await self.db.cache.get("alpha", "dm", "42"))  # api_cache cascade
         self.assertFalse(await self.db.accounts.delete("alpha"))
 
@@ -249,30 +237,6 @@ class TestAccountSettings(AsyncDatabaseTestCase):
         await self.db.account_settings.set("alpha", "k", 1)
         await self.db.account_settings.set("beta", "k", 2)
         self.assertEqual(await self.db.account_settings.list_accounts(), ["alpha", "beta"])
-
-
-class TestProfiles(AsyncDatabaseTestCase):
-    async def test_upsert_get_list_delete(self) -> None:
-        await self.db.profiles.upsert("roller", ["roll"], "rolls")
-        rec = await self.db.profiles.get("roller")
-        self.assertIsInstance(rec, ProfileRecord)
-        self.assertEqual(rec.plugins, ["roll"])
-        self.assertEqual(rec.description, "rolls")
-        await self.db.profiles.upsert("roller", ["snipe", "roll"], "rolls+snipes")
-        got = await self.db.profiles.get("roller")
-        self.assertEqual(got.plugins, ["roll", "snipe"])  # canonical sorted form
-        self.assertEqual(got.description, "rolls+snipes")
-        self.assertEqual(len(await self.db.profiles.list()), 1)
-        self.assertTrue(await self.db.profiles.delete("roller"))
-        self.assertFalse(await self.db.profiles.delete("roller"))
-        self.assertIsNone(await self.db.profiles.get("roller"))
-
-    async def test_delete_profile_drops_assignments(self) -> None:
-        await self.db.accounts.add("alpha")
-        await self.db.profiles.upsert("roller", ["roll"])
-        await self.db.accounts.assign_profile("alpha", "roller")
-        await self.db.profiles.delete("roller")
-        self.assertEqual(await self.db.accounts.profiles_of("alpha"), [])
 
 
 class TestPlugins(AsyncDatabaseTestCase):
@@ -365,6 +329,27 @@ class TestRatePolicies(AsyncDatabaseTestCase):
         self.assertIsNone(await self.db.policies.get("account_plugin", "a_b/x", "dm"))
         self.assertIsNotNone(
             await self.db.policies.get("account_plugin", "axb/x", "dm"))
+
+
+    async def test_delete_sweeps_access_row_exact_match(self) -> None:
+        """Review #5: the access row is deleted by EXACT key, never a
+        prefix sweep — deleting 'bob' must not wipe bobby's admin row."""
+        await self.db.accounts.add("bob", token_ref="T1")
+        await self.db.kv.set("access:account:bob", {"is_admin": True})
+        await self.db.kv.set("access:account:bobby", {"is_admin": True})
+        await self.db.kv.set("access:account:bob2", {"prefix_mode": "mention"})
+        # pstate rows still sweep by prefix (their keys carry separators)
+        await self.db.kv.set("pstate:account:bob:plug/x", {"a": 1})
+        await self.db.kv.set("pstate:account:bobby:plug/x", {"b": 2})
+        await self.db.accounts.delete("bob")
+        self.assertIsNone(await self.db.kv.get("access:account:bob"))
+        self.assertEqual(await self.db.kv.get("access:account:bobby"),
+                         {"is_admin": True})
+        self.assertEqual(await self.db.kv.get("access:account:bob2"),
+                         {"prefix_mode": "mention"})
+        self.assertIsNone(await self.db.kv.get("pstate:account:bob:plug/x"))
+        self.assertEqual(await self.db.kv.get("pstate:account:bobby:plug/x"),
+                         {"b": 2})
 
 
 class TestAuditAndLogs(AsyncDatabaseTestCase):

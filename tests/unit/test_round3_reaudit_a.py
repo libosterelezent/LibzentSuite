@@ -11,7 +11,6 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace as NS
 from typing import Any, Dict, List, Optional
 
 from core.event_bus import EventBus
@@ -351,7 +350,7 @@ class _ClockAdvanceManager(RateLimitManager):
         if seconds > 0:
             self._clock.advance(seconds)
 
-    async def _wait_either(self, seconds: float) -> None:
+    async def _wait_either(self, seconds: float, key=None) -> None:
         await self._sleep(seconds)
 
 
@@ -491,6 +490,16 @@ class RetryAfterClamp(unittest.TestCase):
         manager.report_server_limit("alpha", "message", 1e9)
         self.assertEqual(
             manager.cooldown_remaining("alpha", "message"), MAX_INTERVAL)
+
+
+    def test_none_action_rejected_not_stored(self):
+        from core.rate_limit_manager.policies import RatePolicyError
+        manager = RateLimitManager(
+            EventBus(), _StubLogger(), None, clock=ManualClock(0.0))
+        with self.assertRaises(RatePolicyError):
+            manager.report_server_limit("alpha", None, 5.0)
+        manager.report_server_limit("alpha", "message", 5.0)
+        manager.stats()  # a None-keyed cooldown made sorted() raise TypeError
 
 
 if __name__ == "__main__":  # pragma: no cover

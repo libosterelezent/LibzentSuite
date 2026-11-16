@@ -56,7 +56,7 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
     """Core invariant tests (original round, upgraded with restore)."""
 
     def setUp(self) -> None:
-        self.root = logging.getLogger("slaughtermudae")
+        self.root = logging.getLogger("libzent")
         self._saved_handlers = list(self.root.handlers)
         self._saved_level = self.root.level
         self._saved_propagate = self.root.propagate
@@ -96,7 +96,7 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
     def test_raw_stdlib_records_still_flow_in(self) -> None:
         service = LogService()
         attach_stdlib_bridge(service)
-        logging.getLogger("slaughtermudae.alpha.soulcopy").info(
+        logging.getLogger("libzent.alpha.soulcopy").info(
             "soulcopy loaded (trigger=%s)", "slcopy")
         tail = service.tail(10)
         self.assertEqual(len(tail), 1)
@@ -122,7 +122,7 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
         self.root.propagate = False                # bystander flips it
         detach_stdlib_bridge()
         self.assertTrue(self.root.propagate)       # first-attach value back
-        self.assertNotIn("slaughtermudae", _BRIDGE_PRIOR_PROPAGATE)
+        self.assertNotIn("libzent", _BRIDGE_PRIOR_PROPAGATE)
         detach_stdlib_bridge()                     # idempotent, no restore
         self.assertTrue(self.root.propagate)
 
@@ -140,7 +140,7 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
         attach_stdlib_bridge(service)
         probe = CountingHandler()
         self.root.addHandler(probe)
-        logging.getLogger("slaughtermudae.loader").info("discovered once")
+        logging.getLogger("libzent.loader").info("discovered once")
         self.assertEqual(probe.messages.count("discovered once"), 1)
 
     def test_direct_records_still_mirror_once(self) -> None:
@@ -198,7 +198,7 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
     def test_critical_maps_to_error(self) -> None:
         service = LogService()
         attach_stdlib_bridge(service)
-        logging.getLogger("slaughtermudae.a").critical("die")
+        logging.getLogger("libzent.a").critical("die")
         self.assertEqual(service.tail(1)[0]["severity"], "ERROR")
         logger = ServiceLogger(service, "x")
         logger.log(50, "fatal-ish")
@@ -299,7 +299,7 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
             repo = CountingRepo()
             await service.start_persistence(repo)
             attach_stdlib_bridge(service)
-            logging.getLogger("slaughtermudae.loader").info("once to db")
+            logging.getLogger("libzent.loader").info("once to db")
             await service.stop_persistence()  # drain before the repo could close
             return repo
 
@@ -310,12 +310,12 @@ class TestNoBridgeFeedbackLoop(unittest.TestCase):
         service_a = LogService()
         attach_stdlib_bridge(service_a)
         self.assertGreaterEqual(detach_stdlib_bridge(), 1)
-        logging.getLogger("slaughtermudae.a").info("post-detach")
+        logging.getLogger("libzent.a").info("post-detach")
         self.assertEqual(service_a.tail(10), [])    # no ingestion anymore
         # a fresh attach binds the NEW service (stale-bridge hazard closed)
         service_b = LogService()
         attach_stdlib_bridge(service_b)
-        logging.getLogger("slaughtermudae.b").info("for b")
+        logging.getLogger("libzent.b").info("for b")
         self.assertEqual(len(service_b.tail(10)), 1)
         self.assertEqual(service_a.tail(10), [])
         detach_stdlib_bridge()
@@ -350,7 +350,7 @@ class TestRound2Audit(unittest.TestCase):
     filters, ring bounds with a stalled consumer, post-stop drops."""
 
     def setUp(self) -> None:
-        self.root = logging.getLogger("slaughtermudae")
+        self.root = logging.getLogger("libzent")
         self._saved_handlers = list(self.root.handlers)
         self._saved_level = self.root.level
         self._saved_propagate = self.root.propagate
@@ -368,7 +368,7 @@ class TestRound2Audit(unittest.TestCase):
 
         def foreign() -> None:
             attach_stdlib_bridge(service)
-            logging.getLogger("slaughtermudae.foreign").info("from thread")
+            logging.getLogger("libzent.foreign").info("from thread")
 
         thread = threading.Thread(target=foreign)
         thread.start()
@@ -381,7 +381,7 @@ class TestRound2Audit(unittest.TestCase):
         thread = threading.Thread(target=foreign_detach)
         thread.start()
         thread.join()
-        logging.getLogger("slaughtermudae.foreign").info("after detach")
+        logging.getLogger("libzent.foreign").info("after detach")
         self.assertEqual(len(service.tail(10)), 1)      # not ingested
 
     def test_record_from_threads_ts_monotonic_in_ring(self) -> None:
@@ -472,3 +472,43 @@ class TestRound2Audit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StderrPipelineClaims(unittest.TestCase):
+    """Review pass-3 #1: the listener stops only when the LAST live
+    framework claim releases — an owner shutting down first must not
+    silence a framework built after it."""
+
+    def test_last_release_stops_first_does_not(self):
+        import logging
+        from core import logging_service as m
+        # snapshot + restore the process-global state (the pipeline AND
+        # the stdlib logger it touches — configure_stderr flips
+        # propagate, which the pipeline stop does not restore)
+        users_before = m._STDERR_USERS
+        listener_before = m._STDERR_LISTENER
+        configured_before = m._STDERR_CONFIGURED
+        lg = logging.getLogger("libzent")
+        handlers_before = list(lg.handlers)
+        propagate_before = lg.propagate
+        try:
+            m.stop_stderr_pipeline()          # known idle floor
+            created = m.claim_stderr_pipeline()
+            self.assertTrue(created, "first claim creates the pipeline")
+            self.assertTrue(m.stderr_pipeline_active())
+            borrowed = m.claim_stderr_pipeline()
+            self.assertFalse(borrowed, "second claim borrows")
+            m.release_stderr_pipeline()       # OWNER (first) shuts down
+            self.assertTrue(
+                m.stderr_pipeline_active(),
+                "the live borrower keeps the pipeline after the owner exits")
+            m.release_stderr_pipeline()       # last claim releases
+            self.assertFalse(m.stderr_pipeline_active())
+            m.release_stderr_pipeline()       # stray release is a no-op
+            self.assertFalse(m.stderr_pipeline_active())
+        finally:
+            m._STDERR_USERS = users_before
+            m._STDERR_LISTENER = listener_before
+            m._STDERR_CONFIGURED = configured_before
+            lg.handlers[:] = handlers_before
+            lg.propagate = propagate_before

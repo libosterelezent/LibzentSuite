@@ -10,16 +10,16 @@ Metadata is returned as plain dicts shaped like PluginMetadata.to_dict():
 ``{"name", "version", "description", "settings"}`` — the UI/settings layers
 consume exactly that shape.
 """
+
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from core.errors import DatabaseError
-
 from database.models import PluginMetadata
 
-from .base import BaseRepository, loads_tolerant
+from .base import CORRUPT, BaseRepository, loads_tolerant
 
 __all__ = ["PluginRepository"]
 
@@ -60,12 +60,12 @@ class PluginRepository(BaseRepository):
                 (name, str(version), str(description or ""), manifest),
             )
 
-    async def metadata(self) -> List[Dict[str, Any]]:
+    async def metadata(self) -> list[dict[str, Any]]:
         """All plugin manifests as PluginMetadata-shaped dicts (name order).
 
         A corrupt manifest degrades to an empty settings list, not a crash.
         """
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         for row in await self._fetch_all("SELECT * FROM plugins ORDER BY name"):
             settings = loads_tolerant(
                 row["settings_json"], [], f"plugins[{row['name']!r}].settings_json"
@@ -80,7 +80,7 @@ class PluginRepository(BaseRepository):
             )
         return out
 
-    async def metadata_for(self, name: str) -> Optional[Dict[str, Any]]:
+    async def metadata_for(self, name: str) -> dict[str, Any] | None:
         """One plugin's manifest dict (None when the plugin is unknown)."""
         row = await self._fetch_one("SELECT * FROM plugins WHERE name = ?", (name,))
         if row is None:
@@ -94,7 +94,7 @@ class PluginRepository(BaseRepository):
         ).to_dict()
 
     # --------------------------------------------------------------- state
-    async def state(self, account: str, plugin: str) -> Optional[bool]:
+    async def state(self, account: str, plugin: str) -> bool | None:
         """Persisted enabled flag for (account, plugin).
 
         None means "no row" — the caller applies its own default (True for
@@ -128,17 +128,17 @@ class PluginRepository(BaseRepository):
             row["value_json"], None, f"plugin_settings[{account!r}/{plugin!r}].{key}"
         )
 
-    async def settings(self, account: str, plugin: str) -> Dict[str, Any]:
+    async def settings(self, account: str, plugin: str) -> dict[str, Any]:
         """All stored overrides for one (account, plugin) ({} when none)."""
-        out: Dict[str, Any] = {}
+        out: dict[str, Any] = {}
         for row in await self._fetch_all(
             "SELECT key, value_json FROM plugin_settings WHERE account = ? AND plugin = ? ORDER BY key",
             (account, plugin),
         ):
             value = loads_tolerant(
-                row["value_json"], None, f"plugin_settings[{account!r}/{plugin!r}].{row['key']}"
+                row["value_json"], CORRUPT, f"plugin_settings[{account!r}/{plugin!r}].{row['key']}"
             )
-            if value is not None:
+            if value is not CORRUPT:
                 out[row["key"]] = value
         return out
 
@@ -174,30 +174,30 @@ class PluginRepository(BaseRepository):
         False, never an error — unpinning something already gone is
         idempotent.
         """
-        async with self._tx(
-            f"delete plugin setting {account!r}/{plugin!r}.{key}"
-        ) as conn:
-            async with conn.execute(
-                "DELETE FROM plugin_settings "
-                "WHERE account = ? AND plugin = ? AND key = ?",
+        async with (
+            self._tx(f"delete plugin setting {account!r}/{plugin!r}.{key}") as conn,
+            conn.execute(
+                "DELETE FROM plugin_settings WHERE account = ? AND plugin = ? AND key = ?",
                 (account, plugin, key),
-            ) as cur:
-                return cur.rowcount > 0
+            ) as cur,
+        ):
+            return cur.rowcount > 0
 
-    async def all_account_settings(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    async def all_account_settings(self) -> dict[str, dict[str, dict[str, Any]]]:
         """The whole override layer: account -> plugin -> key -> value.
 
         Consumed by SettingsManager to preload every override in one query.
         Corrupt rows are skipped with a warning (never a crash).
         """
-        out: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        out: dict[str, dict[str, dict[str, Any]]] = {}
         for row in await self._fetch_all(
             "SELECT account, plugin, key, value_json FROM plugin_settings ORDER BY account, plugin, key"
         ):
             value = loads_tolerant(
-                row["value_json"], None,
+                row["value_json"],
+                CORRUPT,
                 f"plugin_settings[{row['account']!r}/{row['plugin']!r}].{row['key']}",
             )
-            if value is not None:
+            if value is not CORRUPT:
                 out.setdefault(row["account"], {}).setdefault(row["plugin"], {})[row["key"]] = value
         return out

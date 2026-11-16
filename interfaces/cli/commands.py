@@ -27,9 +27,8 @@ Decisions for things INTEGRATION.md left open (documented per the contract):
     account→plugin assignments through the facade; removal is idempotent
     (``existed=false`` renders a "nothing to do" message, never an error).
     Assignments apply immediately — there are no next-start semantics.
-  * The ``profiles`` group stays (retained future infrastructure: profile
-    CRUD + bookkeeping assignments), but its help text says plainly that
-    profiles do NOT control which plugins an account runs.
+  * The legacy ``profiles`` group is removed (profiles never controlled
+    which plugins an account runs).
   * ``accounts enable <name> <on|off>`` also accepts true/false; a real bool
     is passed down (ControlAPI.parse_bool re-validates on its side anyway).
   * ``accounts credential <name> <token>`` prints a shell-history warning:
@@ -44,23 +43,42 @@ Decisions for things INTEGRATION.md left open (documented per the contract):
     JSON payload the facade returns, keeping CLI/dashboard parity by
     construction.
 """
+
 from __future__ import annotations
 
 import math
 import shlex
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 __all__ = [
-    "HELP", "QuitRequested", "UsageError", "help_text", "run_command",
-    "format_status", "format_accounts", "format_account_info",
+    "HELP",
+    "QuitRequested",
+    "UsageError",
+    "format_account_info",
     "format_account_plugins",
-    "format_plugins", "format_plugin_state", "format_profiles",
+    "format_accounts",
+    "format_audit",
+    "format_cooldowns",
+    "format_credential_status",
+    "format_effective",
+    "format_group_snapshot",
     "format_groups",
-    "format_group_snapshot", "format_policies",
-    "format_effective", "format_tasks", "format_history", "format_logs",
-    "format_audit", "format_warnings", "format_simulation_report",
-    "format_credential_status", "format_import_report", "format_cooldowns",
+    "format_history",
+    "format_import_report",
+    "format_logs",
+    "format_plugin_state",
+    "format_plugins",
+    "format_policies",
+    "format_simulation_report",
+    "format_status",
+    "format_tasks",
+    "format_warnings",
+    "help_text",
+    "run_command",
 ]
 
 
@@ -75,7 +93,7 @@ class UsageError(ValueError):
 # ------------------------------------------------------------------- HELP
 #: command -> (usage signature, description); the single registry both
 #: help_text() and the contextual usage errors are built from.
-HELP: Dict[str, Tuple[str, str]] = {
+HELP: dict[str, tuple[str, str]] = {
     "help": ("[command]", "show this help (or help for one command)"),
     "status": ("", "overview: accounts, tasks, rate limits, warnings"),
     "accounts": (
@@ -101,41 +119,47 @@ HELP: Dict[str, Tuple[str, str]] = {
     "plugins": (
         "list|state <account>|enable <account> <plugin>"
         "|disable <account> <plugin>|settings <account>"
-        "|set <account> <plugin> <key> <value>",
-        "plugin management",
-    ),
-    "profiles": (
-        "list|create <name> <plugin ...>|delete <name>"
-        "|assign <account> <profile>|unassign <account> <profile>",
-        "profile records — RETAINED FUTURE INFRASTRUCTURE; they do NOT"
-        " control which plugins an account runs (use 'accounts plugin-add')",
+        "|set <account> <plugin> <key> <value>"
+        "|clear <account> <plugin> <key>",
+        "plugin management ('clear' resets one setting to its lower"
+        " layer/default, unmasking profile + plugin defaults)",
     ),
     "groups": (
         "list|show <group>|create <name> [description]"
         "|update <group> <field> <value>|delete <group> [--detach-members]"
         "|add-member <group> <account>|remove-member <group> <account>"
         "|set-account <account> <group>|clear-account <account>",
-        "sync groups (shared pacing membership; update fields: name,"
-        " description, enabled)",
+        "sync groups (shared pacing membership; update fields: name, description, enabled)",
     ),
     "ratelimit": (
         "show|stats|set <action> <interval> [jitter_min jitter_max] [level owner]"
         "|clear <level> <owner> <action>|effective <action> [account] [plugin]"
         "|warnings|floor <seconds>|lane [on [rate]|off|rate <s>]",
-        "rate policies (safety floor: 1.5s/action; lane: server-wide sequential sends)",
+        "rate policies (safety floor: 1.5s/action). The send lane is"
+        " REMOVED — 'ratelimit lane' still answers as a documented compat"
+        " stub (sync groups + per-account pacing replaced it)",
     ),
     "tasks": (
-        "list [status]|cancel <id>|history [n]"
-        "|cancel-matching [account] [plugin]",
+        "list [status]|cancel <id>|history [n]|cancel-matching [account] [plugin]",
         "task queue + history",
     ),
     "simulation": ("list|run [name]", "offline scenario runs"),
-    "logs": ("[n] [account] [DEBUG|INFO|WARNING|ERROR]",
-             "structured log tail (default: last 20; severity UPPERCASE)"),
+    "logs": (
+        "[n] [account] [DEBUG|INFO|WARNING|ERROR]",
+        "structured log tail (default: last 20; severity UPPERCASE)",
+    ),
     "audit": ("[n] [account]", "interaction audit trail (default: last 20)"),
     "estop": ("[resume]", "GLOBAL emergency stop; 'estop resume' re-arms after one"),
     "quit": ("", "graceful shutdown, then exit (alias: exit)"),
 }
+
+
+def _col(value: Any, width: int) -> str:
+    """Left-pad a table cell to ``width`` — but ALWAYS keep a separating
+    space: a plain ``{value:<N}`` lets a value at/over the width run into
+    the next column ("alpha_long_nameonline")."""
+    text = str(value)
+    return text.ljust(width) if len(text) < width else text + " "
 
 
 def help_text() -> str:
@@ -146,9 +170,9 @@ def help_text() -> str:
     """
     lines = ["commands:"]
     for name, (sig, desc) in sorted(HELP.items()):
-        lines.append(f"  {name:<12}{desc}")
+        lines.append(f"  {_col(name, 12)}{desc}")
         if sig:
-            lines.append(f"  {'':<12}usage: {name} {sig}")
+            lines.append(f"  {_col('', 12)}usage: {name} {sig}")
     lines.append(
         "  errors print as one 'error: ...' line and never exit the REPL;"
         " 'quit' shuts everything down first"
@@ -157,7 +181,7 @@ def help_text() -> str:
 
 
 # ------------------------------------------------------------ run_command
-async def run_command(api: Any, line: str) -> Optional[str]:
+async def run_command(api: Any, line: str) -> str | None:
     """Execute one command line against the ControlAPI.
 
     Expects the raw input line (shlex-parsed here, so quoted arguments work).
@@ -191,9 +215,7 @@ async def run_command(api: Any, line: str) -> Optional[str]:
         if name == "exit":
             name = "quit"
         if name not in HELP:
-            raise UsageError(
-                f"help: unknown command {args[0]!r} — try 'help' alone"
-            )
+            raise UsageError(f"help: unknown command {args[0]!r} — try 'help' alone")
         sig, desc = HELP[name]
         focused = [f"{name}: {desc}"]
         if sig:
@@ -210,8 +232,6 @@ async def run_command(api: Any, line: str) -> Optional[str]:
         return await _cooldowns_group(api, args)
     if cmd == "plugins":
         return await _plugins_group(api, args)
-    if cmd == "profiles":
-        return await _profiles_group(api, args)
     if cmd == "groups":
         return await _groups_group(api, args)
     if cmd == "ratelimit":
@@ -226,9 +246,7 @@ async def run_command(api: Any, line: str) -> Optional[str]:
         if rest and rest[-1] in ("DEBUG", "INFO", "WARNING", "ERROR"):
             severity = rest.pop(-1)  # exact-case: account names are lowercase
         limit, account = _tail_args(cmd, rest)
-        return format_logs(
-            await api.logs_tail(limit, account=account, severity=severity)
-        )
+        return format_logs(await api.logs_tail(limit, account=account, severity=severity))
     if cmd == "audit":
         limit, account = _tail_args(cmd, args)
         return format_audit(await api.audit_tail(limit, account=account))
@@ -236,11 +254,17 @@ async def run_command(api: Any, line: str) -> Optional[str]:
         if args and args[0].lower() in ("resume", "unhalt"):
             if len(args) > 1:
                 raise UsageError("usage: estop [resume]")
-            return _result(await api.system_resume(), verb="resume")
+            out = await api.system_resume()
+            # the payload embeds the whole post-resume status snapshot:
+            # render it as its own block instead of one key=value blob
+            status = out.pop("status", None) if isinstance(out, dict) else None
+            text = _result(out, verb="resume")
+            if isinstance(status, dict):
+                text += "\n" + format_status(status)
+            return text
         if args:
             raise UsageError("usage: estop [resume]")
-        return _result(await api.emergency_stop_all(surface="cli"),
-                       verb="EMERGENCY STOP")
+        return _result(await api.emergency_stop_all(surface="cli"), verb="EMERGENCY STOP")
     raise UsageError(f"unknown command {cmd!r} — try 'help'")
 
 
@@ -273,13 +297,7 @@ _PLUGINS_USAGE = {
     "disable": "plugins disable <account> <plugin>",
     "settings": "plugins settings <account>",
     "set": "plugins set <account> <plugin> <key> <value>",
-}
-_PROFILES_USAGE = {
-    "list": "profiles list",
-    "create": "profiles create <name> <plugin ...>",
-    "delete": "profiles delete <name>",
-    "assign": "profiles assign <account> <profile>",
-    "unassign": "profiles unassign <account> <profile>",
+    "clear": "plugins clear <account> <plugin> <key>",
 }
 _GROUPS_USAGE = {
     "list": "groups list",
@@ -312,15 +330,13 @@ _TASKS_USAGE = {
 _LEVELS = ("global", "account", "plugin", "account_plugin")
 
 
-def _sub(usage: Dict[str, str], args: Sequence[str], group: str) -> Tuple[str, List[str]]:
+def _sub(usage: dict[str, str], args: Sequence[str], group: str) -> tuple[str, list[str]]:
     """Split (sub, rest) and validate the subcommand exists."""
     if not args:
         raise UsageError(f"{group}: missing subcommand — usage: {group} {HELP[group][0]}")
     sub, rest = args[0].lower(), list(args[1:])
     if sub not in usage:
-        raise UsageError(
-            f"{group}: unknown subcommand {sub!r} — usage: {group} {HELP[group][0]}"
-        )
+        raise UsageError(f"{group}: unknown subcommand {sub!r} — usage: {group} {HELP[group][0]}")
     return sub, rest
 
 
@@ -339,10 +355,12 @@ def _usage_for(ctx: str) -> str:
     """Look up the concise usage string for a '<group> <sub>' context."""
     group, _, sub = ctx.partition(" ")
     table = {
-        "accounts": _ACCOUNTS_USAGE, "plugins": _PLUGINS_USAGE,
-        "profiles": _PROFILES_USAGE, "groups": _GROUPS_USAGE,
+        "accounts": _ACCOUNTS_USAGE,
+        "plugins": _PLUGINS_USAGE,
+        "groups": _GROUPS_USAGE,
         "ratelimit": _RATELIMIT_USAGE,
-        "tasks": _TASKS_USAGE, "credentials": _CREDENTIALS_USAGE,
+        "tasks": _TASKS_USAGE,
+        "credentials": _CREDENTIALS_USAGE,
         "cooldowns": _COOLDOWNS_USAGE,
     }.get(group, {})
     return table.get(sub, "")
@@ -356,15 +374,10 @@ def _number(token: str, ctx: str, label: str) -> float:
         # raw float() messages have zero context — give the user the input,
         # what it was for, and how to use the command
         usage = _usage_for(ctx) or f"{ctx}"
-        raise UsageError(
-            f"{ctx}: {label} {token!r} is not a number — usage: {usage}"
-        ) from exc
+        raise UsageError(f"{ctx}: {label} {token!r} is not a number — usage: {usage}") from exc
     if not math.isfinite(value):
         usage = _usage_for(ctx) or f"{ctx}"
-        raise UsageError(
-            f"{ctx}: {label} must be a finite number, got {token!r}"
-            f" — usage: {usage}"
-        )
+        raise UsageError(f"{ctx}: {label} must be a finite number, got {token!r} — usage: {usage}")
     return value
 
 
@@ -374,9 +387,7 @@ def _integer(token: str, ctx: str, label: str, *, negative_ok: bool = False) -> 
         value = int(token)
     except ValueError as exc:
         usage = _usage_for(ctx) or f"{ctx}"
-        raise UsageError(
-            f"{ctx}: {label} {token!r} is not an integer — usage: {usage}"
-        ) from exc
+        raise UsageError(f"{ctx}: {label} {token!r} is not an integer — usage: {usage}") from exc
     if value < 0 and not negative_ok:
         raise UsageError(f"{ctx}: {label} must be a non-negative integer, got {value}")
     return value
@@ -392,23 +403,19 @@ def _on_off(token: str, ctx: str) -> bool:
     raise UsageError(f"{ctx}: expected <on|off>, got {token!r}")
 
 
-def _check_level_owner(level: str, owner: Optional[str], ctx: str) -> None:
+def _check_level_owner(level: str, owner: str | None, ctx: str) -> None:
     """Validate a policy level/owner pair (owner format per INTEGRATION.md)."""
     if level not in _LEVELS:
-        raise UsageError(
-            f"{ctx}: unknown level {level!r} — expected one of {'|'.join(_LEVELS)}"
-        )
+        raise UsageError(f"{ctx}: unknown level {level!r} — expected one of {'|'.join(_LEVELS)}")
     if level == "global" and owner is not None:
         raise UsageError(f"{ctx}: level 'global' takes no owner")
     if level != "global" and owner is None:
         raise UsageError(f"{ctx}: level {level!r} needs an owner")
     if level == "account_plugin" and "/" not in owner:
-        raise UsageError(
-            f"{ctx}: account_plugin owner must be '<account>/<plugin>', got {owner!r}"
-        )
+        raise UsageError(f"{ctx}: account_plugin owner must be '<account>/<plugin>', got {owner!r}")
 
 
-def _tail_args(cmd: str, args: Sequence[str]) -> Tuple[int, Optional[str]]:
+def _tail_args(cmd: str, args: Sequence[str]) -> tuple[int, str | None]:
     """Positional '[n] [account]' parsing for logs/audit (old-CLI pattern)."""
     limit, account = 20, None
     rest = list(args)
@@ -423,7 +430,7 @@ def _tail_args(cmd: str, args: Sequence[str]) -> Tuple[int, Optional[str]]:
 
 
 # ------------------------------------------------------------ group impls
-async def _accounts_group(api: Any, args: List[str]) -> str:
+async def _accounts_group(api: Any, args: list[str]) -> str:
     """accounts list|add|plugins|plugin-add|plugin-remove|remove|info|
     credential|enable|start|stop|estop."""
     sub, rest = _sub(_ACCOUNTS_USAGE, args, "accounts")
@@ -435,10 +442,8 @@ async def _accounts_group(api: Any, args: List[str]) -> str:
         if not rest:
             raise UsageError(f"usage: {_ACCOUNTS_USAGE['add']}")
         if not rest[0]:
-            raise UsageError(
-                f"account name cannot be empty — usage: {_ACCOUNTS_USAGE['add']}"
-            )
-        payload: Dict[str, Any] = {"name": rest[0]}
+            raise UsageError(f"account name cannot be empty — usage: {_ACCOUNTS_USAGE['add']}")
+        payload: dict[str, Any] = {"name": rest[0]}
         if rest[1:]:
             # direct account→plugin assignment (the capability model);
             # 'profiles' is deliberately NOT sent — the backend rejects it
@@ -446,9 +451,7 @@ async def _accounts_group(api: Any, args: List[str]) -> str:
         return _result(await api.accounts_add(payload, surface="cli"), verb="added")
     if sub == "plugins":
         account = _exact(rest, 1, ctx)
-        return format_account_plugins(
-            account, await api.accounts_plugins_list(account)
-        )
+        return format_account_plugins(account, await api.accounts_plugins_list(account))
     if sub == "plugin-add":
         account, plugin = _exact(rest, 2, ctx)
         return _result(
@@ -460,10 +463,7 @@ async def _accounts_group(api: Any, args: List[str]) -> str:
         out = await api.accounts_plugin_unassign(account, plugin, surface="cli")
         if isinstance(out, dict) and out.get("existed") is False:
             # idempotent removal: the assignment was already gone
-            return (
-                f"plugin removed: {plugin} was not assigned to {account}"
-                " — nothing to do"
-            )
+            return f"plugin removed: {plugin} was not assigned to {account} — nothing to do"
         return _result(out, verb="plugin removed")
     if sub == "credential":
         name, token = _exact(rest, 2, ctx)
@@ -477,19 +477,16 @@ async def _accounts_group(api: Any, args: List[str]) -> str:
         )
     if sub == "remove":
         name = _exact(rest, 1, ctx)
-        return _result(await api.accounts_remove(name, surface="cli"),
-                       verb="removed")
+        return _result(await api.accounts_remove(name, surface="cli"), verb="removed")
     if sub == "info":
         return format_account_info(await api.accounts_info(_exact(rest, 1, ctx)))
     if sub == "enable":
         name, flag = _exact(rest, 2, ctx)
-        return _result(
-            await api.accounts_enable(name, _on_off(flag, ctx)), verb="updated"
-        )
+        return _result(await api.accounts_enable(name, _on_off(flag, ctx)), verb="updated")
     if sub in ("start", "stop"):
         if len(rest) > 1:
             raise UsageError(f"usage: {_ACCOUNTS_USAGE[sub]}")
-        name: Optional[str] = None
+        name: str | None = None
         if rest and rest[0].lower() != "all":
             if not rest[0]:  # a quoted empty token must never mean "all"
                 raise UsageError(
@@ -508,7 +505,7 @@ async def _accounts_group(api: Any, args: List[str]) -> str:
     raise UsageError(f"accounts: unknown subcommand {sub!r}")  # pragma: no cover
 
 
-async def _credentials_group(api: Any, args: List[str]) -> str:
+async def _credentials_group(api: Any, args: list[str]) -> str:
     """credentials status|import-env [--overwrite]."""
     sub, rest = _sub(_CREDENTIALS_USAGE, args, "credentials")
     ctx = f"credentials {sub}"
@@ -527,7 +524,7 @@ async def _credentials_group(api: Any, args: List[str]) -> str:
     )
 
 
-async def _cooldowns_group(api: Any, args: List[str]) -> str:
+async def _cooldowns_group(api: Any, args: list[str]) -> str:
     """cooldowns [account] | cooldowns clear <account> <plugin> [key]."""
     if args and args[0].lower() == "clear":
         rest = args[1:]
@@ -538,22 +535,19 @@ async def _cooldowns_group(api: Any, args: List[str]) -> str:
             )
         cooldown_key = rest[2] if len(rest) == 3 else None
         return _result(
-            await api.cooldowns_clear(rest[0], rest[1], cooldown_key,
-                                      surface="cli"),
+            await api.cooldowns_clear(rest[0], rest[1], cooldown_key, surface="cli"),
             verb="cooldown cleared",
         )
     if len(args) > 1:
         raise UsageError(f"usage: cooldowns {HELP['cooldowns'][0]}")
     account = args[0] if args else None
     if account == "":
-        raise UsageError(
-            "account name cannot be empty — usage: cooldowns [account]"
-        )
+        raise UsageError("account name cannot be empty — usage: cooldowns [account]")
     return format_cooldowns(await api.cooldowns_list(account))
 
 
-async def _plugins_group(api: Any, args: List[str]) -> str:
-    """plugins list|state|enable|disable|settings|set."""
+async def _plugins_group(api: Any, args: list[str]) -> str:
+    """plugins list|state|enable|disable|settings|set|clear."""
     sub, rest = _sub(_PLUGINS_USAGE, args, "plugins")
     ctx = f"plugins {sub}"
     if sub == "list":
@@ -569,45 +563,19 @@ async def _plugins_group(api: Any, args: List[str]) -> str:
         return format_plugin_state(await api.plugins_settings(_exact(rest, 1, ctx)))
     if sub == "set":
         account, plugin, key, value = _exact(rest, 4, ctx)
+        return _result(await api.plugins_set_setting(account, plugin, key, value), verb="set")
+    if sub == "clear":
+        # parity with the dashboard's value:null reset: the CLI needs its
+        # own verb because shlex cannot express a JSON null argument
+        account, plugin, key = _exact(rest, 3, ctx)
         return _result(
-            await api.plugins_set_setting(account, plugin, key, value), verb="set"
+            await api.plugins_clear_setting(account, plugin, key),
+            verb="cleared",
         )
     raise UsageError(f"plugins: unknown subcommand {sub!r}")  # pragma: no cover
 
 
-async def _profiles_group(api: Any, args: List[str]) -> str:
-    """profiles list|create|delete|assign|unassign.
-
-    Retained future infrastructure: profile CRUD + assignment bookkeeping
-    persist, but they have NO capability effect — plugins are assigned
-    directly per account (``accounts plugin-add`` / ``plugin-remove``).
-    """
-    sub, rest = _sub(_PROFILES_USAGE, args, "profiles")
-    ctx = f"profiles {sub}"
-    if sub == "list":
-        _exact(rest, 0, ctx)
-        return format_profiles(await api.profiles_list())
-    if sub == "create":
-        if len(rest) < 2:
-            raise UsageError(
-                f"profiles create: needs a name and at least one plugin"
-                f" — usage: {_PROFILES_USAGE['create']}"
-            )
-        return _result(
-            await api.profiles_create(rest[0], rest[1:]), verb="created"
-        )
-    if sub == "delete":
-        return _result(await api.profiles_delete(_exact(rest, 1, ctx)), verb="deleted")
-    if sub == "assign":
-        account, profile = _exact(rest, 2, ctx)
-        return _result(await api.profiles_assign(account, profile), verb="assigned")
-    if sub == "unassign":
-        account, profile = _exact(rest, 2, ctx)
-        return _result(await api.profiles_unassign(account, profile), verb="unassigned")
-    raise UsageError(f"profiles: unknown subcommand {sub!r}")  # pragma: no cover
-
-
-async def _groups_group(api: Any, args: List[str]) -> str:
+async def _groups_group(api: Any, args: list[str]) -> str:
     """groups list|show|create|update|delete|add-member|remove-member|
     set-account|clear-account (thin wrappers over ControlAPI)."""
     sub, rest = _sub(_GROUPS_USAGE, args, "groups")
@@ -616,30 +584,21 @@ async def _groups_group(api: Any, args: List[str]) -> str:
         _exact(rest, 0, ctx)
         return format_groups(await api.groups_list())
     if sub == "show":
-        return format_group_snapshot(
-            await api.groups_snapshot(_exact(rest, 1, ctx))
-        )
+        return format_group_snapshot(await api.groups_snapshot(_exact(rest, 1, ctx)))
     if sub == "create":
         if not rest:
-            raise UsageError(
-                f"groups create: needs a name — usage: {_GROUPS_USAGE['create']}"
-            )
-        payload: Dict[str, Any] = {"name": rest[0]}
+            raise UsageError(f"groups create: needs a name — usage: {_GROUPS_USAGE['create']}")
+        payload: dict[str, Any] = {"name": rest[0]}
         if rest[1:]:
             payload["description"] = " ".join(rest[1:])
-        return _result(await api.groups_create(payload, surface="cli"),
-                       verb="created")
+        return _result(await api.groups_create(payload, surface="cli"), verb="created")
     if sub == "update":
         group, field, value = _exact(rest, 3, ctx)
         if field not in ("name", "description", "enabled"):
             raise UsageError(
-                f"groups update: unknown field {field!r} — expected"
-                " name|description|enabled"
+                f"groups update: unknown field {field!r} — expected name|description|enabled"
             )
-        if field == "enabled":
-            payload = {"enabled": _on_off(value, ctx)}
-        else:
-            payload = {field: value}
+        payload = {"enabled": _on_off(value, ctx)} if field == "enabled" else {field: value}
         return _result(
             await api.groups_update(group, payload, surface="cli"),
             verb="updated",
@@ -649,8 +608,7 @@ async def _groups_group(api: Any, args: List[str]) -> str:
         rest = [token for token in rest if token != "--detach-members"]
         group = _exact(rest, 1, ctx)
         return _result(
-            await api.groups_delete(group, detach_members=detach,
-                                    surface="cli"),
+            await api.groups_delete(group, detach_members=detach, surface="cli"),
             verb="deleted",
         )
     if sub == "add-member":
@@ -680,7 +638,7 @@ async def _groups_group(api: Any, args: List[str]) -> str:
     raise UsageError(f"groups: unknown subcommand {sub!r}")  # pragma: no cover
 
 
-async def _ratelimit_group(api: Any, args: List[str]) -> str:
+async def _ratelimit_group(api: Any, args: list[str]) -> str:
     """ratelimit show|set|clear|effective|warnings|floor."""
     sub, rest = _sub(_RATELIMIT_USAGE, args, "ratelimit")
     ctx = f"ratelimit {sub}"
@@ -717,8 +675,12 @@ async def _ratelimit_group(api: Any, args: List[str]) -> str:
             level, owner = rest[4].lower(), rest[5]
             _check_level_owner(level, owner, ctx)
         out = await api.ratelimit_set(
-            action, interval,
-            jitter_min=jitter_min, jitter_max=jitter_max, level=level, owner=owner,
+            action,
+            interval,
+            jitter_min=jitter_min,
+            jitter_max=jitter_max,
+            level=level,
+            owner=owner,
         )
         return _result(out, verb="policy set")
     if sub == "clear":
@@ -726,9 +688,7 @@ async def _ratelimit_group(api: Any, args: List[str]) -> str:
         level = level.lower()
         owner = None if owner_token.lower() in ("-", "none") else owner_token
         _check_level_owner(level, owner, ctx)
-        return _result(
-            await api.ratelimit_clear(level, owner, action), verb="cleared"
-        )
+        return _result(await api.ratelimit_clear(level, owner, action), verb="cleared")
     if sub == "effective":
         if not 1 <= len(rest) <= 3:
             raise UsageError(f"usage: {_RATELIMIT_USAGE['effective']}")
@@ -747,7 +707,7 @@ async def _ratelimit_group(api: Any, args: List[str]) -> str:
     raise UsageError(f"ratelimit: unknown subcommand {sub!r}")  # pragma: no cover
 
 
-async def _lane_subcommand(api: Any, rest: List[str], ctx: str) -> str:
+async def _lane_subcommand(api: Any, rest: list[str], ctx: str) -> str:
     """``ratelimit lane`` — show/configure the sequential send lane.
 
     ``lane``                show state · ``lane on [rate]`` enable (+spacing)
@@ -760,9 +720,7 @@ async def _lane_subcommand(api: Any, rest: List[str], ctx: str) -> str:
         if len(rest) > 2:
             raise UsageError(f"usage: {_RATELIMIT_USAGE['lane']}")
         prefixrate = _number(rest[1], ctx, "rate") if len(rest) > 1 else None
-        return format_lane(
-            await api.ratelimit_set_lane(enabled=True, prefixrate=prefixrate)
-        )
+        return format_lane(await api.ratelimit_set_lane(enabled=True, prefixrate=prefixrate))
     if verb in ("off", "disable"):
         if len(rest) > 1:
             raise UsageError(f"usage: {_RATELIMIT_USAGE['lane']}")
@@ -773,7 +731,7 @@ async def _lane_subcommand(api: Any, rest: List[str], ctx: str) -> str:
     raise UsageError(f"ratelimit lane: unknown verb {verb!r} — usage: {_RATELIMIT_USAGE['lane']}")
 
 
-async def _tasks_group(api: Any, args: List[str]) -> str:
+async def _tasks_group(api: Any, args: list[str]) -> str:
     """tasks list|cancel|history|cancel-matching."""
     sub, rest = _sub(_TASKS_USAGE, args, "tasks")
     ctx = f"tasks {sub}"
@@ -802,40 +760,35 @@ async def _tasks_group(api: Any, args: List[str]) -> str:
     raise UsageError(f"tasks: unknown subcommand {sub!r}")  # pragma: no cover
 
 
-async def _simulation_group(api: Any, args: List[str]) -> str:
+async def _simulation_group(api: Any, args: list[str]) -> str:
     """simulation list|run [name]."""
-    sub, rest = _sub({"list": "simulation list", "run": "simulation run [name]"},
-                     args, "simulation")
+    sub, rest = _sub(
+        {"list": "simulation list", "run": "simulation run [name]"}, args, "simulation"
+    )
     if sub == "list":
         _exact(rest, 0, "simulation list")
         scenarios = await api.simulation_list()
         if not scenarios:
             return "  (no scenarios available)"
         return "\n".join(
-            f"  {str(s.get('name', '?')):<24}{s.get('description', '')}"
-            for s in scenarios
+            f"  {_col(str(s.get('name', '?')), 24)}{s.get('description', '')}" for s in scenarios
         )
     # run
     if not rest:
         scenarios = await api.simulation_list()
         names = ", ".join(str(s.get("name")) for s in scenarios) or "(none)"
         raise UsageError(f"simulation run: needs a scenario name — available: {names}")
-    return format_simulation_report(
-        await api.simulation_run(_exact(rest, 1, "simulation run"))
-    )
+    return format_simulation_report(await api.simulation_run(_exact(rest, 1, "simulation run")))
 
 
 # ---------------------------------------------------------------- formatters
 def format_status(status: dict) -> str:
     """Overview payload (api.status) -> aligned text: uptime/tasks/accounts/
     policies + the safety-warning block."""
-    lines: List[str] = []
+    lines: list[str] = []
     tasks = status.get("tasks") or {}
     if tasks:
-        lines.append(
-            "tasks: "
-            + " ".join(f"{key}={_fmt_val(val)}" for key, val in tasks.items())
-        )
+        lines.append("tasks: " + " ".join(f"{key}={_fmt_val(val)}" for key, val in tasks.items()))
     uptime = status.get("uptime_s")
     if uptime is not None:
         lines[0:0] = [f"uptime: {_fmt_duration(float(uptime))}"]
@@ -845,15 +798,13 @@ def format_status(status: dict) -> str:
     lines.append("")
     lines.append("rate limits:")
     stats = status.get("ratelimit") or {}
-    lines.extend(
-        format_policies(stats.get("policies") or []).splitlines()
-    )
+    lines.extend(format_policies(stats.get("policies") or []).splitlines())
     lines.append("")
     lines.append(format_warnings(status.get("warnings") or []))
     return "\n".join(lines)
 
 
-def format_accounts(accounts: List[dict]) -> str:
+def format_accounts(accounts: list[dict]) -> str:
     """Account list payload (api.accounts_list) -> one block per account.
 
     Capabilities render from ``assigned_plugins`` (the direct account→plugin
@@ -862,7 +813,7 @@ def format_accounts(accounts: List[dict]) -> str:
     """
     if not accounts:
         return "  (no accounts registered — 'accounts add <name>')"
-    lines: List[str] = []
+    lines: list[str] = []
     for account in accounts:
         name = str(account.get("name", "?"))
         state = str(account.get("status") or "-")
@@ -872,7 +823,7 @@ def format_accounts(accounts: List[dict]) -> str:
         enabled = account.get("enabled")
         flag = "" if enabled is None else (" [enabled]" if enabled else " [disabled]")
         lines.append(
-            f"  {name:<16}{state:<14}id={_fmt_val(uid) if uid is not None else '-'}{flag}"
+            f"  {_col(name, 16)}{_col(state, 14)}id={_fmt_val(uid) if uid is not None else '-'}{flag}"
         )
         plugins = account.get("assigned_plugins") or []
         if plugins:
@@ -899,17 +850,13 @@ def format_account_info(details: dict) -> str:
         lines.append(title)
         lines.append("-" * 16)
 
-    lines: List[str] = [f"Account: {name}"]
+    lines: list[str] = [f"Account: {name}"]
     section("Status")
     connected = status.get("connected")
-    lines.append(
-        "Connected: " + ("yes" if connected else "no" if connected is not None else "-")
-    )
+    lines.append("Connected: " + ("yes" if connected else "no" if connected is not None else "-"))
     lines.append(f"State:     {status.get('state', '-')}")
     latency = status.get("latency_ms")
-    lines.append(
-        "Latency:   " + (f"{float(latency):.0f} ms" if latency is not None else "-")
-    )
+    lines.append("Latency:   " + (f"{float(latency):.0f} ms" if latency is not None else "-"))
     uptime = status.get("uptime_s")
     lines.append("Uptime:    " + (_fmt_duration(float(uptime)) if uptime is not None else "-"))
     section("Identity")
@@ -926,13 +873,9 @@ def format_account_info(details: dict) -> str:
         for plugin in plugins:
             state = plugin.get("enabled")
             flag = "enabled" if state else "disabled" if state is not None else "-"
-            lines.append(f"{str(plugin.get('name', '?')):<14}{flag}")
+            lines.append(f"{_col(str(plugin.get('name', '?')), 14)}{flag}")
     else:
         lines.append("(none assigned — 'accounts plugin-add <account> <plugin>')")
-    section("Profiles (informational)")
-    profiles = details.get("profiles") or []
-    lines.append(", ".join(str(p) for p in profiles) if profiles else "(none)")
-    lines.append("(retained future infrastructure — not the capability mechanism)")
     section("Rate Limit")
     rate = details.get("rate_limit") or {}
     if rate:
@@ -941,7 +884,7 @@ def format_account_info(details: dict) -> str:
             jitter = info.get("jitter") or [0.0, 0.0]
             source = info.get("source", "-")
             lines.append(
-                f"{str(action):<14}{_fmt_policy(info.get('interval'), jitter[0], jitter[1]):<22}{source}"
+                f"{_col(str(action), 14)}{_col(_fmt_policy(info.get('interval'), jitter[0], jitter[1]), 22)}{source}"
             )
     else:
         lines.append("(no actions paced)")
@@ -956,18 +899,15 @@ def format_account_plugins(account: str, plugins: Sequence[str]) -> str:
     """
     names = sorted(str(p) for p in plugins or [])
     if not names:
-        return (
-            f"  (no plugins assigned to {account} —"
-            f" 'accounts plugin-add {account} <plugin>')"
-        )
+        return f"  (no plugins assigned to {account} — 'accounts plugin-add {account} <plugin>')"
     return "\n".join(f"  {name}" for name in names)
 
 
-def format_plugins(manifests: List[dict]) -> str:
+def format_plugins(manifests: list[dict]) -> str:
     """Plugin manifests (api.plugins_manifests) -> metadata + settings schema."""
     if not manifests:
         return "  (no plugins discovered)"
-    lines: List[str] = []
+    lines: list[str] = []
     for manifest in manifests:
         lines.append(
             f"  {manifest.get('name', '?')} v{manifest.get('version', '?')}"
@@ -977,9 +917,7 @@ def format_plugins(manifests: List[dict]) -> str:
             key = setting.get("name") or setting.get("key") or "?"
             bounds = ""
             if setting.get("min") is not None or setting.get("max") is not None:
-                bounds = (
-                    f" [{setting.get('min', '')}..{setting.get('max', '')}]"
-                )
+                bounds = f" [{setting.get('min', '')}..{setting.get('max', '')}]"
             lines.append(
                 f"      {key}:{setting.get('type', '?')}"
                 f"={setting.get('default')!r} {setting.get('description', '')}{bounds}"
@@ -987,7 +925,7 @@ def format_plugins(manifests: List[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_plugin_state(states: List[dict]) -> str:
+def format_plugin_state(states: list[dict]) -> str:
     """Per-account plugin state (api.plugins_state / plugins_settings).
 
     Renders '[+]' enabled / '[-]' disabled / '[*]' unknown (the settings-only
@@ -995,7 +933,7 @@ def format_plugin_state(states: List[dict]) -> str:
     """
     if not states:
         return "  (no plugins on this account)"
-    lines: List[str] = []
+    lines: list[str] = []
     for state in states:
         enabled = state.get("enabled")
         flag = "[+]" if enabled else "[-]" if enabled is not None else "[*]"
@@ -1011,32 +949,17 @@ def format_plugin_state(states: List[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_profiles(profiles: List[dict]) -> str:
-    """Profiles payload (api.profiles_list) -> name, plugins, description."""
-    if not profiles:
-        return "  (no profiles defined — 'profiles create <name> <plugin ...>')"
-    lines: List[str] = []
-    for profile in profiles:
-        plugins = ", ".join(str(p) for p in profile.get("plugins") or []) or "-"
-        desc = profile.get("description") or ""
-        lines.append(
-            f"  {str(profile.get('name', '?')):<18}[{plugins}]"
-            + (f" — {desc}" if desc else "")
-        )
-    return "\n".join(lines)
-
-
-def format_groups(groups: List[dict]) -> str:
+def format_groups(groups: list[dict]) -> str:
     """Sync groups payload (api.groups_list) -> name, members, description."""
     if not groups:
         return "  (no sync groups — 'groups create <name>')"
-    lines: List[str] = []
+    lines: list[str] = []
     for group in groups:
         count = group.get("member_count", 0)
         flag = "" if group.get("enabled", True) else " [disabled]"
         desc = group.get("description") or ""
         lines.append(
-            f"  {str(group.get('name', '?')):<18}{count} member(s){flag}"
+            f"  {_col(str(group.get('name', '?')), 18)}{count} member(s){flag}"
             + (f" — {desc}" if desc else "")
         )
     return "\n".join(lines)
@@ -1052,17 +975,13 @@ def format_group_snapshot(snapshot: dict) -> str:
     desc = snapshot.get("description") or ""
     if desc:
         lines.append(f"  Description: {desc}")
-    lines.append(
-        "  Enabled: " + ("yes" if snapshot.get("enabled", True) else "no")
-    )
+    lines.append("  Enabled: " + ("yes" if snapshot.get("enabled", True) else "no"))
     members = snapshot.get("members") or []
     if members:
         for member in members:
             if isinstance(member, dict):
                 status = member.get("status") or "-"
-                lines.append(
-                    f"    {str(member.get('name', '?')):<18}{status}"
-                )
+                lines.append(f"    {_col(str(member.get('name', '?')), 18)}{status}")
             else:
                 lines.append(f"    {member}")
     else:
@@ -1071,7 +990,19 @@ def format_group_snapshot(snapshot: dict) -> str:
 
 
 def format_lane(lane: dict) -> str:
-    """Lane state -> display lines (sequential sends: spacing + pause flag)."""
+    """Lane state -> display lines (the send lane is REMOVED).
+
+    The backend keeps ratelimit_lane/ratelimit_set_lane as documented
+    compat stubs whose payloads carry ``removed``/``note``/``reason`` —
+    render those VERBATIM so nobody reads the stub as a live "off" lane
+    (legacy non-removed payloads still render the old detail view).
+    """
+    if lane.get("removed"):
+        text = "  send lane: REMOVED — fleet lane replaced by sync groups + per-account pacing"
+        note = lane.get("note") or lane.get("reason") or ""
+        if note:
+            text += f"\n      {note}"
+        return text
     if not lane.get("enabled"):
         return "  send lane: off (sends are paced per-account only)"
     state = "PAUSED — all outbound actions hold" if lane.get("paused") else "active"
@@ -1086,20 +1017,24 @@ def format_lane(lane: dict) -> str:
     )
 
 
-def format_policies(policies: List[dict]) -> str:
+def format_policies(policies: list[dict]) -> str:
     """Stored policies (api.ratelimit_policies) -> scope/action/policy table."""
     if not policies:
         return "  (no policies set — 'ratelimit set <action> <interval>')"
-    lines: List[str] = []
+    lines: list[str] = []
     for policy in sorted(
         policies,
-        key=lambda p: (str(p.get("level", "")), str(p.get("owner") or ""), str(p.get("action", ""))),
+        key=lambda p: (
+            str(p.get("level", "")),
+            str(p.get("owner") or ""),
+            str(p.get("action", "")),
+        ),
     ):
         scope = str(policy.get("level", "?"))
         if policy.get("owner"):
             scope += f"/{policy['owner']}"
         lines.append(
-            f"  {scope:<24}{str(policy.get('action', '?')):<16}"
+            f"  {_col(scope, 24)}{_col(str(policy.get('action', '?')), 16)}"
             f"{_fmt_policy(policy.get('interval'), *(policy.get('jitter') or [0.0, 0.0]))}"
         )
     return "\n".join(lines)
@@ -1123,36 +1058,38 @@ def format_effective(effective: dict) -> str:
             scope += f"/{source['owner']}"
         mark = ""
         src_interval = source.get("interval")
-        if interval is not None and src_interval is not None:
-            if abs(float(src_interval) - float(interval)) < 1e-9:
-                mark = "  <- pacing source"
-        lines.append(
-            f"      {scope:<24}{float(src_interval or 0):.2f}s{mark}"
-        )
+        if (
+            interval is not None
+            and src_interval is not None
+            and abs(float(src_interval) - float(interval)) < 1e-9
+        ):
+            mark = "  <- pacing source"
+        src_text = "-" if src_interval is None else f"{float(src_interval):.2f}s"
+        lines.append(f"      {_col(scope, 24)}{src_text}{mark}")
     return "\n".join(lines)
 
 
-def format_tasks(tasks: List[dict]) -> str:
+def format_tasks(tasks: list[dict]) -> str:
     """Queued/running tasks (api.tasks_list) -> a compact table."""
     if not tasks:
         return "  (no tasks — 'tasks list [status]')"
-    lines: List[str] = []
+    lines: list[str] = []
     for task in tasks:
         channel = task.get("channel_id")
         lines.append(
-            f"  #{str(task.get('id', '?')):<5}{str(task.get('status', '-')):<11}"
-            f"{str(task.get('account') or '-'):<12}{str(task.get('plugin') or '-'):<12}"
-            f"{str(task.get('action') or '-'):<10}"
+            f"  #{_col(str(task.get('id', '?')), 5)}{_col(str(task.get('status', '-')), 11)}"
+            f"{_col(str(task.get('account') or '-'), 12)}{_col(str(task.get('plugin') or '-'), 12)}"
+            f"{_col(str(task.get('action') or '-'), 10)}"
             f"ch={channel if channel is not None else '-'}"
         )
     return "\n".join(lines)
 
 
-def format_history(tasks: List[dict]) -> str:
+def format_history(tasks: list[dict]) -> str:
     """Finished tasks (api.tasks_history) -> outcome + duration per task."""
     if not tasks:
         return "  (no history yet)"
-    lines: List[str] = []
+    lines: list[str] = []
     for task in tasks:
         duration = task.get("duration_s")
         if duration is None and task.get("started_at") and task.get("finished_at"):
@@ -1160,22 +1097,24 @@ def format_history(tasks: List[dict]) -> str:
         tail = "-"
         if task.get("error"):
             tail = f"error: {task['error']}"
-        elif task.get("result_summary"):
-            tail = str(task["result_summary"])
+        elif task.get("result_summary") or task.get("summary"):
+            # in-memory rows say result_summary; repository history rows
+            # (TaskHistoryRepository.recent) say summary
+            tail = str(task.get("result_summary") or task.get("summary"))
         dur = f"{float(duration):.1f}s" if duration is not None else "-"
         lines.append(
-            f"  #{str(task.get('id', '?')):<5}{str(task.get('status', '-')):<11}"
-            f"{str(task.get('account') or '-'):<12}{str(task.get('plugin') or '-'):<12}"
-            f"{str(task.get('action') or '-'):<10}{dur:>7}  {tail}"
+            f"  #{_col(str(task.get('id', '?')), 5)}{_col(str(task.get('status', '-')), 11)}"
+            f"{_col(str(task.get('account') or '-'), 12)}{_col(str(task.get('plugin') or '-'), 12)}"
+            f"{_col(str(task.get('action') or '-'), 10)}{dur:>7}  {tail}"
         )
     return "\n".join(lines)
 
 
-def format_logs(entries: List[dict]) -> str:
+def format_logs(entries: list[dict]) -> str:
     """Structured log entries (api.logs_tail) -> 'HH:MM:SS SEVERITY source msg'."""
     if not entries:
         return "  (no log entries)"
-    lines: List[str] = []
+    lines: list[str] = []
     for entry in entries:
         context = []
         if entry.get("account"):
@@ -1188,13 +1127,13 @@ def format_logs(entries: List[dict]) -> str:
             context.append(f"event={entry['event']}")
         suffix = ("  (" + " ".join(context) + ")") if context else ""
         lines.append(
-            f"  {_hms(entry.get('ts'))} {str(entry.get('severity', '-')):<8}"
-            f"{str(entry.get('source', '-')):<18}{entry.get('message', '')}{suffix}"
+            f"  {_hms(entry.get('ts'))} {_col(str(entry.get('severity', '-')), 8)}"
+            f"{_col(str(entry.get('source', '-')), 18)}{entry.get('message', '')}{suffix}"
         )
     return "\n".join(lines)
 
 
-def format_audit(entries: List[dict]) -> str:
+def format_audit(entries: list[dict]) -> str:
     """Audit entries (api.audit_tail) -> compact interaction lines.
 
     Format: ``HH:MM:SS -> account action ch=... content (wait Xms, jitter Yms)``
@@ -1202,7 +1141,7 @@ def format_audit(entries: List[dict]) -> str:
     """
     if not entries:
         return "  (no audited interactions)"
-    lines: List[str] = []
+    lines: list[str] = []
     for entry in entries:
         arrow = "<-" if entry.get("direction") == "in" else "->"
         channel = entry.get("channel_id")
@@ -1210,28 +1149,29 @@ def format_audit(entries: List[dict]) -> str:
         wait = entry.get("wait_ms") or 0.0
         jitter = entry.get("jitter_ms") or 0.0
         lines.append(
-            f"  {_hms(entry.get('ts'))} {arrow} {str(entry.get('account') or '-'):<10}"
-            f"{str(entry.get('action') or '-'):<10}"
+            f"  {_hms(entry.get('ts'))} {arrow} {_col(str(entry.get('account') or '-'), 10)}"
+            f"{_col(str(entry.get('action') or '-'), 10)}"
             f"ch={channel if channel is not None else '-'}  {content!r}"
             f" (wait {float(wait):.0f}ms, jitter {float(jitter):.0f}ms)"
         )
     return "\n".join(lines)
 
 
-def format_warnings(warnings: List[dict]) -> str:
+def format_warnings(warnings: list[dict]) -> str:
     """Safety warnings (api.ratelimit_warnings) -> icon lines.
 
     Icons: ``[i]`` informational, ``[!]`` worth a look, ``[X]`` dangerous.
     """
     if not warnings:
         return "  safety: no warnings — configuration looks sane"
-    icons = {"info": "[i]", "warning": "[!]", "warn": "[!]", "danger": "[X]",
-             "error": "[X]"}
-    lines: List[str] = []
+    icons = {"info": "[i]", "warning": "[!]", "warn": "[!]", "danger": "[X]", "error": "[X]"}
+    lines: list[str] = []
     for warning in warnings:
         level = str(warning.get("level", "")).lower()
         icon = icons.get(level, "[?]")
-        lines.append(f"  {icon} {str(warning.get('code', '?')):<16}{warning.get('message', '')}")
+        lines.append(
+            f"  {icon} {_col(str(warning.get('code', '?')), 16)}{warning.get('message', '')}"
+        )
     return "\n".join(lines)
 
 
@@ -1266,7 +1206,7 @@ def format_simulation_report(report: dict) -> str:
     return "\n".join(lines)
 
 
-def format_credential_status(rows: List[dict]) -> str:
+def format_credential_status(rows: list[dict]) -> str:
     """Credential status payload (api.accounts_credential_status) -> table.
 
     One line per account: name + db/env/missing chip. NEVER a value — the
@@ -1275,11 +1215,11 @@ def format_credential_status(rows: List[dict]) -> str:
     if not rows:
         return "  (no accounts registered — 'accounts add <name>')"
     labels = {"db": "db (encrypted)", "env": "env (.env fallback)"}
-    lines: List[str] = []
+    lines: list[str] = []
     for row in rows:
         state = row.get("credential")
         state_text = labels.get(state, str(state or "missing"))
-        lines.append(f"  {str(row.get('name', '?')):<20}credential: {state_text}")
+        lines.append(f"  {_col(str(row.get('name', '?')), 20)}credential: {state_text}")
     return "\n".join(lines)
 
 
@@ -1289,8 +1229,10 @@ def format_import_report(report: dict) -> str:
     skipped = report.get("skipped") or []
     failed = report.get("failed") or {}
     lines = [f"  imported: {', '.join(imported) if imported else '(none)'}"]
-    lines.append(f"  skipped : {', '.join(skipped) if skipped else '(none)'}"
-                 "  (already stored; use --overwrite)")
+    lines.append(
+        f"  skipped : {', '.join(skipped) if skipped else '(none)'}"
+        "  (already stored; use --overwrite)"
+    )
     if failed:
         lines.append("  failed  :")
         lines.extend(f"      {name}: {reason}" for name, reason in failed.items())
@@ -1299,18 +1241,18 @@ def format_import_report(report: dict) -> str:
     return "\n".join(lines)
 
 
-def format_cooldowns(rows: List[dict]) -> str:
+def format_cooldowns(rows: list[dict]) -> str:
     """Active cooldowns (api.cooldowns_list) -> account/plugin/key table."""
     if not rows:
         return "  (no active cooldowns)"
-    lines: List[str] = []
+    lines: list[str] = []
     for row in rows:
         lines.append(
-            f"  {str(row.get('account', '?')):<16}"
-            f"{str(row.get('plugin') or '-'):<16}"
-            f"{str(row.get('cooldown_key') or '-'):<20}"
+            f"  {_col(str(row.get('account', '?')), 16)}"
+            f"{_col(str(row.get('plugin') or '-'), 16)}"
+            f"{_col(str(row.get('cooldown_key') or '-'), 20)}"
             f"{_fmt_duration(row.get('remaining_s') or 0.0):>10}"
-            f"  {str(row.get('source') or '-')}"
+            f"  {row.get('source') or '-'!s}"
         )
     return "\n".join(lines)
 
@@ -1340,7 +1282,13 @@ def _fmt_val(value: Any) -> str:
 
 
 def _fmt_policy(interval: Any, jitter_min: Any = 0.0, jitter_max: Any = 0.0) -> str:
-    """Interval + jitter -> '2.50s +0.20..0.80s' (jitter omitted when zero)."""
+    """Interval + jitter -> '2.50s +0.20..0.80s' (jitter omitted when zero).
+
+    ``interval=None`` (no applicable policy) renders as the explicit
+    unpaced marker — never as the bare string 'None'.
+    """
+    if interval is None:
+        return "- (unpaced)"
     try:
         text = f"{float(interval):.2f}s"
         lo, hi = float(jitter_min or 0.0), float(jitter_max or 0.0)

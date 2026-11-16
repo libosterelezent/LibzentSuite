@@ -1,9 +1,9 @@
 """Scenario registry tests.
 
-The full-stack runs (runner + all managers + real plugins) are written as
-runnable code but SKIPPED until agents A3/A5/A6 land their modules — the
-All scenario runs execute the full production stack (managers, scheduler,
-limiter, rich event model) over the in-memory world. Everything that does not need the other
+The full-stack runs (runner + all managers + the workload fixture
+plugin) are written as runnable code — all scenario runs execute the
+full production stack (managers, scheduler, limiter, rich event model)
+over the in-memory world. Everything that does not need the other
 managers (registry shape, world setups, pure checks) runs now.
 """
 from __future__ import annotations
@@ -36,6 +36,10 @@ from core.errors import SimulationError
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+#: the workload fixture directory (the framework bundles no plugins; the
+#: scenarios drive the soulcopy-like flow plugin that lives here)
+SIM_PLUGINS = ROOT / "tests" / "fixtures" / "sim_plugins"
 
 #: scenario names the contract requires at minimum
 REQUIRED_SCENARIOS = (
@@ -110,7 +114,7 @@ class TestRegistryShape(unittest.TestCase):
                 self.assertLessEqual(float(jitter[1]), 5.0)
 
     def test_runner_lists_registry(self) -> None:
-        entries = SimulationRunner(plugin_dir=str(ROOT / "plugins")).list()
+        entries = SimulationRunner(plugin_dir=str(SIM_PLUGINS)).list()
         self.assertEqual(
             sorted(entry["name"] for entry in entries),
             sorted(REQUIRED_SCENARIOS),
@@ -119,7 +123,7 @@ class TestRegistryShape(unittest.TestCase):
             self.assertTrue(entry["description"].strip())
 
     def test_unknown_scenario_raises_simulation_error(self) -> None:
-        runner = SimulationRunner(plugin_dir=str(ROOT / "plugins"))
+        runner = SimulationRunner(plugin_dir=str(SIM_PLUGINS))
         with self.assertRaises(SimulationError) as caught:
             runner.scenario("does_not_exist")
         self.assertIn("unknown scenario", str(caught.exception))
@@ -346,11 +350,12 @@ class TestFullStackRuns(unittest.IsolatedAsyncioTestCase):
 
     Requires database.db + core.rate_limit_manager + core.task_scheduler +
     core.audit + core.plugin_manager + core.profile_manager +
-    core.account_manager AND the migrated plugins/ (soulcopy, roll).
+    core.account_manager AND the workload fixture under
+    tests/fixtures/sim_plugins (the framework bundles no plugins).
     """
 
     async def _run(self, name: str) -> dict:
-        runner = SimulationRunner(plugin_dir=str(ROOT / "plugins"))
+        runner = SimulationRunner(plugin_dir=str(SIM_PLUGINS))
         report = await runner.run(name)
         for key in ("name", "passed", "duration_s", "failures", "log_lines",
                     "interactions", "summary"):

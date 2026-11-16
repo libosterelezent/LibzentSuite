@@ -24,49 +24,12 @@ from core.account_manager import AccountManager
 from core.credentials import Credentials
 from core.errors import DatabaseError, SchedulerError
 from core.event_bus import EventBus
-from core.profile_manager import ProfileManager
-from database.models import AccountRecord, ProfileRecord
+from database.models import AccountRecord
 
 LOG = logging.getLogger("tests.helpers")
 
 
 # ------------------------------------------------------------ repositories
-class FakeProfilesRepo:
-    """Dict-backed ProfilesRepository (async methods, like the real one).
-
-    ``accounts`` (optional FakeAccountsRepo) enables the delete cascade the
-    real repository performs: deleting a profile also drops its account
-    assignments (database/repositories/profiles.py delete()).
-    """
-
-    def __init__(self, accounts: Optional["FakeAccountsRepo"] = None) -> None:
-        self.data: Dict[str, ProfileRecord] = {}
-        self._accounts = accounts
-
-    async def upsert(self, name, plugins, description="") -> None:
-        if not isinstance(name, str) or not name.strip():
-            raise DatabaseError("profile name must be a non-empty string")
-        name = name.strip()
-        self.data[name] = ProfileRecord(
-            name=name, plugins=sorted(set(plugins)), description=description
-        )
-
-    async def delete(self, name) -> bool:
-        existed = name in self.data
-        self.data.pop(name, None)
-        if existed and self._accounts is not None:
-            for record in self._accounts.records.values():
-                if name in record.profiles:
-                    record.profiles.remove(name)
-        return existed
-
-    async def get(self, name) -> Optional[ProfileRecord]:
-        return self.data.get(name)
-
-    async def list(self) -> List[ProfileRecord]:
-        return [self.data[k] for k in sorted(self.data)]
-
-
 class FakeAccountsRepo:
     """Dict-backed AccountsRepository with injectable failures (async)."""
 
@@ -121,22 +84,6 @@ class FakeAccountsRepo:
         self._maybe_fail("delete")
         return self.records.pop(name, None) is not None
 
-    async def assign_profile(self, name, profile) -> None:
-        record = self.records.get(name)
-        if record is None:
-            raise RuntimeError(f"unknown account {name!r}")
-        if profile not in record.profiles:
-            record.profiles.append(profile)
-
-    async def unassign_profile(self, name, profile) -> None:
-        record = self.records.get(name)
-        if record is not None and profile in record.profiles:
-            record.profiles.remove(profile)
-
-    async def profiles_of(self, name) -> List[str]:
-        record = self.records.get(name)
-        return sorted(record.profiles) if record is not None else []
-
     @staticmethod
     def _copy(record: AccountRecord) -> AccountRecord:
         return AccountRecord(**record.to_dict())
@@ -149,10 +96,15 @@ class FakeAccountPluginsRepo:
     Mirrors the persisted contract: sorted/deduped lists, idempotent
     assign/unassign, replace-all set_plugins, and all_assignments() that
     OMITS accounts with zero plugins (consumers use .get(name, [])).
+    Profile bindings follow the real v7 column: one OPTIONAL profile per
+    assignment row (None = plugin defaults), wiped by replacement, never
+    created without an assignment.
     """
 
     def __init__(self) -> None:
         self.rows: Dict[str, List[str]] = {}
+        #: (account, plugin) -> bound profile name or None
+        self.profile_of: Dict[tuple, Optional[str]] = {}
         self.fail_on: Optional[str] = None  # method name that raises
 
     def _maybe_fail(self, what: str) -> None:
@@ -170,6 +122,7 @@ class FakeAccountPluginsRepo:
         plugins = set(self.rows.get(account, []))
         plugins.discard(plugin)
         self.rows[account] = sorted(plugins)
+        self.profile_of.pop((account, plugin), None)
 
     async def plugins_of(self, account) -> List[str]:
         self._maybe_fail("plugins_of")
@@ -178,12 +131,36 @@ class FakeAccountPluginsRepo:
     async def set_plugins(self, account, plugins) -> List[str]:
         self._maybe_fail("set_plugins")
         cleaned = sorted({p for p in (plugins or [])})
+        kept = set(cleaned)
+        for plugin in list(self.rows.get(account, [])):
+            if plugin not in kept:  # delete+insert drops the binding column
+                self.profile_of.pop((account, plugin), None)
         self.rows[account] = cleaned
         return list(cleaned)
 
     async def all_assignments(self) -> Dict[str, List[str]]:
         self._maybe_fail("all_assignments")
         return {a: list(ps) for a, ps in sorted(self.rows.items()) if ps}
+
+    async def set_profile(self, account, plugin, profile) -> bool:
+        self._maybe_fail("set_profile")
+        if plugin not in set(self.rows.get(account, [])):
+            return False  # no assignment row: binding never creates one
+        self.profile_of[(account, plugin)] = profile
+        return True
+
+    async def bindings(self, account) -> Dict[str, Optional[str]]:
+        self._maybe_fail("bindings")
+        return {plugin: self.profile_of.get((account, plugin))
+                for plugin in self.rows.get(account, [])}
+
+    async def all_bindings(self) -> Dict[str, Dict[str, Optional[str]]]:
+        self._maybe_fail("all_bindings")
+        return {
+            account: {plugin: self.profile_of.get((account, plugin))
+                      for plugin in plugins}
+            for account, plugins in sorted(self.rows.items()) if plugins
+        }
 
 
 # ------------------------------------------------------------- collaborators
@@ -484,8 +461,6 @@ class ManagerHarness:
     manager: AccountManager
     bus: EventBus
     repo: FakeAccountsRepo
-    profiles_repo: FakeProfilesRepo
-    profile_manager: ProfileManager
     plugins: FakePluginManager
     scheduler: FakeScheduler
     settings: FakeSettings
@@ -495,9 +470,6 @@ class ManagerHarness:
     account_plugins: FakeAccountPluginsRepo
     collector: EventCollector = field(default_factory=lambda: EventCollector(EventBus()))
 
-    def add_profile(self, name: str, *plugin_names: str) -> Any:
-        """Create a profile through the async profile manager (AWAIT this)."""
-        return self.profile_manager.set_profile(name, list(plugin_names))
 
 
 def make_manager(
@@ -512,8 +484,6 @@ def make_manager(
     """Build an AccountManager wired to fakes (fresh bus/repos per call)."""
     bus = EventBus()
     repo = FakeAccountsRepo()
-    profiles_repo = FakeProfilesRepo(accounts=repo)
-    profile_manager = ProfileManager(profiles_repo, LOG, repo)
     plugins = FakePluginManager()
     scheduler = FakeScheduler()
     settings = settings or FakeSettings()
@@ -561,7 +531,7 @@ def make_manager(
         credential_service._runtime_sources[name] = "db"
 
     manager = AccountManager(
-        bus, LOG, repo, plugins, profile_manager, scheduler, settings, audit,
+        bus, LOG, repo, plugins, scheduler, settings, audit,
         factory, credentials, limiter=limiter, supervisor_tick=supervisor_tick,
         credential_service=credential_service,
         account_plugins=account_plugins
@@ -575,8 +545,7 @@ def make_manager(
         AccountConnected, AccountDisconnected, AccountFailed, MessageReceived,
     )
     return ManagerHarness(
-        manager=manager, bus=bus, repo=repo, profiles_repo=profiles_repo,
-        profile_manager=profile_manager, plugins=plugins, scheduler=scheduler,
+        manager=manager, bus=bus, repo=repo, plugins=plugins, scheduler=scheduler,
         settings=settings, audit=audit, factory=factory,
         credentials=credentials, collector=collector,
         account_plugins=manager._account_plugins,
@@ -596,7 +565,7 @@ def make_task(**overrides: Any) -> SimpleNamespace:
 
 
 __all__ = [
-    "FakeProfilesRepo", "FakeAccountsRepo", "FakeAccountPluginsRepo",
+"FakeAccountsRepo", "FakeAccountPluginsRepo",
     "FakePluginManager", "FakeScheduler", "FakeSettings", "FakeAudit",
     "FakeDetailsLimiter", "FakeClient", "FakeClientFactory", "EventCollector",
     "ManagerHarness", "make_manager", "make_task", "default_snapshot",

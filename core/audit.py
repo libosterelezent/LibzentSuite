@@ -25,19 +25,24 @@ the ring).
 Consumers: the dashboard Audit page (live via WS + history via REST), the
 CLI 'audit' command, scripts, and the simulation reports.
 """
+
 from __future__ import annotations
 
-import asyncio
 import logging
 import threading
 import time
 from collections import deque
+from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from ._persist_queue import PersistQueue
 
-LOG = logging.getLogger("slaughtermudae.audit")
+if TYPE_CHECKING:
+    import asyncio
+    from collections.abc import Callable, Iterable
+
+LOG = logging.getLogger("libzent.audit")
 
 #: FINAL-PHASE (F8 gap 3): per-entry content cap (manager paths truncate
 #: to 80 chars; the scheduler's task content was landing untruncated —
@@ -54,22 +59,26 @@ class AuditEntry:
 
     ts: float
     account: str
-    direction: str            # 'out' | 'in'
-    action: str               # 'message' | 'dm' | 'event:message' | ...
-    channel_id: Optional[int] = None
+    direction: str  # 'out' | 'in'
+    action: str  # 'message' | 'dm' | 'event:message' | ...
+    channel_id: int | None = None
     content: str = ""
-    wait_ms: float = 0.0      # time spent waiting for the rate limiter
-    jitter_ms: float = 0.0    # human-like jitter applied after the grant
+    wait_ms: float = 0.0  # time spent waiting for the rate limiter
+    jitter_ms: float = 0.0  # human-like jitter applied after the grant
     note: str = ""
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         """JSON-safe dict form (floats rounded to milliseconds precision)."""
         return {  # explicit: dataclasses.asdict() is ~3x slower (hot path)
-            "ts": round(self.ts, 3), "account": self.account,
-            "direction": self.direction, "action": self.action,
-            "channel_id": self.channel_id, "content": self.content,
+            "ts": round(self.ts, 3),
+            "account": self.account,
+            "direction": self.direction,
+            "action": self.action,
+            "channel_id": self.channel_id,
+            "content": self.content,
             "wait_ms": round(self.wait_ms, 3),
-            "jitter_ms": round(self.jitter_ms, 3), "note": self.note,
+            "jitter_ms": round(self.jitter_ms, 3),
+            "note": self.note,
         }
 
 
@@ -80,25 +89,26 @@ def _field(entry: Any, key: str, default: Any = None) -> Any:
     return getattr(entry, key, default)
 
 
-def format_audit(entries: Iterable[Any]) -> List[str]:
+def format_audit(entries: Iterable[Any]) -> list[str]:
     """Render entries (dicts or AuditEntry) as compact human-readable lines.
 
     Line shape (inbound rows use ``<-``; a missing channel renders as
-    ``ch=-``; newlines in the preview are escaped and long content
-    truncated)::
+    ``ch=-``; newlines in the preview AND in account/action/note are
+    escaped — a multi-line value must never forge extra log lines — and
+    long content truncated)::
 
         HH:MM:SS -> account action ch=... preview (wait Xms, jitter Yms) note
 
     An empty iterable
     renders as the '(no interactions recorded)' placeholder.
     """
-    lines: List[str] = []
+    lines: list[str] = []
     for entry in entries:
         ts = float(_field(entry, "ts", 0.0) or 0.0)
         clock = time.strftime("%H:%M:%S", time.localtime(ts))
         arrow = "->" if _field(entry, "direction", "") == "out" else "<-"
-        account = str(_field(entry, "account", "") or "")
-        action = str(_field(entry, "action", "") or "")
+        account = str(_field(entry, "account", "") or "").replace("\n", "\\n")
+        action = str(_field(entry, "action", "") or "").replace("\n", "\\n")
         channel = _field(entry, "channel_id", None)
         channel_text = f"ch={channel}" if channel is not None else "ch=-"
         preview = str(_field(entry, "content", "") or "").replace("\n", "\\n")
@@ -112,7 +122,7 @@ def format_audit(entries: Iterable[Any]) -> List[str]:
         if jitter_ms:
             waits.append(f"jitter {jitter_ms:.0f}ms")
         extra = f" ({', '.join(waits)})" if waits else ""
-        note = str(_field(entry, "note", "") or "")
+        note = str(_field(entry, "note", "") or "").replace("\n", "\\n")
         note_text = f" {note}" if note else ""
         lines.append(
             f"{clock} {arrow} {account:<12}{action:<14}{channel_text:<24}{preview}{extra}{note_text}"
@@ -151,8 +161,8 @@ class AuditRecorder:
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
             raise ValueError(f"audit capacity must be a positive int, got {capacity!r}")
         self._db = db_repo
-        self._ring: Deque[AuditEntry] = deque(maxlen=capacity)
-        self._subscribers: List[Callable[[AuditEntry], None]] = []
+        self._ring: deque[AuditEntry] = deque(maxlen=capacity)
+        self._subscribers: list[Callable[[AuditEntry], None]] = []
         self._lock = threading.Lock()
         # QUEUED PERSISTENCE: the shared engine also used by LogService
         self._persist = PersistQueue("audit")
@@ -160,7 +170,7 @@ class AuditRecorder:
     # ------------------------------------------------- queued persistence
     async def start_persistence(
         self, repo: Any, *, batch: int = 50, interval: float = 0.25
-    ) -> Optional["asyncio.Task"]:
+    ) -> asyncio.Task | None:
         """Spawn the async drain worker (call BEFORE traffic flows).
 
         Batched writes (``repo.add_many``) when available; failures
@@ -177,7 +187,7 @@ class AuditRecorder:
         """Stop the drain worker (idempotent); call BEFORE ``db.close()``."""
         await self._persist.stop(timeout)
 
-    def persistence_stats(self) -> Dict[str, int]:
+    def persistence_stats(self) -> dict[str, int]:
         """Queued-persistence counters (db_failures / dropped)."""
         return self._persist.stats()
 
@@ -186,12 +196,12 @@ class AuditRecorder:
         account: str,
         direction: str,
         action: str,
-        channel_id: Optional[int] = None,
+        channel_id: int | None = None,
         content: str = "",
         wait_ms: float = 0.0,
         jitter_ms: float = 0.0,
         note: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Store one interaction (ring + queued best-effort DB) and notify
         subscribers.
 
@@ -239,7 +249,7 @@ class AuditRecorder:
                 LOG.debug("audit subscriber failed", exc_info=True)
         return payload
 
-    def tail(self, n: int = 50, account: Optional[str] = None) -> List[Dict[str, Any]]:
+    def tail(self, n: int = 50, account: str | None = None) -> list[dict[str, Any]]:
         """Most recent entries as dicts (oldest first), optionally per account.
 
         n <= 0 returns [] — never the whole ring.
@@ -250,7 +260,7 @@ class AuditRecorder:
             ring = list(self._ring)
         if not account:
             return [e.as_dict() for e in ring[-n:]]
-        out: List[AuditEntry] = []
+        out: list[AuditEntry] = []
         for entry in reversed(ring):  # newest first, stop once n found
             if entry.account == account:
                 out.append(entry)
@@ -265,35 +275,56 @@ class AuditRecorder:
             self._subscribers.append(callback)
 
         def _unsubscribe() -> None:
-            with self._lock:
-                try:
-                    self._subscribers.remove(callback)
-                except ValueError:
-                    pass  # already unsubscribed (idempotent)
+            with self._lock, suppress(ValueError):
+                # already unsubscribed (idempotent)
+                self._subscribers.remove(callback)
 
         return _unsubscribe
 
-    async def history(self, limit: int = 200, account: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def history(self, limit: int = 200, account: str | None = None) -> list[dict[str, Any]]:
         """DB-backed history (awaits the repository; falls back to the ring).
 
         Rows coming from the DB drop their internal 'id' and get 'ts'
         rounded so both sources look identical to consumers. Reads are the
         one place audit touches SQLite directly — they run in async
         contexts (dashboard REST / CLI) and never on the record() path.
+
+        Additive partial marker: when the persistence queue has DROPPED or
+        FAILED rows AND the repository returned fewer rows than the ring
+        currently holds, every returned row carries an extra
+        ``'partial': True`` key — the DB view may be short, and consumers
+        (which ignore unknown keys) can surface that instead of silently
+        showing an incomplete history. The DB rows are still returned as-is
+        (never mixed with ring rows: the repository stays authoritative
+        whenever it answers).
         """
         if self._db is not None:
             try:
                 rows = await self._db.recent(limit=limit, account=account)
-                normalized: List[Dict[str, Any]] = []
+                normalized: list[dict[str, Any]] = []
                 for row in rows:
                     row = dict(row)
                     row.pop("id", None)
                     row["ts"] = round(float(row.get("ts") or 0.0), 3)
                     normalized.append(row)
+                pstats = self._persist.stats()
+                if (pstats["dropped"] or pstats["db_failures"]) and (
+                    len(normalized) < self._ring_count(account)
+                ):
+                    for row in normalized:
+                        row["partial"] = True
                 return normalized
             except Exception:
                 LOG.exception("audit history read failed; falling back to ring")
         return self.tail(limit, account)
 
+    def _ring_count(self, account: str | None = None) -> int:
+        """Entries currently held by the in-memory ring (optionally one
+        account's) — the partial-marker comparison source."""
+        with self._lock:
+            if not account:
+                return len(self._ring)
+            return sum(1 for entry in self._ring if entry.account == account)
 
-__all__ = ["AuditRecorder", "AuditEntry", "format_audit"]
+
+__all__ = ["AuditEntry", "AuditRecorder", "format_audit"]

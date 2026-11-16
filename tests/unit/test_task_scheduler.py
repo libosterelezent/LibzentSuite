@@ -377,18 +377,22 @@ class TestCancel(SchedulerTestBase):
         out, so the outbound audit row must exist."""
         task = self.scheduler.submit("alpha", "p", "message", channel_id=1)
         self.sender.outcomes.append(("sleep", 0.08))
-        await self.settle(0.02)  # running inside the sender
+        # deterministic mid-state: the sender HAS been entered
+        self.assertTrue(await self.wait_until(
+            lambda: len(self.sender.calls) == 1))
         self.assertTrue(self.scheduler.cancel(task.id))
-        await self.settle(0.3)
-        self.assertEqual(len(self.audit.calls), 1)
+        self.assertTrue(await self.wait_until(
+            lambda: len(self.audit.calls) == 1))
         self.assertEqual(self.audit.calls[0]["direction"], "out")
 
     async def test_cancel_running_discards_result_after_sender_returns(self) -> None:
         task = self.scheduler.submit("alpha", "p", "message", channel_id=1)
         self.sender.outcomes.append(("sleep", 0.08))
-        await self.settle(0.02)  # task is running inside the sender
+        self.assertTrue(await self.wait_until(
+            lambda: len(self.sender.calls) == 1))   # running inside the sender
         self.assertTrue(self.scheduler.cancel(task.id))
-        await self.settle(0.3)
+        self.assertTrue(await self.wait_until(
+            lambda: task.status == "cancelled"))
         self.assertEqual(len(self.sender.calls), 1)   # sender did run...
         self.assertEqual(task.status, "cancelled")    # ...but the result is discarded
         self.assertIsNone(task.result_summary)
@@ -426,7 +430,7 @@ class TestRetry(SchedulerTestBase):
         self.assertEqual(len(self.sender.calls), 2)   # failed once, retried, succeeded
         self.assertEqual(task.status, "completed")
         self.assertEqual(task.attempts, 1)
-        self.assertEqual(self.sleeps, [0.5])           # first backoff = retry_backoff
+        self.assertEqual(self.sleeps, [])             # delay-free retries
         self.assertEqual(len(self.audit.calls), 1)     # audited exactly once (terminal)
         self.assertEqual(self.audit.calls[0]["note"], "plugin=p task=1 attempts=2")
 
@@ -436,10 +440,13 @@ class TestRetry(SchedulerTestBase):
         await self.settle(0.2)
         self.assertEqual(task.status, "completed")
         self.assertEqual(task.attempts, 1)
-        self.assertEqual(self.sleeps, [0.5])
+        self.assertEqual(self.sleeps, [])  # NO scheduler delay — limiter paces
         self.assertEqual(len(self.sender.calls), 2)
 
-    async def test_backoff_doubles_and_caps(self) -> None:
+    async def test_retries_carry_no_scheduler_delay(self) -> None:
+        """Delay-free scheduling: retries re-enter limiter.acquire
+        immediately; pacing comes exclusively from the limiter (cooldown +
+        action interval), never from a scheduler sleep."""
         task = self.scheduler.submit("alpha", "p", "message", retries=3)
         self.sender.outcomes.extend([
             ("raise", ConnectionError("boom 1")),
@@ -447,7 +454,7 @@ class TestRetry(SchedulerTestBase):
             ("raise", ConnectionError("boom 3")),
         ])
         await self.settle(0.2)
-        self.assertEqual(self.sleeps, [0.5, 1.0, 2.0])
+        self.assertEqual(self.sleeps, [])   # zero scheduler sleeps
         self.assertEqual(task.attempts, 3)
         self.assertEqual(task.status, "completed")
         self.assertEqual(len(self.sender.calls), 4)
@@ -477,20 +484,27 @@ class TestRetry(SchedulerTestBase):
     async def test_timeout_marks_timed_out(self) -> None:
         task = self.scheduler.submit("alpha", "p", "message", timeout=0.05)
         self.sender.outcomes.append(("sleep", 0.5))
-        await self.settle(0.3)
+        # wait for the transition, not the clock: a fixed settle raced the
+        # timeout sweep under load
+        self.assertTrue(await self.wait_until(lambda: task.status == "timed_out"))
         self.assertEqual(task.status, "timed_out")
         self.assertIn("timed out", task.error)
         failed = self.recorder.of(TaskFailed)
         self.assertEqual([e.task_id for e in failed], [task.id])
 
     async def test_timeout_retries_then_times_out(self) -> None:
+        """Budget-expiry is TERMINAL and never auto-retried: the sender may
+        already have the request on the wire (cancelling the wait cannot
+        un-send it), so a retry would DUPLICATE the message — the primary
+        anti-flag hazard for this framework. The sender is therefore
+        invoked EXACTLY ONCE even with retry budget left."""
         task = self.scheduler.submit("alpha", "p", "message", timeout=0.05, retries=1)
         self.sender.outcomes.extend([("sleep", 0.5), ("sleep", 0.5)])
         await self.settle(0.4)
         self.assertEqual(task.status, "timed_out")
-        self.assertEqual(len(self.sender.calls), 2)
-        self.assertEqual(task.attempts, 1)
-        self.assertEqual(self.sleeps, [0.5])
+        self.assertEqual(len(self.sender.calls), 1)  # NO duplicate send
+        self.assertEqual(task.attempts, 0)           # no retry consumed
+        self.assertEqual(self.sleeps, [])
 
     async def test_server_rate_limit_retries_once_even_with_retries_zero(self) -> None:
         """429 contract: server-provided limits ALWAYS earn one retry even
@@ -502,7 +516,7 @@ class TestRetry(SchedulerTestBase):
         self.assertEqual(task.status, "completed")
         self.assertEqual(len(self.sender.calls), 2)  # failed once, retried
         self.assertEqual(task.attempts, 1)
-        self.assertEqual(self.sleeps, [0.5])
+        self.assertEqual(self.sleeps, [])  # the limiter cooldown paces it
         self.assertEqual(self.limiter.reports, [("alpha", "message", 1.0, True)])
 
 
@@ -688,15 +702,21 @@ class TestStopSingleFlight(SchedulerTestBase):
         self.assertEqual(task.status, "completed")  # drained, not cancelled
         self.scheduler.start()
         after = self.scheduler.submit("alpha", "p", "message")
-        await self.settle(0.1)
+        self.assertTrue(await self.wait_until(
+            lambda: after.status == "completed"))
         self.assertEqual(after.status, "completed")  # no stale re-cancel
 
 
 # --------------------------------------------- exactly-once races (round 2)
 class TestExactlyOnceRaces(SchedulerTestBase):
-    async def test_timeout_retry_then_success_records_exactly_once(self) -> None:
+    async def test_retry_then_success_records_exactly_once(self) -> None:
+        """Retries that are still legal (ConnectionError: provably not on
+        the wire) keep the exactly-once recording contract: one row and
+        one audit row across both attempts. (The former timeout-then-ok
+        variant is gone: budget expiry is now terminal — see
+        test_timeout_retries_then_times_out.)"""
         task = self.scheduler.submit("alpha", "p", "message", timeout=0.05, retries=1)
-        self.sender.outcomes.extend([("sleep", 0.5), ("ok", None)])
+        self.sender.outcomes.extend([("raise", ConnectionError("reset")), ("ok", None)])
         await self.settle(0.4)
         self.assertEqual(task.status, "completed")
         self.assertEqual(len(self.repo.add_calls), 1)  # one row, two sends
@@ -725,60 +745,9 @@ class TestExactlyOnceRaces(SchedulerTestBase):
 
 
 # ------------------------------------------- backoff cancel latency (round 2)
-class TestBackoffInterruption(SchedulerTestBase):
-    async def test_cancel_during_backoff_interrupts_sleep(self) -> None:
-        async def flaky(task):
-            raise ConnectionError("net down")
-
-        self.scheduler._sender = flaky
-        self.scheduler._retry_backoff = 5.0
-        del self.scheduler._sleep  # real sleep: prove the wake, not the seam
-        task = self.scheduler.submit("alpha", "p", "message", retries=3)
-        self.assertTrue(await self.wait_until(lambda: task.attempts == 1))
-        loop = asyncio.get_running_loop()
-        t0 = loop.time()
-        self.assertTrue(self.scheduler.cancel(task.id))
-        self.assertTrue(
-            await self.wait_until(lambda: task.status == "cancelled", timeout=1.0)
-        )
-        self.assertLess(loop.time() - t0, 1.0)  # NOT the remaining ~5s backoff
-        self.assertTrue(  # row + terminal event land via the detached tail
-            await self.wait_until(
-                lambda: self.repo.add_calls
-                and self.repo.add_calls[0]["status"] == "cancelled"
-                and self.recorder.of(TaskCancelled),
-                timeout=2.0,
-            )
-        )
-
-    async def test_cancel_matching_during_backoff_interrupts_sleep(self) -> None:
-        async def flaky(task):
-            raise ConnectionError("net down")
-
-        self.scheduler._sender = flaky
-        self.scheduler._retry_backoff = 5.0
-        del self.scheduler._sleep
-        task = self.scheduler.submit("alpha", "p", "message", retries=3)
-        self.assertTrue(await self.wait_until(lambda: task.attempts == 1))
-        loop = asyncio.get_running_loop()
-        t0 = loop.time()
-        self.assertEqual(self.scheduler.cancel_matching(account="alpha"), 1)
-        self.assertTrue(
-            await self.wait_until(lambda: task.status == "cancelled", timeout=1.0)
-        )
-        self.assertLess(loop.time() - t0, 1.0)
-
-    async def test_backoff_without_cancel_still_sleeps_the_full_delay(self) -> None:
-        self.scheduler._retry_backoff = 0.02
-        del self.scheduler._sleep
-        task = self.scheduler.submit("alpha", "p", "message", retries=1)
-        self.sender.outcomes.append(("raise", ConnectionError("x")))
-        await self.settle(0.1)
-        self.assertEqual(task.status, "completed")
-        self.assertEqual(len(self.sender.calls), 2)  # retry happened after backoff
-
-
-# ------------------------------------------------ worker death (round 2)
+# (TestBackoffInterruption removed: retries carry no scheduler
+# delay anymore — there is no backoff sleep to interrupt. Cancel
+# lands at the standard checkpoints after the grant/sender.)
 class TestWorkerDeath(SchedulerTestBase):
     async def test_lane_death_orphans_queue_but_submit_respawns(self) -> None:
         """A lane task dying outside stop() (crash shape): the in-flight task
@@ -787,18 +756,20 @@ class TestWorkerDeath(SchedulerTestBase):
         hold = asyncio.Event()
         self.sender.hold = hold
         t1 = self.scheduler.submit("alpha", "p", "message", channel_id=1)
-        await self.settle(0.02)  # t1 running, held inside the sender
+        self.assertTrue(await self.wait_until(
+            lambda: t1.status == "running"))   # t1 held inside the sender
         t2 = self.scheduler.submit("alpha", "p", "message", channel_id=2)
         lane = self.scheduler._lanes["alpha"]
         lane.cancel()  # simulate worker death (NOT a scheduler stop)
-        await asyncio.sleep(0.05)
+        self.assertTrue(await self.wait_until(
+            lambda: t1.status == "cancelled" and lane.done()))
         self.assertEqual(t1.status, "cancelled")  # in-flight task terminal
         self.assertEqual(t2.status, "queued")  # orphaned until a new submit
-        self.assertTrue(lane.done())
 
         hold.set()
         t3 = self.scheduler.submit("alpha", "p", "message", channel_id=3)
-        await self.settle(0.3)
+        self.assertTrue(await self.wait_until(
+            lambda: t3.status == "completed"))
         self.assertEqual(t2.status, "completed")  # respawned lane drains it
         self.assertEqual(t3.status, "completed")
         self.assertEqual([t.id for t in self.sender.calls], [t1.id, t2.id, t3.id])
@@ -854,6 +825,7 @@ class TestStressExactlyOnce(SchedulerTestBase):
         audited = {
             t.id for t in tasks
             if t.action in ("message", "dm") and t.sender_ran
+            and t.wire_sent is not False  # pre-wire failures are unaudited
         }
         self.assertEqual(len(self.audit.calls), len(audited))
         for account in accounts:
@@ -864,15 +836,21 @@ class TestStressExactlyOnce(SchedulerTestBase):
 class TestHistoryAndStats(SchedulerTestBase):
     async def test_history_recorded_once_per_terminal_task(self) -> None:
         t1 = self.scheduler.submit("alpha", "p", "message")              # completes
-        await self.settle(0.02)
+        # wait for the PREVIOUS task's outcome to be consumed before
+        # queueing the next — the shared outcome deque is eaten by
+        # whichever send runs, so ordering must never ride the clock
+        self.assertTrue(await self.wait_until(lambda: t1.status == "completed"))
         t2 = self.scheduler.submit("alpha", "p", "message", retries=1)   # retries once
         # self-contained outcome list: attempt 1 raises, attempt 2 succeeds —
         # never depends on when LATER tasks append their own outcomes
         self.sender.outcomes.extend([("raise", ConnectionError("x")), ("ok", None)])
-        await self.settle(0.05)
+        self.assertTrue(await self.wait_until(lambda: t2.status == "completed"))
         t3 = self.scheduler.submit("beta", "p", "message")
         self.sender.outcomes.append(("raise", FlowBlocked("beta", "nope")))
-        await self.settle(0.1)
+        self.assertTrue(await self.wait_until(lambda: t3.status == "failed"))
+        # the history ROW write trails the in-memory status flip by a tick —
+        # wait for the record itself, not the status
+        self.assertTrue(await self.wait_until(lambda: len(self.repo.add_calls) >= 3))
 
         self.assertEqual(len(self.repo.add_calls), 3)
         self.assertEqual([c["id"] for c in self.repo.add_calls], [t1.id, t2.id, t3.id])
@@ -913,17 +891,17 @@ class TestHistoryAndStats(SchedulerTestBase):
             await scheduler.stop(drain=False)
 
     async def test_stats_counts_and_avg_duration(self) -> None:
-        self.scheduler.submit("alpha", "p", "message")                              # ok
-        await self.settle(0.02)
-        self.scheduler.submit("alpha", "p", "message", retries=1)                    # retry -> ok
+        ok1 = self.scheduler.submit("alpha", "p", "message")                        # ok
+        self.assertTrue(await self.wait_until(lambda: ok1.status == "completed"))
+        ok2 = self.scheduler.submit("alpha", "p", "message", retries=1)             # retry -> ok
         self.sender.outcomes.extend([("raise", ConnectionError("x")), ("ok", None)])
-        await self.settle(0.05)
-        self.scheduler.submit("alpha", "p", "message")                              # FlowBlocked
+        self.assertTrue(await self.wait_until(lambda: ok2.status == "completed"))
+        fail = self.scheduler.submit("alpha", "p", "message")                       # FlowBlocked
         self.sender.outcomes.append(("raise", FlowBlocked("alpha", "blocked")))
-        await self.settle(0.05)
-        self.scheduler.submit("alpha", "p", "message", timeout=0.05)                 # timeout
+        self.assertTrue(await self.wait_until(lambda: fail.status == "failed"))
+        slow = self.scheduler.submit("alpha", "p", "message", timeout=0.05)         # timeout
         self.sender.outcomes.append(("sleep", 0.5))
-        await self.settle(0.5)
+        self.assertTrue(await self.wait_until(lambda: slow.status == "timed_out"))
 
         stats = self.scheduler.stats()
         self.assertEqual(stats["completed"], 2)
@@ -940,14 +918,16 @@ class TestHistoryAndStats(SchedulerTestBase):
         hold = asyncio.Event()
         self.sender.hold = hold
         t1 = self.scheduler.submit("alpha", "p", "message")
-        await self.settle(0.02)               # t1 running (held in sender)
+        self.assertTrue(await self.wait_until(
+            lambda: t1.status == "running"))        # t1 held inside the sender
         t2 = self.scheduler.submit("alpha", "p", "message")   # queued behind
         live = self.scheduler.tasks()
         self.assertEqual([r["id"] for r in live], [t1.id, t2.id])
         self.assertEqual([r["status"] for r in live], ["running", "queued"])
 
         hold.set()
-        await self.settle(0.2)
+        self.assertTrue(await self.wait_until(
+            lambda: t2.status == "completed"))
         rows = self.scheduler.tasks()
         self.assertEqual([r["id"] for r in rows], [t1.id, t2.id])
         self.assertEqual([r["status"] for r in rows], ["completed", "completed"])
@@ -1010,10 +990,9 @@ class TestValidation(SchedulerTestBase):
         bus, logger, limiter, sender = self.bus, FakeLogger(), FakeLimiter(), FakeSender()
         with self.assertRaises(ValueError):
             TaskScheduler(bus, logger, limiter, sender, default_timeout=-1)
-        with self.assertRaises(ValueError):
-            TaskScheduler(bus, logger, limiter, sender, retry_backoff=-0.5)
-        with self.assertRaises(ValueError):
-            TaskScheduler(bus, logger, limiter, sender, max_backoff=float("nan"))
+        # retry_backoff/max_backoff kept for API compat (unused now —
+        # pacing is exclusively the limiter's), so they are no longer
+        # validated as pacing parameters
 
 
 # ------------------------------------------- stop hardening (round 3)
@@ -1323,3 +1302,49 @@ class TestRestoreSequence(SchedulerTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+# ----------------------------------------------- delay-free scheduling
+class TestDelayFreeScheduling(unittest.TestCase):
+    """Scheduler owns NO pacing: retries re-enter the limiter immediately
+    (its cooldown + interval own every delay), and bucket capture is gone
+    (429 counters instead)."""
+
+    def test_scheduler_has_no_backoff_machinery(self) -> None:
+        from core.task_scheduler.scheduler import TaskScheduler
+        import inspect
+        src = inspect.getsource(TaskScheduler)
+        self.assertNotIn("_sleep_backoff", src)
+        self.assertNotIn("_backoff_wakers", src)
+
+    def test_engine_counts_429_per_account(self) -> None:
+        from core.event_bus import EventBus
+        from core.rate_limit_manager import RateLimitManager
+        lim = RateLimitManager(EventBus(), _StubLogger(), None)
+        self.assertEqual(lim.stats()["hits_429"], {"accounts": {}, "total": 0})
+        lim.report_server_limit("alpha", "message", 1.0, False)
+        lim.report_server_limit("alpha", "message", 1.0, False)
+        lim.report_server_limit("beta", "message", 1.0, True)
+        s = lim.stats()["hits_429"]
+        self.assertEqual(s["accounts"], {"alpha": 2, "beta": 1})
+        self.assertEqual(s["total"], 3)
+
+    def test_engine_has_no_bucket_capture(self) -> None:
+        from core.rate_limit_manager import RateLimitManager
+        self.assertFalse(hasattr(RateLimitManager, "report_bucket"))
+        self.assertFalse(hasattr(RateLimitManager, "_bucket_block"))
+
+    def test_effective_interval_reads_policy_layers(self) -> None:
+        from core.event_bus import EventBus
+        from core.rate_limit_manager import RateLimitManager
+        lim = RateLimitManager(EventBus(), _StubLogger(), None)
+        lim.set_policy_values("message", 2.6)
+        self.assertAlmostEqual(lim.effective_interval("message"), 2.6)
+        lim.set_policy_values("message", 4.0, level="account", owner="a1")
+        self.assertAlmostEqual(lim.effective_interval("message", "a1"), 4.0)
+        self.assertAlmostEqual(lim.effective_interval("message", "a2"), 2.6)
+
+
+class _StubLogger:
+    def info(self, *a, **k): pass
+    def warning(self, *a, **k): pass
+    def error(self, *a, **k): pass

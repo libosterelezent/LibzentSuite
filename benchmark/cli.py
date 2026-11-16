@@ -1,6 +1,7 @@
 """Benchmark CLI (house style of scripts/bench_db.py). Routed from
 ``main.py --bench`` BEFORE any live boot, or runnable as
 ``python -m benchmark``."""
+
 from __future__ import annotations
 
 import argparse
@@ -9,71 +10,85 @@ import os
 import platform
 import sys
 import time
-from types import SimpleNamespace as NS
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any
 
-from benchmark import SCHEMA
 from benchmark.collector import PerfCollector
-from benchmark.report import compare, load_json, render_table, to_json
+from benchmark.report import SCHEMA, compare, load_json, render_table, to_json
 from benchmark.sampler import SamplerSession, SpikeCapture
-
 from benchmark.scenarios import BENCH_SCENARIOS
+
+if TYPE_CHECKING:
+    from types import SimpleNamespace as NS
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="benchmark",
-        description="SlaughterMudade framework benchmark (isolated, "
-                    "fakes/simulation only — never real Discord, never "
-                    "state/slaughter.db)")
-    parser.add_argument("--scenario", action="append", default=None,
-                        help="scenario name (repeatable; default: all)")
-    parser.add_argument("--list", action="store_true",
-                        help="list scenarios and exit")
+        description="LibzentSuite framework benchmark (isolated, "
+        "fakes/simulation only — never real Discord, never "
+        "state/libzent.db)",
+    )
+    parser.add_argument(
+        "--scenario", action="append", default=None, help="scenario name (repeatable; default: all)"
+    )
+    parser.add_argument("--list", action="store_true", help="list scenarios and exit")
     parser.add_argument("--accounts", type=int, default=5)
     parser.add_argument("--duration", type=float, default=2.0)
-    parser.add_argument("--cycles", type=int, default=None,
-                        help="override the scenario's default cycle count")
+    parser.add_argument(
+        "--cycles", type=int, default=None, help="override the scenario's default cycle count"
+    )
     parser.add_argument("--records", type=int, default=10_000)
     parser.add_argument("--messages", type=int, default=5_000)
     parser.add_argument("--burst", type=int, default=200)
     parser.add_argument("--ops", type=int, default=2_000)
     parser.add_argument("--keys", type=int, default=2_000)
     parser.add_argument("--waiters", type=int, default=4)
-    parser.add_argument("--severity", default="INFO",
-                        choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--severity", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--sampling-ms", type=int, default=100)
-    parser.add_argument("--loop-interval-ms", type=int, default=5,
-                        help="1 = stall-hunt mode")
+    parser.add_argument("--loop-interval-ms", type=int, default=5, help="1 = stall-hunt mode")
     parser.add_argument("--task-interval-ms", type=int, default=1000)
     parser.add_argument("--json", default=None, help="write JSON report")
-    parser.add_argument("--save-baseline", action="store_true",
-                        help="also store the report as the compare baseline")
-    parser.add_argument("--compare", default=None,
-                        help="compare against a previous JSON report")
+    parser.add_argument(
+        "--save-baseline", action="store_true", help="also store the report as the compare baseline"
+    )
+    parser.add_argument("--compare", default=None, help="compare against a previous JSON report")
     # FINAL-PHASE (F6): profiling modes (mutually exclusive — one
     # perturbation at a time; NOT comparable to normal numbers)
-    parser.add_argument("--profile", action="store_true",
-                        help="cProfile each scenario (excluded from compare)")
-    parser.add_argument("--profile-dir", default=None,
-                        help="directory for .pstats dumps "
-                             "(default: state/benchmarks/profiles)")
-    parser.add_argument("--profile-top", type=int, default=15,
-                        help="top-N functions printed/embedded per scenario")
-    parser.add_argument("--tracemalloc", action="store_true",
-                        help="trace allocation sites per scenario boundary")
-    parser.add_argument("--trace-depth", type=int, default=1,
-                        help="tracemalloc frame depth (default 1)")
-    parser.add_argument("--trace-top", type=int, default=10,
-                        help="top-N allocation sites per boundary")
-    parser.add_argument("--repeat", type=int, default=1,
-                        help="re-run each scenario N times; report "
-                             "median/min/max per metric (refused with "
-                             "--profile/--tracemalloc)")
-    parser.add_argument("--capture-spikes", action="store_true",
-                        help="capture diagnostic snapshots on loop-lag/RSS "
-                             "spikes (DEEP_DIAGNOSTIC mode, excluded from "
-                             "compare; combinable with --tracemalloc)")
+    parser.add_argument(
+        "--profile", action="store_true", help="cProfile each scenario (excluded from compare)"
+    )
+    parser.add_argument(
+        "--profile-dir",
+        default=None,
+        help="directory for .pstats dumps (default: state/benchmarks/profiles)",
+    )
+    parser.add_argument(
+        "--profile-top", type=int, default=15, help="top-N functions printed/embedded per scenario"
+    )
+    parser.add_argument(
+        "--tracemalloc", action="store_true", help="trace allocation sites per scenario boundary"
+    )
+    parser.add_argument(
+        "--trace-depth", type=int, default=1, help="tracemalloc frame depth (default 1)"
+    )
+    parser.add_argument(
+        "--trace-top", type=int, default=10, help="top-N allocation sites per boundary"
+    )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="re-run each scenario N times; report "
+        "median/min/max per metric (refused with "
+        "--profile/--tracemalloc)",
+    )
+    parser.add_argument(
+        "--capture-spikes",
+        action="store_true",
+        help="capture diagnostic snapshots on loop-lag/RSS "
+        "spikes (DEEP_DIAGNOSTIC mode, excluded from "
+        "compare; combinable with --tracemalloc)",
+    )
     parser.add_argument("--quiet", action="store_true")
     return parser
 
@@ -85,17 +100,15 @@ def _list_scenarios() -> str:
     return "\n".join(lines)
 
 
-async def run_suite(args: NS) -> Dict[str, Any]:
+async def run_suite(args: NS) -> dict[str, Any]:
     names = args.scenario or list(BENCH_SCENARIOS)
     unknown = [n for n in names if n not in BENCH_SCENARIOS]
     if unknown:
-        raise SystemExit(
-            f"unknown scenario(s) {unknown}; known: {list(BENCH_SCENARIOS)}")
-    report: Dict[str, Any] = {
+        raise SystemExit(f"unknown scenario(s) {unknown}; known: {list(BENCH_SCENARIOS)}")
+    report: dict[str, Any] = {
         "schema": SCHEMA,
         "meta": {
-            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                        time.gmtime()),
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "python": platform.python_version(),
             "platform": platform.platform(),
             "cpu_count": os.cpu_count(),
@@ -113,6 +126,7 @@ async def run_suite(args: NS) -> Dict[str, Any]:
     # is <0.5%/op so benchmark-mode numbers STAY comparable — unlike
     # --profile runs, which remain compare-excluded.
     from database.telemetry import TELEMETRY
+
     TELEMETRY.enabled = True
     run_mode = _run_mode(args)
     report["meta"]["run_mode"] = run_mode
@@ -120,22 +134,22 @@ async def run_suite(args: NS) -> Dict[str, Any]:
     try:
         for name in names:
             scenario = BENCH_SCENARIOS[name]
-            cycles = (args.cycles if args.cycles is not None
-                      else scenario.default_cycles)
+            cycles = args.cycles if args.cycles is not None else scenario.default_cycles
             if not args.quiet:
                 print(f"== running {name} (cycles={cycles}) ...", flush=True)
             TELEMETRY.reset()
             repeats = max(1, int(getattr(args, "repeat", 1)))
-            run_results: List[Dict[str, Any]] = []
-            all_spikes: List[dict] = []
+            run_results: list[dict[str, Any]] = []
+            all_spikes: list[dict] = []
             for _rep in range(repeats):
                 session = SamplerSession(
                     sampling_ms=args.sampling_ms,
                     loop_interval_ms=args.loop_interval_ms,
                     task_interval_ms=args.task_interval_ms,
-                    spike_capture=(SpikeCapture()
-                                   if getattr(args, "capture_spikes", False)
-                                   else None))
+                    spike_capture=(
+                        SpikeCapture() if getattr(args, "capture_spikes", False) else None
+                    ),
+                )
                 # FINAL-PHASE (F6): per-mode wrapping. Profiled runs are marked
                 # and excluded from compare verdicts (profiler overhead makes
                 # their numbers non-comparable — documented in the README).
@@ -143,6 +157,7 @@ async def run_suite(args: NS) -> Dict[str, Any]:
                 stage_allocs: dict = {}
                 if getattr(args, "tracemalloc", False):
                     from benchmark.profiling import make_alloc_hook
+
                     alloc_hook, stage_allocs = make_alloc_hook(args.trace_top)
                 perf = PerfCollector(alloc_hook=alloc_hook)
                 # reset the per-run leak trackers (module-level series)
@@ -150,41 +165,54 @@ async def run_suite(args: NS) -> Dict[str, Any]:
                 scenario.run._task_series = []
                 if getattr(args, "tracemalloc", False):
                     from benchmark.profiling import trace_reset
+
                     trace_reset()
                     import tracemalloc as _tm
+
                     start_snap = _tm.take_snapshot()
 
-                async def _run_scenario():
+                async def _run_scenario(scenario, session, perf, cycles):
                     return await scenario.run(
-                        session, perf, accounts=args.accounts,
-                        duration=args.duration, cycles=cycles,
-                        records=args.records, messages=args.messages,
-                        burst=args.burst, ops=args.ops, keys=args.keys,
-                        waiters=args.waiters, severity=args.severity)
+                        session,
+                        perf,
+                        accounts=args.accounts,
+                        duration=args.duration,
+                        cycles=cycles,
+                        records=args.records,
+                        messages=args.messages,
+                        burst=args.burst,
+                        ops=args.ops,
+                        keys=args.keys,
+                        waiters=args.waiters,
+                        severity=args.severity,
+                    )
 
                 if getattr(args, "profile", False):
                     from benchmark.profiling import cprofile_scope, pstats_top
+
                     profile_dir = args.profile_dir or "state/benchmarks/profiles"
                     dump_path = os.path.join(profile_dir, f"{name}.pstats")
                     with cprofile_scope(dump_path) as prof:
-                        result = await _run_scenario()
+                        result = await _run_scenario(scenario, session, perf, cycles)
                     result["profiled"] = True
                     result["profile"] = {
-                        "mode": "cprofile", "pstats": dump_path,
-                        **pstats_top(prof, args.profile_top)}
+                        "mode": "cprofile",
+                        "pstats": dump_path,
+                        **pstats_top(prof, args.profile_top),
+                    }
                 else:
-                    result = await _run_scenario()
+                    result = await _run_scenario(scenario, session, perf, cycles)
 
                 if getattr(args, "tracemalloc", False):
                     import tracemalloc as _tm
+
                     end_snap = _tm.take_snapshot()
                     current, peak = _tm.get_traced_memory()
                     result["profiled"] = True
                     result.setdefault("profile", {"mode": "tracemalloc"})
                     result.setdefault("custom", {})
                     result["custom"]["allocations"] = {
-                        "total": top_sites_safe(end_snap, start_snap,
-                                                args.trace_top),
+                        "total": top_sites_safe(end_snap, start_snap, args.trace_top),
                         "stages": stage_allocs,
                         "peak_traced_kb": round(peak / 1024.0, 1),
                         "traced_end_kb": round(current / 1024.0, 1),
@@ -196,22 +224,22 @@ async def run_suite(args: NS) -> Dict[str, Any]:
                     all_spikes.extend(session.spike_capture.captures)
                 run_results.append(result)
             # per-run trackers reset for the next repeat
-            scenario.run._rss_series = getattr(
-                scenario.run, "_rss_series", []) and []
-        result = run_results[0]
-        if repeats > 1:
-            from benchmark.report import aggregate_repeats
-            result["repeat"] = aggregate_repeats(run_results)
-            result["passed"] = all(r.get("passed") for r in run_results)
-        if all_spikes:
-            result["spikes"] = all_spikes[:20]
-            result["spikes_truncated"] = len(all_spikes) > 20
-        if getattr(args, "capture_spikes", False):
-            result["profiled"] = True  # DEEP_DIAGNOSTIC: compare-excluded
-        result["name"] = name
-        result["cycles"] = cycles
-        result.setdefault("mode", run_mode)
-        report["scenarios"].append(result)
+            scenario.run._rss_series = getattr(scenario.run, "_rss_series", []) and []
+            result = run_results[0]
+            if repeats > 1:
+                from benchmark.report import aggregate_repeats
+
+                result["repeat"] = aggregate_repeats(run_results)
+                result["passed"] = all(r.get("passed") for r in run_results)
+            if all_spikes:
+                result["spikes"] = all_spikes[:20]
+                result["spikes_truncated"] = len(all_spikes) > 20
+            if getattr(args, "capture_spikes", False):
+                result["profiled"] = True  # DEEP_DIAGNOSTIC: compare-excluded
+            result["name"] = name
+            result["cycles"] = cycles
+            result.setdefault("mode", run_mode)
+            report["scenarios"].append(result)
         report["meta"]["duration_s"] = round(time.perf_counter() - started, 2)
         return report
     finally:
@@ -220,13 +248,15 @@ async def run_suite(args: NS) -> Dict[str, Any]:
         # still-running process.
         if getattr(args, "tracemalloc", False):
             import tracemalloc as _tm
+
             if _tm.is_tracing():
                 _tm.stop()
         TELEMETRY.enabled = False
 
 
-def top_sites_safe(end_snap: Any, start_snap: Any, n: int) -> List[dict]:
+def top_sites_safe(end_snap: Any, start_snap: Any, n: int) -> list[dict]:
     from benchmark.profiling import top_sites
+
     try:
         return top_sites(end_snap.compare_to(start_snap, "lineno"), n)
     except Exception:
@@ -245,32 +275,31 @@ def _run_mode(args: NS) -> str:
     return "BASELINE"
 
 
-def run_bench_cli(argv: List[str] | None = None) -> int:
+def run_bench_cli(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.list:
         print(_list_scenarios())
         return 0
     if args.profile and args.tracemalloc:
         raise SystemExit(
-            "--profile and --tracemalloc are mutually exclusive "
-            "(pick one perturbation)")
+            "--profile and --tracemalloc are mutually exclusive (pick one perturbation)"
+        )
     if args.profile and args.save_baseline:
-        raise SystemExit(
-            "refusing --save-baseline: profiled numbers are not comparable")
+        raise SystemExit("refusing --save-baseline: profiled numbers are not comparable")
     if args.repeat > 1 and (args.profile or args.tracemalloc):
         raise SystemExit(
             "--repeat requires an unprofiled run (profiler overhead/"
-            "attribution makes repeats meaningless)")
+            "attribution makes repeats meaningless)"
+        )
     if args.capture_spikes and args.profile:
         raise SystemExit(
-            "--capture-spikes with --profile would self-observe profiler "
-            "overhead as spikes")
+            "--capture-spikes with --profile would self-observe profiler overhead as spikes"
+        )
     if args.capture_spikes and args.save_baseline:
-        raise SystemExit(
-            "refusing --save-baseline: DEEP_DIAGNOSTIC runs are not "
-            "comparable")
+        raise SystemExit("refusing --save-baseline: DEEP_DIAGNOSTIC runs are not comparable")
     if args.tracemalloc:
         import tracemalloc as _tm
+
         _tm.start(args.trace_depth)
     report = asyncio.run(run_suite(args))
     print(render_table(report))

@@ -25,11 +25,9 @@ Accounts
 Rate limiting
 -------------
 .. automodule:: core.rate_limit_manager.engine
-   :members: RateLimitManager, Grant
+   :members: RateLimitManager, Grant, DEFAULT_ACTION_INTERVALS
 .. automodule:: core.rate_limit_manager.policies
-   :members: RatePolicy, parse_scope
-.. automodule:: core.rate_limit_manager.lane
-   :members: GlobalSendLane
+   :members: RatePolicy, parse_scope, MIN_ACTION_INTERVAL
 
 Task scheduler
 --------------
@@ -45,19 +43,40 @@ Settings & config
 .. automodule:: core.config
    :members: load_config, ProjectConfig
 
-Profiles (retained future infrastructure)
------------------------------------------
-.. automodule:: core.profile_manager.manager
-   :members: ProfileManager
+Access management (admin panel store)
+--------------------------------------
+.. automodule:: core.access_manager
+   :members: AccessManager, PREFIX_MODES, DEFAULT_ACCOUNT_ROW
 
-Profiles no longer decide which plugins an account runs — that is the
+Credentials views
+-----------------
+.. automodule:: core.credentials
+   :members: Credentials
+
+``AccountPluginServices.credentials`` returns the credentials view the
+account manager was constructed with (the injected ``Credentials``); the
+former ``core.framework_credentials.FrameworkCredentials`` wrapper was
+never constructed anywhere and has been removed.
+
 direct account→plugin assignment (``account_plugins`` table; see
 ``ControlAPI.accounts_plugin_assign`` / ``accounts_plugins_set``).
+Per-plugin **setting** profiles ARE implemented:
+``ControlAPI.plugin_profiles_*`` over the ``plugin_profiles`` table
+(migration v7), with the channel-scope convention owned by
+``core.plugin_scopes``.
 
 Plugins
 -------
 .. automodule:: core.plugin_manager.manager
    :members: PluginManager
+.. automodule:: core.plugin_manager.commands
+   :members: SelfCommandHub, FRAMEWORK_COMMANDS, PacingBackend, render_help
+.. automodule:: core.plugin_base
+   :members: PluginBase, PluginContext, PluginServices, CommandSpec,
+             ArgSpec, CommandContext, CommandSettingsApi, StatCard,
+             PanelSection, UIPanel, parse_command_args, usage_line
+.. automodule:: core.plugin_scopes
+   :members: validate, channel_allowed, CHANNELS_KEY
 
 Remote control
 --------------
@@ -79,8 +98,3 @@ Errors
 ------
 .. automodule:: core.errors
    :members:
-
-Credentials
------------
-.. automodule:: core.credentials
-   :members: Credentials

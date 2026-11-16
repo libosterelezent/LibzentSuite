@@ -9,11 +9,12 @@ Rows map to/from plain dicts in the Task.as_dict() shape; unknown keys are
 ignored, and "result_summary" is accepted as an alias for "summary"
 (both spellings circulate in the contract).
 """
+
 from __future__ import annotations
 
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from core.errors import DatabaseError
 
@@ -23,9 +24,20 @@ __all__ = ["TaskHistoryRepository"]
 
 #: whitelisted task_history columns (also guards the f-string UPDATE)
 _TASK_COLUMNS = (
-    "id", "name", "account", "plugin", "action", "status", "priority",
-    "submitted_at", "started_at", "finished_at", "attempts", "duration_s",
-    "error", "summary",
+    "id",
+    "name",
+    "account",
+    "plugin",
+    "action",
+    "status",
+    "priority",
+    "submitted_at",
+    "started_at",
+    "finished_at",
+    "attempts",
+    "duration_s",
+    "error",
+    "summary",
 )
 
 
@@ -37,7 +49,7 @@ class TaskHistoryRepository(BaseRepository):
         super().__init__(database)
         self._keep = max(0, int(keep))
 
-    async def add(self, entry: Dict[str, Any]) -> int:
+    async def add(self, entry: dict[str, Any]) -> int:
         """Insert one history row; returns its id.
 
         Only whitelisted columns are taken from ``entry`` (extra keys are
@@ -50,7 +62,7 @@ class TaskHistoryRepository(BaseRepository):
         """
         if not isinstance(entry, dict):
             raise DatabaseError(f"task history entry must be a dict, got {type(entry).__name__}")
-        row: Dict[str, Any] = {}
+        row: dict[str, Any] = {}
         for col in _TASK_COLUMNS:
             if entry.get(col) is not None:
                 row[col] = entry[col]
@@ -84,7 +96,8 @@ class TaskHistoryRepository(BaseRepository):
         """Highest stored task id (0 when the archive is empty)."""
         row = await self._fetch_one(
             "SELECT COALESCE(MAX(id), 0) AS m FROM task_history",
-            what="read task history high-water mark")
+            what="read task history high-water mark",
+        )
         return int(row["m"]) if row is not None else 0
 
     async def update(self, task_id: int, **fields: Any) -> None:
@@ -97,7 +110,7 @@ class TaskHistoryRepository(BaseRepository):
         """
         if not fields:
             return  # nothing requested — nothing to do (no error)
-        updates: Dict[str, Any] = {}
+        updates: dict[str, Any] = {}
         for key, value in fields.items():
             col = "summary" if key == "result_summary" else key
             if col == "id":
@@ -108,15 +121,17 @@ class TaskHistoryRepository(BaseRepository):
                 )
             updates[col] = value
         assignments = ", ".join(f"{col} = ?" for col in updates)
-        async with self._tx(f"update task history {task_id}") as conn:
-            async with conn.execute(
+        async with (
+            self._tx(f"update task history {task_id}") as conn,
+            conn.execute(
                 f"UPDATE task_history SET {assignments} WHERE id = ?",
                 (*updates.values(), task_id),
-            ) as cur:
-                if cur.rowcount == 0:
-                    raise DatabaseError(f"no task history row for id {task_id}")
+            ) as cur,
+        ):
+            if cur.rowcount == 0:
+                raise DatabaseError(f"no task history row for id {task_id}")
 
-    async def recent(self, limit: int = 50, account: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def recent(self, limit: int = 50, account: str | None = None) -> list[dict[str, Any]]:
         """The newest ``limit`` rows (oldest-first), optionally per-account.
 
         Same DESC-fetch-then-reverse tail ordering as the audit trail, so

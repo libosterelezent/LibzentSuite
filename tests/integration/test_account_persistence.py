@@ -78,15 +78,15 @@ class AccountPersistenceTestBase(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="sm-integ-")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.db_path = self.root / "state" / "slaughter.db"
+        self.db_path = self.root / "state" / "libzent.db"
         self.env_path = self.root / ".env"
         self._old_cwd = os.getcwd()
         os.chdir(self.root)  # relative state/ + .env resolve inside tmp
         self.addCleanup(os.chdir, self._old_cwd)
         # a pinned master key in the environment would change key handling
-        self._old_master = os.environ.pop("SM_MASTER_KEY", None)
+        self._old_master = os.environ.pop("LZ_MASTER_KEY", None)
         if self._old_master is not None:
-            self.addCleanup(os.environ.__setitem__, "SM_MASTER_KEY", self._old_master)
+            self.addCleanup(os.environ.__setitem__, "LZ_MASTER_KEY", self._old_master)
 
     # ------------------------------------------------------------ helpers
     def write_env(self, values: dict[str, str]) -> None:

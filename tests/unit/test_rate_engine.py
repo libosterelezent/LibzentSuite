@@ -25,7 +25,7 @@ from core.rate_limit_manager.engine import (
     _Entry,
 )
 
-ACTION = "message"
+ACTION = "poke"  # no learned default — unstudied-default semantics testable
 
 
 class StubLogger:
@@ -134,12 +134,13 @@ class PacingBasics(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(grant.wait_s, 2.0, places=6)
         self.assertAlmostEqual(manager._clock.now(), 4.0, places=6)
 
-    async def test_no_policy_paces_at_floor(self):
-        manager = make_manager()  # no stored policy -> interval = floor
+    async def test_no_policy_paces_at_unstudied_default(self):
+        # no stored policy -> interval = max(floor, 1.2 s unstudied default)
+        manager = make_manager()
         first = await manager.acquire(ACTION)
         self.assertEqual(first.wait_s, 0.0)
         second = await manager.acquire(ACTION)
-        self.assertAlmostEqual(second.wait_s, 0.05, places=6)
+        self.assertAlmostEqual(second.wait_s, 1.2, places=6)
 
     async def test_pacing_event_published(self):
         bus = EventBus()
@@ -177,7 +178,7 @@ class PacingKeys(unittest.IsolatedAsyncioTestCase):
         beta = await manager.acquire(ACTION, account="beta")
         self.assertAlmostEqual(second.wait_s, 2.0, places=6)
         self.assertEqual(beta.wait_s, 0.0)  # beta has its own key
-        self.assertIn("alpha:message", manager.stats()["last_fire_ages"])
+        self.assertIn("alpha:ACTION", manager.stats()["last_fire_ages"].keys().__class__()) if False else self.assertIn(f"alpha:{ACTION}", manager.stats()["last_fire_ages"])
 
     async def test_account_none_uses_global_key(self):
         manager = make_manager(interval=2.0)
@@ -401,12 +402,12 @@ class ServerCooldowns(unittest.IsolatedAsyncioTestCase):
     async def test_cooldown_remaining_filters(self):
         manager = make_manager()
         manager.report_server_limit("alpha", ACTION, 2.0)
-        manager.report_server_limit("beta", "poke", 3.0)
+        manager.report_server_limit("beta", "other", 3.0)
         self.assertAlmostEqual(manager.cooldown_remaining(), 3.0, places=6)
         self.assertAlmostEqual(manager.cooldown_remaining("alpha"), 2.0, places=6)
-        self.assertAlmostEqual(manager.cooldown_remaining(action="poke"), 3.0, places=6)
-        self.assertAlmostEqual(manager.cooldown_remaining("beta", "poke"), 3.0, places=6)
-        self.assertAlmostEqual(manager.cooldown_remaining("alpha", "poke"), 0.0, places=6)
+        self.assertAlmostEqual(manager.cooldown_remaining(action="other"), 3.0, places=6)
+        self.assertAlmostEqual(manager.cooldown_remaining("beta", "other"), 3.0, places=6)
+        self.assertAlmostEqual(manager.cooldown_remaining("alpha", "other"), 0.0, places=6)
 
     async def test_negative_retry_after_clamped_nonfinite_rejected(self):
         manager = make_manager()
@@ -556,21 +557,23 @@ class WakeMechanics(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(grant.wait_s, 2.5, places=6)
         self.assertEqual(grant.reason, "pacing")
 
-    async def test_clear_policy_wakes_waiters_to_floor(self):
+    async def test_clear_policy_wakes_waiters_to_unstudied_default(self):
         manager = make_manager(manager_cls=GatedSleepManager, interval=6.0)
         await manager.acquire(ACTION)
         task = asyncio.ensure_future(manager.acquire(ACTION))
         await self._let_loop_settle(manager, 1)
         manager.clear_policy("global", None, ACTION)
         await self._let_loop_settle(manager, 2)
-        self.assertAlmostEqual(manager.gates[-1][0], 0.05, places=6)  # floor
+        # cleared -> the 1.2 s unstudied default (>= floor)
+        self.assertAlmostEqual(manager.gates[-1][0], 1.2, places=6)
         manager.gates[-1][1].set()
         grant = await task
-        self.assertAlmostEqual(grant.wait_s, 0.05, places=6)
+        self.assertAlmostEqual(grant.wait_s, 1.2, places=6)
 
 
 class FloorSemantics(unittest.IsolatedAsyncioTestCase):
-    """set_floor: raise-only, never below 1.5s, clamps effective pacing."""
+    """set_floor: raise-only, never below MIN_ACTION_INTERVAL, clamps
+    effective pacing."""
 
     async def test_raise_floor(self):
         manager = make_manager()
@@ -720,7 +723,7 @@ class StatsShape(unittest.IsolatedAsyncioTestCase):
         stats = manager.stats()
         self.assertEqual(
             set(stats),
-            {"floor", "lane", "groups", "policies", "cooldowns", "discord_buckets", "last_fire_ages",
+            {"floor", "lane", "groups", "policies", "cooldowns", "hits_429", "last_fire_ages",
              "grants", "waits", "avg_wait_s"},
         )
         self.assertEqual(stats["floor"], 0.05)

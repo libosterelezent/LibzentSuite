@@ -94,7 +94,7 @@ class FakeControlAPI:
             out["credential"] = "db"  # status only — never the value
         return out
 
-    async def accounts_remove(self, name):
+    async def accounts_remove(self, name, surface="api"):
         self._record("accounts_remove", name)
         return {"removed": name}
 
@@ -150,7 +150,8 @@ def http_get(url: str, token: str | None = TOKEN) -> tuple[int, str]:
         with urllib.request.urlopen(request, timeout=5) as response:
             return response.status, response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8")
+        with exc:
+            return exc.code, exc.read().decode("utf-8")
 
 
 def http_post(url: str, payload, token: str | None = TOKEN) -> tuple[int, str]:
@@ -163,7 +164,8 @@ def http_post(url: str, payload, token: str | None = TOKEN) -> tuple[int, str]:
         with urllib.request.urlopen(request, timeout=10) as response:
             return response.status, response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8")
+        with exc:
+            return exc.code, exc.read().decode("utf-8")
 
 
 def get_json(text: str) -> dict:
@@ -343,7 +345,7 @@ class TestCredentialGateNoToken(_ServerTestCase):
     async def test_spa_served_unauthenticated(self) -> None:
         status, body = await asyncio.to_thread(http_get, self.url("/"), None)
         self.assertEqual(status, 200)
-        self.assertIn("SlaughterMudae", body)
+        self.assertIn("LibzentSuite", body)
 
     async def test_normal_routes_still_open(self) -> None:
         status, body = await asyncio.to_thread(

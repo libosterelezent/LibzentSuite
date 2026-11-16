@@ -23,19 +23,23 @@ at construction time — finite numbers (NaN previously slipped through float
 comparisons and poisoned buckets), sane caps so a stray 1e9 can not wedge the
 fleet, and precise human-readable RatePolicyError messages.
 
-The *safety floor* (MIN_ACTION_INTERVAL — no policy faster than 1.5s/action)
+The *safety floor* (MIN_ACTION_INTERVAL — the validation minimum; the
+shipped default floor comes from the config/boot wiring, and a fleet
+operator can raise it at any time via the dashboard)
 is enforced by the manager (engine.py) at set time, not here: RatePolicy
 itself only guarantees structural sanity so a malformed object can never
 exist, even programmatically.
 """
+
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple, Union
+from typing import Any
+
+from database.models import POLICY_LEVELS
 
 from ..errors import RatePolicyError
-from database.models import POLICY_LEVELS
 
 #: hard safety floor: no rate policy faster than this can ever be SET
 #: (enforced by RateLimitManager.set_policy / set_policy_values).
@@ -83,9 +87,7 @@ class RatePolicy:
         for name in ("interval", "jitter_min", "jitter_max"):
             raw = getattr(self, name)
             if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-                raise RatePolicyError(
-                    f"policy {name} must be a number, got {raw!r}"
-                )
+                raise RatePolicyError(f"policy {name} must be a number, got {raw!r}")
             object.__setattr__(self, name, float(raw))
 
         if not math.isfinite(self.interval) or self.interval <= 0:
@@ -99,9 +101,7 @@ class RatePolicy:
         for name in ("jitter_min", "jitter_max"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
-                raise RatePolicyError(
-                    f"policy {name} must be a finite number >= 0, got {value!r}"
-                )
+                raise RatePolicyError(f"policy {name} must be a finite number >= 0, got {value!r}")
         if self.jitter_max < self.jitter_min:
             raise RatePolicyError(
                 f"policy jitter_max {self.jitter_max:g}s is below jitter_min "
@@ -109,8 +109,7 @@ class RatePolicy:
             )
         if self.jitter_max > MAX_JITTER:
             raise RatePolicyError(
-                f"policy jitter_max {self.jitter_max:g}s exceeds the "
-                f"{MAX_JITTER:g}s cap"
+                f"policy jitter_max {self.jitter_max:g}s exceeds the {MAX_JITTER:g}s cap"
             )
 
     def __str__(self) -> str:
@@ -121,9 +120,7 @@ class RatePolicy:
         return text
 
 
-def parse_scope(
-    level: Any, owner: Any
-) -> Tuple[str, Optional[str]]:
+def parse_scope(level: Any, owner: Any) -> tuple[str, str | None]:
     """Validate + normalize a (level, owner) policy scope.
 
     Rules (mirrors database.models.RatePolicyRecord semantics):
@@ -141,21 +138,22 @@ def parse_scope(
         RatePolicyError: with a human-readable reason for any invalid scope.
     """
     if not isinstance(level, str) or level not in POLICY_LEVELS:
-        raise RatePolicyError(
-            f"unknown policy level {level!r} (use one of {list(POLICY_LEVELS)})"
-        )
+        raise RatePolicyError(f"unknown policy level {level!r} (use one of {list(POLICY_LEVELS)})")
     if level == "global":
         if owner not in (None, ""):
             raise RatePolicyError(
-                f"global policies apply to every account — pass owner=None, "
-                f"got {owner!r}"
+                f"global policies apply to every account — pass owner=None, got {owner!r}"
             )
         return "global", None
     if not isinstance(owner, str) or not owner.strip():
-        raise RatePolicyError(
-            f"policy level {level!r} requires an owner "
-            f"({'account name' if level == 'account' else 'plugin name' if level == 'plugin' else '\"account/plugin\"'})"
+        kind = (
+            "account name"
+            if level == "account"
+            else "plugin name"
+            if level == "plugin"
+            else "'account/plugin'"
         )
+        raise RatePolicyError(f"policy level {level!r} requires an owner ({kind})")
     owner = owner.strip()
     if level == "account_plugin":
         parts = owner.split("/")
@@ -168,7 +166,7 @@ def parse_scope(
     return level, owner
 
 
-def policy_from_row(row: Union[Any, dict]) -> Tuple[str, Optional[str], RatePolicy]:
+def policy_from_row(row: Any | dict) -> tuple[str, str | None, RatePolicy]:
     """Convert one repository row into a validated ``(level, owner, policy)``.
 
     Rows arrive either as RatePolicyRecord-shaped objects (attribute access)
@@ -200,9 +198,9 @@ def policy_from_row(row: Union[Any, dict]) -> Tuple[str, Optional[str], RatePoli
 
 
 __all__ = [
-    "MIN_ACTION_INTERVAL",
     "MAX_INTERVAL",
     "MAX_JITTER",
+    "MIN_ACTION_INTERVAL",
     "RatePolicy",
     "parse_scope",
     "policy_from_row",

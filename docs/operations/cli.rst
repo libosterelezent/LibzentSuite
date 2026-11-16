@@ -16,10 +16,7 @@ Groups: ``status`` · ``accounts
 list|add|plugins|plugin-add|plugin-remove|remove|info|credential|enable|
 start|stop|estop`` · ``credentials
 status|import-env`` · ``cooldowns [account]|clear`` · ``plugins
-list|state|enable|disable|settings|set`` · ``profiles
-list|create|delete|assign|unassign`` (retained future infrastructure —
-no capability effect) · ``ratelimit show|stats|set|clear|effective|
-warnings|floor|lane`` · ``tasks list|cancel|history|cancel-matching`` ·
+list|state|enable|disable|settings|setwarnings|floor|lane`` · ``tasks list|cancel|history|cancel-matching`` ·
 ``simulation list|run`` · ``logs [n] [account] [severity]`` · ``audit`` ·
 ``estop [resume]`` · ``help`` · ``quit``. Bare ``cooldowns [account]``
 lists every account's active persistent cooldowns (soonest first).

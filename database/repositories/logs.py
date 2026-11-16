@@ -10,10 +10,11 @@ Both return rows as plain dicts with float timestamps; ``recent`` fetches
 newest-first then reverses, so callers always see OLDEST-FIRST (tail)
 ordering — matching the old audit code and LogService.tail.
 """
+
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from core.errors import DatabaseError
 
@@ -31,7 +32,7 @@ _LOG_SQL = """INSERT INTO logs (ts, severity, source, account, plugin, task_id, 
    VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
 
 
-def _audit_row(entry: Dict[str, Any]) -> tuple:
+def _audit_row(entry: dict[str, Any]) -> tuple:
     if not isinstance(entry, dict):
         raise DatabaseError(f"audit entry must be a dict, got {type(entry).__name__}")
     return (
@@ -47,7 +48,7 @@ def _audit_row(entry: Dict[str, Any]) -> tuple:
     )
 
 
-def _log_row(entry: Dict[str, Any]) -> tuple:
+def _log_row(entry: dict[str, Any]) -> tuple:
     if not isinstance(entry, dict):
         raise DatabaseError(f"log entry must be a dict, got {type(entry).__name__}")
     return (
@@ -58,7 +59,11 @@ def _log_row(entry: Dict[str, Any]) -> tuple:
         entry.get("plugin"),
         entry.get("task_id"),
         entry.get("event"),
-        str(entry.get("message") or ""),
+        # capped like _audit_row's 500-char content: a huge formatted
+        # exception traceback must not bloat every row; 2000 chars keep
+        # the richer context log messages carry while the trail stays
+        # bounded (audit content is 500).
+        str(entry.get("message") or "")[:2000],
     )
 
 
@@ -70,7 +75,7 @@ class AuditRepository(BaseRepository):
         super().__init__(database)
         self._keep = max(0, int(keep))
 
-    async def add(self, entry: Dict[str, Any]) -> None:
+    async def add(self, entry: dict[str, Any]) -> None:
         """Append one interaction record, then prune to the newest ``keep``.
 
         Missing fields get audited-old defaults ('?' markers) so a malformed
@@ -84,7 +89,7 @@ class AuditRepository(BaseRepository):
             await conn.execute(_AUDIT_SQL, row)
             await self._prune_newest(conn, "audit_logs", self._keep)
 
-    async def add_many(self, entries: List[Dict[str, Any]]) -> int:
+    async def add_many(self, entries: list[dict[str, Any]]) -> int:
         """Append a batch in ONE transaction with ONE prune (the queued
         drain worker's fast path); all-or-nothing. Returns rows written."""
         rows = [_audit_row(e) for e in entries]
@@ -95,7 +100,7 @@ class AuditRepository(BaseRepository):
             await self._prune_newest(conn, "audit_logs", self._keep)
         return len(rows)
 
-    async def recent(self, limit: int = 100, account: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def recent(self, limit: int = 100, account: str | None = None) -> list[dict[str, Any]]:
         """The newest ``limit`` audit rows, returned oldest-first.
 
         ``account`` filters to one account's interactions. The DESC-fetch +
@@ -126,19 +131,21 @@ class LogRepository(BaseRepository):
         super().__init__(database)
         self._keep = max(0, int(keep))
 
-    async def add(self, entry: Dict[str, Any]) -> None:
+    async def add(self, entry: dict[str, Any]) -> None:
         """Append one structured log entry, then prune to the newest ``keep``.
 
         Accepts the LogEntry.as_dict() shape; missing fields default safely.
         Severity is upper-cased so dashboard filters match regardless of who
-        wrote the row. Raises DatabaseError for a non-dict entry.
+        wrote the row; message is truncated to 2000 chars (audit's content
+        cap is 500 — logs carry richer text, still bounded). Raises
+        DatabaseError for a non-dict entry.
         """
         row = _log_row(entry)
         async with self._tx("append log entry") as conn:
             await conn.execute(_LOG_SQL, row)
             await self._prune_newest(conn, "logs", self._keep)
 
-    async def add_many(self, entries: List[Dict[str, Any]]) -> int:
+    async def add_many(self, entries: list[dict[str, Any]]) -> int:
         """Append a batch in ONE transaction with ONE prune (all-or-nothing)."""
         rows = [_log_row(e) for e in entries]
         if not rows:
@@ -152,10 +159,10 @@ class LogRepository(BaseRepository):
         self,
         limit: int = 100,
         *,
-        account: Optional[str] = None,
-        severity: Optional[str] = None,
-        source: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        account: str | None = None,
+        severity: str | None = None,
+        source: str | None = None,
+    ) -> list[dict[str, Any]]:
         """The newest ``limit`` log rows (oldest-first), optionally filtered.
 
         Filters AND together: account=, severity= (case-insensitive — stored
@@ -165,7 +172,7 @@ class LogRepository(BaseRepository):
         """
         limit = max(0, int(limit))
         sql = "SELECT * FROM logs WHERE 1 = 1"
-        params: List[Any] = []
+        params: list[Any] = []
         if account is not None:
             sql += " AND account = ?"
             params.append(account)

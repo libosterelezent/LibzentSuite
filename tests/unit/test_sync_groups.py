@@ -205,22 +205,6 @@ class MembershipTests(SyncGroupTestBase):
         await self.manager.set_account_group("alpha", "one")
         self.assertEqual(await self.manager.get_account_group("alpha"), "one")
 
-    async def test_profiles_stay_independent(self) -> None:
-        """Changing a group never modifies profiles (and vice versa)."""
-        await self.db.profiles.upsert("farming", ["roll"])
-        await self.db.accounts.assign_profile("alpha", "farming")
-        await self.manager.create_group("grinders")
-        await self.manager.set_account_group("alpha", "grinders")
-        record = await self.db.accounts.get("alpha")
-        self.assertEqual(record.profiles, ["farming"])
-        self.assertEqual(record.sync_group, "grinders")
-        # and a profile change leaves the group alone
-        await self.db.accounts.unassign_profile("alpha", "farming")
-        self.assertEqual(
-            (await self.db.accounts.get("alpha")).sync_group, "grinders")
-
-
-# ------------------------------------------------------- rename semantics
 class RenameTests(SyncGroupTestBase):
     async def test_rename_moves_runtime_membership(self) -> None:
         """Alpha -> rename -> Raiders must not leave any account paced under
@@ -301,15 +285,13 @@ class AccountLifecycleTests(SyncGroupTestBase):
     def _wiring(self):
         from tests.unit.helpers import (
             FakePluginManager, FakeScheduler, FakeSettings, FakeAudit,
-            FakeClientFactory, FakeProfilesRepo,
+            FakeClientFactory,
         )
-        from core.profile_manager import ProfileManager
         from core.credentials import Credentials
 
         return (
             FakePluginManager(), FakeScheduler(), FakeSettings(), FakeAudit(),
             FakeClientFactory(),
-            ProfileManager(FakeProfilesRepo(), LOG, self.db.accounts),
             Credentials.from_values({}),
         )
 
@@ -319,10 +301,10 @@ class AccountLifecycleTests(SyncGroupTestBase):
         from core.account_manager import AccountManager
 
         (plugins, scheduler, settings, audit, factory,
-         profiles, credentials) = self._wiring()
+         credentials) = self._wiring()
         return AccountManager(
             EventBus(), LOG, self.db.accounts,
-            plugins, profiles, scheduler, settings, audit,
+            plugins, scheduler, settings, audit,
             factory, credentials,
             limiter=limiter if limiter is not None else self.limiter,
             sync_groups=self.manager if sync_mgr == "default" else sync_mgr,
@@ -405,6 +387,10 @@ class RestartTests(SyncGroupTestBase):
         await self.db.close()
         self.db = Database(self.path)
         await self.db.connect()
+        # the base cleanup closes Database#1 (already closed) — Database#2
+        # must be closed too or its worker thread holds groups.db open on
+        # Windows and the temp-dir cleanup fails (PermissionError)
+        self.addAsyncCleanup(self.db.close)
         limiter2 = SleepAdvanceManager(
             EventBus(), StubLogger(), None, clock=ManualClock(0.0),
             jitter_seed=7)
@@ -470,7 +456,10 @@ class LegacyMigrationTests(unittest.IsolatedAsyncioTestCase):
 
         db = Database(self.path)
         applied = await db.connect()
-        self.assertEqual(applied, 2)  # migration 5 (backfill) + 6 (account_plugins)
+        # migrations 5 (sync-group backfill) + 6 (account_plugins) +
+        # 7 (plugin_profiles + binding column) + 8 (drop legacy profile
+        # tables) + 9 (fleet orchestration state)
+        self.assertEqual(applied, 5)
         groups = sorted(
             (g.name, g.enabled) for g in await db.sync_groups.list())
         self.assertEqual(groups, [("Alpha", True), ("Beta", True)])

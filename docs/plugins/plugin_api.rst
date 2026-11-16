@@ -49,10 +49,36 @@ Priority & pacing
 -----------------
 :class:`core.priority.Priority` (``HIGH``/``NORMAL``/``LOW``) orders
 grants inside the limiter. Every services action is paced (per-task +
-group scopes, server-wide lane, 1.5s floor, jitter) — plugins never
-self-throttle.
+group scopes, the learned per-action default intervals, jitter) —
+plugins never self-throttle.
+
+Self-commands & UI extension
+----------------------------
+Plugins may declare ``COMMANDS`` (a tuple of
+:class:`core.plugin_base.CommandSpec`, whose ``args`` are declarative
+:class:`core.plugin_base.ArgSpec` positional grammar) — each verb
+becomes a ``<prefix><command>`` on every account the plugin is
+assigned+enabled on; handlers receive a
+:class:`core.plugin_base.CommandContext` (same ``services`` facade,
+validated ``settings_api``, ``invoker_id``) and reply through the paced
+pipeline. The optional ``ui_stats`` / ``ui_panels`` hooks contribute
+Home-tab :class:`core.plugin_base.StatCard` metric cards and sidebar
+:class:`core.plugin_base.UIPanel` panels (structured data only —
+rendered escaped by the dashboard's own templates). Guide:
+:doc:`writing_plugins`.
 
 Deep dive (why/ownership/errors per method): ``knowledgebase/PLUGIN_API.md``.
 Examples: ``knowledgebase/PLUGIN_EXAMPLES.md``. Anti-patterns:
-``knowledgebase/PLUGIN_ANTIPATTERNS.md`` — if you maintain a local
-knowledgebase; it is not shipped in a fresh clone (see :doc:`/reference/index`).
+``knowledgebase/PLUGIN_ANTIPATTERNS.md``.
+
+
+Dashboard UI runtime guarantees
+    The builder-based Dashboard UI API enforces its contract at runtime:
+    bound-method actions re-bind to the live plugin instance (rejected
+    when no account runtime is active), ``require_account=True`` actions
+    receive a validated account + services context, ``set_disabled`` and
+    visibility checks are enforced server-side (forged requests cannot
+    bypass them), form submissions are schema-validated before the
+    submit callback runs, and synchronous callbacks run in a bounded
+    worker lane in the served stack. Full contract:
+    ``knowledgebase/DASHBOARD_UI_API.md`` §15.

@@ -3,6 +3,7 @@
 Lives in its own tiny module so neither component imports the other just for
 this enum (avoids a circular dependency while keeping one source of truth).
 """
+
 from __future__ import annotations
 
 from enum import IntEnum
@@ -16,7 +17,7 @@ class Priority(IntEnum):
     LOW = 2
 
     @classmethod
-    def coerce(cls, value: "int | str | Priority | None") -> "Priority":
+    def coerce(cls, value: int | str | Priority | None) -> Priority:
         """Best-effort conversion (int value, name string, or None -> NORMAL).
 
         Raises ValueError for anything unrecognized — callers surface it as a
@@ -35,8 +36,7 @@ class Priority(IntEnum):
                 return cls[value.strip().upper()]
             except KeyError as exc:
                 raise ValueError(
-                    f"unknown priority {value!r} (use one of "
-                    f"{[p.name for p in cls]})"
+                    f"unknown priority {value!r} (use one of {[p.name for p in cls]})"
                 ) from exc
         raise ValueError(f"cannot interpret priority {value!r}")
 

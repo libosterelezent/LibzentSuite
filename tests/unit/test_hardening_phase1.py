@@ -12,6 +12,7 @@ import math
 import os
 import stat
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -28,6 +29,14 @@ from core.event_bus import EventBus, Event
 from core.logging_service import LogService, ServiceLogger
 from database.connection import DatabaseError as ConnDatabaseError
 from database.db import Database
+
+from pathlib import Path
+
+#: fixture plugins (the framework ships none; the fixture keeps the boot
+#: path exercising plugin discovery/attachment)
+FIXTURE_PLUGINS = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "plugins"
+)
 
 
 class _TmpCase(unittest.IsolatedAsyncioTestCase):
@@ -222,6 +231,11 @@ class TestTaskIdsSurviveRestart(_TmpCase):
 
 
 class TestCancellationHelper(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipIf(
+        sys.version_info < (3, 11),
+        "Task.cancelling is 3.11+; on 3.10 the helper's getattr guard "
+        "returns `unknown` and the count is unobservable",
+    )
     async def test_check_does_not_consume_cancellation(self) -> None:
         seen = {}
 
@@ -296,6 +310,19 @@ class TestPersistQueue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([x["n"] for x in repo.singles], [0, 1, 3, 4])
         self.assertEqual(pq.stats()["db_failures"], 1)
 
+    async def test_cancelled_stop_leaves_queue_restartable(self) -> None:
+        repo = self.Repo()
+        pq = PersistQueue("t")
+        await pq.start(repo, batch=10, interval=0.01)
+        stopper = asyncio.ensure_future(pq.stop(2.0))
+        await asyncio.sleep(0)          # parked inside stop()'s first wait
+        stopper.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await stopper
+        self.assertFalse(pq._stopping)  # used to stay True forever
+        self.assertTrue(pq._draining.done())
+        await asyncio.wait_for(pq.stop(1.0), 2.0)   # must not hang or join a dead future
+
     async def test_overflow_counted(self) -> None:
         pq = PersistQueue("t", max_inflight=3)
         for i in range(5):
@@ -351,7 +378,7 @@ class TestCredentials(_TmpCase):
     async def test_key_file_created_private_and_reused(self) -> None:
         path = self.dir / "k" / "credentials.key"
         with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("SM_MASTER_KEY", None)
+            os.environ.pop("LZ_MASTER_KEY", None)
             svc = CredentialService(None, key_path=path)
             _ = svc.fernet
             self.assertEqual(stat.S_IMODE(os.stat(path).st_mode) & 0o077, 0)
@@ -363,36 +390,57 @@ class TestCredentials(_TmpCase):
         path = self.dir / "bad.key"
         path.write_text("not-a-fernet-key")
         with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("SM_MASTER_KEY", None)
+            os.environ.pop("LZ_MASTER_KEY", None)
             with self.assertRaises(CredentialsError):
                 _ = CredentialService(None, key_path=path).fernet
 
 
 class TestBootstrapRobustness(_TmpCase):
-    def _config(self, bad: bool) -> Path:
+    def _config(self) -> Path:
         cfg = self.dir / "cfg"
         cfg.mkdir()
-        if bad:
-            (cfg / "rate_limits.json").write_text(json.dumps(
-                {"global": {"message": {"interval": "oops"}}}))
         return cfg
 
     async def test_failed_build_releases_everything(self) -> None:
         db = Database(self.dir / "b.db")
         creds = Credentials.from_values({"MUDAE_BOT_ID": "1"})
-        with self.assertRaises(ValueError):
-            await build(config_dir=str(self._config(True)), plugin_dir="plugins",
-                        client_factory=lambda n, t: None, credentials=creds,
-                        database=db, quiet=True)
+
+        # a mid-build failure AFTER some cleanups registered (a malformed
+        # rate_limits spec used to be the trigger, but it is now — by
+        # design — a skip-and-warn, so fail a later boot step instead)
+        async def boom(*args, **kwargs):
+            raise ValueError("mid-build failure")
+
+        with mock.patch("core.bootstrap._seed_config_defaults", boom):
+            with self.assertRaises(ValueError):
+                await build(config_dir=str(self._config()),
+                            plugin_dir=str(FIXTURE_PLUGINS),
+                            client_factory=lambda n, t: None, credentials=creds,
+                            database=db, quiet=True)
         self.assertFalse(db.connection.connected)
-        root = logging.getLogger("slaughtermudae")
+        root = logging.getLogger("libzent")
         from core.logging_service import StdlibBridge
         self.assertFalse([h for h in root.handlers if isinstance(h, StdlibBridge)])
+
+    async def test_malformed_policy_spec_no_longer_bricks_boot(self) -> None:
+        db = Database(self.dir / "m.db")
+        creds = Credentials.from_values({"MUDAE_BOT_ID": "1"})
+        cfg = self.dir / "cfg-mal"
+        cfg.mkdir()
+        (cfg / "rate_limits.json").write_text(json.dumps(
+            {"global": {"message": {"interval": "oops"}}}))
+        fw = await build(config_dir=str(cfg),
+                         plugin_dir=str(FIXTURE_PLUGINS),
+                         client_factory=lambda n, t: None, credentials=creds,
+                         database=db, quiet=True)
+        await fw.shutdown()
+        self.assertFalse(db.connection.connected)
 
     async def test_shutdown_survives_failing_step_and_closes_db(self) -> None:
         db = Database(self.dir / "s.db")
         creds = Credentials.from_values({"MUDAE_BOT_ID": "1"})
-        fw = await build(config_dir=str(self._config(False)), plugin_dir="plugins",
+        fw = await build(config_dir=str(self._config()),
+                         plugin_dir=str(FIXTURE_PLUGINS),
                          client_factory=lambda n, t: None, credentials=creds,
                          database=db, quiet=True)
 
@@ -407,7 +455,8 @@ class TestBootstrapRobustness(_TmpCase):
     async def test_boot_logs_are_persisted(self) -> None:
         db = Database(self.dir / "l.db")
         creds = Credentials.from_values({"MUDAE_BOT_ID": "1"})
-        fw = await build(config_dir=str(self._config(False)), plugin_dir="plugins",
+        fw = await build(config_dir=str(self._config()),
+                         plugin_dir=str(FIXTURE_PLUGINS),
                          client_factory=lambda n, t: None, credentials=creds,
                          database=db, quiet=True)
         await fw.logs.stop_persistence()

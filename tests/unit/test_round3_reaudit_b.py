@@ -97,17 +97,17 @@ def make_scheduler(sender, history_repo=None, bus=None) -> TaskScheduler:
 # ---------------------------------------------------------------------------
 class TestTypedErrorAckSeam(unittest.IsolatedAsyncioTestCase):
     async def test_connection_error_round_trip_and_transient_match(self):
-        """A terminal ConnectionError reaches the waiting plugin TYPED, and
-        roll's is_transient_failure matches it by type (not text)."""
-        from plugins.roll.plugin import is_transient_failure
-
+        """A terminal ConnectionError reaches the waiting plugin TYPED
+        (not wrapped in an opaque SchedulerError), so a caller can match
+        it by type (the old roll loop's transient-classification contract
+        — the framework half survives the plugin's removal)."""
         async def sender(task):
             raise ConnectionError("gateway websocket died")
 
         bus = EventBus()
         sched = make_scheduler(sender, bus=bus)
         registry = TaskAckRegistry(bus, sched)
-        svc = AccountPluginServices("alpha", "roll", bus=bus, scheduler=sched,
+        svc = AccountPluginServices("alpha", "probe", bus=bus, scheduler=sched,
                                     credentials=None, cache=None,
                                     ack_registry=registry)
         svc.task_ack_timeout = 5.0
@@ -116,7 +116,6 @@ class TestTypedErrorAckSeam(unittest.IsolatedAsyncioTestCase):
             await svc.send_message(100, "hi")
         self.assertNotIsInstance(caught.exception, SchedulerError)
         self.assertEqual(str(caught.exception), "gateway websocket died")
-        self.assertTrue(is_transient_failure(caught.exception))
         await sched.stop()
 
     async def test_flow_blocked_subclass_round_trip_exact(self):
@@ -128,7 +127,7 @@ class TestTypedErrorAckSeam(unittest.IsolatedAsyncioTestCase):
         bus = EventBus()
         sched = make_scheduler(sender, bus=bus)
         registry = TaskAckRegistry(bus, sched)
-        svc = AccountPluginServices("beta", "soulcopy", bus=bus,
+        svc = AccountPluginServices("beta", "probe", bus=bus,
                                     scheduler=sched, credentials=None,
                                     cache=None, ack_registry=registry)
         svc.task_ack_timeout = 5.0
@@ -141,9 +140,8 @@ class TestTypedErrorAckSeam(unittest.IsolatedAsyncioTestCase):
 
     async def test_scheduler_error_from_ack_timeout_is_transient_text(self):
         """The ack-timeout SchedulerError keeps the 'did not complete within'
-        marker roll's text fallback matches on (untyped legacy path)."""
-        from plugins.roll.plugin import is_transient_failure
-
+        text marker transient-classification fallbacks match on (the
+        untyped legacy path)."""
         async def sender(task):
             await asyncio.sleep(10)
             return "sent"
@@ -151,14 +149,14 @@ class TestTypedErrorAckSeam(unittest.IsolatedAsyncioTestCase):
         bus = EventBus()
         sched = make_scheduler(sender, bus=bus)
         registry = TaskAckRegistry(bus, sched)
-        svc = AccountPluginServices("alpha", "roll", bus=bus, scheduler=sched,
+        svc = AccountPluginServices("alpha", "probe", bus=bus, scheduler=sched,
                                     credentials=None, cache=None,
                                     ack_registry=registry)
         svc.task_ack_timeout = 0.2
         sched.start()
         with self.assertRaises(SchedulerError) as caught:
             await svc.send_message(100, "hi")
-        self.assertTrue(is_transient_failure(caught.exception))
+        self.assertIn("did not complete within", str(caught.exception))
         await sched.stop()
 
 
@@ -183,8 +181,7 @@ class TestEstopResumeViaApi(unittest.IsolatedAsyncioTestCase):
             async def get(self, name):
                 return {}
 
-        api = ControlAPI(accounts=Accts(), plugins=None, profiles=None,
-                         settings=None, cooldowns=None, scheduler=sched,
+        api = ControlAPI(accounts=Accts(), plugins=None,                          settings=None, cooldowns=None, scheduler=sched,
                          limiter=NoopLimiter(), database=None, logs=QuietLog(),
                          audit=None)
         t = sched.submit("alpha", "roll", "message", channel_id=1, content="x")
@@ -428,8 +425,7 @@ class TestDocumentedRegressions(unittest.IsolatedAsyncioTestCase):
             async def accounts(self):
                 return []
 
-        api = ControlAPI(accounts=Accts(), plugins=plugins, profiles=None,
-                         settings=settings, cooldowns=None, scheduler=None,
+        api = ControlAPI(accounts=Accts(), plugins=plugins,                          settings=settings, cooldowns=None, scheduler=None,
                          limiter=None, database=None, logs=LOG, audit=None)
         await plugins.attach_account("a1")
         await settings.set_plugin_setting("a1", "spy", "count", 9, schema)

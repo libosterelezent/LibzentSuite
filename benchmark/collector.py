@@ -1,10 +1,14 @@
 """PerfCollector: opt-in stage timing registry (zero cost when unused)."""
+
 from __future__ import annotations
 
 import asyncio
 import time
-from contextlib import contextmanager
-from typing import Any, Callable, Dict, Iterator, List
+from contextlib import contextmanager, suppress
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 
 class PerfCollector:
@@ -15,19 +19,22 @@ class PerfCollector:
     """
 
     def __init__(self, alloc_hook: Any = None) -> None:
-        self._records: Dict[str, List[float]] = {}
-        self._errors: Dict[str, int] = {}
-        self._counts: Dict[str, int] = {}
+        self._records: dict[str, list[float]] = {}
+        self._errors: dict[str, int] = {}
+        self._counts: dict[str, int] = {}
         # FINAL-PHASE (F6): optional stage-exit allocation hook (the
         # tracemalloc bench mode); None = zero overhead when unused.
         self._alloc_hook = alloc_hook
 
     @contextmanager
-    def stage(self, label: str) -> Iterator["PerfCollector"]:
+    def stage(self, label: str) -> Iterator[PerfCollector]:
         import tracemalloc
-        enter_snap = (tracemalloc.take_snapshot()
-                      if self._alloc_hook is not None
-                      and tracemalloc.is_tracing() else None)
+
+        enter_snap = (
+            tracemalloc.take_snapshot()
+            if self._alloc_hook is not None and tracemalloc.is_tracing()
+            else None
+        )
         start = time.perf_counter()
         try:
             yield self
@@ -37,11 +44,9 @@ class PerfCollector:
         finally:
             self.record_call(label, time.perf_counter() - start)
             if enter_snap is not None and self._alloc_hook is not None:
-                try:  # snapshot AFTER the timer stops: hook cost stays out
-                    self._alloc_hook(label, enter_snap,
-                                     tracemalloc.take_snapshot())
-                except Exception:
-                    pass
+                # snapshot AFTER the timer stops: hook cost stays out
+                with suppress(Exception):
+                    self._alloc_hook(label, enter_snap, tracemalloc.take_snapshot())
 
     def timed(self, label: str) -> Callable:
         """Decorator for sync AND async functions."""
@@ -49,32 +54,36 @@ class PerfCollector:
 
         def decorator(fn: Callable) -> Callable:
             if asyncio.iscoroutinefunction(fn):
+
                 async def async_wrapper(*a: Any, **k: Any) -> Any:
                     with collector.stage(label):
                         return await fn(*a, **k)
+
                 return async_wrapper
+
             def sync_wrapper(*a: Any, **k: Any) -> Any:
                 with collector.stage(label):
                     return fn(*a, **k)
+
             return sync_wrapper
+
         return decorator
 
-    def record_call(self, label: str, seconds: float,
-                    ok: bool = True) -> None:
+    def record_call(self, label: str, seconds: float, ok: bool = True) -> None:
         self._records.setdefault(label, []).append(seconds)
         self._counts[label] = self._counts.get(label, 0) + 1
         if not ok:
             self._errors[label] = self._errors.get(label, 0) + 1
 
     @staticmethod
-    def _pct(values: List[float], q: float) -> float:
+    def _pct(values: list[float], q: float) -> float:
         if not values:
             return 0.0
         ordered = sorted(values)
         idx = min(int(q * len(ordered)), len(ordered) - 1)
         return round(ordered[idx], 6)
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:
         return {
             label: {
                 "count": len(times),

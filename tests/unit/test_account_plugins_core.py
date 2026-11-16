@@ -28,10 +28,9 @@ from pathlib import Path
 from core.account_manager import AccountManager
 from core.api import ControlAPI
 from core.credentials import Credentials
-from core.errors import AccountError, ProfileError
+from core.errors import AccountError
 from core.event_bus import EventBus
 from core.plugin_manager import PluginManager
-from core.profile_manager import ProfileManager
 from core.settings_manager import SettingsManager
 from database.db import Database
 
@@ -39,7 +38,6 @@ from tests.unit.helpers import (
     FakeAudit,
     FakeClientFactory,
     FakePluginManager,
-    FakeProfilesRepo,
     FakeScheduler,
     FakeSettings,
     make_manager,
@@ -194,13 +192,11 @@ def _manager_over(db: Database, *, plugins=None,
 
     Restart tests need real repo roundtrips (accounts + account_plugins
     through one Database); the collaborators stay duck-typed doubles.
-    No I/O happens here (ProfileManager.load is awaited by the caller).
     """
     bus = EventBus()
     plugins = plugins if plugins is not None else FakePluginManager()
-    profiles = ProfileManager(FakeProfilesRepo(), LOG, db.accounts)
     manager = AccountManager(
-        bus, LOG, db.accounts, plugins, profiles, FakeScheduler(),
+        bus, LOG, db.accounts, plugins, FakeScheduler(),
         FakeSettings(), FakeAudit(), FakeClientFactory(),
         Credentials.from_values({"DISCORD_TOKEN_ALPHA": "tok-alpha"}),
         account_plugins=account_plugins if account_plugins is not None
@@ -255,6 +251,49 @@ class RestartTests(unittest.IsolatedAsyncioTestCase):
                 await db.close()
 
 
+# ---------------------------------------------------------- profile bindings
+class BindingMirrorTests(unittest.IsolatedAsyncioTestCase):
+    """The plugin_profiles in-memory mirror: boot restore, status poll,
+    and the assignment mutations that implicitly rewrite it."""
+
+    async def test_bindings_restore_at_boot_and_mirror_status(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sm-core-bindings-") as tmp:
+            db = Database(Path(tmp) / "bindings.db")
+            await db.connect()
+            try:
+                first, _ = _manager_over(db)
+                await first.add_account("alpha", plugins=[ROLL, SOULCOPY])
+                await db.plugin_profiles.create(ROLL, "grind")
+                await db.account_plugins.set_profile("alpha", ROLL, "grind")
+
+                second, _ = _manager_over(db)
+                await second.load()
+                # memory-first read: {plugin: profile or None} for every
+                # ASSIGNED plugin
+                self.assertEqual(await second.plugin_profiles("alpha"),
+                                 {ROLL: "grind", SOULCOPY: None})
+                rows = await second.accounts()
+                self.assertEqual(rows[0]["plugin_profiles"],
+                                 {ROLL: "grind", SOULCOPY: None})
+            finally:
+                await db.close()
+
+    async def test_unassign_clears_the_binding_mirror(self) -> None:
+        h = make_manager()
+        await h.manager.add_account("alpha", plugins=[ROLL, SOULCOPY])
+        await h.account_plugins.set_profile("alpha", ROLL, "grind")
+        await h.manager._refresh_assignment("alpha")
+        self.assertEqual(
+            h.manager.get("alpha").plugin_profiles,
+            {ROLL: "grind", SOULCOPY: None})
+        await h.manager.unassign_plugin("alpha", ROLL)  # row (and its
+        # profile column) is gone — the mirror must not keep the name
+        self.assertEqual(
+            h.manager.get("alpha").plugin_profiles, {SOULCOPY: None})
+        self.assertEqual(await h.manager.plugin_profiles("alpha"),
+                         {SOULCOPY: None})
+
+
 # --------------------------------------------------------------- ControlAPI
 class _LogsStub:
     def info(self, *args, **kwargs) -> None:
@@ -280,7 +319,7 @@ class ApiStack:
         self.h.plugins.known_names = [ROLL, SOULCOPY, "echo"]
         self.api = ControlAPI(
             accounts=self.h.manager, plugins=self.h.plugins,
-            profiles=self.h.profile_manager, settings=self.h.settings,
+            settings=self.h.settings,
             limiter=_LimiterStub(), scheduler=self.h.scheduler,
             logs=_LogsStub(), audit=self.h.audit,
             credentials=self.h.credentials,
@@ -386,46 +425,6 @@ class ControlAPITests(unittest.IsolatedAsyncioTestCase):
         await api.accounts_plugin_assign("alpha", ROLL)
         rows = await api.accounts_list()
         self.assertEqual(rows[0]["assigned_plugins"], [ROLL])
-
-
-# ------------------------------------------------------- profile decoupling
-class ProfileDecouplingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_profile_grant_does_not_change_attachment(self) -> None:
-        h = make_manager()
-        await h.add_profile("grinder", ROLL, SOULCOPY)  # grants BOTH plugins
-        await h.manager.add_account("alpha")  # zero plugin assignments
-        before = h.plugins.attached[-1]
-        self.assertEqual(before, ("alpha", set()))
-
-        out = await h.profile_manager.assign("alpha", "grinder")
-        self.assertEqual(out["profiles"], ["grinder"])  # bookkeeping works
-        # ... and attachment is UNCHANGED (profiles lost their capability
-        # role — the account still has zero DIRECT assignments)
-        self.assertEqual(h.plugins.attached[-1], before)
-        self.assertEqual(h.plugins.attached.count(before), 1)  # no re-attach
-        self.assertEqual(await h.manager.assigned_plugins("alpha"), [])
-
-    async def test_profile_unassign_does_not_change_attachment(self) -> None:
-        h = make_manager()
-        await h.add_profile("grinder", ROLL)
-        await h.manager.add_account("alpha", plugins=[SOULCOPY])
-        baseline = ("alpha", {SOULCOPY})
-        self.assertEqual(h.plugins.attached[-1], baseline)
-
-        await h.profile_manager.assign("alpha", "grinder")
-        await h.profile_manager.unassign("alpha", "grinder")
-        self.assertEqual(h.plugins.attached[-1], baseline)
-        self.assertEqual(await h.manager.assigned_plugins("alpha"), [SOULCOPY])
-
-    async def test_profile_manager_still_functions(self) -> None:
-        """Retained infra: CRUD + grants keep working on their own."""
-        h = make_manager()
-        await h.add_profile("basic", ROLL)
-        await h.manager.add_account("alpha")
-        await h.profile_manager.assign("alpha", "basic")
-        self.assertEqual(h.profile_manager.allowed_plugins("alpha"), {ROLL})
-        with self.assertRaises(ProfileError):
-            await h.profile_manager.assign("alpha", "nope")
 
 
 # ------------------------------------------------ enabled vs assigned (real)

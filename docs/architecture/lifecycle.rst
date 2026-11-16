@@ -5,7 +5,7 @@ Boot
 ----
 ``main.py`` → :func:`core.bootstrap.build` (order pinned by tests):
 credentials → config → Database+migrations → LogService(+bridge) → bus →
-limiter → settings → audit → scheduler → plugins.discover → profiles →
+limiter → settings → audit → scheduler → plugins.discover →
 accounts (DB restore) → sender bind → ``scheduler.start()`` → remote
 control → ControlAPI → surface.
 
@@ -16,7 +16,7 @@ Account
 are migration-only), wires every
 client callback (message + rich events) before connect, connects, ingests
 the READY snapshot (zero API calls), activates the account's assigned
-plugins (direct ``account_plugins`` rows — profiles are not consulted),
+plugins (direct ``account_plugins`` rows),
 spawns the reconnect supervisor (exponential backoff from account
 settings).
 

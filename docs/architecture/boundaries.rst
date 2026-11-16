@@ -21,15 +21,17 @@ Hard rules enforced by review and tests:
 * ``core`` never imports adapters at runtime (event DTOs are typed
   ``Any`` on the core side).
 * Interfaces mutate state exclusively through :class:`core.api.ControlAPI`
-  — CLI and dashboard are 1:1 wrappers (parity by construction).
+  — CLI and dashboard both wrap it (near-parity by construction; a few
+  dashboard surfaces — admin-panel management, profile editing, channel
+  lists, effective-settings view, bulk plugin-set — have no CLI verb).
 * Plugins never touch clients, SQLite, or the limiter directly; everything
   goes through the ``PluginServices`` protocol.
 * Account tokens are stored as Fernet **ciphertext in the database** —
   plaintext never enters it, and the key lives outside the DB
-  (``state/credentials.key`` 0600 or ``SM_MASTER_KEY`` in the process
+  (``state/credentials.key`` 0600 or ``LZ_MASTER_KEY`` in the process
   environment). ``.env`` holds ids/auth switches only; legacy
   ``DISCORD_TOKEN_*`` entries are read just once by the
   ``credentials import-env`` migration into the encrypted store.
 
-Details: ``knowledgebase/COMPONENT_MAP.md`` (if you maintain a local
-knowledgebase — not shipped in a fresh clone).
+Details: ``knowledgebase/COMPONENT_MAP.md`` (committed with the
+repository).

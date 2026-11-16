@@ -6,6 +6,7 @@ Public surface (INTEGRATION 'core/task_scheduler'):
     TaskStatus    — status literal type (see tasks.STATUS_* constants)
     SchedulerError — re-exported from core.errors for caller convenience
 """
+
 from core.errors import SchedulerError
 
 from .scheduler import TaskScheduler
@@ -23,16 +24,16 @@ from .tasks import (
 )
 
 __all__ = [
-    "TaskScheduler",
-    "Task",
-    "TaskStatus",
-    "SchedulerError",
-    "TASK_STATUSES",
-    "TERMINAL_STATUSES",
-    "STATUS_QUEUED",
-    "STATUS_RUNNING",
+    "STATUS_CANCELLED",
     "STATUS_COMPLETED",
     "STATUS_FAILED",
-    "STATUS_CANCELLED",
+    "STATUS_QUEUED",
+    "STATUS_RUNNING",
     "STATUS_TIMED_OUT",
+    "TASK_STATUSES",
+    "TERMINAL_STATUSES",
+    "SchedulerError",
+    "Task",
+    "TaskScheduler",
+    "TaskStatus",
 ]

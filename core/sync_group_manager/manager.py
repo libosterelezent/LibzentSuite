@@ -9,8 +9,6 @@ Division of labour (the managers cooperate, none absorbs another):
                                before; this manager only keeps the engine's
                                account->group metadata in sync through the
                                existing ``set_account_group`` API.
-  * ProfileManager           — plugin permissions (orthogonal: changing a
-                               profile never touches a group, and vice versa).
   * AccountManager           — account lifecycle; delegates the group bits
                                of add/remove/restore here when wired.
 
@@ -29,20 +27,21 @@ the legacy ``accounts sync_group`` field on creation) are ADOPTED verbatim
 — ``sync_membership`` get-or-creates the group row, exactly like migration
 v5 backfills one group per distinct legacy name.
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 from ..errors import SyncGroupError
 from ..names import GROUP_NAME_RE as NAME_RE
 
-__all__ = ["SyncGroupManager", "NAME_RE"]
+__all__ = ["NAME_RE", "SyncGroupManager"]
 
 #: what the group CRUD/membership methods accept as the group reference:
 #: the stable int id or the unique name.
-GroupRef = Union[int, str]
+GroupRef = int | str
 
 
 class SyncGroupManager:
@@ -67,9 +66,9 @@ class SyncGroupManager:
         self._repo = groups_repo
         self._accounts = accounts_repo
         self._limiter = limiter
-        self._logger = (logger or logging.getLogger("slaughtermudae.sync_groups"))
+        self._logger = logger or logging.getLogger("libzent.sync_groups")
         #: name -> SyncGroupRecord (cache; refresh via load()/mutators)
-        self._cache: Dict[str, Any] = {}
+        self._cache: dict[str, Any] = {}
         #: serializes persist+runtime-sync per membership change so the
         #: database and the limiter mapping can never disagree (the repo's
         #: own write lock serializes the SQL; this extends the critical
@@ -80,11 +79,11 @@ class SyncGroupManager:
     async def load(self) -> None:
         """Populate the group cache from the repository (boot path).
 
-        Best-effort like ProfileManager.load: a failure logs and leaves the
+        Best-effort: a failure logs and leaves the
         cache empty — reads then fall back to read-through repo queries.
         """
         try:
-            for record in (await self._repo.list() or []):
+            for record in await self._repo.list() or []:
                 self._cache[record.name] = record
         except Exception:
             self._logger.exception("could not load sync groups from repository")
@@ -117,7 +116,7 @@ class SyncGroupManager:
     # ---------------------------------------------------------------- CRUD
     async def create_group(
         self, name: str, description: str = "", *, enabled: bool = True
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Create a group (may exist with zero members).
 
         Raises:
@@ -131,21 +130,21 @@ class SyncGroupManager:
         self._logger.info("sync group %s created (enabled=%s)", name, enabled)
         return record.to_dict()
 
-    async def get_group(self, group: GroupRef) -> Optional[Dict[str, Any]]:
+    async def get_group(self, group: GroupRef) -> dict[str, Any] | None:
         """One group by id or name (None when unknown)."""
         record = await self._resolve(group, required=False)
         return record.to_dict() if record is not None else None
 
-    async def get_group_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+    async def get_group_by_name(self, name: str) -> dict[str, Any] | None:
         """One group by name (None when unknown)."""
         record = await self._repo_get_by_name((name or "").strip())
         return record.to_dict() if record is not None else None
 
-    async def list_groups(self) -> List[Dict[str, Any]]:
+    async def list_groups(self) -> list[dict[str, Any]]:
         """Every group as ``{"id","name","description","enabled",
         "member_count","created_at","updated_at"}``, sorted by name.
 
-        Read-through (refreshes the cache), like ProfileManager.profiles().
+        Read-through (refreshes the cache on read).
         """
         try:
             records = await self._repo.list() or []
@@ -164,10 +163,10 @@ class SyncGroupManager:
         self,
         group: GroupRef,
         *,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
-        enabled: Optional[bool] = None,
-    ) -> Dict[str, Any]:
+        name: str | None = None,
+        description: str | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
         """Update the given fields; a rename also rewrites every member's
         pointer (repository transaction) and re-syncs the runtime mapping,
         so no account stays attached to the OLD ``group:<name>`` clock.
@@ -196,14 +195,17 @@ class SyncGroupManager:
                 self._sync_runtime(member, updated.name)
             self._logger.info(
                 "sync group %s renamed to %s (%d member(s) moved)",
-                record.name, updated.name, len(members))
+                record.name,
+                updated.name,
+                len(members),
+            )
         else:
             self._logger.info("sync group %s updated", updated.name)
         return updated.to_dict()
 
     async def delete_group(
         self, group: GroupRef, *, detach_members: bool = False
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Delete a group. Its ACCOUNTS are never deleted.
 
         A group with members is refused (the members' pacing membership
@@ -216,7 +218,7 @@ class SyncGroupManager:
         """
         record = await self._resolve(group)
         members = await self._members(record.name)
-        detached: List[str] = []
+        detached: list[str] = []
         if members:
             if not detach_members:
                 raise SyncGroupError(
@@ -231,17 +233,16 @@ class SyncGroupManager:
         existed = bool(await self._repo.delete(record.id))
         self._cache.pop(record.name, None)
         if existed:
-            self._logger.info(
-                "sync group %s deleted (detached=%s)", record.name, detached)
+            self._logger.info("sync group %s deleted (detached=%s)", record.name, detached)
         return {
-            "deleted": record.name, "id": record.id, "existed": existed,
+            "deleted": record.name,
+            "id": record.id,
+            "existed": existed,
             "detached": detached,
         }
 
     # ----------------------------------------------------------- membership
-    async def add_account_to_group(
-        self, group: GroupRef, account: str
-    ) -> Dict[str, Any]:
+    async def add_account_to_group(self, group: GroupRef, account: str) -> dict[str, Any]:
         """Put an account in a group (replaces any previous membership:
         None -> Alpha and Alpha -> Beta are both this one call).
 
@@ -256,12 +257,10 @@ class SyncGroupManager:
         self._logger.info("account %s joined sync group %s", account, record.name)
         return {"account": account, "group": record.name}
 
-    async def remove_account_from_group(
-        self, group: GroupRef, account: str
-    ) -> Dict[str, Any]:
+    async def remove_account_from_group(self, group: GroupRef, account: str) -> dict[str, Any]:
         """Remove an account from ONE group (group -> None).
 
-        Idempotent-lenient like ProfileManager.unassign: removing an
+        Idempotent-lenient: removing an
         account that is not a member of THAT group reports
         ``existed: False`` instead of failing (its actual membership, if
         any, is untouched).
@@ -277,13 +276,10 @@ class SyncGroupManager:
             async with self._membership_lock:
                 await self._repo.set_account_group(account, None)
                 self._sync_runtime(account, None)
-            self._logger.info(
-                "account %s left sync group %s", account, record.name)
+            self._logger.info("account %s left sync group %s", account, record.name)
         return {"account": account, "group": record.name, "existed": existed}
 
-    async def set_account_group(
-        self, account: str, group: Optional[GroupRef]
-    ) -> Dict[str, Any]:
+    async def set_account_group(self, account: str, group: GroupRef | None) -> dict[str, Any]:
         """The membership transition primitive: None -> G, G1 -> G2,
         G -> None and G -> G (idempotent) are all this one call.
 
@@ -305,7 +301,7 @@ class SyncGroupManager:
             name = record.name
         return {"account": account, "group": name, "previous": previous}
 
-    async def clear_account_group(self, account: str) -> Dict[str, Any]:
+    async def clear_account_group(self, account: str) -> dict[str, Any]:
         """Remove the account from any group (back to per-account pacing).
 
         Raises:
@@ -313,25 +309,24 @@ class SyncGroupManager:
         """
         return await self.set_account_group(account, None)
 
-    async def get_group_members(self, group: GroupRef) -> List[str]:
+    async def get_group_members(self, group: GroupRef) -> list[str]:
         """Sorted account names of the group's members ([] when unknown)."""
         record = await self._resolve(group, required=False)
         if record is None:
             return []
         return await self._members(record.name)
 
-    async def get_account_group(self, account: str) -> Optional[str]:
+    async def get_account_group(self, account: str) -> str | None:
         """The account's group NAME (None when in no group / unknown)."""
         if self._accounts is not None:
             try:
                 return await self._repo.account_group_name(account)
             except Exception:
-                self._logger.exception(
-                    "could not read sync group of account %r", account)
+                self._logger.exception("could not read sync group of account %r", account)
         return None
 
     # ------------------------------------------------- framework plumbing
-    async def sync_membership(self, account: str, group: Optional[str]) -> None:
+    async def sync_membership(self, account: str, group: str | None) -> None:
         """Adopt a membership written by a LEGACY path and sync the runtime.
 
         Used by AccountManager for ``add_account(sync_group=...)`` and
@@ -346,19 +341,15 @@ class SyncGroupManager:
             try:
                 record = await self._repo.get_by_name(group)
             except Exception:
-                self._logger.exception(
-                    "could not look up sync group %r", group)
+                self._logger.exception("could not look up sync group %r", group)
                 record = self._cache.get(group)
             if record is None:
                 try:
                     record = await self._repo.create(group)
                     self._cache[record.name] = record
-                    self._logger.info(
-                        "adopted legacy sync group %r (created on first use)",
-                        group)
+                    self._logger.info("adopted legacy sync group %r (created on first use)", group)
                 except Exception as exc:
-                    self._logger.warning(
-                        "could not adopt sync group %r: %s", group, exc)
+                    self._logger.warning("could not adopt sync group %r: %s", group, exc)
                     return
             self._sync_runtime(account, group)
 
@@ -373,7 +364,7 @@ class SyncGroupManager:
             self._sync_runtime(account, None)
 
     # -------------------------------------------------------------- snapshot
-    async def snapshot(self, group: GroupRef) -> Dict[str, Any]:
+    async def snapshot(self, group: GroupRef) -> dict[str, Any]:
         """Application-level group snapshot (JSON-safe).
 
         Persistence fields come from the repository; ``pacing_key`` and
@@ -383,7 +374,7 @@ class SyncGroupManager:
         """
         record = await self._resolve(group)
         members = await self._members(record.name)
-        runtime: Dict[str, str] = {}
+        runtime: dict[str, str] = {}
         mapping = getattr(self._limiter, "account_groups", None)
         if callable(mapping):
             try:
@@ -395,13 +386,11 @@ class SyncGroupManager:
             "member_count": len(members),
             "members": members,
             "pacing_key": f"group:{record.name}",
-            "runtime_members": sorted(
-                name for name, grp in runtime.items() if grp == record.name
-            ),
+            "runtime_members": sorted(name for name, grp in runtime.items() if grp == record.name),
         }
 
     # -------------------------------------------------------------- helpers
-    def _sync_runtime(self, account: str, group: Optional[str]) -> None:
+    def _sync_runtime(self, account: str, group: str | None) -> None:
         """Feed one membership to the limiter (tolerant of unwired/limited
         doubles — pure metadata plumbing, no API involved)."""
         register = getattr(self._limiter, "set_account_group", None)
@@ -410,8 +399,7 @@ class SyncGroupManager:
         try:
             register(account, group)
         except Exception:
-            self._logger.exception(
-                "runtime group sync failed for account %r", account)
+            self._logger.exception("runtime group sync failed for account %r", account)
 
     def _validated_name(self, name: Any) -> str:
         """Strip + regex-validate a NEW group name (create/rename only —
@@ -423,9 +411,7 @@ class SyncGroupManager:
             )
         return name.strip()
 
-    async def _resolve(
-        self, group: GroupRef, *, required: bool = True
-    ) -> Optional[Any]:
+    async def _resolve(self, group: GroupRef, *, required: bool = True) -> Any | None:
         """GroupRef (int id | str name) -> SyncGroupRecord."""
         record = None
         try:
@@ -440,12 +426,10 @@ class SyncGroupManager:
             record = self._cache.get(group) if isinstance(group, str) else None
         if record is None and required:
             known = sorted(self._cache)
-            raise SyncGroupError(
-                f"unknown sync group {group!r} (known groups: {known})"
-            )
+            raise SyncGroupError(f"unknown sync group {group!r} (known groups: {known})")
         return record
 
-    async def _repo_get_by_name(self, name: str) -> Optional[Any]:
+    async def _repo_get_by_name(self, name: str) -> Any | None:
         try:
             record = await self._repo.get_by_name(name)
         except Exception:
@@ -455,15 +439,14 @@ class SyncGroupManager:
                 self._cache[record.name] = record
         return record
 
-    async def _members(self, group_name: str) -> List[str]:
+    async def _members(self, group_name: str) -> list[str]:
         try:
             return await self._repo.members(group_name) or []
         except Exception:
-            self._logger.exception(
-                "could not read members of sync group %r", group_name)
+            self._logger.exception("could not read members of sync group %r", group_name)
             return []
 
-    async def _membership_counts(self) -> Dict[str, int]:
+    async def _membership_counts(self) -> dict[str, int]:
         try:
             return await self._repo.membership_counts() or {}
         except Exception:
@@ -471,7 +454,7 @@ class SyncGroupManager:
 
     async def _require_account(self, account: str) -> None:
         """Typo trap: the account must exist (when an accounts repo is
-        wired) — with the known names in the error, like ProfileManager."""
+        wired) — with the known names in the error."""
         if self._accounts is None:
             return
         try:
@@ -479,6 +462,4 @@ class SyncGroupManager:
         except Exception:
             known = []
         if account not in known:
-            raise SyncGroupError(
-                f"unknown account {account!r} (known accounts: {known})"
-            )
+            raise SyncGroupError(f"unknown account {account!r} (known accounts: {known})")

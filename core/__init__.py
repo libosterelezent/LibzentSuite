@@ -1,4 +1,4 @@
-"""SlaughterMudae core framework.
+"""LibzentSuite core framework.
 
 Component layout (see INTEGRATION.md and ARCHITECTURE.md):
   core.account_manager    Account (first-class), AccountManager, DiscordCache

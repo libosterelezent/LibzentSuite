@@ -14,23 +14,24 @@ Design notes:
     audit-note contract ``attempts={attempts + 1}`` render the total number
     of sends, and keeps the retry budget at ``1 + max_retries`` tries.
   * ``cancelled`` is the cooperative cancel flag. ``cancel()`` sets it and
-    the account worker aborts at the next checkpoint (after the rate-limit
-    grant wait, or right after the sender returns).
+    the account worker aborts at its next checkpoint; a lane parked inside
+    ``limiter.acquire`` is preempted via ``cancel_event`` (the acquire is
+    raced against it and aborted), so a cancel never waits out a pacing
+    cooldown.
   * ``as_dict()`` is the JSON-safe snapshot used for task listings, the
     history repository row, and stats — floats are rounded.
 """
+
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Literal
 
 from core.priority import Priority
 
 #: All valid task statuses (contract: "queued|running|completed|failed|cancelled|timed_out").
-TaskStatus = Literal[
-    "queued", "running", "completed", "failed", "cancelled", "timed_out"
-]
+TaskStatus = Literal["queued", "running", "completed", "failed", "cancelled", "timed_out"]
 
 STATUS_QUEUED: TaskStatus = "queued"
 STATUS_RUNNING: TaskStatus = "running"
@@ -50,9 +51,7 @@ TASK_STATUSES = (
 )
 
 #: Statuses from which a task never transitions again.
-TERMINAL_STATUSES = frozenset(
-    {STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED, STATUS_TIMED_OUT}
-)
+TERMINAL_STATUSES = frozenset({STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED, STATUS_TIMED_OUT})
 
 
 @dataclass
@@ -67,7 +66,12 @@ class Task:
         channel_id / user_id / content: action payload (message targets a
             channel, dm targets a user; other actions may carry either).
         priority: queue priority (core.priority.Priority value).
-        submitted_at / started_at / finished_at: wall-clock timestamps.
+        submitted_at / started_at / finished_at: wall-clock timestamps
+            (display/history only — never used for elapsed-age math: a
+            backward NTP step would latch derived signals high).
+        submitted_mono: monotonic twin of submitted_at; every AGE
+            computation (pressure, queue-wait samples, LOW aging) must
+            read this field, not the wall clock.
         attempts: retries used so far (0 until a retry is scheduled).
         max_retries: how many retries are allowed after the first failure.
         timeout_s: per-attempt asyncio.wait_for budget for the sender.
@@ -77,6 +81,11 @@ class Task:
         grant_wait_ms / grant_jitter_ms: pacing wait + jitter the rate
             limiter applied for the (latest) grant, in milliseconds.
         cancelled: cooperative cancel flag, checked between phases.
+        cancel_event: per-task asyncio.Event created by the scheduler when
+            the lane starts driving the task; cancel() sets it so a lane
+            parked inside limiter.acquire (429 cooldowns park for up to
+            MAX_INTERVAL=86400s) is preempted instead of wedging the
+            account for a day.
     """
 
     id: int
@@ -84,37 +93,57 @@ class Task:
     account: str
     plugin: str
     action: str
-    channel_id: Optional[int] = None
-    user_id: Optional[int] = None
-    content: Optional[str] = None
+    channel_id: int | None = None
+    user_id: int | None = None
+    content: str | None = None
     #: target message for reaction/button actions (emoji / custom_id rides
     #: in ``content``; the scheduler treats both opaquely)
-    message_id: Optional[int] = None
+    message_id: int | None = None
     priority: int = Priority.NORMAL
     submitted_at: float = field(default_factory=time.time)
-    started_at: Optional[float] = None
-    finished_at: Optional[float] = None
+    #: monotonic twin of submitted_at — the ONLY clock age math may use
+    submitted_mono: float = field(default_factory=time.monotonic, repr=False)
+    started_at: float | None = None
+    finished_at: float | None = None
     attempts: int = 0
     max_retries: int = 0
     timeout_s: float = 30.0
     status: TaskStatus = STATUS_QUEUED
-    error: Optional[str] = None
-    result_summary: Optional[str] = None
+    error: str | None = None
+    result_summary: str | None = None
     grant_wait_ms: float = 0.0
     grant_jitter_ms: float = 0.0
     cancelled: bool = False
+    #: preemption channel for cancel-while-parked-in-acquire (see class
+    #: docstring); plain attribute, never persisted
+    cancel_event: Any = field(default=None, repr=False, compare=False)
     #: True once the sender was actually invoked (any attempt) — only
     #: tasks that touched the API may produce an outbound audit row: a
     #: cancel while queued/parked on the grant AND a failure before the
     #: send (limiter error) never sent, so both must stay unaudited.
     sender_ran: bool = False
+    #: PHASE 9 (§5/E): the fleet assignment this task dispatches for —
+    # a STRING assignment id, or None for the independent flow. The
+    #: fleet gate reads it: on a group-managed account only linked
+    #: dispatches run (D1 suspends the independent flow).
+    fleet_assignment: str | None = None
+    #: Tri-state wire classification for the audit gate. None = unknown
+    #: (default: the sender started but its outcome does not prove
+    #: whether a request reached the wire — budget-expiry timeout, cancel
+    #: mid-send, ambiguous failures; audited, the SAFE direction for
+    #: pacing). True = a wire send completed (sender returned a result).
+    #: False = PROVABLY pre-wire (the terminal failure's error kind is in
+    #: the scheduler's pre-wire set: account lookup / run-state check /
+    #: cache validation / DM resolution all failed before any client
+    #: call) — no audit row may exist for a send that never happened.
+    wire_sent: bool | None = None
 
     @property
     def is_terminal(self) -> bool:
         """True once the task reached a final status (no further transitions)."""
         return self.status in TERMINAL_STATUSES
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         """JSON-safe snapshot of the task (all floats rounded, no objects)."""
         return {
             "id": self.id,
@@ -139,6 +168,7 @@ class Task:
             "grant_wait_ms": round(self.grant_wait_ms, 3),
             "grant_jitter_ms": round(self.grant_jitter_ms, 3),
             "cancelled": bool(self.cancelled),
+            "fleet_assignment": self.fleet_assignment,
             "duration_s": (
                 round(self.finished_at - self.started_at, 3)
                 if (self.started_at is not None and self.finished_at is not None)
@@ -148,14 +178,14 @@ class Task:
 
 
 __all__ = [
-    "Task",
-    "TaskStatus",
-    "TASK_STATUSES",
-    "TERMINAL_STATUSES",
-    "STATUS_QUEUED",
-    "STATUS_RUNNING",
+    "STATUS_CANCELLED",
     "STATUS_COMPLETED",
     "STATUS_FAILED",
-    "STATUS_CANCELLED",
+    "STATUS_QUEUED",
+    "STATUS_RUNNING",
     "STATUS_TIMED_OUT",
+    "TASK_STATUSES",
+    "TERMINAL_STATUSES",
+    "Task",
+    "TaskStatus",
 ]

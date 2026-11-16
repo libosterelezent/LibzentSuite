@@ -12,12 +12,14 @@ Each test pins one minimal fix:
   K8  shared IdentifyGate spaces concurrent IDENTIFYs (factory-owned)
   K9  reconnect backoff jitter per account (anti-thundering-herd)
   K10 lane-config kv rows that decode to dicts load correctly
-  K11 roll loop treats the 30s task-ack timeout as transient
+  K11 (REMOVED with the roll plugin) the roll loop's transient-ack
+      handling — the framework half (typed errors across the task-ack
+      seam) stays covered by tests/unit/test_round3_reaudit_b.py
   K12 ServiceLogger stdlib surface forwards account= context
   K13 RealClientFactory builds per-account adapter loggers
   K14 settings/profile mirrors are evicted on account removal
   K15 rate-engine residue + account policies are pruned on removal
-  K16 soulcopy skips a second trigger while a flow is running
+  K16 (REMOVED with the soulcopy plugin) the in-flight trigger latch
   K17 live adapter declares edit/delete/reaction callbacks (undeclared
       attrs are read inside library dispatch, which swallows the error
       and silently drops the events)
@@ -31,12 +33,12 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest import mock
 
+from adapters.discord import client as client_module
 from adapters.discord.client import IdentifyGate, RealClientFactory, RealDiscordClient
 from core.account_manager import AccountStatus
-from core.errors import AccountError, SchedulerError
-from core.event_bus import AccountConnected, AccountFailed, EventBus, MessageReceived
+from core.errors import AccountError
+from core.event_bus import AccountConnected, AccountFailed, EventBus
 from core.logging_service import LogService, ServiceLogger
-from core.profile_manager.manager import ProfileManager
 from core.rate_limit_manager.engine import RateLimitManager
 from core.task_scheduler import TaskScheduler
 
@@ -44,8 +46,6 @@ from tests.unit.helpers import make_manager, make_task
 from tests.unit.test_account_manager import _fast_reconnect_settings
 from tests.unit.test_rate_engine import StubLogger
 from tests.unit._fake_kv import FakeKv
-from tests.unit.test_roll import CHANNEL, OWNER_ID, RollServices
-from tests.unit.test_soulcopy import TRIGGER_CHANNEL, make_plugin
 from tests.unit.test_task_scheduler import (
     FakeAudit,
     FakeHistoryRepo,
@@ -276,21 +276,6 @@ class RemoveFailedAccountTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("alpha", h.plugins.deactivated)  # K6: hooks fired
         self.assertIn("alpha", h.plugins.detached)
 
-    async def test_remove_evicts_mirrors_and_engine_residue(self) -> None:
-        """K14/K15 wiring: the removal cascade reaches every mirror."""
-        h = make_manager()
-        await h.manager.add_account("alpha")
-        h.profile_manager._assignment_cache["alpha"] = ["grinder"]
-        settings = NS(forget_account=mock.MagicMock())
-        limiter = NS(prune_account=mock.MagicMock())
-        h.manager._settings = settings
-        h.manager._limiter = limiter
-        await h.manager.remove_account("alpha")
-        settings.forget_account.assert_called_once_with("alpha")
-        limiter.prune_account.assert_called_once_with("alpha")
-        self.assertNotIn("alpha", h.profile_manager._assignment_cache)
-
-
 # ----------------------------------------------------------------- K7-K8-K13
 class _FakeLibClient:
     """discord.Client stand-in exercising the adapter's connect() contract."""
@@ -350,8 +335,8 @@ class AdapterIsolationTests(unittest.IsolatedAsyncioTestCase):
         alpha = factory("alpha", "tok-a")
         beta = factory("beta", "tok-b")
         self.assertIs(alpha._identify_gate, beta._identify_gate)
-        self.assertEqual(alpha._logger.name, "slaughtermudae.adapter.alpha")
-        self.assertEqual(beta._logger.name, "slaughtermudae.adapter.beta")
+        self.assertEqual(alpha._logger.name, "libzent.adapter.alpha")
+        self.assertEqual(beta._logger.name, "libzent.adapter.beta")
 
     async def test_identify_gate_spaces_concurrent_identifies(self) -> None:
         gate = IdentifyGate(interval=0.08)
@@ -394,18 +379,11 @@ class MirrorForgetTests(unittest.IsolatedAsyncioTestCase):
         from core.settings_manager import SettingsManager
 
         sm = SettingsManager(EventBus(), LOG)
-        sm._account_plugin["alpha"] = {"roll": {"trigger": "x"}}
+        sm._account_plugin["alpha"] = {"probe": {"trigger": "x"}}
         sm._account_framework["alpha"] = {"typing_probability": 0.5}
         sm.forget_account("alpha")
         self.assertNotIn("alpha", sm._account_plugin)
         self.assertNotIn("alpha", sm._account_framework)
-
-    async def test_profile_manager_forget_account(self) -> None:
-        pm = ProfileManager(object(), LOG, object())
-        pm._assignment_cache["alpha"] = ["grinder"]
-        pm.forget_account("alpha")
-        self.assertNotIn("alpha", pm._assignment_cache)
-
 
 # -------------------------------------------------------------------- K15
 class EnginePruneTests(unittest.IsolatedAsyncioTestCase):
@@ -431,86 +409,36 @@ class EnginePruneTests(unittest.IsolatedAsyncioTestCase):
 
 
 # -------------------------------------------------------------------- K16
-class SoulcopyInFlightLatchTests(unittest.IsolatedAsyncioTestCase):
-    async def test_second_trigger_skipped_while_flow_running(self) -> None:
-        pages = ["Soulmates\n---------\n" + "\n".join(f"user{i}" for i in range(40))]
-        manager, services = await make_plugin(
-            pages, {"inter_chunk_delay": 0.05, "dm_read_timeout": 1.0})
-        await manager.activate_account("alpha", services)  # dispatch needs active
-
-        def trigger() -> None:
-            manager._bus.publish_nowait(MessageReceived(
-                account="alpha", message_id=500, channel_id=TRIGGER_CHANNEL,
-                author_id=OWNER_ID, content="slcopy",
-            ))
-
-        trigger()
-        await asyncio.sleep(0.02)  # first flow is now mid-run
-        trigger()                  # second trigger arrives during the flow
-        await asyncio.sleep(0.5)   # let the first flow finish
-
-        # exactly ONE flow's worth of sends ($slud-s + one chunk); a second
-        # interleaved flow would double them (K16)
-        self.assertEqual(len(services.sent), 2)
-        runtime = manager._accounts["alpha"]["soulcopy"]
-        self.assertFalse(runtime.instance._in_flight)  # latch released
+# (REMOVED) SoulcopyInFlightLatchTests tested the soulcopy plugin's
+# one-flow-at-a-time latch — plugin behavior that died with the plugin.
+# The framework's dispatch isolation (one crash never kills siblings)
+# stays covered by tests/unit/test_plugin_manager.py.
 
 
 # -------------------------------------------------------------------- K11
-class _AckTimeoutServices(RollServices):
-    """RollServices whose FIRST send dies with the 30s task-ack timeout."""
-
-    def __init__(self, responses=None):
-        super().__init__(responses)
-        self._failed_once = False
-
-    def validate_channel(self, channel_id):
-        return None  # probe succeeds immediately once the pause cycle runs
-
-    async def send_message(self, channel_id, content, *, priority=2):
-        if not self._failed_once:
-            self._failed_once = True
-            raise SchedulerError(
-                "task 42 did not complete within 30s (cancelled)")
-        return await super().send_message(channel_id, content, priority=priority)
-
-
-class RollAckTimeoutTests(unittest.IsolatedAsyncioTestCase):
-    async def test_ack_timeout_pauses_then_resumes_instead_of_crashing(self):
-        from core.plugin_manager import PluginManager
-        from core.settings_manager import SettingsManager
-
-        bus = EventBus()
-        manager = PluginManager(
-            bus, logging.getLogger("t"),
-            SettingsManager(bus, logging.getLogger("t"), global_layer={"roll": {}}),
-            plugin_dir="plugins",
-        )
-        manager.discover()
-        await manager.attach_account("alpha", allowed={"roll"})
-        services = _AckTimeoutServices()
-        await manager.activate_account("alpha", services)
-        bus.publish_nowait(MessageReceived(
-            account="alpha", message_id=1, channel_id=CHANNEL,
-            author_id=OWNER_ID, content="roll",
-        ))
-        await asyncio.sleep(0.3)
-        runtime = manager._accounts["alpha"]["roll"]
-        # the loop survived the ack-timeout (K11) and is still rolling
-        self.assertTrue(runtime.instance._rolling.get("alpha"))
-        # the transient branch parks one 5s probe cycle, then resumes —
-        # a successful roll command must eventually go out
-        await asyncio.sleep(5.2)
-        self.assertTrue(any(cmd.startswith("$") for _, cmd, _ in services.sent))
-        self.assertTrue(runtime.instance._rolling.get("alpha"))
+# (REMOVED) RollAckTimeoutTests pinned the roll PLUGIN's loop semantics:
+# the 30s task-ack timeout was classified transient and the loop backed
+# off instead of crashing. That loop died with the plugin; the FRAMEWORK
+# half of K11 — typed ConnectionError/TimeoutError reconstruction across
+# the task-ack seam and the "did not complete within" SchedulerError
+# text — stays covered by tests/unit/test_round3_reaudit_b.py
+# (TestTypedErrorAckSeam).
 
 
 # ------------------------------------------------------- M1: close codes
 class DisconnectReasonTests(unittest.IsolatedAsyncioTestCase):
+    """M1 pins, adapted to the audit's debounced-forward design: transient
+    'disconnect' dispatches forward only after the resume window elapses
+    (no on_resumed), and the reason carries the machine-parseable
+    'close=NNNN' sentinel. The session is marked live first — a dispatch
+    while not connected is a startup failure owned by connect()."""
+
     async def test_close_code_surfaces_in_disconnect_reason(self) -> None:
         """M1: 'gateway closed' alone can't discriminate cull vs network."""
         mod = _fake_discord_module()
-        with mock.patch.dict(sys.modules, {"discord": mod}):
+        with mock.patch.dict(sys.modules, {"discord": mod}), \
+                mock.patch.object(
+                    client_module, "_DISCONNECT_FORWARD_DELAY_S", 0.05):
             client = RealDiscordClient("token-tok")
             seen: list = []
             client.on_disconnect = seen.append
@@ -518,18 +446,22 @@ class DisconnectReasonTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
             lib = _FakeLibClient.last_built
             self.assertIsNotNone(lib)
+            client.connected = True  # session live: the debounce owns it
             lib.ws = NS(close_code=4007)
             await lib.on_disconnect()
+            await asyncio.sleep(0.15)  # no resume landed: window elapsed
             connect_task.cancel()
             try:
                 await connect_task
             except asyncio.CancelledError:
                 pass
-        self.assertEqual(seen, ["gateway closed (code=4007)"])
+        self.assertEqual(seen, ["gateway closed (close=4007)"])
 
     async def test_missing_close_code_keeps_plain_reason(self) -> None:
         mod = _fake_discord_module()
-        with mock.patch.dict(sys.modules, {"discord": mod}):
+        with mock.patch.dict(sys.modules, {"discord": mod}), \
+                mock.patch.object(
+                    client_module, "_DISCONNECT_FORWARD_DELAY_S", 0.05):
             client = RealDiscordClient("token-tok")
             seen: list = []
             client.on_disconnect = seen.append
@@ -537,7 +469,9 @@ class DisconnectReasonTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
             lib = _FakeLibClient.last_built
             lib.ws = NS()  # no close_code attribute at all
+            client.connected = True
             await lib.on_disconnect()
+            await asyncio.sleep(0.15)  # debounce window elapsed
             connect_task.cancel()
             try:
                 await connect_task

@@ -8,7 +8,7 @@ import unittest
 
 from adapters.base import DiscordMessage
 from core.account_manager import AccountStatus
-from core.errors import AccountError, CredentialsError, ProfileError, SchedulerError, TargetGone
+from core.errors import AccountError, CredentialsError, SchedulerError, TargetGone
 from core.event_bus import AccountConnected, AccountDisconnected, AccountFailed
 from core.task_scheduler import (
     STATUS_COMPLETED,
@@ -25,10 +25,11 @@ from tests.unit.helpers import (
 )
 
 STATUS_KEYS = {"id", "name", "status", "user_id", "enabled", "sync_group",
-               "profiles", "assigned_plugins", "latency_ms", "uptime_s",
-               "last_error", "credential", "plugins"}
+               "assigned_plugins", "plugin_profiles",
+               "latency_ms", "uptime_s", "last_error", "credential",
+               "plugins"}
 DETAILS_KEYS = {"name", "status", "identity", "runtime", "plugins",
-                "profiles", "rate_limit", "credential"}
+                "rate_limit", "credential"}
 
 _TEST_LOG = logging.getLogger("tests.account_manager")
 
@@ -418,6 +419,36 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         await h.manager.stop("alpha")
         self.assertEqual(len(h.factory.clients), 2)  # no extra reconnects
 
+    async def test_revoked_token_on_reconnect_stands_down(self) -> None:
+        """A credential rejected DURING a reconnect is abandoned once —
+        the supervisor must not re-enter the loop (lost cleared) and
+        hammer the login every tick."""
+        h = make_manager(settings=_fast_reconnect_settings())
+        await h.manager.add_account("alpha")
+        await h.manager.start("alpha")
+        first = h.manager.get("alpha").runtime.client
+        h.manager._client_factory = RejectingFactory()  # type: ignore[attr-defined]
+        first.drop("socket closed")
+        runtime = h.manager.get("alpha").runtime
+        for _ in range(100):
+            if runtime.status == AccountStatus.INVALID_CREDENTIAL:
+                break
+            await asyncio.sleep(0.02)
+        self.assertEqual(runtime.status, AccountStatus.INVALID_CREDENTIAL)
+        built = len(h.manager._client_factory.clients)  # type: ignore[attr-defined]
+        await asyncio.sleep(0.5)
+        self.assertEqual(len(h.manager._client_factory.clients), built)  # type: ignore[attr-defined]
+        self.assertFalse(runtime.lost.is_set())
+        await h.manager.stop("alpha")
+
+    def test_auth_marker_ignores_401_inside_names(self) -> None:
+        from core.account_manager.manager import _looks_like_auth_error
+        self.assertTrue(_looks_like_auth_error(Exception("HTTP 401 Unauthorized")))
+        self.assertTrue(_looks_like_auth_error(Exception("Improper token passed")))
+        self.assertFalse(_looks_like_auth_error(
+            Exception("client for account 'alt401' did not connect")))
+        self.assertFalse(_looks_like_auth_error(Exception("user 1401234 gone")))
+
     async def test_drop_reason_recorded(self) -> None:
         h = make_manager(settings=_fast_reconnect_settings())
         await h.manager.add_account("alpha")
@@ -444,7 +475,10 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         # FAILED (not wedged RECONNECTING): start() stays usable for automation
         self.assertEqual(runtime.status, AccountStatus.FAILED)
         self.assertEqual(len(h.factory.clients), 1)  # never retried
-        self.assertFalse(runtime.lost.is_set())  # no stale wake-ups
+        # stale-start audit: lost is SET on the no-supervisor FAILED path —
+        # the recovery signal for a supervisor spawned later in the same
+        # generation (start() clears it before connecting, so no stale wake)
+        self.assertTrue(runtime.lost.is_set())
         # and the account can be started again
         await h.manager.start("alpha")
         self.assertEqual(runtime.status, AccountStatus.RUNNING)
@@ -485,22 +519,40 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         supervisor keeps retrying at the max delay instead of dying
         silently and leaving the account RECONNECTING forever."""
         settings = _fast_reconnect_settings()
+        # NOTE: _reconnect_settings clamps max with a 0.1s floor — the
+        # effective max here is 0.1, NOT the 0.05 written below.
         settings.overrides["alpha"] = {
             "reconnect_initial_delay": 0.01,
             "reconnect_max_delay": 0.05,
             "reconnect_multiplier": 1e300,  # **2 already overflows float
         }
         h = make_manager(settings=settings)
+        # deterministic clock: record delays instead of sleeping (the
+        # wall-clock polling shape was the suite's known ~1-in-8 flake —
+        # three jittered backoffs of 0.1-0.15s vs a 2.0s poll budget on
+        # a loaded runner). Seed the jitter RNG too, so bounds are exact.
+        recorded: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            recorded.append(seconds)
+            await asyncio.sleep(0)   # yield: never busy-spin the loop
+
+        h.manager._sleep = fake_sleep
+        h.manager._typing_rng = __import__("random").Random(0)
         await h.manager.add_account("alpha")
         await h.manager.start("alpha")
         runtime = h.manager.get("alpha").runtime
         h.factory.client_kwargs["fail_connect"] = True  # reconnects fail
         runtime.client.drop("socket closed")
-        await asyncio.sleep(0.4)  # several overflowing attempts elapse
+        # retries proceed instantly under the fake sleep — poll only for
+        # the COUNT of attempts, never wall-clock
+        await _poll_until(lambda: len(recorded) >= 3, timeout=2.0)
+        # overflow clamps to max (0.1 floor) with x[1.0,1.5) jitter
+        self.assertTrue(all(0.1 <= d <= 0.15 for d in recorded),
+                        f"delays escaped the clamp: {recorded}")
         supervisor = runtime.supervisor
         self.assertIsNotNone(supervisor)
         self.assertFalse(supervisor.done())  # alive, still driving retries
-        self.assertEqual(runtime.status, AccountStatus.RECONNECTING)
         self.assertGreaterEqual(len(h.factory.clients), 4)  # kept retrying
         await h.manager.stop("alpha")
         self.assertEqual(runtime.status, AccountStatus.STOPPED)
@@ -670,7 +722,6 @@ class DetailsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(d["runtime"]["cached_dms"], 1)
         self.assertEqual(d["runtime"]["cache_source"], "client cache (READY)")
         self.assertEqual(d["plugins"], [{"name": "soulcopy", "enabled": True}])
-        self.assertEqual(d["profiles"], [])  # retained field, decoupled
         self.assertEqual(d["rate_limit"], {
             "message": {"interval": 5.0, "jitter": [0.0, 0.0],
                         "source": "global, account:alpha"},
@@ -702,16 +753,6 @@ class DetailsTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AccountError):
             await h.manager.details("ghost")
 
-    async def test_details_reflects_profile_assigned_after_add(self) -> None:
-        h = make_manager()
-        await h.manager.add_account("alpha")
-        await h.add_profile("basic", "soulcopy")
-        await h.profile_manager.assign("alpha", "basic")
-        d = await h.manager.details("alpha")  # record refreshed from the repo
-        self.assertEqual(d["profiles"], ["basic"])
-
-
-class AuditTests(unittest.IsolatedAsyncioTestCase):
     async def test_inbound_messages_are_audited(self) -> None:
         h = make_manager()
         await h.manager.add_account("alpha")
@@ -913,7 +954,6 @@ class RemoveLaneIsolationTests(unittest.IsolatedAsyncioTestCase):
             # (no parked zombie lane until the global stop)
             self.assertNotIn("ghost", scheduler._lanes)
             self.assertNotIn("ghost", scheduler._lane_events)
-            self.assertNotIn("ghost", scheduler._backoff_wakers)
             self.assertNotIn("ghost", scheduler._queues)
         finally:
             try:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import tempfile
 import time
+import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -221,23 +222,6 @@ class FakeSyncCollaborators:
         return lambda: None
 
 
-class FakeProfileManager:
-    async def profiles(self):
-        return []
-
-    async def set_profile(self, name, plugins, description=""):
-        return {"name": name, "plugins": plugins}
-
-    async def delete_profile(self, name):
-        return {"deleted": name}
-
-    async def assign(self, account, profile):
-        return {"account": account, "profiles": [profile]}
-
-    async def unassign(self, account, profile):
-        return {"account": account, "profiles": []}
-
-
 class FakeLimiter:
     """Sync memory-only engine per the pinned contract."""
 
@@ -325,13 +309,12 @@ class SettingsStack:
             self.bus, plugin_repo=self.plugin_repo,
             global_layer={"soulcopy": {"trigger": "global-trigger"}})
         self.plugins = FakePluginManager(self.settings)
-        self.profiles = FakeProfileManager()
         self.limiter = FakeLimiter()
         self.database = FakeDatabase()
         self.audit = FakeAuditRecorder()
         self.api = ControlAPI(
             accounts=self.accounts, plugins=self.plugins,
-            profiles=self.profiles, settings=self.settings,
+            settings=self.settings,
             limiter=self.limiter, scheduler=FakeSyncCollaborators(),
             logs=FakeSyncCollaborators(), audit=self.audit,
             credentials=Credentials.from_values({}),
@@ -426,13 +409,12 @@ class ApiStack:
         self.cooldowns = CooldownService(self.cd_repo)
         self.accounts = FakeAccountsManager(names)
         self.shared = FakeSyncCollaborators()
-        self.profiles = FakeProfileManager()
         self.limiter = FakeLimiter()
         self.database = FakeDatabase()
         self.audit = FakeAuditRecorder()
         self.credentials = Credentials.from_values(env or {})
         self.api = ControlAPI(
-            accounts=self.accounts, plugins=self.shared, profiles=self.profiles,
+            accounts=self.accounts, plugins=self.shared,
             settings=self.shared, limiter=self.limiter, scheduler=self.shared,
             logs=self.shared, audit=self.audit, credentials=self.credentials,
             database=self.database, credentials_svc=self.cred_svc,
@@ -781,6 +763,9 @@ class TestCredentialKeyFileHardening(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(CredentialsError):
             await svc.store("beta", "tok-2")
 
+    @unittest.skipIf(os.name == "nt",
+                     "Windows does not enforce POSIX permission bits - "
+                     "the loose-keyfile warning is still verified at boot")
     async def test_loose_keyfile_permissions_warn_on_read(self) -> None:
         svc = CredentialService(FakeCredentialsRepo(), key_path=self.key_path)
         await svc.store("alpha", "tok-1")
@@ -792,7 +777,7 @@ class TestCredentialKeyFileHardening(unittest.IsolatedAsyncioTestCase):
         svc._memory.clear()
         await svc.resolve("alpha")
         self.assertEqual(self.key_path.stat().st_mode & 0o777, 0o600)
-        with self.assertNoLogs("slaughtermudae.credentials", level="WARNING"):
+        with self.assertNoLogs("libzent.credentials", level="WARNING"):
             svc._fernet = None
             svc._memory.clear()
             await svc.resolve("alpha")
