@@ -278,6 +278,11 @@ class PluginServices(Protocol):
 
     async def profile_active(self) -> str | None: ...
 
+    async def profile_settings(self) -> dict[str, Any] | None:
+        """P4's resolution seam: the ACTIVE profile's body (None when
+        unset) — resolve BEFORE the work; a profile switch changes what
+        the NEXT resolution returns."""
+
     def publish(self, event: Event) -> None:
         """Publish an event on the shared bus (fire-and-forget safe)."""
 

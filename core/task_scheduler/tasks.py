@@ -93,6 +93,10 @@ class Task:
     account: str
     plugin: str
     action: str
+    #: the PROFILE whose execution context produced this task (P4
+    #: attribution; '' = the profile-less scope). Pacing stays
+    #: account-level — the server's limits do not care about profiles.
+    profile: str = ""
     channel_id: int | None = None
     user_id: int | None = None
     content: str | None = None
@@ -146,6 +150,7 @@ class Task:
             "account": self.account,
             "plugin": self.plugin,
             "action": self.action,
+            "profile": self.profile,
             "channel_id": self.channel_id,
             "user_id": self.user_id,
             "content": self.content,

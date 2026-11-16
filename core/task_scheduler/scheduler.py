@@ -657,6 +657,7 @@ class TaskScheduler:
         name: str | None = None,
         timeout: float | None = None,
         retries: int = 0,
+        profile: str = "",
     ) -> Task:
         """Validate, queue and publish one task; returns the live Task.
 
@@ -724,6 +725,7 @@ class TaskScheduler:
             priority=int(prio),
             timeout_s=timeout_s,
             max_retries=retries,
+            profile=profile if isinstance(profile, str) else "",
         )
         try:
             self._ensure_lane(task.account)  # validates a running loop FIRST:
@@ -831,17 +833,22 @@ class TaskScheduler:
         account: str | None = None,
         plugin: str | None = None,
         action: str | None = None,
+        profile: str | None = None,
     ) -> int:
         """Cancel every live task matching ALL given filters.
 
         Counts both immediate (queued) and cooperative (running) cancels.
-        No filters cancels every live task.
+        No filters cancels every live task; ``profile`` scopes the cancel
+        to one profile's work (P4: one profile's estop never touches
+        another profile's tasks; profile=None means every profile).
         """
         count = 0
         for task in list(self._tasks.values()):
             if account is not None and task.account != account:
                 continue
             if plugin is not None and task.plugin != plugin:
+                continue
+            if profile is not None and task.profile != profile:
                 continue
             if action is not None and task.action != action:
                 continue

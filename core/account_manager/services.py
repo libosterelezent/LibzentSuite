@@ -686,6 +686,23 @@ class AccountPluginServices:
         """THIS scope's active profile name (None when unset)."""
         return await self._require_profiles().get_active(self._account, self._plugin)
 
+    async def profile_settings(self) -> dict[str, Any] | None:
+        """THE runtime resolution seam (P4): the ACTIVE profile's body.
+
+        The documented task-start pattern — resolve BEFORE the work:
+
+            settings = await ctx.services.profile_settings() or {}
+
+        Returns None when no profile is active (the caller's own
+        defaults apply). Switching the active profile changes what the
+        NEXT resolution returns; running work keeps what it resolved.
+        """
+        name = await self.profile_active()
+        if name is None:
+            return None
+        record = await self._require_profiles().get(self._account, self._plugin, name)
+        return dict(record.settings) if record is not None else None
+
     def _require_plugin_data(self) -> PluginDataStore:
         """The shared PluginDataStore, or an honest error when unwired."""
         if self._plugin_data is None:
