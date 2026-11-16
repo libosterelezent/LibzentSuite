@@ -6,7 +6,7 @@ These instructions apply to the whole repository. They describe how to make chan
 
 1. **Understand before changing.** Read the relevant implementation, callers, tests, data models, and current architecture/integration contracts before editing. Trace a behavior end to end when it crosses layers. Do not infer current behavior from stale comments or old plans alone.
 2. **Solve the requested problem completely.** Make the smallest coherent change that fixes the root cause. Include the tests and documentation needed to make the change understandable and verifiable. Do not make unrelated refactors while fixing a defect.
-3. **Preserve architecture boundaries.** `core.api.ControlAPI` is the shared application facade for the CLI and dashboard. Both interfaces must use the same application behavior. Extend the shared facade and its tests when a legitimate feature requires it; do not add a second business-logic path to avoid modifying the API. (this api facade will be transformed into a full API with FastAPI.)
+3. **Preserve architecture boundaries.** `core.api.ControlAPI` is the shared application facade for the CLI and dashboard. Both interfaces must use the same application behavior. Extend the shared facade and its tests when a legitimate feature requires it; do not add a second business-logic path to avoid modifying the API.
 4. **Keep plugins Modular.** Plugins uses the provided services and methods from the framework, and therefore cannot directly control and have access to any client, our provided services are the middleware and is authoratative for security reasons, the most descriptic way to describe the structure is: Core Engine (framework) -> Driver (Plugins) in which case core engine provides the ability and plugins utilize them live.
 5. **Preserve safety and data semantics.** Do not bypass validation, authorization, persistence, task scheduling, rate limiting, audit logging, generation/version checks, or server-provided limits in order to simplify a feature or its UI.
 6. **Prefer verified behavior to assumptions.** Distinguish confirmed facts, intended behavior, and hypotheses. When requirements conflict materially, surface the conflict instead of silently inventing a product decision. Resolve minor technical details independently when they do not change product behavior or public contracts.
@@ -123,11 +123,13 @@ lock (`uv export --format requirements-txt --no-hashes --no-dev
 The export-sync and lock-integrity gates in CI enforce this mechanically.
 The mypy strict run is a ratchet gate (`.github/mypy-baseline`): CI fails
 when the error count grows past the baseline, and the baseline is only
-lowered after errors are fixed. The baseline reached ZERO on 2026-11-15
-(485 legacy errors fixed across all 108 source files) — strict mode is
-now a hard floor: any new strict error fails CI, and the baseline must
-stay at zero. Never add a blanket ignore or a blanket suppression to
-shrink the count.
+lowered after errors are fixed. The PRODUCTION tree reached ZERO on
+2026-11-15 (485 legacy errors fixed across 108 source files) — strict
+mode there is a hard floor. On 2026-11-16 the owner widened the scope
+to `tests/` (2,443 errors at first measure): that number is the second
+baseline, ratchets the same way — shrink only, never grow — and any
+NEW production-tree strict error still fails the gate. Never add a
+blanket ignore or a blanket suppression to shrink either count.
 
 ### Ruff baseline
 
