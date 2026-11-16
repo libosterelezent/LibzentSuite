@@ -187,5 +187,21 @@ class CooldownRepository(BaseRepository):
         out["metadata"] = meta if isinstance(meta, dict) else {}
         return out
 
+    async def delete_all_for_accounts(self, accounts: list[str]) -> int:
+        """Sweep every cooldown of the named accounts (orphan recovery).
+
+        The boot restore's backstop: rows a write-racing-deletion left
+        behind for accounts that no longer exist.
+        """
+        if not accounts:
+            return 0
+        marks = ",".join("?" * len(accounts))
+        async with self._tx("sweep orphan cooldowns") as conn:
+            cur = await conn.execute(
+                f"DELETE FROM cooldowns WHERE account IN ({marks})",  # nosec B608 — placeholder marks only
+                tuple(accounts),
+            )
+            return cur.rowcount
+
 
 __all__ = ["CooldownRepository"]

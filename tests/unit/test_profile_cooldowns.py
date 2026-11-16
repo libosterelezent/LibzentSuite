@@ -9,6 +9,7 @@ pre-P1 single-profile behavior, which the existing suites still prove.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 import unittest
@@ -122,3 +123,42 @@ class RepoUniqueness(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConcurrentIsolation(_Base):
+    """P6: concurrent execution — profiles racing the same logical keys."""
+
+    async def test_concurrent_sets_same_key_distinct_profiles_all_land(self) -> None:
+        async def set_profile(profile: str, duration: float) -> None:
+            await self.svc.set("alpha", "exporter", "roll", duration, profile=profile)
+
+        await asyncio.gather(
+            set_profile("main", 60.0),
+            set_profile("alt", 60.0),
+            set_profile("third", 60.0),
+        )
+        for profile in ("main", "alt", "third"):
+            self.assertTrue(
+                await self.svc.is_active("alpha", "exporter", "roll", profile=profile)
+            )
+
+    async def test_concurrent_account_deletion_and_profile_write(self) -> None:
+        """A write racing the account's deletion cascade lands or dies —
+        never half-lands as an orphan row for a dead account."""
+        await self.db.accounts.add("alpha")
+        await self.svc.set("alpha", "exporter", "roll", 60.0, profile="main")
+        await asyncio.gather(
+            self.db.accounts.delete("alpha"),
+            self.svc.set("alpha", "exporter", "roll", 5.0, profile="late"),
+            return_exceptions=True,
+        )
+        # the racing write may land AFTER the cascade — an orphan row.
+        # The lifecycle rule: restore with the known-accounts registry
+        # sweeps it; it is never resurrected into memory.
+        fresh = CooldownService(self.db.cooldowns, time_fn=self.clock)
+        report = await fresh.restore(known_accounts={"beta"})
+        self.assertGreaterEqual(report["orphans"], 1)
+        self.assertNotIn(("alpha", "exporter", "late", "roll"), fresh._active)
+        remaining = await self.db.cooldowns.active_all(now=self.clock())
+        orphans = [r for r in remaining if r["account"] == "alpha"]
+        self.assertEqual(orphans, [])  # swept: no zombie rows for a dead account

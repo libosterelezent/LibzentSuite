@@ -861,7 +861,11 @@ async def _assemble(
             exc,
         )
     await _security_audit(database, credential_service, env_file)
-    await cooldowns.restore()
+    # lifecycle-safe restore: the account registry is the ownership
+    # metadata — a write that raced an account's deletion cascade left
+    # an orphan row, and it is swept here rather than resurrected
+    _known = {a.name for a in await database.accounts.list()}
+    await cooldowns.restore(known_accounts=_known)
 
     # lightweight periodic cooldown resync (30s): external edits (a second
     # process or a manual DB change) heal within one period even in

@@ -40,11 +40,17 @@ class CooldownService:
         self._active: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 
     # ---------------------------------------------------------------- boot
-    async def restore(self) -> dict[str, int]:
+    async def restore(self, known_accounts: set[str] | None = None) -> dict[str, int]:
         """Boot recovery: load live cooldowns, drop expired ones.
 
-        Returns ``{"restored": n, "expired_cleared": m}`` for logging and
-        the dashboard. Deterministic via the injected time seam in tests.
+        ``known_accounts`` (the boot-time account registry) makes restore
+        lifecycle-safe: rows whose owner no longer exists — orphans a
+        write racing the account-deletion cascade can leave behind —
+        are swept and NOT resurrected into memory (isolation lifecycle
+        rule: never attach state to an unresolvable owner). None keeps
+        the pre-seam behavior (restore everything).
+
+        Returns ``{"restored": n, "expired_cleared": m, "orphans": k}``.
         """
         now = self._now()
         try:
@@ -59,14 +65,28 @@ class CooldownService:
             except Exception:
                 LOG.exception("cooldown restore failed (starting empty)")
                 active = []
+            orphans = 0
             for row in active:
+                if known_accounts is not None and row["account"] not in known_accounts:
+                    orphans += 1
+                    continue  # dead owner: swept below, never resurrected
                 self._active[
                     (row["account"], row["plugin"], row.get("profile", ""), row["cooldown_key"])
                 ] = row
                 restored += 1
-        if restored or expired:
-            LOG.info("cooldowns restored=%d expired_cleared=%d", restored, expired)
-        return {"restored": restored, "expired_cleared": expired}
+            if orphans:
+                try:
+                    dead = {r["account"] for r in active} - set(known_accounts)
+                    await self._repo.delete_all_for_accounts(sorted(dead))
+                except Exception:
+                    LOG.exception("orphan cooldown sweep failed (rows stay dormant)")
+        else:
+            orphans = 0
+        if restored or expired or orphans:
+            LOG.info(
+                "cooldowns restored=%d expired_cleared=%d orphans=%d", restored, expired, orphans
+            )
+        return {"restored": restored, "expired_cleared": expired, "orphans": orphans}
 
     # ------------------------------------------------------------------ api
     async def set(
