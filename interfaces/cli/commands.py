@@ -122,6 +122,12 @@ HELP: dict[str, tuple[str, str]] = {
         "plugin management ('clear' resets one setting to its lower"
         " layer/default, unmasking profile + plugin defaults)",
     ),
+    "profiles": (
+        "<account> <plugin> list|show <profile>|active|set-active <profile>"
+        "|clear-active|delete <profile>",
+        "account-owned plugin profiles (the two-level model: each account"
+        " keeps its own instances; the body is plugin-defined)",
+    ),
     "workspaces": (
         "list|show <workspace>|create <name> [description]"
         "|delete <workspace> [--detach-members]"
@@ -230,6 +236,8 @@ async def run_command(api: Any, line: str) -> str | None:
         return await _cooldowns_group(api, args)
     if cmd == "plugins":
         return await _plugins_group(api, args)
+    if cmd == "profiles":
+        return await _profiles_group(api, args)
     if cmd == "workspaces":
         return await _workspaces_group(api, args)
     if cmd == "ratelimit":
@@ -573,6 +581,74 @@ async def _plugins_group(api: Any, args: list[str]) -> str:
             verb="cleared",
         )
     raise UsageError(f"plugins: unknown subcommand {sub!r}")  # pragma: no cover
+
+
+_PROFILES_USAGE = {
+    "list": "profiles <account> <plugin> list",
+    "show": "profiles <account> <plugin> show <profile>",
+    "active": "profiles <account> <plugin> active",
+    "set-active": "profiles <account> <plugin> set-active <profile>",
+    "clear-active": "profiles <account> <plugin> clear-active",
+    "delete": "profiles <account> <plugin> delete <profile>",
+}
+
+
+async def _profiles_group(api: Any, args: list[str]) -> str:
+    """profiles <account> <plugin> list|show|active|set-active|clear|delete.
+
+    The two-level model's account-owned instances (P5): the CLI is a
+    thin view over the facade verbs — settings bodies are plugin-defined
+    JSON, rendered as-is.
+    """
+    if len(args) < 3 or args[2] not in _PROFILES_USAGE:
+        lines = [
+            "usage: profiles <account> <plugin> <command>",
+            "commands:",
+        ]
+        lines += [f"  {name:<12} {how}" for name, how in _PROFILES_USAGE.items()]
+        raise UsageError("\n".join(lines))
+    account, plugin, sub = args[0], args[1], args[2]
+    rest = args[3:]
+    ctx = f"profiles {sub}"
+    if sub == "list":
+        _exact(rest, 0, ctx)
+        rows = await api.account_plugin_profiles(account, plugin)
+        if not rows:
+            return f"no profiles for {plugin} on {account}"
+        return "\n".join(
+            f"{r['name']:<24} v{r['schema_version']}  {r['description'] or '-'}" for r in rows
+        )
+    if sub == "show":
+        name = _exact(rest, 1, ctx)[0]
+        row = await api.account_plugin_profile_get(account, plugin, name)
+        if row is None:
+            return f"no profile {name!r} for {plugin} on {account}"
+        import json as _json
+
+        return _json.dumps(row["settings"], indent=2, sort_keys=True)
+    if sub == "active":
+        _exact(rest, 0, ctx)
+        out = await api.account_plugin_profile_active(account, plugin)
+        return f"active profile: {out['active']}" if out["active"] else "no active profile"
+    if sub == "set-active":
+        name = _exact(rest, 1, ctx)[0]
+        return _result(
+            await api.account_plugin_profile_set_active(account, plugin, name),
+            verb="activated",
+        )
+    if sub == "clear-active":
+        _exact(rest, 0, ctx)
+        return _result(
+            await api.account_plugin_profile_clear_active(account, plugin),
+            verb="cleared",
+        )
+    if sub == "delete":
+        name = _exact(rest, 1, ctx)[0]
+        return _result(
+            await api.account_plugin_profile_delete(account, plugin, name),
+            verb="deleted",
+        )
+    raise UsageError(f"profiles: unknown subcommand {sub!r}")  # pragma: no cover
 
 
 async def _workspaces_group(api: Any, args: list[str]) -> str:

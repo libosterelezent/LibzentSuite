@@ -62,6 +62,20 @@ def _stub_api() -> NS:
     async def _workspaces_tasks(workspace=None, status=None):
         return [{"id": "t1", "workspace": workspace}]
 
+    async def _account_plugin_profiles(name, plugin):
+        return [{"name": "main", "settings": {"x": 1}}]
+
+    async def _account_plugin_profile_create(
+        name, plugin, profile, description="", settings=None, schema_version=1, surface="api"
+    ):
+        return {"account": name, "plugin": plugin, "name": profile, "settings": settings or {}}
+
+    async def _account_plugin_profile_get(name, plugin, profile):
+        return {"name": profile, "settings": {"x": 1}} if profile == "main" else None
+
+    async def _account_plugin_profile_delete(name, plugin, profile, surface="api"):
+        return {"existed": profile == "main"}
+
     async def _plugins_manifests():
         return [{"name": "probe"}]
 
@@ -111,6 +125,10 @@ def _stub_api() -> NS:
         workspaces_resume=_workspaces_resume,
         workspaces_tasks=_workspaces_tasks,
         plugins_manifests=_plugins_manifests,
+        account_plugin_profiles=_account_plugin_profiles,
+        account_plugin_profile_create=_account_plugin_profile_create,
+        account_plugin_profile_get=_account_plugin_profile_get,
+        account_plugin_profile_delete=_account_plugin_profile_delete,
         accounts_plugins_list=_accounts_plugins_list,
         accounts_plugin_assign=_accounts_plugin_assign,
         accounts_plugin_unassign=_accounts_plugin_unassign,
@@ -163,6 +181,27 @@ class FastApiTests(unittest.TestCase):
         )
         self.assertEqual(self.client.get("/api/tasks", headers=self.headers).json()[0]["id"], 1)
         self.assertEqual(len(self.client.get("/api/logs", headers=self.headers).json()), 1)
+
+    def test_profile_routes(self) -> None:
+        r = self.client.get("/api/accounts/probe/plugins/ping/profiles", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()[0]["name"], "main")
+        r = self.client.post(
+            "/api/accounts/probe/plugins/ping/profiles/secondary",
+            json={"description": "d", "settings": {"y": 2}},
+            headers=self.headers,
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["name"], "secondary")
+        r = self.client.get("/api/accounts/probe/plugins/ping/profiles/main", headers=self.headers)
+        self.assertEqual(r.json()["settings"], {"x": 1})
+        r = self.client.get("/api/accounts/probe/plugins/ping/profiles/ghost", headers=self.headers)
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(r.json())
+        r = self.client.delete(
+            "/api/accounts/probe/plugins/ping/profiles/main", headers=self.headers
+        )
+        self.assertTrue(r.json()["existed"])
 
 
 if __name__ == "__main__":

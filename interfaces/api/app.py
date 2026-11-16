@@ -139,6 +139,61 @@ def build_app(api: ControlAPI, *, token: str | None = None) -> FastAPI:
         await api.accounts_plugin_unassign(name, plugin, surface="api")
         return {"unassigned": plugin}
 
+    # ------------------------------- account-owned profiles (P5 surface)
+    @app.get("/api/accounts/{name}/plugins/{plugin}/profiles", dependencies=[Depends(_auth)])
+    async def account_profiles(name: str, plugin: str) -> list[dict[str, Any]]:
+        return await api.account_plugin_profiles(name, plugin)
+
+    @app.post(
+        "/api/accounts/{name}/plugins/{plugin}/profiles/{profile}",
+        dependencies=[Depends(_auth)],
+    )
+    async def account_profile_create(
+        name: str, plugin: str, profile: str, body: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        payload = body or {}
+        return await api.account_plugin_profile_create(
+            name,
+            plugin,
+            profile,
+            payload.get("description", ""),
+            payload.get("settings"),
+            schema_version=int(payload.get("schema_version", 1)),
+            surface="api",
+        )
+
+    @app.get(
+        "/api/accounts/{name}/plugins/{plugin}/profiles/{profile}",
+        dependencies=[Depends(_auth)],
+    )
+    async def account_profile_get(name: str, plugin: str, profile: str) -> dict[str, Any] | None:
+        return await api.account_plugin_profile_get(name, plugin, profile)
+
+    @app.patch(
+        "/api/accounts/{name}/plugins/{plugin}/profiles/{profile}",
+        dependencies=[Depends(_auth)],
+    )
+    async def account_profile_update(
+        name: str, plugin: str, profile: str, body: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        payload = body or {}
+        return await api.account_plugin_profile_update(
+            name,
+            plugin,
+            profile,
+            description=payload.get("description"),
+            settings=payload.get("settings"),
+            schema_version=payload.get("schema_version"),
+            surface="api",
+        )
+
+    @app.delete(
+        "/api/accounts/{name}/plugins/{plugin}/profiles/{profile}",
+        dependencies=[Depends(_auth)],
+    )
+    async def account_profile_delete(name: str, plugin: str, profile: str) -> dict[str, Any]:
+        return await api.account_plugin_profile_delete(name, plugin, profile, surface="api")
+
     # ------------------------------------------------------------- tasks
     @app.get("/api/tasks", dependencies=[Depends(_auth)])
     async def tasks_list(status: str | None = None) -> list[dict[str, Any]]:

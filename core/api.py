@@ -760,6 +760,54 @@ class ControlAPI:
         )
         return {"account": account, "plugin": plugin, "profile": name, "existed": existed}
 
+    async def account_plugin_profile_set_active(
+        self, account: str, plugin: str, name: str, surface: str = "api"
+    ) -> dict[str, Any]:
+        """Activate one of the account's profiles (fail-closed).
+
+        Raises:
+            ValueError: unknown account/plugin, bad name, or the profile
+                does not exist in this scope.
+        """
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        _validate_profile_name(name)
+        repo = self._account_profile_repo()
+        if not await _resolved(repo.exists(account, plugin, name)):
+            raise ValueError(f"no profile {name!r} for {plugin!r} on {account!r}")
+        await _resolved(repo.set_active(account, plugin, name))
+        self._audit_mgmt(
+            account,
+            "mgmt:account_plugin_profile.activated",
+            surface,
+            extra=f"plugin={plugin} profile={name}",
+        )
+        return {"account": account, "plugin": plugin, "active": name}
+
+    async def account_plugin_profile_active(self, account: str, plugin: str) -> dict[str, Any]:
+        """The scope's active profile name (``active`` is None when unset)."""
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        repo = self._account_profile_repo()
+        name = await _resolved(repo.get_active(account, plugin))
+        return {"account": account, "plugin": plugin, "active": name}
+
+    async def account_plugin_profile_clear_active(
+        self, account: str, plugin: str, surface: str = "api"
+    ) -> dict[str, Any]:
+        """Drop the scope's active pointer (fail-open to no profile)."""
+        self._validate_account_known(account)
+        self._validate_plugins_known([plugin])
+        repo = self._account_profile_repo()
+        existed = await _resolved(repo.clear_active(account, plugin))
+        self._audit_mgmt(
+            account,
+            "mgmt:account_plugin_profile.deactivated",
+            surface,
+            extra=f"plugin={plugin} existed={existed}",
+        )
+        return {"account": account, "plugin": plugin, "cleared": existed}
+
     async def plugin_profile_create(
         self,
         plugin: str,
