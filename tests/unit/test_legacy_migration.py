@@ -46,7 +46,7 @@ class LegacyMigrationTests(unittest.IsolatedAsyncioTestCase):
         # migrations 5..14: backfill, assignments, profiles, legacy
         # drop, fleet state, the v10 fold, the v11 drops, the two-level
         # model's v12 store + v13 cooldown profile + v14 active pointer
-        self.assertEqual(applied, 11)
+        self.assertEqual(applied, 12)
         # the fold carried the pointer + projection
         self.assertEqual((await db.accounts.get("a")).workspace, "Alpha")
         self.assertIsNone((await db.accounts.get("d")).workspace)

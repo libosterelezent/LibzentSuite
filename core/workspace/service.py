@@ -117,6 +117,8 @@ class WorkspaceService:
         accounts: AccountsPointer | None = None,
         channels_repo: Any = None,
         presets_repo: Any = None,
+        preset_defs: Any = None,  # P8 definitions + executions
+        profiles: Any = None,  # account-owned profile store (P8 references)
         provenance: ProvenanceWriter | None = None,
         plugin_data: PluginDataStore | None = None,
         settings_writer: SettingsWriter | None = None,
@@ -133,6 +135,8 @@ class WorkspaceService:
         self._plugin_data = plugin_data
         self._settings = settings_writer
         self._limiter = limiter
+        self._preset_defs = preset_defs
+        self._profiles = profiles
         self._publisher = publisher
         self._now = time_fn or time.time
         self._new_id = id_factory or (lambda: uuid.uuid4().hex[:12])
@@ -721,6 +725,125 @@ class WorkspaceService:
         """§6.3 detach: values stay, provenance link drops."""
         await self._require_provenance().clear_provenance(account, plugin)
         return {"account": account, "plugin": plugin, "detached": True}
+
+    # --------------------------------------- P8: reference-based presets
+    async def preset_define(
+        self,
+        workspace: str,
+        name: str,
+        *,
+        participants: list[dict[str, str]],
+        order: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Define a reusable orchestration: REFERENCES, never copies.
+
+        ``participants`` are (account, plugin, profile) tuples the preset
+        coordinates; ``order`` is the execution order (account names).
+        The definition NEVER stores profile configuration — applying
+        validates the references and activates the profiles in place.
+        """
+        if self._preset_defs is None:
+            raise RuntimeError("workspace preset definitions are not wired")
+        definition: dict[str, Any] = {"participants": participants}
+        if order is not None:
+            definition["order"] = order
+        preset_id = await self._preset_defs.define(workspace, name, definition)
+        return {"preset_id": preset_id, "workspace": workspace, "name": name}
+
+    async def preset_apply_references(self, preset_id: int) -> dict[str, Any]:
+        """Validate every referenced profile and ACTIVATE it in place.
+
+        Fail-closed on drift (a renamed/deleted profile is DETECTED,
+        never silently substituted) and on non-membership (a preset may
+        only reference the workspace's member accounts). No
+        configuration is copied anywhere — activation is the whole side
+        effect.
+        """
+        if self._preset_defs is None or self._profiles is None:
+            raise RuntimeError("workspace preset definitions are not wired")
+        record = await self._preset_defs.get(preset_id)
+        if record is None:
+            raise ValueError(f"unknown preset id {preset_id!r}")
+        workspace = record["workspace"]
+        participants = record["definition"].get("participants") or []
+        members = await self._repo.members(workspace)
+        member_names = {m.account for m in members}
+        activated: list[str] = []
+        for ref in participants:
+            account, plugin, profile = (
+                ref.get("account", ""),
+                ref.get("plugin", ""),
+                ref.get("profile", ""),
+            )
+            if account not in member_names:
+                raise ValueError(
+                    f"preset references non-member account {account!r}"
+                    f" (members: {sorted(member_names)})"
+                )
+            if not await self._profiles.exists(account, plugin, profile):
+                raise ValueError(
+                    f"referenced profile {profile!r} does not exist for"
+                    f" {plugin!r} on {account!r} — renamed or deleted"
+                    f" (drift detected, nothing was substituted)"
+                )
+            await self._profiles.set_active(account, plugin, profile)
+            activated.append(f"{account}/{plugin}/{profile}")
+        return {"preset_id": preset_id, "workspace": workspace, "activated": activated}
+
+    async def execution_start(self, preset_id: int) -> dict[str, Any]:
+        """Start (or restart) one execution instance of the definition."""
+        import uuid
+
+        if self._preset_defs is None:
+            raise RuntimeError("workspace preset definitions are not wired")
+        record = await self._preset_defs.get(preset_id)
+        if record is None:
+            raise ValueError(f"unknown preset id {preset_id!r}")
+        execution_id = f"exec-{uuid.uuid4().hex[:12]}"
+        await self._preset_defs.start_execution(record["workspace"], preset_id, execution_id)
+        return {
+            "execution_id": execution_id,
+            "preset_id": preset_id,
+            "state": "running",
+        }
+
+    async def execution_checkpoint(
+        self, execution_id: str, account: str, state: str
+    ) -> dict[str, Any]:
+        """Record a completed participant (the resume point)."""
+        if self._preset_defs is None:
+            raise RuntimeError("workspace preset definitions are not wired")
+        run = await self._preset_defs.execution(execution_id)
+        if run is None:
+            raise ValueError(f"unknown execution {execution_id!r}")
+        if state == "done" and account not in run["completed"]:
+            run["completed"].append(account)
+        await self._preset_defs.checkpoint(execution_id, run["completed"])
+        return {"execution_id": execution_id, "completed": run["completed"]}
+
+    async def execution_resume(self, execution_id: str) -> dict[str, Any]:
+        """The resume view: completed participants are NOT replayed."""
+        if self._preset_defs is None:
+            raise RuntimeError("workspace preset definitions are not wired")
+        run = await self._preset_defs.execution(execution_id)
+        if run is None:
+            raise ValueError(f"unknown execution {execution_id!r}")
+        record = await self._preset_defs.get(run["preset_id"])
+        order = (record or {}).get("definition", {}).get("order") if record else None
+        if order:
+            pending = [a for a in order if a not in run["completed"]]
+        else:
+            done = set(run["completed"])
+            pending = [
+                p["account"]
+                for p in (record or {}).get("definition", {}).get("participants", [])
+                if p["account"] not in done
+            ]
+        return {
+            "execution_id": execution_id,
+            "completed": run["completed"],
+            "pending": pending,
+        }
 
     async def _resolve_preset_version(
         self, preset_id: int, version: int | None

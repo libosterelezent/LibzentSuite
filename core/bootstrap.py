@@ -670,6 +670,8 @@ async def _assemble(
 
     workspaces = WorkspaceService(
         database.workspaces,
+        preset_defs=database.workspace_presets,  # P8: definitions + executions
+        profiles=database.account_plugin_profiles,  # P8: profile references
         accounts=database.accounts,
         channels_repo=database.account_channels,
         presets_repo=database.presets,

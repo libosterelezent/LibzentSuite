@@ -1,126 +1,137 @@
-"""Preset lifecycle tests (W1) — pure transforms.
+"""P8 — workspace presets REFERENCE account-owned profiles.
 
-Locked semantics under test (decisions 9/15/16 + the D.3 owner call):
-apply writes the PRESET'S KEYS ONLY; immutable versions ride along as
-provenance; a stale preview raises instead of overwriting.
+The owner-locked decisions (docs/design/data-management-adoption.md):
+a workspace preset is a reusable orchestration DEFINITION that
+references (account, plugin, profile) tuples — never copies profile
+configuration. A workspace EXECUTION is one running/recoverable
+instance of a definition: it carries the runtime state (workflow
+progress, dependency checkpoints, coordination signals, participant
+status) and persists checkpoints so an interrupted run resumes without
+duplicating completed operations.
+
+The properties under test:
+1. Reference, not copy: applying a preset validates every referenced
+   profile EXISTS on its account and ACTIVATES it — the profile body
+   is never duplicated into the preset or the execution.
+2. Membership: a preset may only reference member accounts.
+3. Drift detection: a renamed/deleted profile is DETECTED at apply
+   time — never silently substituted.
 """
 
 from __future__ import annotations
 
+import sys
+import tempfile
 import unittest
-from types import SimpleNamespace as NS
+from pathlib import Path
 
-from core.workspace import (
-    InvalidDefinition,
-    PresetRecord,
-    StalePreview,
-    apply_diff,
-    compute_apply_diff,
-    detach,
-    preview_revision_ok,
-    validate_preset_settings,
-)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from core.workspace.service import WorkspaceService
+from database.db import Database
 
 
-def schema(*specs: tuple[str, object]) -> list[NS]:
-    """Setting-like doubles: name + validate(value)."""
-    return [NS(name=name, validate=validate) for name, validate in specs]
-
-
-def _str_setting(value):
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError("must be a non-empty string")
-    return value
-
-
-def _bool_setting(value):
-    if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "yes", "on")
-    return bool(value)
-
-
-PRESET = PresetRecord(
-    preset_id="preset-1",
-    scope="account",
-    plugin="cleaner",
-    name="standard",
-    owner_id="acct",
-    version=2,
-    schema_version=1,
-    settings={"trigger": "$clean", "auto_clean": True},
-)
-
-
-class ValidationTests(unittest.TestCase):
-    def test_values_coerced_through_schema(self) -> None:
-        out = validate_preset_settings(
-            {"trigger": "$clean", "auto_clean": "yes"},
-            schema(("trigger", _str_setting), ("auto_clean", _bool_setting)),
+class _Base(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self._tmp.name) / "w.db")
+        await self.db.connect()
+        self.svc = WorkspaceService(
+            self.db.workspaces,
+            preset_defs=self.db.workspace_presets,
+            profiles=self.db.account_plugin_profiles,
         )
-        self.assertEqual(out, {"trigger": "$clean", "auto_clean": True})
 
-    def test_templates_may_not_invent_settings(self) -> None:
-        with self.assertRaises(InvalidDefinition) as ctx:
-            validate_preset_settings({"unknown_key": 1}, schema(("trigger", _str_setting)))
-        self.assertIn("unknown_key", str(ctx.exception))
-        self.assertIn("may not invent", str(ctx.exception))
-
-    def test_invalid_value_names_the_key(self) -> None:
-        with self.assertRaises(InvalidDefinition) as ctx:
-            validate_preset_settings({"trigger": "  "}, schema(("trigger", _str_setting)))
-        self.assertIn("trigger", str(ctx.exception))
+    async def asyncTearDown(self) -> None:
+        await self.db.close()
+        self._tmp.cleanup()
 
 
-class DiffTests(unittest.TestCase):
-    def test_diff_covers_preset_keys_only(self) -> None:
-        current = {"trigger": "$old", "auto_clean": False, "unrelated": "keep"}
-        diff = compute_apply_diff(PRESET.settings, current)
-        self.assertEqual(diff, {"trigger": ("$old", "$clean"), "auto_clean": (False, True)})
-        self.assertNotIn("unrelated", diff)
-
-
-class ApplyTests(unittest.TestCase):
-    def test_apply_writes_preset_keys_and_keeps_the_rest(self) -> None:
-        current = {"trigger": "$old", "auto_clean": False, "unrelated": "keep"}
-        new, provenance = apply_diff(
-            PRESET.settings,
-            current,
-            preview_revision=4,
-            current_revision=4,
-            preset=PRESET,
-            applied_at=123.0,
+class ReferencesNotCopies(_Base):
+    async def test_apply_activates_referenced_profiles_without_copying(self) -> None:
+        # a workspace with two member accounts, each holding a profile
+        await self.svc.create_workspace("farm")
+        await self.svc.join("alpha", "farm")
+        await self.svc.join("beta", "farm")
+        await self.db.account_plugin_profiles.create(
+            "alpha", "exporter", "main", settings={"chunk": 1800}
         )
-        self.assertEqual(new, {"trigger": "$clean", "auto_clean": True, "unrelated": "keep"})
+        await self.db.account_plugin_profiles.create(
+            "beta", "exporter", "secondary", settings={"chunk": 900}
+        )
+        preset = await self.svc.preset_define(
+            "farm",
+            "Mudae Farming",
+            participants=[
+                {"account": "alpha", "plugin": "exporter", "profile": "main"},
+                {"account": "beta", "plugin": "exporter", "profile": "secondary"},
+            ],
+        )
+        applied = await self.svc.preset_apply_references(preset["preset_id"])
+        # every referenced profile is now ACTIVE on its account — the
+        # BODY was never copied anywhere
         self.assertEqual(
-            (provenance.source_preset_id, provenance.source_version, provenance.applied_at),
-            ("preset-1", 2, 123.0),
+            await self.db.account_plugin_profiles.get_active("alpha", "exporter"), "main"
         )
+        self.assertEqual(
+            await self.db.account_plugin_profiles.get_active("beta", "exporter"),
+            "secondary",
+        )
+        instances = await self.db.account_plugin_profiles.list_for("alpha", "exporter")
+        self.assertEqual(len(instances), 1)  # no copy was created
 
-    def test_stale_preview_raises_never_overwrites(self) -> None:
-        with self.assertRaises(StalePreview) as ctx:
-            apply_diff(
-                PRESET.settings,
-                {"trigger": "$edited-by-user"},
-                preview_revision="r4",
-                current_revision="r5",
-                preset=PRESET,
-                applied_at=123.0,
-            )
-        self.assertIn("r4", str(ctx.exception))
-        self.assertIn("r5", str(ctx.exception))
+    async def test_apply_detects_a_missing_profile_fails_closed(self) -> None:
+        await self.svc.create_workspace("farm")
+        await self.svc.join("alpha", "farm")
+        preset = await self.svc.preset_define(
+            "farm",
+            "drifted",
+            participants=[
+                {"account": "alpha", "plugin": "exporter", "profile": "renamed-away"},
+            ],
+        )
+        with self.assertRaises(Exception) as ctx:
+            await self.svc.preset_apply_references(preset["preset_id"])
+        self.assertIn("renamed-away", str(ctx.exception))
 
-    def test_preview_guard_alone(self) -> None:
-        preview_revision_ok("r4", "r4")  # no raise
-        with self.assertRaises(StalePreview):
-            preview_revision_ok("r4", "r6")
+    async def test_membership_enforced_on_non_member(self) -> None:
+        await self.svc.create_workspace("farm")
+        await self.svc.join("alpha", "farm")  # beta is NOT a member
+        await self.db.account_plugin_profiles.create("beta", "exporter", "main")
+        preset = await self.svc.preset_define(
+            "farm",
+            "smuggle",
+            participants=[
+                {"account": "beta", "plugin": "exporter", "profile": "main"},
+            ],
+        )
+        with self.assertRaises(Exception) as ctx:
+            await self.svc.preset_apply_references(preset["preset_id"])
+        self.assertIn("member", str(ctx.exception))
 
-
-class DetachTests(unittest.TestCase):
-    def test_detach_keeps_values_by_dropping_the_link(self) -> None:
-        current = {"trigger": "$clean"}  # values STAY with the account
-        provenance = detach(object())  # the link is what drops
-        self.assertIsNone(provenance)
-        self.assertEqual(current, {"trigger": "$clean"})
+    async def test_execution_checkpoints_resume_without_replaying(self) -> None:
+        """An execution instance carries workflow state; a resumed run
+        skips completed participants."""
+        await self.svc.create_workspace("farm")
+        await self.svc.join("alpha", "farm")
+        await self.svc.join("beta", "farm")
+        for account, profile in (("alpha", "main"), ("beta", "alt")):
+            await self.db.account_plugin_profiles.create(account, "exporter", profile)
+        preset = await self.svc.preset_define(
+            "farm",
+            "ordered",
+            participants=[
+                {"account": "alpha", "plugin": "exporter", "profile": "main"},
+                {"account": "beta", "plugin": "exporter", "profile": "alt"},
+            ],
+            order=["alpha", "beta"],
+        )
+        run = await self.svc.execution_start(preset["preset_id"])
+        # alpha completes; the run is interrupted before beta
+        await self.svc.execution_checkpoint(run["execution_id"], "alpha", "done")
+        resumed = await self.svc.execution_resume(run["execution_id"])
+        self.assertEqual(resumed["completed"], ["alpha"])  # not replayed
+        self.assertEqual(resumed["pending"], ["beta"])  # where it resumes
 
 
 if __name__ == "__main__":

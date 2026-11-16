@@ -167,7 +167,10 @@ class TestDatabaseLayer(_TmpCase):
         await db.cooldowns.upsert(account="a", plugin="p", cooldown_key="old",
                                   started_at=1.0, expires_at=5.0)
         svc = CooldownService(db.cooldowns)
-        self.assertEqual(await svc.restore(), {"restored": 3, "expired_cleared": 1})
+        self.assertEqual(
+            await svc.restore(),
+            {"restored": 3, "expired_cleared": 1, "orphans": 0},
+        )
         self.assertTrue(await svc.is_active("b", "p", "k"))
 
     async def test_cooldown_rejects_non_finite_duration(self) -> None:

@@ -43,6 +43,7 @@ from .repositories.rate_policies import RatePolicyRepository
 from .repositories.settings import AccountSettingsRepository
 from .repositories.signals import SignalsRepository
 from .repositories.tasks import TaskHistoryRepository
+from .repositories.workspace_presets import WorkspacePresetsRepository
 from .repositories.workspaces import WorkspaceRepository
 from .schema import MIGRATIONS, latest_version
 
@@ -97,6 +98,7 @@ class Database:
         self.plugins = PluginRepository(self)
         self.plugin_profiles = PluginProfilesRepository(self)
         self.account_plugin_profiles = AccountPluginProfilesRepository(self)
+        self.workspace_presets = WorkspacePresetsRepository(self)
         self.policies = RatePolicyRepository(self)
         self.audit = AuditRepository(self, keep=self._audit_keep)
         self.logs = LogRepository(self, keep=self._log_keep)

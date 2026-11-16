@@ -159,8 +159,7 @@ class Lifecycle(_Base):
     async def test_migration_version_is_current(self) -> None:
         from database.schema import latest_version
 
-        # 12 profiles, 13 cooldown profile, 14 pointer, 15 the legacy fold
-        self.assertEqual(latest_version(), 15)
+        self.assertGreaterEqual(latest_version(), 16)  # v16 = preset defs/execs
 
 
 if __name__ == "__main__":

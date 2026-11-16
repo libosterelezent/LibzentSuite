@@ -845,6 +845,39 @@ MIGRATIONS: list[tuple[int, str, str]] = [
             updated_at = excluded.updated_at;
         """,
     ),
+    (
+        16,
+        "two-level model P8 — workspace preset definitions + executions",
+        """
+        -- The two-level model's coordination layer
+        -- (docs/design/data-management-adoption.md P8): a preset
+        -- DEFINITION references (account, plugin, profile) tuples —
+        -- never copies profile configuration; an EXECUTION is one
+        -- running/recoverable instance of a definition, carrying the
+        -- workflow state (checkpoints) that lets an interrupted run
+        -- resume without replaying completed participants.
+        CREATE TABLE IF NOT EXISTS workspace_preset_definitions (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace    TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            definition_json TEXT NOT NULL DEFAULT '{}',
+            created_at   REAL NOT NULL,
+            updated_at   REAL NOT NULL,
+            UNIQUE(workspace, name)
+        );
+        CREATE TABLE IF NOT EXISTS workspace_executions (
+            id           TEXT PRIMARY KEY,
+            workspace    TEXT NOT NULL,
+            preset_id    INTEGER NOT NULL,
+            state        TEXT NOT NULL DEFAULT 'running',
+            checkpoint_json TEXT NOT NULL DEFAULT '{}',
+            created_at   REAL NOT NULL,
+            updated_at   REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_wexec_workspace
+            ON workspace_executions(workspace, state);
+        """,
+    ),
 ]
 
 
