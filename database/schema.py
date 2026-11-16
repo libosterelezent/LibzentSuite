@@ -724,6 +724,34 @@ MIGRATIONS: list[tuple[int, str, str]] = [
         ALTER TABLE accounts DROP COLUMN sync_group;
         """,
     ),
+    (
+        12,
+        "two-level model P2 — account-owned plugin profiles",
+        """
+        -- The execution layer of the two-level data model
+        -- (docs/design/data-management-adoption.md): each account owns
+        -- its plugin profile INSTANCES. Distinct from the v7
+        -- plugin_profiles table (the template-era bundle keyed by
+        -- (plugin, name) with NO account dimension) — P7 migrates those
+        -- rows into this shape; until then both tables coexist.
+        -- settings_json is opaque to the core: the plugin owns its
+        -- schema (schema_version lets the plugin evolve the shape).
+        CREATE TABLE IF NOT EXISTS account_plugin_profiles (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            account        TEXT NOT NULL,
+            plugin         TEXT NOT NULL,
+            name           TEXT NOT NULL,
+            description    TEXT NOT NULL DEFAULT '',
+            settings_json  TEXT NOT NULL DEFAULT '{}',
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            created_at     REAL NOT NULL,
+            updated_at     REAL NOT NULL,
+            UNIQUE(account, plugin, name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_app_account_plugin
+            ON account_plugin_profiles(account, plugin);
+        """,
+    ),
 ]
 
 

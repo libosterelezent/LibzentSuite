@@ -554,9 +554,33 @@ class DeletionJobRecord:
         }
 
 
+@dataclass(frozen=True)
+class AccountPluginProfileRecord:
+    """One ACCOUNT-OWNED plugin profile instance (migration v12, the
+    two-level model's execution layer).
+
+    Identity is ``(account, plugin, name)`` — identical names under
+    different accounts or plugins are different profiles. ``settings``
+    is the decoded opaque JSON body: the CORE never interprets
+    plugin-specific fields (the plugin owns its schema; P7 migrates the
+    legacy template-era rows into this shape).
+    """
+
+    id: int
+    account: str
+    plugin: str
+    name: str
+    description: str = ""
+    settings: dict[str, Any] = field(default_factory=dict)
+    schema_version: int = 1
+    created_at: float = 0.0
+    updated_at: float = 0.0
+
+
 __all__ = [
     "POLICY_LEVELS",
     "AccountChannelRecord",
+    "AccountPluginProfileRecord",
     "AccountRecord",
     "DeletionJobRecord",
     "FleetAssignmentRecord",

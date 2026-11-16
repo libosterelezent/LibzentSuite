@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 
 from .connection import DatabaseConnection, DatabaseError
 from .repositories.account_channels import AccountChannelsRepository
+from .repositories.account_plugin_profiles import AccountPluginProfilesRepository
 from .repositories.account_plugins import AccountPluginsRepository
 from .repositories.accounts import AccountsRepository
 from .repositories.cache import CacheRepository
@@ -95,6 +96,7 @@ class Database:
         self.account_settings = AccountSettingsRepository(self)
         self.plugins = PluginRepository(self)
         self.plugin_profiles = PluginProfilesRepository(self)
+        self.account_plugin_profiles = AccountPluginProfilesRepository(self)
         self.policies = RatePolicyRepository(self)
         self.audit = AuditRepository(self, keep=self._audit_keep)
         self.logs = LogRepository(self, keep=self._log_keep)
