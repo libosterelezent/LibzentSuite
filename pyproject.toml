@@ -54,7 +54,7 @@ dev = [
 # Engineering standards: AGENTS.md §8 — Ruff owns linting, import sorting,
 # and formatting for this repository (one canonical config; no competing
 # Black/isort/pyflakes setups).
-exclude = ["knowledgebase", "tests"]
+exclude = ["knowledgebase","docs"]
 target-version = "py310"
 line-length = 100
 
@@ -103,7 +103,7 @@ warn_unreachable = true
 warn_unused_configs = true
 show_error_codes = true
 pretty = true
-files = ["core", "adapters", "database", "interfaces", "plugins", "benchmark", "scripts"]
+files = ["core", "adapters", "database", "interfaces", "plugins", "benchmark", "scripts","tests"]
 
 # narrow per-module exception: flet is deliberately absent from the
 # dev/CI environment (interfaces/ui imports it lazily — the API-client
@@ -125,6 +125,7 @@ source = [
     "benchmark",
     "parsers",
     "scripts",
+    "tests"
 ]
 branch = true
 
