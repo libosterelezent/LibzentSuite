@@ -76,7 +76,8 @@ class CooldownService:
                 restored += 1
             if orphans:
                 try:
-                    dead = {r["account"] for r in active} - set(known_accounts)
+                    known: set[str] = known_accounts
+                    dead = {r["account"] for r in active} - known
                     await self._repo.delete_all_for_accounts(sorted(dead))
                 except Exception:
                     LOG.exception("orphan cooldown sweep failed (rows stay dormant)")
