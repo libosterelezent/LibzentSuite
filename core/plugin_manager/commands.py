@@ -6,14 +6,16 @@ the live surfaces read —
 
   * ``bind``/``unbind``/``bound_manager`` — the simulation runner and
     tests swap plugin managers in/out of the process binding;
-  * ``api_provider`` — FrameworkVerbsCog's ONE ControlAPI handle
+  * ``api_provider`` — legacy seam, unconsumed since the framework
+    verbs left the accounts (2026-11-17); retained for the dump-era
+    record shape
     (bootstrap registers it right after the API is built);
   * ``access`` — the account manager's command-gate fallback (the
     invoker authorization when no direct AccessManager is wired).
 
 The registry, the framework spec table, the executor chain, the help
 renderer, and the pacing bridge moved to ``dump/`` — replaced by the
-library cog surface (FrameworkVerbsCog carries the framework verbs;
+library cog surface (plugins carry their own COGs; the framework-verbs
 plugins declare COG classes). See ``dump/README.md``.
 """
 
@@ -39,7 +41,7 @@ class SelfCommandHub:
         #: manager's command gate falls back to it)
         self.access: Any = None
         #: zero-arg ControlAPI provider (bootstrap registers right after
-        #: the API is built; FrameworkVerbsCog reads it)
+        #: the API is built; unconsumed since the verbs cog retired)
         self.api_provider: Any = None
 
     # ---------------------------------------------------------- bindings

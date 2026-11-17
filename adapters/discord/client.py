@@ -303,7 +303,6 @@ class RealDiscordClient:
         self._connect_aborted = False  # stop()/disconnect raced a pending connect
         self._zombie_tasks: set[asyncio.Task[None]] = set()  # un-reaped run tasks (strong refs)
         self._run_task: asyncio.Task[None] | None = None  # strong ref (see connect)
-        self._framework_cog_task: asyncio.Task[None] | None = None  # strong ref (RUF006)
         self._logger = logger or LOG
         #: self-command prefix ("" = disabled; "@me" = when_mentioned).
         #: When set, the adapter builds an ext.commands Bot in self_bot
@@ -1070,9 +1069,6 @@ class RealDiscordClient:
 
     async def _cancel_run_task(self) -> None:
         """Cancel + reap the background client task (idempotent)."""
-        cog_task, self._framework_cog_task = self._framework_cog_task, None
-        if cog_task is not None and not cog_task.done():
-            cog_task.cancel()  # a pending framework-cog add dies with the client
         task, self._run_task = self._run_task, None
         if task is None or task.done():
             return
@@ -1106,7 +1102,7 @@ class RealDiscordClient:
         the rejection at debug).
 
         The concrete verb set comes from the process-wide self-command
-        converged cog surface (the FrameworkVerbsCog + plugin COGs): the
+        converged cog surface (the attached plugins' COGs only): the
         plugin manager publishes an account's (assigned ∧ enabled)
         commands there and this layer rebuilds its Bot registrations from
         whatever is current — framework verbs (help/pg/say) plus every
@@ -1172,15 +1168,13 @@ class RealDiscordClient:
                 return
             adapter._logger.debug("self-command error: %s", error, exc_info=True)
 
-        # C3: the framework verbs ride a real cog — one add_cog, the
-        # library's dispatch; the hub's registration path is retired
-        from core.plugin_manager.framework_cog import FrameworkVerbsCog
-
-        # asyncio.create_task uses the RUNNING loop: Client.loop is a
-        # sentinel until the library binds it during login, and this
-        # installs before that (the first live connect since C3 caught
-        # it — user report 2026-11-17, accounts start failed to connect)
-        self._framework_cog_task = asyncio.create_task(bot.add_cog(FrameworkVerbsCog()))
+        # The framework verbs NO LONGER ride the accounts (owner call
+        # 2026-11-17): the per-account command surface is the attached
+        # plugins' COGs and nothing else — the library's help lists
+        # exactly what each account runs. Framework control moves off
+        # the chat surface (replacement method pending owner design);
+        # the invoker gate + audit/lift hook below still guard every
+        # PLUGIN command this bot hosts.
 
         # fork adoption: on_http_throttle is the REAL throttle signal
         # (the library absorbs 429s internally; we only see them here).

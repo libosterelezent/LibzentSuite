@@ -168,8 +168,14 @@ class LogsSeverityCase(unittest.IsolatedAsyncioTestCase):
             self.calls: list[dict[str, Any]] = []
 
         async def logs_tail(
-            self, limit: int, account: str | None = None, severity: str | None = None
+            self,
+            limit: int,
+            account: str | None = None,
+            severity: str | None = None,
+            without_account: bool = False,
         ) -> list[dict[str, Any]]:
+            # without_account rides the alias's framework-view route;
+            # these cases pin the account/severity split, not the view
             self.calls.append({"limit": limit, "account": account, "severity": severity})
             return []
 

@@ -986,11 +986,10 @@ async def _assemble(
         started_at=_time.time(),
     )
 
-    # Framework management from chat (status/accounts/plugins/ratelimit/
-    # lane/tasks/estop/simulation) rides FrameworkVerbsCog: the hub's
-    # api_provider bridges the verbs to the ONE ControlAPI. The mention
-    # bridge (RemoteControl) retired with the hub's registry — see dump/.
-    COMMAND_HUB.api_provider = lambda: api
+    # The hub's ACCESS seam stays (the account manager records account
+    # user ids through it); the framework verbs no longer ride the
+    # accounts (owner call 2026-11-17) so api_provider has no consumer —
+    # the mention bridge and the verbs cog both live in dump/ history.
 
     return Framework(
         api=api,

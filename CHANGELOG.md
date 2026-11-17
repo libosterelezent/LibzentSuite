@@ -31,6 +31,14 @@ nothing can ship until that hold is lifted; see
   contracts only (implemented structure in `docs/architecture/`,
   history in `docs/reference/completed.rst`).
 
+### Removed
+- The framework verbs no longer ride Discord accounts: the
+  per-account command surface is exactly the attached plugins' COGs
+  (help lists what each account actually runs). Framework control
+  from chat — the admin/prefix verbs — is retired pending a
+  replacement design; the CLI and API surfaces own framework
+  management meanwhile.
+
 ### Added
 - `scripts/live-debugging/` — the LIVE whole-suite debugging harness:
   boots the REAL stack (the `main.py` bootstrap path) over the offline

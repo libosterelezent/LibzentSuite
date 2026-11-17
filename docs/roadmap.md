@@ -75,6 +75,9 @@ structure is tested and waiting.
 
 ## Open Ideas (unscheduled)
 
+[ ] Framework control from accounts — the replacement method for the
+    retired chat verbs (admin/prefix/help management) — owner design
+    pending (removed 2026-11-17; the CLI/API own it meanwhile).
 [ ] Metric rollup wiring — the opt-in global view over
     AccountPluginData (store + local view shipped; aggregation missing).
 

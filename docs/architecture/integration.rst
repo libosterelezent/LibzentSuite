@@ -230,9 +230,9 @@ Workspace (the single orchestration owner)
 - CLI verbs: ``accounts | credentials | plugins | workspaces |
   ratelimit | cooldowns | tasks | simulation | logs | audit | estop |
   status | help | quit``.
-- Framework verbs (``status``, ``accounts``, ``plugins``, ``ratelimit``,
-  ``tasks``, ``estop``, ``simulation``, ``say``, ``pg``, ``admin*``,
-  ``prefixrate``, ``help``) ride FrameworkVerbsCog — library commands,
-  gated by the access manager before argument parsing. Plugin verbs
-  are their COGs.
+- The framework verbs NO LONGER ride the accounts (owner call
+  2026-11-17): the per-account command surface is the attached
+  plugins' COGs, gated by the access manager before argument parsing.
+  Framework control from chat is retired pending a replacement design;
+  the CLI and the API surfaces own framework management.
 - REST surface reference: ``interfaces/api/app.py`` (27 routes).

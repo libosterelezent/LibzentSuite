@@ -132,9 +132,10 @@ The discipline (enforced by the seams, not by convention):
 * ``ctx.send`` is for COMMAND RESPONSES ONLY — the one documented
   library-native send. Loops and proactive traffic ride
   ``ctx.services.send_message``.
-* Command names must not collide with the reserved framework verbs
-  (``say`` reserves the framework cog; ``ping`` shows the naming
-  discipline). The admin panel decides who may invoke (fail-closed) —
+* The framework verbs no longer ride accounts (owner call
+  2026-11-17) — the per-account command surface is exactly the
+  attached plugins' COGs, and the library's help lists precisely
+  that. The admin gate still decides who may invoke (fail-closed) —
   never the plugin.
 * The toolbox (``self.services`` in the cog) also carries
   ``to_rich``/``audit_rich`` for first-hand message handling in
