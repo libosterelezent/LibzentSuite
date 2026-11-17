@@ -13,3 +13,4 @@ originals).
 
    pivot-audit-fastapi-flet
    flet_ui_design_contract
+   client-capability-adoption
