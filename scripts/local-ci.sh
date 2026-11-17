@@ -77,14 +77,20 @@ mypy_ratchet() {
   "$UV_BIN" run --frozen mypy "$@" &> "$log" || status=$?
   if [ "$status" -gt 1 ]; then
     bad "mypy $label did not complete (exit $status) — count rejected"
+    tail -20 "$log"
     return
   fi
   errs=$(grep -c "error:" "$log" || true)
   base=$(<"$baseline_file")
   echo "mypy $label errors: $errs (baseline: $base)"
   if [ "$errs" -eq "$base" ]; then ok "$label == baseline"
-  elif [ "$errs" -lt "$base" ]; then bad "$label improved — lower $baseline_file to $errs in this push"
-  else bad "$label grew ($base -> $errs)"; fi
+  else
+    # diagnostics BEFORE the exit trap cleans RUN_DIR — a failed gate
+    # must carry its own evidence (CodeRabbit pre-review 2026-11-17)
+    grep "error:" "$log" | head -20
+    if [ "$errs" -lt "$base" ]; then bad "$label improved — lower $baseline_file to $errs in this push"
+    else bad "$label grew ($base -> $errs)"; fi
+  fi
 }
 
 step "4/8 Mypy ratchets — production + tests (split baselines)"
