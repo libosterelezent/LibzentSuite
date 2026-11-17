@@ -1050,15 +1050,15 @@ async def phase_profiles(h: Harness) -> None:
         "clear active profile",
         lambda: h.api.account_plugin_profile_clear_active("alpha", "ldp_worker"),
     )
-    effective_default = await h.step(
-        "effective settings after clear",
-        lambda: h.api.accounts_effective_settings("alpha", "ldp_worker"),
+    body_after_clear = await h.step(
+        "plugin-side profile_settings() after clear",
+        lambda: services.profile_settings(),
     )
     h.expect(
-        isinstance(effective_default, dict) and effective_default.get("burst") != 3,
+        body_after_clear is None,
         what="cleared profile stops overriding",
-        expectation="burst back to default",
-        actual=str(effective_default),
+        expectation="profile_settings() returns None (no active profile)",
+        actual=str(body_after_clear),
     )
     deleted = await h.step(
         "delete profile",
