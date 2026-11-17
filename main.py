@@ -25,6 +25,8 @@ from core.bootstrap import build
 async def run_sim(
     name: str | None, list_only: bool, plugin_dir: str = "tests/fixtures/sim_plugins"
 ) -> int:
+    # sim callers default to the workload fixture (the live default is
+    # dispatched in main(); this entry is simulation-only)
     """Run scenario(s) through the offline SimulationRunner (no network).
 
     The default plugin dir is the SIM workload fixture (where the
@@ -212,8 +214,9 @@ def main() -> int:
     parser.add_argument("--config", default="config", help="config directory (default: ./config)")
     parser.add_argument(
         "--plugins",
-        default="tests/fixtures/sim_plugins",
-        help="plugin directory (default: the simulator workload fixture)",
+        default=None,
+        help="plugin directory override (default: the simulator workload"
+        " fixture in --sim mode, ./plugins for live startup)",
     )
     parser.add_argument("--env", default=".env", help="credentials file (default: ./.env)")
     parser.add_argument(
@@ -237,6 +240,15 @@ def main() -> int:
     )
     parser.add_argument("--db", default="state/libzent.db", help="sqlite persistence file")
     args, extra = parser.parse_known_args()
+
+    # the plugin-dir default is MODE-DISPATCHED (CodeRabbit PR review
+    # 2026-11-17): simulation wants the workload fixture, live startup
+    # wants the production directory — one shared default leaked the
+    # fixture into --start-all and every live command
+    if args.plugins is None:
+        args.plugins = (
+            "tests/fixtures/sim_plugins" if (args.sim is not None or args.sim_list) else "plugins"
+        )
 
     if args.sim is not None or args.sim_list:
         if args.start_all or args.headless or extra or args.db != "state/libzent.db":

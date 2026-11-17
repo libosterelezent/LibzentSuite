@@ -312,18 +312,24 @@ class WorkspaceReconcilerLoopTests(unittest.IsolatedAsyncioTestCase):
         class _ServiceStub:
             _repo = None
 
+        rec = WorkspaceReconciler(_ServiceStub(), interval_s=0.01)  # type: ignore[arg-type]
+        reached = asyncio.Event()
+
         async def _fake_reconcile() -> dict[str, int]:
             nonlocal calls
             calls += 1
+            if calls >= 5:
+                reached.set()
             return {}
 
-        rec = WorkspaceReconciler(_ServiceStub(), interval_s=0.01)  # type: ignore[arg-type]
         rec.reconcile = _fake_reconcile  # type: ignore[method-assign]
         rec.start()
-        await asyncio.sleep(0.12)  # ~10 intervals at 10ms
+        # event-driven, generously bounded: the loop SURVIVES intervals on
+        # any runner load — the old bug died after the FIRST one
+        await asyncio.wait_for(reached.wait(), timeout=5.0)
         await rec.stop()
-        self.assertGreaterEqual(calls, 5)  # boot pass + many cadence passes
+        self.assertGreaterEqual(calls, 5)
         self.assertTrue(rec._task is None or rec._task.done())
-        # no pending-exception wreckage: the retrieved task result is clean
+        # no pending-exception wreckage: cancelled OR clean, never failed
         if rec._task is not None:
-            self.assertIsNone(rec._task.exception())
+            self.assertTrue(rec._task.cancelled() or rec._task.exception() is None)

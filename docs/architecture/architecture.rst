@@ -397,8 +397,11 @@ The live Discord client is the better.py-self fork, adopted fully
   final validation → sender hook → adapter → audit/history/events.
   Retries only for scheduler-classified transient errors; timeouts
   are terminal (an in-flight send cannot be un-sent).
-- **Snowflakes are strings end-to-end** — Python, JSON, persistence,
-  logs, any future browser state. Never ``Number`` in JavaScript.
+- **Snowflakes are exact strings at the data boundaries** — JSON,
+  persistence, logs, any future browser state (never ``Number`` in
+  JavaScript). The Python API takes ``int`` ids (the scheduler
+  validates channel/user/message ids as integers); conversion
+  happens at the serialization seams.
 - **Credentials**: write-only surfaces, Fernet-encrypted at rest, the
   master key outside the database. Tokens never render into logs,
   responses, or exceptions.

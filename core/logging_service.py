@@ -81,14 +81,26 @@ _STDERR_QUEUE_HANDLER: logging.handlers.QueueHandler | None = None
 _STDERR_ATEXIT_ARMED = False
 
 
-def _start_stderr_pipeline() -> None:
+def _start_stderr_pipeline(console_level: int | None = None) -> None:
     """Create + start the one listener thread and attach its queue handler
-    to the ``libzent`` logger (idempotent; lock-guarded)."""
+    to the ``libzent`` logger (idempotent; lock-guarded).
+
+    ``console_level`` rides the TERMINAL stream handler: Python applies
+    an ancestor logger's level only at emission origin, so a child
+    logger that explicitly enables INFO would propagate records past a
+    root-level filter — the handler-level threshold is the one that
+    holds for every record that reaches the queue (CodeRabbit PR
+    review 2026-11-17).
+    """
     global _STDERR_LISTENER, _STDERR_QUEUE_HANDLER, _STDERR_ATEXIT_ARMED
     with _STDERR_PIPELINE_LOCK:
         if _STDERR_QUEUE_HANDLER is not None:
+            if console_level is not None and _STDERR_LISTENER is not None:
+                _STDERR_LISTENER.handlers[0].setLevel(console_level)
             return
         handler = logging.StreamHandler()
+        if console_level is not None:
+            handler.setLevel(console_level)
         handler.setFormatter(
             logging.Formatter(
                 "%(asctime)s %(levelname)-7s %(name)s: %(message)s",
@@ -236,8 +248,12 @@ def configure_stderr(level: int | None = None) -> None:
     if level is None:
         level = _default_console_level()
     root = logging.getLogger("libzent")
-    root.setLevel(level)
-    _start_stderr_pipeline()
+    # the LOGGER admits broadly (INFO keeps the structured bridge fed —
+    # records stay queryable); the CONSOLE threshold lives on the
+    # terminal stream handler inside the pipeline, where propagation
+    # cannot bypass it
+    root.setLevel(logging.INFO)
+    _start_stderr_pipeline(console_level=level)
     handler = _STDERR_QUEUE_HANDLER
     if handler is not None:
         root.addHandler(handler)

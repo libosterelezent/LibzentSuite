@@ -293,24 +293,33 @@ async def _live_log_window(
     severity: str | None,
     input_feed: AwaitableFactory | None,
     limit: int = 20,
+    out: Any = None,
+    stop_wait: Any = None,
 ) -> str:
     """The live log window: stream matching entries until a keypress returns.
 
     Contract (owner rule 2026-11-17): invoking a log verb with --live
     SWITCHES the interface to the log window; any input line ('q' is the
-    convention, Enter works) switches back to the CLI. Rendering is
-    line-buffered stdout; the window never interrupts the REPL's reader.
+    convention, Enter works) switches back to the CLI. All window output
+    rides ``out`` (the REPL's configured stream; stdout when absent).
     """
+    import sys
+
     if input_feed is None:
         raise UsageError("--live needs the interactive REPL (one-shot mode has no window)")
+    stream = out if out is not None else sys.stdout
+
+    def _emit(text: str) -> None:
+        print(text, file=stream, flush=True)
+
     svc = api.logs_service()
     entries: list[dict[str, Any]] = await api.logs_tail(
         limit, account=account, severity=severity, without_account=account is None
     )
     scope = f"account {account!r}" if account else "the suite (global)"
-    print(f"--- live log: {scope} — press q (or Enter) to return ---", flush=True)
+    _emit(f"--- live log: {scope} — press q (or Enter) to return ---")
     for entry in entries:
-        print(_log_line(entry), flush=True)
+        _emit(_log_line(entry))
     streamed: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     def _on_entry(entry: Any) -> None:
@@ -320,33 +329,52 @@ async def _live_log_window(
 
     unsubscribe = svc.subscribe(_on_entry)
     rendered = len(entries)
+    feed_task: asyncio.Future[str] | None = None
+    entry_task: asyncio.Future[dict[str, Any]] | None = None
+    stop_task = asyncio.ensure_future(stop_wait) if stop_wait is not None else None
     try:
         while True:
             feed_task = asyncio.ensure_future(input_feed())
             entry_task = asyncio.ensure_future(streamed.get())
-            done, _pending = await asyncio.wait(
-                {feed_task, entry_task}, return_when=asyncio.FIRST_COMPLETED
-            )
+            # the window observes SHUTDOWN too (CodeRabbit PR review
+            # 2026-11-17): a SIGINT during --live must not wait for a
+            # keypress that may never come — the stop signal exits the
+            # window exactly like a keypress would
+            waits = {feed_task, entry_task}
+            if stop_task is not None:
+                waits.add(stop_task)
+            done, _pending = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
             if entry_task in done:
                 rendered += 1
-                print(_log_line(entry_task.result()), flush=True)
-            for task in (feed_task, entry_task):
+                _emit(_log_line(entry_task.result()))
+            if feed_task in done:
+                feed_task.result()  # consume the line; any input returns
+                break
+            if stop_task is not None and stop_task in done:
+                break  # shutdown exits the window; the REPL tears down
+    finally:
+        # cancel AND reap on EVERY exit path — cancellation landing
+        # inside asyncio.wait skips loop-body cleanup, and an un-reaped
+        # cancelled task is exactly the "exception was never retrieved"
+        # wreckage this window must never cause
+        for task in (feed_task, entry_task, stop_task):
+            if task is not None:
                 task.cancel()
-            # reap BOTH tasks: an un-retrieved cancelled task is exactly
-            # the "exception was never retrieved" wreckage this window
-            # must never cause (awaiting a finished task is a no-op)
-            for task in (feed_task, entry_task):
+        for task in (feed_task, entry_task, stop_task):
+            if task is not None:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
-            if feed_task in done:
-                break
-    finally:
         unsubscribe()
     return f"--- live log closed ({rendered} lines shown; back on the CLI ---"
 
 
 async def run_command(
-    api: Any, line: str, *, input_feed: AwaitableFactory | None = None
+    api: Any,
+    line: str,
+    *,
+    input_feed: AwaitableFactory | None = None,
+    out: Any = None,
+    stop_wait: Any = None,
 ) -> str | None:
     """Execute one command line against the ControlAPI.
 
@@ -426,7 +454,13 @@ async def run_command(
             raise UsageError(f"usage: log {HELP['log'][0]}")
         if live.on:
             return await _live_log_window(
-                api, account=account, severity=severity, input_feed=input_feed, limit=limit
+                api,
+                account=account,
+                severity=severity,
+                input_feed=input_feed,
+                limit=limit,
+                out=out,
+                stop_wait=stop_wait,
             )
         return format_logs(await api.logs_tail(limit, account=account, severity=severity))
     if cmd == "global-log":
@@ -444,7 +478,13 @@ async def run_command(
             raise UsageError(f"usage: global-log {HELP['global-log'][0]}")
         if live.on:
             return await _live_log_window(
-                api, account=None, severity=severity, input_feed=input_feed, limit=limit
+                api,
+                account=None,
+                severity=severity,
+                input_feed=input_feed,
+                limit=limit,
+                out=out,
+                stop_wait=stop_wait,
             )
         return format_logs(await api.logs_tail(limit, severity=severity, without_account=True))
     if cmd == "logs":

@@ -52,7 +52,7 @@ class SignalOutboxTests(unittest.IsolatedAsyncioTestCase):
         deliver=None — bind_delivery is the promised late wiring, and
         an unwired outbox sweeps as a no-op rather than crashing."""
         unwired_outbox = SignalOutbox(self.db.signals, deliver=None)  # the bootstrap shape
-        await unwired_outbox.accept("A", "grinder", "claim_done")
+        signal_id = await unwired_outbox.accept("A", "grinder", "claim_done")
         unwired = await unwired_outbox.deliver_pending()  # deliver=None: no-op
         self.assertEqual((unwired["delivered"], unwired["failed"], unwired["dead"]), (0, 0, 0))
         late: list[str] = []
@@ -63,8 +63,7 @@ class SignalOutboxTests(unittest.IsolatedAsyncioTestCase):
         unwired_outbox.bind_delivery(_deliver)
         wired = await unwired_outbox.deliver_pending()
         self.assertEqual(wired["delivered"], 1)
-        self.assertEqual(len(late), 1)  # the callback received the pending id
-        self.assertTrue(all(late))
+        self.assertEqual(late, [signal_id])  # THE pending signal, by identity
         self.assertEqual(await self.db.signals.pending(10), [])
 
     async def test_delivery_acks_and_retries(self) -> None:

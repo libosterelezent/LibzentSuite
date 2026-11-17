@@ -167,11 +167,12 @@ class TestPluginsClearVerb(unittest.IsolatedAsyncioTestCase):
                 await run_command(FakeClearApi(), line)
 
     async def test_help_advertises_clear(self) -> None:
-        from interfaces.cli.commands import HELP, help_text
+        from interfaces.cli.commands import run_command
+        from tests.unit.test_cli_commands import FakeApi
 
-        sig = HELP["plugins"][0]
-        self.assertIn("clear <account> <plugin> <key>", sig)
-        self.assertIn("plugins", help_text())
+        focused = await run_command(FakeApi(), "help plugins")
+        assert focused is not None
+        self.assertIn("clear <account> <plugin> <key>", focused)
 
 
 # ---------------------------------------------- (c) unpaced None interval

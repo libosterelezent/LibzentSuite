@@ -35,9 +35,11 @@ Ground rules
 
 - Interfaces (CLI today, REST/WS + Flet next) parse input, call
   ControlAPI, render output. They never reimplement domain rules.
-- Plugins reach the platform ONLY through ``PluginContext`` /
-  ``PluginServices`` — the Core Engine → Driver model
-  (architecture.rst §2). Services are the authoritative middleware.
+- Plugins reach the platform through ``PluginContext`` /
+  ``PluginServices`` (proactive sends ride the paced facade) AND
+  through the toolbox's directly injected library client
+  (architecture.rst §2, owner-locked 2026-11-17); command responses
+  are the documented ``ctx.send`` exception.
 - ``core/`` never imports adapters at runtime (event DTOs are typed
   ``Any`` on the core side); adapters never make policy decisions.
 
@@ -104,8 +106,10 @@ Ground rules
   the boundary; runtime-only ``raw`` handles never persist or log.
 - ``fetch_user`` and DM-channel resolution use the account-scoped cache
   (``api_cache``); DM channels resolve once and stay cached.
-- Discord snowflakes remain exact digit strings across Python, JSON,
-  persistence, and logs. Never a JS ``Number``.
+- Discord snowflakes are exact digit STRINGS in JSON, persistence,
+  logs, and any browser state (never a JS ``Number``); the PYTHON API
+  takes ``int`` ids (``TaskScheduler.submit`` validates channel/user/
+  message ids as integers) — conversion happens at the boundaries.
 
 5. Outbound task and pacing contract
 ------------------------------------
