@@ -21,10 +21,11 @@ Output streams (one console, visually separated):
     the findings file. ``--watch`` in a second terminal tails the
     findings file live.
 
-Findings land in ``scripts/live-debugging/findings/run-<stamp>.jsonl``
+Findings land in ``scripts/live-debugging/findings/<run id>.jsonl``
 (one JSON object per anomaly, schema pinned by tests) plus a run
-summary ``run-<stamp>.summary.json`` (PASS lines live there, never in
-the findings file).
+summary ``<run id>.summary.json`` (PASS lines live there, never in
+the findings file). The id is collision-resistant and shared by both
+files.
 
 ISOLATION (AGENTS.md §7): the harness NEVER touches ``state/`` — it
 boots inside a disposable ``tempfile.mkdtemp`` workdir (database,
@@ -55,6 +56,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Sequence
@@ -259,12 +261,16 @@ def make_finding(
 
 
 class FindingsWriter:
-    """Append-only JSONL findings file + in-memory counters."""
+    """Append-only JSONL findings file + in-memory counters.
+
+    The file is created EXCLUSIVELY (mode "x"): a run-id collision
+    raises instead of silently truncating another run's evidence.
+    """
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._path = path
-        self._handle = path.open("w", encoding="utf-8")
+        self._handle = path.open("x", encoding="utf-8")
         self._counts = dict.fromkeys(SEVERITIES, 0)
         self._total = 0
 
@@ -346,12 +352,15 @@ class Harness:
         findings: FindingsWriter,
         console: Console,
         *,
+        run_id: str,
         keep_workdir: bool = False,
     ) -> None:
         self._findings = findings
         self._console = console
         self._keep_workdir = keep_workdir
-        self._stamp = time.strftime("%Y%m%dT%H%M%S")
+        #: the run's collision-resistant id — shared by the findings
+        #: file, the summary file, and every finding id
+        self._stamp = run_id
         self._seq = 0
         self._phase = "pre-boot"
         self._area = "framework"
@@ -1878,9 +1887,14 @@ async def run_pass(
 ) -> dict[str, Any]:
     """Boot once, run the selected phases in registry order, tear down,
     and write the run summary. Returns the summary dict (also written
-    to ``findings_dir/run-<stamp>.summary.json``)."""
-    stamp = time.strftime("%Y%m%dT%H%M%S")
-    findings = FindingsWriter(findings_dir / f"run-{stamp}.jsonl")
+    to ``findings_dir/<run id>.summary.json``)."""
+    # COLLISION-RESISTANT run id: two runs in the same wall-clock second
+    # used to share a filename, and the writer's "w" mode silently
+    # truncated the first run's evidence. The uuid suffix makes the id
+    # unique; the writer's exclusive "x" mode turns any residual
+    # collision into a loud FileExistsError.
+    run_id = f"run-{time.strftime('%Y%m%dT%H%M%S')}-{uuid4().hex[:8]}"
+    findings = FindingsWriter(findings_dir / f"{run_id}.jsonl")
     console = console or Console()
     phases = [phase_by_name(name) for name in selected] or list(PHASES)
     summary: dict[str, Any] = {
@@ -1888,11 +1902,11 @@ async def run_pass(
         "phases": [],
         "exit_code": 0,
     }
-    harness = Harness(findings, console, keep_workdir=keep_workdir)
+    harness = Harness(findings, console, run_id=run_id, keep_workdir=keep_workdir)
     started = time.monotonic()
     try:
         console.banner(
-            f"live-debug pass {stamp} — {len(phases)} phase(s), findings dir {findings_dir}"
+            f"live-debug pass {run_id} — {len(phases)} phase(s), findings dir {findings_dir}"
         )
         await harness.boot()
         if keep_workdir:
@@ -1952,9 +1966,7 @@ async def run_pass(
             1 if (findings.counts().get("critical") or findings.counts().get("major")) else 0
         )
         findings.close()
-        (findings_dir / f"run-{stamp}.summary.json").write_text(
-            json.dumps(summary, indent=2) + "\n"
-        )
+        (findings_dir / f"{run_id}.summary.json").write_text(json.dumps(summary, indent=2) + "\n")
         console.banner(
             f"run finished in {summary['duration_s']}s — findings "
             f"{dict(summary['findings_by_severity'])}, steps "
