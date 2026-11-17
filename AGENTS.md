@@ -274,6 +274,14 @@ Scope & safety:
 - Commit only after the final diff review. The working tree ends
   **clean** — everything relevant committed, nothing extra.
 - Push to remote only when there are five or more commits have been committed.
+- **Run the CodeRabbit pre-review locally before every explicit push**
+  (owner rule, 2026-11-17): after `scripts/local-ci.sh` is green, run the
+  CodeRabbit CLI review over the pending range (`coderabbit-code-review`
+  skill documents the exact workflow), fix or triage its findings, then
+  push. A fix after a green gate invalidates that gate: re-run both the
+  local CI and the pre-review over the final range — a green run over an
+  earlier shape never covers the pushed commits. CI gates and the
+  pre-review are both mandatory — neither substitutes for the other.
 - **Never** push committed series to the remote without owner's explicit approval.
 
 After the series:
