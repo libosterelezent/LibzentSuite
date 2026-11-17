@@ -86,8 +86,9 @@ mypy_ratchet() {
   if [ "$errs" -eq "$base" ]; then ok "$label == baseline"
   else
     # diagnostics BEFORE the exit trap cleans RUN_DIR — a failed gate
-    # must carry its own evidence (CodeRabbit pre-review 2026-11-17)
-    grep "error:" "$log" | head -20
+    # must carry its own evidence (CodeRabbit pre-review 2026-11-17).
+    # `|| true`: an empty match must not kill the gate mid-verdict.
+    grep "error:" "$log" | head -20 || true
     if [ "$errs" -lt "$base" ]; then bad "$label improved — lower $baseline_file to $errs in this push"
     else bad "$label grew ($base -> $errs)"; fi
   fi
@@ -108,8 +109,13 @@ if UV_PROJECT_ENVIRONMENT="$RUN_DIR/venv310" timeout 590 "$UV_BIN" run --frozen 
   python -m unittest discover -s tests -t . > "$RUN_DIR/suite-310.log" 2>&1; then
   ok "3.10 suite: $(grep 'Ran' "$RUN_DIR/suite-310.log" | head -1)"
 else
-  bad "3.10 suite — $(grep -E '^(FAILED|ERROR)' "$RUN_DIR/suite-310.log" | head -2)"
-  grep -B2 -A8 "ERROR:\|FAIL:" "$RUN_DIR/suite-310.log" | head -40
+  # no-match greps stay nonfatal (set -e + pipefail would otherwise
+  # kill the gate before the verdict) and fall back to a bounded tail
+  # — a timeout-killed run has no FAIL:/ERROR: lines at all.
+  reason="$(grep -E '^(FAILED|ERROR)' "$RUN_DIR/suite-310.log" | head -2 || true)"
+  [ -n "$reason" ] || reason="$(tail -15 "$RUN_DIR/suite-310.log" || true)"
+  bad "3.10 suite — $reason"
+  grep -B2 -A8 "ERROR:\|FAIL:" "$RUN_DIR/suite-310.log" | head -40 || true
 fi
 report_state_residue
 
@@ -120,8 +126,14 @@ if "$UV_BIN" run --frozen --python 3.13 coverage run -m unittest discover -s tes
   && "$UV_BIN" run --frozen --python 3.13 coverage report > "$RUN_DIR/cov.log" 2>&1; then
   ok "3.13 suite: $(grep 'Ran' "$RUN_DIR/suite-313.log" | head -1) — $(grep TOTAL "$RUN_DIR/cov.log")"
 else
-  bad "3.13 suite/coverage — $(grep -E '^(FAILED|ERROR)|fail_under' "$RUN_DIR/suite-313.log" "$RUN_DIR/cov.log" | head -3)"
-  grep -B2 -A8 "ERROR:\|FAIL:" "$RUN_DIR/suite-313.log" | head -30
+  # tests and coverage fail separately: the suite log carries
+  # FAILED/ERROR, the coverage log carries the floor line (which reads
+  # "Coverage failure: … fail-under" — hyphen, own line, own file).
+  reason="$(grep -E '^(FAILED|ERROR)' "$RUN_DIR/suite-313.log" | head -3 || true)"
+  reason="$reason$(grep 'Coverage failure' "$RUN_DIR/cov.log" || true)"
+  [ -n "$reason" ] || reason="$(tail -15 "$RUN_DIR/suite-313.log")$(tail -5 "$RUN_DIR/cov.log" 2>/dev/null || true)"
+  bad "3.13 suite/coverage — $reason"
+  grep -B2 -A8 "ERROR:\|FAIL:" "$RUN_DIR/suite-313.log" | head -30 || true
 fi
 report_state_residue
 
