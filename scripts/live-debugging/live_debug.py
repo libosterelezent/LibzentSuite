@@ -1,0 +1,2064 @@
+"""LiveDebug — the whole-suite LIVE reconnaissance harness.
+
+A human-supervised pass over the REAL LibzentSuite stack (the exact
+``core.bootstrap.build`` path of ``main.py``) with only the Discord
+boundary replaced by the offline simulator: no network, no real
+tokens, no second stack. Its job is to drive every feature area in
+ordered PHASES while an anomaly-capture layer watches alongside:
+
+  * LogService.subscribe — every structured row is classified
+    (ERROR → major; contract-suspicious WARNING → minor/observation),
+  * AuditRecorder.subscribe — a bounded audit tail provides evidence
+    context for findings,
+  * loop.set_exception_handler — "Task exception was never retrieved"
+    wreckage becomes a CRITICAL finding instead of stderr noise,
+  * phase expectations — every step states its expectation; a mismatch
+    is a finding with expectation/actual/repro.
+
+Output streams (one console, visually separated):
+  * the PHASE feed — ``phase``/``step``/``PASS`` lines, and
+  * the ANOMALY feed — ``[ANOMALY]``-prefixed lines, also appended to
+    the findings file. ``--watch`` in a second terminal tails the
+    findings file live.
+
+Findings land in ``scripts/live-debugging/findings/run-<stamp>.jsonl``
+(one JSON object per anomaly, schema pinned by tests) plus a run
+summary ``run-<stamp>.summary.json`` (PASS lines live there, never in
+the findings file).
+
+ISOLATION (AGENTS.md §7): the harness NEVER touches ``state/`` — it
+boots inside a disposable ``tempfile.mkdtemp`` workdir (database,
+credential key, staged plugins) removed at exit unless
+``--keep-workdir``. Tokens are synthetic values only.
+
+Usage:
+  python3 scripts/live-debugging/live_debug.py             # full pass
+  python3 scripts/live-debugging/live_debug.py --list      # phase table
+  python3 scripts/live-debugging/live_debug.py --phase cog-commands
+  python3 scripts/live-debugging/live_debug.py --watch     # 2nd terminal
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import itertools
+import json
+import re
+import shutil
+import sys
+import tempfile
+import time
+import traceback
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Coroutine, Sequence
+
+    from core.logging_service import LogEntry
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:  # runnable from any working directory
+    sys.path.insert(0, str(REPO_ROOT))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:  # runnable from any working directory
+    sys.path.insert(0, str(REPO_ROOT))
+
+TOOLKIT_DIR = Path(__file__).resolve().parent
+TOOLKIT_PLUGINS = TOOLKIT_DIR / "plugins"
+DEFAULT_FINDINGS_DIR = TOOLKIT_DIR / "findings"
+SCENARIO_FIXTURES = REPO_ROOT / "tests" / "fixtures" / "sim_plugins"
+
+# --- synthetic world topology (mirrors the repo's sim conventions) ------
+OWNER_ID = 1001
+PRIMARY_BOT_ID = 999_999
+ALPHA_ID = 2001
+BETA_ID = 2002
+GAMMA_ID = 2003
+GUILD_CHANNEL = 500
+OPS_CHANNEL = 501
+
+#: first-boot config: message pacing at the 1.5s floor, near-zero jitter
+#: (deterministic-ish timing for the pacing assertions)
+FAST_POLICIES = {
+    "global": {
+        "message": {"interval": 1.5, "jitter": [0.0, 0.05]},
+        "dm": {"interval": 1.5, "jitter": [0.0, 0.05]},
+    },
+    "accounts": {},
+}
+FAST_SETTINGS = {"ldp_worker": {"burst": 2}}
+
+# --- bounded-wait budgets (every timing wait is explicit) ---------------
+#: idle seconds that count as "the world went quiet"
+QUIET_WINDOW_S = 2.2
+#: hard cap for one world-quiet wait
+QUIET_LIMIT_S = 30.0
+#: the reconciler sweeps every 30s — the signal-delivery wait allows one
+#: full period plus margin
+RECONCILER_WAIT_S = 45.0
+#: hard cap for one simulator scenario driven by the harness
+SCENARIO_BUDGET_S = 120.0
+#: poll cadence for predicate waits
+POLL_S = 0.1
+
+#: evidence lines kept per finding (log excerpt + audit-tail context)
+EVIDENCE_MAX = 12
+#: audit rows kept in the live tail (evidence context)
+AUDIT_TAIL_MAX = 48
+#: findings file naming (the --watch tail targets the newest match)
+_RUN_FILE_PATTERN = re.compile(r"^run-.*\.jsonl$")
+
+# ----------------------------------------------------------------- findings
+#: severity ranking (worst first); the findings file stays anomalies-only
+SEVERITIES = ("critical", "major", "minor", "observation")
+
+#: WARNING rows matching one of these read like a violated contract (the
+#: documented vocabulary of the framework's own failure paths) — they
+#: become findings instead of console noise
+_CONTRACT_WARNING_KEYWORDS = (
+    "failed",
+    "could not",
+    "cannot",
+    "error",
+    "leak",
+    "leaked",
+    "orphan",
+    "stale",
+    "ignored",
+    "skipping",
+    "clamped",
+    "insecure",
+    "deprecated",
+    "dropped",
+    "dead",
+    "unwired",
+    "not wired",
+    "mismatch",
+    "abort",
+    "thrash",
+    "swallow",
+    "re-created",
+    "mid-",
+    "never retrieved",
+)
+
+#: WARNING rows matching these are DOCUMENTED benign behavior (expected
+#: on this harness's stacks) — recorded as observations, not defects
+_BENIGN_WARNING_PATTERNS = (
+    # the harness stops accounts with tasks in flight on purpose
+    "task was cancelled",
+    # scenarios deliberately stage server 429s / channel loss
+    "server rate limit",
+    "target gone",
+    "channel",
+)
+
+
+#: ERROR rows matching these are DELIBERATE operator actions logging loud
+#: by design (the account manager estop line) — observations, not defects
+_BENIGN_ERROR_PATTERNS = ("emergency stop",)
+
+
+def classify_log_entry(severity: str, source: str, message: str) -> str | None:
+    """Map one structured log row to a finding severity (None = not one).
+
+    ERROR (and anything louder the service already collapses to ERROR)
+    is always at least a major finding. WARNING rows become minor when
+    the message reads like a contract violation (the keyword list), an
+    observation when it matches a known-benign pattern, and nothing at
+    all when it is ordinary operational chatter. INFO/DEBUG rows are
+    never findings.
+    """
+    sev = (severity or "").upper()
+    if sev == "ERROR":
+        text = f"{source} {message}".lower()
+        if any(pattern in text for pattern in _BENIGN_ERROR_PATTERNS):
+            return "observation"
+        return "major"
+    if sev != "WARNING":
+        return None
+    text = f"{source} {message}".lower()
+    if any(word in text for word in _CONTRACT_WARNING_KEYWORDS):
+        if any(pattern in text for pattern in _BENIGN_WARNING_PATTERNS):
+            return "observation"
+        return "minor"
+    if any(pattern in text for pattern in _BENIGN_WARNING_PATTERNS):
+        return "observation"
+    return None
+
+
+def format_log_row(severity: str, source: str, message: str) -> str:
+    """One evidence line shaped like the simulator's spec-§9 rows."""
+    return f"{(severity or 'INFO').upper():<7} {source} {message}".rstrip()
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One captured anomaly — the JSONL schema (pinned by unit tests)."""
+
+    id: str
+    ts: float
+    phase: str
+    area: str
+    severity: str
+    summary: str
+    evidence: list[str]
+    expectation: str
+    actual: str
+    repro: str
+
+    def as_dict(self) -> dict[str, Any]:
+        """The exact persisted shape — one JSON object per line."""
+        return {
+            "id": self.id,
+            "ts": round(self.ts, 3),
+            "phase": self.phase,
+            "area": self.area,
+            "severity": self.severity,
+            "summary": self.summary,
+            "evidence": list(self.evidence),
+            "expectation": self.expectation,
+            "actual": self.actual,
+            "repro": self.repro,
+        }
+
+
+def make_finding(
+    seq: int,
+    stamp: str,
+    *,
+    phase: str,
+    area: str,
+    severity: str,
+    summary: str,
+    evidence: Sequence[str],
+    expectation: str,
+    actual: str,
+    repro: str,
+) -> Finding:
+    """Validate-and-build (bad severities fail loudly, not silently)."""
+    if severity not in SEVERITIES:
+        raise ValueError(f"unknown finding severity {severity!r} (known: {SEVERITIES})")
+    return Finding(
+        id=f"{stamp}-{seq:04d}",
+        ts=time.time(),
+        phase=phase,
+        area=area,
+        severity=severity,
+        summary=summary,
+        evidence=[str(line) for line in evidence][:EVIDENCE_MAX],
+        expectation=expectation,
+        actual=actual,
+        repro=repro,
+    )
+
+
+class FindingsWriter:
+    """Append-only JSONL findings file + in-memory counters."""
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._path = path
+        self._handle = path.open("w", encoding="utf-8")
+        self._counts = dict.fromkeys(SEVERITIES, 0)
+        self._total = 0
+
+    def write(self, finding: Finding) -> None:
+        self._handle.write(json.dumps(finding.as_dict(), ensure_ascii=False) + "\n")
+        self._handle.flush()
+        self._counts[finding.severity] += 1
+        self._total += 1
+
+    def counts(self) -> dict[str, int]:
+        return dict(self._counts)
+
+    @property
+    def total(self) -> int:
+        return self._total
+
+    def close(self) -> None:
+        self._handle.close()
+
+
+@dataclass
+class PhaseOutcome:
+    """Run-summary entry for one phase (PASS lines live here, not in
+    the findings file — that one stays anomalies-only)."""
+
+    name: str
+    area: str
+    steps_passed: int = 0
+    steps_failed: int = 0
+    duration_s: float = 0.0
+
+
+class Console:
+    """The two visually separated output feeds (one stdout).
+
+    Phase progress prints indented, quiet lines; anomalies print with
+    the ``[ANOMALY]`` prefix so a supervising human can tell the
+    streams apart at a glance. ``--watch`` mirrors the anomaly feed in
+    a second terminal.
+    """
+
+    def __init__(self, quiet: bool = False) -> None:
+        self._quiet = quiet
+
+    def banner(self, text: str) -> None:
+        print(f"\n=== {text} ===", flush=True)
+
+    def phase(self, text: str) -> None:
+        print(f"\n--- phase: {text} ---", flush=True)
+
+    def line(self, text: str) -> None:
+        if not self._quiet:
+            print(f"    {text}", flush=True)
+
+    def passed(self, text: str) -> None:
+        print(f"  [PASS] {text}", flush=True)
+
+    def failed(self, text: str) -> None:
+        print(f"  [FAIL] {text}", flush=True)
+
+    def anomaly(self, text: str) -> None:
+        print(f"[ANOMALY] {text}", flush=True)
+
+
+class Harness:
+    """One live boot of the REAL stack over the simulator, wrapped in
+    the anomaly-capture layer.
+
+    The stack is composed by ``core.bootstrap.build`` — the same boot
+    path ``main.py`` uses — with the Discord boundary swapped for
+    ``SimClient`` over a shared ``SimWorld`` (the pattern the repo's
+    own full-stack integration tests pin). Everything else (managers,
+    scheduler, limiter, database, audit, credentials, workspace
+    service, reconciler, chain runtime) is production code.
+    """
+
+    def __init__(
+        self,
+        findings: FindingsWriter,
+        console: Console,
+        *,
+        keep_workdir: bool = False,
+    ) -> None:
+        self._findings = findings
+        self._console = console
+        self._keep_workdir = keep_workdir
+        self._stamp = time.strftime("%Y%m%dT%H%M%S")
+        self._seq = 0
+        self._phase = "pre-boot"
+        self._area = "framework"
+        self.steps_passed = 0
+        self.steps_failed = 0
+        self._audit_tail: deque[str] = deque(maxlen=AUDIT_TAIL_MAX)
+        self._unsub_log: Callable[[], None] | None = None
+        self._unsub_audit: Callable[[], None] | None = None
+        self._prior_handler: Callable[[asyncio.AbstractEventLoop, dict[str, Any]], Any] | None = (
+            None
+        )
+        self._torn_down = False
+        # framework handles (set by boot)
+        self.workdir: Path | None = None
+        self.world: Any = None
+        self.framework: Any = None
+
+    # ------------------------------------------------------------- property
+    @property
+    def api(self) -> Any:
+        if self.framework is None:
+            raise RuntimeError("harness has not booted (framework is None)")
+        return self.framework.api
+
+    # ----------------------------------------------------------------- boot
+    async def boot(self) -> None:
+        """Stage the disposable workdir and build the real stack."""
+        from adapters.simulator.client import SimClient
+        from adapters.simulator.world import SimWorld
+        from core.bootstrap import build
+        from core.credentials import Credentials
+        from database.db import Database
+
+        self.workdir = Path(tempfile.mkdtemp(prefix="libzent-live-debug-"))
+        config_dir = self.workdir / "config"
+        (config_dir / "accounts").mkdir(parents=True)
+        (config_dir / "global_settings.json").write_text(json.dumps(FAST_SETTINGS))
+        (config_dir / "rate_limits.json").write_text(json.dumps(FAST_POLICIES))
+        env_file = self.workdir / "synthetic.env"
+        env_file.write_text(
+            f"DISCORD_TOKEN_ALPHA=sim-token-alpha\n"
+            f"DISCORD_TOKEN_BETA=sim-token-beta\n"
+            f"DISCORD_TOKEN_GAMMA=sim-token-gamma\n"
+            f"OWNER_USER_IDS={OWNER_ID}\n"
+            f"PRIMARY_BOT_ID={PRIMARY_BOT_ID}\n"
+        )
+        self._stage_plugins(self.workdir / "plugins")
+
+        self.world = SimWorld(responder_id=PRIMARY_BOT_ID, reply_delay=0.01)
+        for user_id, name in (
+            (OWNER_ID, "owner"),
+            (PRIMARY_BOT_ID, "bot"),
+            (ALPHA_ID, "alpha"),
+            (BETA_ID, "beta"),
+            (GAMMA_ID, "gamma"),
+        ):
+            self.world.add_user(user_id, name)
+        self.world.add_channel(GUILD_CHANNEL, "grind-channel")
+        self.world.add_channel(OPS_CHANNEL, "ops-channel")
+        user_ids = {"alpha": ALPHA_ID, "beta": BETA_ID, "gamma": GAMMA_ID}
+
+        def client_factory(name: str, token: str) -> SimClient:
+            # deterministic per-account latency seed
+            return SimClient(self.world, user_ids[name], seed=user_ids[name])
+
+        credentials = Credentials.from_values(
+            {
+                "PRIMARY_BOT_ID": str(PRIMARY_BOT_ID),
+                "OWNER_USER_IDS": str(OWNER_ID),
+                "DISCORD_TOKEN_ALPHA": "sim-token-alpha",
+                "DISCORD_TOKEN_BETA": "sim-token-beta",
+                "DISCORD_TOKEN_GAMMA": "sim-token-gamma",
+            }
+        )
+        database = Database(str(self.workdir / "libzent.db"))
+        self.framework = await build(
+            config_dir=str(config_dir),
+            plugin_dir=str(self.workdir / "plugins"),
+            client_factory=client_factory,
+            credentials=credentials,
+            database=database,
+            quiet=True,
+            env_file=str(env_file),
+        )
+        self._install_capture()
+
+    @staticmethod
+    def _stage_plugins(target: Path) -> None:
+        """Copy the real plugin tree + the toolkit's fixtures into the
+        workdir (discovery then sees ping + ldp_worker; production
+        trees are only ever read)."""
+        target.mkdir(parents=True, exist_ok=True)
+        for source_root in (REPO_ROOT / "plugins", TOOLKIT_PLUGINS):
+            for child in sorted(source_root.iterdir()):
+                if child.name.startswith("_") or not child.is_dir():
+                    continue
+                shutil.copytree(child, target / child.name, dirs_exist_ok=True)
+
+    # ------------------------------------------------------------- teardown
+    async def teardown(self) -> None:
+        """Framework.shutdown + capture detach + workdir removal (idempotent)."""
+        if self._torn_down:
+            return
+        self._torn_down = True
+        if self.framework is not None:
+            try:
+                await self.framework.shutdown()
+            except Exception as exc:  # teardown must still finish
+                self.report(
+                    severity="major",
+                    summary=f"framework.shutdown raised {type(exc).__name__}",
+                    evidence=[repr(exc)],
+                    expectation="graceful ordered teardown (AGENTS bootstrap contract)",
+                    actual=f"{type(exc).__name__}: {exc}",
+                    repro="shutdown",
+                )
+        self._detach_capture()
+        if self.workdir is not None and not self._keep_workdir:
+            shutil.rmtree(self.workdir, ignore_errors=True)
+
+    # ------------------------------------------------------ anomaly capture
+    def _install_capture(self) -> None:
+        """Wire the parallel anomaly window: log subscriber, audit tail,
+        and the loop exception handler (unhandled task wreckage becomes
+        a CRITICAL finding instead of a stderr print)."""
+
+        def on_log(entry: LogEntry) -> None:
+            severity = getattr(entry, "severity", "INFO")
+            source = str(getattr(entry, "source", "?"))
+            message = str(getattr(entry, "message", ""))
+            verdict = classify_log_entry(severity, source, message)
+            if verdict is None:
+                return
+            self.report(
+                severity=verdict,
+                summary=f"{severity} log row from {source}: {message[:160]}",
+                evidence=[format_log_row(severity, source, message)],
+                expectation=(
+                    "the feature contract holds with no ERROR rows and no "
+                    "contract-violating warnings (docs/architecture/*.rst)"
+                ),
+                actual=format_log_row(severity, source, message),
+                repro=f"{self._phase}/log-capture",
+            )
+
+        def on_audit(entry: Any) -> None:
+            as_dict = getattr(entry, "as_dict", None)
+            data: dict[str, Any] = {}
+            if callable(as_dict):
+                with contextlib.suppress(Exception):
+                    data = dict(as_dict())
+            elif isinstance(entry, dict):
+                data = dict(entry)
+            self._audit_tail.append(
+                " ".join(f"{key}={value}" for key, value in sorted(data.items()))
+            )
+
+        self._unsub_log = self.framework.logs.subscribe(on_log)
+        audit = self.framework.audit
+        if audit is not None and hasattr(audit, "subscribe"):
+            self._unsub_audit = audit.subscribe(on_audit)
+
+        loop = asyncio.get_running_loop()
+        self._prior_handler = loop.get_exception_handler()
+
+        def on_loop_exception(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+            message = str(context.get("message") or "unhandled loop exception")
+            exc = context.get("exception")
+            detail = f"{type(exc).__name__}: {exc}" if exc is not None else ""
+            task = context.get("task") or context.get("future")
+            task_name = getattr(task, "get_name", lambda: "?")()
+            self.report(
+                severity="critical",
+                summary=f"unhandled asyncio exception ({message})",
+                evidence=[line for line in (message, detail, f"task={task_name}") if line],
+                expectation=(
+                    "every framework task retrieves or handles its exception "
+                    "(no 'Task exception was never retrieved' wreckage)"
+                ),
+                actual=(detail or message) + f" [task={task_name}]",
+                repro=f"{self._phase}/loop-exception",
+            )
+
+        loop.set_exception_handler(on_loop_exception)
+
+    def _detach_capture(self) -> None:
+        for unsub in (self._unsub_log, self._unsub_audit):
+            if unsub is not None:
+                with contextlib.suppress(Exception):
+                    unsub()
+        self._unsub_log = self._unsub_audit = None
+        with contextlib.suppress(RuntimeError):
+            loop = asyncio.get_event_loop_policy().get_event_loop()
+            if self._prior_handler is not None:
+                loop.set_exception_handler(self._prior_handler)
+            else:
+                loop.set_exception_handler(None)
+
+    # -------------------------------------------------------------- report
+    def report(
+        self,
+        *,
+        severity: str,
+        summary: str,
+        evidence: Sequence[str],
+        expectation: str,
+        actual: str,
+        repro: str,
+    ) -> Finding:
+        """Record one finding: JSONL line + console anomaly line."""
+        self._seq += 1
+        finding = make_finding(
+            self._seq,
+            self._stamp,
+            phase=self._phase,
+            area=self._area,
+            severity=severity,
+            summary=summary,
+            evidence=[*evidence, *list(self._audit_tail)[-3:]],
+            expectation=expectation,
+            actual=actual,
+            repro=repro,
+        )
+        self._findings.write(finding)
+        self._console.anomaly(f"{finding.id} [{severity}] {summary}")
+        return finding
+
+    def observation(self, summary: str, *, expectation: str, actual: str, repro: str) -> None:
+        """A non-defect behavior worth keeping (contract gap, cosmetic
+        drift, known limitation) — severity 'observation'."""
+        self.report(
+            severity="observation",
+            summary=summary,
+            evidence=[],
+            expectation=expectation,
+            actual=actual,
+            repro=repro,
+        )
+
+    # ------------------------------------------------------- step plumbing
+    def set_phase(self, name: str, area: str) -> None:
+        self._phase = name
+        self._area = area
+
+    async def step(self, name: str, action: Callable[[], Awaitable[Any]]) -> Any:
+        """Run one announced step; exceptions become findings (the phase
+        keeps going — the human watches the anomaly feed)."""
+        self._console.line(f"step: {name}")
+        try:
+            return await action()
+        except Exception as exc:
+            self.steps_failed += 1
+            self._console.failed(f"{name} raised {type(exc).__name__}: {exc}")
+            tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
+            self.report(
+                severity="major",
+                summary=f"step {name!r} raised {type(exc).__name__}: {exc}",
+                evidence=[line.rstrip() for line in tb[-4:]],
+                expectation="the step completes against the documented contract",
+                actual=f"{type(exc).__name__}: {exc}",
+                repro=f"{self._phase}/{name}",
+            )
+
+    async def step_raises(
+        self, name: str, expected: tuple[type[Exception], ...], action: Callable[[], Awaitable[Any]]
+    ) -> bool:
+        """Run one step EXPECTING a domain exception (the typo traps and
+        safety guards): PASS when it raises, finding when it does not."""
+        self._console.line(f"step: {name} (expects {expected[0].__name__})")
+        try:
+            result = await action()
+        except expected as exc:
+            self.steps_passed += 1
+            self._console.passed(f"{name} raised {type(exc).__name__} as designed")
+            return True
+        except Exception as exc:
+            self.steps_failed += 1
+            self._console.failed(f"{name} raised unexpected {type(exc).__name__}: {exc}")
+            self.report(
+                severity="major",
+                summary=f"step {name!r} raised {type(exc).__name__} (expected {expected})",
+                evidence=[repr(exc)],
+                expectation=f"one of {expected}",
+                actual=f"{type(exc).__name__}: {exc}",
+                repro=f"{self._phase}/{name}",
+            )
+            return False
+        self.steps_failed += 1
+        self._console.failed(f"{name} returned {result!r} instead of raising")
+        self.report(
+            severity="major",
+            summary=f"step {name!r} failed to raise (guard did not fire)",
+            evidence=[],
+            expectation=f"one of {expected}",
+            actual=f"returned {result!r}",
+            repro=f"{self._phase}/{name}",
+        )
+        return False
+
+    def expect(self, ok: bool, *, what: str, expectation: str, actual: str) -> bool:
+        """Record one PASS/FAIL expectation check (FAIL → finding)."""
+        if ok:
+            self.steps_passed += 1
+            self._console.passed(f"{what} — {actual}")
+            return True
+        self.steps_failed += 1
+        self._console.failed(f"{what} — expected {expectation!r}, saw {actual!r}")
+        self.report(
+            severity="major",
+            summary=f"expectation not met: {what}",
+            evidence=[],
+            expectation=expectation,
+            actual=actual,
+            repro=f"{self._phase}/{what}",
+        )
+        return False
+
+    # ------------------------------------------------------------- helpers
+    async def wait_until(
+        self,
+        predicate: Callable[[], Awaitable[bool]],
+        *,
+        timeout: float,
+        description: str,
+    ) -> bool:
+        """Bounded poll (every wait in the harness is explicit)."""
+        deadline = time.monotonic() + timeout
+        while True:
+            if await predicate():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(POLL_S)
+
+    async def wait_quiet(
+        self, channel: int = GUILD_CHANNEL, *, limit: float = QUIET_LIMIT_S
+    ) -> None:
+        """Wait for the world to go quiet (bounded hard cap)."""
+        await self.world.wait_for_quiet(channel, quiet=QUIET_WINDOW_S, limit=limit)
+
+    def owner_says(self, content: str, *, channel: int = GUILD_CHANNEL) -> None:
+        """The owner speaks in a guild channel (drives the event path)."""
+        self.world.deliver(channel, OWNER_ID, content)
+
+    async def audit_out_rows(self, *, action: str = "message") -> list[dict[str, Any]]:
+        rows = await self.api.audit_tail(n=200)
+        return [r for r in rows if r.get("direction") == "out" and r.get("action") == action]
+
+    async def account_state(self, name: str) -> str:
+        """The account lifecycle state (accounts_info status is a dict
+        when connected, a string otherwise — both shapes parsed)."""
+        info = await self.api.accounts_info(name)
+        if not isinstance(info, dict):
+            return ""
+        status = info.get("status")
+        if isinstance(status, dict):
+            return str(status.get("state") or "")
+        return str(status or "")
+
+    async def ensure_account(self, name: str = "alpha", plugins: list[str] | None = None) -> None:
+        """Idempotent: the account exists, has the plugins, and runs
+        (standalone ``--phase`` runs need their prerequisites)."""
+        known = {a.get("name") for a in await self.api.accounts_list()}
+        if name not in known:
+            await self.api.accounts_add(
+                {"name": name, "credential": f"sim-token-{name}", "plugins": plugins or []}
+            )
+        assigned = set(await self.api.accounts_plugins_list(name))
+        for plugin in plugins or []:
+            if plugin not in assigned:
+                await self.api.accounts_plugin_assign(name, plugin)
+        if await self.account_state(name) != "running":
+            await self.api.accounts_start(name)
+
+
+# ------------------------------------------------------------------- phases
+async def phase_boot(h: Harness) -> None:
+    """The real bootstrap over the simulator: discovery + status."""
+    manifests = await h.step("plugin manifests", h.api.plugins_manifests)
+    names = sorted(m.get("name") for m in manifests or [])
+    h.expect(
+        names == ["ldp_worker", "ping"],
+        what="discovered plugins (production ping + toolkit fixture)",
+        expectation="['ldp_worker', 'ping']",
+        actual=str(names),
+    )
+    status = await h.step("status snapshot", h.api.status)
+    ok = isinstance(status, dict) and status.get("uptime_s", -1) >= 0
+    h.expect(
+        ok,
+        what="status() returns a live snapshot",
+        expectation="dict with uptime",
+        actual=str(type(status)),
+    )
+
+    import_status = await h.step(
+        "synthetic env import (migration verb, nothing registered yet)",
+        h.api.credentials_import_env,
+    )
+    h.expect(
+        isinstance(import_status, dict),
+        what="credentials_import_env returns the migration report",
+        expectation="EnvImportReport dict",
+        actual=str(import_status),
+    )
+    # the synthetic tokens must never surface in logs or audit rows
+    synthetic_tokens = ("sim-token-alpha", "sim-token-beta", "sim-token-gamma")
+    leak_rows = [
+        row
+        for row in await h.api.logs_tail(n=400)
+        if any(token in str(row.get("message", "")) for token in synthetic_tokens)
+    ]
+    h.expect(
+        not leak_rows,
+        what="no credential material in structured logs",
+        expectation="tokens never appear in log rows",
+        actual=f"{len(leak_rows)} leaking row(s)",
+    )
+
+
+async def phase_accounts(h: Harness) -> None:
+    """Accounts add/credential/start/estop/stop/remove end to end."""
+    out = await h.step(
+        "add alpha (ping + ldp_worker, Fernet-stored credential)",
+        lambda: h.api.accounts_add(
+            {
+                "name": "alpha",
+                "credential": "sim-token-alpha",
+                "plugins": ["ping", "ldp_worker"],
+            }
+        ),
+    )
+    h.expect(
+        isinstance(out, dict) and out.get("name") == "alpha",
+        what="accounts_add alpha",
+        expectation="echoed account row",
+        actual=str(out),
+    )
+    cred_state = (out or {}).get("credential")
+    h.expect(
+        cred_state in ("db", "env", "configured", "memory"),
+        what="credential stored through the encrypted service",
+        expectation="accounts_add echoes a credential state",
+        actual=f"credential={cred_state!r}",
+    )
+
+    await h.step_raises(
+        "duplicate add is refused",
+        (Exception,),
+        lambda: h.api.accounts_add({"name": "alpha"}),
+    )
+    started = await h.step("start alpha", lambda: h.api.accounts_start("alpha"))
+    alpha_state = await h.account_state("alpha")
+    h.expect(
+        alpha_state == "running",
+        what="alpha reaches running",
+        expectation="status.state == running",
+        actual=f"state={alpha_state!r}",
+    )
+    h.expect(
+        isinstance(started, dict),
+        what="accounts_start returns a report",
+        expectation="dict report",
+        actual=str(started),
+    )
+
+    await h.step(
+        "add gamma (scratch)",
+        lambda: h.api.accounts_add({"name": "gamma", "credential": "sim-token-gamma"}),
+    )
+    await h.step("start gamma", lambda: h.api.accounts_start("gamma"))
+    estop = await h.step("emergency-stop gamma", lambda: h.api.accounts_emergency_stop("gamma"))
+    h.expect(
+        isinstance(estop, dict) and estop.get("stop_initiated") is True,
+        what="account-scoped estop initiates the stop",
+        expectation="stop_initiated=True (disconnect is async by contract)",
+        actual=str(estop),
+    )
+    # the estop stop is deliberately fire-and-forget: wait (bounded) for
+    # the teardown to land before removing the account
+    gamma_down = await h.wait_until(
+        lambda: _state_is_not(h, "gamma", "running"),
+        timeout=10.0,
+        description="gamma teardown lands after estop",
+    )
+    gamma_state = await h.account_state("gamma")
+    h.expect(
+        gamma_down,
+        what="gamma is not running after estop",
+        expectation="state leaves running within 10s (async disconnect)",
+        actual=f"state={gamma_state!r}",
+    )
+    removed = await h.step("remove gamma (cascade)", lambda: h.api.accounts_remove("gamma"))
+    h.expect(
+        bool(isinstance(removed, dict) and removed.get("removed")),
+        what="remove cascades (credential + cooldowns + access)",
+        expectation="removed=True",
+        actual=str(removed),
+    )
+    names_after = [a.get("name") for a in await h.step("accounts_list", h.api.accounts_list)]
+    h.expect(
+        "gamma" not in names_after,
+        what="gamma gone from accounts_list",
+        expectation="no gamma",
+        actual=str(names_after),
+    )
+
+
+async def phase_credentials(h: Harness) -> None:
+    """Credential lifecycle: Fernet store, status transitions, cascade."""
+    await h.ensure_account("alpha", ["ping", "ldp_worker"])
+    rows = await h.step("credential status", h.api.accounts_credential_status)
+    alpha_row = next((r for r in rows or [] if r.get("name") == "alpha"), None)
+    h.expect(
+        alpha_row is not None and alpha_row.get("credential") == "db",
+        what="alpha credential resolves through the encrypted store",
+        expectation="credential state db (env no longer exists at runtime)",
+        actual=str(alpha_row),
+    )
+    set_again = await h.step(
+        "re-store alpha credential (rotation)",
+        lambda: h.api.accounts_set_credential("alpha", "sim-token-alpha-2"),
+    )
+    h.expect(
+        isinstance(set_again, dict),
+        what="credential rotation accepted",
+        expectation="dict echo",
+        actual=str(set_again),
+    )
+    env_import = await h.step(
+        "migration import over the env view (overwrite)",
+        lambda: h.api.credentials_import_env(overwrite=True),
+    )
+    h.expect(
+        isinstance(env_import, dict) and "alpha" in (env_import.get("imported") or []),
+        what="import-env re-imports the synthetic alpha token",
+        expectation="alpha listed in imported",
+        actual=str(env_import),
+    )
+    # queued persistence drains asynchronously (§29) — bounded wait for
+    # the mgmt rows to land before reading history back
+    await h.wait_until(
+        lambda: _has_mgmt_credential_rows(h), timeout=5.0, description="mgmt:credential rows drain"
+    )
+    audit = await h.api.audit_tail(n=200, account="alpha")
+    mgmt = [r for r in audit if str(r.get("action", "")).startswith("mgmt:credential")]
+    h.expect(
+        bool(mgmt),
+        what="credential operations leave management audit rows",
+        expectation="mgmt:credential.* rows present",
+        actual=f"{len(mgmt)} row(s)",
+    )
+    # the rotated token must never surface anywhere
+    leak = [
+        r for r in await h.api.logs_tail(n=400) if "sim-token-alpha-2" in str(r.get("message", ""))
+    ]
+    h.expect(
+        not leak,
+        what="rotated token absent from logs",
+        expectation="no leak",
+        actual=f"{len(leak)} row(s)",
+    )
+
+
+async def phase_plugins(h: Harness) -> None:
+    """Plugin assignment + enable/disable on a running account."""
+    await h.ensure_account("alpha", ["ping", "ldp_worker"])
+    assigned = await h.step("accounts_plugins_list", lambda: h.api.accounts_plugins_list("alpha"))
+    h.expect(
+        sorted(assigned or []) == ["ldp_worker", "ping"],
+        what="assignment set readback",
+        expectation="[ldp_worker, ping]",
+        actual=str(assigned),
+    )
+    await h.step_raises(
+        "unknown plugin assignment is refused",
+        (ValueError,),
+        lambda: h.api.accounts_plugin_assign("alpha", "no-such-plugin"),
+    )
+    state = await h.step("plugins_state", lambda: h.api.plugins_state("alpha"))
+    enabled_by_name = {row.get("name"): row.get("enabled") for row in state or []}
+    h.expect(
+        enabled_by_name.get("ldp_worker") is True and enabled_by_name.get("ping") is True,
+        what="both plugins enabled by default",
+        expectation="enabled=True for both",
+        actual=str(enabled_by_name),
+    )
+    await h.step(
+        "disable ldp_worker", lambda: h.api.plugins_set_enabled("alpha", "ldp_worker", False)
+    )
+    state_after = await h.step("plugins_state after disable", lambda: h.api.plugins_state("alpha"))
+    disabled = {row.get("name"): row.get("enabled") for row in state_after or []}
+    h.expect(
+        disabled.get("ldp_worker") is False,
+        what="disable takes effect",
+        expectation="enabled=False",
+        actual=str(disabled),
+    )
+    await h.step(
+        "re-enable ldp_worker", lambda: h.api.plugins_set_enabled("alpha", "ldp_worker", True)
+    )
+    unassigned = await h.step(
+        "unassign + reassign ldp_worker live",
+        lambda: h.api.accounts_plugin_unassign("alpha", "ldp_worker"),
+    )
+    h.expect(
+        isinstance(unassigned, dict) and unassigned.get("existed") is True,
+        what="unassign reports pre-state",
+        expectation="existed=True",
+        actual=str(unassigned),
+    )
+    await h.step("reassign ldp_worker", lambda: h.api.accounts_plugin_assign("alpha", "ldp_worker"))
+    final = await h.step("final assignment set", lambda: h.api.accounts_plugins_list("alpha"))
+    h.expect(
+        sorted(final or []) == ["ldp_worker", "ping"],
+        what="assignment restored",
+        expectation="both assigned",
+        actual=str(final),
+    )
+
+
+async def phase_profiles(h: Harness) -> None:
+    """Account plugin profiles: create/update/activate/clear + settings."""
+    await h.ensure_account("alpha", ["ping", "ldp_worker"])
+    created = await h.step(
+        "create profile 'slow' for ldp_worker",
+        lambda: h.api.account_plugin_profile_create(
+            "alpha", "ldp_worker", "slow", settings={"burst": 1}
+        ),
+    )
+    h.expect(
+        isinstance(created, dict) and created.get("name") == "slow",
+        what="profile created",
+        expectation="echoed profile row",
+        actual=str(created),
+    )
+    updated = await h.step(
+        "update profile settings",
+        lambda: h.api.account_plugin_profile_update(
+            "alpha", "ldp_worker", "slow", settings={"burst": 3}
+        ),
+    )
+    h.expect(
+        isinstance(updated, dict),
+        what="profile updated",
+        expectation="echoed row",
+        actual=str(updated),
+    )
+    await h.step(
+        "set profile active",
+        lambda: h.api.account_plugin_profile_set_active("alpha", "ldp_worker", "slow"),
+    )
+    active = await h.step(
+        "active profile readback",
+        lambda: h.api.account_plugin_profile_active("alpha", "ldp_worker"),
+    )
+    h.expect(
+        isinstance(active, dict) and active.get("active") == "slow",
+        what="active profile resolves",
+        expectation="active == slow",
+        actual=str(active),
+    )
+    # the active pointer feeds the RUNTIME seam (P4: plugins resolve
+    # `await ctx.services.profile_settings()` before their work), not the
+    # merged effective view
+    services = h.framework.accounts.services_for("alpha", "ldp_worker")
+    body = await h.step(
+        "plugin-side profile_settings() resolution",
+        lambda: services.profile_settings(),
+    )
+    h.expect(
+        isinstance(body, dict) and body.get("burst") == 3,
+        what="the active profile's body resolves through the services seam",
+        expectation="burst == 3 (the active profile's settings)",
+        actual=str(body),
+    )
+    h.observation(
+        "accounts_effective_settings does not reflect the ACTIVE profile "
+        "pointer — the merged view reads the assignment-row binding only; "
+        "the active pointer reaches plugins solely through "
+        "ctx.services.profile_settings() (the P4 two-level seam)",
+        expectation="one profile mechanism visible from every settings surface",
+        actual="binding (effective view + refresh_settings) vs active pointer (services seam)",
+        repro="profiles/two-mechanism-seam",
+    )
+    await h.step(
+        "clear active profile",
+        lambda: h.api.account_plugin_profile_clear_active("alpha", "ldp_worker"),
+    )
+    effective_default = await h.step(
+        "effective settings after clear",
+        lambda: h.api.accounts_effective_settings("alpha", "ldp_worker"),
+    )
+    h.expect(
+        isinstance(effective_default, dict) and effective_default.get("burst") != 3,
+        what="cleared profile stops overriding",
+        expectation="burst back to default",
+        actual=str(effective_default),
+    )
+    deleted = await h.step(
+        "delete profile",
+        lambda: h.api.account_plugin_profile_delete("alpha", "ldp_worker", "slow"),
+    )
+    h.expect(
+        isinstance(deleted, dict),
+        what="profile deleted",
+        expectation="echoed row",
+        actual=str(deleted),
+    )
+
+
+async def phase_cog_commands(h: Harness) -> None:
+    """The COG command face: real library dispatch for ``<prefix>ping``.
+
+    The sim boundary has no library Bot (the live adapter's client IS
+    one), so the harness hosts the ping cog the way the account
+    manager's reconcile does — ``plugins.host_cog`` with the REAL
+    per-(account, plugin) paced facade — then drives the command
+    through ``Command.invoke`` with a typed context (the repo's
+    established cog-driving pattern; tests/unit/test_cog_host.py).
+    The ``ctx.services`` lift mirrors the adapter's before_invoke.
+    """
+    from types import SimpleNamespace as NS
+
+    from discord.ext import commands
+    from discord.ext.commands.view import StringView
+
+    await h.ensure_account("alpha", ["ping"])
+    bot = commands.Bot(command_prefix="!", user_bot=True, owner_ids={OWNER_ID}, help_command=None)
+    paced = h.framework.accounts.services_for("alpha", "ping")
+    cog = await h.step(
+        "host ping cog on a library bot",
+        lambda: h.framework.plugins.host_cog("alpha", "ping", bot, paced=paced),
+    )
+    command = bot.get_command("ping")
+    h.expect(
+        cog is not None and command is not None,
+        what="cog hosted + command registered",
+        expectation="PingCog on the bot with command 'ping'",
+        actual=f"cog={cog!r} command={command!r}",
+    )
+    assert command is not None  # narrowed for the typed closures below
+
+    replies: list[str] = []
+
+    async def send(text: str, **kwargs: Any) -> None:
+        replies.append(str(text))
+
+    def make_ctx(content: str) -> Any:
+        view = StringView(content)
+        view.skip_string("!ping")
+        ctx = NS(
+            bot=bot,
+            prefix="!",
+            invoked_with="ping",
+            command=command,
+            message=NS(attachments=[], author=NS(id=ALPHA_ID, bot=False)),
+            view=view,
+            send=send,
+        )
+        ctx.services = paced  # the adapter's before_invoke lift, mirrored
+        return ctx
+
+    async def invoke(content: str) -> None:
+        await command.invoke(make_ctx(content))
+
+    before = len(h.world.messages_of(GUILD_CHANNEL))
+    await h.step(
+        "invoke '!ping 500 hello live-debug'", lambda: invoke("!ping 500 hello live-debug")
+    )
+    await h.wait_quiet()
+    landed = [m for m in h.world.messages_of(GUILD_CHANNEL) if "hello live-debug" in m]
+    h.expect(
+        len(landed) == 1,
+        what="paced send reached the world channel",
+        expectation="exactly one delivered 'hello live-debug' message",
+        actual=f"{len(landed)} message(s) (channel had {before} before)",
+    )
+    h.expect(
+        bool(replies) and replies[-1].startswith("sent to"),
+        what="command replies through ctx.send",
+        expectation="reply 'sent to <channel label>'",
+        actual=str(replies[-1] if replies else None),
+    )
+    outs = await h.audit_out_rows()
+    h.expect(
+        bool(outs),
+        what="paced send left an outbound audit row",
+        expectation="direction=out action=message row",
+        actual=f"{len(outs)} row(s)",
+    )
+
+    await h.step(
+        "invoke '!ping' against a vanished channel (FlowBlocked path)",
+        lambda: invoke("!ping 424242 into the void"),
+    )
+    h.expect(
+        any("unusable" in r or "blocked" in r for r in replies),
+        what="gone channel aborts with one clean reply",
+        expectation="channel unusable / send blocked reply",
+        actual=str(replies),
+    )
+
+
+async def phase_tasks_scheduler(h: Harness) -> None:
+    """Task pipeline: queued/running/history + mid-flight cancellation."""
+    await h.ensure_account("alpha", ["ping", "ldp_worker"])
+    h.owner_says("ldp-go 3")
+    await h.wait_quiet(limit=25.0)
+    ticks = [m for m in h.world.messages_of(GUILD_CHANNEL) if m.startswith("ldp tick")]
+    h.expect(
+        len(ticks) == 3,
+        what="owner trigger produced the full paced burst",
+        expectation="3 'ldp tick' messages through the pipeline",
+        actual=f"{len(ticks)} message(s)",
+    )
+    history = await h.step("tasks_history", lambda: h.api.tasks_history(limit=20))
+    completed = [row for row in history or [] if row.get("status") == "completed"]
+    h.expect(
+        len(completed) >= 3,
+        what="completed tasks persisted in history",
+        expectation=">= 3 completed rows",
+        actual=f"{len(completed)} completed of {len(history or [])}",
+    )
+    listed = await h.step("tasks_list", lambda: h.api.tasks_list())
+    h.expect(
+        isinstance(listed, list),
+        what="tasks_list readable while idle",
+        expectation="list (may be empty)",
+        actual=f"{len(listed)} row(s)",
+    )
+
+    # mid-flight cancellation: start a burst, cancel the tail
+    h.owner_says("ldp-go 5")
+    await asyncio.sleep(1.8)  # the first paced send lands; the rest queue
+    cancelled = await h.step(
+        "cancel_matching while the burst is queued",
+        lambda: h.api.tasks_cancel_matching(account="alpha", plugin="ldp_worker"),
+    )
+    n_cancelled = (cancelled or {}).get("cancelled", 0)
+    await h.wait_quiet(limit=15.0)
+    history_after = await h.step(
+        "tasks_history after cancel", lambda: h.api.tasks_history(limit=30)
+    )
+    cancelled_rows = [row for row in history_after or [] if row.get("status") == "cancelled"]
+    h.expect(
+        n_cancelled >= 1 and len(cancelled_rows) >= 1,
+        what="cancelled tasks are counted and persisted",
+        expectation="cancelled count matches persisted rows",
+        actual=f"verb={n_cancelled} rows={len(cancelled_rows)}",
+    )
+    final_ticks = [m for m in h.world.messages_of(GUILD_CHANNEL) if m.startswith("ldp tick")]
+    h.expect(
+        len(final_ticks) < 3 + 5,
+        what="cancelled tail never reached the world",
+        expectation="fewer than 8 delivered ticks (burst was cut short)",
+        actual=f"{len(final_ticks)} tick message(s) total",
+    )
+
+
+async def phase_rate_limits(h: Harness) -> None:
+    """Pacing: policies, effective views, the 1.5s floor, cooldowns."""
+    await h.ensure_account("alpha", ["ping", "ldp_worker"])
+    effective = await h.step(
+        "effective policy for message", lambda: h.api.ratelimit_effective("message", "alpha")
+    )
+    interval = float((effective or {}).get("interval") or 0)
+    h.expect(
+        interval >= 1.5,
+        what="message pacing sits at or above the 1.5s floor",
+        expectation="interval >= 1.5 (safety floor)",
+        actual=f"interval={interval}",
+    )
+    # measured spacing on the audit trail (the wire truth)
+    before = await h.audit_out_rows()
+    h.owner_says("ldp-go 2")
+    await h.wait_quiet(limit=15.0)
+    rows = await h.audit_out_rows()
+    fresh = rows[len(before) :] if len(rows) > len(before) else []
+    h.expect(
+        len(fresh) >= 2,
+        what="burst left outbound audit rows for the timing check",
+        expectation=">= 2 rows",
+        actual=f"{len(fresh)} row(s)",
+    )
+    if len(fresh) >= 2:
+        gaps = [
+            round(float(b.get("ts", 0)) - float(a.get("ts", 0)), 3)
+            for a, b in itertools.pairwise(fresh)
+        ]
+        h.expect(
+            min(gaps) >= 1.45,
+            what="consecutive paced sends keep the floor (audit timestamps)",
+            expectation="every gap >= 1.45s (1.5s floor, 50ms max jitter)",
+            actual=f"gaps={gaps}",
+        )
+    account_policy = await h.step(
+        "set account-level message policy 2.0s",
+        lambda: h.api.ratelimit_set("message", 2.0, 0.0, 0.0, level="account", owner="alpha"),
+    )
+    effective_after = await h.step(
+        "effective policy after the account override",
+        lambda: h.api.ratelimit_effective("message", "alpha"),
+    )
+    h.expect(
+        isinstance(account_policy, dict)
+        and float((effective_after or {}).get("interval") or 0) == 2.0,
+        what="account-level override wins the effective view",
+        expectation="effective interval == 2.0",
+        actual=f"set={account_policy} effective={effective_after}",
+    )
+    cleared = await h.step(
+        "clear the account override",
+        lambda: h.api.ratelimit_clear("account", "alpha", "message"),
+    )
+    h.expect(
+        (cleared or {}).get("cleared") is True,
+        what="policy clear removes the override",
+        expectation="cleared=True",
+        actual=str(cleared),
+    )
+    await h.step_raises(
+        "below-floor policy is rejected",
+        (Exception,),
+        lambda: h.api.ratelimit_set("message", 0.2, level="global"),
+    )
+    warnings = await h.step("ratelimit_warnings", h.api.ratelimit_warnings)
+    h.expect(
+        isinstance(warnings, list),
+        what="safety review readable",
+        expectation="list",
+        actual=f"{len(warnings)} warning(s)",
+    )
+    stats = await h.step("ratelimit_stats", h.api.ratelimit_stats)
+    h.expect(
+        isinstance(stats, dict),
+        what="rate stats readable",
+        expectation="dict",
+        actual=str(type(stats)),
+    )
+    cooldowns = await h.step("cooldowns list", lambda: h.api.cooldowns_list(account="alpha"))
+    h.expect(
+        isinstance(cooldowns, list),
+        what="cooldown list readable",
+        expectation="list",
+        actual=f"{len(cooldowns)} row(s)",
+    )
+
+
+async def phase_workspaces(h: Harness) -> None:
+    """Workspaces: create/join/pause/resume/eligibility/cooldowns/delete."""
+    await h.ensure_account("alpha", ["ping", "ldp_worker"])
+    created = await h.step(
+        "create workspace 'grind'",
+        lambda: h.api.workspaces_create({"name": "grind", "description": "live-debug"}),
+    )
+    h.expect(
+        isinstance(created, dict),
+        what="workspace created",
+        expectation="echoed row",
+        actual=str(created),
+    )
+    joined = await h.step(
+        "alpha joins grind", lambda: h.api.workspaces_add_account("alpha", "grind")
+    )
+    h.expect(
+        isinstance(joined, dict),
+        what="membership recorded",
+        expectation="join report",
+        actual=str(joined),
+    )
+    info = await h.step("workspaces_get grind", lambda: h.api.workspaces_get("grind"))
+    members = (info or {}).get("members") or []
+    h.expect(
+        "alpha" in members,
+        what="membership visible in the workspace view",
+        expectation="alpha among the member names",
+        actual=str(members),
+    )
+    paused = await h.step("pause grind", lambda: h.api.workspaces_pause("grind"))
+    resumed = await h.step("resume grind", lambda: h.api.workspaces_resume("grind"))
+    h.expect(
+        bool(
+            isinstance(paused, dict)
+            and isinstance(resumed, dict)
+            and paused.get("paused") is True
+            and resumed.get("paused") is False
+        ),
+        what="pause bumps the generation; resume restores flow",
+        expectation="paused=True then paused=False (generation bumps)",
+        actual=f"pause={paused} resume={resumed}",
+    )
+    await h.step(
+        "set member eligibility paused",
+        lambda: h.api.workspaces_op("eligibility", account="alpha", eligibility="paused"),
+    )
+    cooldown = await h.step(
+        "start a member cooldown",
+        lambda: h.api.workspaces_op(
+            "cooldown", scope_type="member", scope_id="alpha", duration_s=30
+        ),
+    )
+    active = await h.step(
+        "cooldowns active_only",
+        lambda: h.api.workspaces_cooldowns(active_only=True),
+    )
+    h.expect(
+        isinstance(cooldown, dict) and len(active or []) >= 1,
+        what="cooldown started and listed",
+        expectation="active cooldown row for alpha",
+        actual=f"start={cooldown} active={len(active or [])}",
+    )
+    cooldown_id = int((active or [{}])[0].get("id") or 0)
+    cleared = await h.step(
+        "clear the cooldown", lambda: h.api.workspaces_op("cooldown_clear", id=cooldown_id)
+    )
+    h.expect(
+        isinstance(cleared, dict),
+        what="cooldown cleared",
+        expectation="clear report",
+        actual=str(cleared),
+    )
+    await h.step(
+        "restore eligibility",
+        lambda: h.api.workspaces_op("eligibility", account="alpha", eligibility="eligible"),
+    )
+    await h.step_raises(
+        "delete with a member is refused",
+        (Exception,),
+        lambda: h.api.workspaces_delete("grind"),
+    )
+    gone = await h.step("leave workspace", lambda: h.api.workspaces_remove_account("alpha"))
+    h.expect(isinstance(gone, dict), what="leave report", expectation="dict", actual=str(gone))
+    # rejoin for the presets/chains phases (standalone-runnable)
+    await h.api.workspaces_add_account("alpha", "grind")
+    h.observation(
+        "workspace events publish only to a debug logger (bootstrap wires "
+        "publisher=ROOT_LOGGER.debug) — membership changes are invisible to "
+        "the structured log tail",
+        expectation="workspace membership/pause transitions surface as structured rows",
+        actual="WorkspaceService events land on libzent root logger at DEBUG only",
+        repro="workspaces/publisher-visibility",
+    )
+
+
+async def phase_presets(h: Harness) -> None:
+    """Presets: settings-template apply path + P8 definitions/executions."""
+    await h.ensure_account("alpha", ["ping", "ldp_worker"])
+    repos = h.framework.database
+    template = await h.step(
+        "create preset template (scope account/alpha)",
+        lambda: repos.presets.create(
+            "account", "alpha", "ldp_worker", "fast", {"burst": 4}, description="live-debug"
+        ),
+    )
+    preset_id = int(getattr(template, "preset_id", 0) or 0)
+    h.expect(
+        preset_id > 0,
+        what="template identity created",
+        expectation="preset_id > 0",
+        actual=f"preset_id={preset_id}",
+    )
+    preview = await h.step(
+        "preset preview (revision fingerprint)",
+        lambda: h.api.workspaces_preset_preview("alpha", "ldp_worker", preset_id),
+    )
+    revision = str((preview or {}).get("revision") or "")
+    h.expect(
+        bool(revision),
+        what="preview returns the revision guard",
+        expectation="revision fingerprint",
+        actual=str(preview),
+    )
+    applied = await h.step(
+        "preset apply (copy-on-write + provenance)",
+        lambda: h.api.workspaces_preset_apply(
+            "alpha", "ldp_worker", preset_id, preview_revision=revision
+        ),
+    )
+    h.expect(
+        (applied or {}).get("applied") is True,
+        what="apply copies settings + records provenance",
+        expectation="applied=True",
+        actual=str(applied),
+    )
+    effective = await h.step(
+        "effective settings after apply",
+        lambda: h.api.accounts_effective_settings("alpha", "ldp_worker"),
+    )
+    h.expect(
+        (effective or {}).get("burst") == 4,
+        what="applied settings are live",
+        expectation="burst == 4",
+        actual=str(effective),
+    )
+    detached = await h.step(
+        "preset detach (values stay, link drops)",
+        lambda: h.api.workspaces_preset_detach("alpha", "ldp_worker"),
+    )
+    h.expect(
+        isinstance(detached, dict), what="detach report", expectation="dict", actual=str(detached)
+    )
+    stale = await h.step(
+        "apply with a stale preview revision is refused",
+        lambda: h.api.workspaces_preset_apply(
+            "alpha", "ldp_worker", preset_id, preview_revision=revision
+        ),
+    )
+    h.expect(
+        (stale or {}).get("applied") is False,
+        what="stale-preview guard fires (decision 16)",
+        expectation="applied=False with a conflict",
+        actual=str(stale),
+    )
+
+    # P8: reference-style definitions + executions (service-level)
+    await h.step(
+        "profile for the preset to reference",
+        lambda: h.api.account_plugin_profile_create(
+            "alpha", "ldp_worker", "preset-profile", settings={"burst": 2}
+        ),
+    )
+    defined = await h.step(
+        "preset_define (references, never copies)",
+        lambda: h.framework.workspaces.preset_define(
+            "grind",
+            "grind-standard",
+            participants=[
+                {"account": "alpha", "plugin": "ldp_worker", "profile": "preset-profile"}
+            ],
+        ),
+    )
+    h.expect(
+        (defined or {}).get("preset_id", 0) > 0,
+        what="preset definition stored",
+        expectation="preset_id > 0",
+        actual=str(defined),
+    )
+    exec_started = await h.step(
+        "execution_start", lambda: h.framework.workspaces.execution_start(defined["preset_id"])
+    )
+    execution_id = str((exec_started or {}).get("execution_id") or "")
+    checkpointed = await h.step(
+        "execution_checkpoint (alpha done)",
+        lambda: h.framework.workspaces.execution_checkpoint(execution_id, "alpha", "done"),
+    )
+    resume_view = await h.step(
+        "execution_resume (completed not replayed)",
+        lambda: h.framework.workspaces.execution_resume(execution_id),
+    )
+    h.expect(
+        execution_id.startswith("exec-")
+        and "alpha" in (checkpointed or {}).get("completed", [])
+        and (resume_view or {}).get("completed") == ["alpha"],
+        what="execution lifecycle: start → checkpoint → resume",
+        expectation="completed=[alpha] and pending=[]",
+        actual=f"start={exec_started} checkpoint={checkpointed} resume={resume_view}",
+    )
+    h.observation(
+        "preset_define / preset_apply_references / execution_* have no "
+        "ControlAPI verb — they are reachable only through the workspace "
+        "service object",
+        expectation="every feature area is drivable through the ONE facade",
+        actual="P8 preset definitions + executions are service-level only",
+        repro="presets/facade-coverage",
+    )
+
+
+async def phase_chains_signals(h: Harness) -> None:
+    """Chains + durable signals: terminal trigger, outbox, reconciler."""
+    await h.ensure_account("alpha", ["ping", "ldp_worker"])
+    repo = h.framework.database.workspaces
+    definition = {
+        "name": "follow-burst",
+        "steps": [
+            {
+                "position": 1,
+                "plugin": "ldp_worker",
+                "routing": "first_eligible",
+                "target": "",
+                "on": {"task_action": "message", "plugin": "ldp_worker", "event": "task_completed"},
+                "gate": {},
+                "emit": "chain-done",
+            }
+        ],
+        "on_skip": "continue",
+    }
+    chain_id = await h.step(
+        "insert chain definition (follow-burst)",
+        lambda: repo.insert_chain("grind", "follow-burst", json.dumps(definition)),
+    )
+    h.expect(bool(chain_id), what="chain stored", expectation="chain id", actual=f"id={chain_id}")
+    runs_before = await repo.chain_runs()
+    h.owner_says("ldp-go 1")
+    ok = await h.wait_until(
+        lambda: _has_new_completed_run(repo, len(runs_before)),
+        timeout=20.0,
+        description="a terminal-triggered chain run completes",
+    )
+    h.expect(
+        ok,
+        what="TaskCompleted fired the chain (A-acts, B-follows)",
+        expectation="a new chain run reaches 'completed' with its step done",
+        actual=f"runs before={len(runs_before)} after={len(await repo.chain_runs())}",
+    )
+    signal_chain = {
+        "name": "signal-followup",
+        "steps": [
+            {
+                "position": 1,
+                "plugin": "ldp_worker",
+                "routing": "first_eligible",
+                "target": "",
+                "on": {"signal": "ldp_worker:chain-done"},
+                "gate": {},
+                "emit": "",
+            }
+        ],
+        "on_skip": "continue",
+    }
+    signal_chain_id = await h.step(
+        "insert signal-triggered chain (signal-followup)",
+        lambda: repo.insert_chain("grind", "signal-followup", json.dumps(signal_chain)),
+    )
+    h.expect(
+        bool(signal_chain_id),
+        what="signal chain stored",
+        expectation="chain id",
+        actual=f"id={signal_chain_id}",
+    )
+    pending_before = len(await h.framework.database.signals.pending(50))
+    emitted = await h.step(
+        "emit a durable signal through the plugin facade",
+        lambda: h.framework.accounts.services_for("alpha", "ldp_worker").emit_signal(
+            "chain-done", {"source": "live-debug"}
+        ),
+    )
+    h.expect(
+        bool(emitted),
+        what="outbox acknowledges with a signal id",
+        expectation="signal id string",
+        actual=f"signal_id={emitted!r}",
+    )
+    print("    waiting for the reconciler sweep (<=45s, 30s cadence)...")
+    delivered = await h.wait_until(
+        lambda: _signal_drained(h),
+        timeout=RECONCILER_WAIT_S,
+        description="the reconciler delivers the pending signal",
+    )
+    h.expect(
+        delivered,
+        what="reconciler delivered the signal and fired the chain",
+        expectation="pending count returns to baseline + a signal-followup run exists",
+        actual=f"pending before={pending_before} now={len(await h.framework.database.signals.pending(50))}",
+    )
+    await h.step("disable both chains", lambda: _disable_chains(repo, [chain_id, signal_chain_id]))
+    h.observation(
+        "chain definitions have no ControlAPI verb (create/update/list) — "
+        "the runtime's create_chain is bootstrap-local; the harness writes "
+        "rows through the workspaces repository",
+        expectation="chains are manageable from the interfaces",
+        actual="repository-level access required",
+        repro="chains-signals/facade-coverage",
+    )
+
+
+async def _has_mgmt_credential_rows(h: Harness) -> bool:
+    """Wait-predicate: mgmt:credential rows drained into readable history
+    (queued persistence is asynchronous by contract, §29)."""
+    rows = await h.api.audit_tail(n=200, account="alpha")
+    return bool([r for r in rows if str(r.get("action", "")).startswith("mgmt:credential")])
+
+
+async def _state_is_not(h: Harness, name: str, state: str) -> bool:
+    """Wait-predicate: the account left the given lifecycle state."""
+    return await h.account_state(name) != state
+
+
+async def _has_new_completed_run(repo: Any, before_count: int) -> bool:
+    """True once a NEW chain run exists in a terminal state."""
+    rows = await repo.chain_runs()
+    done = [r for r in rows if str(r.get("status")) in ("completed", "partial", "failed")]
+    return len(done) > before_count or (len(rows) > before_count and bool(done))
+
+
+async def _signal_drained(h: Harness) -> bool:
+    """True when the emitted signal left the outbox as delivered."""
+    repo = h.framework.database
+    pending = await repo.signals.pending(50)
+    return not pending
+
+
+async def _disable_chains(repo: Any, chain_ids: Sequence[int]) -> None:
+    for chain_id in chain_ids:
+        if chain_id:
+            await repo.set_chain_enabled(int(chain_id), False)
+
+
+async def phase_observability(h: Harness) -> None:
+    """The observability verbs: filtered log tails + audit history."""
+    await h.ensure_account("alpha", ["ping", "ldp_worker"])
+    h.owner_says("ldp-go 1")
+    await h.wait_quiet(limit=15.0)
+    account_rows = await h.step(
+        "log tail (account filter)", lambda: h.api.logs_tail(n=50, account="alpha")
+    )
+    h.expect(
+        bool(account_rows) and all(r.get("account") == "alpha" for r in account_rows),
+        what="account-filtered tail returns only that account's rows",
+        expectation="non-empty, all account=alpha",
+        actual=f"{len(account_rows)} row(s)",
+    )
+    global_rows = await h.step(
+        "global-log view (framework rows)", lambda: h.api.logs_tail(n=50, without_account=True)
+    )
+    h.expect(
+        bool(global_rows) and all(not r.get("account") for r in global_rows),
+        what="global-log view carries no account context",
+        expectation="non-empty, no account field",
+        actual=f"{len(global_rows)} row(s)",
+    )
+    error_rows = await h.step(
+        "severity-filtered tail", lambda: h.api.logs_tail(n=50, severity="ERROR")
+    )
+    h.expect(
+        all(r.get("severity") == "ERROR" for r in error_rows),
+        what="severity filter is exact",
+        expectation="only ERROR rows",
+        actual=f"{len(error_rows)} row(s)",
+    )
+    stats = h.framework.logs.stats()
+    h.expect(
+        stats.get("entries", 0) > 0,
+        what="log stats counters live",
+        expectation="entries > 0",
+        actual=str(stats),
+    )
+    audit_all = await h.step("audit tail", lambda: h.api.audit_tail(n=100))
+    mgmt = [r for r in audit_all or [] if str(r.get("action", "")).startswith("mgmt:")]
+    h.expect(
+        bool(mgmt),
+        what="management operations left audit rows",
+        expectation="mgmt:* rows from the earlier phases",
+        actual=f"{len(mgmt)} mgmt row(s) of {len(audit_all or [])}",
+    )
+    lifecycle = [
+        r
+        for r in await h.api.logs_tail(n=200)
+        if r.get("event") in ("AccountConnected", "TaskCompleted", "PluginLoaded")
+    ]
+    h.expect(
+        bool(lifecycle),
+        what="bus lifecycle events reached the structured log",
+        expectation="AccountConnected/TaskCompleted/PluginLoaded rows",
+        actual=f"{len(lifecycle)} event row(s)",
+    )
+
+
+async def phase_simulation(h: Harness) -> None:
+    """The simulator surface itself: the facade verb + a healthy-baseline
+    scenario run over the repo's workload fixtures."""
+    from adapters.simulator import SimulationRunner
+
+    scenarios = await h.step("simulation_list", h.api.simulation_list)
+    names = sorted(s.get("name") for s in scenarios or [])
+    h.expect(
+        "export_basic" in names,
+        what="the facade lists the registered scenarios",
+        expectation="export_basic among the six",
+        actual=str(names),
+    )
+    # production shape: a runner over the PRODUCTION plugin dir (what
+    # `main.py --sim` does today)
+    prod_runner = SimulationRunner(plugin_dir=str(REPO_ROOT / "plugins"))
+    try:
+        report = await asyncio.wait_for(prod_runner.run("export_basic"), timeout=SCENARIO_BUDGET_S)
+        failures = list(report.get("failures") or [])
+        h.expect(
+            not failures,
+            what="export_basic passes with the production plugin dir",
+            expectation="scenario passes (main.py --sim shape)",
+            actual=f"{len(failures)} failure(s): {failures[:3]}",
+        )
+    except asyncio.TimeoutError:
+        h.expect(
+            False,
+            what="export_basic respects its budget",
+            expectation="scenario returns in <=120s",
+            actual="timed out",
+        )
+    # healthy baseline: the workload fixtures the scenarios script against
+    fixture_runner = SimulationRunner(plugin_dir=str(SCENARIO_FIXTURES))
+    try:
+        base = await asyncio.wait_for(fixture_runner.run("export_basic"), timeout=SCENARIO_BUDGET_S)
+    except asyncio.TimeoutError:
+        base = {"passed": False, "failures": ["timed out"], "summary": "timed out"}
+    h.expect(
+        bool(base.get("passed")),
+        what="export_basic passes over the sim workload fixtures",
+        expectation="scenario passes (baseline)",
+        actual=str(base.get("summary")),
+    )
+
+
+async def phase_shutdown(h: Harness) -> None:
+    """Graceful teardown of the whole stack (the ordered contract)."""
+    counts_before = h._findings.counts()
+    errors_before = counts_before.get("major", 0) + counts_before.get("critical", 0)
+    await h.step("framework.shutdown", h.framework.shutdown)
+    await asyncio.sleep(0.3)  # let straggler warnings surface into the capture
+    counts_after = h._findings.counts()
+    new_errors = counts_after.get("major", 0) + counts_after.get("critical", 0) - errors_before
+    h.expect(
+        new_errors == 0,
+        what="teardown raised no new ERROR-class anomalies",
+        expectation="ordered shutdown completes clean",
+        actual=f"{new_errors} new major+ finding(s) during teardown",
+    )
+
+
+# ------------------------------------------------------------------ registry
+@dataclass(frozen=True)
+class Phase:
+    """One named, announced pass over a feature area."""
+
+    name: str
+    area: str
+    description: str
+    run: Callable[[Harness], Coroutine[Any, Any, None]]
+
+
+PHASES: tuple[Phase, ...] = (
+    Phase("boot", "framework", "bootstrap over the simulator + discovery + leak scan", phase_boot),
+    Phase(
+        "accounts", "accounts", "add/credential/start/estop/stop/remove + cascade", phase_accounts
+    ),
+    Phase(
+        "credentials",
+        "credentials",
+        "Fernet store, status, rotation, env migration",
+        phase_credentials,
+    ),
+    Phase(
+        "plugins",
+        "plugin-assignment",
+        "assign/unassign/enable/disable on a live account",
+        phase_plugins,
+    ),
+    Phase(
+        "profiles",
+        "account-plugin-profiles",
+        "create/update/activate/clear + effective view",
+        phase_profiles,
+    ),
+    Phase(
+        "cog-commands",
+        "cog-dispatch",
+        "library dispatch of <prefix>ping over the paced pipeline",
+        phase_cog_commands,
+    ),
+    Phase(
+        "tasks-scheduler",
+        "scheduler",
+        "queued/running/history + mid-flight cancellation",
+        phase_tasks_scheduler,
+    ),
+    Phase(
+        "rate-limits",
+        "pacing",
+        "policies, effective views, the 1.5s floor, cooldowns",
+        phase_rate_limits,
+    ),
+    Phase(
+        "workspaces",
+        "workspaces",
+        "membership/pause/resume/eligibility/cooldowns",
+        phase_workspaces,
+    ),
+    Phase(
+        "presets",
+        "workspace-presets",
+        "template apply + P8 definitions and executions",
+        phase_presets,
+    ),
+    Phase(
+        "chains-signals",
+        "chains-signals",
+        "terminal-triggered chains, durable outbox, reconciler",
+        phase_chains_signals,
+    ),
+    Phase(
+        "observability",
+        "audit-observability",
+        "filtered log tails, stats, audit history",
+        phase_observability,
+    ),
+    Phase(
+        "simulation",
+        "simulator-scenarios",
+        "the facade verb + scenario baseline runs",
+        phase_simulation,
+    ),
+    Phase("shutdown", "framework", "graceful ordered teardown, no new anomalies", phase_shutdown),
+)
+
+_PHASE_INDEX: dict[str, Phase] = {phase.name: phase for phase in PHASES}
+
+
+def phase_by_name(name: str) -> Phase:
+    """Resolve one phase (KeyError names the known set — typo trap)."""
+    try:
+        return _PHASE_INDEX[name]
+    except KeyError:
+        known = ", ".join(phase.name for phase in PHASES)
+        raise KeyError(f"unknown phase {name!r} (known: {known})") from None
+
+
+async def run_pass(
+    selected: Sequence[str],
+    *,
+    findings_dir: Path = DEFAULT_FINDINGS_DIR,
+    keep_workdir: bool = False,
+    console: Console | None = None,
+) -> dict[str, Any]:
+    """Boot once, run the selected phases in registry order, tear down,
+    and write the run summary. Returns the summary dict (also written
+    to ``findings_dir/run-<stamp>.summary.json``)."""
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    findings = FindingsWriter(findings_dir / f"run-{stamp}.jsonl")
+    console = console or Console()
+    phases = [phase_by_name(name) for name in selected] or list(PHASES)
+    summary: dict[str, Any] = {
+        "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "phases": [],
+        "exit_code": 0,
+    }
+    harness = Harness(findings, console, keep_workdir=keep_workdir)
+    started = time.monotonic()
+    try:
+        console.banner(
+            f"live-debug pass {stamp} — {len(phases)} phase(s), findings dir {findings_dir}"
+        )
+        await harness.boot()
+        if keep_workdir:
+            console.line(f"workdir (kept): {harness.workdir}")
+        for position, phase in enumerate(phases, start=1):
+            console.phase(
+                f"{position}/{len(phases)} {phase.name} ({phase.area}) — {phase.description}"
+            )
+            harness.set_phase(phase.name, phase.area)
+            passed_before = harness.steps_passed
+            failed_before = harness.steps_failed
+            phase_start = time.monotonic()
+            try:
+                await asyncio.wait_for(phase.run(harness), timeout=300.0)
+            except asyncio.TimeoutError:
+                harness.report(
+                    severity="critical",
+                    summary=f"phase {phase.name!r} exceeded the 300s budget",
+                    evidence=[],
+                    expectation="each phase completes inside its budget",
+                    actual="phase abandoned after 300s",
+                    repro=f"{phase.name}/budget",
+                )
+            except Exception as exc:
+                harness.report(
+                    severity="critical",
+                    summary=f"phase {phase.name!r} crashed: {type(exc).__name__}: {exc}",
+                    evidence=[
+                        line.rstrip()
+                        for line in traceback.format_exception(type(exc), exc, exc.__traceback__)[
+                            -6:
+                        ]
+                    ],
+                    expectation="phase completes",
+                    actual=f"{type(exc).__name__}: {exc}",
+                    repro=phase.name,
+                )
+            summary["phases"].append(
+                PhaseOutcome(
+                    name=phase.name,
+                    area=phase.area,
+                    steps_passed=harness.steps_passed - passed_before,
+                    steps_failed=harness.steps_failed - failed_before,
+                    duration_s=round(time.monotonic() - phase_start, 2),
+                ).__dict__
+            )
+    finally:
+        await harness.teardown()
+        summary["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        summary["duration_s"] = round(time.monotonic() - started, 1)
+        summary["findings_by_severity"] = findings.counts()
+        summary["steps_passed"], summary["steps_failed"] = (
+            harness.steps_passed,
+            harness.steps_failed,
+        )
+        summary["exit_code"] = (
+            1 if (findings.counts().get("critical") or findings.counts().get("major")) else 0
+        )
+        findings.close()
+        (findings_dir / f"run-{stamp}.summary.json").write_text(
+            json.dumps(summary, indent=2) + "\n"
+        )
+        console.banner(
+            f"run finished in {summary['duration_s']}s — findings "
+            f"{dict(summary['findings_by_severity'])}, steps "
+            f"{summary['steps_passed']} passed / {summary['steps_failed']} failed "
+            f"(exit {summary['exit_code']})"
+        )
+    return summary
+
+
+# --------------------------------------------------------------------- main
+def _watch(findings_dir: Path) -> int:
+    """Tail the newest findings file live (second terminal window).
+
+    Prints the existing findings, then polls for appended lines until
+    interrupted. A newer run file takes over automatically.
+    """
+    current: Path | None = None
+    handled = 0
+    while True:
+        runs = sorted(
+            p for p in findings_dir.glob("run-*.jsonl") if _RUN_FILE_PATTERN.match(p.name)
+        )
+        newest = runs[-1] if runs else None
+        if newest is None:
+            print(f"[watch] no findings yet under {findings_dir} — waiting...", flush=True)
+            time.sleep(1.0)
+            continue
+        if newest != current:
+            current, handled = newest, 0
+            print(f"[watch] tailing {newest.name}", flush=True)
+        lines = current.read_text(encoding="utf-8").splitlines()
+        for line in lines[handled:]:
+            handled += 1
+            with contextlib.suppress(json.JSONDecodeError):
+                row = json.loads(line)
+                print(
+                    f"[ANOMALY] {row.get('id')} [{row.get('severity')}] "
+                    f"{row.get('phase')}/{row.get('area')}: {row.get('summary')}",
+                    flush=True,
+                )
+        time.sleep(0.4)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="live-debug",
+        description="Live supervised debugging pass over the whole suite (simulator, no network)",
+    )
+    parser.add_argument("--list", action="store_true", help="list phases and exit")
+    parser.add_argument(
+        "--phase",
+        metavar="NAME",
+        action="append",
+        default=None,
+        help="run only these phase(s) (repeatable); the stack still boots first",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="tail the newest findings file live (run in a second terminal)",
+    )
+    parser.add_argument(
+        "--findings-dir",
+        default=str(DEFAULT_FINDINGS_DIR),
+        help=f"findings output directory (default: {DEFAULT_FINDINGS_DIR})",
+    )
+    parser.add_argument(
+        "--keep-workdir",
+        action="store_true",
+        help="keep the disposable boot workdir for forensics (path printed at boot)",
+    )
+    args = parser.parse_args(argv)
+
+    if args.list:
+        print("live-debug phases (registry order):")
+        for position, phase in enumerate(PHASES, start=1):
+            print(f"  {position:2d}. {phase.name:<18} {phase.area:<22} {phase.description}")
+        return 0
+
+    findings_dir = Path(args.findings_dir)
+
+    if args.watch:
+        try:
+            return _watch(findings_dir)
+        except KeyboardInterrupt:
+            return 0
+
+    selected = list(args.phase) if args.phase else [phase.name for phase in PHASES]
+    for name in selected:
+        try:
+            phase_by_name(name)
+        except KeyError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+    if args.keep_workdir:
+        print("note: --keep-workdir set — the workdir prints in the boot banner path")
+    try:
+        summary = asyncio.run(
+            run_pass(selected, findings_dir=findings_dir, keep_workdir=args.keep_workdir)
+        )
+    except KeyboardInterrupt:
+        return 130
+    return int(summary.get("exit_code") or 0)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
