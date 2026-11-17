@@ -105,6 +105,25 @@ dependency extras: ``[api]`` (uvicorn), ``[ui]`` (flet + httpx),
 
 **Key files:** ``interfaces/api/app.py``, ``pyproject.toml``
 
+The Plugin COG Seam — ctx.services (2026-11-17)
+-----------------------------------------------
+
+Roadmap #4 (the host paced-facade gap): plugin cogs reach the paced
+pipeline from their commands. The cog host's toolbox
+(:class:`core.plugin_manager.cog_host.CogServices`) binds the
+per-(account, plugin) ``PluginServices`` facade at attach time
+(fail-closed — unbound is absent, never another account's pipeline);
+the account manager's attach loop hands each cog its own facade from
+``services_for``; the client's ``before_invoke`` lifts the bound
+facade onto ``ctx.services`` (framework verbs carry no toolbox, so
+they stay untouched). Ping's command face landed as the first real
+plugin COG — ``<prefix>ping <channel_id> <text...>`` rides the paced
+pipeline and replies via ``ctx.send`` (the one documented
+library-native use); its ``_ping`` internals retired into the cog.
+
+**Key files:** ``core/plugin_manager/cog_host.py``,
+``adapters/discord/client.py``, ``plugins/ping/plugin.py``
+
 Flet UI Shell (2026-11-14)
 --------------------------
 
