@@ -1,305 +1,252 @@
 # AGENTS.md — LibzentSuite Engineering Standards
 
-These instructions apply to the whole repository. They describe how to make changes that are correct, readable, maintainable, and consistent with LibzentSuite's architecture. They are not a substitute for the current source code, tests, `docs/architecture/architecture.md`, or `docs/architecture/integration.md`.
+Binding instructions for AI coding agents working anywhere in this repository. LibzentSuite is a game-agnostic, multi-account Discord flow-orchestration framework: a framework core, pluggable plugins and parser packs, and three interfaces — CLI, FastAPI core API, Flet UI — that all sit on one `ControlAPI` facade.
+
+These rules do not replace the current source code, the tests, or the architecture contracts (`docs/architecture/architecture.md`, `docs/architecture/integration.md`). Where they disagree with the code, follow §1.6.
+
+## Quick reference
+
+CI runs every check through `uv run --frozen`, so the lock pins the toolchain.
+
+```bash
+uv sync --frozen                                               # install the locked environment (runtime + dev group)
+uv run --frozen ruff check . && uv run --frozen ruff format --check .
+uv run --frozen mypy                                           # strict typing, zero-error floor (§8)
+uv run --frozen python -m unittest discover -s tests -t . -v   # offline suite: no network, no live accounts
+bash scripts/local-ci.sh                                       # mirrors CI; quick mode to iterate, full mode before any push (§12)
+python3 main.py --sim pacing_respected                         # whole stack over the offline Discord simulator
+```
+
+| Path | Role |
+| --- | --- |
+| `core/` | Framework: `api.py` (`ControlAPI`), `bootstrap.py` (composition root), `plugin_base.py` (plugin contract), and the managers for accounts, workspaces, plugins, rate limiting, task scheduling, and events |
+| `adapters/` | Discord boundary: `discord/` (live client, imported lazily) and `simulator/` (complete offline world) |
+| `database/` | SQLite models, ordered migrations, repositories |
+| `interfaces/` | `cli/` (REPL + one-shot), `api/` (FastAPI), `ui/` (Flet, imported lazily) |
+| `plugins/`, `parsers/` | Runtime-discovered plugins (the framework bundles none); the parser registry — game-specific logic lives in parser packs, never in `core/` |
+| `tests/`, `benchmark/`, `scripts/`, `config/` | `unit`/`integration`/`simulation`/`stress` suites; benchmarks; tooling; configuration |
+| `docs/`, `knowledgebase/`, `dump/` | See §5 |
+
+`README.md` → Reference → Layout has more detail. Verify any path against the tree before relying on it.
 
 ## 1. Working principles
 
-1. **Understand before changing.** Read the relevant implementation, callers, tests, data models, and current architecture/integration contracts before editing. Trace a behavior end to end when it crosses layers. Do not infer current behavior from stale comments or old plans alone.
-2. **Solve the requested problem completely.** Make the smallest coherent change that fixes the root cause. Include the tests and documentation needed to make the change understandable and verifiable. Do not make unrelated refactors while fixing a defect.
-3. **Preserve architecture boundaries.** `core.api.ControlAPI` is the shared application facade for the CLI and dashboard. Both interfaces must use the same application behavior. Extend the shared facade and its tests when a legitimate feature requires it; do not add a second business-logic path to avoid modifying the API.
-4. **Keep plugins Modular.** Plugins uses the provided services and methods from the framework, and therefore cannot directly control and have access to any client, our provided services are the middleware and is authoratative for security reasons, the most descriptic way to describe the structure is: Core Engine (framework) -> Driver (Plugins) in which case core engine provides the ability and plugins utilize them live.
-5. **Preserve safety and data semantics.** Do not bypass validation, authorization, persistence, task scheduling, rate limiting, audit logging, generation/version checks, or server-provided limits in order to simplify a feature or its UI.
-6. **Prefer verified behavior to assumptions.** Distinguish confirmed facts, intended behavior, and hypotheses. When requirements conflict materially, surface the conflict instead of silently inventing a product decision. Resolve minor technical details independently when they do not change product behavior or public contracts.
-7. **Respect the task boundary, not an arbitrary file list.** A cross-cutting fix may need coordinated updates to source, tests, contracts, and documentation. Change the smallest set of related files needed; preserve unrelated work and never rewrite unrelated user changes.
-8. **Keep docs always updated and synced.** Reflect the changes that happens in project, evaluate the type of change and respectively update the most relative file/folder the change is subjected to, be either README.md, ROADMAP.md files and `docs/`, `knowledgebase/` folders, once any roadmap item is marked completed migrate it into knowledgebase and docs as a historical record.
+1. **Understand before changing.** Read the relevant implementation, callers, tests, data models, and contracts; trace behavior end to end when it crosses layers. Don't infer current behavior from stale comments or old plans.
+2. **Solve the requested problem completely — and no more.** Make the smallest coherent change that fixes the root cause, with the tests and docs that make it understandable and verifiable. No unrelated refactors inside a fix.
+3. **Preserve architecture boundaries.** `core.api.ControlAPI` is the one application facade for the CLI, the FastAPI core API, and the Flet UI. Extend it (and its tests) when a feature legitimately needs a shared operation; never add a second business-logic path to avoid touching it.
+4. **Keep plugins modular — Core Engine (framework) → Driver (plugins).** The framework provides capabilities; plugins use them live through `PluginServices`. Plugins never touch Discord clients directly: the framework services are the authoritative middleware, for security. The framework itself makes no self-initiated Discord API calls — every call is a plugin action through the paced pipeline.
+5. **Preserve safety and data semantics.** Never bypass validation, authorization, persistence, task scheduling, rate limiting, audit logging, generation/version checks, or server-provided limits to simplify a feature or its UI. Outbound actions flow `PluginServices` → `TaskScheduler` → `RateLimitManager` → `AccountManager.send_hook` → Discord client: the strictest pacing wins, the safety floor only rises, and server 429s always earn paced retries. Accounts stay isolated unless a workspace deliberately couples them (shared pacing clock, chains).
+6. **Prefer verified behavior to assumptions.** Separate confirmed facts, intended behavior, and hypotheses. When requirements conflict materially, surface the conflict instead of silently inventing a product decision; resolve minor technical details yourself when they change neither product behavior nor a public contract.
+7. **Respect the task boundary, not an arbitrary file list.** A cross-cutting fix may need coordinated updates to source, tests, contracts, and docs. Change the smallest set of related files, preserve unrelated work, and never rewrite unrelated user changes.
+8. **Keep docs synced.** Update what the change affects — `README.md`, `docs/`, `docs/roadmap.md`, `CHANGELOG.md` (`[Unreleased]`) — per §5. When a roadmap item completes, move it out of the roadmap into the historical record: `docs/reference/completed.rst` plus a knowledgebase addendum.
 
 ## 2. Readability and maintainability
 
-- Optimize for the next developer understanding the code, not for minimum line count or cleverness.
-- Use descriptive names that express domain meaning. Avoid opaque abbreviations, unnecessary single-letter names, deeply nested conditionals, chained ternaries, clever side effects, and functions that perform unrelated jobs.
-- Keep functions and methods focused. Extract a helper when it names a real reusable operation or makes complex logic easier to follow. Avoid both copy-pasted behavior and abstractions created solely to eliminate a few harmless repeated lines.
-- Prefer explicit control flow, early validation, clear error paths, and small cohesive modules. Handle expected failures close to the boundary and preserve useful diagnostic context.
-- Avoid magic numbers and string literals for domain concepts. Use named constants, enums, or typed models when they clarify invariants. Do not create constants or wrapper layers that only obscure an obvious value.
-- Comments should explain **why** a constraint exists, what invariant must be preserved, or why a non-obvious choice is necessary. Do not narrate each line of straightforward code. Remove or update comments made false by the change.
-- Do not leave dead code, commented-out implementations, unused imports, abandoned compatibility paths, or TODOs that merely restate unfinished work. A TODO should explain the remaining work and its reason when the work cannot be completed in scope.
-- Avoid premature generalization. Introduce an abstraction when there is a real shared concept, multiple consumers, a meaningful contract, or a clear extension point—not merely because two code fragments look similar.
-- Avoid unnecessary dependencies. Prefer the standard library and dependencies already approved by the project; new runtime dependencies require a clear need and compatibility review.
+- **Optimize for the next reader**, not for line count or cleverness. Prefer explicit control flow, early validation, clear error paths, flat conditionals (no chained ternaries or clever side effects), and small cohesive functions and modules. Handle expected failures close to the boundary and keep diagnostic context.
+- **Name domain concepts instead of using magic values.** Use named constants, enums, or typed models where they clarify an invariant; don't add constants or wrapper layers that only obscure an obvious value.
+- **Comments explain why** — a constraint, an invariant, a non-obvious choice — never what the next line does. Fix or delete comments your change made false. House style: docstrings and comments may use typographic punctuation (— → ×); don't flatten it to ASCII.
+- **Leave nothing behind:** no dead code, commented-out code, unused imports, abandoned compatibility paths, or TODOs that merely restate unfinished work. A TODO states what remains and why it is out of scope.
+- **Abstract for a real concept** — a shared domain idea, several consumers, a meaningful contract, or a clear extension point — not because two fragments look alike. Extract a helper when it names a real operation or untangles complex logic; avoid both copy-pasted behavior and abstractions that only remove a few harmless repeated lines.
 
 ## 3. Avoid duplication and keep one source of truth
 
-- Before adding a helper or feature, search for existing models, validators, serializers, error types, formatting helpers, API methods, event types, repositories, and UI components that already own the responsibility.
-- Keep business rules in their owning domain/service layer. Do not duplicate the same rule independently in the CLI, dashboard, plugin, repository, or test fixture.
-- Keep a single canonical implementation of shared behavior. Call it from each surface instead of copying its logic. A frontend may provide user-friendly validation for immediate feedback, but the backend remains authoritative and must validate again.
-- Use shared components for repeated UI behavior, and shared API/client helpers for common transport behavior. A shared component must have a clear contract and state model; do not build a universal abstraction with dozens of unrelated flags.
-- Keep one canonical representation of persisted state. Do not maintain redundant caches or duplicate mutable fields unless ownership, invalidation, and consistency rules are explicit.
-- Do not duplicate data contracts in multiple handwritten documents. Put the contract at its natural owner, then link/reference it from related documentation. Update all dependent call sites and regression tests when the contract changes.
-- Preserve meaningful differences between similar flows. Do not merge distinct domain behavior merely because the UI looks alike; first establish whether they truly share semantics.
+- **Search before you add.** Look for an existing owner of the responsibility — model, validator, serializer, error type, formatter, API method, event type, repository, UI component — before creating a helper or feature.
+- **Business rules live in their owning domain/service layer.** The CLI, API, UI, plugins, repositories, and test fixtures call them; they never re-implement them. Client-side validation is feedback only — the backend validates again and stays authoritative.
+- **Keep one canonical representation of persisted state.** No redundant caches or duplicate mutable fields unless ownership, invalidation, and consistency rules are explicit.
+- **Shared components and helpers need a clear contract and state model** — no universal abstraction with dozens of unrelated flags.
+- **Put each contract at its natural owner and link to it** instead of re-copying it into handwritten docs. When a contract changes, update every call site and regression test.
+- **Keep meaningful differences.** Don't merge flows that merely look alike; first establish that they share semantics.
 
 ## 4. Python types and data models
 
-The project supports **Python 3.10 or newer**. New or materially changed Python code should use complete, useful type annotations.
+Supported baseline: **Python 3.10+**. New or materially changed code is fully annotated; mypy strict (§8) enforces the mechanics, so this section covers what the checker cannot.
 
-- Annotate public functions, methods, constructors with meaningful return types, module-level APIs, callbacks, async functions, and non-obvious local variables. Use `-> None` for procedures that return no useful value.
-- Prefer precise types over `Any`. Use `object`, `Mapping`, `Sequence`, `Iterable`, `Protocol`, `TypedDict`, `Literal`, unions, generics, and domain-specific types where they express the contract better. `Any` may be appropriate at genuinely dynamic boundaries, but contain it and validate before passing data into the domain layer.
-- Model nullable values honestly as `T | None`; do not use a false default to avoid handling absence. Narrow values with validation and explicit checks before use.
-- Treat decoded JSON, HTTP payloads, environment values, plugin manifests, and other external input as untrusted until validated. Do not use a cast as a substitute for runtime validation.
-- Avoid untyped dictionaries as internal domain models when the data has a stable shape. Use a dataclass, enum, `TypedDict`, or another explicit model where it improves correctness and readability. Keep plain dictionaries at serialization or genuinely dynamic-map boundaries.
-- Use `Enum`/`StrEnum` (the latter is available in Python 3.11, so do not require it for the Python 3.10 baseline) for closed sets of domain states when it improves validation and clarity.
+- **Prefer precise types over `Any`.** Use `object`, `Mapping`, `Sequence`, `Iterable`, `Protocol`, `TypedDict`, `Literal`, unions, and generics where they express the contract. `Any` belongs only at genuinely dynamic boundaries — contain it and validate before data reaches the domain layer.
+- **Model absence honestly** as `T | None`; narrow with explicit checks instead of a false default.
+- **External input is untrusted until validated** — decoded JSON, HTTP payloads, environment values, plugin manifests. A `cast` is never validation.
+- **Give stable shapes a real model** (dataclass, `Enum`, `TypedDict`) instead of an untyped dict. Keep plain dicts at serialization and genuinely dynamic boundaries, and convert explicitly there (`as_dict`, serializers, DTO conversion). Use `Enum` for closed sets of domain states; `StrEnum` is 3.11+, so don't use it on the 3.10 baseline.
 
 ### Dataclasses
 
-Use `@dataclass` when a class primarily represents structured data with named fields and predictable construction/equality, rather than hand-written boilerplate.
+Use `@dataclass` when a class mainly represents structured data with named fields and predictable construction and equality.
 
-- Annotate every field. Use `frozen=True` for immutable value objects, event payloads, configuration records, and DTOs when mutation is not part of the contract.
-- Consider `slots=True` for small, high-volume data carriers when compatibility and the need for dynamic attributes have been checked.
-- Use `kw_only=True` when keyword-only construction materially reduces mistakes in a model with many fields or optional values; do not change a stable public constructor casually.
-- Use `field(default_factory=...)` for mutable defaults. Never share a mutable list/dict/set default between instances.
-- Keep mutable runtime/lifecycle state mutable when that is genuinely required; do not freeze a manager or runtime object merely to follow a style rule.
-- Add validation in `__post_init__` only when the invariant belongs to the value object and can be checked locally. Put IO, repository access, network calls, and complicated workflows in service methods, not dataclass constructors.
-- Avoid maintaining both a dataclass and a parallel dictionary containing the same information. Convert explicitly at boundaries (`as_dict`, serializers, API DTO conversion) and keep one canonical in-memory representation.
+- Annotate every field. Use `frozen=True` for value objects, event payloads, configuration records, and DTOs unless mutation is part of the contract. Keep genuinely mutable runtime/lifecycle state mutable — don't freeze a manager just to follow a style rule.
+- Use `field(default_factory=...)` for mutable defaults; never share a mutable default between instances.
+- Consider `slots=True` for small, high-volume carriers and `kw_only=True` for models with many or optional fields — after checking compatibility; don't change a stable public constructor casually.
+- Validate in `__post_init__` only for invariants local to the value object. IO, repository access, network calls, and workflows belong in service methods.
+- Don't keep a dataclass and a parallel dictionary for the same data: one canonical in-memory representation, converted explicitly at boundaries.
 
-### Exceptions and async code
+### Exceptions and async
 
-- Raise domain-specific exceptions already owned by the project where appropriate. Preserve human-readable messages and exception chaining (`raise ... from exc`) where it adds diagnostic value.
-- Catch only exceptions the code can meaningfully handle. Avoid broad `except Exception` unless it is a documented isolation boundary that logs the error and keeps the correct scope alive.
-- Do not swallow cancellation (`asyncio.CancelledError`) or turn cancellation into success. Use `try/finally` for cleanup and make task/resource ownership clear.
-- Do not block the event loop with synchronous IO or long CPU work. Preserve the existing scheduler, persistence, and lifecycle ownership boundaries.
+- Raise the project's domain-specific exceptions; keep messages human-readable and chain with `raise ... from exc` where it adds diagnostic value.
+- Catch only what the code can meaningfully handle. Broad `except Exception` is acceptable only at a documented isolation boundary that logs the error and keeps the right scope alive.
+- Never swallow `asyncio.CancelledError` or turn cancellation into success. Use `try/finally` for cleanup and keep task and resource ownership clear.
+- Don't block the event loop with synchronous IO or long CPU work; preserve the existing scheduler, persistence, and lifecycle ownership boundaries.
 
 ## 5. Documentation and knowledgebase policy
 
-The root `AGENTS.md` plus `docs/architecture/architecture.md` and `docs/architecture/integration.md` are the places for agent guidance and binding engineering/architecture contracts. **Do not put coding rules, agent instructions, linting policy, or behavioral mandates inside `knowledgebase/` or `docs/`.**
+| Location | Role | Rules |
+| --- | --- | --- |
+| `AGENTS.md`, `docs/architecture/architecture.md`, `docs/architecture/integration.md` | Agent guidance and the binding engineering/architecture contracts | The only places for them. Verify against the code; fix or report stale contracts. |
+| `docs/design/`, `docs/plans/` | Subsystem design specs and plans: locked decisions and intended direction (workspace design, data-management adoption, the Flet UI design contract, …) | Read the one for the subsystem you touch. If code and spec disagree, surface it (§1.6) instead of picking silently. |
+| rest of `docs/`, `README.md`, `CHANGELOG.md` | User-facing description, the roadmap (`docs/roadmap.md`), and history | Descriptive only — no coding rules, agent instructions, linting policy, or behavioral mandates. |
+| `knowledgebase/` | Technical reference and project history | Local-only (gitignored, absent from a fresh clone). Append-only. No rules. |
+| `dump/` | Retired code, preserved verbatim | Local-only; only `dump/README.md` is tracked. Leave it as is. |
 
-`knowledgebase/` exists to preserve project knowledge and technical reference material, not to govern agents. It is LOCAL-ONLY: gitignored, never in a fresh clone (same for the `dump/` retirement wing — only its README stays tracked as the pointer).
+### `docs/`
 
-- Treat existing knowledgebase entries as read-only historical knowledge during ordinary implementation work. Do not rewrite, delete, reorder, or silently “clean up” existing material.
-- The knowledgebase is append-only: add knowledge as a new focused document or a clearly dated/attributed addendum. Never replace earlier observations; correct a previous statement by adding a traceable correction that explains what superseded it.
-- Do not turn knowledge entries into new rules. Describe facts, contracts, architecture, observed behavior, decisions already made, examples, caveats, and links to the source. Decisions that need to become binding instructions belong in the root-level contract documents instead.
-- When adding or materially changing a public class, function, method, data model, or subsystem, document its purpose and relevant contract in the code docstring and add/update a knowledgebase reference using the append-only approach. Include applicable inputs, outputs, exceptions, side effects, lifecycle/ownership, persistence, invariants, and callers. Keep the source docstring close to the code; use the knowledgebase for navigable cross-module understanding and deeper reference.
-- Do not put secrets, tokens, personal data, or live account credentials in docs, fixtures, examples, logs, or knowledgebase entries. Use synthetic identifiers and redacted examples.
-- If the project later restores generated knowledgebase areas, follow their generator's ownership: never hand-edit generated/read-only output. Regenerate only through the documented generator after source changes and review the generated diff. Do not claim the knowledgebase currently has tooling or protections unless verified.
+- Describe the project's structure and how to use every available command and feature, in user-readable form; future plans and design direction live here too.
+- Docs are a copy of what the codebase does, not the source of truth. When docs and code disagree, the code wins and the docs get fixed.
+- Any feature or command added, removed, or changed updates the related docs in the same change — never leave stale dumps.
+- The core audience is plugin authors: document the `Plugin` and API surfaces (endpoints, settings, and functions available to plugins) well enough to build a plugin from the docs alone.
+- Give complete working knowledge of running the suite from every supported interface (CLI, API, UI): installation through a running suite, including the environment variables and data to fill in first.
+- State the runtime-environment note explicitly: the project was built and tested on Linux only and other platforms are untested. Change that note only when the full suite runs green elsewhere.
 
-`docs/` exists to describe the projects structure in a user-friendly way and how to use its available commands and the entire LibzentSuite.
+### `knowledgebase/`
 
-- Future plans and direction of design also lives in docs.
-- Treat existing docs as a copy of what is available in the codebase and its functionalities rather then considering it as the source of truth.
-- The docs folder exists just to keep the functionalities, commmands and their uses in a user readable format entirely separate to the knowledgebase folder.
-- If there is any new addition or removal of feature or command and functionality note down it in the related files inside docs folder if available and always keep the docs updated of any changes in commands or functionalities to avoid keeping stale dumps.
-- Docs mostly covers the `Plugin` and `API` related endpoints or settings available to them, to streamline the process for users that want to create plugins they should read it and get to know the available functions they could use to make them.
-- The docs must provide the full knowledge of running and working with this app both from dashboard and cli interface, with clear detailed instructions from installations to the running suite and important envs or data that user need to fill in before running it.
-- Note the runtime enviornment and lack of tests in other devices explicitly as the project was entirely made in linux hence wasn't tested in other platforms (this line subjected to be changed when required tests and full suite runs green in other devices aswell and will be updated in docs).
+- Treat existing entries as read-only history in ordinary work: don't rewrite, delete, reorder, or "clean up" them.
+- It is append-only: add a new focused document or a dated, attributed addendum. Correct an earlier statement with a traceable correction that says what it supersedes — never replace the original.
+- Record facts, contracts, architecture, observed behavior, decisions already made, examples, caveats, and source links — never new rules. A decision that must bind goes into `AGENTS.md` or the architecture contracts.
+- When you add or materially change a public class, function, method, data model, or subsystem, document its purpose and contract in the docstring (inputs, outputs, exceptions, side effects, lifecycle/ownership, persistence, invariants, callers) and add or update a knowledgebase reference the append-only way. The docstring stays next to the code; the knowledgebase holds cross-module understanding.
+- If generated knowledgebase areas are ever restored, follow the generator's ownership: never hand-edit generated output; regenerate after source changes and review the diff. Don't claim knowledgebase tooling or protections exist unless verified.
+
+**Never** put secrets, tokens, personal data, or live account credentials in docs, fixtures, examples, logs, or knowledgebase entries — use synthetic identifiers and redacted examples. (gitleaks runs in pre-commit and CI.)
 
 ## 6. Public contracts, architecture, and UI
 
-- Read `docs/architecture/architecture.md` for ownership and architectural boundaries and `docs/architecture/integration.md` for the current inter-module contract. Verify those documents against current code when they appear stale; do not perpetuate a known contradiction. Propose corrections to the contract docs when necessary.
-- Keep `core.api.ControlAPI` the shared application facade for CLI and dashboard. Add or modify methods there when a feature legitimately requires a shared operation, and update implementations, both interfaces, and tests consistently.
-- The dashboard may change its layout, navigation, component structure, and interaction flow without changing backend behavior. An old page list or prior implementation is not automatically a permanent UI requirement unless reaffirmed in the current task or a current binding contract.
-- For UI work, specify a component's purpose, inputs/outputs, interaction states, disabled/loading states, success/failure feedback, validation, focus/keyboard behavior, responsive behavior, and accessible name/state. Judge acceptance by observable behavior and user outcomes, not by a required markup trick or presence of a comment.
-- Preserve theme-system customization. Prefer design tokens and existing theme-aware variables over hard-coded colors, dimensions, and font choices. Components should remain usable across supported themes and density settings.
-- Keep framework-owned views and plugin-authored/builder views within their established boundaries. Plugins should not gain arbitrary access to the DOM, backend internals, or global application state.
-- Never solve a frontend issue by bypassing backend validation, authorization, transaction semantics, state transitions, or persistence guarantees.
+- Read `docs/architecture/architecture.md` (ownership and boundaries) and `docs/architecture/integration.md` (the current inter-module contract) first. When they look stale, verify them against the code, don't perpetuate a known contradiction, and propose the correction.
+- `core.api.ControlAPI` stays the shared facade for the CLI, the FastAPI core API (`interfaces/api/`), and the Flet UI (`interfaces/ui/`). When a feature needs a new shared operation, add it there and update the implementation, every interface, and the tests together.
+- UI work follows the owner's Flet UI design contract, `docs/plans/flet_ui_design_contract.md`. Layout, navigation, component structure, and interaction flow may change without changing backend behavior; a previous page list or implementation is not a standing requirement unless the task or a current contract reaffirms it.
+- Specify each component: purpose, inputs/outputs, interaction states (disabled, loading, success, failure), validation, focus/keyboard behavior, responsive behavior, and accessible name/state. Judge acceptance by observable behavior and user outcomes, not by a markup trick or the presence of a comment.
+- Prefer theme tokens and existing theme-aware values over hard-coded colors, dimensions, and fonts; components must stay usable across supported themes and density settings.
+- Keep framework-owned views and plugin-authored views within their established boundaries: plugins get no direct access to UI internals, backend internals, or global application state.
+- `flet` is an optional dependency, imported lazily, and absent from the dev/CI environment. Keep it out of module-level imports on any path the tests exercise, so the API-client core and the suite run without the GUI installed.
+- Never fix a frontend problem by bypassing backend validation, authorization, transaction semantics, state transitions, or persistence guarantees.
 
 ## 7. Testing and regression prevention
 
-- Add or update tests for every meaningful behavior change. Test the externally observable contract and the regression that motivated the change, not merely the implementation text or internal helper name.
-- Prefer deterministic tests: injected clocks, seeded randomness, in-memory repositories/databases, simulator adapters, explicit synchronization, and bounded waits. Avoid fragile wall-clock sleeps and real network access in ordinary tests.
-- Cover happy paths, invalid input, missing/unknown data, boundary values, failure recovery, cancellation, duplicate calls, and relevant concurrency/race conditions. For stateful operations, assert both the result and persisted state.
-- For API or model changes, test serialization and compatibility at the boundary. For UI changes, test interaction states, stale-data/loading/error flows, accessibility-relevant keyboard behavior, responsive layout where tooling supports it, and backend persistence where relevant.
-- Run the narrowest relevant tests first. Then run the adjacent unit/integration tests. Run the full suite before claiming repository-wide correctness when practical; if it cannot be run, state exactly what was and was not run.
-- Do not weaken tests, delete assertions, skip failures, or loosen validation just to achieve a green run. Fix the cause or document a genuinely pre-existing failure with reproducible evidence.
-- Do not run tests without cleaning up the residual cached data that was produced and kept on the previous run, start tests with fresh point.
+- **Every meaningful behavior change gets tests** of the externally observable contract and of the regression that motivated it — not of implementation text or helper names.
+- **Deterministic and offline.** Use injected clocks, seeded randomness, in-memory repositories/databases, the simulator adapter, explicit synchronization, and bounded waits. No wall-clock sleeps, real network access, live Discord accounts, or real tokens in ordinary tests.
+- **Isolated storage — never the real `state/`.** Tests use disposable databases, key material, and directories. `state/` holds the live databases and the credentials key: never delete, overwrite, or "reset" it, and never run a script that does. Starting each run from a fresh state means removing only the leftovers the previous test run itself produced (temp data, caches).
+- **Cover the edges:** happy path, invalid input, missing/unknown data, boundary values, failure recovery, cancellation, duplicate calls, and relevant races. For stateful operations assert both the result and the persisted state.
+- **Test at the boundary.** For API or model changes, test serialization and compatibility. For UI changes, test interaction states, stale/loading/error flows, keyboard behavior, responsive layout where tooling supports it, and backend persistence.
+- **Run narrow first**, then the adjacent unit/integration tests, then the full suite before claiming repository-wide correctness. CI runs Python 3.10–3.13: verify changes that touch dependencies, typing, or stdlib APIs on 3.10, the minimum, not only on your local interpreter. If something couldn't be run, say exactly what was and wasn't run.
+- **Never weaken tests** — no deleted assertions, skips, or loosened validation to get green. Fix the cause, or document a genuinely pre-existing failure with reproducible evidence.
+- **Coverage measures production code only** (never add `tests/` to coverage `source`). The floor (`fail_under` in `pyproject.toml`) only rises; never lower it without recording why.
 
 ## 8. Formatting, linting, and type checking
 
-Use **Ruff for Python linting and formatting** and **mypy for static type checking**. Use stable releases compatible with Python 3.10+, check the tools' current official documentation when adopting new options, and keep one canonical configuration (prefer a root `pyproject.toml`). Do not maintain competing Ruff/Black/isort configurations for the same job.
+**Ruff** owns linting, formatting, and import sorting; **mypy** owns strict static typing. The one canonical configuration is the root `pyproject.toml` — read it instead of restating it here, and never add a competing Black/isort/flake8 setup. Tool versions are pinned in `[dependency-groups] dev`; when upgrading, check the tools' current official documentation (mypy's strict flags are version-sensitive).
 
-Ruff and mypy were adopted 2026-10-25: the canonical configuration lives in
-the root `pyproject.toml`, dependencies are declared in `[project]` with dev
-tools in the `[dependency-groups] dev` table, and `uv.lock` is the pinned
-universal resolution — CI installs it with `uv sync --frozen` and runs every
-check through `uv run --frozen` (ruff's `F` rules superseded the former
-pyflakes step). `requirements.txt` is a generated pip-compat export of the
-lock (`uv export --format requirements-txt --no-hashes --no-dev
---no-emit-project -o requirements.txt`) — regenerate it, never hand-edit.
-The export-sync and lock-integrity gates in CI enforce this mechanically.
-The mypy strict run is TWO ratchet gates with split baselines:
-`.github/mypy-baseline` (production) and `.github/mypy-tests-baseline`
-(tests). Each tree's count must EQUAL its baseline — CI fails when the
-count grows past it, and also when it shrinks without the file lowered
-in the same PR. Both scopes reached ZERO: the production
-tree on 2026-11-15 (485 legacy errors across 108 source files) and the
-tests tree on 2026-11-16 (2,443 errors across 86 test files, fixed by
-a six-batch annotation campaign — zero assertions weakened, zero tests
-deleted). Strict mode over all 216 source files is now a hard floor:
-any new strict error fails CI, and the baseline stays at zero. Never
-add a blanket ignore or a blanket suppression to shrink the count.
-
-### Ruff baseline
-
-Recommended initial configuration (adjust only with a documented reason):
-
-```toml
-[tool.ruff]
-target-version = "py310"
-line-length = 100
-
-[tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "W", "I", "UP", "B", "SIM", "C4", "PIE", "RUF", "TCH"]
-
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
-line-ending = "auto"
-docstring-code-format = true
-```
-
-- Run `ruff check` and `ruff format --check` in CI; run `ruff format` locally for files being changed.
-- Ruff owns import sorting (`I`) and formatting. Do not add a separate formatter or import sorter unless there is a demonstrated incompatibility.
-- Avoid enabling unstable/preview rules by default. Add additional lint families intentionally and fix or narrowly justify exceptions.
-- Prefer safe auto-fixes, but inspect every resulting diff. Never auto-fix blindly across unrelated files.
-- Ignore an individual rule only with a concrete reason and the narrowest scope possible. Do not suppress whole categories or entire modules merely to silence debt.
-
-### mypy baseline
-
-Recommended starting point for production code in `pyproject.toml`:
-
-```toml
-[tool.mypy]
-python_version = "3.10"
-strict = true
-warn_unreachable = true
-warn_unused_configs = true
-show_error_codes = true
-pretty = true
-files = ["core", "adapters", "database", "interfaces", "plugins", "benchmark", "scripts"]
-```
-
-- Use strict checking for new modules and materially changed code. If the legacy tree prevents an immediate clean whole-tree run, track the existing errors and expand coverage gradually; do not relax typing for new code to match the weakest legacy module.
-- Resolve type errors by improving the model or boundary validation first. Avoid `Any`, `cast`, `type: ignore`, `# noqa`, and unchecked deserialization as shortcuts.
-- Every suppression must use a specific error code where supported, explain why the checker cannot express the invariant, and be as local as possible. Remove obsolete suppressions when the code changes.
-- Do not use `ignore_missing_imports = true` globally. Apply a narrow per-module exception only when a dependency genuinely lacks usable typing and a safer stub/adapter is not justified.
-- Treat mypy's strict-mode contents as version-sensitive: use a current stable mypy release and review its documented strict flags when upgrading. Keep `warn_unreachable` and `warn_unused_configs` enabled to catch dead branches and stale configuration.
-- Use `reveal_type()` temporarily for investigation, but do not leave debugging artifacts in committed code.
-
-### Suggested local commands
+**Toolchain.** Dependencies live in `[project]`, dev tools in `[dependency-groups] dev`, and `uv.lock` is the pinned universal resolution. CI installs it with `uv sync --frozen` and runs every check through `uv run --frozen`. `requirements.txt` is a generated pip-compat export of the lock — regenerate it, never hand-edit:
 
 ```bash
-ruff check .
-ruff format --check .
-mypy
-python -m unittest discover -s tests -t . -v
+uv export --format requirements-txt --no-hashes --no-dev --no-emit-project -o requirements.txt
 ```
 
-Local checks: `ruff check`, `ruff format --check`, `mypy` (advisory until the
-baseline clears), then the suite. Do not imply a command succeeded unless it
-was actually run.
+CI's export-sync and lock-integrity gates enforce this.
 
-Official references:
-- Ruff configuration and formatter: https://docs.astral.sh/ruff/configuration/ and https://docs.astral.sh/ruff/formatter/
-- mypy configuration: https://mypy.readthedocs.io/en/stable/config_file.html
+**mypy strict is a hard floor.** Two equality-ratchet gates — `.github/mypy-baseline` (production) and `.github/mypy-tests-baseline` (tests) — both sit at zero, so any new strict error fails CI. A count that changes without its baseline file changing in the same PR also fails. Never raise a baseline, and never add a blanket ignore or suppression to move a count.
+
+**Ruff practice**
+
+- CI runs `ruff check` and `ruff format --check`; run `ruff format` locally on the files you change. The pre-commit hooks (`ruff --fix`, `ruff-format`, gitleaks, whitespace/EOF fixers) are a fast subset of CI. They may rewrite files — re-stage and re-commit — and must never be bypassed (`--no-verify`).
+- Inspect every auto-fix diff; never auto-fix blindly across unrelated files.
+- No unstable/preview rules by default. Add new rule families intentionally, and fix or narrowly justify the exceptions.
+- Ignore a rule only with a concrete reason and the narrowest scope — never whole categories or modules to hide debt.
+
+**Typing practice**
+
+- Resolve type errors by improving the model or the boundary validation first. Avoid `Any`, `cast`, `type: ignore`, `# noqa`, and unchecked deserialization as shortcuts.
+- Every suppression uses a specific error code, says why the checker cannot express the invariant, and is as local as possible. Remove obsolete ones when the code changes.
+- Never set `ignore_missing_imports = true` globally. A narrow per-module exception is acceptable only when a dependency lacks usable typing and a stub/adapter isn't justified — the existing `flet` override is the model.
+- Keep `warn_unreachable` and `warn_unused_configs` on. Use `reveal_type()` only temporarily; never commit it.
+
+Official references: [Ruff configuration](https://docs.astral.sh/ruff/configuration/), [Ruff formatter](https://docs.astral.sh/ruff/formatter/), [mypy configuration](https://mypy.readthedocs.io/en/stable/config_file.html).
 
 ## 9. Dependency and compatibility discipline
 
-- Preserve the project's declared Python minimum and runtime dependency policy. New packages must be justified; development-only tools belong in development/CI configuration, not runtime dependencies.
-- Avoid relying on APIs newer than Python 3.10 unless the project intentionally raises its supported minimum and updates CI and documentation accordingly.
-- Prefer explicit protocol/adapter boundaries over version-specific behavior spread throughout the codebase. Centralize compatibility logic when it is actually needed.
-- For third-party API behavior that may have changed, verify current official documentation and the installed version rather than relying on memory.
+- Preserve the declared Python minimum (3.10) and the runtime-dependency policy. Avoid APIs newer than 3.10 unless the minimum is deliberately raised with CI and docs updated.
+- A new dependency needs a clear need and a compatibility review; prefer the standard library and dependencies already approved. Keep the core runtime set minimal: optional interface dependencies (API/UI) belong in extras, and development/CI-only tools in `[dependency-groups] dev`. Audit declared dependencies against actual imports, including test-tooling paths (`fastapi.testclient` needs `httpx` on 3.10).
+- When dependencies change: edit `pyproject.toml`, refresh `uv.lock`, regenerate `requirements.txt` (§8), and keep the CI audit gates (pip-audit, bandit) green.
+- The live Discord client (the `better.py-self` fork) is imported lazily and only at the `adapters/discord/` boundary; simulations and tests never need it or a network.
+- CI actions are dependencies too: pin every action and record it in `.github/workflows/actions.lock` (machine-generated by `gh actions-lock`, validated weekly by the health sweep); workflow tokens stay read-only.
+- Centralize compatibility logic behind explicit protocol/adapter boundaries instead of spreading version checks.
+- For third-party behavior that may have changed, check the current official documentation and the installed version — not memory.
 
 ## 10. Change completion checklist
 
 Before declaring a change complete:
 
-- [ ] Read the relevant implementation and existing tests.
-- [ ] Confirmed the change respects module ownership and existing contracts, or updated the root contract intentionally.
-- [ ] Removed duplicated logic or reused the canonical owner where appropriate.
-- [ ] Added clear types, useful docstrings, and a model appropriate to the data.
-- [ ] Added regression tests for the behavior and important failure paths.
-- [ ] Updated knowledgebase reference material using its append-only policy, without adding rules there.
-- [ ] Ran formatting, linting, typing, and tests that are actually available and relevant; recorded any checks not run.
+- [ ] Read the relevant implementation, callers, and existing tests (§1).
+- [ ] Respected module ownership and existing contracts — or updated the contract deliberately (§1, §6).
+- [ ] Reused the canonical owner instead of duplicating logic (§3).
+- [ ] Added complete types, useful docstrings, and a data model that fits the data (§4).
+- [ ] Added regression tests for the behavior and its important failure paths (§7).
+- [ ] Synced `README.md`, `docs/`, `docs/roadmap.md`, and `CHANGELOG.md` as affected, and added an append-only knowledgebase reference — with no rules added to docs or the knowledgebase (§5).
+- [ ] Ran Ruff, mypy, and the relevant tests (and `scripts/local-ci.sh` before any push); recorded anything not run. Never imply a command succeeded unless it actually ran (§7, §8, §12).
 - [ ] Reviewed the complete diff for unrelated changes, stale comments, accidental API breakage, credentials, and dead code.
 
 ## 11. Naming Conventions
 
-Choose names that are **creative, expressive, memorable, and informative**. Class, method, function, and variable names should communicate purpose clearly while sounding natural and fitting the project's domain. Prefer thoughtful, distinctive names over generic placeholders, cryptic abbreviations, or excessively verbose descriptions.
+Names should be **expressive, informative, and fitting to the project's domain** — memorable where that helps understanding, never cryptic, misleading, or clever at the expense of clarity. Reuse the project's existing vocabulary (workspace, chain, signal, preset, profile, pacing, …) instead of coining synonyms, and keep terminology consistent across modules.
 
-- **Classes and dataclasses:** Use meaningful nouns or domain concepts that communicate identity and responsibility.
-- **Methods and functions:** Prefer clear action-oriented names that describe what they accomplish.
-- **Variables and attributes:** Choose descriptive names that convey intent, context, and expected values.
-- **Booleans:** Use readable names such as `is_ready`, `has_access`, or `can_retry`.
-- **Consistency:** Follow Python naming conventions (`PascalCase` for classes, `snake_case` for functions, methods, and variables) and maintain consistent terminology across modules.
-- **Creative, not confusing:** Memorable names are encouraged when they improve understanding, but avoid forced cleverness, unexplained metaphors, misleading names, and unnecessary abbreviations.
+- **Classes and dataclasses:** nouns or domain concepts that state identity and responsibility (`PascalCase`).
+- **Functions and methods:** action-oriented names that say what they accomplish (`snake_case`).
+- **Variables and attributes:** names that convey intent, context, and expected values.
+- **Booleans:** read as a question — `is_ready`, `has_access`, `can_retry`.
 
-Every name should help another developer understand the code without having to reverse-engineer its intent.
+A good name lets the next developer understand the code without reverse-engineering its intent.
 
 ## 12. Commit Discipline
 
-Onwards commit discipline will be reside in agents.md and there won't be a separate file for it.
+Commit discipline lives here; there is no separate file for it.
 
-Before committing:
+**Before committing**
 
-- Work happens on a **feature branch** — verify it is active before the
-  first edit (`git branch --show-current`). Never commit on `dev`/`main`.
-- **Stop running services** that host the changed code (dashboard,
-  bots) so the committed state is the tested state.
-- Run the relevant test suites and record the outcome. **A red suite
-  blocks the commit series** — fix first, then commit.
-- Review the full diff (`git diff` + `git status --porcelain`). Never
-  commit a file you cannot describe.
+- Work on a **feature branch** and confirm it with `git branch --show-current` before the first edit. Never commit on `master`, `main`, or `dev`. If you are not on a feature branch, stop and ask — switching branches needs explicit authorization.
+- **Stop running services** that host the changed code (API/UI servers, bots) so the committed state is the tested state.
+- Run the relevant test suites and record the outcome. **A red suite blocks the commit series** — fix first, then commit.
+- Review the full diff (`git diff` + `git status --porcelain`). Never commit a file you cannot describe.
+- Hooks (§8) may rewrite files: re-stage and re-commit. Never bypass them with `--no-verify`.
 
-Commit granularity — one logical unit per commit:
+**Granularity — one logical unit per commit**
 
-- **One file = one commit** when the file carries its own concern
-  (13 files → 13 commits, each describing that
-  file's changes).
-- A cohesive new feature may group its own package files into ONE
-  PR, with its tests and docs as separate follow-up in pr-commits.
+- **One file = one commit** when the file carries its own concern (13 files → 13 commits, each describing that file's changes).
+- A cohesive new feature may group its own package files into one PR, with its tests and docs as separate follow-up commits in that PR.
 - Commit in **dependency order**: foundation → feature → tests → docs.
 
-Commit messages:
+**Messages**
 
-- Format: `type(scope): what changed — and the user-visible why`
-  (`feat parsers:`, `fix dashboard:`, `test`, `docs`, `chore` — repo
-  convention).
-- The message describes **the changes in the committed files
-  specifically** — not a vague round summary.
-- Every behavioral fix names its trigger (user report, audit finding,
-  ticket) in the body when useful.
+- Format: `type(scope): what changed — and the user-visible why`, for example `feat(parsers): …`, `fix(ui): …`, `test(workspace): …`, `docs: …`, `chore(deps): …`, `fix(ci): …`.
+- Describe the changes in the committed files specifically — not a vague round summary. Name the trigger (user report, audit finding, ticket, CI failure) in the body when it helps.
 
-Scope & safety:
+**Scope and safety**
 
-- **Never** `git push`, `reset`, `clean`, or switch branches unless
-  explicitly authorized in the same breath as the work.
-- **Never** discard unrelated user changes. Unrelated modified files
-  stay uncommitted (or are committed separately with an accurate
-  message if the user asked for "all changes").
-- Commit only after the final diff review. The working tree ends
-  **clean** — everything relevant committed, nothing extra.
-- Push to remote only when there are five or more commits have been committed.
-- **Run the CodeRabbit pre-review locally before every explicit push**
-  (owner rule, 2026-11-17): after `scripts/local-ci.sh` is green, run the
-  CodeRabbit CLI review over the pending range (`coderabbit-code-review`
-  skill documents the exact workflow), fix or triage its findings, then
-  push. A fix after a green gate invalidates that gate: re-run both the
-  local CI and the pre-review over the final range — a green run over an
-  earlier shape never covers the pushed commits. CI gates and the
-  pre-review are both mandatory — neither substitutes for the other.
-- **Never** push committed series to the remote without owner's explicit approval.
+- **Never** `git reset`, `git clean`, or switch branches unless explicitly authorized in the same breath as the work.
+- **Never** discard unrelated user changes. Unrelated modified files stay uncommitted (or are committed separately with an accurate message if the user asked for "all changes").
+- Never create release tags or releases: the `v*` tag ruleset is locked deliberately until the owner lifts the hold.
+- Commit only after the final diff review. The working tree ends **clean** — everything relevant committed, nothing extra.
 
-After the series:
+**Pushing**
 
-- Show `git log --oneline` for the new commits + final `git status`.
+- A push needs the owner's explicit approval **and** five or more unpushed commits. **Never** push without both.
+- Before **every** approved push: run the full local gate (`bash scripts/local-ci.sh`, full mode) until it is green, then run the CodeRabbit CLI review over the pending range (the `coderabbit-code-review` skill documents the workflow) and fix or triage its findings. The CI gates and the pre-review are both mandatory — neither substitutes for the other.
+- The local gate must never touch `state/` (§7). If `scripts/local-ci.sh`, or any helper, would delete or overwrite it, stop and report instead of running it.
+
+**After the series**
+
+- Show `git log --oneline` for the new commits and the final `git status`.
 - State what was intentionally left uncommitted and why.
 
-## 13. Skills & Tools.
+## 13. Skills & Tools
 
-notable mentions of skills that worth using for more efficiency and speed.
-other skills related to the project resides in `.agents/`.
+Local agent skills live in `.agents/` (gitignored: per-machine, absent from a fresh clone). Use them when present; if a skill isn't installed, fall back to the built-in tools instead of stopping.
 
-[FAST-EDIT]
+**fast-edit** — for every edit, create, write, or save of a file:
 
-When you need to edit, create, write, or save files:
+1. Load it first: `skill("fast-edit")`.
+2. Use its commands (`show`, `replace`, `insert`, `delete`, `batch`, `paste`, `write`, `generate`) instead of the built-in Edit/Write tools.
+3. Prefer `fast-batch` and `fast-write` for batch edits and multi-file writes, and `save-pasted` (zero token, zero escaping) for user-pasted content.
 
-1. Load the fast-edit skill first: skill("fast-edit")
-2. Use fast-edit commands (show/replace/insert/delete/batch/paste/write/generate) instead of the built-in Edit/Write tools.
-3. For batch edits or multi-file writes, prefer fast-batch and fast-write.
-4. For user-pasted content, prefer save-pasted (zero token, zero escaping).
-
+**coderabbit-code-review** — the pre-push review workflow (§12).
