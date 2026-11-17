@@ -2570,9 +2570,7 @@ class AccountManager:
                 facade = self.services_for(name, plugin_name)
                 try:
                     if plugin_name not in hosted and bot is not None and hasattr(bot, "add_cog"):
-                        await self._plugin_manager.host_cog(
-                            name, plugin_name, bot, paced=facade
-                        )
+                        await self._plugin_manager.host_cog(name, plugin_name, bot, paced=facade)
                     else:
                         cog_host.rebind_paced(name, plugin_name, facade)
                 except Exception as exc:
