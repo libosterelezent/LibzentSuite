@@ -1125,10 +1125,16 @@ class RealDiscordClient:
         # C1: the audit hook — after checks pass, before the callback
         # (the authorization / audit / execution separation at the
         # library's own seam). Runs for EVERY command: the hub's verbs
-        # and (from C2 on) plugin cogs alike — one AuditRecorder row
-        # per authorized invocation (command | invoker in the note).
+        # and plugin cogs alike — one AuditRecorder row per authorized
+        # invocation (command | invoker in the note).
+        #
+        # roadmap #4 rides the SAME registration: better.py-self's
+        # before_invoke ASSIGNS one callback (it does not append), so
+        # audit + service injection must share the single hook — a
+        # second registration would silently stop the audit
+        # (CodeRabbit pre-review 2026-11-17).
         @bot.before_invoke
-        async def _audit_command_invocation(ctx: ext_commands.Context[Any]) -> None:
+        async def _audit_and_lift_services(ctx: ext_commands.Context[Any]) -> None:
             if self._audit is not None:
                 self._audit.record(
                     account=self._account or "",
@@ -1136,15 +1142,12 @@ class RealDiscordClient:
                     action=str(getattr(getattr(ctx, "command", None), "qualified_name", "?")),
                     note=f"invoker={getattr(getattr(ctx, 'author', None), 'id', None)}",
                 )
-
-        # roadmap #4: lift the cog's paced facade onto the context —
-        # `ctx.services` is the documented plugin command seam. The
-        # toolbox is (account, plugin)-bound at attach time; this hook
-        # only reads it, never resolves an account from ambient state.
-        # Framework cogs carry no toolbox -> ctx.services stays unset
-        # (fail-closed: unwired means absent, not a global fallback).
-        @bot.before_invoke
-        async def _inject_paced_services(ctx: ext_commands.Context[Any]) -> None:
+            # lift the cog's paced facade onto the context — ctx.services
+            # is the documented plugin command seam. The toolbox is
+            # (account, plugin)-bound at attach time; this hook only
+            # reads it, never resolves an account from ambient state.
+            # Framework cogs carry no toolbox -> ctx.services stays unset
+            # (fail-closed: unwired means absent, not a global fallback).
             toolbox = getattr(ctx.cog, "services", None)
             paced = getattr(toolbox, "paced", None)
             if paced is not None:
