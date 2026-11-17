@@ -80,8 +80,10 @@ class _NeverReadyLibClient(_ReadyThenParkLibClient):
 
 
 def _patch_discord(lib_cls: Any) -> Any:
-    mod = NS(Client=lib_cls, DMChannel=type("DMChannel", (), {}))
-    return mock.patch.dict(sys.modules, {"discord": mod})
+    """The fake discord world via the shared helper (Bot included)."""
+    from tests.unit.helpers import fake_discord_sysmodules
+
+    return mock.patch.dict(sys.modules, fake_discord_sysmodules(lib_cls))
 
 
 # ------------------------------------------------- (a) rich event polarity

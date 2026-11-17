@@ -307,8 +307,9 @@ class _FakeLibClient:
     # assigned by tests to simulate library socket state (annotation-only)
     ws: NS
 
-    def __init__(self) -> None:
+    def __init__(self, **kwargs: Any) -> None:  # Bot kwargs ride through now
         self.closed = False
+        self.constructor_kwargs = kwargs
         self.user = NS(id=777)
         self.before_identify_hook = None
         self._park = asyncio.Event()
@@ -327,25 +328,27 @@ class _FakeLibClient:
         self._park.set()
 
 
-def _fake_discord_module() -> NS:
-    mod = NS(Client=_FakeLibClient, DMChannel=type("DMChannel", (), {}))
+def _fake_discord_module() -> dict[str, Any]:
+    """The fake discord world (Bot included) for sys.modules patching."""
+    from tests.unit.helpers import fake_discord_sysmodules
+
     _FakeLibClient.last_built = None
     original_init = _FakeLibClient.__init__
 
-    def recording_init(self: _FakeLibClient) -> None:
-        original_init(self)
+    def recording_init(self: Any, **kwargs: Any) -> None:
+        original_init(self, **kwargs)
         _FakeLibClient.last_built = self
 
     # deliberately swap __init__ to record the last client built
     _FakeLibClient.__init__ = recording_init  # type: ignore[method-assign]
-    return mod
+    return fake_discord_sysmodules(_FakeLibClient)
 
 
 class AdapterIsolationTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_connect_closes_library_client(self) -> None:
         """K7: reaping only the _run task leaks the HTTP sessions."""
         mod = _fake_discord_module()
-        with mock.patch.dict(sys.modules, {"discord": mod}):
+        with mock.patch.dict(sys.modules, mod):
             client = RealDiscordClient("token-tok")
             task = asyncio.create_task(client.connect())
             await asyncio.sleep(0.05)  # inside _ready wait / client.start
@@ -376,7 +379,7 @@ class AdapterIsolationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_connect_wires_gate_as_before_identify_hook(self) -> None:
         mod = _fake_discord_module()
-        with mock.patch.dict(sys.modules, {"discord": mod}):
+        with mock.patch.dict(sys.modules, mod):
             gate = IdentifyGate(interval=0.01)
             client = RealDiscordClient("token-tok", identify_gate=gate)
             connect_task = asyncio.create_task(client.connect())
@@ -465,7 +468,7 @@ class DisconnectReasonTests(unittest.IsolatedAsyncioTestCase):
         """M1: 'gateway closed' alone can't discriminate cull vs network."""
         mod = _fake_discord_module()
         with (
-            mock.patch.dict(sys.modules, {"discord": mod}),
+            mock.patch.dict(sys.modules, mod),
             mock.patch.object(client_module, "_DISCONNECT_FORWARD_DELAY_S", 0.05),
         ):
             client = RealDiscordClient("token-tok")
@@ -488,7 +491,7 @@ class DisconnectReasonTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_close_code_keeps_plain_reason(self) -> None:
         mod = _fake_discord_module()
         with (
-            mock.patch.dict(sys.modules, {"discord": mod}),
+            mock.patch.dict(sys.modules, mod),
             mock.patch.object(client_module, "_DISCONNECT_FORWARD_DELAY_S", 0.05),
         ):
             client = RealDiscordClient("token-tok")

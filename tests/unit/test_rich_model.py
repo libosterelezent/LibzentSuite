@@ -703,10 +703,10 @@ class TestLiveClientBoundary(unittest.IsolatedAsyncioTestCase):
 
     async def test_connected_lifecycle_through_connect_and_disconnect(self) -> None:
         from adapters.discord.client import RealDiscordClient
+        from tests.unit.helpers import fake_discord_sysmodules
 
         lib_cls = type("LibClient", (self._ReadyLibClient,), {})
-        mod = NS(Client=lib_cls, DMChannel=type("DMChannel", (), {}))
-        with mock.patch.dict(sys.modules, {"discord": mod}):
+        with mock.patch.dict(sys.modules, fake_discord_sysmodules(lib_cls)):
             client = RealDiscordClient("tok")
             await client.connect()
             self.assertTrue(client.connected)
@@ -901,8 +901,9 @@ class TestConnectedFlagRound2(unittest.IsolatedAsyncioTestCase):
     """Round-2 state-transition coverage for the `connected` flag."""
 
     def _patch_discord(self, lib_cls: Any) -> AbstractContextManager[Any]:
-        mod = NS(Client=lib_cls, DMChannel=type("DMChannel", (), {}))
-        return mock.patch.dict(sys.modules, {"discord": mod})
+        from tests.unit.helpers import fake_discord_sysmodules
+
+        return mock.patch.dict(sys.modules, fake_discord_sysmodules(lib_cls))
 
     async def test_disconnect_during_connect_is_not_a_bad_token(self) -> None:
         from adapters.discord.client import RealDiscordClient
@@ -1285,8 +1286,9 @@ class TestClientConstructorRound3(unittest.IsolatedAsyncioTestCase):
     intents=None fallback is gone."""
 
     def _patch_discord(self, lib_cls: Any) -> AbstractContextManager[Any]:
-        mod = NS(Client=lib_cls, DMChannel=type("DMChannel", (), {}))
-        return mock.patch.dict(sys.modules, {"discord": mod})
+        from tests.unit.helpers import fake_discord_sysmodules
+
+        return mock.patch.dict(sys.modules, fake_discord_sysmodules(lib_cls))
 
     async def test_max_ratelimit_timeout_passed_and_no_intents(self) -> None:
         from adapters.discord.client import MAX_RATELIMIT_TIMEOUT_S, RealDiscordClient
@@ -1304,10 +1306,17 @@ class TestClientConstructorRound3(unittest.IsolatedAsyncioTestCase):
         # better.py-self memory/persistence options ride along with the
         # pinned timeout (caps, gc freeze, backlog warning; persistence
         # itself is keyed to the account name and omitted without one)
+        # the Bot construction rides its four command kwargs alongside
+        # the memory options; the prefix is the dynamic resolver's
+        # callable (mention default), owner_ids the empty set (no owners
+        # configured on a bare client)
         self.assertEqual(
-            captured,
+            {k: v for k, v in captured.items() if k != "command_prefix"},
             {
                 "max_ratelimit_timeout": MAX_RATELIMIT_TIMEOUT_S,
+                "user_bot": True,
+                "owner_ids": set(),
+                "help_command": None,
                 "max_member_cache": 500,
                 "max_total_member_cache": 5000,
                 "max_thread_cache": 200,
@@ -1316,12 +1325,19 @@ class TestClientConstructorRound3(unittest.IsolatedAsyncioTestCase):
                 "dispatch_backlog_warning": 500,
             },
         )
+        self.assertTrue(callable(captured["command_prefix"]))
         self.assertEqual(captured["max_ratelimit_timeout"], 30.0)
         self.assertNotIn("intents", captured)  # dead fallback dropped
         self.assertNotIn("persistence_path", captured)  # no account name
 
-    async def test_layout_without_kwarg_still_connects(self) -> None:
+    async def test_layout_without_kwarg_fails_contained(self) -> None:
+        """The construction-fork era's degraded fallback (plain Client
+        without the cap) retired with the fork: ONE Bot construction,
+        contained by contract — a layout that rejects it fails the
+        connect with the AccountError connect() promises, never a
+        silent uncapped client."""
         from adapters.discord.client import RealDiscordClient
+        from core.errors import AccountError
 
         class OldLayoutClient(TestLiveClientBoundary._ReadyLibClient):
             def __init__(self, **kwargs: Any) -> None:
@@ -1331,8 +1347,10 @@ class TestClientConstructorRound3(unittest.IsolatedAsyncioTestCase):
 
         with self._patch_discord(OldLayoutClient):
             client = RealDiscordClient("tok")
-            await client.connect()  # degraded (uncapped), never broken
-        self.assertTrue(client.connected)
+            with self.assertRaises(AccountError) as ctx:
+                await client.connect()
+            self.assertIn("rejected the Bot construction", str(ctx.exception))
+        self.assertFalse(client.connected)
 
     async def test_fork_persistence_keyed_to_account(self) -> None:
         """With an account name, the fork's cache persistence points at
@@ -1345,6 +1363,8 @@ class TestClientConstructorRound3(unittest.IsolatedAsyncioTestCase):
 
         captured: dict[str, Any] = {}
 
+        from tests.unit.helpers import fake_discord_sysmodules
+
         class LibClient(TestLiveClientBoundary._ReadyLibClient):
             def __init__(self, **kwargs: Any) -> None:
                 captured.update(kwargs)
@@ -1352,7 +1372,7 @@ class TestClientConstructorRound3(unittest.IsolatedAsyncioTestCase):
 
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.dict(sys.modules, {"discord": NS(Client=LibClient)}),
+            mock.patch.dict(sys.modules, fake_discord_sysmodules(LibClient)),
         ):
             cwd = Path.cwd()
             os.chdir(tmp)
@@ -1395,10 +1415,10 @@ class TestRawEventMappingRound3(unittest.IsolatedAsyncioTestCase):
 
     async def _connected_client(self) -> RealDiscordClient:
         from adapters.discord.client import RealDiscordClient
+        from tests.unit.helpers import fake_discord_sysmodules
 
         lib_cls = type("LibClient", (_RawEventLibClient,), {})
-        mod = NS(Client=lib_cls, DMChannel=type("DMChannel", (), {}))
-        with mock.patch.dict(sys.modules, {"discord": mod}):
+        with mock.patch.dict(sys.modules, fake_discord_sysmodules(lib_cls)):
             client = RealDiscordClient("tok")
             await client.connect()
         self.assertTrue(client.connected)

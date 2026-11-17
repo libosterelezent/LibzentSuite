@@ -466,18 +466,34 @@ class RealDiscordClient:
     def account(self, name: str) -> None:
         self._account = str(name or "")
 
-    @property
-    def _commands_on(self) -> bool:
-        """Is the self-command layer built for this client?
+    def _build_library_bot(self, discord: Any) -> ext_commands.Bot:
+        """The ONE library construction: ext.commands.Bot, user_bot mode.
 
-        On when the env-level prefix is set OR the admin panel's access
-        gate is wired — the panel's per-account prefix mode/symbol is
-        the real configuration surface, and keying on the (usually
-        commented-out) env prefix alone left the whole layer dead on a
-        default install. Still fail-closed: the invoker gate rejects
-        everyone not allow-listed or admin.
+        Contained by contract (audit fix): any TypeError from the
+        construction becomes the AccountError connect() promises — the
+        old blind retry assumed max_ratelimit_timeout was the only
+        possible offender and let any OTHER TypeError escape uncaught.
+        The plain-Client fallback is gone with the construction fork:
+        the Bot is a Client, and accounts without a configured prefix
+        resolve the mention default instead of losing the COG surface.
         """
-        return bool(self._command_prefix) or self._access_checker is not None
+        from discord.ext import commands as _ext_commands
+
+        prefix = self._dynamic_prefix(_ext_commands)
+        try:
+            return _ext_commands.Bot(
+                command_prefix=prefix,
+                user_bot=True,
+                owner_ids=set(self._owner_ids),
+                help_command=None,
+                max_ratelimit_timeout=MAX_RATELIMIT_TIMEOUT_S,
+                **self._fork_memory_options(),
+            )
+        except TypeError as exc:
+            raise AccountError(
+                f"discord client library rejected the Bot construction "
+                f"({exc!r}) — incompatible layout or configuration"
+            ) from exc
 
     # ------------------------------------------------------------- lifecycle
     def _resolve_prefix(self, _ext_commands: Any) -> str | Callable[[Any, Any], Any]:
@@ -609,53 +625,16 @@ class RealDiscordClient:
         # only exotic/test layouts without it, while the Bot construction
         # is fully contained (TypeError -> AccountError, no blind retry).
         # placeholder — replaced below
-        # SELF-COMMAND layer (upstream): with a prefix configured,
-        # construct the ext.commands Bot (user_bot=True) instead of a
-        # plain Client. user_bot is the correct mode for this framework:
-        # ANY owner in OWNER_USER_IDS may command the account (the
-        # multi-account model — one owner typing, every framework account
-        # responding), whereas self_bot=True would dispatch only the
-        # account's OWN messages. user_bot's _skip_check lets every
-        # message reach dispatch, so ownership is enforced by OUR
-        # invoker gate (allowed_invoker_async, installed as a Bot-level
-        # check) — fail-closed. With no prefix,
-        # behavior is exactly today's (plain Client, no command
-        # machinery).
-        if self._commands_on:
-            from discord.ext import commands as _ext_commands
-
-            prefix = self._dynamic_prefix(_ext_commands)
-            # ONE contained construction (audit fix): the old blind retry
-            # without max_ratelimit_timeout assumed THAT kwarg was the
-            # offender — any other TypeError (prefix resolver, layout
-            # drift) re-raised uncaught and violated the AccountError
-            # contract connect() promises.
-            try:
-                self._client = _ext_commands.Bot(
-                    command_prefix=prefix,
-                    user_bot=True,
-                    owner_ids=set(self._owner_ids),
-                    help_command=None,
-                    max_ratelimit_timeout=MAX_RATELIMIT_TIMEOUT_S,
-                    **self._fork_memory_options(),
-                )
-            except TypeError as exc:
-                raise AccountError(
-                    f"discord client library rejected the Bot construction "
-                    f"({exc!r}) — incompatible layout or configuration"
-                ) from exc
-        else:
-            try:
-                self._client = discord.Client(
-                    max_ratelimit_timeout=MAX_RATELIMIT_TIMEOUT_S,
-                    **self._fork_memory_options(),
-                )
-            except TypeError:
-                self._logger.warning(
-                    "discord client library ignores max_ratelimit_timeout — "
-                    "in-request 429 sleeps are UNBOUNDED on this layout"
-                )
-                self._client = discord.Client()
+        # ONE construction, always the Bot (refactored 2026-11-17): the
+        # pre-cog-era split — plain Client when no prefix/access was
+        # configured — silently denied those accounts a plugin COG
+        # surface (add_cog does not exist on plain Client). The Bot IS a
+        # Client; the command machinery idles when nothing matches, and
+        # user_bot is the correct mode regardless: ANY owner may command
+        # the account (the multi-account model), _skip_check lets every
+        # message reach dispatch, and ownership is enforced by OUR
+        # invoker gate — fail-closed.
+        self._client = self._build_library_bot(discord)
         if self._identify_gate is not None:
             # K8: shadowing the instance method is the library-sanctioned
             # extension point (see Client.before_identify_hook) — every
@@ -673,8 +652,7 @@ class RealDiscordClient:
         # plugin EVENT path keeps the
         # self-echo filter below: a command never becomes a plugin
         # event, and a plugin's own output never re-triggers anything.
-        if self._commands_on:
-            self._install_command_layer(discord)
+        self._install_command_layer(discord)
         self._ready = asyncio.Event()
         self._startup_error = None
         # fresh-session close-code state (a reconnecting client instance
@@ -736,15 +714,14 @@ class RealDiscordClient:
             # This runs BEFORE the self-echo filter: commands and events
             # are SEPARATE paths (a command never becomes a plugin event,
             # and the account's own output never re-triggers plugins).
-            if self._commands_on:
-                from discord.ext import commands as _commands_mod
+            from discord.ext import commands as _commands_mod
 
-                client = self._client
-                if isinstance(client, _commands_mod.Bot):
-                    try:
-                        await client.process_commands(message)
-                    except Exception:
-                        self._logger.debug("self-command dispatch failed", exc_info=True)
+            client = self._client
+            if isinstance(client, _commands_mod.Bot):  # always ours, always a Bot
+                try:
+                    await client.process_commands(message)
+                except Exception:
+                    self._logger.debug("self-command dispatch failed", exc_info=True)
             if self.on_message is None or message.author.id == self.user_id:
                 return
             if self._message_already_seen(message.id):
@@ -1276,10 +1253,8 @@ class RealDiscordClient:
                 await self._client.close()
             except Exception as exc:  # closing a half-open client can throw
                 self._logger.warning("live client close raised %s", exc)
-        if self._commands_on:
-            # C3: cogs ride add_cog/remove_cog; no hub subscription to
-            # drop (the library's close removes the cogs with the Bot)
-            pass
+        # C3: cogs ride add_cog/remove_cog; the library's close removes
+        # them with the Bot — nothing to unsubscribe
         await self._cancel_run_task()
         self._release_identify_slot()
         # allow a later connect() on the same instance — the client
