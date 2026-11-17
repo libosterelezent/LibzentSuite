@@ -1549,7 +1549,6 @@ async def phase_chains_signals(h: Harness) -> None:
     await _ensure_workspace(h, "grind")
     repo = h.framework.database.workspaces
     definition = {
-        "name": "follow-burst",
         "steps": [
             {
                 "position": 1,
@@ -1946,11 +1945,28 @@ async def run_pass(
     }
     harness = Harness(findings, console, run_id=run_id, keep_workdir=keep_workdir)
     started = time.monotonic()
+    completed = False
     try:
         console.banner(
             f"live-debug pass {run_id} — {len(phases)} phase(s), findings dir {findings_dir}"
         )
-        await harness.boot()
+        try:
+            await harness.boot()
+        except Exception as exc:
+            # the summary must never claim success for a stack that never
+            # came up — record the failure, then let it propagate
+            harness.report(
+                severity="critical",
+                summary=f"harness boot failed: {type(exc).__name__}: {exc}",
+                evidence=[
+                    line.rstrip()
+                    for line in traceback.format_exception(type(exc), exc, exc.__traceback__)[-6:]
+                ],
+                expectation="the real stack boots over the simulator",
+                actual=f"{type(exc).__name__}: {exc}",
+                repro="boot",
+            )
+            raise
         if keep_workdir:
             console.line(f"workdir (kept): {harness.workdir}")
         for position, phase in enumerate(phases, start=1):
@@ -1995,6 +2011,7 @@ async def run_pass(
                     duration_s=round(time.monotonic() - phase_start, 2),
                 ).__dict__
             )
+        completed = True
     finally:
         await harness.teardown()
         summary["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -2004,8 +2021,16 @@ async def run_pass(
             harness.steps_passed,
             harness.steps_failed,
         )
+        # completed=False (boot failure, mid-run propagation) is an
+        # unsuccessful pass regardless of finding counts
+        summary["completed"] = completed
         summary["exit_code"] = (
-            1 if (findings.counts().get("critical") or findings.counts().get("major")) else 0
+            0
+            if (
+                completed
+                and not (findings.counts().get("critical") or findings.counts().get("major"))
+            )
+            else 1
         )
         findings.close()
         (findings_dir / f"{run_id}.summary.json").write_text(json.dumps(summary, indent=2) + "\n")
