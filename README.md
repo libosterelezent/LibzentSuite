@@ -418,8 +418,11 @@ will expose the same surface over REST + WebSocket.
 ## Documentation
 
 - `docs/roadmap.md` — the active plan and decision records
-- `docs/design/workspace-design.md` — the workspace unification spec (18 locked
-  decisions; the architecture's foundation)
+- `docs/architecture/architecture.rst` — the binding architecture
+  contract (the implemented structure, including the 18 locked
+  workspace decisions)
+- `docs/plans/` — planned and in-progress contracts only (the Flet UI
+  design contract, the pivot audit)
 - `knowledgebase/` — deep knowledge base (handwritten guides + generated
   read-only reference; `generated/*.json` is gitignored). Start at
   `knowledgebase/README.md`; the complete surface reference is
