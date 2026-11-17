@@ -303,6 +303,7 @@ class RealDiscordClient:
         self._connect_aborted = False  # stop()/disconnect raced a pending connect
         self._zombie_tasks: set[asyncio.Task[None]] = set()  # un-reaped run tasks (strong refs)
         self._run_task: asyncio.Task[None] | None = None  # strong ref (see connect)
+        self._framework_cog_task: asyncio.Task[None] | None = None  # strong ref (RUF006)
         self._logger = logger or LOG
         #: self-command prefix ("" = disabled; "@me" = when_mentioned).
         #: When set, the adapter builds an ext.commands Bot in self_bot
@@ -1069,6 +1070,9 @@ class RealDiscordClient:
 
     async def _cancel_run_task(self) -> None:
         """Cancel + reap the background client task (idempotent)."""
+        cog_task, self._framework_cog_task = self._framework_cog_task, None
+        if cog_task is not None and not cog_task.done():
+            cog_task.cancel()  # a pending framework-cog add dies with the client
         task, self._run_task = self._run_task, None
         if task is None or task.done():
             return
@@ -1172,7 +1176,11 @@ class RealDiscordClient:
         # library's dispatch; the hub's registration path is retired
         from core.plugin_manager.framework_cog import FrameworkVerbsCog
 
-        bot.loop.create_task(bot.add_cog(FrameworkVerbsCog()))
+        # asyncio.create_task uses the RUNNING loop: Client.loop is a
+        # sentinel until the library binds it during login, and this
+        # installs before that (the first live connect since C3 caught
+        # it — user report 2026-11-17, accounts start failed to connect)
+        self._framework_cog_task = asyncio.create_task(bot.add_cog(FrameworkVerbsCog()))
 
         # fork adoption: on_http_throttle is the REAL throttle signal
         # (the library absorbs 429s internally; we only see them here).
