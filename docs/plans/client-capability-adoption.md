@@ -80,44 +80,16 @@ Semantics:
   check_b)`. Events stay framework-mediated — the window subscribes
   to the bus; it never touches the client's socket.
 
-## Track C — the direct client connection (OWNER LOCKED 2026-11-17)
+## Track C — the direct client connection ✅ SHIPPED 2026-11-17
 
-`wait_for()` STAYS on the facade (the owner's call — it has purposes
-outside send-coupled flows; `expect()` covers the reactive send
-pattern). And the original decision point resolved beyond the
-read-only compromise I drafted:
-
-**The owner's thesis, locked:** the framework's value is ORCHESTRATION
-and multi-account isolation — workspaces, chains, pacing law across
-accounts in tandem — not capability mediation. Cogs receive the
-client DIRECTLY (the Mudabot pattern, multi-account): the toolbox
-carries the account's library client at attach, and what plugins do
-with it is plugin authorship, not framework policing.
-
-What the facade is STILL worth (the owner's question, answered):
-
-* **The paced write pipeline** — the orchestration law itself. Direct
-  client sends exist now; the framework's product is that paced,
-  audited, workspace-coordinated sends are the GOOD path plugins
-  choose, not the only path they're allowed.
-* **The persistence + profile families** — cooldowns, state,
-  account-owned profiles: framework data the client knows nothing
-  about.
-* **The orchestration verbs** — emit_signal, chains, publish: the
-  multi-account machinery that has no client-side equivalent.
-
-AGENTS §1.4's "plugins never touch clients" retires with this lock;
-the pacing-floor and pipeline contracts (§1.5) stand unchanged.
-
-**Why the facade does not ride the client's constructor** (owner
-question 2026-11-17): construction ORDER (the bot exists at connect,
-facades at attach — injection would race) and CARDINALITY (the
-client is per-account, the facade per-(account, plugin) — one bot
-hosting N plugins has N facades, so `bot.services` is ambiguous).
-The race-free unified object is the TOOLBOX the cog receives at
-construction: `self.services.client` (raw reach, aliased `self.bot`
-by convention) + `self.services.paced` (the facade's every verb).
-One object, bound at attach, account-scoped, dies with the cog.
+The owner lock shipped the same day it was made: the toolbox carries
+the account's library client at attach (bind_client), the contract
+docs changed with it (AGENTS §1.4, architecture.rst §2), and the
+facade's remaining worth — paced writes, persistence, orchestration
+verbs — is recorded in both. The unified-object convention and the
+why-not-the-constructor analysis (order + cardinality) live in
+archived git history of this plan and the completed record; the
+structure lives in the architecture contract.
 
 ## Tier 2 (behind explicit policy gates) and Tier 3 (excluded)
 
