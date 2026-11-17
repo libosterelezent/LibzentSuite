@@ -83,6 +83,21 @@ class CogServicesTests(unittest.TestCase):
         services.bind_paced(second)  # re-attach rebinds
         self.assertIs(services.paced, second)
 
+    def test_rebind_paced_noops_for_never_hosted_cogs(self) -> None:
+        # rebind must never MINT a toolbox: only attach() creates, so
+        # _attach_plugins' rebind loop cannot fabricate cogs
+        host = PluginCogHost()
+        host.rebind_paced("alpha", "cleaner", NS(kind="fresh"))
+        self.assertNotIn(("alpha", "cleaner"), host._services)
+
+    def test_rebind_paced_refreshes_a_hosted_toolbox(self) -> None:
+        host = PluginCogHost()
+        stale, fresh = NS(kind="stale-facade"), NS(kind="fresh-facade")
+        toolbox = host.services_for("alpha", "cleaner")
+        toolbox.bind_paced(stale)
+        host.rebind_paced("alpha", "cleaner", fresh)
+        self.assertIs(toolbox.paced, fresh)
+
 
 class PluginCogHostTests(unittest.IsolatedAsyncioTestCase):
     async def test_attach_registers_and_toolbox_flows(self) -> None:
