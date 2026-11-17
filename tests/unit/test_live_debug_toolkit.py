@@ -19,6 +19,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -93,6 +94,15 @@ class FindingSchemaTests(unittest.TestCase):
             repro="r",
         )
         self.assertEqual(len(finding.as_dict()["evidence"]), live_debug.EVIDENCE_MAX)
+
+    def test_findings_writer_refuses_to_truncate_an_existing_file(self) -> None:
+        # a run-id collision must be LOUD, never a silent "w"-mode
+        # truncation of the earlier run's evidence
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run-x.jsonl"
+            live_debug.FindingsWriter(path).close()
+            with self.assertRaises(FileExistsError):
+                live_debug.FindingsWriter(path)
 
     def test_findings_writer_writes_one_json_object_per_line(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -186,39 +196,27 @@ class PhaseRegistryTests(unittest.TestCase):
             self.assertIn(expected, names)
 
 
-class IsolationTests(unittest.TestCase):
-    """The toolkit must never touch the live state/ directory."""
-
-    def setUp(self) -> None:
-        self.source = inspect.getsource(live_debug)
-
-    def test_no_production_state_path_in_source(self) -> None:
-        self.assertNotIn("state/libzent.db", self.source)
-        self.assertNotIn("state/credentials.key", self.source)
-
-    def test_workdir_is_a_disposable_tempdir(self) -> None:
-        self.assertIn("libzent-live-debug-", self.source)  # mkdtemp prefix
-        self.assertIn("tempfile.mkdtemp", self.source)
-
-    def test_default_findings_dir_is_inside_the_toolkit(self) -> None:
-        self.assertEqual(
-            live_debug.DEFAULT_FINDINGS_DIR,
-            REPO_ROOT / "scripts" / "live-debugging" / "findings",
-        )
-        self.assertNotIn("state", live_debug.DEFAULT_FINDINGS_DIR.parts)
-
-    def test_boot_targets_are_all_disposable(self) -> None:
-        # the staged database + config live under the temp workdir; the
-        # only REPO paths the harness touches read-only are the plugin
-        # sources and the sim fixtures
-        self.assertTrue(str(live_debug.SCENARIO_FIXTURES).startswith(str(REPO_ROOT)))
+def state_snapshot() -> list[tuple[str, int, int]]:
+    """Observable fingerprint of the live state/ directory: one sorted
+    (name, size, mtime_ns) tuple per entry ([] when absent). Any write,
+    creation, or deletion by a run changes the snapshot; nothing here
+    ever deletes or resets state/ (AGENTS.md §7)."""
+    state = REPO_ROOT / "state"
+    if not state.is_dir():
+        return []
+    return sorted(
+        (entry.name, entry.stat().st_size, entry.stat().st_mtime_ns) for entry in state.iterdir()
+    )
 
 
 class BootPhaseIntegration(unittest.IsolatedAsyncioTestCase):
-    """The smallest phase set, in-process, time-bounded, offline."""
+    """The smallest phase set, in-process, time-bounded, offline — and
+    the observable state/ isolation guarantee (source-text greps proved
+    nothing; the directory itself is the witness)."""
 
     async def test_boot_phase_passes_against_the_simulator(self) -> None:
         findings_rows: list[dict[str, Any]] = []
+        state_before = state_snapshot()
         with tempfile.TemporaryDirectory(prefix="live-debug-test-") as tmp:
             summary = await asyncio.wait_for(
                 live_debug.run_pass(
@@ -228,13 +226,67 @@ class BootPhaseIntegration(unittest.IsolatedAsyncioTestCase):
             )
             runs = sorted(Path(tmp).glob("run-*.jsonl"))
             self.assertEqual(len(runs), 1)
+            summaries = sorted(Path(tmp).glob("run-*.summary.json"))
+            self.assertEqual(len(summaries), 1)
+            # the SAME collision-resistant id backs both files
+            self.assertEqual(
+                runs[0].name[: -len(".jsonl")],
+                summaries[0].name[: -len(".summary.json")],
+            )
             findings_rows = [json.loads(line) for line in runs[0].read_text().splitlines() if line]
+        self.assertTrue(summary["completed"])
         self.assertEqual(summary["exit_code"], 0)
         self.assertEqual(len(summary["phases"]), 1)
         self.assertEqual(summary["phases"][0]["name"], "boot")
         self.assertGreaterEqual(summary["steps_passed"], 3)
         self.assertEqual(summary["phases"][0]["steps_failed"], 0)
         self.assertEqual(findings_rows, [])  # findings file stays anomalies-only
+        # ISOLATION (observable): a full real-stack boot left state/ —
+        # the live databases and credentials key — bit-for-bit untouched
+        self.assertEqual(state_snapshot(), state_before)
+
+    async def test_two_rapid_runs_never_share_a_findings_file(self) -> None:
+        # two boots inside the same wall-clock second used to collide on
+        # one filename; the uuid-suffixed run id keeps them distinct
+        with tempfile.TemporaryDirectory(prefix="live-debug-test-") as tmp:
+            for _ in range(2):
+                await asyncio.wait_for(
+                    live_debug.run_pass(
+                        ["boot"], findings_dir=Path(tmp), console=live_debug.Console(quiet=True)
+                    ),
+                    timeout=90.0,
+                )
+            self.assertEqual(len(list(Path(tmp).glob("run-*.jsonl"))), 2)
+            self.assertEqual(len(list(Path(tmp).glob("run-*.summary.json"))), 2)
+
+    async def test_failed_boot_records_an_unsuccessful_summary(self) -> None:
+        async def broken_boot(self: Any) -> None:
+            raise RuntimeError("simulated boot failure")
+
+        with (
+            tempfile.TemporaryDirectory(prefix="live-debug-test-") as tmp,
+            mock.patch.object(live_debug.Harness, "boot", broken_boot),
+        ):
+            with self.assertRaises(RuntimeError):
+                await asyncio.wait_for(
+                    live_debug.run_pass(
+                        ["boot"], findings_dir=Path(tmp), console=live_debug.Console(quiet=True)
+                    ),
+                    timeout=90.0,
+                )
+            # reads happen while the tempdir lives (assertRaises already
+            # consumed the propagated boot failure above)
+            rows = [
+                json.loads(line)
+                for line in next(Path(tmp).glob("run-*.jsonl")).read_text().splitlines()
+                if line
+            ]
+            summary = json.loads(next(Path(tmp).glob("run-*.summary.json")).read_text())
+        self.assertFalse(summary["completed"])
+        self.assertEqual(summary["exit_code"], 1)
+        self.assertTrue(
+            any(row["severity"] == "critical" and "boot failed" in row["summary"] for row in rows)
+        )
 
 
 if __name__ == "__main__":
