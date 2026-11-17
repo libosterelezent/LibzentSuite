@@ -71,7 +71,8 @@ jobs:
             exit 1
           fi
           if [ "$errors" -lt "$baseline" ]; then
-            echo "::notice::mypy improved ($baseline -> $errors) — lower .github/mypy-baseline in this PR to lock in the gain."
+            echo "::error::mypy improved ($baseline -> $errors) but the baseline was not lowered in this PR — update .github/mypy-baseline to $errors (the shrink-only contract)."
+            exit 1
           fi
       - name: Unit / integration / simulation / stress tests (coverage)
         run: |
