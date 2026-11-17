@@ -16,6 +16,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Resolve uv once: PATH first, then the official installer default
+# (CodeRabbit PR #25). Failing fast with one clear message beats
+# eight per-gate "command not found" verdicts.
+UV_BIN="$(command -v uv || true)"
+[ -n "$UV_BIN" ] || UV_BIN="$HOME/.local/bin/uv"
+if [ ! -x "$UV_BIN" ]; then
+  echo "local-ci: no usable uv — looked on PATH and at $HOME/.local/bin/uv" >&2
+  exit 2
+fi
+
 PROD="main.py core adapters interfaces database benchmark scripts parsers plugins"
 FAIL=0
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -42,15 +52,15 @@ report_state_residue() {
 }
 
 step "1/8 Ruff lint (production tree)"
-if ~/.local/bin/uv run --frozen ruff check $PROD; then ok "ruff check"; else bad "ruff check"; fi
+if "$UV_BIN" run --frozen ruff check $PROD; then ok "ruff check"; else bad "ruff check"; fi
 
 step "2/8 Ruff format check (production tree)"
-if ~/.local/bin/uv run --frozen ruff format --check $PROD; then ok "ruff format"; else bad "ruff format"; fi
+if "$UV_BIN" run --frozen ruff format --check $PROD; then ok "ruff format"; else bad "ruff format"; fi
 
 step "3/8 requirements.txt export sync (AGENTS.md §8)"
 # --locked: a stale lock FAILS here instead of being silently
 # re-exported — the repair would mask exactly the drift CI rejects.
-if ~/.local/bin/uv export --locked --format requirements-txt --no-hashes --no-dev --no-emit-project -o "$RUN_DIR/req.txt" -q \
+if "$UV_BIN" export --locked --format requirements-txt --no-hashes --no-dev --no-emit-project -o "$RUN_DIR/req.txt" -q \
    && diff <(tail -n +3 requirements.txt) <(tail -n +3 "$RUN_DIR/req.txt") >/dev/null; then
   ok "export in sync"
 else
@@ -64,7 +74,7 @@ mypy_ratchet() {
   local label="$1" baseline_file="$2" log status=0 errs base
   log="$RUN_DIR/mypy-$label.log"
   shift 2
-  ~/.local/bin/uv run --frozen mypy "$@" &> "$log" || status=$?
+  "$UV_BIN" run --frozen mypy "$@" &> "$log" || status=$?
   if [ "$status" -gt 1 ]; then
     bad "mypy $label did not complete (exit $status) — count rejected"
     return
@@ -88,7 +98,7 @@ if [ "${1:-}" = "quick" ]; then
 fi
 
 step "5/8 Full suite on Python 3.10 (the leg that catches dep-split breaks)"
-if UV_PROJECT_ENVIRONMENT="$RUN_DIR/venv310" timeout 590 ~/.local/bin/uv run --frozen --python 3.10 \
+if UV_PROJECT_ENVIRONMENT="$RUN_DIR/venv310" timeout 590 "$UV_BIN" run --frozen --python 3.10 \
   python -m unittest discover -s tests -t . > "$RUN_DIR/suite-310.log" 2>&1; then
   ok "3.10 suite: $(grep 'Ran' "$RUN_DIR/suite-310.log" | head -1)"
 else
@@ -100,8 +110,8 @@ report_state_residue
 step "6/8 Full suite + coverage floor on 3.13"
 # --python 3.13 on both calls: with no .python-version pin, uv may
 # otherwise pick any interpreter >= 3.10 and the label would lie.
-if ~/.local/bin/uv run --frozen --python 3.13 coverage run -m unittest discover -s tests -t . > "$RUN_DIR/suite-313.log" 2>&1 \
-  && ~/.local/bin/uv run --frozen --python 3.13 coverage report > "$RUN_DIR/cov.log" 2>&1; then
+if "$UV_BIN" run --frozen --python 3.13 coverage run -m unittest discover -s tests -t . > "$RUN_DIR/suite-313.log" 2>&1 \
+  && "$UV_BIN" run --frozen --python 3.13 coverage report > "$RUN_DIR/cov.log" 2>&1; then
   ok "3.13 suite: $(grep 'Ran' "$RUN_DIR/suite-313.log" | head -1) — $(grep TOTAL "$RUN_DIR/cov.log")"
 else
   bad "3.13 suite/coverage — $(grep -E '^(FAILED|ERROR)|fail_under' "$RUN_DIR/suite-313.log" "$RUN_DIR/cov.log" | head -3)"
@@ -110,7 +120,7 @@ fi
 report_state_residue
 
 step "7/8 Build (sdist + wheel)"
-if timeout 120 ~/.local/bin/uv build > "$RUN_DIR/build.log" 2>&1; then
+if timeout 120 "$UV_BIN" build > "$RUN_DIR/build.log" 2>&1; then
   ok "build: $(grep Successfully "$RUN_DIR/build.log" | head -1)"
   rm -rf dist
 else
