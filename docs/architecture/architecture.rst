@@ -81,13 +81,16 @@ Driver model:
 - The **Core Engine provides the ability** — every outbound action,
   state read, credential use, and signal emission is a framework
   service call that carries pacing, validation, audit, and security.
-- The **plugin drives it live** — plugins hold no accounts, clients,
-  database connections, or pacing state; they *utilize* what the
-  engine provides, when their logic decides.
-- **The services middleware is authoritative for security**: a plugin
-  cannot bypass it because there is no other path to the platform.
-  Plugins are NOT sandboxed Python — safety comes from the explicit
-  surface, not isolation.
+- The **plugin drives it live** — plugin cogs receive their account's
+  library client DIRECTLY (the toolbox carries it at attach,
+  owner-locked 2026-11-17) plus the paced facade; they *utilize* the
+  engine's orchestration, when their logic decides.
+- **The framework's value is orchestration + multi-account isolation**:
+  pacing law across accounts, workspaces, chains, credentials, audit.
+  The paced pipeline is the good path for coordinated outbound action
+  (and the framework makes no self-initiated API calls); the facade's
+  persistence + orchestration verbs have no client-side equivalent.
+  Capability mediation as a security boundary is RETIRED.
 - Core stays game-agnostic: game-specific strings and recognition
   rules belong in parser packs and plugin code, never in ``core/``.
 

@@ -80,22 +80,34 @@ Semantics:
   check_b)`. Events stay framework-mediated — the window subscribes
   to the bus; it never touches the client's socket.
 
-## Track C — the client view (DECISION POINT, owner to lock)
+## Track C — the direct client connection (OWNER LOCKED 2026-11-17)
 
-The Mudabot pattern's real power: cogs reach EVERYTHING on the
-client. The scoped compromise: inject a **read-only ClientView** into
-the toolbox — `client.user`, `get_channel`, `channels`/`guilds` cache
-snapshots, `fetch_user`, plus the Track-A reads as passthroughs —
-with every WRITE path absent and the view's provenance
-(account-bound, generation-fenced) on the object.
+`wait_for()` STAYS on the facade (the owner's call — it has purposes
+outside send-coupled flows; `expect()` covers the reactive send
+pattern). And the original decision point resolved beyond the
+read-only compromise I drafted:
 
-- **For:** plugin authors stop hitting the keyhole; game packs read
-  guild/channel state naturally; parity with the reference script.
-- **Against:** relaxes AGENTS §1.4's absolute "plugins never touch
-  clients" into "never touch UNMEDIATED WRITES" — the cache becomes
-  shared state plugins can walk (reads have no audit trail).
-- **The rule that holds either way:** writes (messages, reactions,
-  friendships, presence, identity) NEVER bypass the paced pipeline.
+**The owner's thesis, locked:** the framework's value is ORCHESTRATION
+and multi-account isolation — workspaces, chains, pacing law across
+accounts in tandem — not capability mediation. Cogs receive the
+client DIRECTLY (the Mudabot pattern, multi-account): the toolbox
+carries the account's library client at attach, and what plugins do
+with it is plugin authorship, not framework policing.
+
+What the facade is STILL worth (the owner's question, answered):
+
+* **The paced write pipeline** — the orchestration law itself. Direct
+  client sends exist now; the framework's product is that paced,
+  audited, workspace-coordinated sends are the GOOD path plugins
+  choose, not the only path they're allowed.
+* **The persistence + profile families** — cooldowns, state,
+  account-owned profiles: framework data the client knows nothing
+  about.
+* **The orchestration verbs** — emit_signal, chains, publish: the
+  multi-account machinery that has no client-side equivalent.
+
+AGENTS §1.4's "plugins never touch clients" retires with this lock;
+the pacing-floor and pipeline contracts (§1.5) stand unchanged.
 
 ## Tier 2 (behind explicit policy gates) and Tier 3 (excluded)
 
@@ -110,5 +122,6 @@ voice — excluded, documented.
 1. Track B first (small, unblocks game logic expressiveness today).
 2. Track A reads (search/history/pins) — the parser-pack engine.
 3. Track A lifecycle (edit/delete/reply/ack).
-4. Track C decided by owner lock; if adopted, ships as its own phase
-   with an isolation test matrix (reads scoped, writes impossible).
+4. Track C (locked): the toolbox carries the account's library
+   client at attach — one seam, tests pin the injection and the
+   per-account binding (each cog sees ONLY its own account's client).
