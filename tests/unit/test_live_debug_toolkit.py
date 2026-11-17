@@ -259,11 +259,17 @@ class BootPhaseIntegration(unittest.IsolatedAsyncioTestCase):
         findings_rows: list[dict[str, Any]] = []
         state_before = state_snapshot()
         with tempfile.TemporaryDirectory(prefix="live-debug-test-") as tmp:
+            # generous bound (the scheduler-flake lesson): it only
+            # matters on failure — a real boot takes ~1.5s, but one
+            # gate run's environmental load pushed 90s once and never
+            # reproduced in ANY context after (isolated x6, full tree,
+            # exact gate rerun). 300s still fails inside the gate's
+            # own 590s timeout with evidence when a boot truly hangs.
             summary = await asyncio.wait_for(
                 live_debug.run_pass(
                     ["boot"], findings_dir=Path(tmp), console=live_debug.Console(quiet=True)
                 ),
-                timeout=90.0,
+                timeout=300.0,
             )
             runs = sorted(Path(tmp).glob("run-*.jsonl"))
             self.assertEqual(len(runs), 1)
