@@ -179,6 +179,13 @@ class PluginCogHost:
         if toolbox is not None:
             toolbox.bind_paced(paced)
 
+    def hosted_plugins(self, account: str) -> set[str]:
+        """The plugins whose cogs are currently hosted on this account
+        — the reconciliation input: the attach flow diffs this against
+        the current runtime set to decide what to host, unhost, or
+        rebind."""
+        return {plugin for (acct, plugin) in self._cogs if acct == account}
+
     async def attach(
         self,
         bot: Any,
