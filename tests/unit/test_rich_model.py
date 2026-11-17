@@ -1316,7 +1316,6 @@ class TestClientConstructorRound3(unittest.IsolatedAsyncioTestCase):
                 "max_ratelimit_timeout": MAX_RATELIMIT_TIMEOUT_S,
                 "user_bot": True,
                 "owner_ids": set(),
-                "help_command": None,
                 "max_member_cache": 500,
                 "max_total_member_cache": 5000,
                 "max_thread_cache": 200,

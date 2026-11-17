@@ -485,7 +485,6 @@ class RealDiscordClient:
                 command_prefix=prefix,
                 user_bot=True,
                 owner_ids=set(self._owner_ids),
-                help_command=None,
                 max_ratelimit_timeout=MAX_RATELIMIT_TIMEOUT_S,
                 **self._fork_memory_options(),
             )
