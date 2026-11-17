@@ -23,7 +23,7 @@ jobs:
         with:
           fetch-depth: 0 # full history — secrets anywhere count
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2.3.9
+        uses: gitleaks/gitleaks-action@v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
