@@ -65,16 +65,7 @@ bridge it: subscribe per-connection, forward account/plugin/task events
 as JSON frames, backpressure-bounded. The Flet pages want live
 updates, not polling.
 
-### 4 — Ping's cog port (the host paced-facade gap)
-
-The cog host injects only the CogServices toolbox
-(to_rich/audit_rich); plugin cogs cannot reach the paced send
-pipeline. Close the gap: inject the per-(account, plugin)
-PluginServices facade so plugin cogs get `ctx.services` — then port
-ping's command face as the first real plugin COG (the roadmap's own
-proof).
-
-### 5 — Release enablement (when you say go)
+### 4 — Release enablement (when you say go)
 
 Lift the `v*` tag ruleset hold, cut `v0.1.0` through the pre-built
 pipeline (build from the exact tag, CHANGELOG notes, artifacts). The
