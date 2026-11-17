@@ -35,6 +35,7 @@ from __future__ import annotations
 import atexit
 import logging
 import logging.handlers
+import os
 import queue
 import sys
 import threading
@@ -207,8 +208,23 @@ class LogEntry:
         }
 
 
-def configure_stderr(level: int = logging.INFO) -> None:
+def _default_console_level() -> int:
+    """The console default: WARNING, unless the operator overrides.
+
+    Logs are a CHOICE (owner rule 2026-11-17): the REPL surface stays
+    readable — everything still persists (ring + DB) and surfaces via
+    `log <account>` / `global-log`. Set LIBZENT_CONSOLE_LEVEL=INFO or
+    DEBUG when developing to bring the live tail back.
+    """
+    raw = os.environ.get("LIBZENT_CONSOLE_LEVEL", "").strip().upper()
+    return _LEVEL_BY_SEVERITY.get(raw, logging.WARNING)
+
+
+def configure_stderr(level: int | None = None) -> None:
     """Attach one human-readable stderr handler to the logger tree (idempotent).
+
+    Defaults to WARNING on the console (see _default_console_level) —
+    the flood is opt-in via LIBZENT_CONSOLE_LEVEL.
 
     The StreamHandler runs on a QueueListener thread behind a
     QueueHandler: callers (including the record() mirror on the event
@@ -217,6 +233,8 @@ def configure_stderr(level: int = logging.INFO) -> None:
     global _STDERR_CONFIGURED
     if _STDERR_CONFIGURED:
         return
+    if level is None:
+        level = _default_console_level()
     root = logging.getLogger("libzent")
     root.setLevel(level)
     _start_stderr_pipeline()
@@ -424,6 +442,7 @@ class LogService:
         plugin: str | None = None,
         severity: str | None = None,
         source: str | None = None,
+        without_account: bool = False,
     ) -> list[dict[str, Any]]:
         """Most recent entries (oldest first) after applying the filters."""
         if n <= 0:
@@ -437,6 +456,8 @@ class LogService:
                 continue
             if account and entry.account != account:
                 continue
+            if without_account and entry.account:
+                continue  # framework-only view (the `global-log` side)
             if plugin and entry.plugin != plugin:
                 continue
             if source and entry.source != source:

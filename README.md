@@ -405,7 +405,7 @@ compare; DB worker telemetry.
 
 ## Management surfaces
 
-- CLI: `accounts|credentials|plugins|workspaces|ratelimit|cooldowns|tasks|simulation|logs|audit|estop|status|help|quit`
+- CLI: `accounts|credentials|plugins|workspaces|ratelimit|cooldowns|tasks|simulation|log|global-log|audit|estop|status|help|quit` (logs are a choice: `log <account>` for one client's tail, `global-log` for the suite's own — the console stays quiet at WARNING unless `LIBZENT_CONSOLE_LEVEL` says otherwise)
 - Self-commands: framework verbs (`pg`, `say`, `help`, `prefixrate`,
   `adminlist`, `adminperms`, `adminprefix`) + every plugin-declared
   `COMMANDS` verb — gated per account by the admin-panel access lists

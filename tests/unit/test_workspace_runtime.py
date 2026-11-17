@@ -10,6 +10,7 @@ reconciliation never blindly replays.
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -294,3 +295,35 @@ class ReconcileTests(RuntimeTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkspaceReconcilerLoopTests(unittest.IsolatedAsyncioTestCase):
+    """The reconciler loop must SURVIVE its cadence (user report
+    2026-11-17): the old bare `raise` under suppress(CancelledError)
+    ran with no active exception after a normal sleep, so the task
+    died with 'No active exception to reraise' after ONE interval —
+    outbox sweeps, deletion resumes, and run repairs silently stopped."""
+
+    async def test_loop_survives_many_intervals_and_stops_cleanly(self) -> None:
+        from core.workspace.guard import WorkspaceReconciler
+
+        calls = 0
+
+        class _ServiceStub:
+            _repo = None
+
+        async def _fake_reconcile() -> dict[str, int]:
+            nonlocal calls
+            calls += 1
+            return {}
+
+        rec = WorkspaceReconciler(_ServiceStub(), interval_s=0.01)  # type: ignore[arg-type]
+        rec.reconcile = _fake_reconcile  # type: ignore[method-assign]
+        rec.start()
+        await asyncio.sleep(0.12)  # ~10 intervals at 10ms
+        await rec.stop()
+        self.assertGreaterEqual(calls, 5)  # boot pass + many cadence passes
+        self.assertTrue(rec._task is None or rec._task.done())
+        # no pending-exception wreckage: the retrieved task result is clean
+        if rec._task is not None:
+            self.assertIsNone(rec._task.exception())

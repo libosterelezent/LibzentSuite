@@ -21,7 +21,6 @@ from interfaces.cli.commands import (
     format_policies,
     format_simulation_report,
     format_warnings,
-    help_text,
     run_command,
 )
 from interfaces.cli.repl import Repl, render_error, run_once
@@ -373,9 +372,13 @@ class FakeApi:
 
     # ---- logs/audit
     async def logs_tail(
-        self, n: int = 100, account: str | None = None, severity: str | None = None
+        self,
+        n: int = 100,
+        account: str | None = None,
+        severity: str | None = None,
+        without_account: bool = False,
     ) -> list[dict[str, Any]]:
-        self._record("logs_tail", n, account, severity)
+        self._record("logs_tail", n, account, severity, without_account)
         return [
             {
                 "ts": 1700000000.5,
@@ -432,7 +435,9 @@ class TestBasics(unittest.IsolatedAsyncioTestCase):
         text = await run_command(FakeApi(), "help")
         assert text is not None
         self.assertIn("accounts", text)
-        self.assertIn("usage: accounts", text)
+        # the overview is grouped BRIEFS — the flood moved behind focus
+        self.assertIn("observability:", text)
+        self.assertNotIn("usage: accounts", text)
 
     async def test_empty_line(self) -> None:
         self.assertIsNone(await run_command(FakeApi(), "   "))
@@ -670,14 +675,12 @@ class TestAccountPluginCommands(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("usage: accounts plugin", str(ctx.exception))
 
     async def test_help_documents_new_commands(self) -> None:
-        text = help_text()
-        self.assertIn("add <name> [plugin ...]", text)
-        self.assertIn("plugins <account>", text)
-        self.assertIn("plugin-add <account> <plugin>", text)
-        self.assertIn("plugin-remove <account> <plugin>", text)
         focused = await run_command(FakeApi(), "help accounts")
         assert focused is not None
-        self.assertIn("plugin-add", focused)
+        self.assertIn("add <name> [plugin ...]", focused)
+        self.assertIn("plugins <account>", focused)
+        self.assertIn("plugin-add <account> <plugin>", focused)
+        self.assertIn("plugin-remove <account> <plugin>", focused)
 
 
 class TestPluginsGroup(unittest.IsolatedAsyncioTestCase):
@@ -866,7 +869,7 @@ class TestSimulationLogsAudit(unittest.IsolatedAsyncioTestCase):
         assert text is not None
         recorded = called(api, "logs_tail")
         assert recorded is not None
-        self.assertEqual(recorded[0], (5, "alpha", None))
+        self.assertEqual(recorded[0], (5, "alpha", None, False))
         self.assertIn("core", text)
         text = await run_command(api, "audit 5 alpha")
         assert text is not None
@@ -912,11 +915,16 @@ class TestCredentialsAndCooldowns(unittest.IsolatedAsyncioTestCase):
             await run_command(FakeApi(), "accounts credential a b c")
 
     async def test_accounts_credential_in_help(self) -> None:
-        text = help_text()
-        self.assertIn("credential <name> <token>", text)
-        self.assertIn("shell history", text)
-        self.assertIn("credentials status|import-env", text)
-        self.assertIn("cooldowns [account]", text)
+        focused = await run_command(FakeApi(), "help accounts")
+        assert focused is not None
+        self.assertIn("credential <name> <token>", focused)
+        self.assertIn("shell history", focused)
+        creds = await run_command(FakeApi(), "help credentials")
+        assert creds is not None
+        self.assertIn("credentials status|import-env", creds)
+        cool = await run_command(FakeApi(), "help cooldowns")
+        assert cool is not None
+        self.assertIn("cooldowns [account]", cool)
 
     async def test_credentials_status(self) -> None:
         api = FakeApi()
@@ -1191,15 +1199,28 @@ class TestHelpCommand(unittest.IsolatedAsyncioTestCase):
     async def test_help_bare_is_full_text(self) -> None:
         text = await run_command(FakeApi(), "help")
         assert text is not None
-        self.assertIn("commands:", text)
-        self.assertIn("usage: accounts", text)
+        # every group header present, every command appears exactly once
+        for group in (
+            "general",
+            "accounts",
+            "plugins",
+            "workspaces",
+            "operations",
+            "observability",
+            "development",
+        ):
+            self.assertIn(f"{group}:", text)
+        for name in HELP:
+            self.assertIn(name, text)
+        # the overview does NOT flood: no usage signatures in the table
+        self.assertNotIn("usage: accounts", text)
 
     async def test_help_focus_for_every_command(self) -> None:
         for name in sorted(HELP):
             text = await run_command(FakeApi(), f"help {name}")
             assert text is not None
             self.assertIn(name, text)
-            self.assertIn(HELP[name][1], text)
+            self.assertIn(HELP[name][2], text)
 
     async def test_help_focus_shows_usage(self) -> None:
         text = await run_command(FakeApi(), "help ratelimit")
@@ -1262,14 +1283,17 @@ class TestHelpCommand(unittest.IsolatedAsyncioTestCase):
                 "ratelimit",
                 "tasks",
                 "simulation",
+                "log",
+                "global-log",
                 "logs",
                 "audit",
                 "estop",
                 "quit",
             },
         )
-        for name, (sig, desc) in HELP.items():
-            self.assertTrue(desc, f"HELP[{name!r}] has no description")
+        for name, (sig, brief, detail) in HELP.items():
+            self.assertTrue(brief, f"HELP[{name!r}] has no brief")
+            self.assertTrue(detail, f"HELP[{name!r}] has no detail")
             self.assertIsInstance(sig, str)
 
 
@@ -1424,7 +1448,8 @@ class TestHostileParsing(unittest.IsolatedAsyncioTestCase):
         await run_command(api, "logs 0")
         recorded = called(api, "logs_tail")
         assert recorded is not None
-        self.assertEqual(recorded[0], (0, None, None))
+        # the alias routes no-account calls to the framework view
+        self.assertEqual(recorded[0], (0, None, None, True))
 
 
 class TestStopEventRaces(unittest.IsolatedAsyncioTestCase):

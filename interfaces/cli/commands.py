@@ -91,15 +91,25 @@ class UsageError(ValueError):
 # ------------------------------------------------------------------- HELP
 #: command -> (usage signature, description); the single registry both
 #: help_text() and the contextual usage errors are built from.
-HELP: dict[str, tuple[str, str]] = {
-    "help": ("[command]", "show this help (or help for one command)"),
-    "status": ("", "overview: accounts, tasks, rate limits, warnings"),
+HELP: dict[str, tuple[str, str, str]] = {
+    # name -> (usage signature, brief (overview line), detail (help <name>))
+    "help": (
+        "[command]",
+        "this page, or detail for one command",
+        "show this help (or help for one command)",
+    ),
+    "status": (
+        "",
+        "overview: accounts, tasks, limits, warnings",
+        "overview: accounts, tasks, rate limits, warnings",
+    ),
     "accounts": (
         "list|add <name> [plugin ...]|plugins <account>"
         "|plugin-add <account> <plugin>|plugin-remove <account> <plugin>"
         "|remove <name>|info <name>"
         "|credential <name> <token>|enable <name> <on|off>"
         "|start [name|all]|stop [name|all]|estop <name>",
+        "account lifecycle, plugins, credentials",
         "account management (capabilities: direct account→plugin"
         " assignment, applied immediately; credentials: dashboard or"
         " 'accounts credential' — CAUTION: the token lands in your shell"
@@ -107,11 +117,13 @@ HELP: dict[str, tuple[str, str]] = {
     ),
     "credentials": (
         "status|import-env [--overwrite]",
+        "token status + .env import",
         "credential management: per-account status; one-shot import of the"
         " legacy .env tokens into encrypted db storage",
     ),
     "cooldowns": (
         "[account]|clear <account> <plugin> [key]",
+        "persistent cooldowns (survive restarts)",
         "active persistent cooldowns (survive restarts; absolute expiry)",
     ),
     "plugins": (
@@ -119,12 +131,14 @@ HELP: dict[str, tuple[str, str]] = {
         "|disable <account> <plugin>|settings <account>"
         "|set <account> <plugin> <key> <value>"
         "|clear <account> <plugin> <key>",
+        "enable/disable/settings per account",
         "plugin management ('clear' resets one setting to its lower"
         " layer/default, unmasking profile + plugin defaults)",
     ),
     "profiles": (
         "<account> <plugin> list|show <profile>|active|set-active <profile>"
         "|clear-active|delete <profile>",
+        "account-owned plugin profiles",
         "account-owned plugin profiles (the two-level model: each account"
         " keeps its own instances; the body is plugin-defined)",
     ),
@@ -133,28 +147,59 @@ HELP: dict[str, tuple[str, str]] = {
         "|delete <workspace> [--detach-members]"
         "|add-member <workspace> <account>|remove-member <account>"
         "|pause <workspace>|resume <workspace>|tasks [workspace [status]]",
+        "membership + orchestration",
         "workspaces (membership + orchestration; the shared pacing clock rides membership)",
     ),
     "ratelimit": (
         "show|stats|set <action> <interval> [jitter_min jitter_max] [level owner]"
         "|clear <level> <owner> <action>|effective <action> [account] [plugin]"
         "|warnings|floor <seconds>|lane [on [rate]|off|rate <s>]",
+        "pacing policies (1.5s floor)",
         "rate policies (safety floor: 1.5s/action). The send lane is"
         " REMOVED — 'ratelimit lane' still answers as a documented compat"
         " stub (sync groups + per-account pacing replaced it)",
     ),
     "tasks": (
         "list [status]|cancel <id>|history [n]|cancel-matching [account] [plugin]",
+        "queue + history",
         "task queue + history",
     ),
-    "simulation": ("list|run [name]", "offline scenario runs"),
+    "simulation": (
+        "list|run [name]",
+        "offline scenario runs",
+        "offline scenario runs over the simulator",
+    ),
+    "log": (
+        "<account> [n] [DEBUG|INFO|WARNING|ERROR]",
+        "one client's log tail",
+        "structured log tail for ONE account (default: last 20; severity"
+        " UPPERCASE as the trailing arg)",
+    ),
+    "global-log": (
+        "[n] [DEBUG|INFO|WARNING|ERROR]",
+        "the suite's own logs",
+        "framework log tail — entries with no account context (default:"
+        " last 20; severity UPPERCASE as the trailing arg). The legacy"
+        " 'logs' verb routes here when no account is given",
+    ),
+    # compat alias — NOT in HELP_GROUPS, so the overview never shows it;
+    # the entry exists so `help logs` and its usage errors resolve
     "logs": (
         "[n] [account] [DEBUG|INFO|WARNING|ERROR]",
-        "structured log tail (default: last 20; severity UPPERCASE)",
+        "(compat alias)",
+        "legacy form — routes to 'log <account>' when an account is given, else to 'global-log'",
     ),
-    "audit": ("[n] [account]", "interaction audit trail (default: last 20)"),
-    "estop": ("[resume]", "GLOBAL emergency stop; 'estop resume' re-arms after one"),
-    "quit": ("", "graceful shutdown, then exit (alias: exit)"),
+    "audit": (
+        "[n] [account]",
+        "interaction audit trail",
+        "interaction audit trail (default: last 20)",
+    ),
+    "estop": (
+        "[resume]",
+        "global emergency stop",
+        "GLOBAL emergency stop; 'estop resume' re-arms after one",
+    ),
+    "quit": ("", "graceful shutdown, then exit", "graceful shutdown, then exit (alias: exit)"),
 }
 
 
@@ -166,20 +211,34 @@ def _col(value: Any, width: int) -> str:
     return text.ljust(width) if len(text) < width else text + " "
 
 
-def help_text() -> str:
-    """Render the HELP registry as aligned text (with an error footer).
+#: overview rendering order — grouped so the page SCANS instead of
+#: flooding; the long signatures live behind `help <command>`.
+HELP_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("general", ("help", "status", "quit")),
+    ("accounts", ("accounts", "credentials")),
+    ("plugins", ("plugins", "profiles", "cooldowns")),
+    ("workspaces", ("workspaces", "tasks")),
+    ("operations", ("ratelimit", "estop")),
+    ("observability", ("log", "global-log", "audit")),
+    ("development", ("simulation",)),
+)
 
-    Long group signatures get their own indented 'usage:' line so the table
-    stays readable at 80 columns.
+
+def help_text() -> str:
+    """One terse line per command, grouped — a page that scans.
+
+    Full signatures stay behind `help <command>` (the detail view);
+    usage errors always name the exact form they expected.
     """
-    lines = ["commands:"]
-    for name, (sig, desc) in sorted(HELP.items()):
-        lines.append(f"  {_col(name, 12)}{desc}")
-        if sig:
-            lines.append(f"  {_col('', 12)}usage: {name} {sig}")
+    lines: list[str] = []
+    for group, names in HELP_GROUPS:
+        lines.append(f"{group}:")
+        for name in names:
+            _sig, brief, _detail = HELP[name]
+            lines.append(f"  {_col(name, 12)}{brief}")
+    lines.append("")
     lines.append(
-        "  errors print as one 'error: ...' line and never exit the REPL;"
-        " 'quit' shuts everything down first"
+        "  full usage: help <command> — errors print one 'error:' line and never exit the REPL"
     )
     return "\n".join(lines)
 
@@ -220,7 +279,7 @@ async def run_command(api: Any, line: str) -> str | None:
             name = "quit"
         if name not in HELP:
             raise UsageError(f"help: unknown command {args[0]!r} — try 'help' alone")
-        sig, desc = HELP[name]
+        sig, _brief, desc = HELP[name]
         focused = [f"{name}: {desc}"]
         if sig:
             focused.append(f"usage: {name} {sig}")
@@ -246,13 +305,47 @@ async def run_command(api: Any, line: str) -> str | None:
         return await _tasks_group(api, args)
     if cmd == "simulation":
         return await _simulation_group(api, args)
-    if cmd == "logs":
+    if cmd == "log":
+        rest = list(args)
+        severity: str | None = None
+        if rest and rest[-1] in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            severity = rest.pop(-1)  # exact-case: account names are lowercase
+        if not rest:
+            raise UsageError(f"usage: log {HELP['log'][0]}")
+        account: str | None = rest.pop(0)
+        limit = 20
+        if rest:
+            if not rest[0].lstrip("-").isdigit():
+                raise UsageError(f"usage: log {HELP['log'][0]}")
+            limit = _integer(rest.pop(0), cmd, "n")
+        if rest:
+            raise UsageError(f"usage: log {HELP['log'][0]}")
+        return format_logs(await api.logs_tail(limit, account=account, severity=severity))
+    if cmd == "global-log":
         rest = list(args)
         severity = None
         if rest and rest[-1] in ("DEBUG", "INFO", "WARNING", "ERROR"):
-            severity = rest.pop(-1)  # exact-case: account names are lowercase
+            severity = rest.pop(-1)
+        limit = 20
+        if rest:
+            if not rest[0].lstrip("-").isdigit():
+                raise UsageError(f"usage: global-log {HELP['global-log'][0]}")
+            limit = _integer(rest.pop(0), cmd, "n")
+        if rest:
+            raise UsageError(f"usage: global-log {HELP['global-log'][0]}")
+        return format_logs(await api.logs_tail(limit, severity=severity, without_account=True))
+    if cmd == "logs":
+        # compat alias (hidden from the overview): the old '[n] [account]'
+        # form routes to the new verbs — an account selects that client's
+        # logs, no account shows the suite's own
+        rest = list(args)
+        severity = None
+        if rest and rest[-1] in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            severity = rest.pop(-1)
         limit, account = _tail_args(cmd, rest)
-        return format_logs(await api.logs_tail(limit, account=account, severity=severity))
+        if account:
+            return format_logs(await api.logs_tail(limit, account=account, severity=severity))
+        return format_logs(await api.logs_tail(limit, severity=severity, without_account=True))
     if cmd == "audit":
         limit, account = _tail_args(cmd, args)
         return format_audit(await api.audit_tail(limit, account=account))

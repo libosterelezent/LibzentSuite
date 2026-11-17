@@ -2083,10 +2083,21 @@ class ControlAPI:
 
     # ------------------------------------------------------------------- logs
     async def logs_tail(
-        self, n: int = 100, account: str | None = None, severity: str | None = None
+        self,
+        n: int = 100,
+        account: str | None = None,
+        severity: str | None = None,
+        without_account: bool = False,
     ) -> list[dict[str, Any]]:
-        """Structured log tail (dashboard Logs page + CLI 'logs')."""
-        return self._logs.tail(n, account=account, severity=severity)
+        """Structured log tail (dashboard Logs page + CLI).
+
+        ``account`` selects one client's logs (``log <account>``);
+        ``without_account`` selects the suite's OWN rows — framework
+        entries that carry no account context (``global-log``).
+        """
+        return self._logs.tail(
+            n, account=account, severity=severity, without_account=without_account
+        )
 
     def logs_service(self) -> LogService:
         """The live service (dashboard WS subscribes to this)."""
