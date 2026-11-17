@@ -1220,3 +1220,62 @@ class CachePortTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class AttachCogReconcileTests(unittest.IsolatedAsyncioTestCase):
+    """roadmap #4 round 2 (CodeRabbit pre-review): the attach flow
+    RECONCILES hosted cogs with the assignment set — newly assigned COG
+    plugins get their command face without a reconnect, removed plugins
+    lose theirs, retained toolboxes rebind to fresh facades."""
+
+    async def test_attach_hosts_unhosts_and_rebinds(self) -> None:
+        from types import SimpleNamespace as NS
+
+        from core.plugin_manager.cog_host import PluginCogHost
+        from plugins.ping.plugin import PingCog
+
+        h = make_manager()
+        await h.manager.add_account("alpha", plugins=["ping"])
+        host = PluginCogHost()
+        h.plugins.cog_host = host
+
+        # the plugin-manager view attach_account builds: ping (declares
+        # COG) attached; "oldie" was hosted on an EARLIER assignment
+        # and is gone from the current runtimes
+        h.plugins._accounts = {
+            "alpha": {"ping": NS(instance=NS(COG=PingCog))},
+        }
+
+        added: list[Any] = []
+        removed: list[str] = []
+
+        class _FakeBot:
+            async def add_cog(self, cog: Any) -> None:
+                added.append(type(cog).__name__)
+
+            async def remove_cog(self, name: str) -> None:
+                removed.append(name)
+
+        bot = _FakeBot()
+        # the PRODUCTION path: Account → runtime → client → _client (the
+        # adapter's library Bot). No phantom attributes — this is exactly
+        # what the reconcile reads.
+        h.manager._accounts["alpha"].runtime.client = NS(_client=bot)
+
+        # the stale cog from the previous assignment set
+        class _OldCog:
+            def __init__(self, *, services: Any = None) -> None:
+                self.services = services
+
+        await host.attach(bot, "alpha", "oldie", _OldCog)
+        self.assertEqual(host.hosted_plugins("alpha"), {"oldie"})
+
+        await h.manager._attach_plugins("alpha")
+
+        # hosted: ping's command face landed on the bot immediately
+        self.assertEqual(host.hosted_plugins("alpha"), {"ping"})
+        self.assertEqual(added, ["_OldCog", "PingCog"])
+        self.assertEqual(removed, ["_OldCog"])
+        # the fresh facade is bound on the retained-new toolbox
+        toolbox = host.services_for("alpha", "ping")
+        self.assertIsNotNone(toolbox.paced)

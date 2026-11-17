@@ -21,9 +21,7 @@ Anatomy
 .. code-block:: python
 
    from core.event_bus import Event, MessageReceived
-   from core.plugin_base import (
-       ArgSpec, CommandContext, CommandSpec, PluginBase, PluginContext,
-   )
+   from core.plugin_base import PluginBase, PluginContext
    from core.priority import Priority
    from core.settings_manager import Setting
 
@@ -97,69 +95,50 @@ Resolution layers (highest wins):
 ``ctx.settings`` is the LIVE resolved dict — changes made at runtime are
 seen without a rebuild.
 
-Self-commands: the declarative COMMANDS grammar
------------------------------------------------
+Self-commands: the plugin COG
+-----------------------------
 
-Declare a ``COMMANDS`` tuple on the class and each verb becomes a
-Discord command (``<prefix><name>``) on every account the plugin is
-ASSIGNED to and ENABLED on. Handlers may be plain methods (bound to the
-per-account instance):
+The command face is a real library Cog (the 2026-11-15 convergence):
+declare ``COG = MyCog`` on the plugin class and the cog host builds one
+instance per (account, plugin) — hosted exactly while the plugin is
+ASSIGNED to that account and ENABLED on it (add_cog/remove_cog is the
+gate). ``plugins/ping/plugin.py`` is the reference implementation.
 
 .. code-block:: python
 
-       # handlers first (a class body is sequential), COMMANDS last:
-       async def _cmd_myset(self, ctx: CommandContext, args) -> str:
-           p = ctx.parsed            # typed + validated BEFORE the handler
-           return f"set: name={p['name']} mode={p['mode']} count={p['count']}"
+       from discord.ext import commands
 
-       async def _cmd_mystart(self, ctx: CommandContext, args) -> str:
-           names = ctx.parsed.get("names") or []
-           return "started: " + ", ".join(names) if names else "nothing"
+       class MyCog(commands.Cog):
+           def __init__(self, *, services=None) -> None:
+               self.services = services   # the CogServices toolbox
 
-       COMMANDS = (
-           CommandSpec(
-               name="myset",
-               help="set a named profile up",
-               handler=_cmd_myset,      # bare method ref -> bound per account
-               args=(
-                   ArgSpec("name"),                          # required str
-                   ArgSpec("mode", choices=("fast", "slow", "auto")),
-                   ArgSpec("count", kind=int),               # typed
-                   ArgSpec("note", required=False, default=""),  # optional
-               ),
-           ),
-           CommandSpec(
-               name="mystart",
-               help="start one or more things by name",
-               handler=_cmd_mystart,
-               args=(ArgSpec("names", greedy=True),),   # <names...> list
-           ),
-       )
+           @commands.command(name="myset")
+           async def myset(self, ctx, name: str, mode: str = "fast") -> None:
+               await ctx.services.my_action(...)   # paced pipeline
+               await ctx.send(f"set {name}")        # the command reply
 
-Rules of the grammar:
+       class MyPlugin(PluginBase):
+           COG = MyCog
+           ...
 
-* ``name`` must match ``[a-z0-9_]+`` and must not collide with a
-  reserved framework verb (``pg``, ``say``, ``help``, ``prefixrate``,
-  ``adminlist``, ``adminperms``, ``adminprefix``) — collisions are
-  dropped with a warning (first registration wins among plugins too).
-* The handler returns a string; it is sent back through the paced
-  pipeline in the invoking channel (1900-char cap). Raising
-  ``ValueError`` renders the auto-generated usage line to the invoker.
-* ``ArgSpec(kind=...)`` accepts ``str``/``int``/``float`` or any
-  ``callable(text) -> value``; ``choices`` are checked after
-  conversion; ``greedy`` consumes the remaining tokens as a list.
-  Parse failures never reach the handler — the invoker sees
-  ``usage: <name> <auto usage line>`` plus the reason.
-* ``ctx`` is a :class:`core.plugin_base.CommandContext`: the SAME
-  ``services`` facade plugin code uses (no raw client), the invoking
-  ``channel_id``/``guild_id``/``invoker_id``, and ``settings_api`` — a
-  validated surface (``schema``/``effective``/``set``/``clear``/
-  ``binding``/``profiles``) matching the CLI set-setting path.
-* Who may invoke is decided by the admin panel
-  (``AccessManager.can_invoke``: per-account allowlists + admin bypass,
-  fail-closed) — never by the plugin.
-* The framework ``help`` verb lists your commands under the plugin's
-  name automatically (descriptions truncated at 25 chars, paginated).
+The discipline (enforced by the seams, not by convention):
+
+* ``ctx.services`` is the per-(account, plugin) paced facade — the SAME
+  one event handlers use, lifted onto the command context by the
+  framework's ``before_invoke``. Sends through it are paced, queued,
+  and audited. It is ABSENT when the stack is unwired (tests, stripped
+  setups): read it with ``getattr(ctx, "services", None)`` and degrade
+  with a clear reply — never a raw client send.
+* ``ctx.send`` is for COMMAND RESPONSES ONLY — the one documented
+  library-native send. Loops and proactive traffic ride
+  ``ctx.services.send_message``.
+* Command names must not collide with the reserved framework verbs
+  (``say`` reserves the framework cog; ``ping`` shows the naming
+  discipline). The admin panel decides who may invoke (fail-closed) —
+  never the plugin.
+* The toolbox (``self.services`` in the cog) also carries
+  ``to_rich``/``audit_rich`` for first-hand message handling in
+  ``@commands.Cog.listener`` methods — the event-side utilities.
 
 Chain declarations: EMITS and FOLLOWS
 -----------------------------------
@@ -205,7 +184,7 @@ bind the declarations into named chains; a step whose plugin is not
 assigned to the routed account is a *visible skip with the reason
 recorded*, never a silent drop. The loader fails a broken declaration
 at discovery (a missing handler, a namespaced EMIT name) — the same
-fail-fast convention as ``COMMANDS``.
+fail-fast convention as the plugin COG.
 Persistence helpers (no SQL)
 ----------------------------
 

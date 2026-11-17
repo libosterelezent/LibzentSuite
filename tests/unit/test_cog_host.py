@@ -69,6 +69,48 @@ class CogServicesTests(unittest.TestCase):
         services = CogServices(account="a", plugin="p")  # nothing wired
         services.audit_rich(NS(id=1))  # no raise
 
+    def test_paced_defaults_none_until_bound(self) -> None:
+        # roadmap #4: fail-closed — an unbound toolbox exposes no
+        # facade, never a fallback to some other account's pipeline
+        services = CogServices(account="alpha", plugin="cleaner")
+        self.assertIsNone(services.paced)
+
+    def test_hosted_plugins_reports_per_account(self) -> None:
+        # the reconciliation input: per-account hosted set, no leaks
+        # across accounts
+        host = PluginCogHost()
+
+        self.assertEqual(host.hosted_plugins("alpha"), set())
+        cog = SampleCog(services=host.services_for("alpha", "cleaner"))
+        host._cogs[("alpha", "cleaner")] = cog
+        host._cogs[("beta", "cleaner")] = cog
+        self.assertEqual(host.hosted_plugins("alpha"), {"cleaner"})
+        self.assertEqual(host.hosted_plugins("beta"), {"cleaner"})
+        self.assertEqual(host.hosted_plugins("gamma"), set())
+
+    def test_bind_paced_sets_and_replaces_the_facade(self) -> None:
+        services = CogServices(account="alpha", plugin="cleaner")
+        first, second = NS(kind="facade-1"), NS(kind="facade-2")
+        services.bind_paced(first)
+        self.assertIs(services.paced, first)
+        services.bind_paced(second)  # re-attach rebinds
+        self.assertIs(services.paced, second)
+
+    def test_rebind_paced_noops_for_never_hosted_cogs(self) -> None:
+        # rebind must never MINT a toolbox: only attach() creates, so
+        # _attach_plugins' rebind loop cannot fabricate cogs
+        host = PluginCogHost()
+        host.rebind_paced("alpha", "cleaner", NS(kind="fresh"))
+        self.assertNotIn(("alpha", "cleaner"), host._services)
+
+    def test_rebind_paced_refreshes_a_hosted_toolbox(self) -> None:
+        host = PluginCogHost()
+        stale, fresh = NS(kind="stale-facade"), NS(kind="fresh-facade")
+        toolbox = host.services_for("alpha", "cleaner")
+        toolbox.bind_paced(stale)
+        host.rebind_paced("alpha", "cleaner", fresh)
+        self.assertIs(toolbox.paced, fresh)
+
 
 class PluginCogHostTests(unittest.IsolatedAsyncioTestCase):
     async def test_attach_registers_and_toolbox_flows(self) -> None:
@@ -121,6 +163,17 @@ class PluginCogHostTests(unittest.IsolatedAsyncioTestCase):
         await cog_seam.on_message(NS(id=42))
         self.assertEqual(len(published), 1)
         self.assertEqual(published[0].message.id, 42)
+
+    async def test_attach_binds_paced_facade_onto_the_toolbox(self) -> None:
+        """roadmap #4: the account manager hands the per-(account,
+        plugin) facade to attach; the cog's toolbox carries it so the
+        client hook can lift it onto ctx.services."""
+        host = PluginCogHost(to_rich=_rich_converter)
+        bot = _make_bot()
+        paced = NS(kind="paced-facade")
+        cog = await host.attach(bot, "alpha", "cleaner", SampleCog, paced=paced)
+        self.assertIs(cog.services.paced, paced)
+        self.assertIsNotNone(bot.get_cog("SampleCog"))
 
     async def test_detach_removes_the_cog(self) -> None:
         host = PluginCogHost(to_rich=_rich_converter)

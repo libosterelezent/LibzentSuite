@@ -71,8 +71,11 @@ reviews:
     - path: "plugins/**"
       instructions: >-
         The plugin contract: COG is the command face, settings are
-        Setting manifests. Sends go ONLY through ctx.services (the
-        paced pipeline) — a raw client send is a review blocker.
+        Setting manifests. Proactive sends (loops, timers, event
+        reactions) go ONLY through ctx.services (the paced pipeline)
+        — a raw client send is a review blocker. Command RESPONSES
+        are the one documented exception: they ride ctx.send
+        (the C1 discipline the framework's own cog follows).
     - path: "tests/**"
       instructions: >-
         Tests assert externally observable contracts. Flag weakened

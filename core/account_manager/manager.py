@@ -1976,7 +1976,9 @@ class AccountManager:
                 runtimes = getattr(plugins_mgr, "_accounts", {}).get(name, {})
                 for plugin_name in list(runtimes):
                     try:
-                        await plugins_mgr.host_cog(name, plugin_name, bot)
+                        await plugins_mgr.host_cog(
+                            name, plugin_name, bot, paced=self.services_for(name, plugin_name)
+                        )
                     except Exception as exc:
                         self._logger.debug(
                             "cog hosting failed for %s/%s: %s", name, plugin_name, exc
@@ -2545,6 +2547,37 @@ class AccountManager:
                         "may linger active until the next stop)",
                         name,
                     )
+        # roadmap #4 (CodeRabbit pre-review 2026-11-17, round 2): the
+        # hosted cogs must RECONCILE with the current assignment set —
+        # hosting only happened at connect, so a COG plugin assigned to
+        # a RUNNING account never got its command face, and a removed
+        # plugin's cog lingered on the bot. Reconcile: detach cogs whose
+        # plugin left, host newly attached ones (when a bot exists), and
+        # rebind retained toolboxes to fresh facades (services_for
+        # reuses the cache the activation factory filled, so commands
+        # and events share one live view; rebind never mints cogs).
+        cog_host = getattr(self._plugin_manager, "cog_host", None)
+        if cog_host is not None:
+            current = set(getattr(self._plugin_manager, "_accounts", {}).get(name, {}))
+            hosted = cog_host.hosted_plugins(name)
+            # the bot rides Account.runtime.client._client (the adapter's
+            # library Bot) — Account itself carries no client field
+            runtime = getattr(rt, "runtime", None) if rt is not None else None
+            bot = getattr(getattr(runtime, "client", None), "_client", None)
+            for plugin_name in hosted - current:
+                try:
+                    await self._plugin_manager.unhost_cog(name, plugin_name)
+                except Exception as exc:
+                    self._logger.debug("cog unhost failed for %s/%s: %s", name, plugin_name, exc)
+            for plugin_name in current:
+                facade = self.services_for(name, plugin_name)
+                try:
+                    if plugin_name not in hosted and bot is not None and hasattr(bot, "add_cog"):
+                        await self._plugin_manager.host_cog(name, plugin_name, bot, paced=facade)
+                    else:
+                        cog_host.rebind_paced(name, plugin_name, facade)
+                except Exception as exc:
+                    self._logger.debug("cog reconcile failed for %s/%s: %s", name, plugin_name, exc)
         return activated
 
     def _allowed_plugins(self, name: str) -> set[str]:

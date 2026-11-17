@@ -197,6 +197,28 @@ class FakePluginManager:
         self.states_map: dict[str, list[dict[str, Any]]] = {}
         self.fail_states = False
         self.known_names: list[str] = list(known_names or [])
+        # cog-hosting surface (roadmap #4 reconcile tests): None / empty
+        # until a test wires a real PluginCogHost + runtimes in
+        self.cog_host: Any = None
+        self._accounts: dict[str, dict[str, Any]] = {}
+
+    async def host_cog(self, account: str, plugin: str, bot: Any, paced: Any = None) -> Any:
+        """Cog-hosting seam (roadmap #4), mirroring the real manager:
+        resolve COG from the runtimes view, host it when a cog_host is
+        wired — None when there is nothing to host."""
+        if self.cog_host is None:
+            return None
+        runtime = self._accounts.get(account, {}).get(plugin)
+        cog_class = getattr(getattr(runtime, "instance", None), "COG", None)
+        if cog_class is None:
+            return None
+        return await self.cog_host.attach(bot, account, plugin, cog_class, paced=paced)
+
+    async def unhost_cog(self, account: str, plugin: str) -> bool:
+        """The detach-side seam — delegates to the wired cog_host."""
+        if self.cog_host is None:
+            return False
+        return bool(await self.cog_host.detach(account, plugin))
 
     def names(self) -> list[str]:
         """Discovered-plugin surface (ControlAPI typo trap)."""

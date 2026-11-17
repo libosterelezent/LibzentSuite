@@ -582,12 +582,15 @@ class PluginManager:
         self._logger.info("plugin %s unloaded (detached from %d account(s))", name, detached)
         return {"plugin": name, "detached_accounts": detached}
 
-    async def host_cog(self, account: str, plugin: str, bot: Any) -> Any:
+    async def host_cog(
+        self, account: str, plugin: str, bot: Any, paced: PluginServices | None = None
+    ) -> Any:
         """C2: host the plugin's COG on the account's Bot (the host
-        builds the instance with the toolbox injected). Returns the
-        cog, or None when the plugin declares no COG / no host is
-        wired. Assignment ∧ enabled gating rides attach/detach: the
-        CALLER only invokes this on the attach path."""
+        builds the instance with the toolbox injected, then binds the
+        paced facade so the client can lift it onto ctx.services).
+        Returns the cog, or None when the plugin declares no COG / no
+        host is wired. Assignment ∧ enabled gating rides attach/
+        detach: the CALLER only invokes this on the attach path."""
         host = getattr(self, "cog_host", None)
         cog_class = None
         runtimes = self._accounts.get(account, {})
@@ -596,7 +599,7 @@ class PluginManager:
             cog_class = getattr(runtime.instance, "COG", None)
         if host is None or cog_class is None or bot is None:
             return None
-        return await host.attach(bot, account, plugin, cog_class)
+        return await host.attach(bot, account, plugin, cog_class, paced=paced)
 
     async def unhost_cog(self, account: str, plugin: str) -> bool:
         """C2: the detach-side remove_cog (idempotent)."""
