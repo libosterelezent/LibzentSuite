@@ -1958,12 +1958,17 @@ async def run_pass(
     """Boot once, run the selected phases in registry order, tear down,
     and write the run summary. Returns the summary dict (also written
     to ``findings_dir/<run id>.summary.json``)."""
-    # COLLISION-RESISTANT run id: two runs in the same wall-clock second
-    # used to share a filename, and the writer's "w" mode silently
-    # truncated the first run's evidence. The uuid suffix makes the id
-    # unique; the writer's exclusive "x" mode turns any residual
-    # collision into a loud FileExistsError.
-    run_id = f"run-{time.strftime('%Y%m%dT%H%M%S')}-{uuid4().hex[:8]}"
+    # COLLISION-RESISTANT, CREATION-ORDERED run id: the timestamp carries
+    # NANOSECOND resolution (fixed-width, so lexical order == creation
+    # order even for two runs inside one second — the --watch tail picks
+    # the newest by name), the uuid suffix stays for uniqueness, and the
+    # writer's exclusive "x" mode turns any residual collision into a
+    # loud FileExistsError instead of a silent truncation.
+    now_ns = time.time_ns()
+    run_id = (
+        f"run-{time.strftime('%Y%m%dT%H%M%S', time.localtime(now_ns / 1_000_000_000))}"
+        f"{now_ns % 1_000_000_000:09d}-{uuid4().hex[:8]}"
+    )
     findings = FindingsWriter(findings_dir / f"{run_id}.jsonl")
     console = console or Console()
     phases = [phase_by_name(name) for name in selected] or list(PHASES)
@@ -2082,6 +2087,9 @@ def _watch(findings_dir: Path) -> int:
     current: Path | None = None
     handled = 0
     while True:
+        # lexical order == creation order: run ids carry a fixed-width
+        # nanosecond component (see run_pass), so the LAST name is the
+        # newest run even when two started inside the same second
         runs = sorted(
             p for p in findings_dir.glob("run-*.jsonl") if _RUN_FILE_PATTERN.match(p.name)
         )
