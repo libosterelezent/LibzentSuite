@@ -1260,7 +1260,7 @@ class AttachCogReconcileTests(unittest.IsolatedAsyncioTestCase):
         # the PRODUCTION path: Account → runtime → client → _client (the
         # adapter's library Bot). No phantom attributes — this is exactly
         # what the reconcile reads.
-        h.manager._accounts["alpha"].runtime.client = NS(_client=bot)  # type: ignore[attr-defined]
+        h.manager._accounts["alpha"].runtime.client = NS(_client=bot)
 
         # the stale cog from the previous assignment set
         class _OldCog:
