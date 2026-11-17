@@ -1570,7 +1570,7 @@ async def phase_chains_signals(h: Harness) -> None:
     baseline_runs = {str(row.get("id")) for row in await repo.chain_runs()}
     h.owner_says("ldp-go 1")
     ok = await h.wait_until(
-        lambda: _new_completed_run(repo, baseline_runs),
+        lambda: _new_completed_run(repo, baseline_runs, chain_id=int(chain_id or 0)),
         timeout=20.0,
         description="a terminal-triggered chain run completes",
     )
@@ -1623,7 +1623,9 @@ async def phase_chains_signals(h: Harness) -> None:
     signal_id = str(emitted or "")
     print("    waiting for the reconciler sweep (<=45s, 30s cadence)...")
     delivered = await h.wait_until(
-        lambda: _signal_delivered_and_followup_ran(h, signal_id, signal_baseline),
+        lambda: _signal_delivered_and_followup_ran(
+            h, signal_id, signal_baseline, int(signal_chain_id or 0)
+        ),
         timeout=RECONCILER_WAIT_S,
         description="the reconciler delivers the signal and fires the followup chain",
     )
@@ -1631,7 +1633,9 @@ async def phase_chains_signals(h: Harness) -> None:
         str(getattr(row, "signal_id", "")) for row in await h.framework.database.signals.pending(50)
     }
     followup_runs = [
-        row for row in await repo.chain_runs() if str(row.get("id")) not in signal_baseline
+        row
+        for row in await repo.chain_runs()
+        if str(row.get("id")) not in signal_baseline and row.get("chain_id") == signal_chain_id
     ]
     h.expect(
         delivered,
@@ -1668,22 +1672,42 @@ async def _state_is_not(h: Harness, name: str, state: str) -> bool:
     return await h.account_state(name) != state
 
 
-async def _new_completed_run(repo: Any, baseline: frozenset[str] | set[str]) -> bool:
+async def _new_completed_run(
+    repo: Any,
+    baseline: frozenset[str] | set[str],
+    *,
+    chain_id: int | None = None,
+    triggered_by: str | None = None,
+) -> bool:
     """True only when a run id ABSENT from the baseline has status
     'completed' — a failed/partial new run, or an old terminal run
-    joined by a fresh pending one, must NOT satisfy the wait."""
-    rows = await repo.chain_runs()
-    return any(
-        str(row.get("id")) not in baseline and str(row.get("status")) == "completed" for row in rows
-    )
+    joined by a fresh pending one, must NOT satisfy the wait.
+
+    ``chain_id`` / ``triggered_by`` narrow the match to ONE chain (and,
+    for signal runs, to the exact ``signal:<id>`` trigger recorded at
+    run creation) — a completed run from an UNRELATED chain can never
+    satisfy the wait."""
+    for row in await repo.chain_runs():
+        if str(row.get("id")) in baseline:
+            continue
+        if str(row.get("status")) != "completed":
+            continue
+        if chain_id is not None and row.get("chain_id") != chain_id:
+            continue
+        if triggered_by is not None and str(row.get("triggered_by") or "") != triggered_by:
+            continue
+        return True
+    return False
 
 
 async def _signal_delivered_and_followup_ran(
-    h: Harness, signal_id: str, baseline: frozenset[str] | set[str]
+    h: Harness, signal_id: str, baseline: frozenset[str] | set[str], chain_id: int
 ) -> bool:
-    """True only when the EMITTED signal is no longer pending AND a
-    follow-up chain run absent from the baseline completed — an empty
-    outbox alone proves nothing (the emission may never have landed)."""
+    """True only when the EMITTED signal is no longer pending AND a run
+    of the SIGNAL-FOLLOWUP chain — triggered by exactly that signal id,
+    absent from the baseline — completed. An empty outbox alone proves
+    nothing (the emission may never have landed), and an unrelated
+    chain's completion proves the wrong thing."""
     if not signal_id:
         return False
     pending_ids = {
@@ -1691,7 +1715,12 @@ async def _signal_delivered_and_followup_ran(
     }
     if signal_id in pending_ids:
         return False
-    return await _new_completed_run(h.framework.database.workspaces, baseline)
+    return await _new_completed_run(
+        h.framework.database.workspaces,
+        baseline,
+        chain_id=chain_id,
+        triggered_by=f"signal:{signal_id}",
+    )
 
 
 async def _disable_chains(repo: Any, chain_ids: Sequence[int]) -> None:
