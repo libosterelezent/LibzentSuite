@@ -8,12 +8,6 @@ says so, and never make an unnecessary API call — all managed from the CLI
 (a FastAPI core API + Flet UI is the planned next interface). Game-specific
 logic lives in pluggable parser packs, not the core.
 
-> ⚠️ Selfbot usage violates Discord's Terms of Service and can get accounts
-> suspended. The safety systems (learned pacing defaults, human-like
-> jitter, workspace serialization, always-on server-limit handling)
-> **mitigate** risk — they do not authorize anything. Keep policies
-> conservative and only use accounts you can afford to lose.
-
 ---
 
 ## Contents
