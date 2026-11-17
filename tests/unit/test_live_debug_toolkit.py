@@ -11,6 +11,7 @@ time, no network.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import inspect
 import json
@@ -196,17 +197,57 @@ class PhaseRegistryTests(unittest.TestCase):
             self.assertIn(expected, names)
 
 
-def state_snapshot() -> list[tuple[str, int, int]]:
-    """Observable fingerprint of the live state/ directory: one sorted
-    (name, size, mtime_ns) tuple per entry ([] when absent). Any write,
-    creation, or deletion by a run changes the snapshot; nothing here
-    ever deletes or resets state/ (AGENTS.md §7)."""
-    state = REPO_ROOT / "state"
-    if not state.is_dir():
+def dir_fingerprint(root: Path) -> list[tuple[str, str]]:
+    """RECURSIVE content fingerprint of a directory tree: one sorted
+    (relative path, sha256 of contents) tuple per FILE ([] when the
+    root is absent). Recursion + digests matter: a nested overwrite
+    (state/cache/account.bin) changes no parent entry's stat tuple, so
+    the old depth-one metadata snapshot could not see it. Nothing here
+    ever deletes or resets anything (AGENTS.md §7)."""
+    if not root.is_dir():
         return []
     return sorted(
-        (entry.name, entry.stat().st_size, entry.stat().st_mtime_ns) for entry in state.iterdir()
+        (str(path.relative_to(root)), hashlib.sha256(path.read_bytes()).hexdigest())
+        for path in root.rglob("*")
+        if path.is_file()
     )
+
+
+def state_snapshot() -> list[tuple[str, str]]:
+    """The live state/ directory's fingerprint (see dir_fingerprint)."""
+    return dir_fingerprint(REPO_ROOT / "state")
+
+
+class DirFingerprintTests(unittest.TestCase):
+    """The isolation witness itself: recursion + content digests."""
+
+    def test_nested_overwrite_changes_the_fingerprint(self) -> None:
+        # the old depth-one metadata snapshot could not see this: the
+        # parent directory's mtime does not change when a nested file's
+        # CONTENTS change
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "cache").mkdir()
+            target = root / "cache" / "account.bin"
+            target.write_bytes(b"v1")
+            before = dir_fingerprint(root)
+            self.assertEqual(before, [("cache/account.bin", hashlib.sha256(b"v1").hexdigest())])
+            target.write_bytes(b"v2")  # same length, different content
+            self.assertNotEqual(dir_fingerprint(root), before)
+            target.write_bytes(b"v1")  # identical content restores it
+            self.assertEqual(dir_fingerprint(root), before)
+
+    def test_added_and_removed_files_change_the_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            before = dir_fingerprint(root)
+            nested = root / "sub"
+            nested.mkdir()
+            (nested / "deep.bin").write_bytes(b"payload")
+            with_deep = dir_fingerprint(root)
+            self.assertNotEqual(with_deep, before)
+            (nested / "deep.bin").unlink()
+            self.assertEqual(dir_fingerprint(root), before)
 
 
 class BootPhaseIntegration(unittest.IsolatedAsyncioTestCase):
