@@ -1529,9 +1529,24 @@ async def phase_presets(h: Harness) -> None:
     )
 
 
+async def _ensure_workspace(h: Harness, name: str = "grind") -> None:
+    """Idempotent: the workspace exists and alpha is an eligible member
+    (standalone ``--phase`` runs for presets/chains need it)."""
+    known = {row.get("name") for row in await h.api.workspaces_list()}
+    if name not in known:
+        await h.api.workspaces_create({"name": name, "description": "live-debug"})
+    info = await h.api.workspaces_get(name)
+    if "alpha" not in ((info or {}).get("members") or []):
+        await h.api.workspaces_add_account("alpha", name)
+    # eligible -> eligible is not a legal move: already there
+    with contextlib.suppress(ValueError):
+        await h.api.workspaces_op("eligibility", account="alpha", eligibility="eligible")
+
+
 async def phase_chains_signals(h: Harness) -> None:
     """Chains + durable signals: terminal trigger, outbox, reconciler."""
     await h.ensure_account("alpha", ["ping", "ldp_worker"])
+    await _ensure_workspace(h, "grind")
     repo = h.framework.database.workspaces
     definition = {
         "name": "follow-burst",
@@ -1553,18 +1568,20 @@ async def phase_chains_signals(h: Harness) -> None:
         lambda: repo.insert_chain("grind", "follow-burst", json.dumps(definition)),
     )
     h.expect(bool(chain_id), what="chain stored", expectation="chain id", actual=f"id={chain_id}")
-    runs_before = await repo.chain_runs()
+    baseline_runs = {str(row.get("id")) for row in await repo.chain_runs()}
     h.owner_says("ldp-go 1")
     ok = await h.wait_until(
-        lambda: _has_new_completed_run(repo, len(runs_before)),
+        lambda: _new_completed_run(repo, baseline_runs),
         timeout=20.0,
         description="a terminal-triggered chain run completes",
     )
+    runs_after = await repo.chain_runs()
+    fresh_runs = [row for row in runs_after if str(row.get("id")) not in baseline_runs]
     h.expect(
         ok,
         what="TaskCompleted fired the chain (A-acts, B-follows)",
-        expectation="a new chain run reaches 'completed' with its step done",
-        actual=f"runs before={len(runs_before)} after={len(await repo.chain_runs())}",
+        expectation="a run id ABSENT from the baseline reaches status 'completed'",
+        actual=f"new runs: {[(r.get('id'), r.get('status')) for r in fresh_runs] or 'none'}",
     )
     signal_chain = {
         "name": "signal-followup",
@@ -1591,7 +1608,7 @@ async def phase_chains_signals(h: Harness) -> None:
         expectation="chain id",
         actual=f"id={signal_chain_id}",
     )
-    pending_before = len(await h.framework.database.signals.pending(50))
+    signal_baseline = {str(row.get("id")) for row in await repo.chain_runs()}
     emitted = await h.step(
         "emit a durable signal through the plugin facade",
         lambda: h.framework.accounts.services_for("alpha", "ldp_worker").emit_signal(
@@ -1604,17 +1621,30 @@ async def phase_chains_signals(h: Harness) -> None:
         expectation="signal id string",
         actual=f"signal_id={emitted!r}",
     )
+    signal_id = str(emitted or "")
     print("    waiting for the reconciler sweep (<=45s, 30s cadence)...")
     delivered = await h.wait_until(
-        lambda: _signal_drained(h),
+        lambda: _signal_delivered_and_followup_ran(h, signal_id, signal_baseline),
         timeout=RECONCILER_WAIT_S,
-        description="the reconciler delivers the pending signal",
+        description="the reconciler delivers the signal and fires the followup chain",
     )
+    still_pending = signal_id in {
+        str(getattr(row, "signal_id", "")) for row in await h.framework.database.signals.pending(50)
+    }
+    followup_runs = [
+        row for row in await repo.chain_runs() if str(row.get("id")) not in signal_baseline
+    ]
     h.expect(
         delivered,
         what="reconciler delivered the signal and fired the chain",
-        expectation="pending count returns to baseline + a signal-followup run exists",
-        actual=f"pending before={pending_before} now={len(await h.framework.database.signals.pending(50))}",
+        expectation=(
+            "the EMITTED signal leaves the pending set AND a run id absent "
+            "from the baseline reaches status 'completed'"
+        ),
+        actual=(
+            f"signal {signal_id[:12]}… pending={still_pending}; new runs: "
+            f"{[(r.get('id'), r.get('status')) for r in followup_runs] or 'none'}"
+        ),
     )
     await h.step("disable both chains", lambda: _disable_chains(repo, [chain_id, signal_chain_id]))
     h.observation(
@@ -1639,18 +1669,30 @@ async def _state_is_not(h: Harness, name: str, state: str) -> bool:
     return await h.account_state(name) != state
 
 
-async def _has_new_completed_run(repo: Any, before_count: int) -> bool:
-    """True once a NEW chain run exists in a terminal state."""
+async def _new_completed_run(repo: Any, baseline: frozenset[str] | set[str]) -> bool:
+    """True only when a run id ABSENT from the baseline has status
+    'completed' — a failed/partial new run, or an old terminal run
+    joined by a fresh pending one, must NOT satisfy the wait."""
     rows = await repo.chain_runs()
-    done = [r for r in rows if str(r.get("status")) in ("completed", "partial", "failed")]
-    return len(done) > before_count or (len(rows) > before_count and bool(done))
+    return any(
+        str(row.get("id")) not in baseline and str(row.get("status")) == "completed" for row in rows
+    )
 
 
-async def _signal_drained(h: Harness) -> bool:
-    """True when the emitted signal left the outbox as delivered."""
-    repo = h.framework.database
-    pending = await repo.signals.pending(50)
-    return not pending
+async def _signal_delivered_and_followup_ran(
+    h: Harness, signal_id: str, baseline: frozenset[str] | set[str]
+) -> bool:
+    """True only when the EMITTED signal is no longer pending AND a
+    follow-up chain run absent from the baseline completed — an empty
+    outbox alone proves nothing (the emission may never have landed)."""
+    if not signal_id:
+        return False
+    pending_ids = {
+        str(getattr(row, "signal_id", "")) for row in await h.framework.database.signals.pending(50)
+    }
+    if signal_id in pending_ids:
+        return False
+    return await _new_completed_run(h.framework.database.workspaces, baseline)
 
 
 async def _disable_chains(repo: Any, chain_ids: Sequence[int]) -> None:
