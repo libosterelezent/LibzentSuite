@@ -32,14 +32,19 @@ else
   bad "export drifted — regenerate: uv export ... -o requirements.txt"
 fi
 
-step "4/8 Mypy ratchet (errors must equal the baseline exactly)"
-MYPY_ERRS=$(~/.local/bin/uv run --frozen mypy &> /tmp/local-ci-mypy.log || true \
-  && grep -c "error:" /tmp/local-ci-mypy.log || true)
-BASELINE=$(<.github/mypy-baseline)
-echo "mypy errors: $MYPY_ERRS (baseline: $BASELINE)"
-if [ "$MYPY_ERRS" -eq "$BASELINE" ]; then ok "mypy == baseline"
-elif [ "$MYPY_ERRS" -lt "$BASELINE" ]; then bad "mypy improved — lower .github/mypy-baseline to $MYPY_ERRS in this push"
-else bad "mypy grew ($BASELINE -> $MYPY_ERRS)"; fi
+step "4/8 Mypy ratchets — production + tests (split baselines)"
+PROD_ERRS=$(~/.local/bin/uv run --frozen mypy main.py core adapters database interfaces plugins benchmark scripts parsers \
+  &> /tmp/local-ci-mypy-prod.log || true && grep -c "error:" /tmp/local-ci-mypy-prod.log || true)
+PROD_BASE=$(<.github/mypy-baseline)
+echo "mypy production: $PROD_ERRS (baseline: $PROD_BASE)"
+if [ "$PROD_ERRS" -eq "$PROD_BASE" ]; then ok "production == baseline"
+else bad "production off-baseline ($PROD_BASE -> $PROD_ERRS)"; fi
+TEST_ERRS=$(~/.local/bin/uv run --frozen mypy tests \
+  &> /tmp/local-ci-mypy-tests.log || true && grep -c "error:" /tmp/local-ci-mypy-tests.log || true)
+TEST_BASE=$(<.github/mypy-tests-baseline)
+echo "mypy tests: $TEST_ERRS (baseline: $TEST_BASE)"
+if [ "$TEST_ERRS" -eq "$TEST_BASE" ]; then ok "tests == baseline"
+else bad "tests off-baseline ($TEST_BASE -> $TEST_ERRS)"; fi
 
 if [ "${1:-}" = "quick" ]; then
   step "quick mode — suites skipped"

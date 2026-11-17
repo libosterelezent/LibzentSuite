@@ -121,9 +121,11 @@ pyflakes step). `requirements.txt` is a generated pip-compat export of the
 lock (`uv export --format requirements-txt --no-hashes --no-dev
 --no-emit-project -o requirements.txt`) — regenerate it, never hand-edit.
 The export-sync and lock-integrity gates in CI enforce this mechanically.
-The mypy strict run is a ratchet gate (`.github/mypy-baseline`): CI fails
-when the error count grows past the baseline, and the baseline is only
-lowered after errors are fixed. Both scopes reached ZERO: the production
+The mypy strict run is TWO ratchet gates with split baselines:
+`.github/mypy-baseline` (production) and `.github/mypy-tests-baseline`
+(tests). Each tree's count must EQUAL its baseline — CI fails when the
+count grows past it, and also when it shrinks without the file lowered
+in the same PR. Both scopes reached ZERO: the production
 tree on 2026-11-15 (485 legacy errors across 108 source files) and the
 tests tree on 2026-11-16 (2,443 errors across 86 test files, fixed by
 a six-batch annotation campaign — zero assertions weakened, zero tests
