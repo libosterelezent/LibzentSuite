@@ -17,6 +17,11 @@ nothing can ship until that hold is lifted; see
 ## [Unreleased]
 
 ### Added
+- The plugin COG seam: plugin cogs get `ctx.services` — the
+  per-(account, plugin) paced facade, bound by the cog host at attach
+  time and lifted onto the command context by the client. Ping's
+  command face (`<prefix>ping <channel_id> <text...>`) lands as the
+  first real plugin COG.
 - The two-level data model IMPLEMENTED (all eight phases, migrations
   v12–v16): account-owned plugin profiles — identity (account, plugin,
   name), profile-scoped cooldowns and task attribution, the
