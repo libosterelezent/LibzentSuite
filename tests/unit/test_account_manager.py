@@ -1279,3 +1279,43 @@ class AttachCogReconcileTests(unittest.IsolatedAsyncioTestCase):
         # the fresh facade is bound on the retained-new toolbox
         toolbox = host.services_for("alpha", "ping")
         self.assertIsNotNone(toolbox.paced)
+
+    async def test_reconcile_honors_the_enabled_half(self) -> None:
+        """assignment ∧ ENABLED (CodeRabbit PR review 2026-11-17): a
+        disabled runtime is never hosted; a hosted plugin whose flag
+        flips is unhosted on the next reconcile — the toggle verb
+        calls it, so the command face moves without waiting for an
+        attach."""
+        from types import SimpleNamespace as NS
+
+        from core.plugin_manager.cog_host import PluginCogHost
+        from plugins.ping.plugin import PingCog
+
+        h = make_manager()
+        await h.manager.add_account("alpha", plugins=["ping"])
+        host = PluginCogHost()
+        h.plugins.cog_host = host
+        h.plugins._accounts = {
+            "alpha": {
+                "ping": NS(instance=NS(COG=PingCog), enabled=True),
+                "sleepy": NS(instance=NS(COG=PingCog), enabled=False),
+            },
+        }
+        added, removed = [], []
+
+        class _Bot:
+            async def add_cog(self, cog: Any) -> None:
+                added.append(type(cog).__name__)
+
+            async def remove_cog(self, name: str) -> None:
+                removed.append(name)
+
+        h.manager._accounts["alpha"].runtime.client = NS(_client=_Bot())
+
+        await h.manager.reconcile_plugin_cogs("alpha")
+        self.assertEqual(host.hosted_plugins("alpha"), {"ping"})  # sleepy never hosted
+        # now disable ping: the toggle-path reconcile unhosts it
+        h.plugins._accounts["alpha"]["ping"].enabled = False
+        await h.manager.reconcile_plugin_cogs("alpha")
+        self.assertEqual(host.hosted_plugins("alpha"), set())
+        self.assertEqual(removed, ["PingCog"])

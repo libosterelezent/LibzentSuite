@@ -121,22 +121,23 @@ gate). ``plugins/ping/plugin.py`` is the reference implementation.
            COG = MyCog
            ...
 
-The discipline (enforced by the seams, not by convention):
+How the seams behave (the binding contract lives in
+``docs/architecture/architecture.rst`` §5–§6 — this section describes,
+it does not legislate):
 
-* ``ctx.services`` is the per-(account, plugin) paced facade — the SAME
-  one event handlers use, lifted onto the command context by the
+* ``ctx.services`` is the per-(account, plugin) paced facade — the
+  same one event handlers use, lifted onto the command context by the
   framework's ``before_invoke``. Sends through it are paced, queued,
-  and audited. It is ABSENT when the stack is unwired (tests, stripped
+  and audited. It is absent when the stack is unwired (tests, stripped
   setups): read it with ``getattr(ctx, "services", None)`` and degrade
-  with a clear reply — never a raw client send.
-* ``ctx.send`` is for COMMAND RESPONSES ONLY — the one documented
-  library-native send. Loops and proactive traffic ride
-  ``ctx.services.send_message``.
-* The framework verbs no longer ride accounts (owner call
-  2026-11-17) — the per-account command surface is exactly the
-  attached plugins' COGs, and the library's help lists precisely
-  that. The admin gate still decides who may invoke (fail-closed) —
-  never the plugin.
+  with a clear reply.
+* ``ctx.send`` carries command responses; loops and proactive traffic
+  ride ``ctx.services.send_message`` (the architecture contract's
+  send discipline).
+* The per-account command surface is exactly the attached plugins'
+  COGs — the library's help lists precisely what the account runs.
+  The admin gate decides who may invoke (fail-closed), never the
+  plugin.
 * The toolbox (``self.services`` in the cog) also carries
   ``to_rich``/``audit_rich`` for first-hand message handling in
   ``@commands.Cog.listener`` methods — the event-side utilities.

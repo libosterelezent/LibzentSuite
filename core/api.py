@@ -1443,6 +1443,8 @@ class ControlAPI:
     async def plugins_set_enabled(self, account: str, plugin: str, enabled: bool) -> dict[str, Any]:
         """Enable/disable a plugin on an account (lifecycle hooks fire)."""
         await self._plugins.set_enabled(account, plugin, parse_bool(enabled, "enabled"))
+        # the command face follows the toggle NOW (assignment ∧ enabled)
+        await self._accounts.reconcile_plugin_cogs(account)
         return {"account": account, "plugin": plugin, "enabled": enabled}
 
     async def plugins_settings(self, account: str) -> list[dict[str, Any]]:

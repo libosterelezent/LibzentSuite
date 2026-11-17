@@ -2556,29 +2556,47 @@ class AccountManager:
         # rebind retained toolboxes to fresh facades (services_for
         # reuses the cache the activation factory filled, so commands
         # and events share one live view; rebind never mints cogs).
-        cog_host = getattr(self._plugin_manager, "cog_host", None)
-        if cog_host is not None:
-            current = set(getattr(self._plugin_manager, "_accounts", {}).get(name, {}))
-            hosted = cog_host.hosted_plugins(name)
-            # the bot rides Account.runtime.client._client (the adapter's
-            # library Bot) — Account itself carries no client field
-            runtime = getattr(rt, "runtime", None) if rt is not None else None
-            bot = getattr(getattr(runtime, "client", None), "_client", None)
-            for plugin_name in hosted - current:
-                try:
-                    await self._plugin_manager.unhost_cog(name, plugin_name)
-                except Exception as exc:
-                    self._logger.debug("cog unhost failed for %s/%s: %s", name, plugin_name, exc)
-            for plugin_name in current:
-                facade = self.services_for(name, plugin_name)
-                try:
-                    if plugin_name not in hosted and bot is not None and hasattr(bot, "add_cog"):
-                        await self._plugin_manager.host_cog(name, plugin_name, bot, paced=facade)
-                    else:
-                        cog_host.rebind_paced(name, plugin_name, facade)
-                except Exception as exc:
-                    self._logger.debug("cog reconcile failed for %s/%s: %s", name, plugin_name, exc)
+        await self.reconcile_plugin_cogs(name)
         return activated
+
+    async def reconcile_plugin_cogs(self, name: str) -> None:
+        """Sync hosted cogs with the account's ENABLED plugin set.
+
+        The C2 contract is assignment AND enabled: a disabled plugin is
+        unhosted (its commands stop being invocable), a newly enabled
+        one is hosted when the bot exists, retained ones rebind to
+        fresh facades. Called from _attach_plugins AND from the
+        enable/disable verb — a toggle must not wait for the next
+        attach to move the command face (CodeRabbit PR review 2026-11-17).
+        Best-effort by construction: every failure is a debug line,
+        never a failed verb.
+        """
+        cog_host = getattr(self._plugin_manager, "cog_host", None)
+        if cog_host is None:
+            return
+        runtimes = getattr(self._plugin_manager, "_accounts", {}).get(name, {})
+        # ENABLED only — the disabled half of the contract
+        current = {p for p, r in runtimes.items() if getattr(r, "enabled", True)}
+        hosted = cog_host.hosted_plugins(name)
+        rt = self._accounts.get(name)
+        # the bot rides Account.runtime.client._client (the adapter's
+        # library Bot) — Account itself carries no client field
+        runtime = getattr(rt, "runtime", None) if rt is not None else None
+        bot = getattr(getattr(runtime, "client", None), "_client", None)
+        for plugin_name in hosted - current:
+            try:
+                await self._plugin_manager.unhost_cog(name, plugin_name)
+            except Exception as exc:
+                self._logger.debug("cog unhost failed for %s/%s: %s", name, plugin_name, exc)
+        for plugin_name in current:
+            facade = self.services_for(name, plugin_name)
+            try:
+                if plugin_name not in hosted and bot is not None and hasattr(bot, "add_cog"):
+                    await self._plugin_manager.host_cog(name, plugin_name, bot, paced=facade)
+                else:
+                    cog_host.rebind_paced(name, plugin_name, facade)
+            except Exception as exc:
+                self._logger.debug("cog reconcile failed for %s/%s: %s", name, plugin_name, exc)
 
     def _allowed_plugins(self, name: str) -> set[str]:
         """The account's DIRECT plugin assignments — NEVER None.
