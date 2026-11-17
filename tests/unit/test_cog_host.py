@@ -187,3 +187,35 @@ class PluginCogHostTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DirectClientConnectionTests(unittest.IsolatedAsyncioTestCase):
+    """The owner-locked contract change (2026-11-17): the toolbox
+    carries the account's library client at attach — the Mudabot-grade
+    direct reach, account-scoped by construction."""
+
+    async def test_attach_binds_the_bot_into_the_toolbox(self) -> None:
+        host = PluginCogHost()
+        bot = _make_bot()
+        cog = await host.attach(bot, "alpha", "cleaner", SampleCog)
+        self.assertIs(cog.services.client, bot)
+
+    async def test_each_cog_sees_only_its_own_accounts_client(self) -> None:
+        host = PluginCogHost()
+        bot_a, bot_b = _make_bot(), _make_bot()
+        await host.attach(bot_a, "alpha", "cleaner", SampleCog)
+        cog_b = await host.attach(bot_b, "beta", "cleaner", SampleCog)
+        self.assertIs(cog_b.services.client, bot_b)
+        self.assertIsNot(cog_b.services.client, bot_a)
+
+    async def test_unattached_toolbox_has_no_client(self) -> None:
+        toolbox = PluginCogHost().services_for("alpha", "cleaner")
+        self.assertIsNone(toolbox.client)
+
+    async def test_detach_pops_the_connection_with_the_toolbox(self) -> None:
+        host = PluginCogHost()
+        bot = _make_bot()
+        await host.attach(bot, "alpha", "cleaner", SampleCog)
+        self.assertTrue(await host.detach("alpha", "cleaner"))
+        toolbox = host.services_for("alpha", "cleaner")  # fresh after pop
+        self.assertIsNone(toolbox.client)
