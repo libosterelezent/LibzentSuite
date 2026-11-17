@@ -42,25 +42,43 @@ This plan closes that depth gap WITHOUT abandoning the middleware
 Reads ride the account-scoped cache (a read pacing class, not the
 send lane); writes ride the EXISTING paced pipeline unchanged.
 
-## Track B — Mudabot-grade reactive waits
+## Track B — Mudabot-grade reactive waits (race-free by construction)
 
-The facade grows the predicate wait Mudabot's game logic runs on,
-over our frozen DTO (embeds/components already parsed once at the
-boundary — the check sees what Mudabot's check sees, minus raw
-handles):
+**The flaw this track must NOT inherit** (owner review 2026-11-17):
+`wait_for` subscribes at call time — a reply arriving between the
+paced send's ack and the subscription is MISSED (the event fired to
+no listener), and pre-creating the waiter before the send dangles an
+irrelevant task and inverts the code's shape. The primitive is
+therefore not `wait_for` but **`expect`** — a send-coupled window:
 
 ```python
-msg = await ctx.services.wait_for(
-    check=lambda m: m.author_id == MUDAE and m.has_embed_with("$wa"),
+async with ctx.services.expect(
+    check=lambda m: m.author_id == MUDAE and m.channel_id == ch and m.mentions_me,
     timeout=30,
-)
+) as window:
+    await ctx.services.send_message(ch, "$wa")   # INSIDE the window
+    reply = await window.match()                 # first match wins
 ```
 
-`wait_for_message`/`collect_messages` today take structured filters;
-`wait_for(check, timeout=)` with arbitrary predicates over
-`DiscordMessage` is the expressiveness parity. Events stay
-framework-meditated (the bus already publishes typed events — the
-wait subscribes, it never touches the client's socket).
+Semantics:
+
+* **Entering subscribes BEFORE the send runs** — the window is open
+  when the reply's event fires; the race is closed by construction,
+  and no plugin-authored task dangles (the framework owns the waiter,
+  cancels and reaps it on exit — the live-window discipline).
+* **Anchored matching underneath:** the matcher resolves against a
+  bounded ring of recent `MessageReceived` events plus the live
+  subscription, anchored at window entry — a reply that lands during
+  the send's queue wait matches just the same as one landing after.
+  (`collect_messages` already needs this ring; one buffer, two
+  consumers.)
+* **The check sees the frozen DTO** (embeds/components parsed once at
+  the boundary) — the expressiveness of Mudabot's raw predicates
+  without raw handles.
+* Composable waits (multi-message flows) ride the same window:
+  `await window.collect(n=2)`, `await window.first_of(check_a,
+  check_b)`. Events stay framework-mediated — the window subscribes
+  to the bus; it never touches the client's socket.
 
 ## Track C — the client view (DECISION POINT, owner to lock)
 
