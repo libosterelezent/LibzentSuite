@@ -166,6 +166,19 @@ class PluginCogHost:
             )
         return self._services[key]
 
+    def rebind_paced(self, account: str, plugin: str, paced: PluginServices) -> None:
+        """Rebind the paced facade on an EXISTING toolbox — a no-op
+        when the (account, plugin) cog was never hosted. attach()
+        creates; rebind refreshes: the account manager calls this after
+        _attach_plugins rebuilt the runtimes and dropped the services
+        cache, so a hosted cog's command path keeps sharing the live
+        settings dict with the event handlers (CodeRabbit pre-review
+        2026-11-17: binding only at connect left the FIRST start's
+        cogs on a pre-attach facade that set_setting stopped updating)."""
+        toolbox = self._services.get((account, plugin))
+        if toolbox is not None:
+            toolbox.bind_paced(paced)
+
     async def attach(
         self,
         bot: Any,

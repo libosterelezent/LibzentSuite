@@ -2547,6 +2547,22 @@ class AccountManager:
                         "may linger active until the next stop)",
                         name,
                     )
+        # roadmap #4 (CodeRabbit pre-review 2026-11-17): attach_account
+        # rebuilt the runtimes and the RUNNING path dropped the services
+        # cache — any already-hosted cog toolbox still carries the
+        # pre-attach facade, whose settings dict no longer receives
+        # set_setting updates. Rebind every HOSTED toolbox to the fresh
+        # facade (services_for reuses the same cache the activation
+        # factory filled, so commands and events share one live view).
+        # rebind_paced no-ops for plugins with no hosted cog — it never
+        # mints instances.
+        cog_host = getattr(self._plugin_manager, "cog_host", None)
+        if cog_host is not None:
+            for plugin_name in list(getattr(self._plugin_manager, "_accounts", {}).get(name, {})):
+                try:
+                    cog_host.rebind_paced(name, plugin_name, self.services_for(name, plugin_name))
+                except Exception as exc:
+                    self._logger.debug("cog rebind failed for %s/%s: %s", name, plugin_name, exc)
         return activated
 
     def _allowed_plugins(self, name: str) -> set[str]:
