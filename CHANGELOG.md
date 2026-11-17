@@ -32,6 +32,23 @@ nothing can ship until that hold is lifted; see
   history in `docs/reference/completed.rst`).
 
 ### Added
+- `scripts/live-debugging/` — the LIVE whole-suite debugging harness:
+  boots the REAL stack (the `main.py` bootstrap path) over the offline
+  simulator and drives every feature area in 14 supervised phases
+  (accounts, credentials, plugin assignment, profiles, COG dispatch,
+  tasks/scheduler, pacing, workspaces, presets, chains/signals,
+  observability, simulation, shutdown) while a parallel anomaly window
+  classifies log rows, tails the audit, and traps unhandled asyncio
+  exceptions into a structured JSONL findings file (`--watch` tails it
+  live; PASS lines go to a run summary). Never touches `state/` — it
+  boots inside a disposable temp workdir with synthetic credentials.
+  First full passes found: `main.py --sim` scenarios broken (the
+  workload moved to `tests/fixtures/sim_plugins`, the runner still
+  points at `plugins/`), terminal-triggered chains dead in production
+  (TaskCompleted/TaskFailed carry no `action`, so the runtime's
+  task_action match can never fire), and durable signal delivery
+  unwired (the outbox is built with `deliver=None` and nothing wires
+  the chain runtime in — signals pend forever).
 - The plugin COG seam: plugin cogs get `ctx.services` — the
   per-(account, plugin) paced facade, bound by the cog host at attach
   time and lifted onto the command context by the client. Ping's
