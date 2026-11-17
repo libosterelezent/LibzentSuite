@@ -9,6 +9,10 @@
 # failure this script did not see first (owner rule, 2026-11-17 —
 # born from the httpx/starlette 3.10 break that local-only-on-3.13
 # verification missed).
+#
+# The gate NEVER touches state/ (AGENTS.md §12): state/ holds the
+# live databases and the credentials key. Suite residue there is
+# reported, never deleted.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -18,6 +22,25 @@ step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 ok()   { printf '\033[32m OK  %s\033[0m\n' "$*"; }
 bad()  { printf '\033[31mFAIL %s\033[0m\n' "$*"; FAIL=1; }
 
+# Per-run scratch workspace: concurrent runs never share logs, the
+# export diff, or the 3.10 environment (CodeRabbit PR #25 review).
+RUN_DIR="$(mktemp -d /tmp/local-ci.XXXXXX)"
+trap 'rm -rf "$RUN_DIR"' EXIT
+
+# state/ is live data. Snapshot before the suites so anything they
+# leave behind is REPORTED — bootstrap places credentials.key,
+# libzent.db, and plugin-data.db there; none of it is ever removed.
+state_snapshot() { ls -A state 2>/dev/null | sort || true; }
+STATE_BEFORE="$(state_snapshot)"
+report_state_residue() {
+  local fresh
+  fresh="$(comm -13 <(printf '%s\n' "$STATE_BEFORE") <(printf '%s\n' "$(state_snapshot)") | grep -v '^$' || true)"
+  if [ -n "$fresh" ]; then
+    printf '\033[33mnote %s\033[0m\n' "suite wrote test residue into state/ (left untouched): $(echo "$fresh" | tr '\n' ' ')"
+    printf '\033[33m     %s\033[0m\n' "isolation gap — tests should use disposable storage (AGENTS.md §7)"
+  fi
+}
+
 step "1/8 Ruff lint (production tree)"
 if ~/.local/bin/uv run --frozen ruff check $PROD; then ok "ruff check"; else bad "ruff check"; fi
 
@@ -25,26 +48,38 @@ step "2/8 Ruff format check (production tree)"
 if ~/.local/bin/uv run --frozen ruff format --check $PROD; then ok "ruff format"; else bad "ruff format"; fi
 
 step "3/8 requirements.txt export sync (AGENTS.md §8)"
-if ~/.local/bin/uv export --format requirements-txt --no-hashes --no-dev --no-emit-project -o /tmp/local-ci-req.txt -q \
-   && diff <(tail -n +3 requirements.txt) <(tail -n +3 /tmp/local-ci-req.txt) >/dev/null; then
+# --locked: a stale lock FAILS here instead of being silently
+# re-exported — the repair would mask exactly the drift CI rejects.
+if ~/.local/bin/uv export --locked --format requirements-txt --no-hashes --no-dev --no-emit-project -o "$RUN_DIR/req.txt" -q \
+   && diff <(tail -n +3 requirements.txt) <(tail -n +3 "$RUN_DIR/req.txt") >/dev/null; then
   ok "export in sync"
 else
   bad "export drifted — regenerate: uv export ... -o requirements.txt"
 fi
 
+# One ratchet per tree. Exit status matters: 0 = clean run, 1 = errors
+# emitted, anything else = the run did not complete — its (possibly
+# empty) log must never count as zero errors.
+mypy_ratchet() {
+  local label="$1" baseline_file="$2" log status=0 errs base
+  log="$RUN_DIR/mypy-$label.log"
+  shift 2
+  ~/.local/bin/uv run --frozen mypy "$@" &> "$log" || status=$?
+  if [ "$status" -gt 1 ]; then
+    bad "mypy $label did not complete (exit $status) — count rejected"
+    return
+  fi
+  errs=$(grep -c "error:" "$log" || true)
+  base=$(<"$baseline_file")
+  echo "mypy $label errors: $errs (baseline: $base)"
+  if [ "$errs" -eq "$base" ]; then ok "$label == baseline"
+  elif [ "$errs" -lt "$base" ]; then bad "$label improved — lower $baseline_file to $errs in this push"
+  else bad "$label grew ($base -> $errs)"; fi
+}
+
 step "4/8 Mypy ratchets — production + tests (split baselines)"
-PROD_ERRS=$(~/.local/bin/uv run --frozen mypy main.py core adapters database interfaces plugins benchmark scripts parsers \
-  &> /tmp/local-ci-mypy-prod.log || true && grep -c "error:" /tmp/local-ci-mypy-prod.log || true)
-PROD_BASE=$(<.github/mypy-baseline)
-echo "mypy production: $PROD_ERRS (baseline: $PROD_BASE)"
-if [ "$PROD_ERRS" -eq "$PROD_BASE" ]; then ok "production == baseline"
-else bad "production off-baseline ($PROD_BASE -> $PROD_ERRS)"; fi
-TEST_ERRS=$(~/.local/bin/uv run --frozen mypy tests \
-  &> /tmp/local-ci-mypy-tests.log || true && grep -c "error:" /tmp/local-ci-mypy-tests.log || true)
-TEST_BASE=$(<.github/mypy-tests-baseline)
-echo "mypy tests: $TEST_ERRS (baseline: $TEST_BASE)"
-if [ "$TEST_ERRS" -eq "$TEST_BASE" ]; then ok "tests == baseline"
-else bad "tests off-baseline ($TEST_BASE -> $TEST_ERRS)"; fi
+mypy_ratchet production .github/mypy-baseline main.py core adapters database interfaces plugins benchmark scripts parsers
+mypy_ratchet tests .github/mypy-tests-baseline tests
 
 if [ "${1:-}" = "quick" ]; then
   step "quick mode — suites skipped"
@@ -53,31 +88,33 @@ if [ "${1:-}" = "quick" ]; then
 fi
 
 step "5/8 Full suite on Python 3.10 (the leg that catches dep-split breaks)"
-rm -rf state
-if UV_PROJECT_ENVIRONMENT=/tmp/local-ci-venv310 timeout 590 ~/.local/bin/uv run --frozen --python 3.10 \
-  python -m unittest discover -s tests -t . > /tmp/local-ci-310.log 2>&1; then
-  ok "3.10 suite: $(grep 'Ran' /tmp/local-ci-310.log | head -1)"
+if UV_PROJECT_ENVIRONMENT="$RUN_DIR/venv310" timeout 590 ~/.local/bin/uv run --frozen --python 3.10 \
+  python -m unittest discover -s tests -t . > "$RUN_DIR/suite-310.log" 2>&1; then
+  ok "3.10 suite: $(grep 'Ran' "$RUN_DIR/suite-310.log" | head -1)"
 else
-  bad "3.10 suite — $(grep -E '^(FAILED|ERROR)' /tmp/local-ci-310.log | head -2)"
-  grep -B2 -A8 "ERROR:\|FAIL:" /tmp/local-ci-310.log | head -40
+  bad "3.10 suite — $(grep -E '^(FAILED|ERROR)' "$RUN_DIR/suite-310.log" | head -2)"
+  grep -B2 -A8 "ERROR:\|FAIL:" "$RUN_DIR/suite-310.log" | head -40
 fi
+report_state_residue
 
 step "6/8 Full suite + coverage floor on 3.13"
-rm -rf state
-if ~/.local/bin/uv run --frozen coverage run -m unittest discover -s tests -t . > /tmp/local-ci-313.log 2>&1 \
-  && ~/.local/bin/uv run --frozen coverage report > /tmp/local-ci-cov.log 2>&1; then
-  ok "3.13 suite: $(grep 'Ran' /tmp/local-ci-313.log | head -1) — $(grep TOTAL /tmp/local-ci-cov.log)"
+# --python 3.13 on both calls: with no .python-version pin, uv may
+# otherwise pick any interpreter >= 3.10 and the label would lie.
+if ~/.local/bin/uv run --frozen --python 3.13 coverage run -m unittest discover -s tests -t . > "$RUN_DIR/suite-313.log" 2>&1 \
+  && ~/.local/bin/uv run --frozen --python 3.13 coverage report > "$RUN_DIR/cov.log" 2>&1; then
+  ok "3.13 suite: $(grep 'Ran' "$RUN_DIR/suite-313.log" | head -1) — $(grep TOTAL "$RUN_DIR/cov.log")"
 else
-  bad "3.13 suite/coverage — $(grep -E '^(FAILED|ERROR)|fail_under' /tmp/local-ci-313.log /tmp/local-ci-cov.log | head -3)"
-  grep -B2 -A8 "ERROR:\|FAIL:" /tmp/local-ci-313.log | head -30
+  bad "3.13 suite/coverage — $(grep -E '^(FAILED|ERROR)|fail_under' "$RUN_DIR/suite-313.log" "$RUN_DIR/cov.log" | head -3)"
+  grep -B2 -A8 "ERROR:\|FAIL:" "$RUN_DIR/suite-313.log" | head -30
 fi
+report_state_residue
 
 step "7/8 Build (sdist + wheel)"
-if timeout 120 ~/.local/bin/uv build > /tmp/local-ci-build.log 2>&1; then
-  ok "build: $(grep Successfully /tmp/local-ci-build.log | head -1)"
+if timeout 120 ~/.local/bin/uv build > "$RUN_DIR/build.log" 2>&1; then
+  ok "build: $(grep Successfully "$RUN_DIR/build.log" | head -1)"
   rm -rf dist
 else
-  bad "build — $(tail -5 /tmp/local-ci-build.log)"
+  bad "build — $(tail -5 "$RUN_DIR/build.log")"
 fi
 
 step "8/8 Verdict"
