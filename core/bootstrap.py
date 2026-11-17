@@ -724,27 +724,41 @@ async def _assemble(
 
     signals_outbox.bind_delivery(_deliver_pending_signal)
 
-    async def _on_task_completed(event: TaskCompleted) -> None:
-        with contextlib.suppress(Exception):
-            await chain_runtime.on_terminal(
+    # terminal triggers run as INDEPENDENT tasks, never inline in the
+    # publisher's stack: the chain step's paced send awaits the scheduler
+    # loop, which is the very stack publish_nowait dispatches on — inline
+    # await deadlocks the run in 'running' (found live by the toolkit's
+    # strengthened predicates, 2026-11-17; direct invoke_handler completed
+    # fine, isolating the re-entrancy).
+    _chain_trigger_tasks: set[asyncio.Task[list[str]]] = set()
+
+    def _spawn_chain_trigger(event: TaskCompleted | TaskFailed, kind: str) -> None:
+        task = asyncio.create_task(
+            chain_runtime.on_terminal(
                 TerminalTrigger(
                     account=event.account,
                     plugin=event.plugin,
                     action=str(getattr(event, "action", "") or ""),
-                    kind="task_completed",
+                    kind=kind,
                 )
-            )
+            ),
+            name=f"chain-trigger-{kind}-{event.task_id}",
+        )
+        _chain_trigger_tasks.add(task)
+
+        def _reap(t: asyncio.Task[list[str]]) -> None:
+            _chain_trigger_tasks.discard(t)
+            if not t.cancelled():
+                with contextlib.suppress(Exception):
+                    t.exception()  # retrieved: never "exception was never retrieved"
+
+        task.add_done_callback(_reap)
+
+    async def _on_task_completed(event: TaskCompleted) -> None:
+        _spawn_chain_trigger(event, "task_completed")
 
     async def _on_task_failed(event: TaskFailed) -> None:
-        with contextlib.suppress(Exception):
-            await chain_runtime.on_terminal(
-                TerminalTrigger(
-                    account=event.account,
-                    plugin=event.plugin,
-                    action=str(getattr(event, "action", "") or ""),
-                    kind="task_failed",
-                )
-            )
+        _spawn_chain_trigger(event, "task_failed")
 
     bus.subscribe(TaskCompleted, _on_task_completed)
     bus.subscribe(TaskFailed, _on_task_failed)
