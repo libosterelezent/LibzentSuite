@@ -174,3 +174,16 @@ class PluginCogHostTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_hosted_plugins_reports_per_account(self) -> None:
+        # the reconciliation input: per-account hosted set, no leaks
+        # across accounts
+        host = PluginCogHost()
+
+        self.assertEqual(host.hosted_plugins("alpha"), set())
+        cog = SampleCog(services=host.services_for("alpha", "cleaner"))
+        host._cogs[("alpha", "cleaner")] = cog
+        host._cogs[("beta", "cleaner")] = cog
+        self.assertEqual(host.hosted_plugins("alpha"), {"cleaner"})
+        self.assertEqual(host.hosted_plugins("beta"), {"cleaner"})
+        self.assertEqual(host.hosted_plugins("gamma"), set())
