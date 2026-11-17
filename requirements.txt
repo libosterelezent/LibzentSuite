@@ -15,7 +15,6 @@ annotated-types==0.8.0
 anyio==4.16.0
     # via
     #   fastapi
-    #   httpx
     #   starlette
 async-timeout==5.0.1 ; python_full_version < '3.11'
     # via aiohttp
@@ -24,10 +23,7 @@ attrs==26.1.0
 audioop-lts==0.2.2 ; python_full_version >= '3.13'
     # via discord-py-self
 certifi==2026.10.23
-    # via
-    #   curl-cffi
-    #   httpcore
-    #   httpx
+    # via curl-cffi
 cffi==2.1.1
     # via
     #   cryptography
@@ -50,16 +46,9 @@ frozenlist==1.8.0
     # via
     #   aiohttp
     #   aiosignal
-h11==0.16.0
-    # via httpcore
-httpcore==1.0.9
-    # via httpx
-httpx==0.28.1
-    # via libzentsuite
 idna==3.20
     # via
     #   anyio
-    #   httpx
     #   yarl
 multidict==7.1.0 ; python_full_version < '3.11'
     # via
@@ -86,7 +75,9 @@ pycparser==3.11 ; python_full_version < '3.11' and implementation_name != 'PyPy'
 pycparser==3.12 ; python_full_version >= '3.11' and implementation_name != 'PyPy'
     # via cffi
 pydantic==2.14.3
-    # via fastapi
+    # via
+    #   fastapi
+    #   libzentsuite
 pydantic-core==2.50.4
     # via pydantic
 starlette==1.7.0 ; python_full_version < '3.11'

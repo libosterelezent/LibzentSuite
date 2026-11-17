@@ -5,15 +5,72 @@
 name = "libzentsuite"
 version = "0.0.0"
 description = "Game-agnostic, multi-account Discord flow-orchestration framework"
+readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
+authors = [
+    { name = "libosterelezent" },
+]
+keywords = [
+    "discord",
+    "automation",
+    "orchestration",
+    "multi-account",
+    "selfbot",
+    "rate-limiting",
+    "asyncio",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Communications :: Chat",
+    "Topic :: System :: Distributed Computing",
+    "Typing :: Typed",
+]
+# dependency tree = the DIRECT third-party imports of the production
+# tree, audited 2026-11-17: aiosqlite (database/connection), cryptography
+# (credential Fernet), discord (the better.py-self fork), fastapi +
+# pydantic (interfaces/api — pydantic declared because app.py imports
+# BaseModel directly, not just via fastapi). httpx had ZERO direct
+# importers (a stale runtime entry) — removed.
 dependencies = [
     "aiosqlite>=0.20",
     "cryptography>=42",
     "discord.py-self @ git+https://github.com/Demonic1594/better.py-self.git",
     "fastapi>=0.162.5",
+    "pydantic>=2.14",
+]
+
+[project.optional-dependencies]
+# the interface surfaces, deliberately optional: the API server needs a
+# ASGI runner (nothing serves build_app without it) and the Flet UI
+# needs flet + its HTTP client. `pip install libzentsuite[all]` gets
+# both; the core (CLI + REPL) needs neither.
+api = [
+    "uvicorn>=0.34",
+]
+ui = [
+    "flet>=0.28",
     "httpx>=0.28.1",
 ]
+all = [
+    "libzentsuite[api,ui]",
+]
+
+[project.urls]
+Homepage = "https://github.com/libosterelezent/LibzentSuite"
+Repository = "https://github.com/libosterelezent/LibzentSuite"
+Issues = "https://github.com/libosterelezent/LibzentSuite/issues"
+Changelog = "https://github.com/libosterelezent/LibzentSuite/blob/master/CHANGELOG.md"
 
 [build-system]
 # The app normally runs from the checkout (`python main.py`, uv-managed
