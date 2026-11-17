@@ -2560,7 +2560,10 @@ class AccountManager:
         if cog_host is not None:
             current = set(getattr(self._plugin_manager, "_accounts", {}).get(name, {}))
             hosted = cog_host.hosted_plugins(name)
-            bot = getattr(getattr(rt, "client", None), "_client", None) if rt is not None else None
+            # the bot rides Account.runtime.client._client (the adapter's
+            # library Bot) — Account itself carries no client field
+            runtime = getattr(rt, "runtime", None) if rt is not None else None
+            bot = getattr(getattr(runtime, "client", None), "_client", None)
             for plugin_name in hosted - current:
                 try:
                     await self._plugin_manager.unhost_cog(name, plugin_name)

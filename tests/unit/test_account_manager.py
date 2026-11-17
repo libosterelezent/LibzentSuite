@@ -1257,9 +1257,10 @@ class AttachCogReconcileTests(unittest.IsolatedAsyncioTestCase):
                 removed.append(name)
 
         bot = _FakeBot()
-        # the runtime wrapper (what _attach_plugins reads), not the
-        # public Account model — the bot rides rt.client._client
-        h.manager._accounts["alpha"].client = NS(_client=bot)  # type: ignore[attr-defined]
+        # the PRODUCTION path: Account → runtime → client → _client (the
+        # adapter's library Bot). No phantom attributes — this is exactly
+        # what the reconcile reads.
+        h.manager._accounts["alpha"].runtime.client = NS(_client=bot)  # type: ignore[attr-defined]
 
         # the stale cog from the previous assignment set
         class _OldCog:
