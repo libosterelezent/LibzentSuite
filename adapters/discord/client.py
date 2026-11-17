@@ -1137,6 +1137,22 @@ class RealDiscordClient:
                     note=f"invoker={getattr(getattr(ctx, 'author', None), 'id', None)}",
                 )
 
+        # roadmap #4: lift the cog's paced facade onto the context —
+        # `ctx.services` is the documented plugin command seam. The
+        # toolbox is (account, plugin)-bound at attach time; this hook
+        # only reads it, never resolves an account from ambient state.
+        # Framework cogs carry no toolbox -> ctx.services stays unset
+        # (fail-closed: unwired means absent, not a global fallback).
+        @bot.before_invoke
+        async def _inject_paced_services(ctx: ext_commands.Context[Any]) -> None:
+            toolbox = getattr(ctx.cog, "services", None)
+            paced = getattr(toolbox, "paced", None)
+            if paced is not None:
+                # the fork's Context type declares no `services`
+                # attribute — this seam defines it; consumers read it
+                # via getattr (fail-closed when unset)
+                ctx.services = paced  # type: ignore[attr-defined]
+
         @bot.event
         async def on_command_error(ctx: ext_commands.Context[Any], error: Exception) -> None:
             # unknown commands are NOT pass-throughs — silently drop them
